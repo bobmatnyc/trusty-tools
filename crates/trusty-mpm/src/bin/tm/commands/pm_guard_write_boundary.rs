@@ -51,6 +51,16 @@
 //! still fires for the PM on every shell write; this rule adds the WHERE
 //! dimension ADR-0048's Consequences recorded as open.
 //!
+//! **A scratchpad-rooted clone is not a shared tree (#7778).** ADR-0044
+//! protects the checkout other sessions are standing in; a disposable
+//! `git clone --local` under the session scratchpad has no other session in it
+//! and is reaped with the session. Treating it as a main checkout refused two
+//! read-only reviews their probe file and blocks #7628's revert-experiment
+//! recipe, so [`checkout_is_scratchpad_rooted`] lifts the deny for it — decided
+//! on the CHECKOUT ROOT, so a `scratchpad` directory inside a real checkout
+//! exempts nothing, and fail-closed, so a scratchpad root that cannot be
+//! determined leaves the refusal exactly as it was.
+//!
 //! Residual bypasses, stated rather than hidden: the path is resolved
 //! lexically, so a symlink into a checkout is not followed — the same limit
 //! [`is_main_checkout`] carries and documents. The `Bash` half sees only the
@@ -97,7 +107,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::project_aliases::is_main_checkout;
+use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
 use super::pm_guard_bash::shell_write_target;
@@ -109,10 +119,13 @@ use super::pm_guard_bash::shell_write_target;
 /// nor a `Bash` call — costs one slice comparison and nothing else.
 /// What: `Some(reason)` when the call names a write target, that target
 /// [`is_source_code_path`], and the directory it resolves into
-/// [`is_main_checkout`]. The target comes from [`edit_tool_target_path`] for an
-/// [`EDIT_TOOLS`] member and from [`shell_write_target`] for `Bash` (#7399).
-/// `None` (ALLOW) in every other case.
+/// [`is_main_checkout`] — except when that checkout is rooted under the session
+/// scratchpad ([`checkout_is_scratchpad_rooted`], #7778). The target comes from
+/// [`edit_tool_target_path`] for an [`EDIT_TOOLS`] member and from
+/// [`shell_write_target`] for `Bash` (#7399). `None` (ALLOW) in every other
+/// case.
 /// Test: `denies_a_source_write_in_a_main_checkout`,
+/// `allows_a_source_write_in_a_scratchpad_rooted_clone`,
 /// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
 /// `denies_a_git_output_write_in_a_main_checkout`,
 /// `allows_a_git_read_in_a_main_checkout`,
@@ -160,8 +173,78 @@ fn evaluate_main_checkout_write_with(
         return None;
     }
     let resolved = resolve_write_target(&resolvable, cwd);
+    if !is_main_checkout(&resolved) {
+        return None;
+    }
+    // #7778: a disposable clone under the session scratchpad is nobody's shared
+    // tree, so ADR-0044 has no other session's work to protect there.
+    if checkout_is_scratchpad_rooted(&resolved) {
+        return None;
+    }
     // The message quotes the spelling the caller used, not the expansion.
-    is_main_checkout(&resolved).then(|| deny_reason(&target))
+    Some(deny_reason(&target))
+}
+
+/// The directory name the agent harness gives each session's scratch space.
+///
+/// Matched exactly, never case-folded: a `SCRATCHPAD` directory that is not the
+/// harness's own costs a refusal the operator can see, which is the direction
+/// this trust boundary may err in.
+const SCRATCHPAD_SEGMENT: &str = "scratchpad";
+
+/// Does the checkout containing `resolved` have its ROOT under the session
+/// scratchpad?
+///
+/// Why (#7778): two read-only reviews were refused a probe file (`.rs`, `.py`)
+/// inside a disposable `git clone --local` placed in the scratchpad, and
+/// neither could re-run a new test against pre-fix code as a result. A clone
+/// made for one agent's own experiment is not the shared tree ADR-0044 protects
+/// — no other session stands in it, and the harness reaps it — so the
+/// main-checkout match is wrong there. #7628's revert-experiment recipe needs
+/// the same exemption.
+/// What: the question is asked of the CHECKOUT ROOT
+/// ([`trusty_mpm::core::project_aliases::main_checkout_root`]), never of the
+/// write target. That is what keeps a `scratchpad` directory INSIDE a real
+/// checkout from exempting the checkout: the root is resolved first, and only
+/// then tested for a scratchpad prefix. `false` whenever
+/// [`scratchpad_root`] cannot name one, which leaves the caller's deny exactly
+/// as it was.
+/// Test: `allows_a_source_write_in_a_scratchpad_rooted_clone`,
+/// `denies_a_source_write_in_a_main_checkout_outside_the_scratchpad`,
+/// `denies_a_checkout_whose_path_merely_contains_the_scratchpad_name`,
+/// `denies_when_no_scratchpad_root_can_be_determined`.
+fn checkout_is_scratchpad_rooted(resolved: &Path) -> bool {
+    main_checkout_root(resolved).is_some_and(|root| scratchpad_root(&root).is_some())
+}
+
+/// The session scratchpad directory `path` sits under, when it sits under one.
+///
+/// Why (#7778): nothing hands this process the scratchpad path — no env var, no
+/// hook-payload field — so the root is read off the path itself, by the SAME
+/// two-part definition `commands::projects::offerable` already uses for the
+/// same directory: a `scratchpad` component under a system temp root. Inventing
+/// a config knob would add a second, driftable answer to a question the crate
+/// already answers.
+/// What: the SHORTEST prefix of `path` whose final component is exactly
+/// [`SCRATCHPAD_SEGMENT`] and which is itself under a system temp root
+/// ([`trusty_common::bin_resolve::is_under_system_temp`], which compares whole
+/// path components, so `/tmpfoo` is not `/tmp`). `None` — the root cannot be
+/// determined — when no component matches or the matching prefix is outside
+/// every temp root; the caller then refuses exactly as it did before, so the
+/// undetermined case can never widen the exemption.
+/// Test: `scratchpad_root_names_only_a_temp_rooted_harness_directory`,
+/// `denies_when_no_scratchpad_root_can_be_determined`.
+fn scratchpad_root(path: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if component.as_os_str() == SCRATCHPAD_SEGMENT
+            && trusty_common::bin_resolve::is_under_system_temp(&prefix)
+        {
+            return Some(prefix);
+        }
+    }
+    None
 }
 
 /// The file this tool call would write, whichever tool named it.
@@ -821,6 +904,126 @@ mod tests {
             )
             .is_some(),
             "a literal relative source path must still deny"
+        );
+    }
+
+    /// A `<temp>/scratchpad/<name>` clone, `.git` DIRECTORY and all — the shape
+    /// `git clone --local` leaves in the harness scratchpad (#7778).
+    ///
+    /// `tempfile::tempdir()` lands under `std::env::temp_dir()`, which is the
+    /// same value `is_under_system_temp` consults, so the fixture is temp-rooted
+    /// on every host rather than only on the one that wrote the test.
+    fn scratchpad_clone(name: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join(name);
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir .git");
+        (dir, clone)
+    }
+
+    // #7778 condition 1. RED before the fix: the clone answers
+    // `is_main_checkout`, so both spellings were denied and two read-only
+    // reviews could not drop a probe file into their own throwaway clone.
+    #[test]
+    fn allows_a_source_write_in_a_scratchpad_rooted_clone() {
+        let (_dir, clone) = scratchpad_clone("revert-probe");
+        for name in ["crates/x/src/lib.rs", "probe.py"] {
+            assert_eq!(
+                evaluate_main_checkout_write(
+                    "Write",
+                    Some(&write_input(&clone.join(name))),
+                    &clone
+                ),
+                None,
+                "{name} lands in a disposable scratchpad clone, not a shared tree"
+            );
+        }
+        // The shell half shares the one decision point, so it must agree.
+        let command = format!(
+            "echo 'fn main() {{}}' > {}",
+            clone.join("probe.rs").display()
+        );
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), &clone),
+            None
+        );
+    }
+
+    // #7778 condition 2: the exemption must not reach the tree ADR-0044 exists
+    // for. This checkout carries no `scratchpad` component anywhere.
+    #[test]
+    fn denies_a_source_write_in_a_main_checkout_outside_the_scratchpad() {
+        let dir = main_checkout();
+        let reason = evaluate_main_checkout_write(
+            "Write",
+            Some(&write_input(&dir.path().join("crates/x/src/lib.rs"))),
+            dir.path(),
+        )
+        .expect("a real main checkout is still refused");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #7778 condition 3: the exemption is decided on the CHECKOUT ROOT, so a
+    // `scratchpad` directory sitting INSIDE a real checkout exempts nothing —
+    // the case a target-path test would have got wrong.
+    #[test]
+    fn denies_a_checkout_whose_path_merely_contains_the_scratchpad_name() {
+        let dir = main_checkout();
+        for name in ["scratchpad/probe.rs", "scratchpad/nested/probe.py"] {
+            let reason = evaluate_main_checkout_write(
+                "Write",
+                Some(&write_input(&dir.path().join(name))),
+                dir.path(),
+            )
+            .unwrap_or_else(|| panic!("{name} is inside a real checkout and must be refused"));
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+    }
+
+    // #7778 Fail-Open Check: an undeterminable scratchpad root leaves the
+    // refusal exactly as it was. A temp-rooted clone with no `scratchpad`
+    // component is the case, and it denies.
+    #[test]
+    fn denies_when_no_scratchpad_root_can_be_determined() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("revert-probe");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir .git");
+        assert_eq!(scratchpad_root(&clone), None);
+        assert!(
+            evaluate_main_checkout_write(
+                "Write",
+                Some(&write_input(&clone.join("probe.rs"))),
+                &clone
+            )
+            .is_some(),
+            "no scratchpad root could be determined, so the deny must stand"
+        );
+    }
+
+    /// The root finder on its own: both halves of the definition are required,
+    /// and the match is component-exact.
+    #[test]
+    fn scratchpad_root_names_only_a_temp_rooted_harness_directory() {
+        assert_eq!(
+            scratchpad_root(Path::new(
+                "/private/tmp/claude-502/proj/9f1c/scratchpad/clone/src"
+            )),
+            Some(PathBuf::from(
+                "/private/tmp/claude-502/proj/9f1c/scratchpad"
+            ))
+        );
+        // Outside every temp root, `scratchpad` is just somebody's directory.
+        assert_eq!(
+            scratchpad_root(Path::new("/Users/x/repos/scratchpad/clone")),
+            None
+        );
+        // Component-exact: a name that merely CONTAINS the string is not it.
+        assert_eq!(
+            scratchpad_root(Path::new("/private/tmp/claude-502/scratchpad-notes/clone")),
+            None
+        );
+        assert_eq!(
+            scratchpad_root(Path::new("/private/tmp/claude-502/x")),
+            None
         );
     }
 
