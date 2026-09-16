@@ -552,7 +552,14 @@ pub(crate) fn request_for_path(
         // #7488: text that is not a checkout on this host may still name a
         // project to clone, so the same recogniser the filter entry uses gets
         // the second look — one implementation, two ways in.
-        return super::new_session_entry::request_for_entry(trimmed, targets).map_err(|_| {
+        return super::new_session_entry::request_for_entry(trimmed, targets).map_err(|e| {
+            // #7898: only text the recogniser REFUSED gets the generic wording.
+            // A recognised project that is simply not cloned yet answers with
+            // the `git clone` instruction, and overwriting that with "is not a
+            // clone URL" would send the operator looking for a typo.
+            if super::new_session_entry::parse_project_entry(trimmed).is_some() {
+                return e;
+            }
             format!(
                 "{trimmed} is not a git checkout, a clone URL, or an \
                  owner/repo project"

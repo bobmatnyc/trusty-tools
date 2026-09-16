@@ -11,18 +11,38 @@
 //! `github.com`), and an explicit `domain/owner/repo`. [`request_for_entry`]
 //! turns a recognised one into the SAME
 //! [`NewSessionRequest`](super::new_session::NewSessionRequest) a typed checkout
-//! path produces, so the clone and the registration run through
+//! path produces, so the registration runs through
 //! [`perform`](super::new_session::perform) — the one register-then-create
-//! driver — rather than a second implementation of either.
+//! driver — rather than a second implementation of it.
+//!
+//! #7898: what the create leg carries is the project's LOCAL CHECKOUT, not the
+//! clone URL. Since ADR-0055 the daemon clones nothing, so the URL was accepted
+//! by the registration and then refused by the spawn, leaving a registration
+//! behind for a session that never existed. A project that is not cloned yet is
+//! refused up front with the same `git clone <url> <path>` instruction the
+//! registered-row path prints (#7887) — the picker does not clone on the
+//! operator's behalf, because a multi-minute clone inside a keystroke handler
+//! has nowhere to report progress.
 //!
 //! Nothing here touches the network or the disk: a rejected entry is a
 //! `Result::Err` the overlay shows inline, never a silently dropped keystroke.
 //!
 //! Test: `new_session_entry_*` in `super::tests`.
 
+use std::path::PathBuf;
+
 use trusty_common::github_path::parse_remote_url;
 
 use super::new_session::{NewProject, NewSessionRequest, Target};
+
+/// How an unregistered project's clone URL becomes a local checkout (#7898).
+///
+/// Why: the production answer
+/// ([`local_checkout_for_url`](trusty_mpm::project::local_checkout_for_url))
+/// depends on this host's projects root, which no unit test should read. A
+/// function pointer keeps the whole unregistered branch decidable with a stub.
+/// Test: `new_session_entry_builds_a_clone_and_register_request`.
+pub(crate) type CheckoutForUrl = fn(&str) -> Option<PathBuf>;
 
 /// Forge a bare `owner/repo` entry means.
 ///
@@ -145,13 +165,34 @@ fn is_host(segment: &str) -> bool {
 /// [`request_for_registered`](super::new_session::request_for_registered), the
 /// same builder the arrow-key confirm uses (#7887), so typing a registered
 /// `owner/repo` cannot send something different from picking its row. Anything
-/// else carries a `register` leg and its clone URL as the create argument.
+/// else carries a `register` leg beside the LOCAL CHECKOUT that project's clone
+/// URL resolves to (#7898), never the URL itself.
 /// Test: `new_session_entry_builds_a_clone_and_register_request`,
 /// `new_session_entry_reuses_a_registered_project`,
+/// `new_session_entry_without_a_checkout_names_the_clone_step`,
 /// `new_session_entry_rejects_malformed_text`.
 pub(crate) fn request_for_entry(
     text: &str,
     targets: &[Target],
+) -> Result<NewSessionRequest, String> {
+    request_for_entry_with(text, targets, trusty_mpm::project::local_checkout_for_url)
+}
+
+/// [`request_for_entry`] with an explicit checkout resolver (the test seam).
+///
+/// Why (#7989): the production resolver reads this host's projects root —
+/// `$TRUSTY_MPM_REPOS_ROOT` / `$TRUSTY_MPM_WORKSPACE_ROOT` / config / real
+/// `$HOME` — which sibling tests in this binary `set_var`, so a test that
+/// called it would race them under the parallel harness. The same seam
+/// [`targets_from_with`](super::new_session::targets_from_with) is for.
+/// What: see [`request_for_entry`]; `checkout_for` answers where an
+/// unregistered project's clone URL is checked out on this host.
+/// Test: `new_session_entry_builds_a_clone_and_register_request`,
+/// `new_session_entry_without_a_checkout_names_the_clone_step`.
+pub(crate) fn request_for_entry_with(
+    text: &str,
+    targets: &[Target],
+    checkout_for: CheckoutForUrl,
 ) -> Result<NewSessionRequest, String> {
     let trimmed = text.trim();
     let Some(entry) = parse_project_entry(trimmed) else {
@@ -175,12 +216,28 @@ pub(crate) fn request_for_entry(
     if let Some((name, repo, checkout)) = known {
         return super::new_session::request_for_registered(&name, &repo, checkout.as_deref());
     }
-    Ok(NewSessionRequest {
-        register: Some(NewProject {
-            name: entry.name.clone(),
-            repo_url: entry.repo_url.clone(),
-        }),
-        repo: entry.repo_url,
-        label: entry.name,
-    })
+    // #7898: not registered yet — but the create leg still owes the daemon a
+    // DIRECTORY. Sending the clone URL registered the project and was then
+    // refused one hop later ("repo_url … is not an existing local directory",
+    // ADR-0055), leaving a registration behind for a session that never
+    // started. `request_for_registered` is the same builder the registered-row
+    // path uses, so an uncloned project refuses here with the identical
+    // `git clone <url> <path>` instruction — before anything is written.
+    let Some(checkout) = checkout_for(&entry.repo_url) else {
+        // Unreachable for a recognised entry — `parse_project_entry` only
+        // produces host/owner/repo URLs, which always resolve to a directory.
+        // Answered here anyway so the registered-row wording ("is registered
+        // as …") cannot reach a project that is not registered.
+        return Err(format!(
+            "{} names no checkout directory on this host",
+            entry.repo_url
+        ));
+    };
+    let mut request =
+        super::new_session::request_for_registered(&entry.name, &entry.repo_url, Some(&checkout))?;
+    request.register = Some(NewProject {
+        name: entry.name.clone(),
+        repo_url: entry.repo_url,
+    });
+    Ok(request)
 }

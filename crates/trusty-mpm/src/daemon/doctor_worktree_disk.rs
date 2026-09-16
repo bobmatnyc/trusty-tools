@@ -91,12 +91,19 @@ use crate::disk::human_bytes;
 ///   a full disk inverts its own purpose;
 /// - otherwise → `Ok` with the total, still reporting the number.
 ///
+/// #7886: the byte figure itself changes shape with coverage. Complete coverage
+/// prints `<bytes> across <n> worktree(s)`, the total it is. Incomplete coverage
+/// prints `total disk use UNKNOWN — at least <bytes> measured across <m> of <n>`,
+/// because a budget-expired sum is a lower bound and printing it in the total's
+/// position is what reported 41.8 MiB for a 146 GB store.
+///
 /// `Fail` is never returned: disk consumption is a pressure signal, not a
 /// broken component, and a probe that fails the whole report for a large but
 /// legitimate workspace would train operators to ignore it.
 /// Test: `worktree_disk_check_warns_when_bytes_are_reclaimable`,
 /// `worktree_disk_check_is_unknown_when_no_pr_state_resolved`,
 /// `worktree_disk_check_is_unknown_when_the_walk_is_incomplete`,
+/// `worktree_disk_check_never_prints_a_partial_sum_as_a_total`,
 /// `worktree_disk_check_is_ok_when_nothing_is_reclaimable`.
 fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
     let total = survey.candidates.len();
@@ -107,19 +114,35 @@ fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
             "no git-registered worktrees under the managed workspace root",
         );
     }
-    let measured = format!(
-        "{} across {total} worktree(s)",
-        human_bytes(survey.total_bytes)
-    );
-    let undercount = if survey.unmeasured > 0 {
-        format!(
-            " — an UNDERCOUNT: {} worktree(s) went unmeasured inside this probe's {}s budget; \
-             `tm session prune-worktrees --merged-prs` surveys with no deadline for exact figures",
-            survey.unmeasured,
-            SURVEY_TIMEOUT.as_secs()
+    // #7886: a budget-expired probe has a FLOOR, not a total. The headline read
+    // "41.8 MiB across 212 worktree(s)" for a 146 GB store — a partial sum in
+    // the grammatical position of the total, with the disclosure only after it.
+    // When coverage is incomplete the figure is labelled as a lower bound and
+    // counted against the worktrees actually MEASURED, never the fleet size.
+    let (measured, undercount) = if survey.unmeasured > 0 {
+        (
+            format!(
+                "total disk use UNKNOWN — at least {} measured across {} of {total} worktree(s)",
+                human_bytes(survey.total_bytes),
+                total.saturating_sub(survey.unmeasured)
+            ),
+            format!(
+                " — an UNDERCOUNT: {} worktree(s) went unmeasured inside this probe's {}s \
+                 budget, so this run is PARTIAL and establishes no total; \
+                 `tm session prune-worktrees --merged-prs` surveys with no deadline for \
+                 exact figures",
+                survey.unmeasured,
+                SURVEY_TIMEOUT.as_secs()
+            ),
         )
     } else {
-        String::new()
+        (
+            format!(
+                "{} across {total} worktree(s)",
+                human_bytes(survey.total_bytes)
+            ),
+            String::new(),
+        )
     };
     // #2919 MEDIUM: this probe reads only the most recent
     // `PR_INDEX_LIMIT` pull requests, and this repository has thousands — so a

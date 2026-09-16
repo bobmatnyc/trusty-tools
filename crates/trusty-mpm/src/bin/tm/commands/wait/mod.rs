@@ -247,10 +247,20 @@ pub(crate) struct Outcome {
 /// remaining slice)` between polls so a nap can never overshoot either
 /// boundary. `budget.polls` and `budget.updated_at` are advanced in place so
 /// the caller can persist them whatever the outcome.
+///
+/// #7956: the slice is a real ceiling on the INVOCATION, not just on the naps.
+/// Two things enforce that. Each poll is handed the time left before the
+/// ceiling, so a probe that cannot answer by then errors instead of blocking;
+/// and a nap that lands on the ceiling returns `pending` rather than starting
+/// one more poll the wait has no budget for. Without either, a stalled `gh`
+/// read carried the invocation past whatever ran it and the process was
+/// SIGKILLed — exit 137, which is none of the four documented statuses.
 /// Test: `loop_returns_met_on_first_poll`, `loop_returns_pending_at_slice_end`,
 /// `loop_returns_timeout_when_budget_exhausted`,
 /// `loop_gives_up_after_repeated_probe_errors`,
-/// `loop_recovers_from_a_transient_probe_error`.
+/// `loop_recovers_from_a_transient_probe_error`,
+/// `loop_bounds_each_poll_to_the_time_left_in_the_slice`,
+/// `loop_never_starts_a_poll_it_has_no_slice_for`.
 pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
     cond: &C,
     plan: &Plan,
@@ -264,10 +274,20 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
     let mut detail: String;
 
     loop {
+        let started = clock.now_unix();
         budget.polls += 1;
-        budget.updated_at = clock.now_unix();
+        budget.updated_at = started;
 
-        match cond.poll() {
+        // #7956: the poll gets the time that is actually left — before the
+        // slice ceiling, and before the hard deadline. Never zero: a poll with
+        // no budget at all could only fail.
+        let poll_budget = std::time::Duration::from_secs(
+            slice_end
+                .saturating_sub(started)
+                .min(budget.remaining(started))
+                .max(1),
+        );
+        match cond.poll(poll_budget) {
             Ok(Poll::Met(d)) => {
                 return Ok(Outcome {
                     status: Status::Met,
@@ -308,6 +328,22 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
             .min(slice_end.saturating_sub(now))
             .max(1);
         clock.sleep(nap);
+        // #7956: the nap is capped AT the ceiling, so waking on it and polling
+        // once more is how every invocation used to return after its slice
+        // rather than inside it. Re-decide here, in the same precedence order.
+        let now = clock.now_unix();
+        if budget.expired(now) {
+            return Ok(Outcome {
+                status: Status::Timeout,
+                detail,
+            });
+        }
+        if now >= slice_end {
+            return Ok(Outcome {
+                status: Status::Pending,
+                detail,
+            });
+        }
     }
 }
 

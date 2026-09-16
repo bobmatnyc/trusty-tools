@@ -242,6 +242,50 @@ fn worktree_disk_check_flags_an_undercounted_total() {
     );
 }
 
+/// A budget-expired probe never prints its partial sum in the total's position.
+///
+/// Why (#7886): the owner's run read "41.8 MiB across 212 worktree(s) — 210
+/// unmeasured …" for a 146 GB store. The disclosure was present and the
+/// headline still SAID 41.8 MiB was what 212 worktrees hold, which is the
+/// downgraded-failure shape: a budget expiry rendered as a successful
+/// measurement. This asserts the exact string the pre-#7886 code emitted is
+/// absent, so it fails against that code and cannot pass by accident.
+#[test]
+fn worktree_disk_check_never_prints_a_partial_sum_as_a_total() {
+    let blocked = || ReclaimVerdict::Blocked {
+        gate: ReclaimGate::PrState,
+        reason: "open".into(),
+    };
+    let s = survey_of(vec![
+        candidate(Some(43_834_572), BranchPrState::Open { pr: 1 }, blocked()),
+        candidate(None, BranchPrState::Open { pr: 2 }, blocked()),
+        candidate(None, BranchPrState::Open { pr: 3 }, blocked()),
+    ]);
+    let check = build_worktree_disk_check(&s);
+    let as_a_total = format!(
+        "{} across {} worktree(s)",
+        crate::disk::human_bytes(s.total_bytes),
+        s.candidates.len()
+    );
+    assert!(
+        !check.message.contains(&as_a_total),
+        "the partial sum was presented as the total ({as_a_total}): {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("UNKNOWN") && check.message.contains("at least"),
+        "a partial probe must mark its figure a floor: {}",
+        check.message
+    );
+    // And the count beside the figure is what was MEASURED, not the fleet size.
+    assert!(
+        check.message.contains("across 1 of 3 worktree(s)"),
+        "the coverage the figure covers must be named: {}",
+        check.message
+    );
+    assert_ne!(check.status, CheckStatus::Ok, "{}", check.message);
+}
+
 #[tokio::test]
 async fn worktree_disk_check_is_ok_without_a_repos_root() {
     let check = check_worktree_disk(None, &LiveClaims::default()).await;
