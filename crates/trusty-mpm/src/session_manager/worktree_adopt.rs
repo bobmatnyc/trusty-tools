@@ -26,6 +26,13 @@
 //! and is refused — a delegation map is rebuilt empty at every daemon boot, so
 //! its silence proves nothing about an agent that is still working.
 //!
+//! #7974 does not relax that: it supplies the missing EVIDENCE from a second,
+//! daemon-independent source. [`liveness_with_lock_fallback`] reads the git
+//! worktree lock the harness itself wrote, and upgrades `Undeterminable` to
+//! `Dead` only when that lock names a pid the kernel reports does not exist.
+//! An `Alive` answer is never touched, and a lock that cannot answer leaves the
+//! refusal exactly where it was.
+//!
 //! What adoption does NOT do, stated rather than hidden: it changes the
 //! sentinel, so it changes what the reclaim and prune gates believe about the
 //! tree. It does not move the harness's own worktree isolation — a subagent
@@ -81,6 +88,74 @@ impl OwnerLiveness {
             AgentDelegationState::Live => Self::Alive,
             AgentDelegationState::Ended => Self::Dead,
             AgentDelegationState::Unknown => Self::Undeterminable,
+        }
+    }
+}
+
+/// What the git worktree lock says about the pid it was written for (#7974).
+///
+/// Why a second source at all: the delegation registry is rebuilt empty at
+/// every daemon boot, so after a restart it answers
+/// [`OwnerLiveness::Undeterminable`] for every dispatched agent — including one
+/// that died days ago holding uncommitted work. That is the moment adoption
+/// exists for, and it was exactly the moment it refused. The harness's own
+/// worktree lock does not have that defect: no daemon writes it, so it survives
+/// a daemon restart, and its reason names the process that was dispatched into
+/// the tree.
+/// What: the three answers a pid probe can give, kept apart rather than folded
+/// into a bool so an unanswerable probe cannot read as death (ADR-0045).
+/// Test: `lock_fallback_takes_a_dead_pids_tree`,
+/// `lock_fallback_refuses_a_running_pid`,
+/// `lock_fallback_refuses_when_the_lock_says_nothing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LockEvidence {
+    /// A harness agent lock names this pid, and no such process exists.
+    HolderPidGone(u32),
+    /// A harness agent lock names this pid, and that process is running.
+    HolderPidRunning(u32),
+    /// Git could not be asked, the tree carries no harness agent lock, the
+    /// reason names no pid, or the pid probe could not answer.
+    Silent,
+}
+
+/// Refine an UNDETERMINABLE registry answer with the worktree lock (#7974).
+///
+/// Why this is not a weakening of the gate: the refinement runs in ONE
+/// direction and from ONE starting point. [`OwnerLiveness::Alive`] and
+/// [`OwnerLiveness::Dead`] pass through untouched, so no lock state can take a
+/// tree from an owner the registry says is working; only the answer that meant
+/// "I cannot tell" can be upgraded, and only by POSITIVE evidence — a pid the
+/// kernel reports does not exist. Everything else stays `Undeterminable` and
+/// still refuses, including a running pid: pid reuse means a live pid is
+/// evidence about a process, not about the agent, and the refusal is the same
+/// either way.
+/// What: `(liveness, evidence)`. The second element is `Some` exactly when the
+/// lock changed the answer, and carries the sentence the caller logs — an
+/// adoption that succeeded on this path must say what made it succeed, because
+/// nothing else in the record explains why a refusal became a transfer.
+/// Test: `lock_fallback_takes_a_dead_pids_tree`,
+/// `lock_fallback_refuses_a_running_pid`,
+/// `lock_fallback_refuses_when_the_lock_says_nothing`,
+/// `lock_fallback_never_revives_a_live_owner`,
+/// `lock_fallback_leaves_a_dead_owner_dead`.
+pub(crate) fn liveness_with_lock_fallback(
+    registry: OwnerLiveness,
+    lock: LockEvidence,
+) -> (OwnerLiveness, Option<String>) {
+    if registry != OwnerLiveness::Undeterminable {
+        return (registry, None);
+    }
+    match lock {
+        LockEvidence::HolderPidGone(pid) => (
+            OwnerLiveness::Dead,
+            Some(format!(
+                "the delegation registry holds no record (rebuilt empty at daemon boot, \
+                 ADR-0045), and the git worktree lock still names dispatched pid {pid}, \
+                 which the kernel reports does not exist — the agent ended (#7974)"
+            )),
+        ),
+        LockEvidence::HolderPidRunning(_) | LockEvidence::Silent => {
+            (OwnerLiveness::Undeterminable, None)
         }
     }
 }

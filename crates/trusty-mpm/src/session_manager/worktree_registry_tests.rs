@@ -668,6 +668,85 @@ fn harness_agent_lock_reason_rejects_an_operator_lock() {
     );
 }
 
+/// #7974: the pid comes out of the measured reason shape, and only out of a
+/// harness reason.
+/// Test: this function IS the test.
+#[test]
+fn harness_lock_pid_reads_the_measured_reason_shape() {
+    assert_eq!(
+        harness_lock_pid_in_reason(
+            "claude agent agent-a92efd8de8a9e6960 (pid 17167 start Mon Sep 14 15:30:46 2026)"
+        ),
+        Some(17167)
+    );
+}
+
+/// #7974: an operator's lock names no dispatched process, so reading a pid out
+/// of one would attribute a stranger's process to the harness.
+/// Test: this function IS the test.
+#[test]
+fn harness_lock_pid_rejects_an_operator_lock() {
+    assert_eq!(
+        harness_lock_pid_in_reason("do not remove (pid 17167)"),
+        None
+    );
+}
+
+/// #7974: a harness reason whose pid is missing or unparsable yields `None`
+/// rather than a guess — silence refuses at the adoption gate.
+/// Test: this function IS the test.
+#[test]
+fn harness_lock_pid_is_none_when_the_reason_names_no_pid() {
+    assert_eq!(harness_lock_pid_in_reason("claude agent agent-a1c"), None);
+    assert_eq!(
+        harness_lock_pid_in_reason("claude agent agent-a1c (pid notanumber)"),
+        None
+    );
+}
+
+/// #7974: a path git does not list is not a locked worktree, and must not be
+/// read as one.
+/// Test: this function IS the test.
+#[test]
+fn harness_lock_pid_of_a_non_worktree_is_none() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert_eq!(harness_agent_lock_pid(tmp.path()), None);
+}
+
+/// #7974: the tri-state pid probe separates running, gone, and unanswerable.
+///
+/// Why a spawned-and-reaped child rather than a large constant: a hard-coded
+/// "surely unused" pid is only probably unused, and a test that passes because
+/// nothing happened to hold that number is not a test. Waiting on the child
+/// reaps the zombie, so the pid is genuinely free at the moment it is probed.
+/// Test: this function IS the test.
+#[test]
+fn pid_liveness_separates_running_gone_and_undeterminable() {
+    assert_eq!(
+        pid_liveness(std::process::id()),
+        Some(true),
+        "this process is running"
+    );
+
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits immediately");
+    let dead = child.id();
+    child.wait().expect("reap the child");
+    assert_eq!(
+        pid_liveness(dead),
+        Some(false),
+        "a reaped child's pid is gone"
+    );
+
+    assert_eq!(pid_liveness(0), None, "0 is a process group, not a process");
+    assert_eq!(
+        pid_liveness(u32::MAX),
+        None,
+        "a pid outside positive pid_t is not a process"
+    );
+}
+
 /// The scan reports the harness's agent lock as its OWN admission verdict
 /// (#6561).
 ///

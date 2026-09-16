@@ -102,6 +102,17 @@ pub(crate) struct TransitionReport {
     pub(crate) to: String,
     /// Whether an assignee mutation was applied.
     pub(crate) assignee_changed: bool,
+    /// The issue was ALREADY in the target state, so nothing was mutated
+    /// (#8003).
+    ///
+    /// Why a field rather than an error: a caller asking for the state an issue
+    /// already holds got what it wanted, so exit 0 is right — but "nothing
+    /// changed" and "moved one rung" must not print the same line, which is
+    /// what sent operators to a second `tm issue current` call to tell them
+    /// apart. The distinction is reported, not swallowed.
+    /// Test: `ops_transition_same_state_is_a_reported_no_op`,
+    /// `ops_transition_same_state_makes_no_gh_mutation`.
+    pub(crate) no_op: bool,
 }
 
 /// Every label the harness applies by policy, in seed order.
@@ -229,7 +240,8 @@ pub(crate) fn seed_labels<S: TicketSystem>(
 /// assignee rule, and post an audit comment so the change is reconstructable.
 /// What: resolves `<to>` to a known state; fetches the issue; resolves the
 /// current state from its labels and open/closed flag (erroring clearly on
-/// multiple); checks the `from → to` edge; refuses an edge whose
+/// multiple); returns a [`TransitionReport::no_op`] when the issue is already
+/// in `<to>` (#8003); checks the `from → to` edge; refuses an edge whose
 /// `requires_note` is set when no `--note` was given; performs the single-call
 /// swap (`swap_labels`), or a plain add/remove when one end is label-less;
 /// applies the assignee rule via `set_assignee` (no-op for the factory
@@ -238,6 +250,8 @@ pub(crate) fn seed_labels<S: TicketSystem>(
 /// [`TransitionReport`].
 /// Test: `ops_transition_happy_path`, `ops_transition_rejects_invalid_terminal`,
 /// `ops_transition_rejects_zero_state`, `ops_transition_rejects_multi_state`,
+/// `ops_transition_same_state_is_a_reported_no_op`,
+/// `ops_transition_same_state_makes_no_gh_mutation`,
 /// plus `project_*` in `project_model_tests.rs`.
 pub(crate) fn transition<S: TicketSystem>(
     sys: &S,
@@ -268,6 +282,20 @@ pub(crate) fn transition<S: TicketSystem>(
             );
         }
     };
+
+    // 2b. #8003: the issue is already where the caller is asking it to go.
+    // Reported as a no-op and returned BEFORE the edge check, because a
+    // self-edge is not in any transition graph — leaving this to step 3 turned
+    // "nothing to do" into "invalid transition", and leaving it to step 5 would
+    // have swapped a label for itself.
+    if from.as_deref() == Some(to) {
+        return Ok(TransitionReport {
+            from,
+            to: to.to_string(),
+            assignee_changed: false,
+            no_op: true,
+        });
+    }
 
     // 3. Validate the edge BEFORE any gh mutation.
     if !sm.transition_allowed(from.as_deref(), to) {
@@ -338,6 +366,7 @@ pub(crate) fn transition<S: TicketSystem>(
         from,
         to: to.to_string(),
         assignee_changed,
+        no_op: false,
     })
 }
 

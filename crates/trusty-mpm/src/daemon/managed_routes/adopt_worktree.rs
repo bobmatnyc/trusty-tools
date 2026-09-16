@@ -18,8 +18,16 @@
 //!
 //! It changes ONE thing on disk: the sentinel. It moves no files, commits
 //! nothing, and creates and deletes no worktree.
+//!
+//! #7974: when the delegation registry cannot answer — the state every daemon
+//! restart leaves it in — [`lock_evidence_for`] asks git's own worktree lock
+//! whether the pid it was written for still exists, and
+//! [`liveness_with_lock_fallback`] admits that as death evidence. Nothing else
+//! about the gate changes.
 //! Test: `adopt_worktree_route_refuses_a_live_owner`,
-//! `adopt_worktree_route_transfers_a_dead_owners_tree`.
+//! `adopt_worktree_route_transfers_a_dead_owners_tree`,
+//! `adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart`,
+//! `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,9 +40,11 @@ use crate::daemon::services::agent_worktree_reap::delegation_state_for_agent;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::record::ManagedSessionId;
 use crate::session_manager::worktree_adopt::{
-    AdoptionVerdict, OwnerLiveness, adopt_worktree, evaluate_adoption,
+    AdoptionVerdict, LockEvidence, OwnerLiveness, adopt_worktree, evaluate_adoption,
+    liveness_with_lock_fallback,
 };
 use crate::session_manager::worktree_ownership::{SentinelOwner, read_sentinel_owner};
+use crate::session_manager::worktree_registry::{harness_agent_lock_pid, pid_liveness};
 
 /// The request body: which tree, and which session takes it (#6497).
 #[derive(Debug, Deserialize)]
@@ -86,7 +96,18 @@ pub(crate) async fn adopt_worktree_core(
     req: AdoptWorktreeRequest,
 ) -> RouteOutcome {
     let owner = read_sentinel_owner(&req.path);
-    let liveness = owner_liveness(state, &owner).await;
+    // #7974: the registry's answer first, then the durable git lock for the one
+    // case the registry cannot answer after a daemon restart.
+    let (liveness, lock_evidence) = liveness_with_lock_fallback(
+        owner_liveness(state, &owner).await,
+        lock_evidence_for(&req.path),
+    );
+    if let Some(reason) = &lock_evidence {
+        tracing::info!(
+            path = %req.path.display(), %reason,
+            "adopt-worktree: the worktree lock supplied the death evidence the registry could not (#7974)"
+        );
+    }
     let claimants = live_claimants_in(state, &req.path);
     match evaluate_adoption(&req.path, &owner, liveness, &claimants) {
         AdoptionVerdict::Refuse(reason) => {
@@ -155,6 +176,28 @@ async fn owner_liveness(state: &Arc<DaemonState>, owner: &SentinelOwner) -> Owne
             }
         }
         SentinelOwner::Unknown => OwnerLiveness::Undeterminable,
+    }
+}
+
+/// What the git worktree lock on `path` says about its dispatched pid (#7974).
+///
+/// Why here rather than in the policy module: this is the half that touches the
+/// machine — one `git worktree list` and one `kill(pid, 0)` — so
+/// [`liveness_with_lock_fallback`] stays a pure function of the two answers.
+/// What: [`LockEvidence::Silent`] whenever any step declines to answer — git
+/// unavailable, the path not registered, no harness agent lock, no pid in the
+/// reason, or a pid probe that returned an errno it does not recognise. Silence
+/// refuses, so every one of those is the safe direction.
+/// Test: `adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart`,
+/// `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`.
+fn lock_evidence_for(path: &Path) -> LockEvidence {
+    let Some(pid) = harness_agent_lock_pid(path) else {
+        return LockEvidence::Silent;
+    };
+    match pid_liveness(pid) {
+        Some(true) => LockEvidence::HolderPidRunning(pid),
+        Some(false) => LockEvidence::HolderPidGone(pid),
+        None => LockEvidence::Silent,
     }
 }
 

@@ -110,6 +110,107 @@ async fn adopt_worktree_route_transfers_a_dead_owners_tree() {
     }
 }
 
+/// A REAL git worktree, harness-locked for `agent_id` at `pid`, carrying an
+/// agent ownership sentinel and NO delegation record (#7974).
+///
+/// Why a real worktree rather than a bare tempdir: the fallback's whole input
+/// is `git worktree list --porcelain`'s lock reason, so a directory git has
+/// never heard of exercises only the silent arm.
+/// Why no delegation record: that IS the reported state. A delegation map is
+/// rebuilt empty at every daemon boot, so after a restart the registry answers
+/// `Unknown` for an agent that may have died days ago.
+fn harness_locked_tree(
+    agent_id: &str,
+    pid: u32,
+) -> (
+    crate::session_manager::worktree_git_fixture::GitWorktreeFixture,
+    std::path::PathBuf,
+) {
+    let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let wt = fixture.add_worktree(agent_id);
+    write_agent_sentinel(&wt, agent_id, SessionId::new());
+    fixture.harness_lock_worktree_with_pid(&wt, agent_id, pid);
+    (fixture, wt)
+}
+
+/// #7974, the reported case: a dispatched agent's tree is adoptable once the
+/// agent is provably gone, even though the daemon restart left the delegation
+/// registry with no record of it.
+///
+/// Fails before #7974: the registry answers `Unknown`, which ADR-0045 refuses,
+/// so the 409 named the dead agent and the operator's uncommitted work stayed
+/// unreachable by the documented verb.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart() {
+    // A reaped child's pid is provably free, unlike any constant.
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits immediately");
+    let dead_pid = child.id();
+    child.wait().expect("reap the child");
+    assert_eq!(
+        crate::session_manager::worktree_registry::pid_liveness(dead_pid),
+        Some(false),
+        "premise broken: the fixture pid must be genuinely gone"
+    );
+
+    let (_fixture, tree) = harness_locked_tree("agent-a92efd8de8a9e6960", dead_pid);
+    // A daemon that has just restarted: no delegation record either way.
+    let state = Arc::new(DaemonState::new());
+    let successor = ManagedSessionId::new();
+
+    let outcome = adopt_worktree_core(
+        &state,
+        AdoptWorktreeRequest {
+            path: tree.clone(),
+            as_session: successor,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.status, 200,
+        "a dead dispatched agent's tree must be adoptable; body was: {:?}",
+        outcome.body
+    );
+    match read_sentinel_owner(&tree) {
+        SentinelOwner::Known(id, _) => assert_eq!(id, successor),
+        other => panic!("the sentinel must name the adopting session; got {other:?}"),
+    }
+}
+
+/// #7974, the arm that must NOT move: the same daemon-restart state, but the
+/// lock names a pid that is running. The fallback supplies no death evidence,
+/// so ADR-0045's refusal stands and the sentinel is untouched.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart() {
+    // This test process is unambiguously running.
+    let (_fixture, tree) = harness_locked_tree("agent-still-working", std::process::id());
+    let state = Arc::new(DaemonState::new());
+    let before = std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel");
+
+    let outcome = adopt_worktree_core(
+        &state,
+        AdoptWorktreeRequest {
+            path: tree.clone(),
+            as_session: ManagedSessionId::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.status, 409,
+        "a lock naming a RUNNING pid must not permit adoption"
+    );
+    assert_eq!(
+        std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel"),
+        before,
+        "a refusal must write nothing"
+    );
+}
+
 /// A tree that exists under two names — `<tmp>/real/tree` and, through a
 /// symlinked parent, `<tmp>/link/tree` — with an ENDED owner, so only the
 /// claimant gate can refuse.

@@ -570,15 +570,27 @@ async fn parity_doctor_agrees_across_transports() {
 /// message or status — is derived from a quantity it re-reads from the host on
 /// every call, rather than from config on disk or the daemon's own state.
 ///
-/// Why exactly these five: `worktree_disk` measures the worktree tree against a
+/// Why exactly these six: `worktree_disk` measures the worktree tree against a
 /// 3-second deadline, `worktrees` reports the reconciled inventory's counts,
 /// `session_store` reports `sessions.json`'s record count and byte length
 /// (#6490), `pty_headroom` takes a live census of allocated pseudo-terminals
-/// (#6577), and `skill_staleness` re-walks the deployed skill FILES at every
+/// (#6577), `skill_staleness` re-walks the deployed skill FILES at every
 /// tier — including `~/.claude/skills` — and derives both its message and its
-/// verdict from what it finds there (#6622). Each answer moves whenever another
-/// process on the machine adds a worktree, writes a session, opens a pty, or
-/// deploys a skill between this test's two calls.
+/// verdict from what it finds there (#6622), and `disk_usage` reads the live
+/// used-percentage of the MOUNT holding the worktree store (#7973). Each answer
+/// moves whenever another process on the machine adds a worktree, writes a
+/// session, opens a pty, deploys a skill, or writes a byte to that volume
+/// between this test's two calls.
+///
+/// Why the `$HOME` pin does not already cover `disk_usage` (#7973): the pin
+/// buys a path no other process knows, which is what makes every OTHER
+/// home-rooted row hermetic. It buys nothing here, because the quantity is not
+/// the tempdir's contents — it is the free space on the VOLUME the tempdir sits
+/// on, which is the same volume `target/` and every sibling test's fixtures are
+/// being written to. Observed 2026-09-15 as `79.6%` over HTTP against `79.7%`
+/// over the socket, beside `worktrees_exclude_entry_protects_against_double_
+/// force_clean` (#7638) creating and removing git worktrees in the same
+/// parallel run.
 ///
 /// Why `skill_staleness` and not every other row that resolves a path under
 /// `$HOME` (#6622): reading these checks, the home-rooted set is large —
@@ -609,7 +621,8 @@ async fn parity_doctor_agrees_across_transports() {
 /// What: the names [`normalize_host_sampled_checks`] normalizes.
 /// Test: [`parity_doctor_agrees_across_transports`],
 /// [`host_sampled_status_is_excused_from_parity_and_no_other_check_is`],
-/// [`skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is`].
+/// [`skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is`],
+/// [`disk_usage_divergence_is_excused_from_parity_and_no_other_check_is`].
 const HOST_SAMPLED_CHECKS: &[&str] = &[
     "worktree_disk",
     "worktrees",
@@ -620,6 +633,9 @@ const HOST_SAMPLED_CHECKS: &[&str] = &[
     // #6622: skill_staleness re-walks the deployed skill files at every tier,
     // which a concurrent `tm install` or managed-session bootstrap rewrites.
     "skill_staleness",
+    // #7973: disk_usage reads the live used-percentage of the mount, which any
+    // write anywhere on that volume moves between the two transport calls.
+    "disk_usage",
 ];
 
 /// Reduce each [`HOST_SAMPLED_CHECKS`] row to what cannot churn: its name, and
@@ -693,6 +709,8 @@ fn host_sampled_status_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "session_store", "status": "ok", "message": "43 session record(s), 59773 byte(s)"},
                 {"name": "pty_headroom", "status": "ok", "message": "82 of 511 pseudo-terminals allocated"},
                 {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
+                // #7973: present so only the exclusion under test varies.
+                {"name": "disk_usage", "status": "ok", "message": "/ is at 79.6% disk usage"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -741,6 +759,8 @@ fn skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "session_store", "status": "ok", "message": "43 session record(s)"},
                 {"name": "pty_headroom", "status": "ok", "message": "82 of 511 allocated"},
                 {"name": "skill_staleness", "status": skills_status, "message": skills_message},
+                // #7973: present so only the exclusion under test varies.
+                {"name": "disk_usage", "status": "ok", "message": "/ is at 79.6% disk usage"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -767,6 +787,75 @@ fn skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is() {
     // still has its verdict compared whole.
     let http = normalize_host_sampled_checks(report("ok", "clean", "ok"));
     let socket = normalize_host_sampled_checks(report("ok", "clean", "fail"));
+    assert_ne!(
+        http, socket,
+        "a NON-host-sampled check's STATUS divergence must still fail parity"
+    );
+}
+
+/// #7973: a `disk_usage` row that differs in MESSAGE — and, at the threshold,
+/// in STATUS — between the two samples passes parity, and a row that is not
+/// host-sampled and differs in status still fails it.
+///
+/// Why a hand-built pair: the live divergence needs another process to write to
+/// the volume between the two reads, which cannot be forced deterministically.
+/// That is exactly what broke [`parity_doctor_agrees_across_transports`] — the
+/// HTTP report read `79.6%` and the socket report, moments later, read `79.7%`,
+/// in a parallel run where a sibling test was creating and removing git
+/// worktrees on the same volume (#7638).
+///
+/// Why the status pair too, and not only the message: `build_disk_usage_check`
+/// derives the verdict FROM the sample, so a volume sitting at the configured
+/// threshold answers `ok` on one read and `warn` on the next with nothing else
+/// changed — the same not-independently-stable shape #6577 established for
+/// `worktree_disk`.
+/// Test: this function IS the test.
+#[test]
+fn disk_usage_divergence_is_excused_from_parity_and_no_other_check_is() {
+    let report = |disk_status: &str, disk_message: &str, instructions_status: &str| {
+        json!({
+            "checks": [
+                {"name": "worktree_disk", "status": "warn", "message": "6.2 GiB measured"},
+                {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
+                {"name": "session_store", "status": "ok", "message": "43 session record(s)"},
+                {"name": "pty_headroom", "status": "ok", "message": "82 of 511 allocated"},
+                {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
+                {"name": "disk_usage", "status": disk_status, "message": disk_message},
+                {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
+            ]
+        })
+    };
+
+    // The observed break: the mount was resampled between the two reads.
+    let http = normalize_host_sampled_checks(report(
+        "ok",
+        "/System/Volumes/Data is at 79.6% disk usage; disk.max_usage_pct threshold is 90%",
+        "warn",
+    ));
+    let socket = normalize_host_sampled_checks(report(
+        "ok",
+        "/System/Volumes/Data is at 79.7% disk usage; disk.max_usage_pct threshold is 90%",
+        "warn",
+    ));
+    assert_eq!(
+        http, socket,
+        "a `disk_usage` row resampled between the reads must not fail parity"
+    );
+
+    // At the threshold the VERDICT churns with the same sample, so the status
+    // has to be normalized too, not just the message.
+    let http = normalize_host_sampled_checks(report("ok", "at 89.9%", "warn"));
+    let socket = normalize_host_sampled_checks(report("warn", "at 90.0%", "warn"));
+    assert_eq!(
+        http, socket,
+        "a `disk_usage` row whose verdict crossed the threshold between the reads \
+         must not fail parity"
+    );
+
+    // Non-vacuous: `instructions` reads a project file, is NOT host-sampled, and
+    // still has its verdict compared whole.
+    let http = normalize_host_sampled_checks(report("ok", "at 79.6%", "ok"));
+    let socket = normalize_host_sampled_checks(report("ok", "at 79.6%", "fail"));
     assert_ne!(
         http, socket,
         "a NON-host-sampled check's STATUS divergence must still fail parity"

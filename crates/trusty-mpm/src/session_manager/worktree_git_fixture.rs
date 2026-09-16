@@ -408,13 +408,27 @@ impl GitWorktreeFixture {
     /// Test: `scan_separates_a_harness_agent_lock_from_an_operator_lock`,
     /// `survey_discloses_a_harness_locked_agent_worktree`.
     pub(crate) fn harness_lock_worktree(&self, wt: &Path, agent_id: &str) {
+        self.harness_lock_worktree_with_pid(wt, agent_id, 4242);
+    }
+
+    /// [`Self::harness_lock_worktree`] with the dispatched pid chosen (#7974).
+    ///
+    /// Why: adoption's lock fallback turns on whether that pid is RUNNING, so
+    /// the two arms it has to separate — a dead agent's tree and a live one's —
+    /// differ only in this number. A fixed 4242 can be either, depending on
+    /// what else the machine is running, which would make both tests
+    /// nondeterministic.
+    /// What: the same reason string, with `pid` substituted.
+    /// Test: `adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart`,
+    /// `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`.
+    pub(crate) fn harness_lock_worktree_with_pid(&self, wt: &Path, agent_id: &str, pid: u32) {
         git_ok(
             &self.repo,
             &[
                 "worktree",
                 "lock",
                 "--reason",
-                &format!("claude agent {agent_id} (pid 4242 start Mon Sep 1 20:33:51 2026)"),
+                &format!("claude agent {agent_id} (pid {pid} start Mon Sep 1 20:33:51 2026)"),
                 wt.to_str().expect("utf8 worktree path"),
             ],
         );

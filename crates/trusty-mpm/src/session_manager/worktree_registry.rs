@@ -191,6 +191,83 @@ pub(crate) fn harness_lock_state(path: &Path) -> HarnessLockState {
     }
 }
 
+/// The pid a harness agent lock reason names, if it names one (#7974).
+///
+/// Why: [`is_harness_agent_lock_reason`] deliberately recognises the SHAPE and
+/// reads nothing out of it, because nothing needed the pid until adoption did.
+/// Adoption needs it: after a daemon restart the delegation registry answers
+/// `Unknown` for every agent (ADR-0045), and this lock — written by the harness,
+/// never by a daemon — is the only durable record of WHICH process was
+/// dispatched into the tree. A pid the kernel does not know is positive
+/// evidence that process ended.
+/// What: the digits after `(pid ` in a reason already confirmed to be a harness
+/// agent lock. Measured shape (git 2.54.0, Claude Code agent isolation):
+/// `claude agent agent-<id> (pid 17167 start Mon Sep 14 15:30:46 2026)`.
+/// Returns `None` for a non-harness reason, a missing marker, or digits that do
+/// not fit a `u32` — never a guess.
+/// Test: `harness_lock_pid_reads_the_measured_reason_shape`,
+/// `harness_lock_pid_rejects_an_operator_lock`,
+/// `harness_lock_pid_is_none_when_the_reason_names_no_pid`.
+pub(crate) fn harness_lock_pid_in_reason(reason: &str) -> Option<u32> {
+    if !is_harness_agent_lock_reason(reason) {
+        return None;
+    }
+    let rest = reason.split_once("(pid ")?.1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The pid of the harness agent lock git reports on `path`, if any (#7974).
+///
+/// Why: the one line that touches git, so the parse above stays pure.
+/// What: resolves `path` in the registry that actually owns it and reads the
+/// pid out of its lock reason. `None` when git could not be asked, when the
+/// path is not a registered worktree, when it is unlocked or locked by an
+/// operator, or when the reason carries no pid.
+/// Test: `harness_lock_pid_of_a_non_worktree_is_none`.
+pub(crate) fn harness_agent_lock_pid(path: &Path) -> Option<u32> {
+    let registered = list_registered_worktrees(path)?;
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let record = registered
+        .into_iter()
+        .find(|w| std::fs::canonicalize(&w.path).unwrap_or_else(|_| w.path.clone()) == canonical)?;
+    if !record.locked {
+        return None;
+    }
+    harness_lock_pid_in_reason(record.lock_reason.as_deref()?)
+}
+
+/// Is `pid` running, as far as this process can tell (#7974)?
+///
+/// Why a tri-state rather than [`crate::core::process::is_process_alive`]'s
+/// bool: that wrapper folds every errno it did not expect into "dead", which is
+/// the coercion ADR-0045 forbids on a probe feeding a mutation. Adoption takes
+/// a tree away from whoever holds it, so an UNANSWERED probe must refuse, not
+/// proceed.
+/// What: `kill(pid, 0)` — a null signal that performs the existence and
+/// permission check and delivers nothing. `Some(true)` when the process exists
+/// (`EPERM` included: it exists, under another user); `Some(false)` only on
+/// `ESRCH`; `None` for a pid outside the positive `pid_t` range (`0` and
+/// negatives are process groups, never one process) and for any other errno.
+/// Test: `pid_liveness_separates_running_gone_and_undeterminable`.
+pub(crate) fn pid_liveness(pid: u32) -> Option<bool> {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let raw = i32::try_from(pid).ok()?;
+    if raw <= 0 {
+        return None;
+    }
+    match kill(Pid::from_raw(raw), None) {
+        Ok(()) | Err(Errno::EPERM) => Some(true),
+        Err(Errno::ESRCH) => Some(false),
+        // intentional fail-closed (ADR-0045): an errno this probe does not
+        // recognise has not proven the process gone.
+        Err(_) => None,
+    }
+}
+
 /// Parse `git worktree list --porcelain` output into records (#4207).
 ///
 /// Why: the parse is the one piece of this module that can be tested without
