@@ -1,2 +1,0 @@
-Fixed
-- `tm doctor`'s `background_sweeps` row reports a sweep that is actually running. Doctor runs daemonless, so the row's in-memory timings were always the CLI's own empty ones and every sweep read "ON, idle, no pass yet" while the daemon's reclaim pass had live `git`/`gh` children. Each sweep now also writes a marker under `~/.trusty-mpm/sweeps/` at both edges of a pass, and the row folds it with the daemon's atomics. A marker whose writing daemon is gone reads as idle, never as a pass stuck in flight (#8059).

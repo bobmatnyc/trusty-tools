@@ -1,2 +1,0 @@
-Changed
-- The `pm_guard` harness-refusal catalogue covers eight more read-only shapes (bare `ls`, `cat -n`, `grep -rln`, `find … -name`, `cargo --version`, `git log --oneline -5`), asserts each is ADMITTED on all 50 rounds rather than merely stable, and adds the write-shaped deny rows that bound the allowance (#7477). The refusal text those reports quote comes from the Claude Code harness, not from any `trusty-*` binary.

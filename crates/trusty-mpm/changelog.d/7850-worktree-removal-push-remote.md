@@ -1,2 +1,0 @@
-Fixed
-- The ADR-0057 worktree-removal gate searches for the merged pull request in the repository the branch was PUSHED to, resolved from git's own `branch.<name>.pushRemote` / `remote.pushDefault` / `branch.<name>.remote` keys, instead of always `origin` (#7850). A fork workflow whose pull request merged on the fork is no longer refused. A MERGED pull request is still required; every way the resolution can fail lands on `origin` or on a deny.

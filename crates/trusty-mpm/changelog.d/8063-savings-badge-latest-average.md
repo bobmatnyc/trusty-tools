@@ -1,3 +1,0 @@
-Changed
-
-- The `💸` statusline segment now renders the LATEST savings row's own reduction over the mean of this session's rows — `💸30%/25%` — instead of a whole-session share over a cross-session average (owner ruling 2026-09-15, #8063). Each figure is one row's `tokens_saved / tokens_before`, the reduction the producer actually measured, so a `git diff` the compressor just cut by 19 % shows as 19 % rather than the ~1 % of everything the session sent that it diluted to. A session with one row shows that row on both sides. The zero-fold and no-denominator guards are unchanged: a row with no `tokens_before` contributes no percent, and `💸—` still marks a session with nothing recorded. `tm commit-trailers` keeps reporting the session share.

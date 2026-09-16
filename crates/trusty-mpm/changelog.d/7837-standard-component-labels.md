@@ -1,2 +1,0 @@
-Fixed
-- `tm issue standard` derives the component labels from the workspace's own crates and cross-checks them against the repository's live `gh label list`, instead of printing only the labels the harness seeds. A crate whose label the repository does not carry is flagged MISSING; a failed crate derivation or a failed `gh label list` prints as an error line rather than a silently shorter list (#7837).
