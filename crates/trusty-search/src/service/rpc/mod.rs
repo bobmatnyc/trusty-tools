@@ -46,6 +46,44 @@ pub mod chat;
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
 
+/// Restore both process-global memory limits when a test that touches them ends.
+///
+/// Why: `core::memguard`'s two limits are `AtomicU64` cells shared by the whole
+/// test binary, and `/config` projects both. A case that leaves them where it
+/// put them — including one that leaves them there by panicking mid-assertion —
+/// becomes the next case's baseline. #7665: the reads-parity case read the cells
+/// twice, once per transport, and a concurrent writer between the two reads made
+/// the two bodies differ; every writer is `#[serial_test::serial]` so the reader
+/// must be too, and this guard is what keeps the pinning it does from leaking.
+/// What: `capture` snapshots the RESOLVED value of each limit; `Drop` writes
+/// both back. Shared by `reads::tests` and `admin::tests`, which are sibling
+/// private modules and so cannot reach each other's items.
+/// Test: `config_over_the_socket_matches_the_http_body`,
+/// `config_set_over_the_socket_matches_the_http_body`.
+#[cfg(test)]
+pub(crate) struct RestoreLimits {
+    memory_limit_mb: Option<u64>,
+    index_memory_limit_mb: Option<u64>,
+}
+
+#[cfg(test)]
+impl RestoreLimits {
+    pub(crate) fn capture() -> Self {
+        Self {
+            memory_limit_mb: crate::core::memguard::memory_limit_mb(),
+            index_memory_limit_mb: crate::core::memguard::index_memory_limit_mb(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RestoreLimits {
+    fn drop(&mut self) {
+        crate::core::memguard::set_memory_limit_mb(self.memory_limit_mb);
+        crate::core::memguard::set_index_memory_limit_mb(self.index_memory_limit_mb);
+    }
+}
+
 /// A typed report as the JSON axum would have written for it.
 ///
 /// Why: `serde_json::to_value`, which the router applies to a typed response,

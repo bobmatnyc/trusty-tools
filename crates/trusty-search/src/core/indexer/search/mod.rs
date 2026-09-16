@@ -304,17 +304,10 @@ impl CodeIndexer {
         };
         // #7675: an identifier- or literal-shaped query earns an exact-match
         // lane whose hits the floor below ranks above every semantic guess. A
-        // conceptual query extracts no literal and pays nothing.
+        // conceptual query extracts no literal and pays nothing. The lane
+        // itself runs after fusion (#7775) — see below for why.
         let exact_literal = exact::extract_exact_literal(&query.text);
         let exact_re = exact_literal.as_ref().and_then(exact::literal_regex);
-        let exact_lane = match (&exact_literal, &exact_re) {
-            (Some(lit), Some(re)) => {
-                self.exact_match_lane(lit, re, want, effective_mode, filter)
-                    .await
-            }
-            _ => exact::ExactLaneOutcome::default(),
-        };
-        let exact_ids: Vec<String> = exact_lane.hits.iter().map(|h| h.id.clone()).collect();
         let bm25_fut = self.bm25_search(&query.text, want, filter);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
@@ -389,6 +382,28 @@ impl CodeIndexer {
                 effective_mode,
             )
             .await?;
+        // #7775: the exact-match lane runs HERE rather than beside the other
+        // lanes so it can see their verdict. A `Filename` literal's hits tie on
+        // every ordering key the lane owns — the path-suffix tier and an
+        // occurrence count that is always 1 — so before this the tie fell back
+        // to chunk id and `FILENAME_HIT_CAP` floored an alphabetical 8 above the
+        // whole fused page. Handing the lane `all`'s scores lets the cap keep
+        // the 8 those lanes ranked best. Nothing between this and the old call
+        // site read the lane, so only the tie order moves.
+        let (exact_lane, exact_ids) = {
+            let fused: std::collections::HashMap<&str, f32> =
+                all.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let tie_scores = |id: &str| fused.get(id).copied().unwrap_or(0.0);
+            let lane = match (&exact_literal, &exact_re) {
+                (Some(lit), Some(re)) => {
+                    self.exact_match_lane(lit, re, want, effective_mode, filter, Some(&tie_scores))
+                        .await
+                }
+                _ => exact::ExactLaneOutcome::default(),
+            };
+            let ids: Vec<String> = lane.hits.iter().map(|h| h.id.clone()).collect();
+            (lane, ids)
+        };
         // #7675: the floor is a ranking rule, so the chunks it ranks must first
         // survive `materialize_search_results`' `take(top_k)`.
         let all = exact::promote_candidates(all, &exact_ids);
