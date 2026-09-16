@@ -245,6 +245,77 @@ pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
     repo_slug_with(dir, &SshHostAliases::for_current_user())
 }
 
+/// The remote name every caller means when it does not name one.
+pub(crate) const DEFAULT_REMOTE: &str = "origin";
+
+/// [`repo_slug_for`], asked of a named remote rather than of `origin` (#7850).
+///
+/// Why: `origin` is the right remote for the overwhelming majority of
+/// checkouts, and the wrong one for a fork workflow. In `breezeblue-ai/breeze-tts`
+/// local `main` tracks `fork` (`bobmatnyc/breeze-tts`) while `origin`
+/// (`breezeblue-ai/breeze-tts`) 403s for the operator's account; branch
+/// `fix/matsuoka-respelling` merged as `bobmatnyc/breeze-tts#5`, and the
+/// ADR-0057 removal gate still refused the worktree because it asked `origin`
+/// for a pull request that was never opened there. The question the gate means
+/// to ask is "did these commits land on the remote they were PUSHED to", so the
+/// caller resolves that remote ([`push_remote_for_branch`]) and states it here.
+///
+/// What: identical to [`repo_slug_for`] except for the remote whose URL is
+/// read, including the one-hop fallback to the owning checkout. `remote` is
+/// [`DEFAULT_REMOTE`] for every caller that has no better answer, which makes
+/// this function's behaviour there byte-identical to the pre-#7850 one.
+/// Test: `a_fork_branch_is_searched_in_the_repository_it_was_pushed_to`,
+/// `an_unknown_named_remote_refuses_rather_than_answering_for_origin`.
+pub(crate) fn repo_slug_for_remote(dir: &Path, remote: &str) -> Result<String, String> {
+    repo_slug_with_remote(dir, remote, &SshHostAliases::for_current_user())
+}
+
+/// The remote a branch's commits were pushed to, when it is not `origin`
+/// (#7850).
+///
+/// Why: git already records the answer, in the same three keys `git push` itself
+/// consults, so the guard reads it rather than inferring one. Resolving it is a
+/// correction to WHICH repository is asked, never a relaxation of what must be
+/// found there: a MERGED pull request is still required, and asking the wrong
+/// repository could only ever produce a false DENY.
+/// What: the first non-empty of `branch.<branch>.pushRemote`,
+/// `remote.pushDefault`, `branch.<branch>.remote` — git's own precedence — and
+/// `None` when none is set, when the value is blank, or when git cannot be
+/// asked at all. `None` means the caller uses [`DEFAULT_REMOTE`], which is the
+/// pre-#7850 behaviour, so every failure branch here lands on the old verdict.
+/// Test: `push_remote_follows_gits_own_precedence_and_is_none_when_unset`,
+/// `a_fork_branch_is_searched_in_the_repository_it_was_pushed_to`.
+pub(crate) fn push_remote_for_branch(dir: &Path, branch: &str) -> Option<String> {
+    let keys = [
+        format!("branch.{branch}.pushRemote"),
+        "remote.pushDefault".to_string(),
+        format!("branch.{branch}.remote"),
+    ];
+    keys.iter().find_map(|key| {
+        git_stdout(dir, &["config", "--get", key])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// [`repo_slug_for_remote`], against a stated SSH alias table (#7196, #7850).
+///
+/// Why: same reason as [`repo_slug_with`] — the operator's `~/.ssh/config` is
+/// not readable by a test that must answer the same on two machines.
+/// What: [`repo_slug_with`]'s body with the remote name supplied.
+/// Test: `a_fork_branch_is_searched_in_the_repository_it_was_pushed_to`.
+pub(crate) fn repo_slug_with_remote(
+    dir: &Path,
+    remote: &str,
+    aliases: &SshHostAliases,
+) -> Result<String, String> {
+    match remote_url(dir, remote) {
+        Some(url) => parse_repo_slug(&url, aliases).map_err(|r| refusal(dir, &url, &r)),
+        None => slug_from_owning_checkout_remote(dir, remote, aliases),
+    }
+}
+
 /// [`repo_slug_for`], against a stated SSH alias table (#7196).
 ///
 /// Why: the alias table is the operator's `~/.ssh/config`, which no test may
@@ -257,15 +328,12 @@ pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
 /// Test: `an_aliased_origin_resolves_through_the_given_ssh_config`,
 /// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`.
 pub(crate) fn repo_slug_with(dir: &Path, aliases: &SshHostAliases) -> Result<String, String> {
-    match origin_url(dir) {
-        Some(url) => parse_repo_slug(&url, aliases).map_err(|r| refusal(dir, &url, &r)),
-        None => slug_from_owning_checkout(dir, aliases),
-    }
+    repo_slug_with_remote(dir, DEFAULT_REMOTE, aliases)
 }
 
-/// `dir`'s own `origin` URL, or `None` when git reports none.
-fn origin_url(dir: &Path) -> Option<String> {
-    git_stdout(dir, &["config", "--get", "remote.origin.url"])
+/// `dir`'s URL for the named remote, or `None` when git reports none.
+fn remote_url(dir: &Path, remote: &str) -> Option<String> {
+    git_stdout(dir, &["config", "--get", &format!("remote.{remote}.url")])
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -274,13 +342,17 @@ fn origin_url(dir: &Path) -> Option<String> {
 /// The slug of the checkout that owns `dir`'s worktree registry.
 ///
 /// The fallback is ONE hop and never recurses: a checkout that is its own
-/// registry root and still has no `origin` has nothing left to fall back to.
-fn slug_from_owning_checkout(dir: &Path, aliases: &SshHostAliases) -> Result<String, String> {
+/// registry root and still has no such remote has nothing left to fall back to.
+fn slug_from_owning_checkout_remote(
+    dir: &Path,
+    remote: &str,
+    aliases: &SshHostAliases,
+) -> Result<String, String> {
     let root = registry_root_for(dir).ok_or_else(|| missing(dir))?;
     if same_directory(&root, dir) {
         return Err(missing(dir));
     }
-    let url = origin_url(&root).ok_or_else(|| missing(dir))?;
+    let url = remote_url(&root, remote).ok_or_else(|| missing(dir))?;
     parse_repo_slug(&url, aliases).map_err(|r| refusal(&root, &url, &r))
 }
 

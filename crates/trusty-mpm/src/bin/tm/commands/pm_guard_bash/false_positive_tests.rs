@@ -294,6 +294,15 @@ mod go_template_braces {
 /// in this module's `tests` sibling); these rows extend the same catalogue with
 /// the shapes these two issues report, and add the DETERMINISM claim neither
 /// issue could make about the harness.
+///
+/// The 2026-09-16 round added eight more shapes, refused live in the isolation
+/// worktree the fix was written in — a bare `ls`, `cargo --version` and
+/// `git log --oneline -5` among them, none of which names a path to verify —
+/// beside `echo hello` and `pwd`, which ran in the same minutes. It also added
+/// the deny direction the module lacked: the read-only rows are a withdrawal of
+/// nothing, and `a_write_shaped_command_is_refused_on_all_fifty_rounds` is what
+/// stops a later edit from turning them into a blanket allow while every
+/// existing row stays green.
 mod harness_refusals_are_not_this_guard {
     use super::*;
 
@@ -303,6 +312,15 @@ mod harness_refusals_are_not_this_guard {
     /// read-back, plus two shapes refused live in the session that produced
     /// this fix — a multi-file `grep` and a `grep` carrying context flags —
     /// each of which has an allowed twin differing only in a flag.
+    ///
+    /// Rows 8-15 were refused live on 2026-09-16, in the worktree of the
+    /// session that extended this catalogue, and are the reason #7477 says "no
+    /// complexity pattern predicts the refusal". `ls` with no argument at all,
+    /// `cargo --version`, and `git log --oneline -5` carry no path to verify
+    /// and were refused anyway — while `echo hello`, `pwd` and
+    /// `wc -l <four paths>` ran in the same minutes. #7477's body also lists
+    /// `cat -n`, `grep -rln` and a `find` with a name filter, which had no row
+    /// here before.
     const REPORTED_REFUSALS: &[&str] = &[
         "ls apps",
         "ls -la",
@@ -312,6 +330,30 @@ mod harness_refusals_are_not_this_guard {
         "grep -n scratchpad crates/trusty-mpm/src/bin/tm/commands/pm_guard.rs \
          crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/mod.rs",
         "grep -n fn -B 4 -A 12 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/mod.rs",
+        "ls",
+        "ls -1 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash",
+        "cat -n crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/mod.rs",
+        "cat /private/tmp/claude-502/proj/sess/scratchpad/gate-7477.txt",
+        "grep -rln healthz services",
+        "find crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash -maxdepth 1 -type f",
+        "find docs/adr -name '0057-*.md'",
+        "cargo --version",
+        "git log --oneline -5",
+    ];
+
+    /// Write-shaped commands, for the direction this catalogue must NOT move.
+    ///
+    /// Why: every row above withdraws nothing — these shapes were already
+    /// allowed here — but a future edit that widened the read-only allowance
+    /// into a blanket one would pass the rows above unchanged and this module
+    /// would still be green. These are the bound: each command WRITES, and each
+    /// keeps its refusal from [`evaluate_bash_command`], with the same
+    /// determinism the read-only rows claim.
+    const WRITE_SHAPED_REFUSALS: &[&str] = &[
+        "echo 'fn main() {}' > crates/trusty-mpm/src/lib.rs",
+        "ls -la > listing.txt",
+        "grep -rn healthz services >> notes.md",
+        "cat crates/a/src/lib.rs > crates/b/src/lib.rs",
     ];
 
     /// Every reported shape is classifiable and allowed here.
@@ -375,6 +417,57 @@ mod harness_refusals_are_not_this_guard {
                     ),
                     first,
                     "verdict changed on round {round} for: {command}"
+                );
+            }
+        }
+    }
+
+    /// 🔴 Each read-only shape is ADMITTED on all 50 rounds, not merely stable.
+    ///
+    /// Why (#7477's closure condition): "the same classification 50 times with
+    /// no refusal". The row above proves the answer does not VARY, which a
+    /// consistently-refusing classifier would also satisfy. This one pins the
+    /// value: `None` from both bands, every round, for every shape the harness
+    /// refused — including the ones refused live on 2026-09-16 in the very
+    /// worktree this fix was written in.
+    /// Test: itself.
+    #[test]
+    fn every_reported_shape_is_admitted_on_all_fifty_rounds() {
+        for command in REPORTED_REFUSALS {
+            for round in 0..50 {
+                assert_eq!(
+                    unclassifiable_command(command),
+                    None,
+                    "round {round}: this guard must still establish what it runs: {command}"
+                );
+                assert_eq!(
+                    evaluate_bash_command(command),
+                    None,
+                    "round {round}: a read-only command must allow: {command}"
+                );
+            }
+        }
+    }
+
+    /// 🔴 The deny direction, held to the same standard.
+    ///
+    /// Why: the withdrawal above is only correct while what it was protecting
+    /// still refuses. A shell write is the thing an agent's worktree isolation
+    /// exists to place, so it must stay refused — and refused on every one of
+    /// the same 50 rounds, or "deterministic" would be a claim about the allow
+    /// side alone.
+    /// What: asserts [`evaluate_bash_command`] denies each write-shaped row on
+    /// every round. Two of them share a read-only twin in
+    /// [`REPORTED_REFUSALS`] differing only by the redirect, which is what
+    /// makes the pair a test of the redirect rather than of the verb.
+    /// Test: itself.
+    #[test]
+    fn a_write_shaped_command_is_refused_on_all_fifty_rounds() {
+        for command in WRITE_SHAPED_REFUSALS {
+            for round in 0..50 {
+                assert!(
+                    evaluate_bash_command(command).is_some(),
+                    "round {round}: a write must still be refused: {command}"
                 );
             }
         }

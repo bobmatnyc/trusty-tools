@@ -153,6 +153,28 @@ the guard will establish every precondition itself.
      comparison is made twice, once in the probe and again in the policy, so the
      grant does not rest on a filter the deciding function cannot see.
 
+     Amended by #7850 — the pull request is looked for in the repository the
+     branch was PUSHED to, not unconditionally in `origin`'s. #7057 fixed the
+     question "which repository" by reading it from the worktree's own remote
+     rather than letting `gh` infer one, and hard-coded `origin` as that remote.
+     A fork workflow breaks the assumption: in `breezeblue-ai/breeze-tts` local
+     `main` tracks `fork` (`bobmatnyc/breeze-tts`) because `origin` 403s for the
+     operator's account, `fix/matsuoka-respelling` merged as
+     `bobmatnyc/breeze-tts#5`, and the removal was still refused with "GitHub
+     has no MERGED pull request … in `breezeblue-ai/breeze-tts` (resolved from
+     this worktree's `origin` remote)". The remote now comes from git's own push
+     precedence — `branch.<name>.pushRemote`, then `remote.pushDefault`, then
+     `branch.<name>.remote` — and only then falls back to `origin`.
+
+     This is a CORRECTION of which repository is asked, not a relaxation of what
+     must be found there: a MERGED pull request is still required, and asking
+     the wrong repository could only ever produce a false DENY. It therefore
+     needs no fail-closed carve-out of its own, and gets one anyway in the one
+     place it could matter — a remote name that resolves to no parseable URL is
+     an `Err`, which denies, rather than a silent second attempt at `origin`. A
+     repository with none of the three keys set answers `None` and takes the
+     pre-#7850 `origin` path byte for byte.
+
      Amended by #7958 — a worktree whose HEAD is its own pull request's
      `headRefOid` grants regardless of the `unpushed-commits` answer. `gh pr
      merge` leaves `@{upstream}` STALE rather than level, so `Ahead(n)` is what

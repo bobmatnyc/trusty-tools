@@ -55,6 +55,30 @@ worktree creation.
 6. The per-project `worktree` flag has no role in PM placement or agent
    worktree creation. Its live effect is limited to the daemon-unreachable
    fallback permission for framework deployment.
+7. **A project may declare that it holds no source (#7905).** Decision 1's
+   "documents and configuration" is decided by file EXTENSION, which is a proxy
+   for "a change another session standing in this tree could be building on". A
+   prose repository has no such change, and the ones whose own CLAUDE.md forbids
+   worktrees have no second place to write either — so a `.py` helper beside an
+   article in `bobmatnyc/writing` was unwritable AND uncommittable at once, and
+   a `git mv` of it into the archive could be landed by neither route. A project
+   states the exception once, as `documents_only = true` in the committed
+   `.trusty-mpm.toml` (ADR-0042's project-level surface), and the two rules that
+   consult it — this ADR's write boundary and ADR-0049's commit gate — read it
+   through ONE function so they cannot disagree about whether a file may be
+   written but not committed.
+
+   The declaration empties the SOURCE CLASS for that checkout and relaxes
+   nothing else. ADR-0049 decision 3's live-writer check, decision 5's
+   empty/unreadable-index denies, decision 8's lone-command rule, ADR-0048's
+   destructive-git rules and every secret-file rule are untouched. It is read
+   from the checkout ROOT the guard already resolved, never from the working
+   directory, and it fails closed: an absent file, a `false` value, an
+   unreadable file and one that fails `deny_unknown_fields` all leave the deny
+   exactly as it was, so a declaration that cannot be trusted can never widen
+   anything. It is a SEPARATE key from `agent_worktree` and does not imply it —
+   that one says where dispatched agents stand, this one says what the
+   repository contains.
 
 ## Consequences
 

@@ -12,7 +12,9 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::{PROJECT_CONFIG_FILE, ProjectConfigError, ProjectLevelConfig, load_or_report};
+use super::{
+    PROJECT_CONFIG_FILE, ProjectConfigError, ProjectLevelConfig, documents_only_at, load_or_report,
+};
 
 /// Write a project config into a fresh temp project directory.
 fn project_with(body: &str) -> TempDir {
@@ -256,4 +258,80 @@ fn this_repositorys_project_config_enables_prompt_self_improvement() {
     let raw = std::fs::read_to_string(&path).expect("the committed project config is readable");
     let cfg = ProjectLevelConfig::from_toml(&raw, &path).expect("it parses");
     assert_eq!(cfg.prompt_self_improvement, Some(true));
+}
+
+/// #7905: the key parses, and an absent key is not `false`.
+#[test]
+fn project_config_parses_documents_only() {
+    let on = ProjectLevelConfig::from_toml("documents_only = true\n", Path::new("/p")).unwrap();
+    assert_eq!(on.documents_only, Some(true));
+
+    let off = ProjectLevelConfig::from_toml("documents_only = false\n", Path::new("/p")).unwrap();
+    assert_eq!(off.documents_only, Some(false));
+
+    let absent = ProjectLevelConfig::from_toml("worktree = true\n", Path::new("/p")).unwrap();
+    assert_eq!(absent.documents_only, None);
+}
+
+/// 🔴 #7905: only a parseable file saying `true` widens the write boundary.
+///
+/// Why: [`documents_only_at`] is the single reader both ADR-0044 rules consult,
+/// and its `true` REMOVES a deny. So every way of not-saying-true has to answer
+/// `false`: an absent file, a `false` value, a file that fails
+/// `deny_unknown_fields`, and one that is not TOML at all. A single wrong
+/// `true` here would open a shared checkout to source writes.
+#[test]
+fn documents_only_at_reads_a_declared_checkout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(PROJECT_CONFIG_FILE);
+
+    assert!(!documents_only_at(dir.path()), "no file declares nothing");
+
+    std::fs::write(&path, "documents_only = true\n").expect("write");
+    assert!(
+        documents_only_at(dir.path()),
+        "a declared repository says so"
+    );
+
+    std::fs::write(&path, "documents_only = false\n").expect("write");
+    assert!(!documents_only_at(dir.path()), "`false` is not a grant");
+
+    std::fs::write(&path, "worktree = false\n").expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "another project key is not this one"
+    );
+}
+
+/// 🔴 #7905 fail-closed: a declaration that cannot be TRUSTED is not a
+/// declaration.
+///
+/// Why: `load_or_report` rejects a file wholesale when any key fails
+/// `deny_unknown_fields` — a typo means the author's intent is unknown, not
+/// partially known. A relaxation read out of such a file would be a grant
+/// nobody wrote.
+#[test]
+fn documents_only_at_is_false_for_an_undeclared_or_unreadable_checkout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(PROJECT_CONFIG_FILE);
+
+    // A real `documents_only = true` sitting beside a misspelled key: the file
+    // is rejected as a whole, so the grant does not survive.
+    std::fs::write(&path, "documents_only = true\nwrktree = false\n").expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "a file that fails deny_unknown_fields grants nothing"
+    );
+
+    std::fs::write(&path, "documents_only = \"yes\"\n").expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "a wrong type grants nothing"
+    );
+
+    std::fs::write(&path, "this is not toml = = =\n").expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "an unparseable file grants nothing"
+    );
 }

@@ -216,6 +216,42 @@ pub struct ProjectLevelConfig {
     /// `project_config_prompt_self_improvement_defaults_to_none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_self_improvement: Option<bool>,
+
+    /// This repository holds documents, so ADR-0044's source class is empty here
+    /// (#7905).
+    ///
+    /// Why: ADR-0044 decision 1 restricts a main checkout to documents and
+    /// configuration, and decides "source" by EXTENSION
+    /// ([`crate::core::project_config`]'s consumer,
+    /// `pm_guard::is_source_code_path`). A prose repository whose own CLAUDE.md
+    /// forbids worktrees has no second place to write, so a `.py` helper beside
+    /// an article is unwritable and uncommittable by both routes at once: the
+    /// reported `git mv …/make-graphics.py …/archive/` could be landed from
+    /// neither the checkout nor a worktree the project does not permit. The
+    /// boundary's PURPOSE — keeping source changes out of a tree other sessions
+    /// share — has no subject in a repository that ships no source, so the
+    /// project says so once, here, rather than the guard guessing from a file
+    /// census.
+    ///
+    /// What: `None` (the default) and `Some(false)` → the boundary is exactly
+    /// what it was; `Some(true)` → [`crate::core::project_config::documents_only_at`]
+    /// answers yes for this checkout and the two ADR-0044/ADR-0049 rules that
+    /// consult it treat every staged or written path as a document. It is a
+    /// SEPARATE key from [`Self::agent_worktree`] and does not imply it: opting
+    /// dispatched agents out of worktrees says where they stand, while this says
+    /// what the repository contains, and a source repository may well want the
+    /// first without the second.
+    ///
+    /// It relaxes ONE question — is this path source — and nothing else. The
+    /// live-writer check on a commit (ADR-0049 decision 3), the single-command
+    /// rule (decision 8), the destructive-git rules and every secret-file rule
+    /// are untouched.
+    /// Test: `project_config_parses_documents_only`,
+    /// `documents_only_at_reads_a_declared_checkout`,
+    /// `allows_a_source_write_in_a_documents_only_checkout`,
+    /// `classify_staged_commit_permits_a_rename_in_a_documents_only_project`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documents_only: Option<bool>,
 }
 
 /// The `[session]` table: this project's MCP-server and plugin allowlists.
@@ -334,6 +370,34 @@ pub fn load_or_report(project_dir: &Path) -> Option<ProjectLevelConfig> {
             None
         }
     }
+}
+
+/// Has the checkout rooted at `root` declared itself documents-only (#7905)?
+///
+/// Why: the ONE place the ADR-0044 write boundary and the ADR-0049 commit gate
+/// ask the question, so the two cannot drift into disagreeing about whether a
+/// file may be written but not committed — the exact incoherence ADR-0049
+/// decision 2 exists to remove.
+///
+/// What: `true` only for a `<root>/.trusty-mpm.toml` that PARSES and carries
+/// `documents_only = true`. Every other outcome is `false`, and `false` leaves
+/// the caller's deny exactly as it was: an absent file, an unreadable one, one
+/// that fails `deny_unknown_fields`, and an absent or `false` key all keep the
+/// boundary. That direction is the whole safety case for the key — a
+/// declaration that cannot be read never widens anything, which is
+/// [ADR-0045](../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
+/// applied to a relaxation rather than to a destructive path. Callers ask it
+/// only once a deny is otherwise certain, so ordinary traffic pays no file read.
+///
+/// `root` is the checkout root the caller already resolved
+/// ([`crate::core::project_aliases::main_checkout_root`]), never the `cwd`: the
+/// declaration belongs to the repository, and reading it from a subdirectory
+/// would let a nested directory answer for a project that never declared
+/// anything.
+/// Test: `documents_only_at_reads_a_declared_checkout`,
+/// `documents_only_at_is_false_for_an_undeclared_or_unreadable_checkout`.
+pub fn documents_only_at(root: &Path) -> bool {
+    load_or_report(root).and_then(|cfg| cfg.documents_only) == Some(true)
 }
 
 #[cfg(test)]

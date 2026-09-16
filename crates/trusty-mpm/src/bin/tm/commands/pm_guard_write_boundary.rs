@@ -64,6 +64,18 @@
 //! "yes" removes a deny; see that function for the three shapes that bought an
 //! exemption from a lexical answer.
 //!
+//! **A documents-only repository has no source to protect (#7905).** ADR-0044
+//! decides "source" by extension, which is a proxy for "a change other sessions
+//! in this tree could be standing on". In a prose repository whose own CLAUDE.md
+//! forbids worktrees the proxy has no subject and no escape hatch at once: a
+//! `.py` helper beside an article was writable by neither route, so a `git mv`
+//! into the archive could not be landed at all. A project declares the exception
+//! once, in the committed `.trusty-mpm.toml`
+//! ([`documents_only_at`](trusty_mpm::core::project_config::documents_only_at)),
+//! and the declaration is read from the CHECKOUT ROOT this rule already
+//! resolved, fail-closed: an absent, unreadable or malformed file leaves the
+//! deny untouched.
+//!
 //! Residual bypasses, stated rather than hidden. The deny half resolves the
 //! path lexically, so a symlink into a checkout is not followed — the same
 //! limit [`main_checkout_root`] carries and documents, and a fail-OPEN one: it
@@ -132,11 +144,14 @@ use super::pm_guard_bash::shell_write_target;
 /// What: `Some(reason)` when the call names a write target, that target
 /// [`is_source_code_path`], and the directory it resolves into
 /// [`main_checkout_root`] — except when that checkout is rooted under the
-/// session scratchpad ([`root_is_scratchpad_rooted`], #7778). The target comes from
+/// session scratchpad ([`root_is_scratchpad_rooted`], #7778) or has declared
+/// itself documents-only (#7905). The target comes from
 /// [`edit_tool_target_path`] for an [`EDIT_TOOLS`] member and from
 /// [`shell_write_target`] for `Bash` (#7399). `None` (ALLOW) in every other
 /// case.
 /// Test: `denies_a_source_write_in_a_main_checkout`,
+/// `allows_a_source_write_in_a_documents_only_checkout`,
+/// `denies_a_source_write_when_the_project_did_not_declare_documents_only`,
 /// `allows_a_source_write_in_a_scratchpad_rooted_clone`,
 /// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
 /// `denies_a_git_output_write_in_a_main_checkout`,
@@ -190,6 +205,12 @@ fn evaluate_main_checkout_write_with(
     // #7778: a disposable clone under the session scratchpad is nobody's shared
     // tree, so ADR-0044 has no other session's work to protect there.
     if write_lands_in_a_scratchpad_clone(&resolved, &root) {
+        return None;
+    }
+    // #7905: a repository that declared itself documents-only has no source
+    // class for this boundary to defend. Asked LAST, so only a write already
+    // certain to be denied pays for the file read.
+    if trusty_mpm::core::project_config::documents_only_at(&root) {
         return None;
     }
     // The message quotes the spelling the caller used, not the expansion.
@@ -531,6 +552,76 @@ mod tests {
                 None,
                 "{name} is a document or configuration and must stay writable"
             );
+        }
+    }
+
+    /// 🔴 #7905 arm 1: a declared documents-only repository admits a
+    /// source-classified write in its own main checkout.
+    ///
+    /// Why: the reported case. `bobmatnyc/writing` forbids worktrees in its
+    /// CLAUDE.md, so a `.py` helper beside an article had no second place to be
+    /// written and no route to being committed — the boundary refused the only
+    /// tree the project has. The declaration is what tells the guard the source
+    /// class is empty here.
+    /// What: the same fixture as `denies_a_source_write_in_a_main_checkout`,
+    /// plus one committed `.trusty-mpm.toml`.
+    /// Test: itself.
+    #[test]
+    fn allows_a_source_write_in_a_documents_only_checkout() {
+        let dir = main_checkout();
+        std::fs::write(
+            dir.path()
+                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+            "documents_only = true\n",
+        )
+        .expect("write the declaration");
+        for name in ["make-graphics.py", "src/lib.rs", "scripts/build.sh"] {
+            assert_eq!(
+                evaluate_main_checkout_write(
+                    "Write",
+                    Some(&write_input(&dir.path().join(name))),
+                    dir.path()
+                ),
+                None,
+                "{name} is a document in a repository that declared itself documents-only"
+            );
+        }
+    }
+
+    /// 🔴 #7905 arm 2: a repository that did NOT declare it is unchanged.
+    ///
+    /// Why: the relaxation is worth nothing unless it is confined to the
+    /// projects that asked for it. Each spelling here is a way of not declaring
+    /// — no file, the key set to `false`, and a file whose typo makes it
+    /// untrusted — and each must leave ADR-0044's deny exactly as it was.
+    /// Test: itself.
+    #[test]
+    fn denies_a_source_write_when_the_project_did_not_declare_documents_only() {
+        for declaration in [
+            None,
+            Some("documents_only = false\n"),
+            Some("worktree = false\n"),
+            // A real grant beside a misspelled key: rejected wholesale.
+            Some("documents_only = true\nwrktree = false\n"),
+        ] {
+            let dir = main_checkout();
+            if let Some(raw) = declaration {
+                std::fs::write(
+                    dir.path()
+                        .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+                    raw,
+                )
+                .expect("write the declaration");
+            }
+            let reason = evaluate_main_checkout_write(
+                "Write",
+                Some(&write_input(&dir.path().join("src/lib.rs"))),
+                dir.path(),
+            )
+            .unwrap_or_else(|| {
+                panic!("an undeclared project must keep the deny; declaration={declaration:?}")
+            });
+            assert!(reason.contains("ADR-0044"), "{reason}");
         }
     }
 

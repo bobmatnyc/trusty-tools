@@ -32,11 +32,24 @@
 //! <branch> --state merged` is the only question that answers correctly.
 //!
 //! **Which repository is STATED, never inferred (#7057).** The `--repo` slug
-//! comes from the target worktree's own `origin` remote
+//! comes from the target worktree's own remote
 //! ([`crate::session_manager::worktree_repo_slug`]); a worktree whose
 //! repository cannot be established denies rather than asking `gh` to guess,
 //! and the deny message names the repository that WAS searched so a
 //! wrong-repository answer is visible instead of reading as "no pull request".
+//!
+//! **Which REMOTE is the one the branch was pushed to (#7850).** `origin` is
+//! not always that remote. In `breezeblue-ai/breeze-tts` local `main` tracks
+//! `fork` (`bobmatnyc/breeze-tts`) because `origin` 403s for the operator's
+//! account; `fix/matsuoka-respelling` merged as `bobmatnyc/breeze-tts#5`, and
+//! the removal gate refused the worktree because it searched `origin` for a
+//! pull request that had never been opened there. The lookup now resolves the
+//! branch's push remote through git's own three keys
+//! ([`crate::session_manager::worktree_repo_slug::push_remote_for_branch`]) and
+//! searches THAT repository. It corrects which repository is asked and relaxes
+//! nothing: a MERGED pull request is still required, and every way the
+//! resolution can fail — no key set, git unaskable, a URL that will not parse —
+//! lands on `origin` or on an `Err`, both of which are the pre-#7850 verdict.
 //!
 //! **"Does this tree hold work" is ONE question, asked in one place (#7185).**
 //! This module used to count `git status --porcelain` lines itself, while the
@@ -124,7 +137,9 @@ use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_withi
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
 };
-use crate::session_manager::worktree_repo_slug::repo_slug_for;
+use crate::session_manager::worktree_repo_slug::{
+    DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
+};
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.
@@ -403,6 +418,10 @@ pub trait WorktreeRemovalProbe {
 
     /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
     /// repository the question was asked (#7057).
+    ///
+    /// #7850: the repository is the one behind the branch's PUSH remote, not
+    /// unconditionally `origin` — see the module doc.
+    /// Test: `a_fork_branch_is_searched_in_the_repository_it_was_pushed_to`.
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String>;
 
     /// Would merging this worktree's HEAD into `base_ref` change anything
@@ -568,10 +587,18 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
 
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
         // #7057: the repository — and its host, when that is not github.com —
-        // comes from THIS worktree's `origin`, not from whatever `gh` would
-        // infer at this working directory. An origin that cannot be read or
+        // comes from THIS worktree's own remote, not from whatever `gh` would
+        // infer at this working directory. A remote that cannot be read or
         // parsed is an `Err`, which denies — never a lookup aimed at a guess.
-        let repo = repo_slug_for(dir)?;
+        // #7850: WHICH remote is the one this branch was pushed to, read from
+        // git's own three push keys. A fork workflow pushes to `fork` and opens
+        // the pull request there, so asking `origin` searched a repository the
+        // branch had never reached and refused a worktree whose pull request had
+        // merged. `None` — nothing configured, or git could not be asked —
+        // means `origin`, so every failure branch here lands on the pre-#7850
+        // verdict rather than on a guess.
+        let remote = push_remote_for_branch(dir, branch);
+        let repo = repo_slug_for_remote(dir, remote.as_deref().unwrap_or(DEFAULT_REMOTE))?;
         // #6623: the same per-project `github:` binding an interactive `tm`
         // resolves. The hook inherits the operator's shell environment in the
         // common case, but not when Claude Code is launched from a GUI, and a

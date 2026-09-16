@@ -117,6 +117,21 @@
 //! unconditional deny ADR-0048 decision 4 shipped, so this rule can only turn a
 //! deny into an allow and never the reverse.
 //!
+//! **A documents-only repository stages no source (#7905).** ADR-0049 decision
+//! 9 pins `--no-renames` so a staged `git mv <src>.py <docs>.md` reports BOTH
+//! sides, which is right for a source repository and wrong for a prose one: in
+//! `bobmatnyc/writing`, whose CLAUDE.md forbids worktrees, a `git mv` of a
+//! utility script into an article's archive directory was refused here and had
+//! no worktree to be refused into. A project declares the exception once, in
+//! the committed `.trusty-mpm.toml`, and
+//! [`documents_only_at`](trusty_mpm::core::project_config::documents_only_at)
+//! — the same reader `pm_guard_write_boundary` uses, so the two rules cannot
+//! disagree about whether a file may be written but not committed — empties the
+//! source class for that checkout. It relaxes ONE question. The live-writer
+//! query, the lone-command rule, the empty/unreadable-index denies and every
+//! destructive verb above are untouched, and an absent, unreadable or malformed
+//! declaration leaves the pre-#7905 deny standing.
+//!
 //! Test: `is_whole_tree_destructive_*`, `destructive_target_dir_*`,
 //! `commit_target_dir_*`, `classify_staged_commit_*`,
 //! `commit_flags_leave_the_index_authoritative_*`, `main_checkout_head_move_*`,
@@ -390,11 +405,22 @@ fn command_is_a_lone_commit(command: &str) -> bool {
 ///   `--include`, `--only`, a bare pathspec) makes the staged set a lie about
 ///   what will land, so the staged set cannot license it.
 ///
+/// #7905: a repository that declared `documents_only = true` in its committed
+/// `.trusty-mpm.toml` has no source class here, so the extension filter finds
+/// nothing and a staged rename of a `.py` helper reads as the documents commit
+/// it is. Nothing else about this verdict moves: an empty or unreadable index,
+/// and a flag the index does not describe, each deny in a documents-only
+/// project exactly as anywhere else, and the caller's live-writer check
+/// (ADR-0049 decision 3) still gates the `DocsOnly` answer.
+///
 /// Test: `classify_staged_commit_permits_documents_and_configuration`,
 /// `classify_staged_commit_denies_source_and_names_it`,
 /// `classify_staged_commit_denies_a_mixed_set_and_names_only_the_source`,
 /// `classify_staged_commit_denies_an_unreadable_or_empty_index`,
-/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`.
+/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`,
+/// `classify_staged_commit_permits_a_rename_in_a_documents_only_project`,
+/// `classify_staged_commit_denies_a_rename_without_the_declaration`,
+/// `classify_staged_commit_still_denies_an_empty_index_in_a_documents_only_project`.
 fn classify_staged_commit(
     tail: &[String],
     staged: Option<Vec<String>>,
@@ -407,10 +433,12 @@ fn classify_staged_commit(
     let Some(staged) = staged.filter(|s| !s.is_empty()) else {
         return CommitVerdict::Deny(commit_deny_reason(&root));
     };
+    // #7905: read once, and only after the index is known non-empty.
+    let documents_only = trusty_mpm::core::project_config::documents_only_at(&root);
     let source: Vec<&str> = staged
         .iter()
         .map(String::as_str)
-        .filter(|p| is_source_code_path(p))
+        .filter(|p| !documents_only && is_source_code_path(p))
         .collect();
     if source.is_empty() {
         CommitVerdict::DocsOnly {
@@ -1470,6 +1498,112 @@ mod tests {
             CommitVerdict::Deny(reason) => reason,
             CommitVerdict::DocsOnly { .. } => panic!("expected a deny"),
         }
+    }
+
+    /// [`classify`] against a REAL checkout root, so the #7905 declaration can
+    /// be read off disk.
+    ///
+    /// Why: `classify` uses the literal `/repo`, which carries no
+    /// `.trusty-mpm.toml` and therefore always answers "not documents-only" —
+    /// which is exactly what keeps every row above unaffected by #7905.
+    fn classify_at(root: &Path, tail: &[&str], staged: &[&str]) -> CommitVerdict {
+        let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+        let staged: Vec<String> = staged.iter().map(|p| (*p).to_string()).collect();
+        classify_staged_commit(&tail, Some(staged), root, root.to_path_buf())
+    }
+
+    /// A checkout root that has (or has not) declared itself documents-only.
+    fn root_declaring(documents_only: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(raw) = documents_only {
+            std::fs::write(
+                dir.path()
+                    .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+                raw,
+            )
+            .expect("write the declaration");
+        }
+        dir
+    }
+
+    /// 🔴 #7905 arm 3: a RENAME commit in a documents-only repository is
+    /// documents-only.
+    ///
+    /// Why: the reported refusal verbatim. ADR-0049 decision 9 pins
+    /// `--no-renames` so a staged `git mv` reports BOTH sides, and in
+    /// `bobmatnyc/writing` both sides of `git mv …/make-graphics.py
+    /// …/archive/make-graphics.py` are `.py`. The commit was refused here and
+    /// the project forbids the worktree the refusal points at, so the rename
+    /// could be landed by neither route and the archive stayed split.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_permits_a_rename_in_a_documents_only_project() {
+        let root = root_declaring(Some("documents_only = true\n"));
+        let verdict = classify_at(
+            root.path(),
+            &["-m", "chore: archive the graphics script"],
+            &[
+                "articles/hyperdev/drafts/tripbot/video/make-graphics.py",
+                "articles/hyperdev/drafts/tripbot/video/archive/make-graphics.py",
+            ],
+        );
+        assert!(
+            is_docs_only(&verdict),
+            "both sides of the rename are documents in a documents-only repository"
+        );
+    }
+
+    /// 🔴 #7905 arm 2, at the commit gate: the same rename WITHOUT the
+    /// declaration still denies, and still names both sides.
+    ///
+    /// Why: the relaxation is confined to the projects that asked for it. A
+    /// source repository committing a `.py` rename in its shared checkout is
+    /// the case ADR-0044 exists for, and nothing here may move it.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_denies_a_rename_without_the_declaration() {
+        for declaration in [None, Some("documents_only = false\n")] {
+            let root = root_declaring(declaration);
+            let verdict = classify_at(
+                root.path(),
+                &["-m", "chore: archive"],
+                &["video/make-graphics.py", "video/archive/make-graphics.py"],
+            );
+            let reason = deny_text(&verdict);
+            assert!(reason.contains("video/make-graphics.py"), "{reason}");
+            assert!(
+                reason.contains("video/archive/make-graphics.py"),
+                "{reason}"
+            );
+        }
+    }
+
+    /// 🔴 #7905: the declaration relaxes ONE question and no other.
+    ///
+    /// Why: `documents_only` says what the repository CONTAINS. It says nothing
+    /// about whether the index describes the commit, so an empty index and a
+    /// content flag must deny in a documents-only project exactly as anywhere
+    /// else — otherwise one key would quietly retire ADR-0049 decisions 5 and 8
+    /// as well as decision 2.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_still_denies_an_empty_index_in_a_documents_only_project() {
+        let root = root_declaring(Some("documents_only = true\n"));
+        let tail: Vec<String> = ["-m", "wip"].iter().map(|s| (*s).to_string()).collect();
+        for staged in [None, Some(Vec::new())] {
+            let verdict =
+                classify_staged_commit(&tail, staged.clone(), root.path(), root.path().into());
+            assert!(
+                deny_text(&verdict).contains("ADR-0044"),
+                "an unreadable or empty index denies whatever the repository contains: {staged:?}"
+            );
+        }
+        // And a flag that commits content the index does not hold.
+        let verdict = classify_at(root.path(), &["-a", "-m", "wip"], &["notes.md"]);
+        assert!(
+            !is_docs_only(&verdict),
+            "`-a` commits what the index does not hold, declaration or not"
+        );
     }
 
     #[test]
