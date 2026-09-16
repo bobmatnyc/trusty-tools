@@ -138,6 +138,33 @@ struct TaskRunRequestParams {
     context: Option<String>,
     #[serde(default)]
     model_override: Option<String>,
+    /// (#8030) Pins the TOP-LEVEL agent's model for this run, the sibling
+    /// `model_override` never had — that field only ever rewired the
+    /// DELEGATED engineer, so a caller could not repoint the agent that
+    /// actually orchestrates.
+    ///
+    /// Why: the owner rule (2026-09-15) is that every tcode capability is
+    /// reachable from CLI/API; before this, the top-level model was reachable
+    /// only by hand-editing a deployed `.trusty-code/agents/<agent>.md`.
+    /// What: `#[serde(default)]` — omitted means "no override", which is the
+    /// pre-#8030 behaviour exactly. A short alias (`opus`/`sonnet`/`haiku`)
+    /// is accepted and normalised downstream by
+    /// `crate::provider::resolve_model_with_override`.
+    /// Test: `task::protocol::tests::task_run_params_parse_pm_model`,
+    /// `task::protocol::tests::task_run_params_default_pm_model_to_none`.
+    #[serde(default)]
+    pm_model: Option<String>,
+    /// (#8128) Raises (or lowers) the PM loop's turn cap for this run.
+    ///
+    /// Why: the cap was `AgentLoopConfig::default()`'s 8 with no override, so
+    /// a multi-step delivery task could not be given more turns.
+    /// What: `#[serde(default)]` — omitted keeps the built-in 8. Zero is
+    /// rejected as `invalid_argument` by [`task_run`]: a zero-turn loop makes
+    /// no LLM call and would report an empty run as a normal one.
+    /// Test: `task::protocol::tests::task_run_params_parse_max_turns`,
+    /// `task::protocol::tests::task_run_rejects_zero_max_turns`.
+    #[serde(default)]
+    max_turns: Option<u32>,
     /// #2056 extension beyond the spec's literal example: when present,
     /// runs against an EXISTING session (created via `session.create`)
     /// instead of minting a fresh one — the spec's "sessionful" execution
@@ -208,7 +235,7 @@ struct TaskRunRequestParams {
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
 /// session_id?, mode?, deadline_secs?, project?, workstream_id?,
-/// no_delegate?) -> { session_id, status, mode }`.
+/// no_delegate?, pm_model?, max_turns?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
@@ -302,6 +329,13 @@ async fn task_run_with_permissions(
             "task_description must not be empty",
         ));
     }
+    // #8128: a zero turn cap would run no turns at all and report the empty
+    // result as a normal one — reject it before a session is ever minted.
+    if p.max_turns == Some(0) {
+        return Err(RpcError::invalid_argument(
+            "max_turns must be at least 1 (0 would run no turns at all)",
+        ));
+    }
     // #3178: a per-call `project` overrides the boot-time binding for this
     // call only, resolved through the exact same helper `session.create` uses
     // — never a second, divergent implementation of "what is a project".
@@ -390,6 +424,10 @@ async fn task_run_with_permissions(
         binding: binding.clone(),
         agents_dir,
         model_override: p.model_override,
+        // #8030/#8128: both carried straight through — the CLI already
+        // applied its flag-then-env tiers before the request was built.
+        pm_model: p.pm_model,
+        max_turns: p.max_turns,
         mode,
         deadline_secs: p.deadline_secs,
         // #3902: no test-only override for this production call site.

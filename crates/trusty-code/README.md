@@ -104,7 +104,7 @@ workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 |------------|-------------|
 | `tcode serve [--project <PATH>] --stdio\|--http` | Start a project-bound or projectless orchestration server |
 | `tcode tui [--project <PATH>]` | Launch the interactive TUI and attach to or start an HTTP daemon |
-| `tcode run-task <agent> <task>` | Run a task through a daemon-owned session |
+| `tcode run-task <agent> <task>` | Run a task through a daemon-owned session. `--pm-model <SLUG>` pins the top-level agent's model, `--engineer-model <SLUG>` the delegated engineer's, and `--max-turns <N>` the top-level loop's turn cap |
 | `tcode session …` | List, inspect, and create sessions |
 | `tcode attach`, `cancel`, `transcript` | Operate on an existing session |
 | `tcode workstream …` | Manage workstreams and their active state |
@@ -132,17 +132,36 @@ blocked decision: epic #4570.)
 ## Model selection and the OpenRouter ZDR guardrail (#7955)
 
 `tcode`'s built-in default model (`provider::DEFAULT_MODEL`, currently
-`anthropic/claude-sonnet-4.5`) is an OpenRouter slug served under
+`anthropic/claude-sonnet-5`) is an OpenRouter slug served under
 zero-data-retention (ZDR). An OpenRouter account with the ZDR guardrail
 enabled rejects any model whose routing excludes ZDR-compliant endpoints with
 `404 zdr-violation-by-guardrail` — the older default, `openai/gpt-4o-mini`,
 hit this on every ZDR account.
 
+### Per-run overrides
+
+A `run-task` run has two agents, each with its own model, and both flags work
+on the default (daemon) path and under `--legacy-in-process`. Short aliases
+`opus` / `sonnet` / `haiku` are accepted anywhere a slug is, and resolve to
+`anthropic/claude-opus-5`, `anthropic/claude-sonnet-5`, and
+`anthropic/claude-haiku-4.5`.
+
+| Flag | Env fallback | What it pins | Precedence |
+|------|--------------|--------------|------------|
+| `--pm-model <SLUG>` (#8030) | `TCODE_PM_MODEL` | The TOP-LEVEL agent's own model | flag > env > the agent's front-matter `model:` > `DEFAULT_MODEL` |
+| `--engineer-model <SLUG>` (#1035) | `TCODE_ENGINEER_MODEL` | The delegated `python-engineer`'s model | flag > env > that agent's own config |
+| `--max-turns <N>` (#8128) | `TCODE_MAX_TURNS` | The top-level loop's turn cap | flag > env > the built-in cap of 8 |
+
+`--max-turns 0` is rejected: a zero-turn loop makes no LLM call and would
+report an empty run as a normal one. An unparseable `TCODE_MAX_TURNS` is
+treated as unset, logged at `warn`, matching `TCODE_RUN_DEADLINE_SECONDS`.
+
 If a chat call still 404s on your chosen model (a ZDR exclusion, an unknown
 slug, or a retired one), `tcode` surfaces an actionable error naming the
 model and the two remedies, rather than a bare HTTP status:
 
-- Pick a different model with `--model <slug>` (`run-task`) or the agent's
+- Pick a different model with `run-task --pm-model <slug>` /
+  `--engineer-model <slug>` (see "Per-run overrides" above) or the agent's
   `model` / `[llm].model_override` config.
 - Confirm your OpenRouter credentials are set with `tcode config keys list`.
 

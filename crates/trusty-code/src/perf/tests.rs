@@ -67,6 +67,89 @@ fn cost_usd_known_haiku() {
     assert!((c - 4.0).abs() < 1e-9, "got {c}");
 }
 
+// --- #8128: explicit Claude 5 / Haiku 4.5 rows ---
+
+/// `anthropic/claude-opus-5` prices at Opus 5's published rates, not the
+/// `opus-4` fallback it used to land on.
+///
+/// Why (#8128): `RunReport.cost_usd` is compared against Claude Code's own
+/// `total_cost_usd` in the #8127 bake-off; the 4.x fallback priced Opus 5
+/// input at $15/MTok against a real $5/MTok — a 3x overstatement.
+/// What: one million tokens in each bucket, asserted against $5 / $25 /
+/// $0.50 / $6.25 per MTok.
+/// Test: this test.
+#[test]
+fn cost_usd_opus_5_matches_published_rates() {
+    assert!((cost_usd("anthropic/claude-opus-5", 1_000_000, 0, 0, 0) - 5.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-opus-5", 0, 1_000_000, 0, 0) - 25.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-opus-5", 0, 0, 1_000_000, 0) - 0.50).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-opus-5", 0, 0, 0, 1_000_000) - 6.25).abs() < 1e-9);
+}
+
+/// `anthropic/claude-sonnet-5` prices at Sonnet 5's published rates, not the
+/// `sonnet-4` fallback.
+///
+/// Why (#8128): Sonnet 5 is what the `sonnet` alias and `DEFAULT_MODEL` now
+/// resolve to, so this row prices the DEFAULT run — the 4.x fallback
+/// overstated its input by 50%.
+/// What: $2 / $10 / $0.20 / $2.50 per MTok.
+/// Test: this test.
+#[test]
+fn cost_usd_sonnet_5_matches_published_rates() {
+    assert!((cost_usd("anthropic/claude-sonnet-5", 1_000_000, 0, 0, 0) - 2.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-sonnet-5", 0, 1_000_000, 0, 0) - 10.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-sonnet-5", 0, 0, 1_000_000, 0) - 0.20).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-sonnet-5", 0, 0, 0, 1_000_000) - 2.50).abs() < 1e-9);
+}
+
+/// `claude-haiku-4.5` prices at Haiku 4.5's own published rates in BOTH
+/// slug spellings, ahead of the generic `haiku-4` row.
+///
+/// Why (#8128): `claude-haiku-4.5` contains the substring `haiku-4`, so the
+/// explicit row only works if it is matched first — this is the ordering
+/// guard. The published rate ($1/$5) is also higher than the legacy Haiku
+/// 3/4 row's $0.80/$4, so the fallback understated it.
+/// What: the OpenRouter spelling (`-4.5`) and the Anthropic/Bedrock one
+/// (`-4-5`), both at $1 / $5 / $0.10 / $1.25 per MTok.
+/// Test: this test.
+#[test]
+fn cost_usd_haiku_4_5_matches_published_rates() {
+    for slug in ["anthropic/claude-haiku-4.5", "claude-haiku-4-5"] {
+        assert!(
+            (cost_usd(slug, 1_000_000, 0, 0, 0) - 1.0).abs() < 1e-9,
+            "input rate for {slug}"
+        );
+        assert!(
+            (cost_usd(slug, 0, 1_000_000, 0, 0) - 5.0).abs() < 1e-9,
+            "output rate for {slug}"
+        );
+        assert!(
+            (cost_usd(slug, 0, 0, 1_000_000, 0) - 0.10).abs() < 1e-9,
+            "cache-read rate for {slug}"
+        );
+        assert!(
+            (cost_usd(slug, 0, 0, 0, 1_000_000) - 1.25).abs() < 1e-9,
+            "cache-write rate for {slug}"
+        );
+    }
+}
+
+/// The pre-#8128 4.x rows still price exactly as they did.
+///
+/// Why: the new rows are additive. A stored perf record from a 4.x run must
+/// keep reproducing the same cost, or historical bake-off comparisons shift
+/// under a change that was only meant to add three rows.
+/// What: Sonnet 4.x at $3 in, Opus 4.x at $75 out, Haiku 3/4 at $0.80 in,
+/// and the unknown-model default still Sonnet-4-class at $3 in.
+/// Test: this test.
+#[test]
+fn cost_usd_legacy_4x_rows_are_unchanged() {
+    assert!((cost_usd("anthropic/claude-sonnet-4-5", 1_000_000, 0, 0, 0) - 3.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-opus-4-5", 0, 1_000_000, 0, 0) - 75.0).abs() < 1e-9);
+    assert!((cost_usd("anthropic/claude-haiku-4", 1_000_000, 0, 0, 0) - 0.80).abs() < 1e-9);
+    assert!((cost_usd("some-vendor/unheard-of", 1_000_000, 0, 0, 0) - 3.0).abs() < 1e-9);
+}
+
 #[test]
 fn cost_usd_cache_read_is_cheaper() {
     // Cache-read is 10x cheaper than fresh input on Sonnet.

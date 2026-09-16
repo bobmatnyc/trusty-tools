@@ -62,7 +62,12 @@ const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
 /// (#2207) through as `RunTaskParams.deadline_secs` — final flag/env/default
 /// resolution happens inside `execute_run_task` via `resolve_deadline_secs`;
 /// and `--no-delegate` (#8031) through as `RunTaskParams.no_delegate`, which
-/// swaps `delegate_to_agent` for the named agent's own tools for this run),
+/// swaps `delegate_to_agent` for the named agent's own tools for this run;
+/// and `--pm-model` (#8030) / `--max-turns` (#8128) through
+/// `crate::provider::resolve_pm_model_override` /
+/// `crate::provider::resolve_max_turns` so their env tiers
+/// (`TCODE_PM_MODEL`, `TCODE_MAX_TURNS`) are applied before the params are
+/// built — a zero turn cap exits 2 rather than running nothing),
 /// prints the human or JSON report, and exits with the report's `ExitCode`. A
 /// missing OpenRouter key is only a config error (exit 2) when the resolved
 /// model actually needs OpenRouter; a pure-Bedrock model needs only AWS
@@ -82,7 +87,20 @@ pub async fn run(
     timeout_seconds: Option<u64>,
     permission_mode_flag: Option<String>,
     no_delegate: bool,
+    pm_model_flag: Option<String>,
+    max_turns_flag: Option<u32>,
 ) -> Result<()> {
+    // #8030/#8128: resolve the two top-level overrides' flag-then-env tiers
+    // here, so `RunTaskParams` carries an already-settled value. A zero turn
+    // cap is a config error, not a run that silently does nothing.
+    let pm_model = trusty_code::provider::resolve_pm_model_override(pm_model_flag);
+    let max_turns = match trusty_code::provider::resolve_max_turns(max_turns_flag) {
+        Ok(turns) => turns,
+        Err(e) => {
+            eprintln!("tcode run-task: {e}");
+            process::exit(ExitCode::ConfigError.code());
+        }
+    };
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
         process::exit(ExitCode::ConfigError.code());
@@ -123,6 +141,8 @@ pub async fn run(
         agents_dir = %agents_dir.display(),
         json,
         engineer_model = engineer_model.as_deref().unwrap_or("(agent default)"),
+        pm_model = pm_model.as_deref().unwrap_or("(agent default)"),
+        max_turns = ?max_turns,
         timeout_seconds = ?timeout_seconds,
         "tcode run-task: starting"
     );
@@ -142,6 +162,9 @@ pub async fn run(
         project: project_root,
         agents_dir,
         engineer_model,
+        // #8030/#8128: resolved above; `None` means "no override".
+        pm_model,
+        max_turns,
         deadline_secs: timeout_seconds,
         // #7948: headless by construction; the flag wins over the env var.
         permission_mode: trusty_code::permissions::PermissionMode::resolve(

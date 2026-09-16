@@ -53,6 +53,8 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
         // #3902: this daemon path (`run_and_record`) always sets `cadence:
         // Some(_)` on the PM loop, so any test built from this shared
         // helper that runs enough turns to trip a real cadence/threshold
@@ -143,6 +145,8 @@ fn resolve_engineer_model_falls_back_to_embedded_when_disk_config_missing() {
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
         // Never reaches an `AgentLoop` run in this test (only
         // `resolve_engineer_model` is called below) — irrelevant here.
         telemetry_data_dir: None,
@@ -721,6 +725,10 @@ struct ScriptedLlm {
     /// (#8031) Tool-schema names from the FIRST request, so one fixture can
     /// prove both what the loop advertised and what it then did.
     tool_names: Mutex<Vec<String>>,
+    /// (#8030/#8128) Every request's model slug, in call order — the wire
+    /// observation both the top-level model override and the turn-cap
+    /// override are asserted against.
+    models: Mutex<Vec<String>>,
 }
 
 impl ScriptedLlm {
@@ -733,12 +741,19 @@ impl ScriptedLlm {
             responses,
             cursor: AtomicUsize::new(0),
             tool_names: Mutex::new(Vec::new()),
+            models: Mutex::new(Vec::new()),
         }
     }
 
     /// The tool names advertised on the first request (#8031).
     fn first_tool_names(&self) -> Vec<String> {
         self.tool_names.lock().expect("tool_names lock").clone()
+    }
+
+    /// Every model slug the client was asked to use, in call order
+    /// (#8030/#8128).
+    fn models_seen(&self) -> Vec<String> {
+        self.models.lock().expect("models lock").clone()
     }
 }
 
@@ -748,6 +763,10 @@ impl InferenceAdapter for ScriptedLlm {
 
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        self.models
+            .lock()
+            .expect("models lock")
+            .push(req.model.clone());
         if idx == 0 {
             *self.tool_names.lock().expect("tool_names lock") = req
                 .tools
@@ -1296,4 +1315,158 @@ async fn no_delegate_run_respects_the_agents_tools_allowlist() {
              advertised on a --no-delegate run; got {advertised:?}"
         );
     }
+}
+
+// ── #8030 / #8128: top-level model + turn-cap overrides, daemon path ────────
+
+/// A response calling a tool this run's registry does not carry, so the loop
+/// answers it with a recoverable error and takes another turn.
+///
+/// Why: the turn-cap test below needs a PM that never terminates and never
+/// spends a script entry on a delegated engineer turn.
+/// What: one `tool_calls` response naming a tool registered nowhere.
+/// Test: `max_turns_override_reaches_the_pm_loop`.
+fn unregistered_tool_response() -> Value {
+    json!({
+        "id": "gen-unknown",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-unknown",
+                    "type": "function",
+                    "function": {
+                        "name": "definitely_not_a_registered_tool",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    })
+}
+
+/// `task.run`'s `pm_model` pins the TOP-LEVEL loop's model on the DAEMON
+/// path, ahead of the agent's front-matter `model:` (#8030).
+///
+/// Why: #8030's evidence is a daemon-path run where `--engineer-model`
+/// repointed the engineer and the top-level agent's own calls still hit the
+/// old slug. The daemon path is the default `tcode run-task` path, so a fix
+/// that only reached `--legacy-in-process` would not close the issue.
+/// What: `pm.md` pins `openai/gpt-4o-mini`; the run sets
+/// `pm_model: Some("opus")`; assert the first wire request's model is the
+/// concrete Claude 5 Opus slug.
+/// Test: this test.
+#[tokio::test]
+async fn pm_model_override_pins_the_top_level_model() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[stop_response("pm: done")]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        pm_model: Some("opus".to_string()),
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let models = mock.models_seen();
+    assert_eq!(
+        models.first().map(String::as_str),
+        Some("anthropic/claude-opus-5"),
+        "the top-level loop must use the pinned override, normalised; got {models:?}"
+    );
+}
+
+/// With no `pm_model`, the daemon path's top-level loop still uses the agent
+/// config's own model (#8030 — the override is additive).
+///
+/// Why: the control that makes the test above meaningful, and the guard that
+/// every pre-#8030 `task.run` keeps its behaviour byte-for-byte.
+/// What: same fixture, `pm_model: None`; assert `pm.md`'s declared slug.
+/// Test: this test.
+#[tokio::test]
+async fn absent_pm_model_override_uses_the_agent_config_model_on_the_daemon_path() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[stop_response("pm: done")]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+
+    spawn_task_run(
+        Arc::clone(&registry),
+        llm,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let models = mock.models_seen();
+    assert_eq!(
+        models.first().map(String::as_str),
+        Some("openai/gpt-4o-mini"),
+        "an absent override must leave the agent config's model in place; got {models:?}"
+    );
+}
+
+/// `task.run`'s `max_turns` replaces the daemon path's PM turn cap, and its
+/// absence leaves that cap at 8 (#8128).
+///
+/// Why: `run_and_record` never overrode `AgentLoopConfig`'s `max_turns`, so a
+/// daemon-driven multi-step delivery task could not be given more turns.
+/// Counting the requests the loop issued is the observation that proves the
+/// value reached the config literal.
+/// What: scripts more never-terminating turns than either cap consumes, runs
+/// once with `max_turns: Some(3)` and once with `None`, asserting exactly 3
+/// and exactly 8 requests.
+/// Test: this test.
+#[tokio::test]
+async fn max_turns_override_reaches_the_pm_loop() {
+    let script: Vec<Value> = (0..12).map(|_| unregistered_tool_response()).collect();
+
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let capped = Arc::new(ScriptedLlm::from_json(&script));
+    let p = TaskRunParams {
+        max_turns: Some(3),
+        ..params(&agents, &project, &session.id)
+    };
+    spawn_task_run(
+        Arc::clone(&registry),
+        Arc::clone(&capped) as Arc<dyn InferenceAdapter>,
+        p,
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+    assert_eq!(
+        capped.models_seen().len(),
+        3,
+        "the top-level loop must stop after the overridden cap"
+    );
+
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let defaulted = Arc::new(ScriptedLlm::from_json(&script));
+    spawn_task_run(
+        Arc::clone(&registry),
+        Arc::clone(&defaulted) as Arc<dyn InferenceAdapter>,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+    assert_eq!(
+        defaulted.models_seen().len(),
+        8,
+        "an absent override must leave AgentLoopConfig::default()'s cap of 8"
+    );
 }
