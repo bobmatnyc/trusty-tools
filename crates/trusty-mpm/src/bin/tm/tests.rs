@@ -73,17 +73,17 @@ fn deploy_summary_line_formats_counts() {
 
 /// The wire form the daemon actually emits renders as a real id, not dashes.
 ///
-/// Why (#7805): `GET /sessions` answers `"id":"82024851-a2a0-…"` — serde writes
+/// Why (#7805): `GET /sessions` answers `"id":"0f1e2d3c-4b5a-…"` — serde writes
 /// the `SessionId` newtype transparently — but `short_id` read only the
 /// `{"0": …}` tuple shape, so EVERY row rendered `--------` and the list output
 /// `-------- Starting <path>` was mistaken for a session-start progress line.
 /// Test: this function IS the test; it fails on the pre-fix `short_id`.
 #[test]
 fn short_id_reads_the_daemon_string_wire_form() {
-    let value = serde_json::json!("82024851-a2a0-404b-8973-25defb22d3e2");
+    let value = serde_json::json!("0f1e2d3c-4b5a-4697-8a8b-9c0d1e2f3a4b");
     assert_eq!(
         short_id(&value),
-        "82024851",
+        "0f1e2d3c",
         "the bare-string wire form must render its uuid prefix, never the placeholder"
     );
 }
