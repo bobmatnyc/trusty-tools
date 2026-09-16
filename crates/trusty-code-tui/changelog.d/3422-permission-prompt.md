@@ -1,0 +1,2 @@
+Added
+- A permission prompt blocks the turn until it is answered (#3422): a `permission_requested` event opens a modal prompt naming the tool, the redacted subject and the matched rule; `y` allows once, `a` allows for the session, `n`/Esc denies; the answer is relayed to the backend through the new `TuiEngine::respond_permission`, and `permission_resolved` closes the prompt. Both the request and the decision are recorded in the scrollback.

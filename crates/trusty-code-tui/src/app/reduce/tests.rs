@@ -1031,3 +1031,222 @@ fn clear_scrollback_drops_delegation_state() {
     assert!(app.tool_cards.is_empty());
     assert_eq!(app.active_agent(), None);
 }
+
+// ── Permission prompt (#3422) ─────────────────────────────────────────────
+
+fn permission_requested(request_id: &str) -> ReplEvent {
+    ReplEvent::PermissionRequested {
+        request_id: request_id.into(),
+        agent: "python-engineer".into(),
+        agent_id: "spawn-1".into(),
+        tool: "bash".into(),
+        subject: "rm -rf build".into(),
+        rule: "bash[rm *]".into(),
+    }
+}
+
+fn permission_resolved(request_id: &str, decision: &str, source: &str) -> ReplEvent {
+    ReplEvent::PermissionResolved {
+        request_id: request_id.into(),
+        agent: "python-engineer".into(),
+        agent_id: "spawn-1".into(),
+        decision: decision.into(),
+        source: source.into(),
+    }
+}
+
+fn app_with_prompt() -> ReplApp {
+    let mut app = ReplApp::new("demo", "u");
+    apply(&mut app, permission_requested("req-1"));
+    app
+}
+
+/// The request opens the prompt AND lands in the scrollback — the prompt is
+/// transient, the transcript entry is not.
+#[test]
+fn permission_requested_opens_a_prompt_and_records_it() {
+    let app = app_with_prompt();
+    let pending = app.pending_permission.as_ref().expect("prompt is open");
+    assert_eq!(pending.request_id, "req-1");
+    assert_eq!(pending.tool, "bash");
+    assert_eq!(pending.subject, "rm -rf build");
+    assert_eq!(pending.rule, "bash[rm *]");
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat[0].role, ChatRole::Status);
+    assert!(app.chat[0].text.contains("bash"), "{}", app.chat[0].text);
+    assert!(
+        app.chat[0].text.contains("rm -rf build"),
+        "{}",
+        app.chat[0].text
+    );
+    assert!(
+        app.chat[0].text.contains("bash[rm *]"),
+        "{}",
+        app.chat[0].text
+    );
+}
+
+/// A second request replaces the first rather than stacking — see
+/// `super::apply_permission_requested`'s doc comment.
+#[test]
+fn permission_requested_twice_keeps_only_the_newest_prompt() {
+    let mut app = app_with_prompt();
+    apply(&mut app, permission_requested("req-2"));
+    assert_eq!(
+        app.pending_permission.as_ref().expect("prompt").request_id,
+        "req-2"
+    );
+    assert_eq!(app.chat.len(), 2, "both requests are still recorded");
+}
+
+/// Criterion 3: requested -> resolved leaves BOTH entries in the scrollback
+/// and no pending prompt.
+#[test]
+fn permission_resolved_clears_the_prompt_and_records_the_decision() {
+    let mut app = app_with_prompt();
+    apply(
+        &mut app,
+        permission_resolved("req-1", "allow_once", "client"),
+    );
+    assert!(app.pending_permission.is_none());
+    assert_eq!(app.chat.len(), 2);
+    assert!(
+        app.chat[0].text.contains("rm -rf build"),
+        "the request: {}",
+        app.chat[0].text
+    );
+    assert!(
+        app.chat[1].text.contains("allow_once") && app.chat[1].text.contains("client"),
+        "the decision: {}",
+        app.chat[1].text
+    );
+}
+
+/// A resolution for some OTHER request is recorded but must not unblock the
+/// prompt the user is looking at — an auto-allowed call elsewhere in the run
+/// resolves under a request id this client never saw opened.
+#[test]
+fn permission_resolved_for_another_request_leaves_the_prompt_pending() {
+    let mut app = app_with_prompt();
+    apply(
+        &mut app,
+        permission_resolved("req-other", "allow_once", "remembered"),
+    );
+    assert_eq!(
+        app.pending_permission
+            .as_ref()
+            .expect("still open")
+            .request_id,
+        "req-1"
+    );
+    assert_eq!(app.chat.len(), 2, "the other decision is still recorded");
+}
+
+/// Criterion 1: a submitted line is a no-op while a prompt is pending, and
+/// the prompt is untouched by the attempt.
+#[test]
+fn submit_line_is_noop_while_a_permission_prompt_is_pending() {
+    let mut app = app_with_prompt();
+    let before = app.pending_permission.clone();
+    let chat_len = app.chat.len();
+
+    apply(&mut app, ReplEvent::Submit("run the thing".to_string()));
+
+    assert_eq!(app.pending_submit, None, "no turn may be staged");
+    assert!(!app.busy, "no turn may start");
+    assert_eq!(app.chat.len(), chat_len, "nothing echoed to the scrollback");
+    assert_eq!(app.pending_permission, before, "prompt state unchanged");
+}
+
+/// Enter must not smuggle a typed line past the prompt either — it answers
+/// allow-once instead, and the buffer is left alone.
+#[test]
+fn enter_while_a_permission_prompt_is_pending_does_not_submit() {
+    let mut app = app_with_prompt();
+    app.set_input("run the thing".to_string());
+
+    apply(&mut app, key(KeyCode::Enter));
+
+    assert_eq!(app.pending_submit, None);
+    assert_eq!(
+        app.input_buf, "run the thing",
+        "the typed line is preserved"
+    );
+}
+
+/// Criterion 2, key 1 of 3.
+#[test]
+fn permission_key_y_answers_allow_once() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Char('y')));
+    let response = app
+        .take_pending_permission_response()
+        .expect("an answer is staged");
+    assert_eq!(response.request_id, "req-1");
+    assert_eq!(response.answer, PermissionAnswer::AllowOnce);
+    assert!(
+        app.pending_permission.is_none(),
+        "the prompt releases input"
+    );
+}
+
+/// Criterion 2, key 2 of 3. `pattern` is `None` because choosing a grant
+/// width is the backend's policy, not the TUI's (ADR-0063).
+#[test]
+fn permission_key_a_answers_allow_for_session() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Char('a')));
+    let response = app
+        .take_pending_permission_response()
+        .expect("an answer is staged");
+    assert_eq!(response.request_id, "req-1");
+    assert_eq!(
+        response.answer,
+        PermissionAnswer::AllowForSession { pattern: None }
+    );
+}
+
+/// Criterion 2, key 3 of 3.
+#[test]
+fn permission_key_n_answers_deny() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Char('n')));
+    let response = app
+        .take_pending_permission_response()
+        .expect("an answer is staged");
+    assert_eq!(response.request_id, "req-1");
+    assert_eq!(response.answer, PermissionAnswer::Deny);
+}
+
+/// Escape is the second deny binding — #3422's original proposal named it.
+#[test]
+fn permission_key_escape_answers_deny() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Esc));
+    assert_eq!(
+        app.take_pending_permission_response()
+            .expect("an answer is staged")
+            .answer,
+        PermissionAnswer::Deny
+    );
+}
+
+/// Criterion 2: an unbound key leaves the prompt pending and stages nothing
+/// — never a guessed allow or deny.
+#[test]
+fn permission_unbound_key_leaves_the_prompt_pending() {
+    let mut app = app_with_prompt();
+    for unbound in [key(KeyCode::Char('q')), key(KeyCode::Tab), ctrl_key('c')] {
+        apply(&mut app, unbound);
+    }
+    assert!(
+        app.pending_permission.is_some(),
+        "the prompt must still be open"
+    );
+    assert_eq!(app.pending_permission_response, None);
+    assert!(
+        !app.pending_cancel,
+        "Ctrl-C is swallowed by the modal prompt"
+    );
+    assert!(app.input_buf.is_empty(), "no key reached the line editor");
+}

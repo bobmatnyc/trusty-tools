@@ -119,7 +119,10 @@ use ratatui::style::Color;
 use ratatui::text::Line;
 
 use crate::event::WorkstreamSummary;
-use crate::model::{CommandDescriptor, PickerRequest, StatuslineSegment};
+use crate::model::{
+    CommandDescriptor, PendingPermission, PermissionAnswer, PermissionResponse, PickerRequest,
+    StatuslineSegment,
+};
 use crate::run::TuiModel;
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
@@ -277,6 +280,22 @@ pub struct ReplApp {
     /// "routing correctness", not the visual overlay); this field is the
     /// data half of that contract.
     pub active_picker: Option<PickerRequest>,
+    /// The permission request currently blocking the turn (#3422), or `None`
+    /// when nothing is pending.
+    ///
+    /// Why: a suspended tool call is a second, independent reason input must
+    /// not be accepted — [`Self::busy`] cannot express it, because the
+    /// backend is stopped rather than working. `Self::submit_line` refuses
+    /// while this is `Some`, exactly as it refuses while `busy`, and
+    /// `reduce::apply_key` routes every key to the decision bindings.
+    /// What: set by [`crate::event::ReplEvent::PermissionRequested`], cleared
+    /// by a matching `PermissionResolved` or by the user answering.
+    pub pending_permission: Option<PendingPermission>,
+    /// An answer staged for the outer driver to relay to
+    /// [`crate::engine::TuiEngine::respond_permission`] (#3422). Drained by
+    /// [`TuiModel::take_pending_permission_response`], same as
+    /// [`Self::pending_submit`].
+    pub pending_permission_response: Option<PermissionResponse>,
     /// Whether a response is currently streaming in. Drives the input
     /// composer's placeholder text.
     pub busy: bool,
@@ -378,6 +397,8 @@ impl ReplApp {
             banner_art: Vec::new(),
             commands: Vec::new(),
             active_picker: None,
+            pending_permission: None,
+            pending_permission_response: None,
             busy: false,
             streaming_idx: None,
             delegations: Vec::new(),
@@ -578,9 +599,14 @@ impl ReplApp {
     /// [`crate::commands::tests::submit_line_builtin_help_lists_commands`],
     /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`],
     /// [`reduce::tests::apply_enter_is_noop_while_busy_and_preserves_buffer`],
-    /// [`reduce::tests::apply_submit_event_is_noop_while_busy`].
+    /// [`reduce::tests::apply_submit_event_is_noop_while_busy`],
+    /// [`reduce::tests::submit_line_is_noop_while_a_permission_prompt_is_pending`].
     pub(crate) fn submit_line(&mut self, line: String) {
-        if self.busy {
+        // #3422: a suspended permission request blocks the turn for the same
+        // reason `busy` does — the backend will not accept new work until it
+        // is answered — so the guard is the same shape, and authoritative
+        // here rather than only at the key-handling call site.
+        if self.busy || self.pending_permission.is_some() {
             return;
         }
         self.remember_input(&line);
@@ -601,6 +627,34 @@ impl ReplApp {
                 self.pending_submit = Some(forwarded);
             }
         }
+    }
+
+    /// Answer the open permission prompt (#3422), staging the answer for the
+    /// outer driver and releasing the input block.
+    ///
+    /// Why: the prompt is modal, so it must close the moment the user
+    /// answers rather than waiting on the RPC — the same reasoning
+    /// [`TuiModel::on_cancelled`] documents for clearing `busy` ahead of
+    /// `cancel_session`. A backend that is slow to confirm must not leave
+    /// the keyboard dead. The backend's own
+    /// [`crate::event::ReplEvent::PermissionResolved`] is what records the
+    /// outcome in the scrollback; this method records nothing, because the
+    /// TUI's belief about the decision is not evidence that it was applied.
+    /// What: no-op when no prompt is open. Otherwise takes the prompt and
+    /// stages [`Self::pending_permission_response`] addressed to its
+    /// `request_id`.
+    /// Test: `reduce::tests::permission_key_y_answers_allow_once`,
+    /// `reduce::tests::permission_key_a_answers_allow_for_session`,
+    /// `reduce::tests::permission_key_n_answers_deny`,
+    /// `reduce::tests::permission_unbound_key_leaves_the_prompt_pending`.
+    pub fn answer_permission(&mut self, answer: PermissionAnswer) {
+        let Some(pending) = self.pending_permission.take() else {
+            return;
+        };
+        self.pending_permission_response = Some(PermissionResponse {
+            request_id: pending.request_id,
+            answer,
+        });
     }
 
     /// Push a line onto `history`, deduping an immediate repeat.
@@ -742,6 +796,12 @@ impl TuiModel for ReplApp {
     /// Drain-and-clear [`Self::pending_cancel`].
     fn take_pending_cancel(&mut self) -> bool {
         std::mem::replace(&mut self.pending_cancel, false)
+    }
+
+    /// Drain [`Self::pending_permission_response`] (#3422) — see
+    /// `crate::run::dispatch_pending` for the caller.
+    fn take_pending_permission_response(&mut self) -> Option<PermissionResponse> {
+        self.pending_permission_response.take()
     }
 
     /// Reset the in-flight-request UI state the moment a cancel is

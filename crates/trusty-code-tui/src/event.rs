@@ -198,6 +198,48 @@ pub enum ReplEvent {
         agent: String,
         outcome: DelegationOutcome,
     },
+    /// A tool call matched an `ask` permission rule and is SUSPENDED on the
+    /// backend until this client answers (#3422, wire event from #7948).
+    ///
+    /// Why: the backend has already stopped the call and is waiting; the TUI
+    /// has to say so and collect an answer, because silence resolves as a
+    /// deny after the backend's timeout. The reducer opens a modal prompt on
+    /// this event — see [`crate::app::ReplApp::pending_permission`].
+    /// What: `request_id` is the correlation key the answer goes back on
+    /// (NOT a tool-call id — the call has not run). `agent`/`agent_id` are
+    /// the same attribution pair [`Self::DelegationStarted`] carries, so a
+    /// prompt raised inside a delegation can name its sub-agent. `subject`
+    /// is what the tool would act on, ALREADY redacted and length-bounded by
+    /// the producer — this crate renders it verbatim and never re-derives it.
+    /// `rule` is the matching policy pattern, shown so the user can see why
+    /// they are being asked.
+    PermissionRequested {
+        request_id: String,
+        agent: String,
+        agent_id: String,
+        tool: String,
+        subject: String,
+        rule: String,
+    },
+    /// A suspended permission request reached a decision (#3422, wire event
+    /// from #7948) — the explicit close for the prompt
+    /// [`Self::PermissionRequested`] opened.
+    ///
+    /// Why: the backend decides, not the TUI (thin-client axiom, ADR-0063):
+    /// a request can resolve without this client answering at all (another
+    /// client answered, the backend timed out, a remembered grant or an
+    /// auto-allow mode covered it). This event — not the local key press —
+    /// is what puts the outcome in the scrollback.
+    /// What: `decision` and `source` are the producer's own words, rendered
+    /// verbatim; this crate parses neither. A `request_id` matching the open
+    /// prompt closes it, and one that does not is still recorded.
+    PermissionResolved {
+        request_id: String,
+        agent: String,
+        agent_id: String,
+        decision: String,
+        source: String,
+    },
     /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
     StatusMessage(String),
     /// Clear the scrollback buffer. Emitted by the shared `/clear` built-in

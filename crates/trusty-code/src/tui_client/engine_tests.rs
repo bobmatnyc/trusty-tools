@@ -380,6 +380,67 @@ fn forward_agent_failed_closes_with_the_error() {
     );
 }
 
+/// #3422: `permission_requested` must reach the TUI field for field. Until
+/// this mapping existed the event fell into `forward_session_event`'s
+/// catch-all, so a tool call suspended on the daemon looked like the TUI had
+/// simply stopped responding.
+#[test]
+fn forward_permission_requested_opens_the_prompt() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::PermissionRequested {
+            session_id: "s-1".into(),
+            request_id: "req-9".into(),
+            agent: "python-engineer".into(),
+            agent_id: "spawn-7".into(),
+            tool: "bash".into(),
+            subject: "rm -rf build".into(),
+            rule: "bash[rm *]".into(),
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::PermissionRequested {
+            request_id: "req-9".into(),
+            agent: "python-engineer".into(),
+            agent_id: "spawn-7".into(),
+            tool: "bash".into(),
+            subject: "rm -rf build".into(),
+            rule: "bash[rm *]".into(),
+        }
+    );
+}
+
+/// #3422: `permission_resolved` is the daemon's own close for the prompt, so
+/// its `decision`/`source` words cross the seam verbatim — the TUI renders
+/// them and parses neither.
+#[test]
+fn forward_permission_resolved_closes_the_prompt() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::PermissionResolved {
+            session_id: "s-1".into(),
+            request_id: "req-9".into(),
+            agent: "python-engineer".into(),
+            agent_id: "spawn-7".into(),
+            decision: "allow_for_session".into(),
+            source: "client".into(),
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::PermissionResolved {
+            request_id: "req-9".into(),
+            agent: "python-engineer".into(),
+            agent_id: "spawn-7".into(),
+            decision: "allow_for_session".into(),
+            source: "client".into(),
+        }
+    );
+}
+
 /// Classify every [`Event`] variant as agent-attributed or not (#7940).
 ///
 /// Why: `forward_session_event`'s `_ => false` catch-all silently drops
@@ -454,14 +515,10 @@ const INTENTIONALLY_IGNORED: &[(&str, &str)] = &[
         "memory_recalled",
         "recall telemetry; same reason as search_performed",
     ),
-    (
-        "permission_requested",
-        "rendered by #3422, the TUI permission prompt; #7948 ships the daemon half only",
-    ),
-    (
-        "permission_resolved",
-        "rendered by #3422 — the close half of the same prompt",
-    ),
+    // #3422 removed `permission_requested`/`permission_resolved` from this
+    // list: both now map, and
+    // `forward_permission_requested_opens_the_prompt` /
+    // `forward_permission_resolved_closes_the_prompt` pin the mapping.
 ];
 
 /// Every agent-attributed `Event` the daemon can emit during a delegation

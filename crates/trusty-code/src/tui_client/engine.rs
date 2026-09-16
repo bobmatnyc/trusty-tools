@@ -35,7 +35,11 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_code_tui::{CommandDescriptor, CommandRouting, PickerRequest, ReplEvent, TuiEngine};
+use trusty_code_tui::{
+    CommandDescriptor, CommandRouting, PermissionAnswer, PickerRequest, ReplEvent, TuiEngine,
+};
+
+use crate::permissions::{PERMISSION_RESPOND_METHOD, PermissionDecision};
 
 use super::engine_state::EngineState;
 use super::error::EngineError;
@@ -213,6 +217,68 @@ impl TuiEngine for CodeEngine {
         self.state
             .rpc
             .call("session.cancel", json!({ "session_id": session_id }))
+            .await?;
+        Ok(())
+    }
+
+    /// Answer one suspended permission request over
+    /// `session.permission.respond` (#3422).
+    ///
+    /// Why: an `ask` rule parks the tool call inside the daemon's gate
+    /// (`crate::permissions::gate`), and only the daemon's broker can release
+    /// it — same thin-client reasoning as `cancel_session` above (DOC-39
+    /// §2.1 C-2, ADR-0063). The TUI decided nothing; it named a button.
+    /// What: translates the shared crate's [`PermissionAnswer`] into this
+    /// daemon's own [`PermissionDecision`] and sends its wire word, so the
+    /// vocabulary has exactly one definition
+    /// (`crate::permissions::protocol`). With no session yet (`setup` has
+    /// not run) there is no request to answer, so this is a no-op rather
+    /// than an error.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the RPC failure, including the daemon's `-32602` for a
+    /// `request_id` nobody is waiting on — an answer that did not land must
+    /// not read as one that did.
+    /// Test: `respond_permission_releases_a_suspended_call`,
+    /// `respond_permission_without_a_session_is_a_noop` (both in
+    /// `tests/tui_client_engine.rs`).
+    async fn respond_permission(
+        &self,
+        request_id: String,
+        answer: PermissionAnswer,
+    ) -> anyhow::Result<()> {
+        let session_id = {
+            self.state
+                .session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
+        let Some(session_id) = session_id else {
+            return Ok(());
+        };
+        let (decision, pattern) = match answer {
+            PermissionAnswer::AllowOnce => (PermissionDecision::AllowOnce, None),
+            PermissionAnswer::AllowForSession { pattern } => (
+                PermissionDecision::AllowForSession {
+                    pattern: pattern.clone(),
+                },
+                pattern,
+            ),
+            PermissionAnswer::Deny => (PermissionDecision::Deny, None),
+        };
+        self.state
+            .rpc
+            .call(
+                PERMISSION_RESPOND_METHOD,
+                json!({
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "decision": decision.as_str(),
+                    "pattern": pattern,
+                }),
+            )
             .await?;
         Ok(())
     }

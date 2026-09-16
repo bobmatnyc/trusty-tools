@@ -351,6 +351,9 @@ struct MockEngine {
     /// When set, `handle_input` sends nothing at all and returns `Err(...)`
     /// — exercises the error-completion path.
     returns_err: AtomicBool,
+    /// Every `(request_id, answer)` pair `respond_permission` was handed
+    /// (#3422), in call order.
+    permission_answers: StdMutex<Vec<(String, crate::model::PermissionAnswer)>>,
 }
 
 #[async_trait]
@@ -386,6 +389,18 @@ impl TuiEngine for MockEngine {
 
     async fn cancel_session(&self) -> anyhow::Result<()> {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn respond_permission(
+        &self,
+        request_id: String,
+        answer: crate::model::PermissionAnswer,
+    ) -> anyhow::Result<()> {
+        self.permission_answers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((request_id, answer));
         Ok(())
     }
 }
@@ -442,6 +457,79 @@ async fn dispatch_pending_cancel_reaches_cancel_session() {
         engine.cancel_calls.load(Ordering::SeqCst),
         1,
         "Ctrl-C must reach engine.cancel_session() exactly once"
+    );
+}
+
+/// #3422's acceptance criterion at the dispatch layer: answering the prompt
+/// must reach `TuiEngine::respond_permission` with the matching answer, since
+/// only the backend can release the suspended tool call. Drives the real
+/// reducer so this proves the full path — event, key press, staged answer,
+/// dispatch, engine — not `dispatch_pending` in isolation.
+#[tokio::test]
+async fn dispatch_pending_permission_answer_reaches_respond_permission() {
+    let engine = Arc::new(MockEngine::default());
+    let mut app = ReplApp::new("demo", "u");
+    app_apply(
+        &mut app,
+        ReplEvent::PermissionRequested {
+            request_id: "req-1".to_string(),
+            agent: "python-engineer".to_string(),
+            agent_id: "spawn-1".to_string(),
+            tool: "bash".to_string(),
+            subject: "rm -rf build".to_string(),
+            rule: "bash[rm *]".to_string(),
+        },
+    );
+    app_apply(
+        &mut app,
+        ReplEvent::Key(KeyInput {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::default(),
+        }),
+    );
+    assert!(
+        app.pending_permission_response.is_some(),
+        "reducer must stage the answer"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+
+    assert!(
+        app.pending_permission_response.is_none(),
+        "must be drained synchronously"
+    );
+    assert_eq!(
+        generation.load(Ordering::SeqCst),
+        0,
+        "an answer releases a held call; it starts no turn"
+    );
+
+    for _ in 0..200 {
+        if !engine
+            .permission_answers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let answers = engine
+        .permission_answers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(
+        answers,
+        vec![(
+            "req-1".to_string(),
+            crate::model::PermissionAnswer::AllowForSession { pattern: None }
+        )],
+        "the answer must reach the engine verbatim, exactly once"
     );
 }
 

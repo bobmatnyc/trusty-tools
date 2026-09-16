@@ -25,6 +25,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::ReplApp;
 use crate::widgets::banner::banner_lines;
 use crate::widgets::input_composer::draw_input;
+use crate::widgets::permission_prompt::{PROMPT_HEIGHT, draw_permission_prompt};
 use crate::widgets::scrollback::{chat_line_count, draw_chat};
 use crate::widgets::status_line::draw_statusline;
 
@@ -70,9 +71,18 @@ pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
         chat_line_count(app, area.width as usize).max(1)
     };
 
-    // Reserved rows below chat: top_sep(1) + input(1) + bot_sep(1) +
+    // #3422: the prompt sits directly above the input row, and costs its rows
+    // only while a request is actually pending. Given to the chat pane
+    // otherwise, so an idle frame looks exactly as it did before.
+    let prompt_h = if app.pending_permission.is_some() {
+        PROMPT_HEIGHT
+    } else {
+        0
+    };
+
+    // Reserved rows below chat: prompt + top_sep(1) + input(1) + bot_sep(1) +
     // statusline(1) + bottom spacer minimum(1).
-    let reserved: u16 = 5;
+    let reserved: u16 = 5 + prompt_h;
     let available_h = area.height.saturating_sub(reserved) as usize;
     let chat_h = content_h
         .min(available_h)
@@ -82,20 +92,22 @@ pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(chat_h as u16),
-            Constraint::Length(1), // separator above input
-            Constraint::Length(1), // input
-            Constraint::Length(1), // separator below input
-            Constraint::Length(1), // statusline
-            Constraint::Min(1),    // trailing spacer
+            Constraint::Length(prompt_h), // permission prompt (0 when none)
+            Constraint::Length(1),        // separator above input
+            Constraint::Length(1),        // input
+            Constraint::Length(1),        // separator below input
+            Constraint::Length(1),        // statusline
+            Constraint::Min(1),           // trailing spacer
         ])
         .split(area);
 
     draw_chat(f, app, chunks[0]);
-    draw_separator(f, chunks[1]);
-    draw_input(f, app, chunks[2]);
-    draw_separator(f, chunks[3]);
-    draw_statusline(f, app, chunks[4]);
-    f.render_widget(Paragraph::new(""), chunks[5]);
+    draw_permission_prompt(f, app, chunks[1]);
+    draw_separator(f, chunks[2]);
+    draw_input(f, app, chunks[3]);
+    draw_separator(f, chunks[4]);
+    draw_statusline(f, app, chunks[5]);
+    f.render_widget(Paragraph::new(""), chunks[6]);
 }
 
 #[cfg(test)]
@@ -123,6 +135,20 @@ mod tests {
             terminal
                 .draw(|f| draw(f, &app))
                 .expect("draw populated app");
+
+            // #3422: the prompt steals four rows, so the tiny-terminal case
+            // above is where an unchecked subtraction would surface.
+            app.pending_permission = Some(crate::model::PendingPermission {
+                request_id: "req-1".to_string(),
+                agent: "python-engineer".to_string(),
+                agent_id: "spawn-1".to_string(),
+                tool: "bash".to_string(),
+                subject: "rm -rf build".to_string(),
+                rule: "bash[rm *]".to_string(),
+            });
+            terminal
+                .draw(|f| draw(f, &app))
+                .expect("draw app with a pending permission prompt");
         }
     }
 }

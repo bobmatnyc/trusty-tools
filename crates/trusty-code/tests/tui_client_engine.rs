@@ -32,7 +32,7 @@ use tokio::time::timeout;
 use trusty_code::binding::ProjectBinding;
 use trusty_code::tui_client::CodeEngine;
 use trusty_code::tui_client::uds_rpc::UdsRpcClient;
-use trusty_code_tui::{ReplEvent, TuiEngine};
+use trusty_code_tui::{PermissionAnswer, ReplEvent, TuiEngine};
 
 const WS_NAME: &str = "Feature X";
 
@@ -262,6 +262,9 @@ struct StubDaemon {
     _dir: tempfile::TempDir,
     /// Every method name the stub was asked for, in order.
     seen: Arc<Mutex<Vec<String>>>,
+    /// Every whole request the stub was asked for, in order (#3422) — the
+    /// method name alone cannot prove a decision word crossed the socket.
+    requests: Arc<Mutex<Vec<Value>>>,
 }
 
 impl StubDaemon {
@@ -277,11 +280,14 @@ impl StubDaemon {
             .expect("harden the stub socket");
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
+        let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_requests = requests.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let answers = answers.clone();
                 let frames = stream_frames.clone();
                 let recorded = recorded.clone();
+                let recorded_requests = recorded_requests.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -297,6 +303,10 @@ impl StubDaemon {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(method.clone());
+                    recorded_requests
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(request.clone());
                     let id = request["id"].clone();
 
                     if request["stream"] == json!(true) {
@@ -332,6 +342,7 @@ impl StubDaemon {
             socket,
             _dir: dir,
             seen,
+            requests,
         }
     }
 
@@ -341,6 +352,16 @@ impl StubDaemon {
 
     fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The whole request the stub received for `method`, if any (#3422).
+    fn request_for(&self, method: &str) -> Option<Value> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|r| r["method"] == method)
+            .cloned()
     }
 }
 
@@ -500,5 +521,64 @@ async fn deactivation_with_no_replacement_refreshes_and_is_surfaced() {
     assert!(
         refreshes >= 2,
         "the cache must be refreshed beyond setup's own call: {calls:?}"
+    );
+}
+
+/// #3422: answering a prompt must become a real `session.permission.respond`
+/// call carrying the daemon's own decision word, because only the daemon's
+/// broker can release the suspended tool call (ADR-0063). A TUI that resolved
+/// the prompt locally would clear its own screen while the call stayed parked.
+#[tokio::test]
+async fn respond_permission_releases_a_suspended_call() {
+    let mut answers = stub_answers(Some("ws-1"));
+    answers["session.permission.respond"] = json!({"accepted": true});
+    let stub = StubDaemon::start(answers, Vec::new());
+    let engine = stub.engine();
+    let (tx, _rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup");
+
+    engine
+        .respond_permission(
+            "req-1".to_string(),
+            PermissionAnswer::AllowForSession {
+                pattern: Some("git *".to_string()),
+            },
+        )
+        .await
+        .expect("respond_permission");
+
+    let request = stub
+        .request_for("session.permission.respond")
+        .expect("the answer must reach the daemon");
+    let params = &request["params"];
+    assert_eq!(params["session_id"], "sess-1", "{request}");
+    assert_eq!(params["request_id"], "req-1", "{request}");
+    assert_eq!(
+        params["decision"], "allow_for_session",
+        "the daemon's own wire word, not a TUI-local spelling: {request}"
+    );
+    assert_eq!(
+        params["pattern"], "git *",
+        "an explicit grant width must cross verbatim: {request}"
+    );
+}
+
+/// #3422: before `setup` there is no session, so no request can exist to
+/// answer — a no-op, not an error, so a stray key press during startup cannot
+/// surface as a failure the user has to read.
+#[tokio::test]
+async fn respond_permission_without_a_session_is_a_noop() {
+    let stub = StubDaemon::start(stub_answers(Some("ws-1")), Vec::new());
+    let engine = stub.engine();
+
+    engine
+        .respond_permission("req-1".to_string(), PermissionAnswer::Deny)
+        .await
+        .expect("must not error without a session");
+
+    assert!(
+        stub.request_for("session.permission.respond").is_none(),
+        "no session means nothing to answer: {:?}",
+        stub.seen()
     );
 }
