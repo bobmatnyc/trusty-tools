@@ -151,6 +151,20 @@ fn pm_guard_allows_a_go_template_format_argument() {
 /// the worktree" is absent from the `tm` binary and present in the harness. A
 /// change to this guard could not have fixed either issue, and this row is what
 /// a future reporter should re-run before routing a third one here (#6982).
+/// 2026-09-16: the eight shapes refused live in the isolation worktree that
+/// extended this catalogue are here too — a bare `ls`, `cargo --version` and
+/// `git log --oneline -5` name no path to verify and were refused anyway, in
+/// the same minutes `echo hello` and `pwd` ran. The unit catalogue is
+/// `false_positive_tests::harness_refusals_are_not_this_guard`.
+///
+/// The write-shaped BOUND on these rows lives there, not here. A shell write is
+/// a `SHELL_EDIT_REASON` deny, which the #2918 budget gate makes eligible for
+/// the first `DEFAULT_FILE_CHANGE_BUDGET` calls of a turn-window — so the
+/// binary ALLOWS `ls -la > listing.txt` on a fresh session and stdout cannot
+/// distinguish it from a read-only allow.
+/// `false_positive_tests::a_write_shaped_command_is_refused_on_all_fifty_rounds`
+/// asserts the classification itself instead, which is the thing a later edit
+/// could widen.
 #[test]
 fn pm_guard_allows_every_shape_the_harness_refused_as_unverifiable() {
     assert_allowed("ls apps");
@@ -160,6 +174,13 @@ fn pm_guard_allows_every_shape_the_harness_refused_as_unverifiable() {
     assert_allowed(
         r#"grep -E "^test result" /private/tmp/claude-502/proj/sess/scratchpad/gate-7359.txt"#,
     );
+    // #7477, 2026-09-16.
+    assert_allowed("ls");
+    assert_allowed("cat -n crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/mod.rs");
+    assert_allowed("grep -rln healthz services");
+    assert_allowed("find crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash -maxdepth 1 -type f");
+    assert_allowed("cargo --version");
+    assert_allowed("git log --oneline -5");
 }
 
 /// #7477 and #7436: one command gets the same verdict across SEPARATE
