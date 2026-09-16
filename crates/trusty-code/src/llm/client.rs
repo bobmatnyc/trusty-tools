@@ -452,9 +452,16 @@ impl InferenceAdapter for OpenAiCompatClient {
     }
 
     /// Route + issue one blocking chat call through the shared adapter.
+    ///
+    /// What: on failure, runs the response through [`Self::actionable_model_error`]
+    /// (#7955) before returning it, so a model-not-found 404 names the model
+    /// and the remedy instead of a bare HTTP status.
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let (adapter, routed) = self.route(req).await?;
-        adapter.chat(&routed).await
+        adapter
+            .chat(&routed)
+            .await
+            .map_err(|err| Self::actionable_model_error(adapter.name(), &req.model, err))
     }
 
     /// Route + issue one STREAMING chat call through the shared adapter.
@@ -462,14 +469,56 @@ impl InferenceAdapter for OpenAiCompatClient {
     /// Why (#4425): this override is the whole reason trusty-code can stream —
     /// the shared `OpenAiCompatAdapter` implements native SSE, and inheriting
     /// the trait's buffered default here would have silently thrown that away.
-    /// What: same routing as [`Self::chat`], then the adapter's `chat_stream`.
+    /// What: same routing as [`Self::chat`], then the adapter's `chat_stream`,
+    /// with the same #7955 error enrichment applied to a synchronous handshake
+    /// failure.
     /// A `stream=true` handshake failure surfaces synchronously as `Err`, so a
     /// caller may choose to retry non-streaming rather than see a half-open
     /// stream.
     /// Test: `tests/inference_shared_adapter_e2e.rs` streaming round-trip.
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatStream, InferenceError> {
         let (adapter, routed) = self.route(req).await?;
-        adapter.chat_stream(&routed).await
+        adapter
+            .chat_stream(&routed)
+            .await
+            .map_err(|err| Self::actionable_model_error(adapter.name(), &req.model, err))
+    }
+}
+
+impl OpenAiCompatClient {
+    /// Enrich a model-not-found 404 with the model slug and the remedy.
+    ///
+    /// Why (#7955): OpenRouter answers an unknown, retired, or
+    /// guardrail-excluded (e.g. zero-data-retention) model slug with a bare
+    /// `404`; [`InferenceError::Api`]'s `Display` only shows the raw status
+    /// and body, which reached an operator as an unreadable HTTP error with
+    /// no indication of which model was requested or how to change it. Every
+    /// other variant (`is_retryable`/`is_alarm`) is untouched — only the 404
+    /// `body` gains actionable text, so classification and every other status
+    /// pass through unchanged.
+    /// What: for `InferenceError::Api { status: 404, .. }`, replaces `body`
+    /// with a message naming `model` and `provider` and pointing at the two
+    /// remedies (`--model`/`model_override`, and `tcode config keys list` to
+    /// confirm credentials); every other error variant passes through
+    /// unchanged.
+    /// Test: `client::tests::actionable_model_error_rewrites_404_body`,
+    /// `client::tests::actionable_model_error_leaves_other_statuses_unchanged`,
+    /// `client::tests::chat_maps_404_to_actionable_model_error`.
+    fn actionable_model_error(provider: &str, model: &str, err: InferenceError) -> InferenceError {
+        match err {
+            InferenceError::Api { status: 404, body } => InferenceError::Api {
+                status: 404,
+                body: format!(
+                    "model \"{model}\" was rejected by {provider} (404: {body}). This \
+                     usually means the account's zero-data-retention (ZDR) guardrail \
+                     excludes this model, or the slug is unknown/retired. Pick a \
+                     different model with `--model <slug>` (run-task) or the agent's \
+                     `model`/`[llm].model_override` config, and confirm credentials with \
+                     `tcode config keys list`."
+                ),
+            },
+            other => other,
+        }
     }
 }
 
@@ -1091,5 +1140,161 @@ mod tests {
             client.context_window("fireworks/accounts/x/models/y"),
             128_000
         );
+    }
+
+    /// [`OpenAiCompatClient::actionable_model_error`] rewrites a 404's body to
+    /// name the model, the provider, and both remedies (#7955).
+    ///
+    /// Why: the pure mapping is the unit the fix actually changes — proving it
+    /// directly (no network) pins the exact wording an operator sees, faster
+    /// and more precisely than reading it back through a mock server.
+    /// What: feed a ZDR-shaped 404 body through the mapper; assert the
+    /// rewritten body names the model, the provider, and points at both
+    /// `--model`/`model_override` and `tcode config keys list`.
+    /// Test: this test.
+    #[test]
+    fn actionable_model_error_rewrites_404_body() {
+        let err = InferenceError::Api {
+            status: 404,
+            body: "ZDR violation (guardrail): 1 endpoint excluded".to_string(),
+        };
+        let mapped =
+            OpenAiCompatClient::actionable_model_error("openrouter", "openai/gpt-4o-mini", err);
+        match mapped {
+            InferenceError::Api { status, body } => {
+                assert_eq!(status, 404);
+                assert!(
+                    body.contains("openai/gpt-4o-mini"),
+                    "must name model: {body}"
+                );
+                assert!(body.contains("openrouter"), "must name provider: {body}");
+                assert!(
+                    body.contains("model_override") && body.contains("--model"),
+                    "must name the model-override remedy: {body}"
+                );
+                assert!(
+                    body.contains("tcode config keys"),
+                    "must name the config-keys remedy: {body}"
+                );
+                assert!(
+                    body.contains("ZDR violation"),
+                    "must preserve the raw provider body: {body}"
+                );
+            }
+            other => panic!("expected Api{{status:404}}, got: {other:?}"),
+        }
+    }
+
+    /// [`OpenAiCompatClient::actionable_model_error`] leaves every non-404
+    /// error untouched — including a non-404 `Api` status.
+    ///
+    /// Why: the rewrite must be scoped to the model-not-found case; rewriting a
+    /// 429/5xx body would strip the raw text `is_retryable`/operator tooling
+    /// may parse, and rewriting a non-`Api` variant makes no sense at all.
+    /// What: a 429 `Api` and a `MissingConfig` both round-trip byte-for-byte.
+    /// Test: this test.
+    #[test]
+    fn actionable_model_error_leaves_other_statuses_unchanged() {
+        let rate_limited = InferenceError::Api {
+            status: 429,
+            body: "slow down".to_string(),
+        };
+        match OpenAiCompatClient::actionable_model_error(
+            "openrouter",
+            "openai/gpt-4o-mini",
+            rate_limited,
+        ) {
+            InferenceError::Api { status, body } => {
+                assert_eq!(status, 429);
+                assert_eq!(body, "slow down");
+            }
+            other => panic!("expected untouched Api{{status:429}}, got: {other:?}"),
+        }
+
+        let missing = InferenceError::MissingConfig("OPENROUTER_API_KEY not set".to_string());
+        match OpenAiCompatClient::actionable_model_error(
+            "openrouter",
+            "openai/gpt-4o-mini",
+            missing,
+        ) {
+            InferenceError::MissingConfig(msg) => assert_eq!(msg, "OPENROUTER_API_KEY not set"),
+            other => panic!("expected untouched MissingConfig, got: {other:?}"),
+        }
+    }
+
+    /// `chat()` itself applies the #7955 enrichment to a real 404 response —
+    /// proves the mapper is actually wired into the call site, not just
+    /// correct in isolation.
+    ///
+    /// Why: `actionable_model_error_rewrites_404_body` pins the mapping; this
+    /// test pins that `OpenAiCompatClient::chat` calls it. A future refactor
+    /// that drops the `.map_err(...)` at the call site would leave the pure
+    /// function correct but the fix dead.
+    /// What: point the OpenRouter base at a [`MockInferenceServer`] answering
+    /// 404 with a ZDR-shaped body, seed a fake OpenRouter key so credential
+    /// resolution succeeds, `chat()`, and assert the returned error names the
+    /// requested model and the remedy. No network call reaches OpenRouter —
+    /// the mock is an in-process loopback server (#2403's own pattern).
+    /// Test: this test.
+    #[tokio::test]
+    async fn chat_maps_404_to_actionable_model_error() {
+        use trusty_common::inference::test_support::MockInferenceServer;
+
+        let server = MockInferenceServer::spawn(
+            404,
+            serde_json::json!({
+                "error": {
+                    "message": "ZDR violation (guardrail): 1 endpoint excluded",
+                    "code": 404
+                }
+            }),
+        )
+        .await
+        .expect("spawn mock");
+
+        let store = MemoryKeyStore::new();
+        store.set("openrouter", "sk-or-mock").expect("seed key"); // pragma: allowlist secret
+
+        let client = OpenAiCompatClient::with_config(
+            Box::new(store),
+            server.url().to_string(),
+            "http://127.0.0.1:1/unused".to_string(),
+            "http://127.0.0.1:1/unused".to_string(),
+            "http://127.0.0.1:1/unused".to_string(),
+        );
+
+        let req = ChatRequest {
+            model: "openai/gpt-4o-mini".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+            response_schema: None,
+            stop: None,
+        };
+
+        let err = client
+            .chat(&req)
+            .await
+            .expect_err("404 must surface as an error");
+        match err {
+            InferenceError::Api { status: 404, body } => {
+                assert!(
+                    body.contains("openai/gpt-4o-mini"),
+                    "must name model: {body}"
+                );
+                assert!(
+                    body.contains("model_override") && body.contains("--model"),
+                    "must name the model-override remedy: {body}"
+                );
+                assert!(
+                    body.contains("tcode config keys"),
+                    "must name the config-keys remedy: {body}"
+                );
+            }
+            other => panic!("expected an enriched Api{{status:404}}, got: {other:?}"),
+        }
     }
 }

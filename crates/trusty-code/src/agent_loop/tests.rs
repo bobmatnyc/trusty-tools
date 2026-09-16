@@ -1247,7 +1247,11 @@ mod permission_gate;
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final
-/// answer. Gated on `OPENROUTER_API_KEY` so CI stays offline-green.
+/// answer. Gated on `OPENROUTER_API_KEY` so CI stays offline-green. Uses
+/// `provider::DEFAULT_MODEL` rather than a hard-coded slug (#7955) — the
+/// former hard-coded `openai/gpt-4o-mini` failed deterministically on any
+/// account with the ZDR guardrail enabled, a recurrence traced back to this
+/// test in the same issue.
 /// What: Build a real `OpenAiCompatClient` (shared-adapter transport, #2406),
 /// register the echo tool, and ask the model to reply with a short word; assert
 /// a non-empty final answer and that usage accrued.
@@ -1256,6 +1260,7 @@ mod permission_gate;
 #[ignore = "requires OPENROUTER_API_KEY; skipped in CI"]
 async fn agent_loop_live() {
     use crate::llm::OpenAiCompatClient;
+    use crate::provider::DEFAULT_MODEL;
 
     let Ok(key) = std::env::var("OPENROUTER_API_KEY") else {
         eprintln!("OPENROUTER_API_KEY not set — skipping live agent-loop test");
@@ -1275,7 +1280,7 @@ async fn agent_loop_live() {
         AgentLoopConfig {
             max_turns: 4,
             timeout_secs: 60,
-            model: "openai/gpt-4o-mini".to_string(),
+            model: DEFAULT_MODEL.to_string(),
             mode: crate::mode::HarnessMode::default(),
             ..AgentLoopConfig::default()
         },

@@ -129,6 +129,23 @@ with `tcode paths show`.
 (Whether the keychain should be required repo-wide is a separate, currently
 blocked decision: epic #4570.)
 
+## Model selection and the OpenRouter ZDR guardrail (#7955)
+
+`tcode`'s built-in default model (`provider::DEFAULT_MODEL`, currently
+`anthropic/claude-sonnet-4.5`) is an OpenRouter slug served under
+zero-data-retention (ZDR). An OpenRouter account with the ZDR guardrail
+enabled rejects any model whose routing excludes ZDR-compliant endpoints with
+`404 zdr-violation-by-guardrail` — the older default, `openai/gpt-4o-mini`,
+hit this on every ZDR account.
+
+If a chat call still 404s on your chosen model (a ZDR exclusion, an unknown
+slug, or a retired one), `tcode` surfaces an actionable error naming the
+model and the two remedies, rather than a bare HTTP status:
+
+- Pick a different model with `--model <slug>` (`run-task`) or the agent's
+  `model` / `[llm].model_override` config.
+- Confirm your OpenRouter credentials are set with `tcode config keys list`.
+
 ## Configuration layout (`.trusty-code`)
 
 Trusty Code owns two directories. It READS from three, and WRITES to only one
