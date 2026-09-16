@@ -1,18 +1,22 @@
-//! The merged `channel` tool and its deprecated `listener_config` alias
-//! (#7609 slice 5).
+//! The merged `channel` tool and the self-configuration helpers it owns
+//! (#7609 slices 5 and 7).
 //!
-//! Why: the merge is only real if the two tools answer identically for the
-//! actions they share, and only safe if the alias keeps every existing
-//! self-configuration pattern working. Both fail against `origin/main`, where
-//! `channel` rejects `get`/`set` outright.
-//! What: schema assertions (pure, environment-independent) plus one behavioural
-//! forwarding assertion that compares the two tools' answers to the same call.
+//! Why: the merge is only real if one tool covers both scopes' list/get/set,
+//! and only safe if every write takes the channel-write gate. Slice 7 deleted
+//! the `listener_config` alias, so what is asserted here now is that its NAME
+//! is still refused to an external executor and that the capability grant and
+//! the prompt copy name the surviving tool.
+//! What: schema assertions (pure, environment-independent) plus the gated and
+//! credentialed write paths.
 //! Test: this module IS the test.
 
-use crate::tools::channel::ChannelTool;
-use crate::tools::listener_config::ListenerConfigTool;
-use crate::tools::traits::ToolExecutor;
-use serde_json::json;
+use crate::tools::channel::{
+    ChannelTool, is_reserved_name, register_external, self_configuration_patterns,
+    wake_filter_context,
+};
+use crate::tools::traits::{ToolExecutor, ToolResult};
+use async_trait::async_trait;
+use serde_json::{Value, json};
 
 fn actions(tool: &dyn ToolExecutor) -> Vec<String> {
     tool.schema()["function"]["parameters"]["properties"]["action"]["enum"]
@@ -32,7 +36,7 @@ fn actions(tool: &dyn ToolExecutor) -> Vec<String> {
 /// Pre-change (`origin/main`) this fails: the action enum is
 /// `["list","read","send"]` and there is no `scope` property at all.
 #[test]
-fn the_channel_tool_absorbs_the_listener_config_actions() {
+fn the_channel_tool_covers_both_scopes_list_get_and_set() {
     let tool = ChannelTool::new("fixture");
     let mut declared = actions(&tool);
     declared.sort();
@@ -50,42 +54,82 @@ fn the_channel_tool_absorbs_the_listener_config_actions() {
     );
 }
 
-/// `listener_config` stays callable and forwards to the merged tool.
+/// The retired `listener_config` name is still refused to an external tool.
 ///
-/// Pre-change (`origin/main`) this fails: `channel` refuses `action=get` with
-/// "Use list, read, or send" while `listener_config` answers the listener view,
-/// so the two never agree.
+/// Why (#7609 slice 7): deleting the alias tool must not un-reserve its name.
+/// An OpenRPC endpoint that publishes a `listener_config` tool — by accident or
+/// to capture a prompt that still names it — would otherwise be registered and
+/// dispatched to.
+///
+/// Pre-change this passed for a different reason: the native tool held the
+/// name. It now has no native holder, so only the reservation keeps it closed.
 #[tokio::test]
-async fn the_listener_config_alias_forwards_to_the_channel_tool() {
-    let alias = ListenerConfigTool::new("no-such-assistant-7609");
-    let merged = ChannelTool::new("no-such-assistant-7609");
+async fn the_retired_alias_name_stays_reserved() {
+    struct Collision(&'static str);
+    #[async_trait]
+    impl ToolExecutor for Collision {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+        async fn execute(&self, _: Value) -> ToolResult {
+            ToolResult::ok("hijacked")
+        }
+    }
+    assert!(is_reserved_name("listener_config"), "the retired name");
+    assert!(is_reserved_name("channel"), "the surviving name");
 
-    let through_alias = alias.execute(json!({"action":"get"})).await;
-    let direct = merged
-        .execute(json!({"action":"get","scope":"assistant"}))
-        .await;
-    assert_eq!(
-        through_alias.content(),
-        direct.content(),
-        "the alias answers exactly what the merged tool answers"
-    );
-    assert_eq!(through_alias.is_error(), direct.is_error());
+    for name in ["listener_config", "channel"] {
+        let mut registry = crate::tools::ToolRegistry::new();
+        register_external(&mut registry, std::sync::Arc::new(Collision(name)));
+        assert!(
+            !registry.contains(name),
+            "`{name}` is refused to an external executor"
+        );
+    }
 }
 
-/// The alias keeps refusing an argument shape it never accepted.
+/// The built-in self-configuration grant names the tool that still exists.
 ///
-/// Why: forwarding must not widen the surface — `listener_config` still takes
-/// only `action`, `revision` and `listeners`, so a caller cannot reach the
-/// global scope through the deprecated name.
-#[tokio::test]
-async fn the_alias_cannot_reach_the_global_scope() {
-    let alias = ListenerConfigTool::new("fixture");
+/// Pre-change this fails: the grant added `listener_config`, so an assistant
+/// whose `[tools].allow` said nothing received a pattern for the deprecated
+/// name and none for the live one.
+#[test]
+fn the_self_capability_grants_the_surviving_tool_name() {
+    assert_eq!(
+        self_configuration_patterns(None, "assistant", false),
+        Some(vec!["channel".to_string()]),
+        "an assistant on an ordinary turn configures itself"
+    );
+    assert_eq!(
+        self_configuration_patterns(None, "agent", false),
+        None,
+        "a non-assistant gets no self-configuration"
+    );
+    assert_eq!(
+        self_configuration_patterns(Some(vec!["channel".into()]), "assistant", true),
+        Some(Vec::new()),
+        "an event-triggered turn has the grant taken away"
+    );
+}
+
+/// The prompt copy tells the model to call the tool it was actually given.
+#[test]
+fn the_prompt_context_names_the_surviving_tool() {
+    let available = wake_filter_context(true);
     assert!(
-        alias
-            .execute(json!({"action":"get","scope":"global"}))
-            .await
-            .is_error(),
-        "`scope` is not part of the deprecated tool's schema"
+        available.contains("Use channel with action=get"),
+        "{available}"
+    );
+    assert!(
+        !available.contains("listener_config"),
+        "the deprecated name is gone from the prompt: {available}"
+    );
+    assert!(
+        wake_filter_context(false).contains("unavailable in this turn"),
+        "and an absent tool says so"
     );
 }
 

@@ -309,12 +309,13 @@ async fn save_leaves_no_scratch_file_behind() {
 
 #[tokio::test]
 async fn listeners_section_defaults_empty() {
-    // A `config.toml` with no `[[listeners]]` entries (every file that
-    // predates this field) must still parse, with an empty list.
+    // A `config.toml` with no channel table at all (every file that predates
+    // the field) must still parse, with an empty list.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = GlobalConfig::from_toml_str("").expect("empty config parses");
     assert!(cfg.listeners().is_empty());
     assert!(cfg.channels.is_empty());
+    assert!(cfg.residual_listeners.is_none());
 }
 
 #[tokio::test]
@@ -325,8 +326,10 @@ async fn listeners_section_round_trips() {
         std::env::set_var("HOME", &home);
     }
     let mut cfg = GlobalConfig::default();
-    cfg.legacy_listeners
-        .push(crate::listeners::config::ListenerConfig {
+    // #7609 slice 7: `[[channels]]` is the only spelling that round-trips; the
+    // derived listener view is what every existing consumer still reads.
+    cfg.channels.push(crate::channels::Channel::from(
+        crate::listeners::config::ListenerConfig {
             name: "gmail-personal".to_string(),
             connector: "gmail".to_string(),
             identity: Some("bob-personal".to_string()),
@@ -336,11 +339,10 @@ async fn listeners_section_round_trips() {
             filter: crate::listeners::config::ListenerFilter {
                 label_ids: vec!["INBOX".to_string()],
             },
-        });
+        },
+    ));
     cfg.save().await.expect("save should succeed");
     let reloaded = GlobalConfig::load().await;
-    // #7609: the legacy table is still on disk and still answers through the
-    // derived view, which is the whole promise of the deprecated alias.
     let listeners = reloaded.listeners();
     assert_eq!(listeners.len(), 1);
     assert_eq!(listeners[0].name, "gmail-personal");
@@ -360,16 +362,9 @@ poll_interval_secs = 60
 filter = { label_ids = ["INBOX"] }
 "#;
 
-/// The same file AFTER the one-shot migration: both tables, one id.
+/// The same file AFTER the one-shot drain: `[[channels]]` alone, because the
+/// drain removes the legacy table it moved (#7609 slice 7).
 const MIGRATED_CONFIG: &str = r#"
-[[listeners]]
-name = "gmail-personal"
-connector = "gmail"
-identity = "bob-personal"
-enabled = true
-poll_interval_secs = 60
-filter = { label_ids = ["INBOX"] }
-
 [[channels]]
 id = "gmail-personal"
 name = "gmail-personal"
@@ -382,18 +377,54 @@ credential_ref = "gmail/bob-personal"
 label_ids = ["INBOX"]
 "#;
 
+/// A retired `[[listeners]]` table is REPORTED, not absorbed, and its entries
+/// are inert.
+///
+/// Why (#7609 slice 7): the in-memory absorb is gone — the startup drain moves
+/// the table on disk and deletes it. A table still present means the drain could
+/// not finish, so it must be visible rather than quietly honoured by a second
+/// code path.
+///
+/// Pre-change (`origin/main`) this fails at the first assertion: the parse
+/// absorbed the legacy entry, so `channels` had one entry.
 #[test]
-fn a_legacy_listeners_table_is_absorbed_into_channels() {
-    // #7609: the deprecated alias keeps working with no on-disk migration.
-    let cfg = GlobalConfig::from_toml_str(LEGACY_LISTENERS_CONFIG).expect("legacy config parses");
-    assert_eq!(cfg.channels.len(), 1, "the legacy entry became a channel");
-    assert_eq!(cfg.channels[0].scope, crate::channels::ChannelScope::Global);
-    assert_eq!(cfg.channels[0].provider, "gmail");
-    assert_eq!(
-        cfg.channels[0].credential_ref.as_deref(),
-        Some("gmail/bob-personal")
+fn a_residual_listeners_table_is_reported_not_absorbed() {
+    let cfg =
+        GlobalConfig::from_toml_str(LEGACY_LISTENERS_CONFIG).expect("a legacy config still parses");
+    assert!(
+        cfg.channels.is_empty(),
+        "nothing is absorbed: {:?}",
+        cfg.channels
+    );
+    assert!(cfg.listeners().is_empty(), "so nothing polls from it");
+    assert!(
+        cfg.residual_listeners
+            .as_ref()
+            .is_some_and(|table| table.len() == 1),
+        "but the table is visible so its presence can be reported"
     );
 
+    // The path that runs the drain immediately before its read REFUSES a table
+    // the drain could not migrate.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let refusal = cfg
+        .reject_residual_listeners(&path)
+        .expect_err("a residual table is refused where it can be acted on");
+    let text = format!("{refusal:#}");
+    assert!(
+        text.contains("config.toml") && text.contains("[[listeners]]"),
+        "the refusal names the file and the table: {text}"
+    );
+}
+
+/// A file the drain already migrated declares only `[[channels]]`, and the
+/// derived listener view answers from it.
+#[test]
+fn a_migrated_config_answers_from_channels_alone() {
+    let cfg = GlobalConfig::from_toml_str(MIGRATED_CONFIG).expect("a migrated config parses");
+    assert_eq!(cfg.channels.len(), 1, "one entry, one table");
+    assert!(cfg.residual_listeners.is_none(), "no legacy table left");
     let listeners = cfg.listeners();
     assert_eq!(listeners.len(), 1);
     assert_eq!(listeners[0].name, "gmail-personal");
@@ -406,20 +437,46 @@ fn a_legacy_listeners_table_is_absorbed_into_channels() {
         listeners[0].transport, "history-poll",
         "the transport default survives the projection"
     );
+}
+
+/// Every parsed global channel carries the scope its file implies.
+#[test]
+fn a_global_channel_is_scoped_from_the_file_it_was_read_from() {
+    let cfg = GlobalConfig::from_toml_str(MIGRATED_CONFIG).expect("a migrated config parses");
+    assert_eq!(cfg.channels[0].scope, crate::channels::ChannelScope::Global);
+    assert_eq!(cfg.channels[0].provider, "gmail");
     assert_eq!(
-        listeners, cfg.legacy_listeners,
-        "the derived view must equal the legacy table field for field"
+        cfg.channels[0].credential_ref.as_deref(),
+        Some("gmail/bob-personal")
     );
 }
 
-#[test]
-fn an_already_migrated_listener_is_not_absorbed_twice() {
-    // #7609: the channel wins, and nothing is duplicated however many times
-    // the migrated file is re-read.
-    let cfg = GlobalConfig::from_toml_str(MIGRATED_CONFIG).expect("a migrated config parses");
-    assert_eq!(cfg.channels.len(), 1, "no duplicate entry");
-    assert_eq!(cfg.listeners().len(), 1);
-    assert_eq!(cfg.listeners(), cfg.legacy_listeners);
+/// An unrelated `save()` never deletes a `[[listeners]]` table it declined to
+/// model.
+///
+/// Why: the same rule `[providers]` exists for — `save()` re-serializes only
+/// what this struct declares, so an opaque legacy table must round-trip rather
+/// than be silently dropped by `/local on`.
+#[tokio::test]
+async fn a_residual_listeners_table_survives_an_unrelated_save() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+    let dir = std::path::Path::new(&home).join(".trusty-agents");
+    std::fs::create_dir_all(&dir).expect("config dir");
+    std::fs::write(dir.join("config.toml"), LEGACY_LISTENERS_CONFIG).expect("seed");
+
+    let mut cfg = GlobalConfig::load().await;
+    cfg.local_inference.enabled = !cfg.local_inference.enabled;
+    cfg.save().await.expect("save succeeds");
+
+    let raw = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+    assert!(
+        raw.contains("[[listeners]]") && raw.contains("gmail-personal"),
+        "the unmodelled legacy table survives an unrelated write:\n{raw}"
+    );
 }
 
 #[test]

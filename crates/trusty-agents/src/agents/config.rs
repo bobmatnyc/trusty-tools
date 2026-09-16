@@ -123,42 +123,40 @@ pub struct AgentConfig {
     #[serde(skip, default = "default_adapter")]
     pub adapter: Arc<dyn ModelAdapter>,
 
-    /// Per-agent listener bindings (#3820, DOC-54 SPEC-AGENTS-04/06)  — the
-    /// third leg of the stores/tools/listeners config triple.
+    /// A `[[listeners]]` table still in this `agent.toml` — the RETIRED spelling
+    /// of a per-assistant channel, held only so its presence can be reported
+    /// (#7609 slice 7).
     ///
-    /// Why: An agent REACTS to inbound events (Gmail, Calendar, …) via
-    /// listeners, distinct from how it ACTS via `[tools].allow`. Each entry
-    /// names a harness-level listener (defined in `~/.trusty-agents/config.toml`'s
-    /// `[[listeners]]`) and further narrows (stage-two filter) which of that
-    /// listener's events wake THIS agent. Absent = the agent never wakes for
-    /// any event (deny-by-default, matching `[tools].allow`'s posture).
-    /// What: `Vec<AgentListenerBinding>` parsed from repeated `[[listeners]]`
-    /// tables.
-    ///
-    /// DEPRECATED (#7609): the legacy spelling of a per-assistant channel,
-    /// kept parsing for one release and never dropped from disk. Read
-    /// [`AgentConfig::listeners`] instead of this field — it answers from
-    /// `channels`, which is where a migrated binding lands.
-    /// Test: `crate::listeners::config` unit tests cover the binding shape;
-    /// `crate::listeners::wake` tests cover matching semantics.
-    #[serde(default, rename = "listeners")]
-    pub legacy_listeners: Vec<crate::listeners::config::AgentListenerBinding>,
+    /// Why this is no longer a parsed binding list: `[[listeners]]` was folded
+    /// into `channels` in memory on every parse for one release. The persisted
+    /// move ([`crate::channels::migrate::migrate_agent_channels_if_absent`])
+    /// seeds `<name>.channels.json`, and
+    /// [`crate::channels::retire::retire_agent_listeners`] then deletes the
+    /// legacy table once every binding is represented there — so keeping the
+    /// in-memory fold as well meant two sources for one concept.
+    /// What: `None` on every migrated or new manifest. `Some` is reported once
+    /// per process naming the file and leaves the entries INERT; it is not an
+    /// error, because this parse runs on listing, dispatch and inheritance
+    /// paths and the retirement sweep is detached — refusing here would take an
+    /// assistant offline for the seconds before the sweep reaches it.
+    /// Test: `a_residual_agent_listeners_table_is_reported_not_absorbed`.
+    #[serde(default, rename = "listeners", skip_serializing_if = "Option::is_none")]
+    pub residual_listeners: Option<toml::value::Array>,
 
     /// Per-assistant channels (#7609) — the merge of the listener-binding and
     /// channel-binding models.
     ///
-    /// Why: one concept, one list. A `[[listeners]]` binding from before the
-    /// merge is absorbed here on every parse, so the deprecated table keeps
-    /// working; the stored home of these is the assistant's
-    /// `<name>.channels.json`, which
+    /// Why: one concept, one list, and one spelling — `[[listeners]]` is no
+    /// longer read into it (#7609 slice 7). The stored home of these is the
+    /// assistant's `<name>.channels.json`, which
     /// [`crate::channels::migrate::migrate_agent_channels_if_absent`] seeds
-    /// once.
+    /// once from the legacy table.
     /// What: [`crate::channels::Channel`] with
-    /// [`crate::channels::ChannelScope::Assistant`]. A binding absorbed out of
+    /// [`crate::channels::ChannelScope::Assistant`]. A binding migrated out of
     /// `agent.toml` carries an EMPTY `provider`, because the provider lives on
     /// the global channel it names and this parse holds no global config;
     /// dispatch (slice 4) resolves it.
-    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`.
+    /// Test: `an_agent_channel_carries_the_assistant_scope`.
     #[serde(default)]
     pub channels: Vec<crate::channels::Channel>,
 

@@ -1,12 +1,11 @@
-//! `GET`/`PUT /api/channels`, the channel-write authorization gate, and the
-//! deprecated `/api/agents/{name}/listeners` aliases (#7609 slice 5).
+//! `GET`/`PUT /api/channels` and the channel-write authorization gate (#7609
+//! slices 5 and 7).
 //!
-//! Why: these four behaviours are the whole of the slice's HTTP contract, and
-//! every one of them fails against `origin/main` — the global routes do not
-//! exist there (404), a tokenless daemon accepts channel writes there, and the
-//! listener alias answers without saying it is deprecated. Driving them through
-//! `build_router*` rather than the handler functions is deliberate: the gate is
-//! a router layer, so a handler-level test would not see it.
+//! Why: these behaviours are the whole of the global surface's HTTP contract.
+//! Driving them through `build_router*` rather than the handler functions is
+//! deliberate: the gate is a router layer, so a handler-level test would not
+//! see it, and the retired listener routes can only be shown absent from the
+//! router the daemon actually serves.
 //! What: each test sandboxes `$HOME` through `crate::test_env::lock_home` so
 //! the global config it reads is a fixture and never the developer's own.
 //! Test: this module IS the test.
@@ -21,17 +20,25 @@ use tower::ServiceExt;
 const TOKEN: &str = "test-token";
 
 /// A `config.toml` carrying an operator comment, an unrelated table, and one
-/// legacy `[[listeners]]` entry the global view must absorb.
+/// global channel in its migrated form.
+///
+/// #7609 slice 7: this used to declare `[[listeners]]` and rely on the parse
+/// absorbing it. The absorb is retired — the startup drain moves the table on
+/// disk and deletes it — so the fixture declares what a drained file declares.
 const FIXTURE_CONFIG: &str = "\
 # operator comment that must survive a channel write
 [mcp]
 inject_for_roles = [\"ctrl\"]
 
-[[listeners]]
+[[channels]]
+id = \"gmail-personal\"
 name = \"gmail-personal\"
-connector = \"gmail\"
-identity = \"bob-personal\"
+provider = \"gmail\"
+target = \"\"
 enabled = true
+send_enabled = false
+receive_enabled = true
+credential_ref = \"gmail/bob-personal\"
 ";
 
 /// Point `$HOME` at a fresh tempdir holding [`FIXTURE_CONFIG`].
@@ -121,7 +128,7 @@ async fn global_channels_round_trip_preserves_config_and_rejects_a_stale_revisio
             .as_array()
             .map(|c| c.iter().map(|v| v["id"].clone()).collect::<Vec<_>>()),
         Some(vec![json!("gmail-personal")]),
-        "the legacy [[listeners]] entry is absorbed into the global view"
+        "the declared global channel is what the view lists"
     );
     let revision = view["revision"].as_str().expect("revision").to_owned();
 
@@ -197,26 +204,11 @@ async fn a_tokenless_daemon_refuses_every_channel_write() {
         "tokenless PUT /api/agents/{{name}}/channels"
     );
 
-    // #7609 critic HIGH-2: the deprecated listener alias writes `instructions`
-    // that reach the wake prompt as TRUSTED text, so it takes the same gate.
-    let listeners = json!({"revision": "0000", "listeners": []});
-    let app = build_router(AppState::default());
-    let response = app
-        .oneshot(put("/api/agents/fixture/listeners", None, &listeners))
-        .await
-        .expect("alias put");
-    assert_eq!(
-        response.status(),
-        StatusCode::UNAUTHORIZED,
-        "tokenless PUT /api/agents/{{name}}/listeners"
-    );
-
     // A WRONG credential is refused just as a missing one is, on every write
     // route the gate covers (critic round 3, LOW).
     for (uri, payload) in [
         ("/api/channels", &body),
         ("/api/agents/fixture/channels", &per_assistant),
-        ("/api/agents/fixture/listeners", &listeners),
     ] {
         let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
         let response = app
@@ -470,50 +462,6 @@ async fn the_channel_credential_is_withheld_from_a_foreign_origin() {
     assert_eq!(config["channel_write_token"].as_str(), Some("c0ffee"));
 }
 
-/// A broken `<name>.channels.json` does not break the listener alias.
-///
-/// Why (#7609 critic MEDIUM-5): an earlier revision routed the alias `GET`
-/// through the channel view, which also parses the channels file — turning a
-/// previously-200 listeners read into a 500 for a file this route never needed.
-#[tokio::test]
-async fn a_broken_channels_file_does_not_break_the_listener_alias() {
-    let _home_guard = crate::test_env::lock_home();
-    let (home, _config) = seed_home();
-    let agents = home.path().join(".trusty-agents/agents");
-    std::fs::create_dir_all(&agents).expect("agents dir");
-    std::fs::write(agents.join("fixture.toml"), "[agent]\nname='fixture'\n").expect("manifest");
-    // A provider with no adapter: `agent_channels::load_at` refuses this file.
-    std::fs::write(
-        agents.join("fixture.channels.json"),
-        r#"[{"id":"team","name":"Team","provider":"notion","target":"page","enabled":true}]"#,
-    )
-    .expect("channels");
-
-    let app = build_router(AppState::default());
-    let response = app
-        .oneshot(get("/api/agents/fixture/listeners", None))
-        .await
-        .expect("alias get");
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "the listener view does not depend on the channels file"
-    );
-    let body = body_json(response).await;
-    assert!(
-        body.get("listeners").is_some() && body.get("revision").is_some(),
-        "the pre-merge body shape: {body}"
-    );
-
-    // The channel view still reports the broken file, as it always did.
-    let app = build_router(AppState::default());
-    let response = app
-        .oneshot(get("/api/agents/fixture/channels", None))
-        .await
-        .expect("channels get");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
-
 /// An accepted channel write emits exactly one audit line naming the route,
 /// the scope and the binding counts either side of it.
 ///
@@ -601,32 +549,70 @@ async fn a_credentialed_channel_write_is_admitted_and_audited() {
     );
 }
 
-/// The deprecated listener alias still answers, and says so in a header.
+/// The retired listener routes are unregistered, and the router answers for
+/// them instead of a handler.
 ///
-/// Pre-change (`origin/main`) this fails at the header assertion: the alias is
-/// the live route and carries no `Deprecation` header.
+/// Why (#7609 slice 7): the aliases were kept for one release and no published
+/// release of this crate ever carried them (`git tag --list 'trusty-agents-v*'`
+/// is empty), so they are deleted. What matters is HOW they are gone: the
+/// request must complete against the router the daemon actually serves, with no
+/// panic and with nothing that looks like the old contract — no listener view,
+/// no `Deprecation` header, no write accepted.
+///
+/// On the `GET` the answer is the SPA catch-all `/{*path}`, which is what every
+/// unregistered GET path has always returned; the `PUT` matches no method on
+/// that path at all. Neither reaches a handler.
+///
+/// Pre-change this fails on the first assertion: the alias is registered and
+/// answers the listener view with a `Deprecation` header.
 #[tokio::test]
-async fn the_listeners_alias_answers_with_a_deprecation_header() {
+async fn the_retired_listener_routes_are_unregistered() {
     let _home_guard = crate::test_env::lock_home();
     let (_home, _config) = seed_home();
+    let body = json!({"revision": "0000", "listeners": []});
 
-    let app = build_router(AppState::default());
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
     let response = app
-        .oneshot(get("/api/agents/fixture/listeners", None))
+        .oneshot(get("/api/agents/fixture/listeners", Some(TOKEN)))
         .await
-        .expect("alias get");
-    assert_eq!(
-        response
-            .headers()
-            .get("deprecation")
-            .and_then(|v| v.to_str().ok()),
-        Some("true"),
-        "the alias marks itself deprecated whatever it answers"
+        .expect("the GET completes without panicking");
+    assert!(
+        response.headers().get("deprecation").is_none(),
+        "no deprecated alias answered it"
     );
+    let answered = body_json(response).await;
+    assert!(
+        answered.get("listeners").is_none() && answered.get("revision").is_none(),
+        "the listener view is gone, not merely renamed: {answered}"
+    );
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put("/api/agents/fixture/listeners", Some(TOKEN), &body))
+        .await
+        .expect("the PUT completes without panicking");
     assert_eq!(
-        response.headers().get("link").and_then(|v| v.to_str().ok()),
-        Some("</api/agents/{name}/channels>; rel=\"successor-version\""),
-        "and names its successor"
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "no method is registered on the retired path"
+    );
+
+    // The successor route IS registered for the same method on the same shape,
+    // so the 405 above is the retired path being absent rather than `PUT` being
+    // unroutable under `/api/agents/{name}/`.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put(
+            "/api/agents/fixture/channels",
+            Some(TOKEN),
+            &json!({"revision": "0000", "bindings": []}),
+        ))
+        .await
+        .expect("channels put");
+    assert_ne!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the successor route accepts the method the retired one no longer does"
     );
 }
 
@@ -754,71 +740,6 @@ async fn a_turn_originated_listener_patch_takes_the_gate() {
     crate::api::server::channel_auth::record_daemon_credential(restore);
 }
 
-/// The deprecated listener alias audits an ACCEPTED write, with real counts.
-///
-/// Why (#7609 critic round 3, MEDIUM-2): the alias's success branch had no test
-/// at all — the gate's refusal was covered, the thing it lets through was not —
-/// and the count it reports comes from a read that can fail. A failure used to
-/// render as `channels_before=0`, which reads as "the assistant had no
-/// bindings" in the one record an operator has to reconstruct the change from.
-#[tokio::test]
-async fn the_listener_alias_audits_an_accepted_write() {
-    let _home_guard = crate::test_env::lock_home();
-    let (home, _config) = seed_home();
-    let agents = home.path().join(".trusty-agents/agents");
-    std::fs::create_dir_all(&agents).expect("agents dir");
-    std::fs::write(
-        agents.join("fixture.toml"),
-        "[agent]\nname='fixture'\n\n[[listeners]]\nname='gmail-personal'\n",
-    )
-    .expect("manifest");
-
-    let logs = CaptureWriter::default();
-    let log_guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .finish(),
-    );
-
-    let credential = "minted-for-the-alias";
-    let app = router_with_credential(credential);
-    let view = body_json(
-        app.oneshot(get("/api/agents/fixture/listeners", Some(credential)))
-            .await
-            .expect("alias get"),
-    )
-    .await;
-    let revision = view["revision"].as_str().expect("revision").to_owned();
-    assert_eq!(
-        view["listeners"].as_array().map(Vec::len),
-        Some(1),
-        "the fixture starts with one binding"
-    );
-
-    let app = router_with_credential(credential);
-    let response = app
-        .oneshot(put(
-            "/api/agents/fixture/listeners",
-            Some(credential),
-            &json!({"revision": revision, "listeners": []}),
-        ))
-        .await
-        .expect("alias put");
-    assert_eq!(response.status(), StatusCode::OK, "the write is accepted");
-
-    let captured = logs.contents();
-    drop(log_guard);
-    assert!(
-        captured.contains("audit=\"channel-write\"")
-            && captured.contains("route=\"PUT /api/agents/{name}/listeners\"")
-            && captured.contains("assistant=\"fixture\"")
-            && captured.contains("channels_before=\"1\"")
-            && captured.contains("channels_after=0"),
-        "the alias audits its accepted write with real counts:\n{captured}"
-    );
-}
-
 /// A `before` count the audit could not read says so, rather than claiming nil.
 #[test]
 fn an_unreadable_before_count_audits_as_unknown() {
@@ -943,6 +864,81 @@ fn a_global_write_keeps_a_comment_block_unrelated_to_channels() {
     let note = raw.find("# tickets-mcp").expect("the note survived");
     let services = raw.find("[[mcp.services]]").expect("services header");
     assert!(note < services, "the note stayed in order:\n{raw}");
+}
+
+/// `GET /api/channels` publishes the assistant roster `route_to` may name, and
+/// it is the roster the dispatcher measures `route_to` against.
+///
+/// Why (#7609 slice 7): `route_to` was the one field whose legal values the
+/// payload did not carry, so a client had to keep its own roster — and a roster
+/// that drifts from this host's turns a legitimate save into an unexplainable
+/// 400. The assertion that matters is the SOURCE: the served list is compared
+/// against `candidate_agent_names`, the same enumeration
+/// `channels::dispatch::unknown_routes` uses on the inbound path, so this can
+/// never become a separately maintained list.
+///
+/// Pre-change this fails on the first assertion: the payload has no
+/// `routable_assistants` key at all.
+#[tokio::test]
+async fn global_channels_serve_the_dispatchable_assistant_roster() {
+    let _home_guard = crate::test_env::lock_home();
+    let (home, _config) = seed_home();
+    for name in ["alpha-assistant", "beta-assistant"] {
+        let dir = home.path().join(".trusty-agents/agents").join(name);
+        std::fs::create_dir_all(&dir).expect("assistant dir");
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!("[agent]\nname = \"{name}\"\n"),
+        )
+        .expect("assistant manifest");
+    }
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(get("/api/channels", Some(TOKEN)))
+        .await
+        .expect("the GET completes");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let served: Vec<String> = serde_json::from_value(
+        body.get("routable_assistants")
+            .cloned()
+            .expect("the payload carries the roster"),
+    )
+    .expect("a list of names");
+
+    let dispatchable = crate::listeners::wake::candidate_agent_names()
+        .await
+        .expect("the dispatcher's roster");
+    assert_eq!(
+        served, dispatchable,
+        "the served roster IS the dispatcher's, not a parallel list"
+    );
+    for name in ["alpha-assistant", "beta-assistant"] {
+        assert!(
+            served.iter().any(|value| value == name),
+            "`{name}` is routable: {served:?}"
+        );
+    }
+
+    // The same list decides what dispatch calls unroutable: a `route_to` drawn
+    // from it is silent, one outside it is reported.
+    let mut routed = crate::channels::Channel {
+        id: "global-mail".into(),
+        route_to: vec!["alpha-assistant".into()],
+        ..Default::default()
+    };
+    assert!(
+        crate::channels::dispatch::unknown_routes(std::slice::from_ref(&routed), &served)
+            .is_empty(),
+        "a name from the served roster wakes somebody"
+    );
+    routed.route_to = vec!["gamma-assistant".into()];
+    assert_eq!(
+        crate::channels::dispatch::unknown_routes(std::slice::from_ref(&routed), &served),
+        vec![("global-mail", "gamma-assistant")],
+        "a name the roster omits is exactly what dispatch refuses to route"
+    );
 }
 
 /// A `tracing` writer that keeps every emitted line in memory.

@@ -23,9 +23,9 @@ use tempfile::TempDir;
 /// Parse a minimal agent config from TOML for direct merge/resolve tests.
 fn cfg(toml: &str) -> AgentConfig {
     let mut parsed: AgentConfig = toml::from_str(toml).expect("valid test agent TOML");
-    // #7609: mirror `AgentConfig::from_toml_str`, which folds the deprecated
-    // `[[listeners]]` table into `channels` on every real parse.
-    parsed.absorb_legacy_listeners();
+    // #7609: mirror `AgentConfig::from_toml_str`, which stamps every parsed
+    // channel with the scope its file implies.
+    parsed.scope_channels();
     // #7901: mirror the per-key presence record `from_toml_str` takes.
     parsed.declared = super::DeclaredKeys::from_toml(toml).expect("valid test agent TOML");
     parsed
@@ -734,7 +734,7 @@ fn extends_tier_child_can_declare_l0_over_l1_base() {
 }
 
 #[test]
-fn extends_unions_listener_bindings_by_name() {
+fn extends_unions_channels_by_name() {
     let base = cfg(r#"
 [agent]
 name = "base"
@@ -746,8 +746,10 @@ temperature = 0.0
 max_tokens = 1024
 [system_prompt]
 content = "b"
-[[listeners]]
+[[channels]]
+id = "calendar-personal"
 name = "calendar-personal"
+provider = ""
 event_types = ["event.created"]
 "#);
     let ch = cfg(r#"
@@ -762,8 +764,10 @@ temperature = 0.0
 max_tokens = 1024
 [system_prompt]
 content = "c"
-[[listeners]]
+[[channels]]
+id = "gmail-personal"
 name = "gmail-personal"
+provider = ""
 event_types = ["message.received"]
 "#);
     let merged = merge_extends(base, ch);
@@ -775,7 +779,7 @@ event_types = ["message.received"]
 }
 
 #[test]
-fn extends_listener_binding_child_override_replaces_base_filter() {
+fn extends_channel_child_override_replaces_base_filter() {
     let base = cfg(r#"
 [agent]
 name = "base"
@@ -787,10 +791,12 @@ temperature = 0.0
 max_tokens = 1024
 [system_prompt]
 content = "b"
-[[listeners]]
+[[channels]]
+id = "gmail-personal"
 name = "gmail-personal"
+provider = ""
 event_types = ["message.received"]
-filter = { from = ["*@duetto.com"] }
+wake_filter = { from = ["*@duetto.com"] }
 "#);
     let ch = cfg(r#"
 [agent]
@@ -804,10 +810,12 @@ temperature = 0.0
 max_tokens = 1024
 [system_prompt]
 content = "c"
-[[listeners]]
+[[channels]]
+id = "gmail-personal"
 name = "gmail-personal"
+provider = ""
 event_types = ["message.received"]
-filter = { from = ["*@family.com"] }
+wake_filter = { from = ["*@family.com"] }
 "#);
     let merged = merge_extends(base, ch);
     // #7609: same semantics, now keyed on the channel `id`.

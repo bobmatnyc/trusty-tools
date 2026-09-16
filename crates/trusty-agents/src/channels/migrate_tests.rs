@@ -89,25 +89,45 @@ fn the_migrated_global_channel_projects_back_to_the_original_listener() {
     assert_eq!(listener.transport, "history-poll");
 }
 
+/// The drain takes the legacy table OUT, and keeps the comment above it.
+///
+/// Why this reverses the slice-2 contract (#7609 slice 7): the in-memory absorb
+/// that made a left-behind `[[listeners]]` harmless is gone, so a table the
+/// drain leaves would be an inert listener. Pre-change this fails at the first
+/// assertion — the drain appended and left the table in place.
 #[test]
-fn migration_leaves_the_legacy_listeners_table_intact() {
+fn the_drain_removes_the_legacy_listeners_table_and_keeps_its_comment() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write(dir.path(), "config.toml", LIVE_GLOBAL_CONFIG);
+    let annotated = format!("# an operator note above the table\n{LIVE_GLOBAL_CONFIG}");
+    let path = write(dir.path(), "config.toml", &annotated);
     migrate_global_if_absent(&path)
         .expect("migration succeeds")
         .expect("migration happened");
 
     let after = std::fs::read_to_string(&path).expect("read back");
     assert!(
-        after.starts_with(LIVE_GLOBAL_CONFIG),
-        "the operator's original bytes must be a prefix of the result; got:\n{after}"
+        !after.contains("[[listeners]]"),
+        "the retired table is gone:\n{after}"
+    );
+    assert!(
+        after.contains("# an operator note above the table"),
+        "the comment above it survives:\n{after}"
     );
     let table: toml::Table = toml::from_str(&after).expect("still parses");
-    let listeners = read_key::<ListenerConfig>(&table, "listeners", &path)
-        .expect("the legacy table still parses")
-        .expect("the legacy table is still present");
+    assert!(
+        read_key::<ListenerConfig>(&table, "listeners", &path)
+            .expect("no legacy table to parse")
+            .is_none(),
+        "and nothing re-reads it"
+    );
+    let listeners = read_key::<Channel>(&table, "channels", &path)
+        .expect("the migrated table parses")
+        .expect("the migrated table is present");
     assert_eq!(listeners.len(), 1);
-    assert_eq!(listeners[0].identity.as_deref(), Some("bob-personal"));
+    assert_eq!(
+        listeners[0].credential_ref.as_deref(),
+        Some("gmail/bob-personal")
+    );
 }
 
 #[test]
@@ -457,32 +477,27 @@ content = "x"
     format!("{head}{LIVE_AGENT_TOML}")
 }
 
+/// A retired `[[listeners]]` table is REPORTED, not folded, and its entries are
+/// inert.
+///
+/// Pre-change (`origin/main`) this fails at the first assertion: the parse
+/// folded the legacy binding into `channels`, so the list had one entry.
 #[test]
-fn an_agent_toml_listeners_table_is_absorbed_into_channels() {
-    // #7609: loading an agent.toml folds the deprecated table into `channels`
-    // with NO side effect on disk; the provider stays empty because this parse
-    // cannot see a global config.
+fn a_residual_agent_listeners_table_is_reported_not_absorbed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let agent = write(dir.path(), "izzie.toml", &live_agent_manifest());
-    let cfg = crate::agents::AgentConfig::load(&agent).expect("agent loads");
-    assert_eq!(cfg.channels.len(), 1);
-    assert_eq!(cfg.channels[0].scope, ChannelScope::Assistant);
-    assert_eq!(cfg.channels[0].id, "gmail-personal");
-    assert_eq!(cfg.channels[0].provider, "");
-    assert_eq!(
-        cfg.channels[0].event_types,
-        vec!["message.received".to_string()]
+    let cfg = crate::agents::AgentConfig::load(&agent).expect("agent still loads");
+    assert!(
+        cfg.channels.is_empty(),
+        "the retired table is not folded into channels: {:?}",
+        cfg.channels
     );
-    assert_eq!(cfg.channels[0].wake_filter.from, vec!["*".to_string()]);
-    assert_eq!(
-        cfg.channels[0].wake_filter.exclude_labels,
-        vec!["CATEGORY_PROMOTIONS".to_string()]
-    );
-
-    let bindings = cfg.listeners();
-    assert_eq!(
-        bindings, cfg.legacy_listeners,
-        "the derived view must equal the legacy table field for field"
+    assert!(cfg.listeners().is_empty(), "so nothing wakes from it");
+    assert!(
+        cfg.residual_listeners
+            .as_ref()
+            .is_some_and(|table| table.len() == 1),
+        "but the table is visible, so its presence can be reported"
     );
     assert!(
         !dir.path().join("izzie.channels.json").exists(),
@@ -490,8 +505,9 @@ fn an_agent_toml_listeners_table_is_absorbed_into_channels() {
     );
 }
 
+/// A manifest's own `[[channels]]` is what the parse reads, scoped to the file.
 #[test]
-fn an_agent_channel_is_not_absorbed_twice() {
+fn an_agent_channel_carries_the_assistant_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest = live_agent_manifest();
     let both = format!(
@@ -499,20 +515,17 @@ fn an_agent_channel_is_not_absorbed_twice() {
     );
     let agent = write(dir.path(), "izzie.toml", &both);
     let cfg = crate::agents::AgentConfig::load(&agent).expect("agent loads");
-    assert_eq!(cfg.channels.len(), 1, "no duplicate entry");
-    assert_eq!(
-        cfg.channels[0].provider, "slack",
-        "the explicit channel wins over the legacy binding"
-    );
+    assert_eq!(cfg.channels.len(), 1, "the declared channel, and only it");
+    assert_eq!(cfg.channels[0].scope, ChannelScope::Assistant);
+    assert_eq!(cfg.channels[0].provider, "slack");
     assert_eq!(cfg.listeners().len(), 1);
 }
 
 #[test]
-fn the_deprecation_warnings_fire_at_most_once() {
-    // Both are `Once`-guarded, so calling them repeatedly must not panic and
-    // must not re-arm; the observable contract is that they are idempotent.
+fn the_retirement_notice_fires_at_most_once() {
+    // `Once`-guarded, so calling it repeatedly must not panic and must not
+    // re-arm; the observable contract is that it is idempotent.
     for _ in 0..3 {
-        warn_global_listeners_deprecated();
         warn_agent_listeners_deprecated();
     }
 }
@@ -633,20 +646,22 @@ fn globals_as_a_daemon_loads_them(raw: &str) -> Vec<Channel> {
 ///
 /// Why (#7609): `migrate_global_if_absent` was reachable only from
 /// `GlobalConfig::load_or_create`, and only the REPL routing command calls
-/// that. A supervised `tagent --api` / `tagent --slack` absorbed the legacy
-/// `[[listeners]]` table in memory and left `config.toml` byte-identical across
-/// every restart, so the `route_to` backfill had no `[[channels]]` entry to
-/// append the bound assistant to.
+/// that. A supervised `tagent --api` / `tagent --slack` left `config.toml`
+/// byte-identical across every restart, so the `route_to` backfill had no
+/// `[[channels]]` entry to append the bound assistant to.
+///
+/// #7609 slice 7: a daemon that has not yet drained sees NO global channel —
+/// the in-memory absorb that used to cover the gap is gone, which is exactly
+/// why the drain has to run at startup rather than only in the REPL.
 #[test]
 fn a_daemon_start_drains_the_global_config_once() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = write(dir.path(), "config.toml", LIVE_GLOBAL_CONFIG);
     write(dir.path(), "izzie.toml", &assistant_instance_manifest());
     let globals = globals_as_a_daemon_loads_them(LIVE_GLOBAL_CONFIG);
-    assert_eq!(
-        globals.len(),
-        1,
-        "the in-memory absorb still yields the legacy listener: {globals:?}"
+    assert!(
+        globals.is_empty(),
+        "an undrained legacy table yields no channel: {globals:?}"
     );
 
     let first = run_startup_migration(Some(&config), &[dir.path().to_path_buf()], &globals);
@@ -660,9 +675,13 @@ fn a_daemon_start_drains_the_global_config_once() {
     assert_eq!(channels.len(), 1, "one migrated channel: {channels:?}");
     assert_eq!(channels[0].id, "gmail-personal");
     assert_eq!(
-        globals[0].id, channels[0].id,
-        "the id survives the rewrite, so the assistant binding that named the \
-         in-memory channel still resolves against the persisted one"
+        globals_as_a_daemon_loads_them(&std::fs::read_to_string(&config).expect("read back"))
+            .iter()
+            .map(|channel| channel.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gmail-personal"],
+        "the NEXT daemon load sees the drained channel, which is the whole point \
+         of draining at startup"
     );
     let after_first = std::fs::read_to_string(&config).expect("read back");
     assert!(

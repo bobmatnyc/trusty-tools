@@ -292,9 +292,9 @@ pub(crate) fn replace_array_of_tables(document: &mut DocumentMut, key: &str, mut
             pin(table, at);
         }
     }
-    if let Some(salvage) = salvage {
-        set_leading(&mut rendered, salvage);
-    }
+    // A key the document declared keeps its own heading; a new one gets a blank
+    // line, so an appended array does not abut the table above it.
+    set_leading(&mut rendered, salvage.unwrap_or_else(|| "\n".to_string()));
     document[key] = rendered;
     normalize_positions(document);
 }

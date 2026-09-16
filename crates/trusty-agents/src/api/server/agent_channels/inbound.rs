@@ -1341,7 +1341,7 @@ mod receive_tests {
     }
 
     /// An `agent.toml` that will not parse is LOGGED and absorbs nothing; a
-    /// healthy one still hands its legacy overlay to the inbound loop, and a
+    /// healthy one still hands its manifest overlay to the inbound loop, and a
     /// stored record of the same id wins over it.
     ///
     /// Why (#7609 review HIGH-2): the silent `let Ok(cfg) = … else { return }`
@@ -1358,10 +1358,12 @@ mod receive_tests {
             .expect("fixture write");
         std::fs::write(
             dir.path().join("fixture-legacy.toml"),
+            // #7609 slice 7: the manifest overlay is `[[channels]]`; the retired
+            // `[[listeners]]` spelling is no longer read at all.
             "[agent]\nname = \"fixture-legacy\"\nrole = \"assistant\"\nmodel = \"\"\n\
              description = \"\"\n\n[llm]\ntemperature = 0.0\nmax_tokens = 1024\n\n\
-             [system_prompt]\ncontent = \"x\"\n\n[[listeners]]\n\
-             name = \"gmail-personal\"\nenabled = true\n",
+             [system_prompt]\ncontent = \"x\"\n\n[[channels]]\nid = \"gmail-personal\"\n\
+             name = \"gmail-personal\"\nprovider = \"\"\nenabled = true\n",
         )
         .expect("fixture write");
 

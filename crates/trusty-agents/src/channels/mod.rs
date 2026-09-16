@@ -43,6 +43,9 @@ pub mod migrate;
 pub mod model;
 mod registry;
 pub mod resolve;
+// #7609 slice 7: taking the retired `[[listeners]]` table out of an
+// `agent.toml` once the assistant's channels file covers it.
+pub(crate) mod retire;
 mod slack;
 pub(crate) mod status;
 mod telegram;

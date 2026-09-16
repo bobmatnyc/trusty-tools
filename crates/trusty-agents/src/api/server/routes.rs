@@ -41,7 +41,6 @@ use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
 };
-use super::deprecated_aliases::{get_listeners_alias, put_listeners_alias};
 use super::event_tickets::EventStreamAuth;
 use super::events_sse::{events_handler, mint_event_ticket};
 use super::handlers::{
@@ -216,12 +215,6 @@ pub fn build_router_with_channel_credential(
         .route(
             "/api/channels",
             get(super::global_channels::get_route).put(super::global_channels::put_route),
-        )
-        // #7609 slice 5: DEPRECATED — forwards to the channel handlers, sets a
-        // `Deprecation` header, and is removed in slice 7.
-        .route(
-            "/api/agents/{name}/listeners",
-            get(get_listeners_alias).put(put_listeners_alias),
         )
         .route("/api/project-tools", get(get_project_tools))
         .route(

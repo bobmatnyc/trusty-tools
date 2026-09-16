@@ -47,7 +47,7 @@ pub(super) async fn register_mcp_tools(
     project_path: &Path,
 ) -> (ResolvedMcp, Vec<String>) {
     for tool in crate::tools::mcp_tools::mcp_tool_executors() {
-        crate::tools::listener_config::register_external(registry, tool);
+        crate::tools::channel::register_external(registry, tool);
     }
 
     // #7454: every surface below is built from THIS persona's resolved server
@@ -57,7 +57,7 @@ pub(super) async fn register_mcp_tools(
     let resolved = crate::mcp::resolve_for_assistant(Some(persona_name), project_path).await;
     let usable = resolved.usable();
     for tool in crate::tools::mcp_service_tools::mcp_service_tool_executors(&usable) {
-        crate::tools::listener_config::register_external(registry, tool);
+        crate::tools::channel::register_external(registry, tool);
     }
 
     // #3987: the returned vocabulary is the UNFILTERED set every endpoint
@@ -71,7 +71,7 @@ pub(super) async fn register_mcp_tools(
     {
         Ok((executors, vocabulary)) => {
             for tool in executors {
-                crate::tools::listener_config::register_external(registry, tool);
+                crate::tools::channel::register_external(registry, tool);
             }
             vocabulary
         }

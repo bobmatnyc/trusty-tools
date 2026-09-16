@@ -1,0 +1,3 @@
+Removed
+- `GET`/`PUT /api/agents/{name}/listeners` and the `listener_config` tool, deprecated in slice 5, are gone. The routes are unregistered and the tool name is refused to an external executor rather than left free to claim. Use `GET`/`PUT /api/agents/{name}/channels` and the `channel` tool.
+- The `[[listeners]]` parse path is retired in both `~/.trusty-agents/config.toml` and an assistant's `agent.toml`. Nothing is folded into `channels` in memory any more: the startup drain moves the entries on disk and deletes the legacy table, keeping the comment block above it. A table the drain could not move is reported — an error from `GlobalConfig::load_or_create`, a once-per-process log on the read-only paths — and its entries are inert, never silently honoured.

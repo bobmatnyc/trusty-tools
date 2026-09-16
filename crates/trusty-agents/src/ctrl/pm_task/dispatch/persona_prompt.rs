@@ -77,10 +77,8 @@ pub(super) fn system_prompt(
     );
     let base = format!(
         "{base}\n\n{}",
-        crate::tools::listener_config::context(
-            persona_tool_names
-                .iter()
-                .any(|name| name == "listener_config")
+        crate::tools::channel::wake_filter_context(
+            persona_tool_names.iter().any(|name| name == "channel")
         )
     );
     let base = format!(
@@ -206,7 +204,7 @@ pub(super) fn append_cli_context(persona_cfg: &mut AgentConfig, project_path: &P
     persona_cfg
         .system_prompt
         .content
-        .push_str(&crate::tools::listener_config::context(false));
+        .push_str(&crate::tools::channel::wake_filter_context(false));
     persona_cfg
         .system_prompt
         .content

@@ -52,7 +52,7 @@ impl AgentConfig {
     /// field held, so no wake decision changed.
     /// What: every `Assistant`-scope channel as an `AgentListenerBinding`, in
     /// stored order.
-    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`.
+    /// Test: `an_agent_channel_carries_the_assistant_scope`.
     pub fn listeners(&self) -> Vec<crate::listeners::config::AgentListenerBinding> {
         crate::channels::model::project(
             &self.channels,
@@ -61,33 +61,43 @@ impl AgentConfig {
         )
     }
 
-    /// Fold any legacy `[[listeners]]` binding into `channels`, in memory.
+    /// Stamp every parsed channel with the scope this file implies.
     ///
-    /// Why (#7609): parsing an `agent.toml` must never have a side effect on
-    /// disk — this runs on listing, dispatch and inheritance paths, not only
-    /// on writes. Persisting the result is a separate one-shot
-    /// ([`crate::channels::migrate::migrate_agent_channels_if_absent`]).
-    /// What: scope is set from this file's location, then each legacy binding
-    /// with no channel of the same `id` is appended with an EMPTY provider —
-    /// the binding names a global channel and this parse cannot see one.
-    /// Warns once per process.
-    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`,
-    /// `an_agent_channel_is_not_absorbed_twice`.
-    pub(crate) fn absorb_legacy_listeners(&mut self) {
+    /// Why: `Channel::scope` is `#[serde(skip)]` — a fact about WHERE the record
+    /// was read, not a field an operator writes — so every parse has to set it.
+    /// Split out of the retired legacy fold (#7609 slice 7) so it keeps running
+    /// now that nothing is folded.
+    /// Test: `an_agent_channel_carries_the_assistant_scope`.
+    pub(crate) fn scope_channels(&mut self) {
         for channel in &mut self.channels {
             channel.scope = crate::channels::ChannelScope::Assistant;
         }
-        if self.legacy_listeners.is_empty() {
+    }
+
+    /// Say once per process that a retired `[[listeners]]` table is inert.
+    ///
+    /// Why not an error (#7609 slice 7): `from_toml_str` is the one parse every
+    /// listing, dispatch and inheritance path runs, and the retirement sweep
+    /// that deletes the table is detached from startup. Refusing the manifest
+    /// would take the assistant offline until the sweep caught up, trading a
+    /// working assistant for a tidy one. The line names the file, so the fault
+    /// is actionable.
+    /// What: once per process, not once per parse — a dispatch re-reads every
+    /// manifest and a per-parse line would be a flood.
+    /// Test: `a_residual_agent_listeners_table_is_reported_not_absorbed`.
+    pub(crate) fn report_residual_listeners(&self, path: &Path) {
+        if self
+            .residual_listeners
+            .as_ref()
+            .is_none_or(|table| table.is_empty())
+        {
             return;
         }
         crate::channels::migrate::warn_agent_listeners_deprecated();
-        for binding in self.legacy_listeners.clone() {
-            if self.channels.iter().any(|c| c.id == binding.name) {
-                continue;
-            }
-            self.channels
-                .push(crate::channels::Channel::from_agent_binding(binding, ""));
-        }
+        tracing::debug!(
+            path = %path.display(),
+            "`[[listeners]]` in this manifest is retired and INERT (#7609)"
+        );
     }
 
     /// Load an AgentConfig from a TOML file path.
@@ -676,9 +686,10 @@ impl AgentConfig {
     pub(super) fn from_toml_str(raw: &str, path: &Path) -> Result<Self> {
         let mut cfg: AgentConfig = toml::from_str(raw)
             .with_context(|| format!("failed to parse agent TOML {}", path.display()))?;
-        // #7609: the deprecated `[[listeners]]` table keeps working — folded
-        // into `channels` here so every caller of this parse sees one list.
-        cfg.absorb_legacy_listeners();
+        cfg.scope_channels();
+        // #7609 slice 7: the retired `[[listeners]]` table is no longer folded
+        // into `channels`; its presence is reported and its entries are inert.
+        cfg.report_residual_listeners(path);
         // #7901: record which inherited-table keys this file declared, so
         // `extends` can let a child's own value win instead of dropping it.
         cfg.declared = crate::agents::extends::DeclaredKeys::from_toml(raw)

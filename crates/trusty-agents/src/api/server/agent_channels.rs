@@ -552,30 +552,6 @@ pub(crate) async fn write_from_turn(name: &str, update: Update) -> Result<Value,
     read(name).await
 }
 
-/// The listener half of this module, for the deprecated
-/// `PUT /api/agents/{name}/listeners` alias to forward into.
-///
-/// Why (#7609): `read` already composes `agent_listeners::read` — the listener
-/// view IS a projection of the channel view — so the alias forwards through
-/// this module rather than reaching around it into a second implementation.
-/// Test: `the_listener_alias_audits_an_accepted_write`.
-pub(super) async fn write_listeners(
-    name: &str,
-    update: agent_listeners::ListenerUpdate,
-) -> Result<(Value, Option<usize>, usize), Error> {
-    // #7609: the caller audits this write, so it needs the stored count either
-    // side of it. A read that fails does NOT fail the write — the count is
-    // audit detail and the write is already authorized — but it yields `None`
-    // rather than `0`, so the record cannot claim the assistant had no
-    // bindings when we simply could not tell (critic round 3, MEDIUM-2).
-    let before = agent_listeners::read(name)
-        .await
-        .ok()
-        .and_then(|view| view["listeners"].as_array().map(Vec::len));
-    let after = update.listeners.len();
-    let view = agent_listeners::write(name, update).await?;
-    Ok((view, before, after))
-}
 pub(super) async fn send_route(
     AxumPath((name, id)): AxumPath<(String, String)>,
     Json(body): Json<Send>,

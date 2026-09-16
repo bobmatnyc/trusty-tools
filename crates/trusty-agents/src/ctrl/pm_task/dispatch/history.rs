@@ -509,7 +509,7 @@ pub async fn run_pm_task_with_history(
         registry.register(Arc::new(crate::tools::run_bash::RunBashTool::new(cwd)));
     }
     for tool in crate::tools::mcp_tools::mcp_tool_executors() {
-        crate::tools::listener_config::register_external(&mut registry, tool);
+        crate::tools::channel::register_external(&mut registry, tool);
     }
     register_ticketing_tools(&mut registry).await;
 

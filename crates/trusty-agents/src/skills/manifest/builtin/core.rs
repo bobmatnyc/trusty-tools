@@ -27,18 +27,6 @@ pub(super) static TABLE: &[SkillDef] = &[
         System,
         None,
     ),
-    // #7609: `listener_config` is the deprecated name for the `channel` tool's
-    // assistant-scope get/set. The row stays for one release because every tool
-    // declared in source owes a skill row and the alias is still callable;
-    // slice 7 removes both.
-    tool_skill(
-        "listener-config",
-        "Configure My Listeners (deprecated)",
-        "Deprecated alias for Assistant Channels; use the channel skill instead.",
-        "listener_config",
-        System,
-        None,
-    ),
     tool_skill(
         "channel",
         "Assistant Channels",

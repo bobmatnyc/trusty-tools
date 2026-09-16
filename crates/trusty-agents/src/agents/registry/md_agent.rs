@@ -235,7 +235,7 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         // ships the binding only for directory-package `agent.toml`, DOC-54
         // §5.3's primary format) — a `.md` overlay agent never wakes on a
         // listener event until this parser grows frontmatter support.
-        legacy_listeners: Vec::new(),
+        residual_listeners: None,
         channels: Vec::new(),
         // #3816: markdown agents carry no `[[stores]]` table — an unbound
         // store is a valid state (see `AgentConfig::stores`).

@@ -111,6 +111,6 @@ mod tests {
             .execute(json!({"action":"backfill","revision":"x","months":1,"root":"/other"}))
             .await;
         assert!(result.is_error());
-        assert!(crate::tools::listener_config::is_reserved_name(tool.name()));
+        assert!(crate::tools::channel::is_reserved_name(tool.name()));
     }
 }
