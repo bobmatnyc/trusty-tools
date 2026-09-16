@@ -147,7 +147,7 @@ Inspect a managed session's recent activity. ALWAYS returns the raw tmux pane co
 
 ## `session_send`
 
-Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns a confirmation with the target tmux session name.
+Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns the target tmux session name plus `submit_state`: `submitted`, `unsubmitted_paste` (the harness collapsed a long message into a bracketed paste and the Enter did not commit it — resend in smaller parts), or `unverified` (the pane could not be read). `sent` is false only for `unsubmitted_paste`.
 
 | Parameter | Type | Required |
 |---|---|---|
