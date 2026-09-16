@@ -410,12 +410,15 @@ impl InProcessAgentRunner {
         // project ctx) — see `assemble_system_prompt_for_mode`'s docs (#2059).
         // Fallback guidance (the #1023 per-tier seam) is not wired here yet.
         // `skills_catalog` (#2069) is appended only in `HarnessMode::DailyDriver`.
+        // #4602: gated on THIS delegation's registry, so an agent narrowed by
+        // `tools.allowed` is never told to call a tool the gate removed.
         let system = assemble_system_prompt_for_mode(
             self.mode,
             &agent,
             self.project_context.as_deref(),
             None,
             self.skills_catalog.as_deref(),
+            Some(registry.as_ref()),
         );
 
         // (DOC-39 AC-13.1/13.2) Mint a fresh, per-spawn stable id for THIS

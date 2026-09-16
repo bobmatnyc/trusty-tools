@@ -1,0 +1,2 @@
+Fixed
+- The interactive PM is no longer told to call `glob`, `grep`, `list_dir` or `search_code`, nor to batch its writes into `write_files` — none of which its registry carried. The file-discovery, code-discovery and batch-write guidance is now gated on the run's tool registry, so `tcode tui` stops emitting calls the daemon rejects with "no schema registered for tool". `BASE_PREAMBLE_VERSION` moves 1.8.0 → 1.10.0 because both blocks left the shared preamble (#4602).

@@ -420,12 +420,15 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // #2924: mirrors `task::executor::run_and_record` — always resolves as
     // `HarnessMode::DailyDriver` (see `daily_driver_skills_catalog`'s docs
     // for why this path never needs to resolve `Parity`).
+    // #4602: gated on the PM's OWN registry — a delegating PM carries harness
+    // tools only, so it must not be told to call `glob`/`grep`/`list_dir`.
     let pm_system = assemble_system_prompt_for_mode(
         HarnessMode::DailyDriver,
         &pm_config,
         project_context.as_deref(),
         catchup_ctx.as_deref(),
         skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
+        Some(&pm_registry),
     );
     // (#2265 fix #5, re-scoped by #2852) Once the shared cap latches, every
     // further `delegate_to_agent` call the PM might issue is a guaranteed dead
