@@ -712,14 +712,27 @@ fn a_daemon_start_drains_the_global_config_once() {
     );
 }
 
-/// A global config the drain cannot write still starts the daemon.
+/// A global config the drain cannot write still starts the daemon, and says
+/// what the failure costs.
 ///
 /// Why (#7609): the drain runs on the startup path of a supervised process. A
 /// read-only or hand-broken `config.toml` is an operator problem to log, never
 /// a reason to refuse to boot — and it must not take the assistant half of the
 /// sweep down with it.
+///
+/// Why the log text is asserted (#7609 slice 7 review): the alarm used to
+/// promise the daemon "starts on the in-memory absorb instead". That absorb is
+/// gone, so the promise was false and the operator had no reason to act. The
+/// wording is the only notice they get, which makes it behaviour.
 #[test]
 fn a_daemon_start_survives_a_malformed_global_config() {
+    let logs = crate::test_env::CaptureWriter::default();
+    let _log_guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish(),
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     // `[[channels]]` is present but its `id` is not a string, so the drain
     // reports a parse error instead of reading it as "already migrated".
@@ -746,6 +759,16 @@ fn a_daemon_start_survives_a_malformed_global_config() {
         report.assistants.len(),
         1,
         "the assistant half still runs after a failed drain: {report:?}"
+    );
+    let logged = logs.contents();
+    assert!(
+        logged.contains("its entries are INERT")
+            && logged.contains("move them to [[channels]] by hand"),
+        "the alarm must state the real consequence and the hand edit: {logged}"
+    );
+    assert!(
+        !logged.contains("in-memory absorb"),
+        "the retired absorb must never be offered as a fallback again: {logged}"
     );
 }
 

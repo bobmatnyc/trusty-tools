@@ -355,16 +355,17 @@ pub struct StartupMigrationReport {
 /// Why (#7609): [`migrate_global_if_absent`] was reachable only from
 /// `GlobalConfig::load_or_create`, which only the REPL routing command calls.
 /// Every daemon entry point reads the config through `GlobalConfig::load`,
-/// which absorbs the legacy table in memory and never persists — so a
+/// which absorbed the legacy table in memory and never persisted — so a
 /// supervised `tagent --api` or `tagent --slack` left `config.toml` unchanged
 /// across every restart. This is the one entry point those starts call, and it
 /// keeps the hot `load` path read-only.
 /// What: drains `config_path` FIRST, so the assistant sweep's `route_to`
 /// backfill finds the `[[channels]]` entry it appends to; then sweeps `dirs`.
-/// A drain failure is logged and does NOT stop the sweep — the in-memory
-/// absorb keeps the legacy listener working either way, so nothing here is
-/// worth failing a daemon start over. An empty `dirs` runs the global drain
-/// alone, which is what [`spawn_global_migration`] wants.
+/// A drain failure is logged and does NOT stop the sweep: the assistant half
+/// migrates files the global half never touches, and taking it down too would
+/// widen one unwritable `config.toml` into a whole host's worth of inert
+/// bindings. An empty `dirs` runs the global drain alone, which is what
+/// [`spawn_global_migration`] wants.
 /// Test: `a_daemon_start_drains_the_global_config_once`,
 /// `a_daemon_start_survives_a_malformed_global_config`.
 pub fn run_startup_migration(
@@ -427,9 +428,11 @@ fn published_globals(config_path: &Path) -> Option<Vec<Channel>> {
 ///
 /// Why: a drain failure is an operator-visible problem — a read-only or
 /// hand-broken `config.toml` — that must name its path and its cause in the
-/// daemon's own log, and must then be dropped rather than propagated: the
-/// legacy in-memory absorb in `GlobalConfig::load` keeps the listener working,
-/// so refusing to start would trade a working daemon for a cosmetic one.
+/// daemon's own log. Nothing absorbs `[[listeners]]` at parse time any more
+/// (#7609 slice 7), so a failed drain is not a recoverable state the daemon
+/// papers over: the legacy table stays on disk and every entry in it is INERT
+/// until an operator moves it to `[[channels]]` by hand. The warn arm says
+/// exactly that, because it is the only notice the operator gets.
 /// Test: `a_daemon_start_survives_a_malformed_global_config`.
 fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMigrationError> {
     let outcome = migrate_global_if_absent(path);
@@ -443,8 +446,9 @@ fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMi
         Err(error) => tracing::warn!(
             path = %path.display(),
             %error,
-            "channel migration: the global drain wrote nothing; the daemon starts on the \
-             in-memory absorb instead (#7609)",
+            "channel migration: the global drain wrote nothing; the legacy [[listeners]] table \
+             stays on disk and its entries are INERT — move them to [[channels]] by hand \
+             (#7609)",
         ),
     }
     outcome

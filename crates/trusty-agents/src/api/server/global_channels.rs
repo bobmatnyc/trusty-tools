@@ -383,14 +383,19 @@ fn render(channels: &[Channel]) -> anyhow::Result<Option<toml_edit::Item>> {
 }
 
 /// Every assistant name this host can route to.
+///
+/// What: the failure arm is neutral to the caller's verb (#7609 review) —
+/// [`get_route`] and [`read_view`] need this roster to RENDER the `route_to`
+/// choices, so a read failure answering "the write was refused" named an
+/// operation the caller never attempted.
 async fn known_assistants() -> Result<Vec<String>, Error> {
     crate::listeners::wake::candidate_agent_names()
         .await
         .map_err(|e| {
-            tracing::warn!(error = %e, "channel config: the assistant roster could not be read; refusing the write (#7609)");
+            tracing::warn!(error = %e, "channel config: the assistant roster could not be read; the request could not be served (#7609)");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "The assistant roster could not be read; the write was refused",
+                "The assistant roster could not be read",
             )
         })
 }
