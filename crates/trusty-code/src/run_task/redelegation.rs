@@ -77,8 +77,39 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::agent_loop::AgentLoopError;
+use crate::runner::RunnerError;
 use crate::tools::delegate::redelegation_hint;
 use crate::tools::{AgentOutput, AgentRunner, RunContext};
+
+/// Name the cause of ONE caught delegation failure: its variant tag plus the
+/// underlying message (#8018).
+///
+/// Why: a run whose every delegate attempt died on a provider HTTP error
+/// reported only `turn_cap_exceeded`, because the retry loop discarded `e` and
+/// returned a fresh `anyhow!` naming attempt counts. The operator saw a turn
+/// budget they never exhausted instead of the 404 that killed every attempt
+/// (#7955 was diagnosed only by re-running by hand). The cause has to travel
+/// with the exhaustion error, and only the retry loop still holds it.
+/// What: downcasts to [`RunnerError`] and maps each [`AgentLoopError`] variant
+/// to a stable snake_case tag plus its Display text. `turn_cap_exceeded` is
+/// produced for `TurnCapExceeded` and for nothing else, so the tag in the
+/// report is the actual reason rather than a default. A failure that never
+/// reached an agent loop renders its whole `anyhow` chain.
+/// Test: `retry_exhaustion_names_the_provider_error_not_the_turn_cap`,
+/// `retry_exhaustion_names_the_turn_cap_when_the_cap_was_the_reason`.
+fn failure_cause(err: &anyhow::Error) -> String {
+    let Some(RunnerError::Loop { source, .. }) = err.downcast_ref::<RunnerError>() else {
+        return format!("{err:#}");
+    };
+    match source {
+        AgentLoopError::Llm(inner) => format!("llm_error: {inner}"),
+        AgentLoopError::TurnCapExceeded { .. } => format!("turn_cap_exceeded: {source}"),
+        AgentLoopError::Timeout { .. } => format!("timeout: {source}"),
+        AgentLoopError::Cancelled { .. } => format!("cancelled: {source}"),
+        AgentLoopError::StoppedBySignal { .. } => format!("stopped_by_signal: {source}"),
+    }
+}
 
 /// Maximum engineer attempts for ONE `delegate_to_agent` call — 1 initial
 /// invocation plus up to 2 reuse-aware retries (#2265, re-scoped by #2852).
@@ -385,7 +416,9 @@ impl RedelegatingRunner {
     /// `redelegating_runner_stops_at_per_call_cap_without_latching_stop_signal`,
     /// `failure_ceiling_latches_cap_reached`,
     /// `redelegating_runner_propagates_non_retryable_errors_immediately`,
-    /// `cap_reached_message_names_the_project_path`.
+    /// `cap_reached_message_names_the_project_path`,
+    /// `retry_exhaustion_names_the_provider_error_not_the_turn_cap`,
+    /// `retry_exhaustion_names_the_turn_cap_when_the_cap_was_the_reason`.
     async fn run_with_retries(
         &self,
         agent_name: &str,
@@ -407,6 +440,10 @@ impl RedelegatingRunner {
         }
 
         let mut current_task = task.to_string();
+        // #8018: the cause of the most recent attempt's failure, carried out of
+        // the loop so both exhaustion exits can name it. `None` only before the
+        // first failure, which no exhaustion path can be reached from.
+        let mut last_cause: Option<String> = None;
         // #2852: per-CALL, not per-run. Reset at entry so reconnaissance
         // delegations that succeed never starve the build that follows.
         let mut attempt: u32 = 0;
@@ -414,22 +451,27 @@ impl RedelegatingRunner {
             attempt += 1;
             if attempt > MAX_REDELEGATIONS {
                 self.signal.mark_retry_budget_exhausted();
+                let cause = last_cause
+                    .as_deref()
+                    .unwrap_or("unknown (no attempt failure recorded)");
                 // #2852: this cap used to be entirely silent — run-6's stderr
                 // carried no trace of it and the mechanism was only findable
                 // by cross-run forensics on the report's `task` label. Say so.
+                // #8018: and say WHY — the caught error, not just the count.
                 // Recoverable: the PM's loop continues (this does NOT latch
                 // `cap_reached`), so it may delegate afresh.
                 tracing::warn!(
                     agent = agent_name,
                     attempts = MAX_REDELEGATIONS,
                     run_invocations = self.signal.attempts(),
+                    cause = cause,
                     "re-delegation retry budget exhausted for this delegation; refusing \
                      further retries of it. The PM loop continues — a fresh delegation \
                      gets a full budget."
                 );
                 return Err(anyhow::anyhow!(
-                    "re-delegation limit reached after {MAX_REDELEGATIONS} attempts; \
-                     partial work preserved at {}",
+                    "re-delegation limit reached after {MAX_REDELEGATIONS} attempts \
+                     (last engineer failure: {cause}); partial work preserved at {}",
                     self.project.display()
                 ));
             }
@@ -447,6 +489,10 @@ impl RedelegatingRunner {
             {
                 Ok(out) => return Ok(out),
                 Err(e) => {
+                    // #8018: capture the cause BEFORE any early return, so both
+                    // exhaustion exits name the failure that actually happened.
+                    let cause = failure_cause(&e);
+                    last_cause = Some(cause.clone());
                     // Only FAILURES feed the terminal ceiling — the whole point
                     // of #2852, applied at the run-wide level too and not just
                     // to the per-delegation counter.
@@ -462,13 +508,15 @@ impl RedelegatingRunner {
                             agent = agent_name,
                             failed_invocations = failures,
                             ceiling = MAX_FAILED_INVOCATIONS,
+                            cause = cause.as_str(),
                             "run-wide engineer failure ceiling reached; stopping the PM \
                              loop. Delegations this run kept failing rather than \
                              succeeding."
                         );
                         return Err(anyhow::anyhow!(
                             "engineer failure ceiling reached after {failures} failed \
-                             invocations this run; partial work preserved at {}",
+                             invocations this run (last engineer failure: {cause}); \
+                             partial work preserved at {}",
                             self.project.display()
                         ));
                     }

@@ -2334,3 +2334,38 @@ fn local_ops_honours_diagnose_only_briefs_8027() {
         "local-ops.md must state the log-mtime check before citing root cause (#8027)"
     );
 }
+
+/// #8017: the resume skill's CLI fallback named `tm session catchup`, a verb
+/// `main.rs` answers with `warning: 'session' is deprecated; use 'sessions'`,
+/// and said nothing about the CLI having neither JSON nor paged output — so a
+/// session that lost the MCP server fell back to an unbounded markdown blob
+/// (163 KB for 23 sessions) without knowing a paged read existed.
+///
+/// Why: the skill is the only thing the PM reads before shelling out; a
+/// deprecated verb there is a warning on every fallback, and an unnamed paging
+/// knob is a paging knob nobody uses.
+/// What: asserts the singular verb is gone from the skill and that the paged
+/// and JSON forms `session_context_catchup` offers are named.
+/// Test: this test.
+#[test]
+fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
+    assert!(
+        !TM_SESSION_RESUME.contains("tm session catchup"),
+        "tm-session-resume.md still cites the deprecated singular `tm session catchup`; \
+         the live verb is `tm sessions catchup` (#2116)"
+    );
+    for needle in [
+        "tm sessions catchup",
+        "--all-projects",
+        "--full",
+        "sessions_offset",
+        "sessions_next_offset",
+        "no JSON mode and no paging",
+        "#8017",
+    ] {
+        assert!(
+            TM_SESSION_RESUME.contains(needle),
+            "tm-session-resume.md is missing the #8017 CLI-fallback correction: {needle:?}"
+        );
+    }
+}
