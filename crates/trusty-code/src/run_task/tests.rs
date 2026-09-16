@@ -425,6 +425,7 @@ fn params(agents: &TempDir, project: &TempDir, engineer_model: Option<&str>) -> 
         agents_dir: agents.path().to_path_buf(),
         engineer_model: engineer_model.map(str::to_string),
         deadline_secs: None,
+        no_delegate: false,
     }
 }
 
@@ -708,6 +709,7 @@ async fn missing_agent_config_is_config_error() {
             agents_dir: empty_agents.path().to_path_buf(),
             engineer_model: None,
             deadline_secs: None,
+            no_delegate: false,
         },
         llm,
     )
@@ -749,6 +751,7 @@ async fn missing_disk_pm_config_falls_back_to_embedded_pm() {
             agents_dir: empty_agents.path().to_path_buf(),
             engineer_model: None,
             deadline_secs: None,
+            no_delegate: false,
         },
         llm,
     )
@@ -1185,6 +1188,7 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
         agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
         engineer_model: None,
         deadline_secs: None,
+        no_delegate: false,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1259,6 +1263,7 @@ fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
         agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
         engineer_model: None,
         deadline_secs: None,
+        no_delegate: false,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1337,6 +1342,7 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
         agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
         engineer_model: None,
         deadline_secs: None,
+        no_delegate: false,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1399,6 +1405,7 @@ fn assemble_report_maps_completed_engineer_with_deliverable_to_success() {
         agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
         engineer_model: None,
         deadline_secs: None,
+        no_delegate: false,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1463,6 +1470,7 @@ fn assemble_report_maps_completed_engineer_without_deliverable_to_no_changes() {
         agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
         engineer_model: None,
         deadline_secs: None,
+        no_delegate: false,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1838,6 +1846,70 @@ async fn run_task_registry_never_registers_recall_session() {
     assert!(
         !names.contains(&"recall_session".to_string()),
         "run_task's one-shot registry must never register recall_session; got {names:?}"
+    );
+}
+
+/// Build `params` with `no_delegate` set, for the #8031 pair below.
+fn params_no_delegate(agents: &TempDir, project: &TempDir) -> RunTaskParams {
+    RunTaskParams {
+        no_delegate: true,
+        ..params(agents, project, None)
+    }
+}
+
+/// #8031: a `no_delegate` run must not advertise `delegate_to_agent` at all.
+///
+/// Why: the closure condition — `tcode run-task engineer --no-delegate
+/// "<task>"` completes with no `delegate_to_agent` call in the transcript.
+/// A tool the model is never shown is a tool it cannot call, so asserting on
+/// the wire-level schema set is the strongest form of that guarantee.
+/// What: Script [PM stop] only, run with `no_delegate: true`, and assert the
+/// PM's first (only) turn advertises `finish_task` but not
+/// `delegate_to_agent`. Fails on `origin/main`, where the tool is registered
+/// unconditionally.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_run_omits_delegate_tool() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+    let _report = execute_run_task(params_no_delegate(&agents, &project), llm.clone()).await;
+
+    let names = llm.first_tool_names();
+    assert!(
+        names.contains(&"finish_task".to_string()),
+        "sanity: finish_task must still be registered; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"delegate_to_agent".to_string()),
+        "a no_delegate run must not advertise delegate_to_agent; got {names:?}"
+    );
+}
+
+/// #8031 companion: the DEFAULT run still advertises `delegate_to_agent`.
+///
+/// Why: without this, `no_delegate_run_omits_delegate_tool` would also pass
+/// if the tool were dropped from every run — the fix would be indistinguishable
+/// from a regression.
+/// What: same script and fixture, `no_delegate` left at its `false` default.
+/// Test: this test.
+#[tokio::test]
+async fn default_run_registers_delegate_tool() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+    let _report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    let names = llm.first_tool_names();
+    assert!(
+        names.contains(&"delegate_to_agent".to_string()),
+        "the default run must keep advertising delegate_to_agent; got {names:?}"
     );
 }
 

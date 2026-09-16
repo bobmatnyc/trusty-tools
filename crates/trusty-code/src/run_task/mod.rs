@@ -216,6 +216,18 @@ pub struct RunTaskParams {
     /// `TCODE_PERMISSION_MODE=allow-asks`) permits it. A `deny` is refused
     /// either way.
     pub permission_mode: crate::permissions::PermissionMode,
+    /// (#8031) Run the named top-level agent ALONE: `true` skips
+    /// [`DelegateToAgentTool`] registration on the PM registry, so the agent
+    /// cannot hand the task to `python-engineer`.
+    ///
+    /// Why: `run-task engineer <task>` still advertised `delegate_to_agent`,
+    /// and the model self-delegated read/write work instead of doing it — a
+    /// guaranteed single-agent run was not expressible.
+    /// What: `false` (the default every pre-#8031 caller gets) registers the
+    /// tool exactly as before.
+    /// Test: `run_task::tests::no_delegate_run_omits_delegate_tool`,
+    /// `run_task::tests::default_run_registers_delegate_tool`.
+    pub no_delegate: bool,
 }
 
 /// Execute a `run-task` end-to-end and return the rendered report.
@@ -235,10 +247,14 @@ pub struct RunTaskParams {
 /// snapshots again, and assembles a `RunReport` (diff + transcript + usage/cost +
 /// exit code). A PM-config or loop error yields a `ConfigError`/`RunFailure`
 /// report rather than a panic.
+/// (#8031) `params.no_delegate` skips the `DelegateToAgentTool` registration
+/// entirely, leaving the named agent to run alone.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
 /// `exit_code_reflects_run_failure`,
-/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
+/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`,
+/// `no_delegate_run_omits_delegate_tool`,
+/// `default_run_registers_delegate_tool`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapter>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
@@ -328,12 +344,16 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // the implicit no-tool-call convention. Pre-flight validation uses the
     // agents dir.
     let mut pm_registry = ToolRegistry::new();
-    pm_registry.register(Arc::new(
-        DelegateToAgentTool::new(engineer_runner)
-            .with_config_dir(params.agents_dir.clone())
-            // (#2683) refuse a re-delegation once the engineer has completed.
-            .with_completion_signal(completion_signal.clone()),
-    ));
+    // #8031: `--no-delegate` makes this a single-agent run — the tool is never
+    // registered, so the named agent cannot hand the task to the engineer.
+    if !params.no_delegate {
+        pm_registry.register(Arc::new(
+            DelegateToAgentTool::new(engineer_runner)
+                .with_config_dir(params.agents_dir.clone())
+                // (#2683) refuse a re-delegation once the engineer has completed.
+                .with_completion_signal(completion_signal.clone()),
+        ));
+    }
     pm_registry.register(Arc::new(FinishTaskTool::new()));
     // #2924: mirrors `task::executor::run_and_record` — only the PM registers
     // `use_skill`; the delegated engineer inherits the catalog/prompt but not

@@ -130,6 +130,20 @@ pub struct TaskRunParams {
     pub permission_broker: Option<Arc<crate::permissions::PermissionBroker>>,
     /// (#7948) What this run does with an `ask` it cannot put to a client.
     pub permission_mode: crate::permissions::PermissionMode,
+    /// (#8031) Run `agent_name` ALONE: `true` skips [`DelegateToAgentTool`]
+    /// registration on this run's PM registry, so the agent cannot hand the
+    /// task to `python-engineer`.
+    ///
+    /// Why: `tcode run-task engineer <task>` still advertised
+    /// `delegate_to_agent`, and the model self-delegated read/write work
+    /// instead of doing it — a guaranteed single-agent run was not
+    /// expressible. Carried from `task.run`'s own `no_delegate` request
+    /// field, which the CLI's `--no-delegate` flag sets.
+    /// What: `false` (the default every pre-#8031 caller and every omitted
+    /// request field gets) registers the tool exactly as before.
+    /// Test: `task::executor::tests::no_delegate_run_omits_delegate_tool`,
+    /// `task::executor::tests::session_path_registers_delegate_tool_by_default`.
+    pub no_delegate: bool,
 }
 
 /// Reserve the session's execution slot and spawn the background run.
@@ -433,9 +447,13 @@ async fn run_and_record(
     // engineer's registry — since goal slots are a session, not sub-agent,
     // feature.
     let mut pm_registry = ToolRegistry::new();
-    pm_registry.register(Arc::new(
-        DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
-    ));
+    // #8031: `no_delegate` makes this a single-agent run — the tool is never
+    // registered, so the named agent cannot hand the task to the engineer.
+    if !params.no_delegate {
+        pm_registry.register(Arc::new(
+            DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
+        ));
+    }
     pm_registry.register(Arc::new(FinishTaskTool::new()));
     pm_registry.register(Arc::new(SetGoalTool::new(Arc::clone(&goals))));
     pm_registry.register(Arc::new(ClearGoalTool::new(Arc::clone(&goals))));

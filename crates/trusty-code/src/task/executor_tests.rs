@@ -52,6 +52,7 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
+        no_delegate: false,
         // #3902: this daemon path (`run_and_record`) always sets `cadence:
         // Some(_)` on the PM loop, so any test built from this shared
         // helper that runs enough turns to trip a real cadence/threshold
@@ -141,6 +142,7 @@ fn resolve_engineer_model_falls_back_to_embedded_when_disk_config_missing() {
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
+        no_delegate: false,
         // Never reaches an `AgentLoop` run in this test (only
         // `resolve_engineer_model` is called below) — irrelevant here.
         telemetry_data_dir: None,
@@ -1030,5 +1032,73 @@ async fn session_path_registers_recall_session_tool() {
     assert!(
         names.contains(&"finish_task".to_string()),
         "sanity: finish_task must still be registered alongside it; got {names:?}"
+    );
+}
+
+/// #8031: a `no_delegate` run on the DAEMON path must not advertise
+/// `delegate_to_agent`.
+///
+/// Why: `tcode run-task` routes through this path by default (the thin JSON-RPC
+/// client), so the issue's closure condition — no `delegate_to_agent` call in
+/// the transcript — is only met if the tool never reaches the wire here. A
+/// tool the model is never shown is a tool it cannot call.
+/// What: drives `spawn_task_run` with `no_delegate: true` and the existing
+/// `SchemaCapturingLlm`, then asserts the PM's advertised schema set. Fails on
+/// `origin/main`, where the tool is registered unconditionally.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_run_omits_delegate_tool() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(SchemaCapturingLlm::new());
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let names = mock.tool_names.lock().expect("tool_names lock").clone();
+    assert!(
+        names.contains(&"finish_task".to_string()),
+        "sanity: finish_task must still be registered; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"delegate_to_agent".to_string()),
+        "a no_delegate run must not advertise delegate_to_agent; got {names:?}"
+    );
+}
+
+/// #8031 companion: the DEFAULT daemon run still advertises
+/// `delegate_to_agent`.
+///
+/// Why: without this, `no_delegate_run_omits_delegate_tool` would also pass if
+/// the tool were dropped from every run — the fix would be indistinguishable
+/// from a regression.
+/// What: same fixture, `no_delegate` left at its `false` default.
+/// Test: this test.
+#[tokio::test]
+async fn session_path_registers_delegate_tool_by_default() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(SchemaCapturingLlm::new());
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = params(&agents, &project, &session.id);
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let names = mock.tool_names.lock().expect("tool_names lock").clone();
+    assert!(
+        names.contains(&"delegate_to_agent".to_string()),
+        "the default run must keep advertising delegate_to_agent; got {names:?}"
     );
 }

@@ -188,11 +188,23 @@ struct TaskRunRequestParams {
     /// docs).
     #[serde(default)]
     workstream_id: Option<String>,
+    /// (#8031) Run `agent_name` ALONE — skip `delegate_to_agent` registration
+    /// for this run, so the agent cannot hand the task to `python-engineer`.
+    ///
+    /// Why: the API surface has to express the same run shape the CLI's
+    /// `--no-delegate` flag does, or a non-CLI caller (the GUI, an MCP
+    /// client) cannot request a guaranteed single-agent run at all.
+    /// What: `#[serde(default)]` — an omitted field is `false`, which is
+    /// exactly the pre-#8031 behaviour, so no existing caller changes.
+    /// Test: `task::protocol::tests::task_run_params_default_no_delegate_to_false`,
+    /// `task::protocol::tests::task_run_params_parse_no_delegate_true`.
+    #[serde(default)]
+    no_delegate: bool,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?, mode?, deadline_secs?, project?, workstream_id?) -> {
-/// session_id, status, mode }`.
+/// session_id?, mode?, deadline_secs?, project?, workstream_id?,
+/// no_delegate?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
@@ -383,6 +395,10 @@ async fn task_run_with_permissions(
         // request, so a caller cannot widen its own permissions.
         permission_broker: permissions,
         permission_mode: crate::permissions::PermissionMode::resolve(None),
+        // #8031: a single-agent run — carried straight through, no resolution
+        // tiers (unlike `mode`/`deadline_secs`, this has no env or settings
+        // source; the request is the only one).
+        no_delegate: p.no_delegate,
     };
     spawn_task_run(registry, llm, task_params)?;
 
