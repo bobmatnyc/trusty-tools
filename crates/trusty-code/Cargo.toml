@@ -28,7 +28,15 @@ name = "trusty-code"
 # enables `trusty-mcp/config`. Purely ADDITIVE — no existing public item
 # changed shape, and the two `ProjectToolFactory` structs that gained a field
 # are private — so Cargo's 0.x rule puts it in PATCH.
-version = "0.6.2"
+#
+# 0.7.0 (#7779): MINOR bump. Closing the write-target TOCTOU changes three
+# public signatures — `paths::import::apply_import` takes the project root,
+# `agents::skill_refs::materialize_skill_refs` takes a pinned
+# `paths::write_dir::NativeWriteDir` instead of a `&Path`, and
+# `paths::WriteTargetError` gains `Unpinned`/`Unpinnable`. All three are
+# `enum_variant_added` / `function_parameter_count_changed` breaks, which
+# Cargo's 0.x rule puts in MINOR.
+version = "0.7.0"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.

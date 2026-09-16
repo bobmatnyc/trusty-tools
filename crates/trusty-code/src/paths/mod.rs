@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 pub mod import;
 pub mod private_state;
+pub mod write_dir;
 
 /// Trusty Code's own project configuration directory name.
 ///
@@ -344,15 +345,18 @@ pub fn native_child(project_root: &Path, relative: &str) -> PathBuf {
 
 /// Why a candidate write target was refused.
 ///
-/// Why: the two refusals are different failures with different fixes — one means
-/// "you aimed at the wrong product's directory", the other "something on this
-/// path is a symlink out of the tree" — and collapsing them into one string
-/// would hide which.
+/// Why: each refusal has a different fix — "you aimed at the wrong product's
+/// directory", "something on this path is a symlink out of the tree", "the
+/// directory you validated was swapped out from under the write" — and
+/// collapsing them into one string would hide which.
 /// What: [`WriteTargetError::CrossProduct`] for a path outside
 /// `<project>/.trusty-code/`; [`WriteTargetError::SymlinkEscape`] for a path
-/// whose nearest existing ancestor resolves outside it.
+/// whose nearest existing ancestor resolves outside it;
+/// [`WriteTargetError::Unpinned`] and [`WriteTargetError::Unpinnable`] for the
+/// handle-based writes in [`write_dir`] (#7779).
 /// Test: `paths::tests::write_to_claude_dir_is_refused`,
-/// `paths::tests::symlinked_native_subdir_escape_is_refused`.
+/// `paths::tests::symlinked_native_subdir_escape_is_refused`,
+/// `paths::write_dir_tests::symlinked_component_is_refused_at_open`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WriteTargetError {
     /// The path is not beneath the project's own `.trusty-code/` directory.
@@ -365,6 +369,26 @@ pub enum WriteTargetError {
         path: PathBuf,
         /// The only permitted write root.
         native_root: PathBuf,
+    },
+    /// A component was a symlink, or stopped being the directory the handle was
+    /// opened on, at write time (#7779).
+    #[error(
+        "refusing to write to {path}: `{component}` is not the directory this write was \
+         validated against — a symlink or rename was swapped in. Nothing was written through it."
+    )]
+    Unpinned {
+        /// The refused path, as supplied.
+        path: PathBuf,
+        /// The component that is no longer the validated directory.
+        component: String,
+    },
+    /// The write target could not be pinned to a directory handle at all.
+    #[error("refusing to write to {path}: {detail}")]
+    Unpinnable {
+        /// The refused path, as supplied.
+        path: PathBuf,
+        /// The underlying reason the handle could not be established.
+        detail: String,
     },
     /// A symlink on the path resolves outside `.trusty-code/`.
     #[error("refusing to write to {path}: it resolves to {resolved}, outside {native_root}")]
@@ -406,6 +430,13 @@ pub enum WriteTargetError {
 ///
 /// With nothing on the path existing yet, no symlink can be redirecting it and
 /// check 1 is the whole answer.
+///
+/// **This decides MEMBERSHIP, not the write.** Its answer describes the tree as
+/// it was when it ran, so a caller that then writes through the same path string
+/// can be overtaken by a rename (#7779). Every write target is therefore opened
+/// through [`write_dir::NativeWriteDir`], which runs this check and then pins the
+/// directory to a descriptor nothing can redirect. Call this function directly
+/// only to classify a path without writing to it — the import PLAN does.
 /// Test: `paths::tests::write_to_native_dir_is_allowed`,
 /// `paths::tests::write_to_claude_dir_is_refused`,
 /// `paths::tests::write_outside_project_is_refused`,

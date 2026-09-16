@@ -29,6 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::write_dir::NativeWriteDir;
 use super::{CLAUDE_COMPAT_DIRNAME, SETTINGS_FILENAME, check_native_write_target, native_child};
 
 /// The `.claude/` subtrees an import considers, in plan order.
@@ -339,15 +340,16 @@ fn settings_secret_key(path: &Path) -> Option<String> {
 /// a refusal with the I/O error and does not abort the remaining entries, so one
 /// bad file cannot leave the import half-done with no record of what landed.
 /// Test: `paths::import_tests::apply_creates_only_the_planned_files`,
-/// `paths::import_tests::apply_is_idempotent`.
-pub fn apply_import(plan: &ImportPlan) -> ImportReport {
+/// `paths::import_tests::apply_is_idempotent`,
+/// `paths::import_tests::swapped_target_dir_never_reaches_the_victim`.
+pub fn apply_import(project_root: &Path, plan: &ImportPlan) -> ImportReport {
     let mut report = ImportReport::default();
     for entry in &plan.entries {
         match &entry.action {
             ImportAction::Refuse(reason) => {
                 report.refused.push((entry.from.clone(), reason.clone()));
             }
-            ImportAction::Copy => match copy_one(&entry.from, &entry.to) {
+            ImportAction::Copy => match copy_one(project_root, &entry.from, &entry.to) {
                 Ok(()) => report.created.push(entry.to.clone()),
                 Err(e) => report
                     .refused
@@ -359,17 +361,45 @@ pub fn apply_import(plan: &ImportPlan) -> ImportReport {
     report
 }
 
-/// Copy one file, creating its parent directory.
+/// Copy one file through a pinned handle on its target directory.
 ///
-/// Why: a one-line helper keeps [`apply_import`]'s error handling readable.
-/// What: `create_dir_all` on the parent, then `std::fs::copy`.
-/// Test: `paths::import_tests::apply_creates_only_the_planned_files`.
-fn copy_one(from: &Path, to: &Path) -> std::io::Result<()> {
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(from, to)?;
-    Ok(())
+/// Why: #7779. The plan's write-target check ran in [`classify`], and an
+/// operator can sit on a `--dry-run` listing for minutes before authorising it —
+/// the widest check-to-write window in the crate. A `create_dir_all` plus
+/// `std::fs::copy` through the same path string followed whatever had been
+/// swapped in since.
+/// What: re-derives the target's path relative to `<project>/.trusty-code/`,
+/// opens that directory with [`NativeWriteDir`] (which re-applies the membership
+/// rule and then pins the directory), and writes with `create_new` — so the
+/// "never overwrite a user-authored file" rule is decided by `O_EXCL` at the
+/// moment of the write rather than by the plan's `exists()` test.
+/// Test: `paths::import_tests::apply_creates_only_the_planned_files`,
+/// `paths::import_tests::swapped_target_dir_never_reaches_the_victim`.
+fn copy_one(project_root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
+    let relative = to
+        .strip_prefix(super::native_config_dir(project_root))
+        .map_err(|_| {
+            std::io::Error::other(format!(
+                "{} is not beneath the project's own configuration directory",
+                to.display()
+            ))
+        })?;
+    let (parent, name) = match (
+        relative.parent(),
+        relative.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(parent), Some(name)) => (parent, name),
+        _ => {
+            return Err(std::io::Error::other(format!(
+                "{} is not a usable import target",
+                to.display()
+            )));
+        }
+    };
+    let content = std::fs::read(from)?;
+    NativeWriteDir::open(project_root, parent)
+        .and_then(|dir| dir.create_new(name, &content))
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
