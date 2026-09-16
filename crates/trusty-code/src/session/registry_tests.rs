@@ -804,6 +804,25 @@ async fn record_permission_requested_publishes_event() {
     ));
 }
 
+/// (#8100) A live event consumer is what the registry reports as an attached
+/// prompter — the same receiver `session.attach`, `session.events` and the SSE
+/// route each hold for as long as their client is connected.
+///
+/// Only this direction is asserted: the bus is process-global, so a test
+/// binary running in parallel cannot prove the count is zero. The gate covers
+/// the no-prompter arm with its own sink.
+#[tokio::test]
+async fn prompter_attached_while_an_event_consumer_lives() {
+    use crate::permissions::PermissionEvents;
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let consumer = crate::events::subscribe();
+
+    assert!(registry.prompter_attached(&session.id));
+    drop(consumer);
+}
+
 /// (#7948) The resolution half reaches the stream too, naming its source.
 #[tokio::test]
 async fn record_permission_resolved_publishes_event() {

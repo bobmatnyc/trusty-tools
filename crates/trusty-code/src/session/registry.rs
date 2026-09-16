@@ -1061,6 +1061,11 @@ fn spawn_forwarder(session_id: String, notify: NotifySender, cancel_rx: oneshot:
 #[path = "registry_events.rs"]
 mod events;
 
+/// #7948's permission-prompt recording and the `PermissionEvents` impl, split
+/// off `events` (#8100) for the same 500-SLOC-cap reason.
+#[path = "registry_permission_events.rs"]
+mod permission_events;
+
 /// #2345 turn-recorder sink lazy-init/lookup, split out into its own file for
 /// the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_memory_sink.rs"]

@@ -207,4 +207,9 @@ impl PermissionEvents for RequestIdCapture {
         _source: &str,
     ) {
     }
+
+    /// #8100: these tests drive the client round trip, so the client is here.
+    fn prompter_attached(&self, _session_id: &str) -> bool {
+        true
+    }
 }

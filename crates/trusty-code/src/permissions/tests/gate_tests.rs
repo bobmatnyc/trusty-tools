@@ -206,6 +206,9 @@ async fn absolute_in_root_path_meets_a_relative_deny() {
 struct RecordingEvents {
     lines: Mutex<Vec<String>>,
     request_ids: Mutex<Vec<String>>,
+    /// #8100: `false` (the default) is "a client is watching", which is what
+    /// every interactive test in this module assumes.
+    detached: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingEvents {
@@ -215,6 +218,14 @@ impl RecordingEvents {
 
     fn pending_request_id(&self) -> Option<String> {
         self.request_ids.lock().expect("lock").last().cloned()
+    }
+
+    /// #8100: a sink nobody is reading — the daemon `task.run` shape.
+    fn detached() -> Self {
+        Self {
+            detached: std::sync::atomic::AtomicBool::new(true),
+            ..Self::default()
+        }
     }
 }
 
@@ -253,6 +264,10 @@ impl PermissionEvents for RecordingEvents {
             .expect("lock")
             .push(format!("resolved {decision} {source}"));
     }
+
+    fn prompter_attached(&self, _session_id: &str) -> bool {
+        !self.detached.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// An interactive context wired to `broker`'s slot for `session`.
@@ -261,7 +276,18 @@ fn interactive_ctx(
     session: &str,
     timeout: Duration,
 ) -> (PermissionContext, Arc<RecordingEvents>) {
-    let events = Arc::new(RecordingEvents::default());
+    ctx_with_events(broker, session, timeout, RecordingEvents::default())
+}
+
+/// [`interactive_ctx`] with the sink supplied, so a test can build the
+/// no-client shape (#8100).
+fn ctx_with_events(
+    broker: &PermissionBroker,
+    session: &str,
+    timeout: Duration,
+    sink: RecordingEvents,
+) -> (PermissionContext, Arc<RecordingEvents>) {
+    let events = Arc::new(sink);
     let ctx = PermissionContext {
         mode: PermissionMode::Default,
         timeout,
@@ -299,6 +325,76 @@ async fn headless_ask_is_denied() {
         gate(&ctx, ask_bash())
             .resolve("bash", &json!({"command": "ls"}))
             .await,
+        Outcome::Denied {
+            rule: "bash".to_string(),
+            source: DenySource::Headless
+        }
+    );
+}
+
+/// (#8100) HEADLESS, the daemon shape: broker state exists — `task.run`
+/// always mints it — but no client is watching, so the `ask` denies at once
+/// instead of sitting out `DEFAULT_ASK_TIMEOUT_SECS`.
+///
+/// The `tokio::time::timeout` is the assertion: the context carries the real
+/// 300 s ask budget, so a gate that still waits fails here in 200 ms rather
+/// than hanging the suite.
+#[tokio::test]
+async fn ask_without_an_attached_prompter_denies_immediately() {
+    let broker = PermissionBroker::new();
+    let (ctx, events) = ctx_with_events(
+        &broker,
+        "s-no-client",
+        Duration::from_secs(crate::permissions::DEFAULT_ASK_TIMEOUT_SECS),
+        RecordingEvents::detached(),
+    );
+    let gate = gate(&ctx, ask_bash());
+
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        gate.resolve("bash", &json!({"command": "ls"})),
+    )
+    .await
+    .expect("an ask nobody can answer must not wait out the ask timeout");
+
+    assert_eq!(
+        outcome,
+        Outcome::Denied {
+            rule: "bash".to_string(),
+            source: DenySource::Headless
+        }
+    );
+    assert_eq!(
+        outcome.message().as_deref(),
+        Some("denied by policy (bash): headless run")
+    );
+    assert!(
+        events.lines().is_empty(),
+        "nothing was asked, so nothing may be published: {:?}",
+        events.lines()
+    );
+}
+
+/// (#8100) An `ask` with a rendezvous but no event sink is headless too: the
+/// request id only reaches a client through the event, so an unpublished
+/// request can never be answered.
+#[tokio::test]
+async fn an_ask_with_no_event_sink_is_headless() {
+    let broker = PermissionBroker::new();
+    let ctx = PermissionContext {
+        ask: Some(broker.session("s-silent")),
+        ..PermissionContext::headless(PermissionMode::Default)
+    };
+
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        gate(&ctx, ask_bash()).resolve("bash", &json!({"command": "ls"})),
+    )
+    .await
+    .expect("an unpublishable ask must not wait out the ask timeout");
+
+    assert_eq!(
+        outcome,
         Outcome::Denied {
             rule: "bash".to_string(),
             source: DenySource::Headless
@@ -427,6 +523,9 @@ async fn client_deny_is_denied() {
 }
 
 /// The request/resolve event pair is emitted around an answered `ask`.
+///
+/// #8100: this is also the ATTACHED arm — `interactive_ctx` builds a sink that
+/// reports a watching client, and the round trip must still happen in full.
 #[tokio::test]
 async fn ask_emits_requested_then_resolved() {
     let broker = Arc::new(PermissionBroker::new());

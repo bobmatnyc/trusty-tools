@@ -236,6 +236,23 @@ pub trait PermissionEvents: Send + Sync {
         decision: &str,
         source: &str,
     );
+
+    /// Whether anything is consuming this session's events, and so could see a
+    /// prompt and answer it.
+    ///
+    /// Why (#8100): a daemon `task.run` always holds broker state, so
+    /// `PermissionContext::ask.is_some()` says only that a rendezvous EXISTS —
+    /// never that a client is on the other end of it. A headless run therefore
+    /// sat out the full [`DEFAULT_ASK_TIMEOUT_SECS`] per `ask` rule and then
+    /// denied anyway. This is the question that distinguishes the two, asked of
+    /// the same object that publishes the prompt.
+    /// What: no default — an implementor must answer deliberately, because
+    /// answering `true` wrongly restores the 300 s stall and answering `false`
+    /// wrongly denies an operator who was watching. A sink that cannot tell
+    /// must answer `false`: an event nobody consumes is a prompt nobody sees.
+    /// Test: `ask_without_an_attached_prompter_denies_immediately`,
+    /// `ask_emits_requested_then_resolved`.
+    fn prompter_attached(&self, session_id: &str) -> bool;
 }
 
 /// The session-scoped, agent-independent half of a gate's configuration.
@@ -245,7 +262,11 @@ pub trait PermissionEvents: Send + Sync {
 /// agent in one run, so the sub-agent runner mints a gate per delegation from
 /// one cloned context.
 /// What: `ask` is `None` for a headless run; an `ask` rule then resolves
-/// immediately per `mode`. #7948: `root` is the run's working root, which
+/// immediately per `mode`. #8100: `ask` being `Some` is NOT the same as a
+/// client being attached — the daemon mints broker state for every `task.run`
+/// — so `events.prompter_attached` is consulted too, and a run nobody is
+/// watching is headless however the broker was wired. #7948: `root` is the
+/// run's working root, which
 /// [`subjects_for_in_root`] needs to decide an absolute in-root path against a
 /// relatively-written rule; `None` restricts matching to the spelling the model
 /// wrote.
@@ -375,12 +396,15 @@ impl PermissionGate {
     /// on `Outcome::Denied`.
     /// What: `evaluate` runs; `Allow`/`Deny` return at once. `Ask` checks this
     /// session's remembered grants, then `AllowAsks` — both auto-allow paths
-    /// record the approval — then, only with an answering channel, emits
-    /// `PermissionRequested`, awaits an answer for `ctx.timeout`, and emits
-    /// `PermissionResolved`. Without a channel it is
-    /// `Denied { source: Headless }`.
+    /// record the approval — then, only with an answering channel AND a client
+    /// watching the session (#8100), emits `PermissionRequested`, awaits an
+    /// answer for `ctx.timeout`, and emits `PermissionResolved`. Missing
+    /// either is `Denied { source: Headless }`, returned at once rather than
+    /// after [`DEFAULT_ASK_TIMEOUT_SECS`].
     ///
     /// Test: `headless_ask_is_denied`, `allow_asks_mode_permits_an_ask`,
+    /// `ask_without_an_attached_prompter_denies_immediately`,
+    /// `an_ask_with_no_event_sink_is_headless`,
     /// `allow_asks_mode_emits_an_audit_event`,
     /// `timed_out_ask_is_denied`, `client_deny_is_denied`,
     /// `ask_emits_requested_then_resolved`,
@@ -428,13 +452,32 @@ impl PermissionGate {
             );
             return Outcome::Allow;
         }
-        let Some(state) = self.ctx.ask.clone() else {
+        // #8100: BOTH halves must hold — a rendezvous to wait on, and someone
+        // watching the events who could answer into it. A daemon `task.run`
+        // always has the first, which is why a headless run used to wait out
+        // the whole ask timeout before denying.
+        let Some(state) = self.ctx.ask.clone().filter(|_| self.prompter_attached()) else {
             return Outcome::Denied {
                 rule,
                 source: DenySource::Headless,
             };
         };
         self.ask(&state, tool, &subjects, rule).await
+    }
+
+    /// Whether a client is watching this session and could answer an `ask`.
+    ///
+    /// Why (#8100): see [`PermissionEvents::prompter_attached`]. No event sink
+    /// at all is headless by the same argument — the `permission_requested`
+    /// event carries the `request_id` a client answers with, so a request that
+    /// is never published can never be answered.
+    /// Test: `ask_without_an_attached_prompter_denies_immediately`,
+    /// `an_ask_with_no_event_sink_is_headless`.
+    fn prompter_attached(&self) -> bool {
+        self.ctx
+            .events
+            .as_ref()
+            .is_some_and(|events| events.prompter_attached(&self.ctx.session_id))
     }
 
     /// Record an `ask` this gate allowed WITHOUT putting it to a client —
