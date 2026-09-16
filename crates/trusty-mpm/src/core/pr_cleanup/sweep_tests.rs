@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use super::{SweepDecision, run_sweep, sweep_decision};
+use crate::core::pr_cleanup::auth_backoff::{AuthBackoff, STRIKES};
 use crate::core::pr_cleanup::driver::{ClaimEnder, CmdOut, Gh, Git, Landing};
 use crate::core::pr_cleanup::plan::PrView;
 use crate::core::pr_cleanup::registry::{CleanupRegistry, OpenedPr};
@@ -217,7 +218,16 @@ async fn sweep_stamps_only_a_fully_successful_run() {
 
     let gh = gh_merged();
     let git = git_nothing_left();
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg).await;
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
 
     assert_eq!(cleaned, 1, "the newly merged PR is cleaned once");
     assert!(reg.pending().is_empty(), "and stamped so it never re-runs");
@@ -225,7 +235,16 @@ async fn sweep_stamps_only_a_fully_successful_run() {
     // A second sweep against the same registry must do nothing at all.
     let gh2 = gh_merged();
     let git2 = git_nothing_left();
-    let again = run_sweep(&gh2, &git2, &NoClaims, &NoLanding, &clean, &reg).await;
+    let again = run_sweep(
+        &gh2,
+        &git2,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
     assert_eq!(again, 0, "the trigger is idempotent");
     assert!(
         gh2.calls().is_empty() && git2.calls().is_empty(),
@@ -252,7 +271,16 @@ async fn sweep_leaves_a_dirty_worktree_pending() {
             unpushed_commits: 0,
         })
     };
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &dirty, &reg).await;
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &dirty,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
 
     assert_eq!(cleaned, 0, "a refused run is not a success");
     assert_eq!(
@@ -279,7 +307,16 @@ async fn sweep_skips_a_pr_that_has_not_merged() {
         &format!("{{\"state\":\"OPEN\",\"headRefName\":\"{BRANCH}\"}}"),
     );
     let git = Scripted::new();
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg).await;
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
 
     assert_eq!(cleaned, 0);
     assert_eq!(reg.pending().len(), 1, "an open PR stays pending");
@@ -287,6 +324,136 @@ async fn sweep_skips_a_pr_that_has_not_merged() {
         git.calls().is_empty(),
         "no git command runs for an unmerged PR: {:?}",
         git.calls()
+    );
+}
+
+/// The #8058 regression: a `gh auth login` failure must stop the calls.
+///
+/// Why: before the backoff gate, an auth failure was a per-entry `warn!` and a
+/// `continue`, so every pending entry spawned its own doomed `gh` on every
+/// tick — the tight loop the 2026-09-15 log shows, whose process churn alone
+/// degraded `/health`. The assertion is therefore on the CALL COUNT across
+/// ticks, not on the log.
+/// What: three pending entries, a `gh` that always fails the way `gh` fails
+/// without a credential, and five ticks. Un-gated that is fifteen calls; gated
+/// it is [`STRIKES`], after which the window holds for five minutes.
+#[tokio::test]
+async fn sweep_stops_calling_gh_after_repeated_auth_failures() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    for pr in [7275u64, 7276, 7277] {
+        reg.record_open(entry(pr, false, Path::new("/repo")))
+            .expect("record");
+    }
+
+    // `Scripted` with no route bails with its own message, so this fake answers
+    // the auth failure verbatim instead.
+    struct AuthDenied {
+        calls: RefCell<usize>,
+    }
+    impl Gh for AuthDenied {
+        fn run(&self, _args: &[String]) -> anyhow::Result<CmdOut> {
+            *self.calls.borrow_mut() += 1;
+            Ok(CmdOut {
+                success: false,
+                stdout: String::new(),
+                stderr: "To get started with GitHub CLI, please run: gh auth login.".to_string(),
+            })
+        }
+    }
+
+    let gh = AuthDenied {
+        calls: RefCell::new(0),
+    };
+    let git = Scripted::new();
+    let backoff = AuthBackoff::new();
+    const TICKS: usize = 5;
+    for _ in 0..TICKS {
+        let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg, &backoff).await;
+        assert_eq!(cleaned, 0, "an auth failure cleans nothing");
+    }
+
+    let calls = *gh.calls.borrow();
+    assert_eq!(
+        calls,
+        usize::try_from(STRIKES).expect("STRIKES fits usize"),
+        "the sweep must stop calling `gh` after {STRIKES} auth failures; it made {calls} over \
+         {TICKS} tick(s) against 3 pending entries"
+    );
+    assert_eq!(
+        reg.pending().len(),
+        3,
+        "nothing is stamped on an auth failure"
+    );
+
+    let reason = backoff
+        .degraded_reason()
+        .expect("a suspended sweep publishes its reason to /health");
+    assert!(reason.contains("gh auth login"), "{reason}");
+}
+
+/// The #8058 fail-open arm: a NON-auth failure must not suspend anything.
+///
+/// Why: the backoff is a failure branch, and its dangerous direction is the
+/// opposite of the loop it fixes. `run_sweep` downgrades every `view_pr` error
+/// to a `continue`, and only the auth arm may also take a strike — so an
+/// over-broad [`is_auth_failure`], or the two arms in the wrong order, would
+/// turn ONE stale registry row into a host-wide cleanup outage that `/health`
+/// then reports as a deliberate suspension. That is strictly worse than the
+/// tight loop, because it is silent and self-sustaining.
+/// What: three pending entries, a `gh` that always fails the way a deleted pull
+/// request fails, and two ticks. Every entry must still be asked on every tick
+/// — six calls — with nothing stamped and nothing published to `/health`.
+#[tokio::test]
+async fn a_non_auth_failure_never_suspends_the_sweep() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    for pr in [7275u64, 7276, 7277] {
+        reg.record_open(entry(pr, false, Path::new("/repo")))
+            .expect("record");
+    }
+
+    struct NotFound {
+        calls: RefCell<usize>,
+    }
+    impl Gh for NotFound {
+        fn run(&self, _args: &[String]) -> anyhow::Result<CmdOut> {
+            *self.calls.borrow_mut() += 1;
+            Ok(CmdOut {
+                success: false,
+                stdout: String::new(),
+                stderr: "GraphQL: Could not resolve to a PullRequest with the number of 7275."
+                    .to_string(),
+            })
+        }
+    }
+
+    let gh = NotFound {
+        calls: RefCell::new(0),
+    };
+    let git = Scripted::new();
+    let backoff = AuthBackoff::new();
+    const TICKS: usize = 2;
+    for _ in 0..TICKS {
+        let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg, &backoff).await;
+        assert_eq!(cleaned, 0, "a failed read cleans nothing");
+    }
+
+    let calls = *gh.calls.borrow();
+    assert_eq!(
+        calls, 6,
+        "every pending entry is still asked on every tick; a per-entry error must not gate the \
+         host-wide sweep (made {calls} over {TICKS} tick(s) against 3 entries)"
+    );
+    assert!(
+        backoff.degraded_reason().is_none(),
+        "a per-entry error is not a degraded subsystem: {:?}",
+        backoff.degraded_reason()
+    );
+    assert_eq!(
+        reg.pending().len(),
+        3,
+        "nothing is stamped on a failed read"
     );
 }
 

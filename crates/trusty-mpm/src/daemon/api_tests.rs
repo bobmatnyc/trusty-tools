@@ -90,6 +90,31 @@ async fn health_response_serializes_supervised_field() {
     );
 }
 
+/// #8058: `/health` must carry the `degraded` list, and it must be EMPTY on a
+/// daemon whose pr-cleanup sweep has not parked itself.
+///
+/// Why: the field exists so a suspended subsystem is visible. A field that is
+/// non-empty by accident would train readers to ignore it, which is the same
+/// failure as not having it.
+/// Test: this test.
+#[tokio::test]
+async fn health_publishes_no_degraded_subsystem_when_idle() {
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert!(
+        body.degraded.is_empty(),
+        "an idle daemon reports nothing degraded: {:?}",
+        body.degraded
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("degraded"),
+        Some(&serde_json::Value::Array(Vec::new())),
+        "wire shape must carry `degraded`: {value}"
+    );
+}
+
 /// #4469: `/health` must publish the THREE-STATE launchd answer, not only the
 /// bool that collapses it.
 ///

@@ -1062,6 +1062,17 @@ pub struct HealthSnapshot {
     /// Test: `health_snapshot_deserializes`.
     #[serde(default)]
     pub unsupervised_forced: bool,
+    /// Background work the responding daemon has suspended, and why (#8058).
+    ///
+    /// Why: a green `status` describes the HTTP surface, not the periodic work
+    /// behind it. The pr-cleanup sweep parks itself after repeated `gh`
+    /// authentication failures, and a client that cannot read that reports a
+    /// healthy daemon whose cleanup has silently stopped.
+    /// What: mirrors `daemon::api::types::HealthResponse::degraded`; empty both
+    /// when nothing is suspended and when the daemon predates the field.
+    /// Test: `health_snapshot_degraded_defaults_to_empty`.
+    #[serde(default)]
+    pub degraded: Vec<String>,
     /// The daemon's THREE-STATE launchd answer (issue #4469).
     ///
     /// Why: `supervised` is a bool and cannot say "launchd could not be asked".

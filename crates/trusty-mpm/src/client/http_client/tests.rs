@@ -1038,6 +1038,24 @@ fn health_snapshot_pid_is_none_when_absent() {
     assert_eq!(minimal.pid, None);
 }
 
+/// #8058: `degraded` is how a daemon says it has parked a subsystem, and a
+/// daemon predating the field must still parse — as "nothing suspended", which
+/// is also what a healthy daemon sends.
+#[test]
+fn health_snapshot_degraded_defaults_to_empty() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert!(minimal.degraded.is_empty());
+
+    let suspended: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "ok",
+        "degraded": ["pr-cleanup sweep suspended: run `gh auth login`"],
+    }))
+    .expect("body with the field parses");
+    assert_eq!(suspended.degraded.len(), 1);
+    assert!(suspended.degraded[0].contains("gh auth login"));
+}
+
 /// #4469: an older daemon that does not publish `launchd_supervision` must
 /// parse, yielding the empty string rather than a hard error.
 ///
