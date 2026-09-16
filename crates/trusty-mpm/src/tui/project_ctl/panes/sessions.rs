@@ -114,21 +114,26 @@ pub fn deliverable_glyph(
     }
 }
 
-/// Build one numbered session row: `N. <glyph> <short-id>  <branch>  <detail>`,
+/// Build one numbered session row: `N. <glyph> <name>  <branch>  <detail>`,
 /// with an optional trailing deliverable-link glyph (DOC-35 §10.6, #2383).
 ///
 /// Why: DOC-16 §3.2 numbers session rows so an operator can refer to one by
-/// its list position; the detail column prefers the task description and
-/// falls back to the raw state word when no task is recorded.
+/// its list position; the label column names the session, as every other view
+/// of the same fleet does, and the detail column prefers the task description
+/// and falls back to the raw state word when no task is recorded.
 /// `deliverable_link_state` is resolved by the caller ([`render`]) via
 /// [`ProjectCtlState::deliverable_link_state`] so this function stays a pure,
 /// terminal-free builder.
-/// What: returns e.g. `1. ● 4f9ca1b2  main  ship the thing ◆` when bound and
-/// resolved, `… ◈` (dim) when bound and confirmed dangling, or no trailing
-/// glyph when unbound OR the link state is still
-/// [`DeliverableLinkState::Unknown`].
+/// What: returns e.g. `1. ● tm-trusty-tools-27  main  ship the thing ◆` when
+/// bound and resolved, `… ◈` (dim) when bound and confirmed dangling, or no
+/// trailing glyph when unbound OR the link state is still
+/// [`DeliverableLinkState::Unknown`]. A nameless row falls back to
+/// `short_id`; a blank task falls back to the state word.
+///
 /// Test: `session_line_shows_number_glyph_branch_and_task`,
+/// `session_line_renders_name_not_short_id`,
 /// `session_line_falls_back_to_state_word`,
+/// `session_line_falls_back_to_state_word_when_task_is_empty`,
 /// `session_line_appends_deliverable_glyph_when_bound`.
 pub fn session_line(
     number: usize,
@@ -137,7 +142,19 @@ pub fn session_line(
 ) -> Line<'static> {
     let glyph = state_glyph(&row.state);
     let branch = row.branch.clone().unwrap_or_else(|| "-".to_string());
-    let detail = row.task.clone().unwrap_or_else(|| row.state.clone());
+    // #8163: rows named themselves by an 8-char uuid prefix; the name is what
+    // every other view shows, so short_id is now only the nameless fallback.
+    let label = if row.name.trim().is_empty() {
+        row.short_id.clone()
+    } else {
+        row.name.clone()
+    };
+    // #8163: the daemon emits `task: Some("")`, so an empty task must count as
+    // absent or the state-word fallback never fires and the column renders blank.
+    let detail = match row.task.as_deref() {
+        Some(task) if !task.trim().is_empty() => task.to_string(),
+        _ => row.state.clone(),
+    };
     let mut spans = vec![
         Span::styled(
             format!("{number:>2}. "),
@@ -145,7 +162,7 @@ pub fn session_line(
         ),
         Span::styled(format!("{glyph} "), glyph_style(&row.state)),
         Span::styled(
-            format!("{}  ", row.short_id),
+            format!("{label}  "),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("{branch}  ")),
@@ -264,9 +281,31 @@ mod tests {
         ));
         assert!(text.starts_with(" 1. "), "missing number: {text}");
         assert!(text.contains(ACTIVE_GLYPH), "missing glyph: {text}");
-        assert!(text.contains("4f9ca1b2"), "missing short id: {text}");
+        // #8163: the label column is the session name, not the short id.
+        assert!(text.contains("session"), "missing session name: {text}");
         assert!(text.contains("feat/x"), "missing branch: {text}");
         assert!(text.contains("ship the thing"), "missing task: {text}");
+    }
+
+    /// #8163: a named row must render the name, never the 8-char uuid prefix;
+    /// `short_id` survives only as the nameless fallback.
+    #[test]
+    fn session_line_renders_name_not_short_id() {
+        let mut r = row("active");
+        r.name = "tm-trusty-tools-27".to_string();
+        let text = line_text(&session_line(1, &r, DeliverableLinkState::Unknown));
+        assert!(text.contains("tm-trusty-tools-27"), "missing name: {text}");
+        assert!(
+            !text.contains("4f9ca1b2"),
+            "a named row must not render the short id: {text}"
+        );
+
+        r.name = String::new();
+        let nameless = line_text(&session_line(1, &r, DeliverableLinkState::Unknown));
+        assert!(
+            nameless.contains("4f9ca1b2"),
+            "a nameless row must fall back to the short id: {nameless}"
+        );
     }
 
     #[test]
@@ -275,6 +314,19 @@ mod tests {
         r.task = None;
         let text = line_text(&session_line(2, &r, DeliverableLinkState::Unknown));
         assert!(text.contains("stopped"), "missing state fallback: {text}");
+    }
+
+    /// #8163: the daemon emits `task: Some("")` rather than `None`, which left
+    /// the detail column blank instead of showing the state word.
+    #[test]
+    fn session_line_falls_back_to_state_word_when_task_is_empty() {
+        let mut r = row("stopped");
+        r.task = Some(String::new());
+        let text = line_text(&session_line(2, &r, DeliverableLinkState::Unknown));
+        assert!(
+            text.contains("stopped"),
+            "an empty task must fall back to the state word: {text}"
+        );
     }
 
     #[test]
