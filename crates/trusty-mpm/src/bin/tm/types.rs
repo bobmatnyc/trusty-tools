@@ -14,7 +14,8 @@ use serde::Deserialize;
 /// One session row as returned by `GET /sessions`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct SessionRow {
-    /// Session id (a `SessionId` newtype: `{"0": "<uuid>"}`).
+    /// Session id — serde writes the `SessionId` newtype transparently, so the
+    /// wire value is the bare string `"<uuid>"` (#7805).
     pub(crate) id: serde_json::Value,
     /// Working directory.
     pub(crate) workdir: String,
@@ -28,7 +29,7 @@ pub(crate) struct SessionRow {
 /// One event row as returned by `GET /events`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct EventRow {
-    /// Originating session (`SessionId` newtype JSON).
+    /// Originating session id, in the same bare-string wire form (#7805).
     pub(crate) session: serde_json::Value,
     /// Claude Code wire event name.
     pub(crate) event: String,

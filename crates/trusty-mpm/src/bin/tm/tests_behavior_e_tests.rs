@@ -114,6 +114,41 @@ fn cli_session_and_sessions_agree_for_every_verb() {
     }
 }
 
+/// The singular alias's `list` reaches the LIST verb, never a start/launch one.
+///
+/// Why (#7805): the alias was reported as starting a session instead of
+/// listing. It does not — the reported `-------- Starting <path>` line was the
+/// list row itself, with its id column blanked by the `short_id` defect this
+/// issue's fix corrects (`short_id_reads_the_daemon_string_wire_form`). This is
+/// the standing guard the issue asks for: the alias must keep resolving `list`
+/// to [`SessionAction::List`], so the dispatcher in `commands::session::session`
+/// can only take the read-only `GET /sessions` branch. It must never land on
+/// `Start`/`New` (which provision and spawn tmux) or on
+/// [`Command::External`], whose catch-all would treat `session` as a
+/// registry/repo token and `list` as a trailing argument.
+/// Test: this function IS the test.
+#[test]
+fn session_alias_list_routes_to_the_list_verb_never_a_start() {
+    let command = Cli::try_parse_from(["trusty-mpm", "session", "list"])
+        .expect("`tm session list` must parse")
+        .command
+        .expect("a subcommand must be present");
+    match command {
+        Command::Session {
+            action: SessionAction::List { dir },
+        } => assert_eq!(dir, None, "no `--dir` means the cwd, not a positional name"),
+        Command::Session { action } => panic!(
+            "`tm session list` must route to the List verb, got {action:?} — a start/launch \
+             verb here is #7805"
+        ),
+        Command::External(tokens) => panic!(
+            "`session` must match its own hidden subcommand, never the external catch-all \
+             (got {tokens:?})"
+        ),
+        other => panic!("expected Command::Session, got {other:?}"),
+    }
+}
+
 #[test]
 fn top_level_alias_notice_message() {
     // #2116: the top-level `session` -> `sessions` alias reuses the shared
