@@ -386,8 +386,14 @@ async fn session_events_sse(
             .map(|envelope| Ok(sse_event_for(&envelope))),
     );
 
+    // #8100: an SSE client can answer this session's permission prompt over
+    // `POST /rpc`, so it counts as a prompter. The guard rides the stream's
+    // closure — dropping the response body (the client went away) releases it.
+    let prompter = state.sessions.claim_prompter(&session_id);
+
     let filter_id = session_id.clone();
     let live_stream = BroadcastStream::new(crate::events::subscribe()).filter_map(move |item| {
+        let _ = &prompter;
         let filter_id = filter_id.clone();
         async move {
             match item {

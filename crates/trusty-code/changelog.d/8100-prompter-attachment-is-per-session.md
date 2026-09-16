@@ -1,0 +1,2 @@
+Fixed
+- Permission-prompter attachment is now tracked per session rather than read off the daemon-global event bus (#8100). One console attached to a PM session no longer marks every headless `task.run` sub-agent as watched, which had put each of them back on the 300 s ask timeout. A claim is released by its guard's `Drop`, so a client that dies mid-ask stops counting without calling `session.detach`.

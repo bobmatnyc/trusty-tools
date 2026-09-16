@@ -11,7 +11,9 @@
 //! bus directly.
 //! What: `record_tool_started`/`record_tool_finished`/`record_tool_error`/
 //! `record_log`/`record_progress`/`record_message`, plus the shared
-//! `ensure_exists` existence guard they all call before recording.
+//! `ensure_exists` existence guard they all call before recording. The
+//! permission-prompt half lives in the `registry_permission_events` sibling
+//! (#8100), split out to keep this file under the cap.
 //! Test: `registry_tests::record_tool_started_publishes_event`,
 //! `registry_tests::record_tool_finished_publishes_event`,
 //! `registry_tests::record_tool_error_publishes_event`,
@@ -705,116 +707,13 @@ impl SessionRegistry {
     ///
     /// Why: every `record_*` plumbing method needs the same existence guard
     /// before recording; centralising it keeps each one a two-line body.
-    /// Record a tool call suspended on an `ask` permission rule (#7948).
-    ///
-    /// Why: `crate::permissions` emits through its `PermissionEvents` trait so
-    /// it never depends on the session layer; this is the implementation side.
-    /// What: `subject` arrives already redacted and bounded by the gate and is
-    /// recorded as-is.
-    /// Test: `registry_tests::record_permission_requested_publishes_event`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_permission_requested(
-        &self,
-        id: &str,
-        request_id: &str,
-        agent: &str,
-        agent_id: &str,
-        tool: &str,
-        subject: &str,
-        rule: &str,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::PermissionRequested {
-                session_id: id.to_string(),
-                request_id: request_id.to_string(),
-                agent: agent.to_string(),
-                agent_id: agent_id.to_string(),
-                tool: tool.to_string(),
-                subject: subject.to_string(),
-                rule: rule.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a suspended permission request reaching a decision (#7948).
-    /// Test: `registry_tests::record_permission_resolved_publishes_event`.
-    pub fn record_permission_resolved(
-        &self,
-        id: &str,
-        request_id: &str,
-        agent: &str,
-        agent_id: &str,
-        decision: &str,
-        source: &str,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::PermissionResolved {
-                session_id: id.to_string(),
-                request_id: request_id.to_string(),
-                agent: agent.to_string(),
-                agent_id: agent_id.to_string(),
-                decision: decision.to_string(),
-                source: source.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    fn ensure_exists(&self, id: &str) -> Result<(), RpcError> {
+    // #8100: `pub(super)` so the `registry_permission_events` sibling, split
+    // out of this file for the SLOC cap, can still use the same guard.
+    pub(super) fn ensure_exists(&self, id: &str) -> Result<(), RpcError> {
         if self.lock().contains_key(id) {
             Ok(())
         } else {
             Err(RpcError::session_not_found(id))
-        }
-    }
-}
-
-/// (#7948) The registry is the permission gate's event sink.
-///
-/// Why: `SessionRegistry::record` is the sole assigner of an event's `seq`;
-/// implementing the trait here keeps `crate::permissions` free of a registry
-/// dependency.
-/// What: a `session_not_found` is logged at `debug` and dropped. It affects
-/// only the event, never the decision: the gate still waits for an answer or
-/// the timeout, and a timeout denies.
-/// Test: `registry_tests::record_permission_requested_publishes_event`,
-/// `registry_tests::record_permission_resolved_publishes_event`.
-impl crate::permissions::PermissionEvents for SessionRegistry {
-    fn permission_requested(
-        &self,
-        session_id: &str,
-        request_id: &str,
-        agent: &str,
-        agent_id: &str,
-        tool: &str,
-        subject: &str,
-        rule: &str,
-    ) {
-        if let Err(e) = self.record_permission_requested(
-            session_id, request_id, agent, agent_id, tool, subject, rule,
-        ) {
-            tracing::debug!(session_id = %session_id, "record_permission_requested skipped: {e}");
-        }
-    }
-
-    fn permission_resolved(
-        &self,
-        session_id: &str,
-        request_id: &str,
-        agent: &str,
-        agent_id: &str,
-        decision: &str,
-        source: &str,
-    ) {
-        if let Err(e) = self
-            .record_permission_resolved(session_id, request_id, agent, agent_id, decision, source)
-        {
-            tracing::debug!(session_id = %session_id, "record_permission_resolved skipped: {e}");
         }
     }
 }

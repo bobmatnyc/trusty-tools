@@ -93,14 +93,15 @@ pub async fn open(
     // by the `seq` floor in `forward`.
     let live = crate::events::subscribe();
     let replay = sessions.replay(&params.session_id)?;
+    // #8100: this stream's client can answer a permission prompt it sees, so
+    // it counts as a prompter for exactly as long as the stream runs.
+    let prompter = sessions.claim_prompter(&params.session_id);
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::spawn(forward(
-        params.session_id,
-        params.after_seq,
-        replay,
-        live,
-        tx,
-    ));
+    let session_id = params.session_id;
+    tokio::spawn(async move {
+        let _prompter = prompter;
+        forward(session_id, params.after_seq, replay, live, tx).await;
+    });
     Ok(rx)
 }
 

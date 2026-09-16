@@ -73,6 +73,11 @@ struct SessionEntry {
     /// task. Re-attaching the same connection to the same session replaces
     /// (and thus cancels, via `Sender` drop) the previous forwarder.
     attachments: HashMap<Uuid, oneshot::Sender<()>>,
+    /// #8100: how many live prompters — clients able to SEE this session's
+    /// permission prompt and answer it — are watching. Held behind an `Arc`
+    /// so a `prompters::PrompterGuard` can decrement without re-entering the
+    /// registry lock. `0` makes an `ask` on this session deny at once.
+    prompters: Arc<std::sync::atomic::AtomicUsize>,
     /// #2056: set while a background task-execution is in flight; `None`
     /// when idle (never started, or already finished).
     execution: Option<Execution>,
@@ -338,6 +343,8 @@ impl SessionRegistry {
                     seq: 0,
                     ring: VecDeque::new(),
                     attachments: HashMap::new(),
+                    // #8100: nobody is watching a brand-new session yet.
+                    prompters: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     execution: None,
                     transcript: Vec::new(),
                     usage: TokenUsage::default(),
@@ -552,6 +559,9 @@ impl SessionRegistry {
         connection_id: Uuid,
         notify: NotifySender,
     ) -> Result<Vec<SessionEventEnvelope>, RpcError> {
+        // #8100: an attached connection can answer this session's prompt, so
+        // it claims a prompter before the forwarder that will hold the claim.
+        let prompter = self.claim_prompter(id);
         let replay = {
             let mut sessions = self.lock();
             let entry = sessions
@@ -559,7 +569,7 @@ impl SessionRegistry {
                 .ok_or_else(|| RpcError::session_not_found(id))?;
             let (cancel_tx, cancel_rx) = oneshot::channel();
             entry.attachments.insert(connection_id, cancel_tx);
-            spawn_forwarder(id.to_string(), notify, cancel_rx);
+            prompters::spawn_forwarder(id.to_string(), notify, cancel_rx, prompter);
             entry.ring.iter().cloned().collect::<Vec<_>>()
         };
         Ok(replay)
@@ -1002,64 +1012,23 @@ impl SessionRegistry {
     }
 }
 
-/// Spawn the background task that forwards one session's live event
-/// envelopes to a connection until cancelled or the connection is gone.
-///
-/// Why: split out of `attach` for readability; also gives `registry_tests`
-/// a single well-named spawn site to reason about. Subscribing to the bus
-/// SYNCHRONOUSLY here — before `tokio::spawn` schedules the forwarder body
-/// — matters: if the subscription happened inside the spawned `async`
-/// block instead, a caller that calls `send()` immediately after `attach()`
-/// returns could publish its event before the spawned task ever gets polled
-/// and subscribes, and `broadcast::Receiver`s only see events published
-/// after `subscribe()` was called — the event would be silently missed.
-/// What: subscribes to `crate::events::subscribe()` immediately, then
-/// spawns a task that forwards envelopes whose `session_id` matches
-/// `session_id` as a JSON-RPC notification via `notify` (`params` is the
-/// envelope itself — `seq`/`at`/`kind`/`event` all present), skips
-/// envelopes for other sessions and lag gaps, and exits on `cancel_rx`
-/// firing (either a real detach or the sender being dropped) or
-/// `notify.send` failing (connection gone).
-/// Test: `registry_tests::attach_forwards_live_events_until_detach`.
-fn spawn_forwarder(session_id: String, notify: NotifySender, cancel_rx: oneshot::Receiver<()>) {
-    use tokio::sync::broadcast::error::RecvError;
-
-    // Subscribe before spawning (see the Why above) so no event published
-    // by the caller right after `attach()` returns can be missed.
-    let mut events = crate::events::subscribe();
-
-    tokio::spawn(async move {
-        tokio::pin!(cancel_rx);
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut cancel_rx => break,
-                received = events.recv() => match received {
-                    Ok(envelope) if envelope.session_id == session_id => {
-                        let notification = json!({
-                            "jsonrpc": "2.0",
-                            "method": "session.event",
-                            "params": envelope,
-                        });
-                        if notify.send(notification).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => continue,
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                },
-            }
-        }
-    });
-}
-
 /// #2055 tool/log/progress/message event-recording plumbing, split out into
 /// its own file (#2344) purely to keep this production file under the
 /// 500-SLOC cap — these methods are still `impl SessionRegistry`, called
 /// exactly the same way as if they lived here.
 #[path = "registry_events.rs"]
 mod events;
+
+/// #8100's per-session prompter accounting and the `session.attach`
+/// forwarder that holds one claim, split out for the same 500-SLOC-cap reason.
+#[path = "registry_prompters.rs"]
+mod prompters;
+pub use prompters::PrompterGuard;
+
+/// #7948's permission-prompt recording and the `PermissionEvents` impl, split
+/// off `events` (#8100) for the same 500-SLOC-cap reason.
+#[path = "registry_permission_events.rs"]
+mod permission_events;
 
 /// #2345 turn-recorder sink lazy-init/lookup, split out into its own file for
 /// the same 500-SLOC-cap reason as `events` above.

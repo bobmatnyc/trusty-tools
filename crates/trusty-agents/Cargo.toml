@@ -36,6 +36,9 @@ include = [
     "ui/tailwind.config.*",
     "ui/postcss.config.*",
     "build.rs",
+    # #8094: `build.rs` `include!`s this, so a published crate without it
+    # would not build at all.
+    "build_ui_policy.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",
