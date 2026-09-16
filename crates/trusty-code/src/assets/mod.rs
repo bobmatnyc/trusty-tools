@@ -31,19 +31,26 @@
 //!
 //! ## Tools-restriction deviation (Slice E3, #2958, Bob's 2026-07-18 ruling)
 //!
-//! Four of the 28 roster agents — `qa`, `code-critic`, `code-analyzer`,
+//! Four of the 26 roster agents — `qa`, `code-critic`, `code-analyzer`,
 //! `web-qa` — carry an explicit restrictive `tools:` override in their tcode
 //! FORK (`assets/agents/{qa,code-critic,code-analyzer,web-qa}.md`) that is NOT
 //! present in the shared asset they were derived from
 //! (`trusty_agents_common::agent_assets`). These four are the only agent `.md`
 //! files trusty-code still keeps a second copy of: every other roster agent is
-//! embedded straight from the shared crate, so it cannot drift. This is a
+//! embedded straight from the shared crate, so it cannot drift. (#8129's four
+//! delivery-workflow agents also live in `assets/agents/`, but they are
+//! tcode-AUTHORED, not copies — see the "Delivery-workflow agents" section
+//! below.) This is a
 //! deliberate, Bob-approved deviation, not drift: those four are
 //! reviewer-intent agents and get
 //! the same read-only tool allowlist tcode's own `code-reviewer` default uses
-//! (no `write_file`/`edit`/`bash`). `documentation` and `research` stay
-//! byte-identical and unrestricted per Bob's explicit ruling — they build
-//! docs and research reports, not verdicts. NOTE for the file itself: the
+//! (no `write_file`/`edit`/`bash`). `research` stays byte-identical and
+//! unrestricted per Bob's explicit ruling — it builds research reports, not
+//! verdicts. `documentation` was covered by that same ruling until #8129,
+//! which replaced the shared body with a tcode-native one carrying its own
+//! `tcode_tools:` grant; see the "Delivery-workflow agents" section below for
+//! its real status — that grant is strictly WIDER than the reviewer-intent
+//! four get, so it is not a reversal of the ruling. NOTE for the file itself: the
 //! shared frontmatter parser
 //! (`trusty_agents_common::agents::builder::split_frontmatter`) does NOT
 //! tolerate `#`-comment lines inside a frontmatter block (verified
@@ -90,9 +97,10 @@
 //! `ticketing` joined this roster (same treatment `research` got) so
 //! trusty-agents' widened `dispatch_task` bridge (#4026) can reach ONE roster
 //! instead of growing a second dispatch leg into trusty-mpm — the owner's OQ-4
-//! ruling. It carries no tcode-specific `tools:` restriction and is not a
-//! pinned deviation: it is embedded directly from the shared crate, so it stays
-//! in lockstep by construction. Its non-coding property is enforced where the
+//! ruling. It was embedded directly from the shared crate until #8129, which
+//! replaced the body with a tcode-native one declaring its own `tcode_tools:`;
+//! the dispatch NAME the bridge resolves is unchanged, which is all #4026
+//! depends on. Its non-coding property is enforced where the
 //! owner's OQ-7 ruling put enforcement — the BRIDGE's fail-closed
 //! `NON_CODING_TARGETS` floor in
 //! `crates/trusty-agents/src/tools/cross_product.rs` — not by an asset-level
@@ -388,7 +396,7 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
 ];
 
 // -- Slice E2 (#2958): embedded tm agent catalog, for `md_loader`'s in-memory
-// extends-composer. Slice E3 wires the 28 roster names above into
+// extends-composer. Slice E3 wires the 26 roster names above into
 // `DEFAULT_AGENTS` as `EmbeddedAgent::Composed` entries; this table remains
 // their content source, resolved at load time via
 // `agents::md_loader::project_embedded_md_with_extends`. --

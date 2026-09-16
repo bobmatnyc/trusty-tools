@@ -138,7 +138,7 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
 ///
 /// Why: [`project_embedded_md`] handles tcode's own 3 defaults, none of
 /// which declare `extends:`. The bundled tm agent catalog (5 `BASE-*`
-/// templates + 28 coding-relevant roster agents) DOES use `extends:`
+/// templates + 26 coding-relevant roster agents) DOES use `extends:`
 /// chains -- e.g. `rust-engineer` extends `base-engineer` extends
 /// `base-agent` -- and [`compose_agent`] can't resolve those because it
 /// requires a real `source_dir` to scan, which embedded `&'static str`
@@ -158,7 +158,7 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
 /// `anyhow::Error`, never a panic. Called from
 /// `crate::agents::load_embedded_default_agents` for every
 /// `crate::assets::EmbeddedAgent::Composed` entry in `DEFAULT_AGENTS` (Slice
-/// E3, #2958) -- the 28 roster agents are dispatchable defaults as of this
+/// E3, #2958; 26 since #8129) -- the roster agents are dispatchable defaults as of this
 /// slice.
 /// Test: `project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`,
 /// `project_embedded_md_with_extends_unknown_name_errors`,

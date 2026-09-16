@@ -182,6 +182,12 @@ fn every_shared_roster_tool_name_is_translated_or_deliberately_dropped() {
         "Grep",
         "Glob",
         "Skill",
+        // `Task` appears in no shared roster `tools:` line today — the roster's
+        // delegating agent is trusty-mpm's PM, which this crate does not embed.
+        // It is in the table because an IMPORTED Claude Code catalog may carry
+        // it, and `delegate_to_agent` is the one grant a misread would hand an
+        // agent the power to fan out with. Asserted concretely below.
+        "Task",
         "WebFetch",
         "WebSearch",
         "mcp__trusty-search",
@@ -198,6 +204,20 @@ fn every_shared_roster_tool_name_is_translated_or_deliberately_dropped() {
             "'{name}' must be either translated or deliberately dropped, exactly one"
         );
     }
+
+    // The two entries the table carries that no shared roster agent exercises,
+    // pinned by value rather than by membership: `Task` is the delegation
+    // grant, and `mcp__trusty-search` is the only `mcp__*` server with a tcode
+    // analogue. A membership check alone would not catch either mapping being
+    // rewired to the wrong tcode tool.
+    assert_eq!(
+        claude_tools_to_tcode_allowlist(&owned(&["Task"])),
+        owned(&["delegate_to_agent", "finish_task"])
+    );
+    assert_eq!(
+        claude_tools_to_tcode_allowlist(&owned(&["mcp__trusty-search"])),
+        owned(&["search_code", "finish_task"])
+    );
 }
 
 /// An explicit `tcode_tools:` wins: the Claude Code grant is never consulted.
