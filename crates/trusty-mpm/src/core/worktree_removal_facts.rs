@@ -111,7 +111,10 @@
 //! `the_harness_ownership_marker_alone_leaves_the_tree_clean`,
 //! `a_real_untracked_file_beside_the_marker_still_counts`,
 //! `a_branch_with_no_upstream_reports_no_upstream_not_an_error`,
-//! `a_branch_with_an_upstream_counts_the_commits_it_is_ahead_by` below; the
+//! `a_branch_with_an_upstream_counts_the_commits_it_is_ahead_by`,
+//! `only_a_non_fork_row_whose_own_head_is_this_commit_matches`,
+//! `head_sha_reads_the_full_oid_of_a_detached_checkout`,
+//! `an_unoverridden_probe_establishes_neither_new_fact` below; the
 //! policy that consumes these answers is tested in
 //! `bin/tm/commands/pm_guard_bash/worktree_remove`.
 
@@ -210,6 +213,10 @@ impl MergedPrLookup {
 
     /// The same answer, carrying the merged pull request's own head commit
     /// (#7958).
+    ///
+    /// Test: `a_head_sha_matching_the_merged_prs_own_head_grants_despite_a_stale_upstream`,
+    /// `a_detached_head_matched_to_a_pull_request_with_another_head_denies` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
     #[must_use]
     pub fn with_head_sha(mut self, head_sha: impl Into<String>) -> Self {
         self.head_sha = head_sha.into();
@@ -219,6 +226,15 @@ impl MergedPrLookup {
 
 /// What `git rev-parse --abbrev-ref HEAD` prints for a detached HEAD.
 const DETACHED_HEAD: &str = "HEAD";
+
+/// The fail-closed default for the #7832/#7958 probe methods.
+///
+/// Why: they were added to an already-`pub` trait, so they carry default bodies
+/// rather than breaking every outside implementor. The body has to be the
+/// ADR-0045 undeterminable answer — an implementor that has not overridden it
+/// establishes nothing, and nothing is never a grant.
+const NOT_IMPLEMENTED: &str =
+    "this `WorktreeRemovalProbe` implementation does not answer that question";
 
 /// The rev-list argv behind [`WorktreeRemovalProbe::local_only_commits`] (#7914).
 ///
@@ -310,11 +326,22 @@ pub trait WorktreeRemovalProbe {
     /// pull request's own head. Both routes compare it, neither infers from it.
     /// What: `git rev-parse HEAD`. `Err` when git could not be asked, which
     /// never grants — see the module doc.
+    ///
+    /// **Defaulted, not required.** The two #7832/#7958 methods arrived after
+    /// this trait was already `pub`, and making them required would break every
+    /// outside implementor's build. The default is the ADR-0045 answer — the
+    /// fact cannot be established — so an implementor that has not overridden it
+    /// is refused both new grant routes and keeps exactly its pre-#7832
+    /// behaviour. It can never grant anything, which is why defaulting is safe
+    /// here and would not be for a method whose `Ok` relaxes the gate.
     /// Test: `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable`,
     /// `an_unresolvable_head_sha_denies_a_detached_head`,
     /// `an_unanswerable_head_sha_never_grants_an_ahead_worktree` in
-    /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
-    fn head_sha(&self, dir: &Path) -> Result<String, String>;
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    fn head_sha(&self, _dir: &Path) -> Result<String, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
 
     /// The MERGED pull request whose OWN head commit is `sha`, and in WHICH
     /// repository the question was asked (#7832).
@@ -330,15 +357,21 @@ pub trait WorktreeRemovalProbe {
     /// exact head match needs no merge-tree comparison to judge, so no base is
     /// required. A fork's pull request is never a match, for the reason
     /// `worktree_reclaim_pr_match` skips one. `Err` denies.
+    ///
+    /// Defaulted for the reason [`head_sha`](Self::head_sha) is, and with the
+    /// same fail-closed default.
     /// Test: `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable`,
     /// `a_detached_head_no_merged_pr_carries_still_denies`,
     /// `an_unanswerable_commit_search_denies_a_detached_head` in
-    /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
     fn merged_pull_request_for_commit(
         &self,
-        dir: &Path,
-        sha: &str,
-    ) -> Result<MergedPrLookup, String>;
+        _dir: &Path,
+        _sha: &str,
+    ) -> Result<MergedPrLookup, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
 
     /// Commits reachable from `HEAD` that no `origin` remote-tracking ref has
     /// (#7914).
@@ -392,6 +425,36 @@ pub trait WorktreeRemovalProbe {
     /// would change files or conflict, `Err` when git could not be asked —
     /// which denies, like every other undeterminable answer here.
     fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
+}
+
+/// The row, if any, whose pull request was opened from exactly `sha` (#7832).
+///
+/// Why: the commit search returns every MERGED pull request GitHub relates to a
+/// commit, which includes ones that merely MENTION it in a body or a comment.
+/// Only one relationship is landing evidence for a worktree the guard is about
+/// to delete: the pull request's own head branch pointed at this commit, so
+/// everything the tree holds is what merged. The match is therefore EXACT and
+/// ONE-DIRECTIONAL. `worktree_reclaim_pr_match` accepts ancestry either way
+/// round because its gate 6 re-inspects whatever the merge did not carry; this
+/// gate has no such gate after it, so an ancestor relationship — which can
+/// leave commits here the merge never saw — is refused.
+/// What: `None` for no rows, for a fork's row (a fork's pull request says
+/// nothing about this repository's checkout, the reason
+/// `worktree_reclaim_pr_match` skips one), for a row carrying no `headRefOid`,
+/// and for any row whose oid differs. Comparison is
+/// [`str::eq_ignore_ascii_case`] on the trimmed ids, because `gh` and `git`
+/// agree on the object id but not reliably on its case.
+/// Test: `only_a_non_fork_row_whose_own_head_is_this_commit_matches`.
+fn pr_opened_from_commit<'a>(
+    rows: &'a [crate::session_manager::worktree_reclaim_pr_match::MergedPrHead],
+    sha: &str,
+) -> Option<&'a crate::session_manager::worktree_reclaim_pr_match::MergedPrHead> {
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return None;
+    }
+    rows.iter()
+        .find(|row| !row.is_cross_repository && row.head_ref_oid.trim().eq_ignore_ascii_case(sha))
 }
 
 /// The production probe: git for the local facts, `gh` for the merge state.
@@ -461,23 +524,16 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         sha: &str,
     ) -> Result<MergedPrLookup, String> {
         // #7832: the commit search `worktree_reclaim_pr_match` already owns —
-        // same hardened `gh` spawn, same #6867 hang gate, same #7057 repository
-        // resolution, same fork skip. Re-spelling it here would have dropped
-        // one of those.
-        use crate::session_manager::worktree_reclaim_pr_match::{GhLandingProbe, LandingProbe};
+        // the same hardened `gh` spawn and #6867 hang gate. The repository is
+        // resolved ONCE here and handed down, so this call costs one
+        // `git config` spawn rather than two inside the hook's 5 s budget
+        // (critic round). Which rows count is decided by
+        // [`pr_opened_from_commit`], not by that module's ancestry ladder.
         let repo = repo_slug_for(dir)?;
-        let rows = GhLandingProbe.merged_prs_containing(dir, sha)?;
-        // The match is EXACT and one-directional: this worktree's HEAD must BE
-        // the commit the pull request was opened from. The sweep's ladder
-        // accepts ancestry either way because a later gate re-inspects whatever
-        // is left over; this gate has no such gate after it, so an ancestor
-        // relationship — which can leave commits here the merge never saw — is
-        // not accepted.
-        let matched = rows.iter().find(|row| {
-            !row.is_cross_repository
-                && !row.head_ref_oid.trim().is_empty()
-                && row.head_ref_oid.trim().eq_ignore_ascii_case(sha.trim())
-        });
+        let rows = crate::session_manager::worktree_reclaim_pr_match::merged_prs_containing_in(
+            dir, &repo, sha,
+        )?;
+        let matched = pr_opened_from_commit(&rows, sha);
         Ok(
             MergedPrLookup::new(usize::from(matched.is_some()), repo, "")
                 .with_head_sha(matched.map(|row| row.head_ref_oid.trim()).unwrap_or("")),
@@ -629,6 +685,7 @@ mod tests {
 
     use super::*;
     use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
+    use crate::session_manager::worktree_reclaim_pr_match::MergedPrHead;
 
     #[test]
     fn merged_pull_request_argv_asks_github_for_the_branch() {
@@ -653,6 +710,121 @@ mod tests {
         // A detached HEAD prints the literal `HEAD`, which is not a branch a
         // pull request can be looked up by — so it must not become one.
         assert_eq!(DETACHED_HEAD, "HEAD");
+    }
+
+    /// One commit-search row, as `gh` would deserialize it.
+    fn row(oid: &str, fork: bool) -> MergedPrHead {
+        MergedPrHead {
+            number: 7794,
+            head_ref_oid: oid.to_string(),
+            is_cross_repository: fork,
+        }
+    }
+
+    /// 🔴 #7832: the whole safety case for the commit route in one table. Only
+    /// a row from THIS repository whose own head IS this commit is landing
+    /// evidence; a fork's row, an oid-less row, a mention-only row and an empty
+    /// result are all refusals, and case alone never decides.
+    #[test]
+    fn only_a_non_fork_row_whose_own_head_is_this_commit_matches() {
+        let head = "02a83032d1f0b4c9e7a6d5c4b3a291807f6e5d4c";
+        let other = "9c8699fe0a1b2c3d4e5f60718293a4b5c6d7e8f9";
+        for (label, rows, expected) in [
+            ("no rows at all", vec![], false),
+            ("this repository's own head", vec![row(head, false)], true),
+            (
+                "the same oid upper-cased",
+                vec![row(&head.to_uppercase(), false)],
+                true,
+            ),
+            ("a fork's row carrying it", vec![row(head, true)], false),
+            ("a row with no head oid", vec![row("", false)], false),
+            ("a mention-only row", vec![row(other, false)], false),
+            (
+                "a fork's row before the real one",
+                vec![row(head, true), row(head, false)],
+                true,
+            ),
+        ] {
+            assert_eq!(
+                pr_opened_from_commit(&rows, head).is_some(),
+                expected,
+                "{label}"
+            );
+        }
+        // A HEAD git could not name matches nothing, however many rows there
+        // are — otherwise an empty oid would pair with an empty HEAD.
+        assert!(pr_opened_from_commit(&[row("", false)], "  ").is_none());
+    }
+
+    /// 🔴 #7832: `head_sha` reads the FULL object id. A `--short` answer would
+    /// turn every comparison against GitHub's `headRefOid` into a prefix
+    /// question nobody asked, and detaching must not change the answer.
+    #[test]
+    fn head_sha_reads_the_full_oid_of_a_detached_checkout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        let on_branch = GitAndGhProbe
+            .head_sha(&repo)
+            .expect("HEAD resolvable on a branch");
+        assert_eq!(on_branch.len(), 40, "{on_branch}");
+        assert!(
+            on_branch.chars().all(|c| c.is_ascii_hexdigit()),
+            "{on_branch}"
+        );
+
+        git_ok(&repo, &["checkout", "--detach", "HEAD"]);
+        assert!(
+            GitAndGhProbe.branch(&repo).is_err(),
+            "the fixture must actually be detached for this to mean anything"
+        );
+        assert_eq!(
+            GitAndGhProbe
+                .head_sha(&repo)
+                .expect("HEAD still resolvable"),
+            on_branch,
+            "detaching moves no commit, so the object id is unchanged"
+        );
+    }
+
+    /// A probe that overrides only the pre-#7832 methods, standing in for an
+    /// outside implementor that has not been recompiled against them.
+    struct UnoverriddenProbe;
+
+    impl WorktreeRemovalProbe for UnoverriddenProbe {
+        fn dirty_entries(&self, _dir: &Path) -> Result<usize, String> {
+            Ok(0)
+        }
+        fn unpushed_commits(&self, _dir: &Path) -> Result<UpstreamComparison, String> {
+            Ok(UpstreamComparison::NoUpstream)
+        }
+        fn branch(&self, _dir: &Path) -> Result<String, String> {
+            Ok("main".to_string())
+        }
+        fn local_only_commits(&self, _dir: &Path) -> Result<usize, String> {
+            Ok(0)
+        }
+        fn merged_pull_requests(&self, _dir: &Path, _b: &str) -> Result<MergedPrLookup, String> {
+            Ok(MergedPrLookup::new(0, "o/r", ""))
+        }
+        fn merge_into_base_is_a_noop(&self, _dir: &Path, _base: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    /// 🔴 #7832/#7958, critic round: the two new methods carry DEFAULT bodies so
+    /// adding them to an already-`pub` trait breaks no outside implementor. The
+    /// default must be the ADR-0045 undeterminable answer — an implementor that
+    /// has not overridden them establishes nothing and can grant nothing.
+    #[test]
+    fn an_unoverridden_probe_establishes_neither_new_fact() {
+        let dir = Path::new("/nonexistent");
+        assert!(UnoverriddenProbe.head_sha(dir).is_err());
+        assert!(
+            UnoverriddenProbe
+                .merged_pull_request_for_commit(dir, "deadbeef")
+                .is_err()
+        );
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.

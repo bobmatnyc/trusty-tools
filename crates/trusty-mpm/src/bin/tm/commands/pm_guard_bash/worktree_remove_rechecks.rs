@@ -115,6 +115,8 @@
 //! `a_merged_pr_carrying_no_head_sha_never_grants_an_ahead_worktree`,
 //! `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable`,
 //! `a_detached_head_no_merged_pr_carries_still_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_no_head_denies`,
 //! `an_unanswerable_commit_search_denies_a_detached_head`,
 //! `an_unresolvable_head_sha_denies_a_detached_head`
 //! in `super::worktree_remove`.
@@ -383,15 +385,18 @@ fn head_is_the_merged_pr_head(
 /// admission, so the tree is already known clean, unowned, and holding at least
 /// one commit no `origin` ref has — which is what the merged pull request has
 /// to vouch for.
-/// What: `None` grants when a MERGED pull request in this repository was opened
-/// from exactly this commit. Everything else denies under
-/// `merged-pull-request`: an unresolvable HEAD, a commit search that did not
-/// answer, and a search that answered with no such pull request. `branch_error`
-/// is git's own words for why there is no branch, quoted so a deny on a
-/// NON-detached failure (a corrupt HEAD, an unreadable repository) still says
-/// what git said.
+/// What: `None` grants when the search reported a MERGED pull request AND that
+/// pull request's own head commit is the one this worktree is sitting on — the
+/// count alone never grants, so the exact-sha invariant holds even if the probe
+/// behind it were to relax. Everything else denies under `merged-pull-request`:
+/// an unresolvable HEAD, a commit search that did not answer, a search that
+/// answered with no such pull request, and a pull request whose head is some
+/// other commit. `branch_error` is git's own words for why there is no branch,
+/// quoted so a deny on a NON-detached failure (a corrupt HEAD, an unreadable
+/// repository) still says what git said.
 /// Test: `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable`,
 /// `a_detached_head_no_merged_pr_carries_still_denies`,
+/// `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
 /// `an_unanswerable_commit_search_denies_a_detached_head`,
 /// `an_unresolvable_head_sha_denies_a_detached_head`.
 fn detached_head_verdict(
@@ -427,17 +432,34 @@ fn detached_head_verdict(
             ));
         }
     };
-    if found.count > 0 {
+    // #7832, critic round: the exact-sha invariant is enforced HERE, not only
+    // inside the probe that produced the count. A `count` the policy trusts on
+    // its own makes the whole grant rest on one unobserved line of a different
+    // module, and a search hit that merely MENTIONS this commit would then
+    // delete the tree holding it. The answer has to name the commit back.
+    let pr_head = found.head_sha.trim();
+    if found.count > 0 && pr_head.eq_ignore_ascii_case(head.trim()) && !pr_head.is_empty() {
         return None;
     }
+    let mismatch = match (found.count, pr_head.is_empty()) {
+        (0, _) => String::new(),
+        (_, true) => " GitHub did report a MERGED pull request for that search, but named no \
+                       head commit for it, so it cannot be shown to be this tree's."
+            .to_string(),
+        (_, false) => format!(
+            " GitHub did report a MERGED pull request for that search, but its own head commit \
+             is `{pr_head}` — a pull request that merely mentions a commit, or was opened from \
+             a descendant of it, is not evidence that THIS tree's content landed."
+        ),
+    };
     Some(recheck_deny(
         CHECK_MERGED_PULL_REQUEST,
         target,
         &format!(
             "{branch_error}, and no MERGED pull request in `{repo}` was opened from its commit \
-             `{head}` either (resolved from this worktree's `origin` remote). Check the commit \
-             out on a branch and open a pull request for it, or reclaim the tree with `tm \
-             session prune-worktrees --merged-prs --force`.{local_only_note}",
+             `{head}` either (resolved from this worktree's `origin` remote).{mismatch} Check \
+             the commit out on a branch and open a pull request for it, or reclaim the tree \
+             with `tm session prune-worktrees --merged-prs --force`.{local_only_note}",
             repo = found.repo
         ),
     ))

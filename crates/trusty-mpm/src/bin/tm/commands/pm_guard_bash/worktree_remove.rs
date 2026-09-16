@@ -58,6 +58,8 @@
 //! `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`,
 //! `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable` (#7832),
 //! `a_detached_head_no_merged_pr_carries_still_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_no_head_denies`,
 //! `an_unanswerable_commit_search_denies_a_detached_head`,
 //! `an_unresolvable_head_sha_denies_a_detached_head`,
 //! `a_head_sha_matching_the_merged_prs_own_head_grants_despite_a_stale_upstream` (#7958),
@@ -1251,6 +1253,42 @@ mod tests {
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains(WORKTREE_HEAD), "{reason}");
         assert!(reason.contains(FAKE_REPO), "{reason}");
+    }
+
+    /// 🔴 #7832, critic round: a count the policy cannot corroborate never
+    /// grants. GitHub's commit search returns pull requests that merely MENTION
+    /// a commit, and one row reporting `count: 1` for a head that is some OTHER
+    /// commit must deny — otherwise the whole grant rests on a filter in a
+    /// different module that this function cannot see.
+    #[test]
+    fn a_detached_head_matched_to_a_pull_request_with_another_head_denies() {
+        let probe = FakeProbe {
+            commit_pr: Ok(MergedPrLookup::new(1, FAKE_REPO, "").with_head_sha(MERGED_PR_HEAD)),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a pull request opened from another commit is not this tree's evidence");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains(MERGED_PR_HEAD), "{reason}");
+        assert!(
+            reason.contains("merely mentions a commit"),
+            "the deny must say why the reported pull request did not count: {reason}"
+        );
+    }
+
+    /// 🔴 #7832, critic round: the same guard with the head commit ABSENT. A
+    /// row GitHub named no `headRefOid` for leaves nothing to corroborate, so
+    /// two empty strings must not compare equal into a grant.
+    #[test]
+    fn a_detached_head_matched_to_a_pull_request_with_no_head_denies() {
+        let probe = FakeProbe {
+            commit_pr: Ok(MergedPrLookup::new(1, FAKE_REPO, "")),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a pull request with no head commit cannot vouch for this tree");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("named no head commit"), "{reason}");
     }
 
     /// 🔴 #7832, failure path: a commit search that did not answer establishes

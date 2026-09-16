@@ -363,6 +363,39 @@ pub(crate) fn resolve_with_index(
     resolve_landing(worktree, registry_root, branch, pr, probe)
 }
 
+/// Ask GitHub, in an ALREADY-RESOLVED repository, for the MERGED pull requests
+/// carrying `sha`.
+///
+/// Why: split out of [`LandingProbe::merged_prs_containing`] so a caller that
+/// has already resolved the repository slug does not pay for a second
+/// `git config --get remote.origin.url` spawn (#7832, critic round). The
+/// ADR-0057 removal guard runs inside a `PreToolUse` hook with a 5-second
+/// budget, where one avoidable subprocess is worth removing.
+/// What: `gh pr list --repo <repo> --state merged --search <sha>`, through the
+/// #6867 hang gate under a key naming the question — a commit search is not the
+/// per-branch query and the two must never share a reply. The rows are returned
+/// unfiltered; deciding which of them vouches for a worktree is the caller's.
+/// Test: `a_renamed_branch_matches_the_pr_opened_from_its_head_commit`,
+/// `a_fork_pull_request_containing_the_commit_is_ignored`.
+pub(crate) fn merged_prs_containing_in(
+    registry_root: &Path,
+    repo: &str,
+    sha: &str,
+) -> Result<Vec<MergedPrHead>, String> {
+    let stdout = worktree_reclaim_gh_gate::shared()
+        .poll(registry_root, &format!("merged-sha:{repo}:{sha}"), || {
+            let gh_env = resolve_daemon_gh_env(registry_root);
+            let mut cmd = gh_pr_list_command(registry_root, &gh_env, repo);
+            cmd.args(["--state", "merged", "--search", sha, "--limit"])
+                .arg(COMMIT_SEARCH_LIMIT.to_string())
+                .args(["--json", COMMIT_SEARCH_JSON_FIELDS]);
+            run_with_timeout(cmd, GH_TIMEOUT)
+        })
+        .map_err(|f| format!("{f} (repository searched: {repo})"))?;
+    serde_json::from_str(&stdout)
+        .map_err(|e| format!("`gh pr list --repo {repo} --search {sha}` JSON did not parse: {e}"))
+}
+
 /// The production [`LandingProbe`] — real `gh`, real `git` (#7267).
 ///
 /// Why: every call it makes goes through the module that already owns that
@@ -392,22 +425,7 @@ impl LandingProbe for GhLandingProbe {
         // #7057: the repository comes from this root's own `origin`, never from
         // whatever `gh` would infer at this working directory.
         let repo = repo_slug_for(registry_root)?;
-        // #6867: through the same hang gate every other `gh` poll uses, under a
-        // key naming the question — a commit search is not the per-branch query
-        // and the two must never share a reply.
-        let stdout = worktree_reclaim_gh_gate::shared()
-            .poll(registry_root, &format!("merged-sha:{repo}:{sha}"), || {
-                let gh_env = resolve_daemon_gh_env(registry_root);
-                let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
-                cmd.args(["--state", "merged", "--search", sha, "--limit"])
-                    .arg(COMMIT_SEARCH_LIMIT.to_string())
-                    .args(["--json", COMMIT_SEARCH_JSON_FIELDS]);
-                run_with_timeout(cmd, GH_TIMEOUT)
-            })
-            .map_err(|f| format!("{f} (repository searched: {repo})"))?;
-        serde_json::from_str(&stdout).map_err(|e| {
-            format!("`gh pr list --repo {repo} --search {sha}` JSON did not parse: {e}")
-        })
+        merged_prs_containing_in(registry_root, &repo, sha)
     }
 
     fn is_ancestor(
