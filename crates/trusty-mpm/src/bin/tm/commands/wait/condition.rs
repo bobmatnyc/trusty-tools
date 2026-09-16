@@ -42,11 +42,19 @@ pub(crate) enum Poll {
 /// also lets the tests drive the loop with a scripted fake condition.
 /// What: one `poll` returning [`Poll`], or an error for a genuine probe
 /// failure (unreadable file, `gh` not installed) — never for "not yet".
+///
+/// #7956: `poll` takes the time it has. The driver's `--slice` ceiling used to
+/// bound only the SLEEP between polls, so a probe that blocked — a `gh` call
+/// against a stalled connection — carried the whole invocation past the
+/// harness's own ceiling and the process was SIGKILLed (exit 137) instead of
+/// returning `pending`. A probe that cannot answer inside `budget` must return
+/// an error by then, which the driver counts and reports through the documented
+/// exit codes.
 /// Test: `FakeCondition` in `tests.rs` drives the loop; each real impl has its
 /// own tests.
 pub(crate) trait Condition {
-    /// Inspect the world once.
-    fn poll(&self) -> anyhow::Result<Poll>;
+    /// Inspect the world once, returning within `budget`.
+    fn poll(&self, budget: std::time::Duration) -> anyhow::Result<Poll>;
 }
 
 /// Wait for a process to exit.
@@ -92,7 +100,8 @@ impl RunCondition {
 }
 
 impl Condition for RunCondition {
-    fn poll(&self) -> anyhow::Result<Poll> {
+    // #7956: a `kill(pid, 0)` cannot block, so this verb has no use for the budget.
+    fn poll(&self, _budget: std::time::Duration) -> anyhow::Result<Poll> {
         let pid = self.resolve()?;
         if trusty_mpm::core::process::is_process_alive(pid) {
             Ok(Poll::Pending(format!("pid {pid} still running")))
@@ -157,7 +166,8 @@ impl FileCondition {
 }
 
 impl Condition for FileCondition {
-    fn poll(&self) -> anyhow::Result<Poll> {
+    // #7956: a local stat and read cannot block on the network; budget unused.
+    fn poll(&self, _budget: std::time::Duration) -> anyhow::Result<Poll> {
         let shown = self.path.display();
         if !self.path.exists() {
             return Ok(Poll::Pending(format!("{shown} does not exist yet")));
@@ -187,8 +197,14 @@ impl Condition for FileCondition {
 /// What: one method returning the raw `gh pr view --json …` stdout.
 /// Test: `FakeProbe` in `tests.rs`.
 pub(crate) trait ChecksProbe {
-    /// Return `gh pr view <pr> --json state,statusCheckRollup` stdout.
-    fn pr_view_json(&self, pr: u64, repo: Option<&str>) -> anyhow::Result<String>;
+    /// Return `gh pr view <pr> --json state,statusCheckRollup` stdout,
+    /// answering within `budget` (#7956).
+    fn pr_view_json(
+        &self,
+        pr: u64,
+        repo: Option<&str>,
+        budget: std::time::Duration,
+    ) -> anyhow::Result<String>;
 }
 
 /// Production [`ChecksProbe`] over `trusty_common::gh::GhCommand`.
@@ -199,12 +215,26 @@ pub(crate) trait ChecksProbe {
 /// capability.
 /// What: runs `gh pr view <pr> --json state,statusCheckRollup`, requiring a
 /// zero exit and non-blank stdout.
-/// Test: exercised live; the parsing it feeds is covered by `check_condition_*`.
+///
+/// #7956: through [`run_within`], not `nonempty_stdout_blocking`. That helper
+/// waits forever, so one stalled `gh` call held the whole invocation past its
+/// `--slice` ceiling and the process was killed (137) instead of returning
+/// `pending`.
+/// Test: `probe_command_answers_within_its_budget`,
+/// `probe_command_that_outlives_its_budget_is_killed_not_awaited`; the parsing
+/// it feeds is covered by `check_condition_*`.
 pub(crate) struct GhChecksProbe;
 
 impl ChecksProbe for GhChecksProbe {
-    fn pr_view_json(&self, pr: u64, repo: Option<&str>) -> anyhow::Result<String> {
-        let out = trusty_common::gh::GhCommand::new([
+    fn pr_view_json(
+        &self,
+        pr: u64,
+        repo: Option<&str>,
+        budget: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        // #5475: the argv and the environment scrub still come from the one
+        // `gh` entry point; only the RUNNER is this module's own (#7956).
+        let cmd = trusty_common::gh::GhCommand::new([
             "pr",
             "view",
             &pr.to_string(),
@@ -212,10 +242,42 @@ impl ChecksProbe for GhChecksProbe {
             "state,statusCheckRollup",
         ])
         .repo(repo)
-        .nonempty_stdout_blocking()
-        .with_context(|| format!("`gh pr view {pr}` failed"))?;
-        Ok(out)
+        .to_std_command();
+        run_within(cmd, &format!("gh pr view {pr}"), budget)
     }
+}
+
+/// Run a configured command, killing it if it outlives `budget` (#7956).
+///
+/// Why: `tm wait` promises that ONE invocation returns inside its `--slice`
+/// ceiling, and that promise is what keeps the exit code a documented
+/// pending(75)/timeout(1)/error(2) rather than a SIGKILL from whatever ran the
+/// command. A probe with no deadline of its own breaks it, so the deadline is
+/// enforced here rather than hoped for.
+/// What: [`run_bounded`](trusty_mpm::core::bounded_proc::run_bounded) —
+/// #7965's single kill-on-timeout runner, which puts the child in its own
+/// process group so a `gh` credential helper cannot survive the kill. A
+/// timeout, a non-zero exit and blank output are three distinct errors, each
+/// naming `label`; none of them returns an empty success a caller could parse
+/// as "no checks".
+/// Test: `probe_command_answers_within_its_budget`,
+/// `probe_command_that_outlives_its_budget_is_killed_not_awaited`.
+pub(crate) fn run_within(
+    cmd: std::process::Command,
+    label: &str,
+    budget: std::time::Duration,
+) -> anyhow::Result<String> {
+    let out = trusty_mpm::core::bounded_proc::run_bounded(cmd, budget)
+        .map_err(|e| anyhow::anyhow!("`{label}` {e} ({:?})", budget))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`{label}` failed ({}): {}",
+        out.status,
+        out.stderr.trim()
+    );
+    let stdout = out.stdout.trim().to_string();
+    anyhow::ensure!(!stdout.is_empty(), "`{label}` printed nothing");
+    Ok(stdout)
 }
 
 /// Wait for a GitHub PR's checks to settle.
@@ -259,8 +321,11 @@ impl<P: ChecksProbe> CheckCondition<P> {
 }
 
 impl<P: ChecksProbe> Condition for CheckCondition<P> {
-    fn poll(&self) -> anyhow::Result<Poll> {
-        let json = self.probe.pr_view_json(self.pr, self.repo.as_deref())?;
+    // #7956: the read is the only part that can block, so it gets the budget.
+    fn poll(&self, budget: std::time::Duration) -> anyhow::Result<Poll> {
+        let json = self
+            .probe
+            .pr_view_json(self.pr, self.repo.as_deref(), budget)?;
         let view: PrView = serde_json::from_str(&json)
             .with_context(|| format!("cannot parse `gh pr view {}` JSON", self.pr))?;
         Ok(settle(&view, self.allow_empty))

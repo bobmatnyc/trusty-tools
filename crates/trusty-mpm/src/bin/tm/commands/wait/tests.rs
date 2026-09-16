@@ -56,10 +56,17 @@ impl Clock for FakeClock {
     }
 }
 
+/// A budget generous enough that no direct-`poll` test is about it (#7956).
+const ANY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A condition that yields a scripted sequence, then repeats its last value.
+///
+/// #7956: it also RECORDS the budget each poll was handed, which is what pins
+/// that the driver never lets a poll outlive the slice it was started in.
 struct FakeCondition {
     script: Vec<Result<Poll, String>>,
     calls: Cell<usize>,
+    budgets: std::cell::RefCell<Vec<u64>>,
 }
 
 impl FakeCondition {
@@ -67,15 +74,21 @@ impl FakeCondition {
         Self {
             script,
             calls: Cell::new(0),
+            budgets: std::cell::RefCell::new(Vec::new()),
         }
     }
     fn pending_forever() -> Self {
         Self::new(vec![Ok(Poll::Pending("not yet".into()))])
     }
+    /// Seconds each poll was told it had, in call order (#7956).
+    fn budgets(&self) -> Vec<u64> {
+        self.budgets.borrow().clone()
+    }
 }
 
 impl Condition for FakeCondition {
-    fn poll(&self) -> anyhow::Result<Poll> {
+    fn poll(&self, budget: std::time::Duration) -> anyhow::Result<Poll> {
+        self.budgets.borrow_mut().push(budget.as_secs());
         let i = self.calls.get().min(self.script.len() - 1);
         self.calls.set(self.calls.get() + 1);
         match &self.script[i] {
@@ -91,7 +104,12 @@ struct FakeProbe {
 }
 
 impl ChecksProbe for FakeProbe {
-    fn pr_view_json(&self, _pr: u64, _repo: Option<&str>) -> anyhow::Result<String> {
+    fn pr_view_json(
+        &self,
+        _pr: u64,
+        _repo: Option<&str>,
+        _budget: std::time::Duration,
+    ) -> anyhow::Result<String> {
         Ok(self.json.clone())
     }
 }
@@ -100,7 +118,12 @@ impl ChecksProbe for FakeProbe {
 struct FailingProbe;
 
 impl ChecksProbe for FailingProbe {
-    fn pr_view_json(&self, _pr: u64, _repo: Option<&str>) -> anyhow::Result<String> {
+    fn pr_view_json(
+        &self,
+        _pr: u64,
+        _repo: Option<&str>,
+        _budget: std::time::Duration,
+    ) -> anyhow::Result<String> {
         anyhow::bail!("gh: command not found")
     }
 }
@@ -123,14 +146,14 @@ fn budget_at(now: u64, timeout_s: u64) -> Budget {
 fn run_condition_met_for_dead_pid() {
     // `u32::MAX` can never be a live pid (see `core::process::is_process_alive`).
     let c = RunCondition::new(Some(u32::MAX), None);
-    assert!(matches!(c.poll().unwrap(), Poll::Met(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Met(_)));
 }
 
 /// Why: the inverse — a process we know is alive must never read as finished.
 #[test]
 fn run_condition_pending_for_self() {
     let c = RunCondition::new(Some(std::process::id()), None);
-    assert!(matches!(c.poll().unwrap(), Poll::Pending(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Pending(_)));
 }
 
 /// Why: a launcher writes the PID to a handle file; the wait has to read it.
@@ -144,7 +167,7 @@ fn run_condition_reads_handle_file() {
     )
     .unwrap();
     let c = RunCondition::new(None, Some(handle));
-    assert!(matches!(c.poll().unwrap(), Poll::Pending(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Pending(_)));
 }
 
 /// Why: a handle file with no PID in it is a real error — silently treating it
@@ -155,7 +178,7 @@ fn run_condition_rejects_unparsable_handle() {
     let handle = dir.path().join("job.pid");
     std::fs::write(&handle, "starting up\n").unwrap();
     let c = RunCondition::new(None, Some(handle));
-    let err = c.poll().unwrap_err();
+    let err = c.poll(ANY_BUDGET).unwrap_err();
     assert!(format!("{err:#}").contains("no PID found"), "{err:#}");
 }
 
@@ -177,7 +200,7 @@ fn parse_handle_pid_accepts_bare_and_keyed() {
 fn file_condition_pending_when_absent() {
     let dir = tempfile::tempdir().unwrap();
     let c = FileCondition::new(dir.path().join("gate.txt"), None);
-    assert!(matches!(c.poll().unwrap(), Poll::Pending(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Pending(_)));
 }
 
 /// Why: with no `--contains`, existence alone is the condition.
@@ -187,7 +210,7 @@ fn file_condition_met_on_existence() {
     let p = dir.path().join("gate.txt");
     std::fs::write(&p, "").unwrap();
     let c = FileCondition::new(p, None);
-    assert!(matches!(c.poll().unwrap(), Poll::Met(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Met(_)));
 }
 
 /// Why: the guard-compliant shape is `<cmd> > gate.txt; echo EXIT=$? >> gate.txt`
@@ -199,10 +222,10 @@ fn file_condition_waits_for_substring() {
     let p = dir.path().join("gate.txt");
     std::fs::write(&p, "compiling trusty-mpm...\n").unwrap();
     let c = FileCondition::new(p.clone(), Some("EXIT=".to_string()));
-    assert!(matches!(c.poll().unwrap(), Poll::Pending(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Pending(_)));
 
     std::fs::write(&p, "compiling trusty-mpm...\nEXIT=0\n").unwrap();
-    assert!(matches!(c.poll().unwrap(), Poll::Met(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Met(_)));
 }
 
 /// Why: build logs carry non-UTF-8 bytes; a wait must not die on one.
@@ -212,7 +235,7 @@ fn file_condition_tolerates_non_utf8() {
     let p = dir.path().join("gate.bin");
     std::fs::write(&p, [0xff, 0xfe, b'D', b'O', b'N', b'E']).unwrap();
     let c = FileCondition::new(p, Some("DONE".to_string()));
-    assert!(matches!(c.poll().unwrap(), Poll::Met(_)));
+    assert!(matches!(c.poll(ANY_BUDGET).unwrap(), Poll::Met(_)));
 }
 
 // ── check verb ───────────────────────────────────────────────────────────────
@@ -226,7 +249,7 @@ fn check_with(json: &str, allow_empty: bool) -> Poll {
         None,
         allow_empty,
     )
-    .poll()
+    .poll(ANY_BUDGET)
     .unwrap()
 }
 
@@ -316,6 +339,46 @@ fn check_condition_unknown_shape_is_pending() {
 fn check_condition_merged_pr_is_met() {
     let json = r#"{"state":"MERGED","statusCheckRollup":[]}"#;
     assert!(matches!(check_with(json, false), Poll::Met(_)));
+}
+
+/// The production probe runner returns a child's output (#7956).
+///
+/// Why: the bound must not cost the normal answer. This is the same function
+/// `GhChecksProbe` runs `gh` through, with an argv a test can rely on.
+#[test]
+fn probe_command_answers_within_its_budget() {
+    let mut cmd = std::process::Command::new("echo");
+    cmd.arg("hello");
+    let out = condition::run_within(cmd, "echo", std::time::Duration::from_secs(10))
+        .expect("a command that exits must be reported");
+    assert_eq!(out, "hello");
+}
+
+/// A probe that outlives its budget is killed and reported, never awaited.
+///
+/// Why (#7956): `gh pr view` used to run through `nonempty_stdout_blocking`,
+/// which waits forever. One stalled read therefore held `tm wait` past its
+/// `--slice` ceiling and past whatever ran it, and the process was SIGKILLed —
+/// exit 137, which is none of the four documented statuses. This is a real
+/// process-level test: it spawns a child that would run for 30 seconds, gives
+/// it one, and requires an `Err` back promptly. Against the pre-#7956 probe
+/// there is no deadline at all and the call blocks for the full 30 seconds.
+#[test]
+fn probe_command_that_outlives_its_budget_is_killed_not_awaited() {
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
+    let started = std::time::Instant::now();
+    let err = condition::run_within(cmd, "sleep 30", std::time::Duration::from_secs(1))
+        .expect_err("a child past its budget must not be waited on");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the probe blocked for {elapsed:?} instead of returning at its budget"
+    );
+    assert!(
+        format!("{err:#}").contains("did not answer within its budget"),
+        "{err:#}"
+    );
 }
 
 // ── selector validation ──────────────────────────────────────────────────────
@@ -457,7 +520,69 @@ fn loop_returns_pending_at_slice_end() {
         1_700,
         "budget must carry over"
     );
-    assert_eq!(b.polls, 11);
+    // #7956: ten polls, at t+0 through t+90. The eleventh — at t+100, ON the
+    // ceiling — is the one this used to make and then return after; see
+    // `loop_never_starts_a_poll_it_has_no_slice_for`.
+    assert_eq!(b.polls, 10);
+}
+
+/// A poll is never started at or past the slice ceiling (#7956).
+///
+/// Why: the nap is capped AT `slice_end`, so the pre-#7956 loop woke exactly on
+/// the ceiling and polled once more. That last poll's whole duration lands
+/// OUTSIDE the slice the caller sized its own timeout against — with a real
+/// `gh` read that is seconds, and with a stalled one it is unbounded, which is
+/// how the invocation got SIGKILLed (137) instead of returning 75. Against the
+/// pre-#7956 loop this reads 11 polls and fails.
+#[test]
+fn loop_never_starts_a_poll_it_has_no_slice_for() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::pending_forever();
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(10, 100, 1800), &mut b, &clock).unwrap();
+
+    assert_eq!(out.status, Status::Pending);
+    let started_at: Vec<u64> = (0..b.polls).map(|i| 1_000 + i * 10).collect();
+    assert_eq!(*started_at.last().expect("at least one poll"), 1_090);
+    assert!(
+        started_at.iter().all(|t| *t < 1_100),
+        "a poll was started on or past the ceiling: {started_at:?}"
+    );
+}
+
+/// Every poll is told how much of the slice is left (#7956).
+///
+/// Why: the `--slice` ceiling used to bound only the naps, so a probe that
+/// blocked carried the invocation past it. The budget handed down is what lets
+/// `GhChecksProbe` kill a stalled `gh` in time; it must shrink toward the
+/// ceiling and never exceed the time remaining before it.
+#[test]
+fn loop_bounds_each_poll_to_the_time_left_in_the_slice() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::pending_forever();
+    let mut b = budget_at(1_000, 1800);
+    poll_until(&cond, &plan(10, 100, 1800), &mut b, &clock).unwrap();
+
+    assert_eq!(
+        cond.budgets(),
+        vec![100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+        "each poll must be bounded by the slice it was started in"
+    );
+}
+
+/// The hard deadline bounds a poll too, not only the slice (#7956).
+///
+/// Why: with 10 seconds of budget left, a probe allowed the full 100-second
+/// slice would spend ninety seconds the wait does not have before anyone could
+/// report `timeout`.
+#[test]
+fn loop_bounds_a_poll_to_the_hard_deadline_when_it_is_nearer() {
+    let clock = FakeClock::at(11_790);
+    let cond = FakeCondition::pending_forever();
+    let mut b = budget_at(10_000, 1_800);
+    poll_until(&cond, &plan(10, 100, 1_800), &mut b, &clock).unwrap();
+
+    assert_eq!(cond.budgets(), vec![10]);
 }
 
 /// Why: the other half of the contract. A budget already spent across earlier

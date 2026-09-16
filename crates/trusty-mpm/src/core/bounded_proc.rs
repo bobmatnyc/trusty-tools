@@ -50,7 +50,7 @@ const PIPE_DRAIN_WAIT: Duration = Duration::from_secs(2);
 ///
 /// Test: `run_bounded_captures_stdout_and_status`.
 #[derive(Debug)]
-pub(crate) struct BoundedOutput {
+pub struct BoundedOutput {
     /// The child's exit status. A non-zero status is NOT an error here — the
     /// caller decides what a non-zero exit means for its own command.
     pub status: ExitStatus,
@@ -68,7 +68,7 @@ pub(crate) struct BoundedOutput {
 /// that returns instantly must never be counted as one.
 /// Test: `run_bounded_kills_a_hung_child`, `run_bounded_reports_a_spawn_failure`.
 #[derive(Debug)]
-pub(crate) enum BoundedError {
+pub enum BoundedError {
     /// The child could not be started.
     Spawn(std::io::Error),
     /// The child started but exposed no pipe for the named stream.
@@ -169,10 +169,7 @@ fn kill_child_group(child: &mut Child) {
 /// deadline arm's identical, tested call.
 /// Test: `run_bounded_captures_stdout_and_status`, `run_bounded_kills_a_hung_child`,
 /// `run_bounded_kills_the_whole_process_group`, `run_bounded_reports_a_spawn_failure`.
-pub(crate) fn run_bounded(
-    mut cmd: Command,
-    budget: Duration,
-) -> Result<BoundedOutput, BoundedError> {
+pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, BoundedError> {
     // #6867: BEFORE the spawn — a group cannot be joined retroactively.
     isolate_process_group(&mut cmd);
     let mut child = cmd
