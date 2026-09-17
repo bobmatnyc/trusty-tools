@@ -230,6 +230,21 @@ pub mod gui_mcp_client;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
+/// Keep credential VALUES out of every generated launchd plist (#8236).
+///
+/// Why: `~/Library/LaunchAgents/*.plist` is user-readable, so a credential in
+/// its `EnvironmentVariables` dict is readable by every process running as the
+/// user and by every backup of the disk.
+/// What: [`launchd_secrets::is_credential_env_key`] and
+/// [`launchd_secrets::looks_like_credential_value`] detect;
+/// [`launchd_secrets::strip_credential_env`] guards the renderer and
+/// [`launchd_secrets::scrub_plist_credential_env`] remediates an already-
+/// installed plist.
+/// Deliberately NOT macOS-gated, unlike `launchd`, so `tm doctor`'s scan and
+/// the detection tests build on Linux CI too.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_secrets`.
+pub mod launchd_secrets;
+
 /// Label-correct LaunchAgent activation with legacy eviction and rollback
 /// (#4919). macOS-only, like [`launchd`] itself.
 ///
