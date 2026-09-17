@@ -1,7 +1,7 @@
 [package]
 name = "trusty-code-tui"
 description = "Engine-agnostic terminal-UI seam (TuiEngine trait + ReplEvent) shared by trusty-code and trusty-agents interactive REPLs"
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 keywords = ["tui", "repl", "terminal", "ratatui", "engine-adapter"]
 categories = ["command-line-interface", "asynchronous"]
 version = "0.2.0"
