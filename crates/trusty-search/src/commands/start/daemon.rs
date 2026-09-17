@@ -21,6 +21,9 @@ use colored::Colorize;
 
 use super::embedder::build_embedder;
 use super::graceful_bootstrap::run_graceful_python_bootstrap;
+use super::isolation::{
+    auto_discover_enabled, data_dir_is_fresh, resolve_data_dir_override, DATA_DIR_ENV,
+};
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
@@ -105,18 +108,26 @@ pub(super) fn already_running_message(
 /// `TRUSTY_DATA_DIR` for the foreground path AND passed as an explicit
 /// `--data-dir` CLI arg to the background self-spawn (issue #1182: the explicit
 /// flag now always wins over any pre-existing `TRUSTY_DATA_DIR` in the
-/// environment). When `no_auto_discover` is `true` (or
-/// `TRUSTY_NO_AUTO_DISCOVER=1` is set), the post-hydration auto-discovery scan
-/// is skipped entirely so the daemon serves only indexes already in
-/// `indexes.toml` or registered at runtime. Issue #3929: the flag also gates
-/// warm-boot's colocated-root discovery scan (`restore_indexes` →
-/// `collect_colocated_for_warmboot`) — previously that scan ran unconditionally
-/// even with `--no-auto-discover` set, re-registering already-tracked indexes
-/// under a second id and colliding on the shared `.redb` corpus.
+/// environment — #8149 made that true of the foreground path too). When
+/// `no_auto_discover` is `true` (or `TRUSTY_NO_AUTO_DISCOVER=1` is set), the
+/// post-hydration auto-discovery scan is skipped entirely so the daemon serves
+/// only indexes already in `indexes.toml` or registered at runtime. Issue
+/// #3929: the flag also gates warm-boot's colocated-root discovery scan
+/// (`restore_indexes` → `collect_colocated_for_warmboot`) — previously that
+/// scan ran unconditionally even with `--no-auto-discover` set, re-registering
+/// already-tracked indexes under a second id and colliding on the shared
+/// `.redb` corpus. #8176: a FRESH isolated data dir also refuses the scan, and
+/// `auto_discover` is the explicit opt-in that grants it back; the decision is
+/// taken once here, before the data dir is created, and forwarded to the
+/// background child as `--no-auto-discover` so the fork cannot re-decide it
+/// against a directory this very call just populated.
 /// Test: run twice in a row — the second invocation must exit 1 with the
 /// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
 /// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`. Unit coverage:
-/// `spawn_args_include_data_dir_when_preset_env` in `tests/data_dir_forward.rs`.
+/// `spawn_args_include_data_dir_when_preset_env` in `tests/data_dir_forward.rs`;
+/// `data_dir_flag_wins_over_an_inherited_env_value` and
+/// `fresh_data_dir_does_not_auto_discover_without_opt_in` pin the two
+/// resolvers.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_start(
     port: u16,
@@ -125,48 +136,52 @@ pub async fn handle_start(
     data_dir: Option<&std::path::Path>,
     verbose: bool,
     no_auto_discover: bool,
+    auto_discover: bool,
     fanout_concurrency: Option<usize>,
     serial: bool,
 ) -> Result<()> {
-    // Apply the --data-dir override as early as possible so the foreground path
-    // sees the correct root in TRUSTY_DATA_DIR.  The background self-spawn path
-    // receives the explicit --data-dir CLI arg directly (issue #1182) so the
-    // CLI flag wins over any pre-set TRUSTY_DATA_DIR.  Precedence for the
-    // foreground path: TRUSTY_DATA_DIR (env) > --data-dir (flag).
-    //
-    // SAFETY: `set_var` is sound here because nothing else reads/writes
-    // process env concurrently yet — this runs before the daemon starts
-    // accepting requests (the tokio runtime and its worker threads already
-    // exist at this point, since `handle_start` is itself async; the
-    // soundness argument is "no concurrent env access", not "no workers").
-    if std::env::var_os("TRUSTY_DATA_DIR").is_none() {
-        if let Some(dir) = data_dir {
-            let dir = dir.to_path_buf();
-            // Reject relative paths — a relative data-dir would resolve
-            // differently depending on CWD, breaking daemon re-discovery.
-            anyhow::ensure!(
-                dir.is_absolute(),
-                "--data-dir must be an absolute path (got: {})",
+    // Apply the data-dir override as early as possible so every per-instance
+    // path — the lockfile, the port file, `indexes.toml` and the RPC socket —
+    // derives from it. #8149: an explicit `--data-dir` now wins over an
+    // inherited `TRUSTY_DATA_DIR` on the foreground path too, matching the
+    // background self-spawn's stated intent (#1182). Before this, a second
+    // daemon that named its own data dir kept resolving the socket from the
+    // FIRST daemon's value and bound it.
+    let resolved_data_dir = resolve_data_dir_override(std::env::var_os(DATA_DIR_ENV), data_dir)?;
+    // #8176: freshness is read BEFORE the directory is created, and the
+    // decision it feeds is forwarded to the background child — after this call
+    // the directory exists and nothing downstream could tell it was new.
+    let fresh_isolated_data_dir = resolved_data_dir.as_deref().is_some_and(data_dir_is_fresh);
+    if let Some(dir) = resolved_data_dir.as_deref() {
+        // Create the directory now so the child daemon can acquire its
+        // lockfile immediately on first start.
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create --data-dir directory: {}", dir.display()))?;
+        if fresh_isolated_data_dir {
+            tracing::warn!(
+                "--data-dir {} is empty (no existing indexes); daemon will start fresh",
                 dir.display()
             );
-            // Create the directory now so the child daemon can acquire its
-            // lockfile immediately on first start.
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("create --data-dir directory: {}", dir.display()))?;
-            if std::fs::read_dir(&dir)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false)
-            {
-                tracing::warn!(
-                    "--data-dir {} is empty (no existing indexes); daemon will start fresh",
-                    dir.display()
-                );
-            }
-            unsafe {
-                std::env::set_var("TRUSTY_DATA_DIR", &dir);
-            }
-            tracing::info!("data-dir override: {}", dir.display());
         }
+        // SAFETY: `set_var` is sound here because nothing else reads/writes
+        // process env concurrently yet — this runs before the daemon starts
+        // accepting requests (the tokio runtime and its worker threads already
+        // exist at this point, since `handle_start` is itself async; the
+        // soundness argument is "no concurrent env access", not "no workers").
+        unsafe {
+            std::env::set_var(DATA_DIR_ENV, dir);
+        }
+        tracing::info!("data-dir override: {}", dir.display());
+    }
+
+    // #8176: one decision, taken here and carried through the fork. A fresh
+    // isolated data dir refuses the scan unless `--auto-discover` grants it.
+    let discover = auto_discover_enabled(no_auto_discover, auto_discover, fresh_isolated_data_dir);
+    if !discover && !no_auto_discover {
+        tracing::info!(
+            "auto-discover: disabled for a fresh isolated data dir (#8176); \
+             pass --auto-discover to scan anyway"
+        );
     }
 
     // #6590: refuse in the PARENT, before the fork below detaches the child's
@@ -201,7 +216,10 @@ pub async fn handle_start(
             .arg(port.to_string())
             .arg("--device")
             .arg(device);
-        if no_auto_discover {
+        // #8176: forward the DECISION, not the flag. The child re-reads the
+        // data dir this call has just created, so `data_dir_is_fresh` would
+        // answer "not fresh" there and silently re-enable the scan.
+        if !discover {
             cmd.arg("--no-auto-discover");
         }
         // Issue #2845: forward the fan-out bounding flags to the foreground
@@ -453,7 +471,7 @@ pub async fn handle_start(
                 // Issue #3929: `no_auto_discover` must also gate the warm-boot
                 // colocated-root discovery scan, not just `auto_discover_and_index`
                 // below — see `restore_indexes`'s doc comment.
-                restore_indexes(&install_state, &embedder, no_auto_discover).await;
+                restore_indexes(&install_state, &embedder, !discover).await;
                 // Issue #1670: boot-time stale-index reconciliation — for each
                 // restored index, compare the stored indexed_head_sha against
                 // the current git HEAD and reindex only what changed (or fall
@@ -465,7 +483,9 @@ pub async fn handle_start(
                 crate::service::metrics::set_index_count(install_state.registry.list().len());
                 // Issue #40: auto-discover Claude Code / git projects.
                 // Issue #314: skip when `--no-auto-discover` / `TRUSTY_NO_AUTO_DISCOVER=1`.
-                if !no_auto_discover {
+                // #8176: `discover` already folded in the fresh-isolated-data-dir
+                // default and the `--auto-discover` opt-in.
+                if discover {
                     tokio::spawn(crate::commands::discover::auto_discover_and_index());
                 } else {
                     tracing::info!(

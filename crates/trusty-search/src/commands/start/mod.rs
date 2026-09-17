@@ -22,6 +22,10 @@
 
 mod daemon;
 mod embedder;
+// #8149 / #8176: the two isolation decisions `handle_start` used to make as
+// inline branches no test could reach — which data dir every per-instance path
+// derives from, and whether a fresh one may auto-discover.
+mod isolation;
 mod embedder_fallback;
 mod graceful_bootstrap;
 // #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
@@ -55,6 +59,12 @@ mod swap_back_cycle_soak_tests;
 
 // Public entry point consumed by `commands/mod.rs`.
 pub use daemon::handle_start;
+
+// #8149: the data-dir precedence resolver, re-exported so
+// `socket_path_follows_trusty_data_dir_not_home` can compose it with
+// `service::socket::resolve_socket_path` — the two halves of the socket a
+// second daemon actually binds.
+pub(crate) use isolation::resolve_data_dir_override;
 
 // Re-exports that formerly lived at the top of `start.rs` and are consumed by
 // the test module below (via `use super::*`) and by service::lazy_loader /

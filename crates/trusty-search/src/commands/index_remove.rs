@@ -5,8 +5,8 @@
 //!      against a directory they later delete have to either DELETE the index
 //!      manually via curl or hand-edit `indexes.toml` and the global config
 //!      file. The `index remove` subcommand collapses both steps into one.
-//! What: resolves PATH (explicit index id > CLI path arg > project auto-detection
-//!       from CWD), finds the matching daemon-side index id via
+//! What: resolves PATH (CLI path arg > explicit index id > project auto-detection
+//!       from CWD, #8175), finds the matching daemon-side index id via
 //!       `GET /indexes/:id/status`, calls
 //!       `DELETE /indexes/:id?delete_data=<bool>`, then drops the matching entry
 //!       from `~/.config/trusty-search/config.yaml`.
@@ -16,6 +16,14 @@
 //! the parent `Commands::Index { index_id }` field and uses it directly (skipping
 //! the path→id lookup entirely) when it is `Some`.
 //!
+//! Issue #8175: #1087's fix went one step too far — an EXPLICIT `PATH` argument
+//! also lost to `-i`/`TRUSTY_INDEX`, so `TRUSTY_INDEX=a trusty-search index
+//! remove /some/other/root` deregistered `a` and left `/some/other/root`
+//! registered. `TRUSTY_INDEX` is a session-wide ambient value, and a typed path
+//! is not. The precedence is now PATH > `-i` > CWD detection, and when both a
+//! PATH and an `-i` are given but resolve to different indexes the command
+//! REFUSES, naming both, rather than deleting either.
+//!
 //! Issue #6422: removing an index deletes its on-disk data by default, and
 //! `--keep-data` is the explicit opt-out that deregisters and keeps the corpus.
 //! The daemon's own default is still the opposite (`?delete_data` absent ⇒
@@ -24,6 +32,8 @@
 //!
 //! Test: `index_remove_resolves_path_*` unit tests cover the path resolution;
 //!       `index_remove_explicit_id_bypasses_path_lookup` covers the -i flag fix;
+//!       `index_remove_path_argument_wins_over_env_index` and
+//!       `index_remove_refuses_when_path_and_env_index_disagree` cover #8175;
 //!       `delete_index_url_*`, `confirmation_*` and `delete_body_*` cover the
 //!       #6422 default and its failure paths; the HTTP round-trip is exercised
 //!       end-to-end by the daemon integration tests.
@@ -43,10 +53,13 @@ use std::path::{Path, PathBuf};
 ///      in helpers so the same flow can be invoked from a future MCP tool.
 ///
 /// Issue #1087: `explicit_index_id` is the value of the PARENT command's
-/// `-i`/`--index` flag (`Commands::Index { index_id }`). When it is `Some`,
-/// the id is used directly and no path-based lookup is performed — this is
-/// the fix for the bug where `index remove -i other` would remove the CWD
-/// index instead of `other`.
+/// `-i`/`--index` flag (`Commands::Index { index_id }`). When it is `Some`
+/// and no PATH argument came with it, the id is used directly and no
+/// path-based lookup is performed — this is the fix for the bug where
+/// `index remove -i other` would remove the CWD index instead of `other`.
+///
+/// Issue #8175: an explicit `cli_path` now outranks that id, and a `cli_path`
+/// resolving to a different index than the id names is refused outright.
 ///
 /// Issue #6422: `keep_data` is the opt-out from the destructive default. When
 /// it is false the on-disk corpus goes with the registration and the operator
@@ -69,17 +82,34 @@ pub async fn handle_index_remove(
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
     let client = trusty_common::server::daemon_http_client()?;
 
-    // Issue #1087: when an explicit index id is supplied via `-i`/`--index`,
-    // use it directly and skip the CWD-path→id lookup entirely. This prevents
-    // accidentally removing the CWD's index when the user clearly specified a
-    // different one.
-    let (index_id, registered_path) = if let Some(ref id) = explicit_index_id {
-        // Fetch the root_path for this explicit id so we can clean up the
-        // global config and allowlist (same post-delete steps as the path path).
-        find_index_by_id(&client, &base, id).await?
-    } else {
-        let target_path = resolve_target_path(cli_path)?;
-        find_index_by_path(&client, &base, &target_path).await?
+    // Issue #1087 / #8175: an explicit `-i`/`--index` still beats CWD detection,
+    // but an explicit PATH argument now beats BOTH — and a PATH that resolves to
+    // a different index than `-i` names is refused rather than guessed at.
+    let (index_id, registered_path) = match resolve_removal_target(
+        cli_path,
+        explicit_index_id.as_deref(),
+    ) {
+        RemovalTarget::Id(id) => {
+            // Fetch the root_path for this explicit id so we can clean up the
+            // global config and allowlist (same post-delete steps as the path
+            // path).
+            find_index_by_id(&client, &base, &id).await?
+        }
+        RemovalTarget::Path(target_path) => {
+            let found = find_index_by_path(&client, &base, &target_path).await?;
+            // #8175: fail closed on disagreement — never remove the env-selected
+            // index because a PATH was also typed.
+            refuse_on_selector_disagreement(
+                &target_path,
+                &found.0,
+                explicit_index_id.as_deref(),
+            )?;
+            found
+        }
+        RemovalTarget::DetectFromCwd => {
+            let target_path = resolve_target_path(None)?;
+            find_index_by_path(&client, &base, &target_path).await?
+        }
     };
 
     // #6422: the confirmation gate. It runs after resolution so the prompt can
@@ -277,22 +307,78 @@ fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
     Ok(ctx.root_path)
 }
 
-/// Classify how the index to remove should be resolved (issue #1087).
+/// Which selector `index remove` acts on.
 ///
-/// Why: the decision "explicit id vs. path lookup" is a small pure predicate
-/// that sits at the heart of the #1087 fix. Extracting it lets unit tests
-/// verify the correct branch is taken for each input combination WITHOUT
-/// needing a live daemon.
+/// Test: `index_remove_path_argument_wins_over_env_index`,
+/// `index_remove_explicit_id_bypasses_path_lookup`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemovalTarget {
+    /// The PATH argument the operator typed.
+    Path(PathBuf),
+    /// The `-i`/`TRUSTY_INDEX` id, with no PATH argument beside it.
+    Id(String),
+    /// Neither: walk up from CWD for a project root.
+    DetectFromCwd,
+}
+
+/// Classify how the index to remove should be resolved (#1087, #8175).
 ///
-/// What: returns `Some(id)` when an explicit `-i` id was given (the id should
-/// be used directly, bypassing CWD detection entirely), or `None` when the
-/// removal should fall back to path-based lookup.
+/// Why: the decision is a small pure predicate at the heart of two fixes, and
+/// extracting it lets unit tests verify the branch taken for every input
+/// combination without a live daemon. #1087 made `-i` beat CWD detection;
+/// #8175 corrects the case that fix over-reached into — an explicit PATH
+/// argument losing to an ambient `TRUSTY_INDEX`, which deregistered the
+/// env-named index and left the typed path registered.
+/// What: PATH wins when present, then `-i`, then CWD detection. A PATH beside
+/// an `-i` does NOT silently discard the id; the caller checks the two agree
+/// via [`refuse_on_selector_disagreement`] once the path has resolved to an id.
+/// Test: `index_remove_path_argument_wins_over_env_index`,
+/// `index_remove_explicit_id_bypasses_path_lookup`.
+pub(crate) fn resolve_removal_target(
+    cli_path: Option<PathBuf>,
+    explicit_index_id: Option<&str>,
+) -> RemovalTarget {
+    match (cli_path, explicit_index_id) {
+        // #8175: a typed path is a deliberate argument; TRUSTY_INDEX is ambient.
+        (Some(path), _) => RemovalTarget::Path(path),
+        (None, Some(id)) => RemovalTarget::Id(id.to_string()),
+        (None, None) => RemovalTarget::DetectFromCwd,
+    }
+}
+
+/// Refuse a removal whose PATH and `-i` name different indexes (#8175).
 ///
-/// Test: `index_remove_explicit_id_bypasses_path_lookup` exercises this
-/// function directly.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn resolve_index_id_source(explicit_index_id: Option<&str>) -> Option<String> {
-    explicit_index_id.map(|id| id.to_string())
+/// Why: resolving the ambiguity either way destroys something the operator did
+/// not point at. The observed failure removed the `TRUSTY_INDEX` allowlist entry
+/// for a real checkout while the typed path stayed registered; silently
+/// preferring the path would be the same defect mirrored for anyone who relies
+/// on `-i`. Neither is guessable, so the command stops.
+/// What: `Ok(())` when no `-i` was given or when it names the index the PATH
+/// resolved to; otherwise an error naming the path, the index the path resolves
+/// to, and the id `-i`/`TRUSTY_INDEX` supplied.
+///
+/// # Errors
+///
+/// When `explicit_index_id` is `Some` and differs from `resolved_id`.
+///
+/// Test: `index_remove_refuses_when_path_and_env_index_disagree`.
+pub(crate) fn refuse_on_selector_disagreement(
+    target_path: &Path,
+    resolved_id: &str,
+    explicit_index_id: Option<&str>,
+) -> Result<()> {
+    let Some(id) = explicit_index_id else {
+        return Ok(());
+    };
+    if id == resolved_id {
+        return Ok(());
+    }
+    bail!(
+        "refusing to remove: the path {} is index \"{resolved_id}\", but \
+         -i/TRUSTY_INDEX names \"{id}\". Re-run with only one of the two \
+         (drop the PATH argument, or unset TRUSTY_INDEX / omit -i)",
+        target_path.display()
+    )
 }
 
 /// Fetch the registered `root_path` for a known index id.
@@ -433,48 +519,86 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// Regression test for issue #1087 — explicit `-i <id>` MUST bypass
-    /// CWD detection and never fall back to path lookup.
+    /// Regression test for issue #1087 — `-i <id>` with no PATH argument MUST
+    /// bypass CWD detection and never fall back to path lookup.
     ///
     /// Why: `handle_index_remove` used to ignore `-i`/`--index` entirely and
-    /// always resolve via the CWD path. This test pins the `resolve_index_id_source`
-    /// decision function, which is the pure predicate at the heart of the fix.
-    ///
-    /// What (issue #1097 enhancement): `resolve_index_id_source` is now a
-    /// named pure function (not just an inline `if let`) so its behaviour can
-    /// be asserted directly — no live daemon needed:
-    ///
-    /// - `Some("my-index")` → explicit id returned as `Some("my-index")`.
-    /// - `None` → `None` (signals: fall back to path lookup).
-    ///
-    /// End-to-end coverage for the full `-i` code path (daemon HTTP round-trip)
-    /// lives in the integration tests.
+    /// always resolve via the CWD path. This test pins `resolve_removal_target`,
+    /// the pure predicate at the heart of the fix, on the one input combination
+    /// #1087 was about. #8175 narrowed the rule to "no PATH argument beside it";
+    /// this is the case that behaviour must survive unchanged.
     ///
     /// Test: this test.
     #[test]
     fn index_remove_explicit_id_bypasses_path_lookup() {
-        // Explicit id is given: must be returned as Some(id), never as None.
-        let result = super::resolve_index_id_source(Some("other-project"));
         assert_eq!(
-            result.as_deref(),
-            Some("other-project"),
-            "explicit id must be returned verbatim — CWD must not interfere"
+            super::resolve_removal_target(None, Some("other-project")),
+            super::RemovalTarget::Id("other-project".to_string()),
+            "an -i with no PATH must be used directly — CWD must not interfere"
         );
 
-        // No explicit id: must return None so callers know to use path lookup.
-        let fallback = super::resolve_index_id_source(None);
+        assert_eq!(
+            super::resolve_removal_target(None, None),
+            super::RemovalTarget::DetectFromCwd,
+            "no selector at all → CWD detection"
+        );
+    }
+
+    /// Why (#8175, closure condition 1): `TRUSTY_INDEX=trusty-tools-checkout
+    /// trusty-search index remove /private/tmp/ts7979root` removed the
+    /// allowlist entry for the checkout and left the typed path registered. An
+    /// ambient session variable must not outrank an argument the operator
+    /// typed. Against the pre-fix `resolve_index_id_source`, whose only rule
+    /// was "an explicit id wins", the first assertion here fails: it returned
+    /// the id for exactly this input.
+    /// Test: this function IS the test.
+    #[test]
+    fn index_remove_path_argument_wins_over_env_index() {
+        let typed = PathBuf::from("/private/tmp/ts7979root");
+
+        assert_eq!(
+            super::resolve_removal_target(Some(typed.clone()), Some("trusty-tools-checkout")),
+            super::RemovalTarget::Path(typed.clone()),
+            "an explicit PATH must win over -i / TRUSTY_INDEX"
+        );
+
+        // And with no id in play the PATH is still what is targeted.
+        assert_eq!(
+            super::resolve_removal_target(Some(typed.clone()), None),
+            super::RemovalTarget::Path(typed),
+            "a PATH with no -i must target the PATH"
+        );
+    }
+
+    /// Why (#8175, closure condition 2): when the two selectors resolve to
+    /// different indexes, either choice destroys a registration the operator
+    /// did not point at. The command stops instead, naming both so the operator
+    /// can drop one.
+    /// Test: this function IS the test.
+    #[test]
+    fn index_remove_refuses_when_path_and_env_index_disagree() {
+        let path = Path::new("/private/tmp/ts7979root");
+
+        let err = super::refuse_on_selector_disagreement(
+            path,
+            "ts7979root",
+            Some("trusty-tools-checkout"),
+        )
+        .expect_err("a disagreement must be refused, not resolved");
+        let msg = err.to_string();
         assert!(
-            fallback.is_none(),
-            "no explicit id → None (path-based lookup will be used)"
+            msg.contains("ts7979root") && msg.contains("trusty-tools-checkout"),
+            "the refusal must name both selectors: {msg}"
         );
 
-        // The explicit id must never equal the CWD — they are distinct sources.
-        // (Guards against a regression where both branches return the same thing.)
-        let cwd_p = resolve_target_path(None).unwrap();
-        assert_ne!(
-            cwd_p.to_string_lossy().as_ref(),
-            "other-project",
-            "CWD fallback must not accidentally equal an explicit id string"
+        // Agreement, and the no-`-i` case, both proceed.
+        assert!(
+            super::refuse_on_selector_disagreement(path, "ts7979root", Some("ts7979root")).is_ok(),
+            "an -i naming the same index as the PATH must proceed"
+        );
+        assert!(
+            super::refuse_on_selector_disagreement(path, "ts7979root", None).is_ok(),
+            "no -i means nothing to disagree with"
         );
     }
 

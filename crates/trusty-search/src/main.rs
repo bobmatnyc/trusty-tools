@@ -509,6 +509,19 @@ enum Commands {
         #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = commands::service_unit::parse_truthy_bool)]
         no_auto_discover: bool,
 
+        /// Run the auto-discovery scan even on a fresh isolated data directory.
+        ///
+        /// #8176: a daemon started against a brand-new `--data-dir` (or
+        /// `TRUSTY_DATA_DIR`) no longer auto-discovers. A throwaway instance
+        /// used to walk `scan_paths` and force-reindex the colocated
+        /// `.trusty-search/` stores of every unrelated repository it found,
+        /// which is the opposite of what an isolated data directory asks for.
+        /// Pass this flag to opt that scan back in; it has no effect on the
+        /// machine's default data directory, which still auto-discovers, and
+        /// `--no-auto-discover` still wins over it.
+        #[arg(long, conflicts_with = "no_auto_discover")]
+        auto_discover: bool,
+
         /// Cap on how many per-index searches run concurrently within a single
         /// cross-project (`search_all` / `POST /search`) fan-out (issue #2845).
         ///
@@ -1341,6 +1354,9 @@ async fn run() -> Result<()> {
             device,
             data_dir,
             no_auto_discover,
+            // #8176: the explicit opt-in that grants auto-discovery on a fresh
+            // isolated data dir, which no longer scans by default.
+            auto_discover,
             fanout_concurrency,
             serial,
         } => {
@@ -1351,6 +1367,7 @@ async fn run() -> Result<()> {
                 data_dir.as_deref(),
                 cli.verbose,
                 no_auto_discover,
+                auto_discover,
                 fanout_concurrency,
                 serial,
             )
