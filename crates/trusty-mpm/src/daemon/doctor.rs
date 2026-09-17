@@ -593,6 +593,11 @@ pub(crate) async fn run_doctor_with_claims(
     // since an audit that did not run has not found the tickets clean.
     checks.push(check_issue_audit_recent(project_dir).await);
     checks.push(check_oauth_token_config());
+    // #8236: the row above asks whether a credential is CONFIGURED; this asks
+    // whether one is sitting in plaintext in a user-readable LaunchAgent plist.
+    // Read-only and key-only — it never prints a credential value.
+    // `tm doctor --fix` removes the entries.
+    checks.push(crate::daemon::doctor_launchd_secrets::check_launchd_plist_secrets(&home));
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
     // #7490: the fourth is the inverse of the first — a lifecycle event a

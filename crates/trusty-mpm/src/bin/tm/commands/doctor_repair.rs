@@ -130,8 +130,9 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// auto-memory key (`auto_memory`, #7685),
 /// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
-/// the `legacy_sources` refusals, and the stray-`.mcp.json`
-/// sweep (`stray_mcp_json`) — printing each item's path, what would change,
+/// the `legacy_sources` refusals, the stray-`.mcp.json`
+/// sweep (`stray_mcp_json`), and the LaunchAgent credential strip
+/// (`launchd_secrets`, #8236) — printing each item's path, what would change,
 /// and the outcome. In dry run it closes by naming the flag that applies. It
 /// never deletes: `legacy_sources` findings are reported as refused, and a
 /// stray `.mcp.json` is RENAMED aside rather than removed.
@@ -241,6 +242,13 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             &home,
             mode,
         ));
+        // #8236: strip plaintext credentials out of the trusty LaunchAgent
+        // plists. The only repair here that takes NO backup — a backup of a
+        // plist holding a credential is a second readable copy of it. Removing
+        // the entry does not un-expose the value, so each step says to rotate.
+        steps.extend(
+            trusty_mpm::daemon::doctor_launchd_secrets::repair_launchd_plist_secrets(&home, mode),
+        );
     }
 
     print_steps(&steps, apply, FIX_APPLY_HINT);

@@ -143,9 +143,30 @@ impl LaunchdConfig {
     /// [`crate::shutdown::TERMINATION_GRACE_SECS`]), and an
     /// `EnvironmentVariables` dictionary when `env_vars` is non-empty. All
     /// string values are XML-escaped.
+    ///
+    /// #8236: this is the ONE place every trusty-* plist is generated, so it is
+    /// where the credential guard belongs. Any `env_vars` entry whose key
+    /// [`crate::launchd_secrets::is_credential_env_key`] accepts is DROPPED
+    /// before rendering and named (key only) in a `tracing::warn!` — a plist is
+    /// user-readable, and trusty-search's #4868 carry-forward would otherwise
+    /// copy a hand-added credential from the installed unit into every
+    /// regenerated one. Dropping rather than failing is deliberate: the
+    /// rewritten plist IS the remediation, and a failing render would abort
+    /// `service install` on exactly the hosts that need it. A
+    /// `ProgramArguments` entry that carries a credential-shaped VALUE is a
+    /// hard error instead — no caller in this workspace passes one, so there is
+    /// nothing to remediate and nothing to break.
+    ///
+    /// # Errors
+    ///
+    /// When a path is not valid UTF-8, or an argument carries a credential
+    /// value (#8236).
+    ///
     /// Test: `render_plist_contains_core_keys`, `render_plist_keepalive_*`,
     /// `render_plist_escapes_xml`, `render_plist_includes_resource_limits`,
-    /// `render_plist_declares_exit_timeout`.
+    /// `render_plist_declares_exit_timeout`,
+    /// `render_plist_drops_a_credential_env_var`,
+    /// `render_plist_refuses_a_credential_program_argument`.
     pub fn render_plist(&self) -> Result<String> {
         let exe = self
             .exe_path
@@ -175,7 +196,17 @@ impl LaunchdConfig {
         s.push_str("  <key>ProgramArguments</key>\n");
         s.push_str("  <array>\n");
         s.push_str(&format!("    <string>{}</string>\n", xml_escape(exe)));
-        for arg in &self.args {
+        for (index, arg) in self.args.iter().enumerate() {
+            // #8236: never the value, only its position — an error message is a
+            // log line, and a log line is one more place a credential lands.
+            anyhow::ensure!(
+                !crate::launchd_secrets::looks_like_credential_value(arg),
+                "refusing to write a credential into the {} plist: argument {} is \
+                 credential-shaped. Resolve it at runtime instead (process env, \
+                 `.env.local`, or the 0600 credential store)",
+                self.label,
+                index + 1,
+            );
             s.push_str(&format!("    <string>{}</string>\n", xml_escape(arg)));
         }
         s.push_str("  </array>\n");
@@ -239,10 +270,23 @@ impl LaunchdConfig {
             }
         }
 
-        if !self.env_vars.is_empty() {
+        // #8236: strip before rendering, never after — a value that reaches the
+        // string has already been formatted once.
+        let mut env_vars = self.env_vars.clone();
+        for key in crate::launchd_secrets::strip_credential_env(&mut env_vars) {
+            tracing::warn!(
+                label = %self.label,
+                env_key = %key,
+                "dropped a credential from the generated launchd plist — a plist is \
+                 user-readable; supply this at runtime instead (process env, \
+                 `.env.local`, or the 0600 credential store)"
+            );
+        }
+
+        if !env_vars.is_empty() {
             s.push_str("  <key>EnvironmentVariables</key>\n");
             s.push_str("  <dict>\n");
-            for (k, v) in &self.env_vars {
+            for (k, v) in &env_vars {
                 s.push_str(&format!("    <key>{}</key>\n", xml_escape(k)));
                 s.push_str(&format!("    <string>{}</string>\n", xml_escape(v)));
             }
@@ -506,6 +550,50 @@ mod tests {
         assert!(xml.contains("<key>EnvironmentVariables</key>"));
         assert!(xml.contains("<key>RUST_LOG</key>"));
         assert!(xml.contains("<string>info</string>"));
+    }
+
+    /// The #8236 regression guard: a plist is user-readable, so no credential
+    /// value may reach one however it entered `env_vars`.
+    ///
+    /// Why: trusty-search's #4868 carry-forward copies EVERY key an installed
+    /// unit holds into the regenerated one, so a hand-added
+    /// `OPENROUTER_API_KEY` propagated through every `service install` forever.
+    /// Guarding at the renderer covers that path and every future writer.
+    /// What: renders a config whose `env_vars` carry an obvious fake credential
+    /// beside an ordinary tunable; asserts the value and its key are absent and
+    /// the tunable survives.
+    /// Test: itself.
+    #[test]
+    fn render_plist_drops_a_credential_env_var() {
+        let fake = "sk-or-v1-0000000000000000000000000000FAKE";
+        let mut cfg = sample(KeepAlive::Always);
+        cfg.env_vars = vec![
+            ("RUST_LOG".to_string(), "info".to_string()),
+            ("OPENROUTER_API_KEY".to_string(), fake.to_string()),
+        ];
+        let xml = cfg.render_plist().unwrap();
+        assert!(!xml.contains(fake), "the value must never reach the plist");
+        assert!(!xml.contains("OPENROUTER_API_KEY"));
+        assert!(xml.contains("<key>RUST_LOG</key>"));
+    }
+
+    /// The argv half of the same guard.
+    ///
+    /// Why: `EnvironmentVariables` is not the only user-readable field. No
+    /// caller here passes a credential as an argument, so a refusal breaks
+    /// nothing and keeps the invariant total.
+    /// What: asserts the render errors and that the message names the position
+    /// rather than echoing the value.
+    /// Test: itself.
+    #[test]
+    fn render_plist_refuses_a_credential_program_argument() {
+        let fake = "sk-or-v1-0000000000000000000000000000FAKE";
+        let mut cfg = sample(KeepAlive::Always);
+        cfg.args = vec!["--api-key".to_string(), fake.to_string()];
+        let err = cfg.render_plist().expect_err("must refuse");
+        let msg = format!("{err}");
+        assert!(!msg.contains(fake), "the error must not echo the value");
+        assert!(msg.contains("credential-shaped"), "was: {msg}");
     }
 
     /// Why: #1298 — every generated launchd plist for a daemon that spawns
