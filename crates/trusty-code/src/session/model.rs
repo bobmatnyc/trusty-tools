@@ -178,6 +178,23 @@ pub struct Session {
     /// `model::tests::session_round_trips_with_a_result`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::session::task_result::TaskResult>,
+    /// (#8184) Whether this session runs the SOLO agent — the #8031
+    /// single-agent shape, where the named agent carries its own tcode tools
+    /// and `delegate_to_agent` is never registered.
+    ///
+    /// Why: an interactive `tcode tui` session has to read and edit files
+    /// itself (Claude Code's basic loop), and the delegating PM registry has
+    /// no filesystem tools at all. The choice belongs to the SESSION rather
+    /// than to each `task.run`, so every turn of one conversation runs the
+    /// same agent shape and `session.status`/`session.list` can state which.
+    /// What: set once, at creation (`SessionRegistry::create_with_delegation`)
+    /// — `session.create` defaults it to `true`, `task.run`'s own mint path
+    /// carries that call's `no_delegate` through. `#[serde(default)]` reads an
+    /// older serialized `Session` back as delegating, the pre-#8184 shape.
+    /// Test: `session::protocol::tests::create_defaults_to_the_solo_agent`,
+    /// `session::protocol::tests::create_with_delegate_true_keeps_the_delegating_pm`.
+    #[serde(default)]
+    pub no_delegate: bool,
 }
 
 #[cfg(test)]
@@ -279,6 +296,7 @@ mod tests {
             mode: Some(crate::mode::HarnessMode::DailyDriver),
             workstream_id: None,
             result: None,
+            no_delegate: false,
         };
         let value = serde_json::to_value(&session).unwrap();
         assert_eq!(value["id"], "s-1");
@@ -340,6 +358,7 @@ mod tests {
                 crate::session::TaskResult::new(crate::session::TaskResultStatus::Success)
                     .with_diff_ref(Some("tree-sha".to_string())),
             ),
+            no_delegate: false,
         };
 
         let value = serde_json::to_value(&session).expect("serialize");
@@ -371,6 +390,7 @@ mod binding_model_tests {
             mode: None,
             workstream_id: None,
             result: None,
+            no_delegate: false,
         };
         let value = serde_json::to_value(&session).expect("serialize");
         assert_eq!(value["binding"]["state"], "projectless");
@@ -412,6 +432,7 @@ mod binding_model_tests {
             mode: None,
             workstream_id: Some(ws_id),
             result: None,
+            no_delegate: false,
         };
         let value = serde_json::to_value(&session).expect("serialize");
         assert_eq!(value["workstream_id"], ws_id.to_string());

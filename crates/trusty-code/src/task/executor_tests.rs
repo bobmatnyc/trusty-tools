@@ -1317,6 +1317,103 @@ async fn no_delegate_run_respects_the_agents_tools_allowlist() {
     }
 }
 
+// ── #8184: the interactive solo session's registry and permission gate ──────
+
+/// #8184: the SOLO run of the stock `pm` agent advertises the file tools.
+///
+/// Why: `tcode tui`'s default session runs `task.run`'s default agent (`pm`)
+/// with `no_delegate`, so "the agent reads and edits the file itself" is true
+/// only if the SHIPPED `pm` agent card carries those tools. A fixture agent
+/// with a hand-written allowlist would prove nothing about what a user gets.
+/// What: an EMPTY agents dir, so `crate::agents::resolve_agent` falls back to
+/// the embedded roster's real `pm.md`, and asserts the advertised schema set.
+/// Test: this test.
+#[tokio::test]
+async fn solo_run_of_the_stock_pm_advertises_the_file_tools() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = tempfile::tempdir().expect("empty agents tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let advertised = mock.first_tool_names();
+    for tool in ["read_file", "write_file", "edit", "bash"] {
+        assert!(
+            advertised.contains(&tool.to_string()),
+            "the solo session must carry {tool}; got {advertised:?}"
+        );
+    }
+    assert!(
+        !advertised.contains(&"delegate_to_agent".to_string()),
+        "a solo session must not advertise delegate_to_agent; got {advertised:?}"
+    );
+}
+
+/// #8184 / #3422: the solo agent's OWN tool calls go through the permission
+/// gate, and a deny stops the write.
+///
+/// Why: giving the top-level agent `write_file`/`bash` in an interactive
+/// session widens what one un-gated call can do, so the merged tools must be
+/// gated exactly like a delegated agent's. This is the daemon path the TUI
+/// drives (`spawn_task_run`), not a gate unit test — the same
+/// `PermissionContext` whose `ask` branch suspends against the broker
+/// `session.permission.respond` answers (`tests/tui_client_engine.rs::
+/// respond_permission_releases_a_suspended_call`).
+/// What: a solo `engineer` whose front matter denies `write_file`, scripted to
+/// call it anyway. Asserts the tool was advertised (so absence of the file is
+/// the gate's doing, not a missing tool) and that nothing was written.
+/// Test: this test.
+#[tokio::test]
+async fn solo_run_honours_a_deny_rule_on_its_own_tools() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    std::fs::write(
+        agents.path().join("engineer.md"),
+        "---\nname: engineer\nmodel: openai/gpt-4o-mini\n\
+         tcode_tools: [read_file, write_file, finish_task]\n\
+         permissions:\n  write_file: deny\n---\n\nYou are the engineer.\n",
+    )
+    .expect("write engineer.md");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[
+        write_file_tool_call_response("call_1", "denied.txt", "nope"),
+        stop_response("engineer: the write was denied"),
+    ]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        agent_name: "engineer".to_string(),
+        task: "create denied.txt".to_string(),
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let advertised = mock.first_tool_names();
+    assert!(
+        advertised.contains(&"write_file".to_string()),
+        "the tool must be advertised, so the gate is what stops it; got {advertised:?}"
+    );
+    assert!(
+        !project.path().join("denied.txt").exists(),
+        "a denied write_file must not reach the disk"
+    );
+}
+
 // ── #8030 / #8128: top-level model + turn-cap overrides, daemon path ────────
 
 /// A response calling a tool this run's registry does not carry, so the loop

@@ -86,6 +86,41 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
     None
 }
 
+/// One line naming the agent shape and the working root of the session
+/// `session.create` just returned (#8184).
+///
+/// Why: the two facts that decide what a turn can actually do — whether the
+/// agent edits files itself or delegates, and WHERE it edits them — were
+/// invisible from the TUI, so a projectless session (which works in a
+/// throwaway scratch directory, never the launch directory) looked exactly
+/// like a bound one. Kept pure (no `&self`) so it is unit-testable without a
+/// daemon.
+/// What: reads `no_delegate` and `binding.root` off the returned `Session`.
+/// A missing/false `no_delegate` reads as the delegating PM, matching
+/// `Session::no_delegate`'s own `#[serde(default)]`.
+/// Test: `engine_tests::session_shape_summary_names_the_solo_agent_and_root`,
+/// `engine_tests::session_shape_summary_names_the_projectless_scratch_root`,
+/// `engine_tests::session_shape_summary_names_the_delegating_pm`.
+fn session_shape_summary(session: &Value) -> String {
+    let agent = if session
+        .get("no_delegate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "solo agent (no delegation)"
+    } else {
+        "delegating PM"
+    };
+    match session
+        .get("binding")
+        .and_then(|b| b.get("root"))
+        .and_then(Value::as_str)
+    {
+        Some(root) => format!("{agent}, editing in {root}"),
+        None => format!("{agent}, projectless — editing in a scratch workspace"),
+    }
+}
+
 /// The `trusty_code_tui::TuiEngine` adapter for `tcode tui` — see module docs.
 pub struct CodeEngine {
     state: Arc<EngineState>,
@@ -118,9 +153,37 @@ impl CodeEngine {
     /// Build a `CodeEngine` dialling an explicit socket — the constructor
     /// `tcode tui`'s auto-spawn path and every test in
     /// `tests/tui_client_engine.rs` use.
+    ///
+    /// (#8184) The session this engine creates runs the SOLO agent — see
+    /// [`CodeEngine::with_socket_delegating`] for the PM opt-in.
     pub fn with_socket(socket: impl Into<PathBuf>, project_path: Option<PathBuf>) -> Self {
+        Self::build(socket, project_path, false)
+    }
+
+    /// [`CodeEngine::with_socket`] for a session that runs the DELEGATING PM
+    /// — `tcode tui --delegate` (#8184).
+    ///
+    /// Why: the interactive default is the solo agent, so PM/delegation mode
+    /// needs one named surface to be asked for. A second constructor rather
+    /// than a third parameter: every other call site wants the default.
+    /// What: sends `session.create`'s `delegate: true` from `setup`.
+    /// Test: `tui_delegate_opt_in_creates_a_delegating_session` (in
+    /// `tests/tui_client_engine.rs`).
+    pub fn with_socket_delegating(
+        socket: impl Into<PathBuf>,
+        project_path: Option<PathBuf>,
+    ) -> Self {
+        Self::build(socket, project_path, true)
+    }
+
+    /// The shared body of both constructors above.
+    fn build(socket: impl Into<PathBuf>, project_path: Option<PathBuf>, delegate: bool) -> Self {
         Self {
-            state: Arc::new(EngineState::new(UdsRpcClient::new(socket), project_path)),
+            state: Arc::new(EngineState::new(
+                UdsRpcClient::new(socket),
+                project_path,
+                delegate,
+            )),
         }
     }
 
@@ -154,6 +217,11 @@ impl TuiEngine for CodeEngine {
                 json!({
                     "task": "tcode tui session",
                     "project": self.state.project_path,
+                    // #8184: an interactive session runs the solo agent —
+                    // `false` here IS `session.create`'s own default, sent
+                    // explicitly so this client's shape never depends on a
+                    // daemon-side default drifting. `--delegate` flips it.
+                    "delegate": self.state.delegate,
                 }),
             )
             .await?;
@@ -193,9 +261,12 @@ impl TuiEngine for CodeEngine {
             ));
         }
 
+        // #8184: name the agent shape and working root — see
+        // `session_shape_summary`.
         let _ = tx.send(ReplEvent::StatusMessage(format!(
-            "connected to tcode daemon at {} (session {session_id})",
+            "connected to tcode daemon at {} (session {session_id}; {})",
             self.state.rpc.socket().display(),
+            session_shape_summary(&result),
         )));
         Ok(())
     }

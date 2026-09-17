@@ -91,9 +91,47 @@ impl RealDaemon {
         CodeEngine::with_socket(self.socket.clone(), Some(self.project.clone()))
     }
 
+    /// (#8184) `tcode tui --delegate` — the PM opt-in.
+    fn delegating_engine(&self) -> CodeEngine {
+        CodeEngine::with_socket_delegating(self.socket.clone(), Some(self.project.clone()))
+    }
+
+    /// (#8184) `tcode tui` with no `--project`.
+    fn projectless_engine(&self) -> CodeEngine {
+        CodeEngine::with_socket(self.socket.clone(), None)
+    }
+
     fn client(&self) -> UdsRpcClient {
         UdsRpcClient::new(self.socket.clone())
     }
+}
+
+/// The one session `setup` created, read back over the socket.
+async fn only_session(daemon: &RealDaemon) -> Value {
+    let listed = daemon
+        .client()
+        .call("session.list", json!({}))
+        .await
+        .expect("session.list over the socket");
+    let sessions = listed["sessions"]
+        .as_array()
+        .expect("session.list returns an array")
+        .clone();
+    assert_eq!(sessions.len(), 1, "setup must have created one session");
+    sessions[0].clone()
+}
+
+/// The `connected to tcode daemon` line `setup` published.
+fn connect_line(rx: &mut UnboundedReceiver<ReplEvent>) -> String {
+    drain(rx)
+        .iter()
+        .find_map(|event| match event {
+            ReplEvent::StatusMessage(text) if text.contains("connected to tcode daemon") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("setup must report the daemon it connected to")
 }
 
 impl Drop for RealDaemon {
@@ -580,5 +618,106 @@ async fn respond_permission_without_a_session_is_a_noop() {
         stub.request_for("session.permission.respond").is_none(),
         "no session means nothing to answer: {:?}",
         stub.seen()
+    );
+}
+
+// ── #8184: the interactive session's default agent shape ────────────────────
+
+/// #8184: a plain `tcode tui` session runs the SOLO agent, against the bound
+/// project root — end to end, against a real daemon.
+///
+/// Why: this is the wiring the unit tests cannot see — that the engine's
+/// `session.create` really produces the solo shape on the daemon, and that the
+/// connect line the user reads says so and names where edits will land.
+/// What: `setup` against a project-bound daemon, then reads the session back
+/// over the socket.
+/// Test: this test.
+#[tokio::test]
+async fn tui_default_session_runs_the_solo_agent() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(
+        session["no_delegate"],
+        json!(true),
+        "a default TUI session runs the solo agent: {session}"
+    );
+    assert_eq!(
+        session["binding"]["root"],
+        json!(daemon.project.display().to_string()),
+        "the session must be scoped to the bound project root: {session}"
+    );
+
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("solo agent (no delegation)"),
+        "the connect line must state the agent shape: {line}"
+    );
+    assert!(
+        line.contains(&daemon.project.display().to_string()),
+        "the connect line must name the working root: {line}"
+    );
+}
+
+/// #8184: `tcode tui --delegate` still gets the delegating PM.
+///
+/// Why: the opt-in has to survive the same hop, or PM mode is unreachable from
+/// the TUI and the default change becomes a removal.
+/// What: the same flow through `CodeEngine::with_socket_delegating`.
+/// Test: this test.
+#[tokio::test]
+async fn tui_delegate_opt_in_creates_a_delegating_session() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.delegating_engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(
+        session["no_delegate"],
+        json!(false),
+        "--delegate must mint the PM shape: {session}"
+    );
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("delegating PM"),
+        "the connect line must state the agent shape: {line}"
+    );
+}
+
+/// #8184: `tcode tui` with no `--project` still succeeds, still runs solo, and
+/// says its edits land in a scratch workspace.
+///
+/// Why: a projectless session is a first-class state, and its run works in the
+/// executor's ephemeral scratch root — never the launch directory. A user who
+/// is not told that would read an "edited the file" report as a claim about
+/// their own tree.
+/// What: `setup` with `project_path: None`, asserting the projectless binding,
+/// the solo shape, and the connect line's wording.
+/// Test: this test.
+#[tokio::test]
+async fn tui_projectless_default_session_runs_solo_in_a_scratch_root() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.projectless_engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine
+        .setup(tx)
+        .await
+        .expect("a projectless setup must succeed");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(session["binding"]["state"], json!("projectless"));
+    assert_eq!(
+        session["no_delegate"],
+        json!(true),
+        "a projectless TUI session runs solo too: {session}"
+    );
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("projectless — editing in a scratch workspace"),
+        "the connect line must say where a projectless session edits: {line}"
     );
 }

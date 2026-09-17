@@ -144,6 +144,17 @@ enum Command {
         /// directory when given.
         #[arg(long, short, value_name = "PATH")]
         project: Option<PathBuf>,
+
+        /// Run the DELEGATING PM instead of the solo agent (#8184).
+        ///
+        /// An interactive session runs one agent that reads, edits and runs
+        /// commands itself — every tool call still goes through the
+        /// permission prompt. This flag restores the pre-#8184 shape: the
+        /// top-level agent gets `delegate_to_agent` and hands implementation
+        /// work to a sub-agent instead of doing it. Sent as
+        /// `session.create`'s `delegate` param.
+        #[arg(long)]
+        delegate: bool,
     },
 
     /// Create (or target) a session, run a task through it via the daemon's
@@ -539,7 +550,10 @@ async fn main() -> Result<()> {
         // failure.
         // #4512: that failure is now rare — a missing daemon is started, not
         // reported.
-        Command::Tui { project } => run_thin_client(cli::tui::run(project), "tui").await,
+        // #8184: `--delegate` is the ONE opt-in back to the delegating PM.
+        Command::Tui { project, delegate } => {
+            run_thin_client(cli::tui::run(project, delegate), "tui").await
+        }
 
         Command::RunTask {
             agent,

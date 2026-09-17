@@ -223,6 +223,17 @@ struct CreateParams {
     /// [`create`]'s docs.
     #[serde(default)]
     workstream_id: Option<String>,
+    /// (#8184) Opt this session INTO the delegating PM — the pre-#8184 shape,
+    /// where the top-level agent gets `delegate_to_agent` and no filesystem
+    /// tools of its own.
+    ///
+    /// Why: an interactive session's default is now the #8031 solo agent (see
+    /// [`create`]'s docs), so PM/delegation mode needs a way to be asked for.
+    /// What: `#[serde(default)]` — an omitted field is `false`, i.e. SOLO.
+    /// Inverted into [`crate::session::Session::no_delegate`] at the mint.
+    /// Test: `tests::create_with_delegate_true_keeps_the_delegating_pm`.
+    #[serde(default)]
+    delegate: bool,
 }
 
 /// `params` shape for `session.send`.
@@ -285,6 +296,20 @@ fn parse<T: DeserializeOwned>(params: Value, method: &str) -> Result<T, RpcError
 /// `workstream_binding_tests::create_stays_projectless_without_explicit_or_active`,
 /// `workstream_binding_tests::create_rejects_closed_explicit_workstream`,
 /// `workstream_binding_tests::create_rejected_bind_leaves_no_phantom_session`.
+///
+/// **(#8184) The session's agent shape defaults to SOLO.** A session minted
+/// here runs #8031's single-agent path: the named agent carries its own tcode
+/// tools (read/edit/write/bash) and `delegate_to_agent` is never registered.
+/// This is a deliberate default change — `tcode tui`'s interactive session is
+/// minted through this method and could not do a basic read-edit loop while
+/// the delegating PM registry (which has no filesystem tools at all) was the
+/// only shape available. `delegate: true` asks for the pre-#8184 PM instead;
+/// `task.run`'s own mint path is untouched and stays delegating by default.
+/// The chosen shape is persisted on `Session.no_delegate`, so
+/// `session.status`/`session.list` state which agent a session runs.
+/// Test: `tests::create_defaults_to_the_solo_agent`,
+/// `tests::create_with_delegate_true_keeps_the_delegating_pm`,
+/// `tests::create_without_project_defaults_to_the_solo_agent`.
 async fn create(
     registry: &SessionRegistry,
     workstreams: &SharedWorkstreamStore,
@@ -302,7 +327,12 @@ async fn create(
         workstreams,
         p.workstream_id.as_deref(),
         "session.create",
-        || registry.create(p.task, p.agent, binding).id,
+        // #8184: solo unless the caller explicitly asks for the PM.
+        || {
+            registry
+                .create_with_delegation(p.task, p.agent, binding, !p.delegate)
+                .id
+        },
     )
     .await
 }
