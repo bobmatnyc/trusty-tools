@@ -78,6 +78,9 @@ name = "trusty-mpm"
 # bundles the rust-delivery-workflow skill and wires it to rust-engineer,
 # touching src/**, so the "PR version bump vs crates.io" check (#4421)
 # requires the bump. Patch: additive skill bundling, no breaking change.
+# Also #8135/#8156 (this PR): same 1.6.1 patch bump applies here too, since
+# this PR also edits src/** (tm-delegation-patterns.md skill asset) after
+# 1.6.0's crates.io publish.
 version = "1.6.1"
 edition.workspace = true
 rust-version.workspace = true
