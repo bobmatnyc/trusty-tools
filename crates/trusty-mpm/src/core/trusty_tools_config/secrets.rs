@@ -134,24 +134,81 @@ pub fn resolve_group(
     Ok(group)
 }
 
-/// Read the `secrets:` section from an explicit config path.
+/// Read the `secrets:` section from an explicit config path, FAILING CLOSED
+/// on a config that will not parse.
 ///
-/// Why: the test seam — every write test round-trips through a temp path.
-/// What: an unreadable or absent file resolves to `None`, the same
-/// "no configuration" answer an empty file gives.
-/// Test: `secrets_configure_writes_group_and_backend_to_config`.
-pub fn load_at(path: &Path) -> Option<SecretsConfig> {
-    trusty_common::crate_config::load_at::<TrustyToolsConfig>(path)
-        .ok()
-        .flatten()
-        .and_then(|c| c.secrets)
+/// Why: collapsing a read/parse failure to `None` makes an unreadable config
+/// indistinguishable from "no `secrets:` section", so `add`/`list`/`remove`
+/// would fall through to the git-remote-derived group and silently target a
+/// different vault than the operator configured. Same inversion #6927 found in
+/// the disk keep-list, and the same three-way answer as
+/// [`super::load_disk_keep_list_at`].
+/// What: absent file (or an empty one) → `Ok(None)`; a valid file → its
+/// section; a read or parse failure → `Err`.
+/// Test: `secrets_config_load_reports_a_corrupt_config_instead_of_defaulting`,
+/// `secrets_configure_writes_group_and_backend_to_config`.
+pub fn load_at(path: &Path) -> Result<Option<SecretsConfig>, SecretsConfigError> {
+    Ok(trusty_common::crate_config::load_at::<TrustyToolsConfig>(path)?.and_then(|c| c.secrets))
 }
 
 /// Read the `secrets:` section from the machine config file.
 ///
-/// Test: covered by the live smoke in PR #7521's report.
-pub fn load() -> Option<SecretsConfig> {
-    trusty_common::crate_config::crate_config_path(CRATE_NAME).and_then(|p| load_at(&p))
+/// What: an unknown home is "no config" (`Ok(None)`), the same answer an
+/// absent file gives; every other failure propagates.
+/// Test: `secrets_config_load_reports_a_corrupt_config_instead_of_defaulting`
+/// covers the fail-closed path through [`load_at`].
+pub fn load() -> Result<Option<SecretsConfig>, SecretsConfigError> {
+    match trusty_common::crate_config::crate_config_path(CRATE_NAME) {
+        Some(path) => load_at(&path),
+        None => Ok(None),
+    }
+}
+
+/// Backend and group for one invocation, resolved together and fail-closed.
+///
+/// Why: the single entry point every `tm secrets` verb uses, so a corrupt
+/// config cannot reach the group resolver through one caller while another
+/// propagates it.
+/// What: loads the section (propagating a read/parse failure), then resolves
+/// the backend and the group. Holds no value.
+/// Test: `secrets_config_load_reports_a_corrupt_config_instead_of_defaulting`,
+/// `secrets_group_resolution_prefers_the_configured_group`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSecrets {
+    /// Backend id — `keychain` in slice 1.
+    pub backend: String,
+    /// The vault namespace this invocation reads and writes.
+    pub group: String,
+}
+
+/// Resolve backend and group from the config file at `path`.
+///
+/// Test: `secrets_config_load_reports_a_corrupt_config_instead_of_defaulting`.
+pub fn resolve_at(
+    path: &Path,
+    explicit_group: Option<&str>,
+    dir: &Path,
+) -> Result<ResolvedSecrets, SecretsConfigError> {
+    let cfg = load_at(path)?;
+    Ok(ResolvedSecrets {
+        backend: resolve_backend(cfg.as_ref()),
+        group: resolve_group(explicit_group, cfg.as_ref(), dir)?,
+    })
+}
+
+/// Resolve backend and group from the machine config file.
+///
+/// Test: `secrets_config_load_reports_a_corrupt_config_instead_of_defaulting`
+/// covers the shared [`resolve_at`] body.
+pub fn resolve(
+    explicit_group: Option<&str>,
+    dir: &Path,
+) -> Result<ResolvedSecrets, SecretsConfigError> {
+    let cfg = load()?;
+    Ok(ResolvedSecrets {
+        backend: resolve_backend(cfg.as_ref()),
+        group: resolve_group(explicit_group, cfg.as_ref(), dir)?,
+    })
 }
 
 /// Merge `cfg` into the config file at `path`, preserving every other setting.
@@ -201,7 +258,9 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_at(&path).expect("secrets section must round-trip");
+        let loaded = load_at(&path)
+            .expect("a valid config must load")
+            .expect("secrets section must round-trip");
         assert_eq!(loaded.backend.as_deref(), Some(KEYCHAIN_BACKEND));
         assert_eq!(loaded.group.as_deref(), Some("bobmatnyc/trusty-tools"));
 
@@ -251,6 +310,37 @@ mod tests {
             resolve_group(Some("../escape"), None, tmp.path()).is_err(),
             "an illegal group must be refused, not sanitized"
         );
+    }
+
+    /// Why: a config that will not parse must not read as "no `secrets:`
+    /// section". Collapsing it to `None` sends `add`/`list`/`remove` to the
+    /// git-remote-derived group — a DIFFERENT vault than the operator
+    /// configured — with nothing said about it. The group resolver must never
+    /// be consulted at all when the load failed, which is what the error
+    /// VARIANT proves here: fail-open reached `resolve_group` and returned
+    /// `GroupUndetermined` (or, in a checkout with a remote, a group).
+    /// Test: itself.
+    #[test]
+    fn secrets_config_load_reports_a_corrupt_config_instead_of_defaulting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "secrets:\n  backend: [unclosed\n").unwrap();
+
+        let err = load_at(&path).unwrap_err();
+        assert!(
+            matches!(err, SecretsConfigError::Config(_)),
+            "a corrupt config must surface as a config error, got: {err}"
+        );
+
+        let err = resolve_at(&path, None, tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, SecretsConfigError::Config(_)),
+            "resolution must stop at the load, never reach the group resolver: {err}"
+        );
+
+        // An ABSENT file is still the documented "no configuration" answer.
+        let missing = tmp.path().join("absent.yaml");
+        assert_eq!(load_at(&missing).unwrap(), None);
     }
 
     /// Why: fail-closed — a directory with no git remote and no configured

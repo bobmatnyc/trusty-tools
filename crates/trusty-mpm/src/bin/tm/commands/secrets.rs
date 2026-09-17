@@ -67,8 +67,9 @@ fn validate_provider(provider: &str) -> anyhow::Result<()> {
 fn configure(provider: &str, group: Option<&str>) -> anyhow::Result<()> {
     validate_provider(provider)?;
     let cwd = std::env::current_dir().context("resolving the working directory")?;
-    let existing = secrets_config::load();
-    let group = secrets_config::resolve_group(group, existing.as_ref(), &cwd)?;
+    // A config that will not parse is an error here, never a fall-through to
+    // the git-remote-derived group.
+    let group = secrets_config::resolve(group, &cwd)?.group;
     let path = secrets_config::save(SecretsConfig::new(KEYCHAIN_BACKEND, Some(group.clone())))?;
     println!("tm secrets: backend {KEYCHAIN_BACKEND}, group {group}");
     println!("  config: {}", path.display());
@@ -89,12 +90,12 @@ fn configure(provider: &str, group: Option<&str>) -> anyhow::Result<()> {
 /// Test: exercised by `secrets_list_prints_names_only` through the injected
 /// backend; the config half is tested in `trusty_tools_config::secrets`.
 fn open_backend() -> anyhow::Result<KeychainBackend> {
-    let cfg = secrets_config::load();
-    let backend = secrets_config::resolve_backend(cfg.as_ref());
-    validate_provider(&backend)?;
     let cwd = std::env::current_dir().context("resolving the working directory")?;
-    let group = secrets_config::resolve_group(None, cfg.as_ref(), &cwd)?;
-    Ok(KeychainBackend::new(&group)?)
+    // Fail-closed: a corrupt config errors here rather than resolving to the
+    // git-remote-derived group, which would be a different vault.
+    let resolved = secrets_config::resolve(None, &cwd)?;
+    validate_provider(&resolved.backend)?;
+    Ok(KeychainBackend::new(&resolved.group)?)
 }
 
 /// Read a value from `reader` to EOF, trimmed; blank is an error.

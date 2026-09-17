@@ -381,7 +381,17 @@ impl KeychainBackend {
         })
     }
 
-    /// Write the index back at `0600`, creating its directory if needed.
+    /// Write the index back at `0600`, atomically, creating its directory if
+    /// needed.
+    ///
+    /// Why: a crash mid-write would otherwise leave truncated JSON at the
+    /// final path, which [`Self::read_index`] then refuses forever — a vault
+    /// that lists nothing and refuses every add. Same tmp-then-rename shape
+    /// `FileKeyStore::write` uses for the credentials file.
+    /// What: renders, writes to `<index>.json.tmp` at `0600` from birth, then
+    /// renames onto the final path. A failed tmp write leaves the previous
+    /// index untouched.
+    /// Test: `keychain_backend_index_write_is_atomic`.
     fn write_index(&self, mut index: SecretsIndex) -> Result<(), KeyStoreError> {
         index.group = self.group.clone();
         index.names.sort();
@@ -396,7 +406,12 @@ impl KeychainBackend {
             path: self.index_path.clone(),
             source: std::io::Error::other(e.to_string()),
         })?;
-        write_owner_only(&self.index_path, &json)
+        let tmp = self.index_path.with_extension("json.tmp");
+        write_owner_only(&tmp, &json)?;
+        std::fs::rename(&tmp, &self.index_path).map_err(|e| KeyStoreError::Io {
+            path: self.index_path.clone(),
+            source: e,
+        })
     }
 }
 

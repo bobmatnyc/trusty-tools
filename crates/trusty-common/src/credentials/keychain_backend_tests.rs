@@ -121,6 +121,43 @@ fn keychain_backend_debug_never_contains_a_value() {
     assert!(rendered.contains("trusty/bobmatnyc/trusty-tools"));
 }
 
+/// Why: a crash mid-write would leave truncated JSON at the final path, and
+/// `read_index` (correctly) refuses that forever — a vault that lists nothing
+/// and refuses every add. The write must therefore land by rename, and a
+/// failed write must leave the previous index intact.
+/// Test: itself.
+#[test]
+fn keychain_backend_index_write_is_atomic() {
+    let (_tmp, _store, backend) = fixture();
+    backend.set("FIRST", FAKE_VALUE).unwrap();
+
+    let tmp_path = backend.index_path().with_extension("json.tmp");
+    assert!(
+        !tmp_path.exists(),
+        "no scratch file may survive a successful write"
+    );
+    assert_eq!(backend.list().unwrap(), vec!["FIRST".to_string()]);
+    let before = std::fs::read_to_string(backend.index_path()).unwrap();
+
+    // Make the scratch write fail: a directory cannot be opened for writing.
+    std::fs::create_dir(&tmp_path).unwrap();
+    let err = backend.set("SECOND", FAKE_VALUE);
+    assert!(err.is_err(), "a failed scratch write must surface");
+    assert_eq!(
+        std::fs::read_to_string(backend.index_path()).unwrap(),
+        before,
+        "a failed write must leave the previous index byte-identical"
+    );
+    assert_eq!(backend.list().unwrap(), vec!["FIRST".to_string()]);
+
+    std::fs::remove_dir(&tmp_path).unwrap();
+    backend.set("SECOND", FAKE_VALUE).unwrap();
+    assert_eq!(
+        backend.list().unwrap(),
+        vec!["FIRST".to_string(), "SECOND".to_string()]
+    );
+}
+
 /// Why: the group is a path segment under `~/.trusty-tools/...`; a `..`
 /// segment would place the index outside it.
 /// Test: itself.
