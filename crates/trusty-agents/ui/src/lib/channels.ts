@@ -31,12 +31,9 @@ export interface ChannelIngestFilter { label_ids:string[]; }
 // as a two-way channel; its target is a correspondent (`from:someone@example.com`)
 // or a label (`label:INBOX`), not a destination id, so the placeholder is per
 // provider.
-// #8187 (critic LOW): a provider id is the string the daemon serves, in BOTH
-// records. A closed union here was a claim this bundle cannot keep: the table
-// carries whatever adapters the daemon has — the opt-in `stub`, the connector
-// id `gmail` a migrated listener declares, an adapter shipped after this bundle
-// was built — and a binding's provider is picked out of that table. Unknown ids
-// are handled where it matters, in `targetHint` and [`offerableProviders`].
+// #8187: `provider` is a plain string in both records — the daemon's table
+// carries whatever adapters it has, so a closed union here would go stale.
+// Unknown ids are handled in `targetHint` and `offerableProviders`.
 export interface ChannelBinding { id:string; name:string; provider:string; target:string; enabled:boolean; send_enabled:boolean; receive_enabled:boolean; filter:ChannelFilter; instructions:string; credential_ref?:string; }
 export interface ChannelProvider {id:string;name:string;configured:boolean;can_send:boolean;can_read:boolean;can_receive?:boolean;receive_reason?:string;}
 export interface ChannelBindingStatus {dispatch_failures:number;last_error:string|null;}
@@ -136,7 +133,7 @@ export const createGlobalChannel=(revision:string,channel:NewGlobalChannel)=>wit
  * DELETE carries no body the server can rely on. `force` is sent only when it
  * is true, so an ordinary delete cannot be mistaken for a forced one in a log
  * or a proxy. Unforced, the server refuses with 409 and names the assistants
- * whose bindings overlay this channel — see [`channelReferences`].
+ * whose bindings overlay this channel — see `channelReferences`.
  * Test: `channels.global.test.ts`, `GlobalChannelsPanel.test.ts`.
  */
 export const deleteGlobalChannel=(revision:string,id:string,force=false)=>withChannelWriteAuth(headers=>tmApi<GlobalChannelDeletion>(`${channelPath(id)}?revision=${encodeURIComponent(revision)}${force?'&force=true':''}`,{method:'DELETE',headers}));

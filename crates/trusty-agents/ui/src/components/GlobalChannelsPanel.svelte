@@ -86,11 +86,9 @@
   /**
    * False while the parent's scope toggle hides this panel (#8187).
    *
-   * Why: the toggle hides the panel with `display:none` on an ancestor
-   * (`ChannelsView.svelte`), which does not unmount it. An open confirmation
-   * hidden that way stayed ARMED — the window Escape handler still answered for
-   * it and `dirty` still pinned the assistant selector — with nothing on screen
-   * to explain either (critic MEDIUM).
+   * Why: the toggle is `display:none` on an ancestor (`ChannelsView.svelte`),
+   * which does not unmount — so an open confirmation stayed armed, answering
+   * the window Escape handler with nothing on screen to explain it.
    */
   export let visible = true;
   /**
@@ -242,13 +240,12 @@
     pending = channel; referencedBy = []; pendingError = ''; error = ''; notice = '';
   }
   /**
-   * Dismiss the confirmation and give focus to `target`, the Delete button that
-   * raised it unless a caller names another (critic MEDIUM-2, LOW).
+   * Dismiss the confirmation and focus `target`, by default the Delete button
+   * that raised it (#8187).
    *
-   * What: the focus call waits a tick. The list `fieldset` is disabled while
-   * the dialog is up, and a disabled button cannot take focus, so restoring it
-   * before the DOM re-renders would silently land on `<body>`. A landed delete
-   * passes the Add button, because its own row — and the button in it — is gone.
+   * What: the focus call waits a tick, because the list `fieldset` is still
+   * disabled while the dialog is up and a disabled button cannot take focus. A
+   * landed delete passes the Add button, its own row having gone with it.
    */
   async function closeDelete(target: HTMLElement | null = invoker) {
     pending = null; referencedBy = []; pendingError = '';
