@@ -410,13 +410,17 @@ it('says a deleted receiver keeps polling until the daemon restarts', async () =
   expect(document.body.textContent).toContain('Restarting it stops the receiver');
 });
 
-it('says nothing about a restart when no receiver was left running', async () => {
+// The mirror of the test above, on a channel that does not receive at all, so
+// the walked-through fixture matches the name: nothing is said about a restart
+// because the server reported nothing was left running.
+it('says nothing about a restart when the server reports no receiver was left running', async () => {
+  channels = [channel({ receive_enabled: false })];
   await render();
-  deleteButton('Ops').click();
+  deleteButton('Personal mail').click();
   await settle();
   button('Delete channel').click();
   await settle();
-  expect(document.body.textContent).toContain('Ops deleted.');
+  expect(document.body.textContent).toContain('Personal mail deleted.');
   expect(document.body.textContent).not.toContain('keeps polling until the daemon restarts');
 });
 
@@ -646,4 +650,32 @@ it('states why the create failed when the reload after the conflict also fails',
   // The reload is what tells a duplicate id from a lost race. When it fails
   // too, the create's own refusal is the only thing left to say (critic LOW).
   expect(alerts()).toContain('Channel settings changed');
+});
+
+// #8187 (critic HIGH): the confirmation branched on `receive_enabled` and said
+// either that a receiver keeps polling or that the change is immediate. Neither
+// is this page's to claim: `receive_enabled` is not the rule that decides
+// whether a receiver survives — an enabled Gmail channel with receiving off
+// still has a poll loop — so an immediacy claim was simply false there. Before
+// the response, the only truthful sentence is that the result will report it.
+async function dialogTextForDelete(receive: boolean) {
+  channels = [channel({ receive_enabled: receive })];
+  await render();
+  deleteButton('Personal mail').click();
+  await settle();
+  return document.querySelector('[role="dialog"]')?.textContent ?? '';
+}
+
+it('claims nothing about when receiving stops before the delete, with receiving off', async () => {
+  const dialog = await dialogTextForDelete(false);
+  expect(dialog).not.toContain('The change is immediate');
+  expect(dialog).not.toContain('keeps polling');
+  expect(dialog).toContain('will say whether a receiver');
+});
+
+it('claims nothing about when receiving stops before the delete, with receiving on', async () => {
+  const dialog = await dialogTextForDelete(true);
+  expect(dialog).not.toContain('The change is immediate');
+  expect(dialog).not.toContain('keeps polling');
+  expect(dialog).toContain('will say whether a receiver');
 });

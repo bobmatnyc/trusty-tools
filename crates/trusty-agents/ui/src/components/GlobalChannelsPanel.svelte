@@ -35,11 +35,11 @@
    * their own revision, so leaving them pending beside an unsaved field edit
    * would mean two drafts of one list.
    *
-   * #8187 (critic HIGH): what a delete publishes is not the whole of what it
-   * does. The route removes the DECLARATION; a receiver already polling keeps
-   * polling until the daemon restarts, and only the server knows whether one
-   * was. Every sentence this panel says about a delete is conditioned on the
-   * `receiving_until_restart` it answers with — see [`RECEIVER_LIVES`].
+   * #8187 (critic HIGH): a delete removes the DECLARATION, and whether a
+   * receiver for it keeps running until the daemon restarts is the server's to
+   * report — no field this page holds predicts it. So the confirmation claims
+   * nothing about when receiving stops, and the notice after it says the
+   * restart fact exactly when `receiving_until_restart` came back true.
    * Test: `GlobalChannelsPanel.test.ts`.
    */
   import { onDestroy, onMount, tick } from 'svelte';
@@ -175,8 +175,8 @@
    * re-check immediately before going to the wire.
    */
   const UNSAVED = 'The list below has unsaved changes. Save or discard them first — adding or deleting publishes the stored list, which would throw those changes away.';
-  // #8187 (critic HIGH): said only when the server reports it, and in the same
-  // words the confirmation warned with.
+  // #8187 (critic HIGH): said after a delete, and only when its response
+  // reported `receiving_until_restart`.
   const RECEIVER_LIVES = 'Its receiver keeps polling until the daemon restarts. Restarting it stops the receiver.';
   /** Open the Add form on a channel that does nothing until it is enabled. */
   function beginAdd() {
@@ -421,12 +421,11 @@
       {#if referencedBy.length}
         <p role="alert">{referencedBy.join(', ')} {referencedBy.length === 1 ? 'still binds' : 'still bind'} this channel.</p>
         <p>Deleting it anyway keeps {referencedBy.length === 1 ? 'that binding' : 'those bindings'} on the assistant, but inert: {referencedBy.length === 1 ? 'it addresses' : 'they address'} nothing, send nothing and receive nothing until {referencedBy.length === 1 ? 'it is' : 'they are'} removed there. Removing the binding first avoids that.</p>
-      {:else if pending.receive_enabled}
-        <!-- #8187 (critic HIGH): a receiving channel's poll loop outlives the
-             delete, so this branch never claims the change is immediate. -->
-        <p>This removes the channel from this host and is not covered by Save. Anything it routes to stops receiving its updates. {RECEIVER_LIVES}</p>
       {:else}
-        <p>This removes the channel from this host. Anything it routes to stops receiving its updates. The change is immediate and is not covered by Save.</p>
+        <!-- #8187 (critic HIGH): whether a receiver outlives the delete is the
+             server's to report and no client-side field predicts it, so this
+             says nothing in either direction until the response does. -->
+        <p>This removes the channel from this host and is not covered by Save. Anything it routes to stops receiving its updates. The result will say whether a receiver for it is left running until the daemon restarts.</p>
       {/if}
       {#if pendingError}<p class="error" role="alert">{pendingError}</p>{/if}
       <div class="row">
