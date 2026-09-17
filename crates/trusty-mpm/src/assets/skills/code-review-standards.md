@@ -173,6 +173,17 @@ the acceptance record to state how the documented escape path was actually
 exercised — the command run and its result. Prose alone marks the criterion
 unverified, never MET (#8132).
 
+## Liveness Criteria Require a Sampled Check
+
+A single HTTPS request checked right after a managed certificate reports
+ACTIVE can still fail on a transient TLS handshake error. One failing request
+reports a false red; one lucky success reports a false green over an endpoint
+that is mostly failing.
+
+Require a liveness acceptance criterion — "the certificate is live", "the
+endpoint answers" — to cite a sample with a stated count, N/M requests over T
+seconds, never a single request (#8131).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
