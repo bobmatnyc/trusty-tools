@@ -24,5 +24,4 @@
 /// What: embedded markdown skill file deployed to
 /// `skills/rust-delivery-workflow.md`.
 /// Test: `bundle_table_is_complete`, `rust_delivery_workflow_skill_is_in_bundle`.
-pub const RUST_DELIVERY_WORKFLOW: &str =
-    include_str!("../assets/skills/rust-delivery-workflow.md");
+pub const RUST_DELIVERY_WORKFLOW: &str = include_str!("../assets/skills/rust-delivery-workflow.md");

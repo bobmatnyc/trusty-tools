@@ -1370,15 +1370,36 @@ fn rust_delivery_workflow_states_each_delivery_rule() {
     // reachability test above, so pin the rule set itself — one needle per
     // section that a rewrite must not silently lose.
     for (fact, needle) in [
-        ("it defers build speed to the sibling skill", "rust-build-performance"),
-        ("the gate chain is preceded by a commit", "Commit and push the branch"),
-        ("CI's workflow file is the clippy pin's source", "CI workflow file is the source of truth"),
-        ("a crate-scoped local pass is not CI evidence", "is not evidence"),
-        ("concurrent builds contend for RAM, not just the build lock", "CPU and RAM bound"),
+        (
+            "it defers build speed to the sibling skill",
+            "rust-build-performance",
+        ),
+        (
+            "the gate chain is preceded by a commit",
+            "Commit and push the branch",
+        ),
+        (
+            "CI's workflow file is the clippy pin's source",
+            "CI workflow file is the source of truth",
+        ),
+        (
+            "a crate-scoped local pass is not CI evidence",
+            "is not evidence",
+        ),
+        (
+            "concurrent builds contend for RAM, not just the build lock",
+            "CPU and RAM bound",
+        ),
         ("the job cap is read off the machine", "CARGO_BUILD_JOBS"),
-        ("env must be prefixed inline per command", "does not persist"),
+        (
+            "env must be prefixed inline per command",
+            "does not persist",
+        ),
         ("gate output is a verdict", "EXIT=$?"),
-        ("sccache is recommended, never silently enabled", "never silently enable"),
+        (
+            "sccache is recommended, never silently enabled",
+            "never silently enable",
+        ),
         ("installs batch across a merge batch", "one `cargo install`"),
         ("test scope widens by stage", "Test Scope Widens by Stage"),
     ] {
