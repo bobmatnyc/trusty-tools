@@ -31,9 +31,15 @@
    * another writer's unrelated edit into a 409 instead of republishing a stale
    * list, and a delete can be refused by a server that knows something this
    * page does not — which per-assistant bindings overlay the channel. Creating
-   * and deleting are deliberately immediate, not part of the Save above: both
-   * publish on their own revision, so leaving them pending beside an unsaved
-   * field edit would mean two drafts of one list.
+   * and deleting are deliberately not part of the Save above: both publish on
+   * their own revision, so leaving them pending beside an unsaved field edit
+   * would mean two drafts of one list.
+   *
+   * #8187 (critic HIGH): what a delete publishes is not the whole of what it
+   * does. The route removes the DECLARATION; a receiver already polling keeps
+   * polling until the daemon restarts, and only the server knows whether one
+   * was. Every sentence this panel says about a delete is conditioned on the
+   * `receiving_until_restart` it answers with — see [`RECEIVER_LIVES`].
    * Test: `GlobalChannelsPanel.test.ts`.
    */
   import { onDestroy, onMount, tick } from 'svelte';
