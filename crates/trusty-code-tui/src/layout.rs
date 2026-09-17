@@ -149,4 +149,91 @@ mod tests {
                 .expect("draw app with a pending permission prompt");
         }
     }
+
+    /// Every row of the rendered frame, as plain text.
+    fn rendered_rows(app: &ReplApp, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("construct terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// #8205 regression, at the 80x24 the defect was reported on: the connect
+    /// line's `home <path>` must be RENDERED, not merely assembled. The chat
+    /// pane used to be sized by logical line count while the pane wraps, so
+    /// the status line's continuation row fell outside the pane and the home
+    /// path — the fact the owner ruled must be named — never reached a cell.
+    ///
+    /// The three shapes are the ones `tui_client::splash::connect_line`
+    /// produces: a short bound path, a long worktree path (pre-elided at that
+    /// function's 60-column path budget), and projectless with a workstream.
+    #[test]
+    fn draw_keeps_the_connect_line_home_segment_at_80_columns() {
+        let socket = "/Users/masa/Library/Application Support/tcode/tcode.sock";
+        let worktree = crate::text::elide_middle(
+            "/private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef",
+            60,
+        );
+        let cases: [(&str, &str); 3] = [
+            ("/private/tmp/q8230/repoA", ""),
+            (&worktree, ""),
+            (
+                "projectless",
+                ", workstream bobmatnyc/bakeoff-l1 (548f2143)",
+            ),
+        ];
+
+        for (home, workstream) in cases {
+            let mut app = ReplApp::new("demo", "bob");
+            app.show_banner = false;
+            app.push_status(format!(
+                "connected to tcode daemon at {socket} — home {home}{workstream}, \
+                 solo agent (no delegation)"
+            ));
+            let rows = rendered_rows(&app, 80, 24);
+
+            assert!(
+                rows.iter().any(|r| r.contains(home)),
+                "the home segment must reach a cell: {home:?} missing from {rows:#?}"
+            );
+            assert!(
+                rows.iter().any(|r| r.contains("home")),
+                "the `home` label must render: {rows:#?}"
+            );
+            if !workstream.is_empty() {
+                assert!(
+                    rows.iter().any(|r| r.contains("bobmatnyc/bakeoff-l1")),
+                    "a bound workstream must render: {rows:#?}"
+                );
+            }
+        }
+    }
+
+    /// #8205: the repository name is what the banner's `project` row is read
+    /// for, and it used to be the first thing elided away at 80 columns.
+    #[test]
+    fn draw_keeps_the_repository_name_on_the_banner_project_row() {
+        let mut app = ReplApp::new("demo", "bob");
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0".to_string(),
+            "project /private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef"
+                .to_string(),
+        ];
+        let rows = rendered_rows(&app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("trusty-tools-demo")),
+            "the repository name must render: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("agent-0123456789abcdef")),
+            "the worktree name must render: {rows:#?}"
+        );
+    }
 }
