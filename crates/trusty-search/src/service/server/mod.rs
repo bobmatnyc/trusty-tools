@@ -110,6 +110,9 @@ mod tests_8148;
 // #8134: vectors restored over an empty corpus never register as ready.
 #[cfg(test)]
 mod tests_8134;
+// #8147: `POST /indexes` must honour `colocated: false`.
+#[cfg(test)]
+mod tests_8147;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

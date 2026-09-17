@@ -221,6 +221,29 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     pub defer_embed: Option<bool>,
 
+    /// Storage layout for this registration (issue #403 chose colocated;
+    /// #8147 makes it selectable). `None`/missing/`true` ⇒ the corpus lives at
+    /// `<root_path>/.trusty-search/` exactly as before. `false` ⇒ it lives at
+    /// `<data_dir>/indexes/<id>/`, and nothing is created under `root_path`.
+    ///
+    /// Why: registration unconditionally opened (and created)
+    /// `<root>/.trusty-search/`, so a read-only or root-owned root answered
+    /// `500 corpus open failed … refusing to register a broken index handle`
+    /// — an index deliberately built into the data-dir store could be DELETEd
+    /// but never re-registered without a daemon restart. The persistence layer
+    /// has always routed on `PersistedIndex::colocated`; only this door
+    /// hardcoded `true`.
+    /// What: `Option<bool>`; persisted to `indexes.toml` so warm boot restores
+    /// the same layout. `false` against a root that ALREADY has
+    /// `.trusty-search/` is refused with `400` — the write paths route on
+    /// `has_colocated_storage(root)`, so honouring it there would split the
+    /// writer and the loader across two layouts (the #483/#485 failure, in
+    /// reverse).
+    /// Test: `create_index_honours_colocated_false`,
+    /// `create_index_refuses_colocated_false_over_existing_colocated_storage`.
+    #[serde(default)]
+    pub colocated: Option<bool>,
+
     /// Issue #1372: extra directory basenames pruned during the reindex walk on
     /// top of the built-in `SKIP_DIRS`. `None`/missing ⇒ the targeted default
     /// set (`data`/`exports`/`output`/`reports`/`snapshots`/`results`); an

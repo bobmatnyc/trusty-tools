@@ -234,6 +234,15 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **`colocated` (bool, optional, #8147)**: storage layout. Omitted or `true` ⇒
+  the corpus lives at `<root_path>/.trusty-search/` (the #403 default, and the
+  only shape the off-box delivery recipe below describes). `false` ⇒ it lives
+  at `<data_dir>/indexes/<id>/` and registration creates nothing under
+  `root_path` — the way to adopt an index whose root is read-only or
+  root-owned, which otherwise answered `500 corpus open failed for root_path
+  …`. `false` against a root that already contains `.trusty-search/` is
+  refused with `400`: the write paths route on that directory's presence, so
+  the two layouts would disagree.
 
 ###### Off-box per-index delivery (issue #8135)
 
