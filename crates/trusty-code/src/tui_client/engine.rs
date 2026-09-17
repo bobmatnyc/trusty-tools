@@ -239,6 +239,10 @@ impl TuiEngine for CodeEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
 
+        // #8184: the daemon only prompts while someone is watching this
+        // session; claim that BEFORE any run can issue a gated tool call.
+        super::prompter_claim::hold_prompter_claim(self.state.clone(), session_id.clone()).await?;
+
         // `TuiEngine::commands()` cache — see `EngineState`'s struct docs.
         // The one engine-routed command this MVP supports.
         *self

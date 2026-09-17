@@ -621,6 +621,49 @@ async fn respond_permission_without_a_session_is_a_noop() {
     );
 }
 
+/// #8184: `setup` claims a prompter BEFORE any run can issue a gated call.
+///
+/// Why: the daemon suspends an `ask` only while someone is watching that
+/// session (#8100), and on this transport the only thing that claims a
+/// prompter is an open `session.events` stream. `run_chat_turn` issued
+/// `task.run` first and opened its stream afterwards, so the interactive
+/// default's first `write_file`/`bash` — gated since #8184 — raced the stream
+/// open and a call that lost was DENIED with no prompt to answer. Ordering the
+/// claim into `setup` makes the race unreachable for every later turn.
+/// What: drives `setup` against the stub and asserts the claim stream was
+/// opened, right after the session was created and before anything else. FAILS
+/// before this change: `setup` requested `session.create` and never a
+/// `session.events`, so nothing held a claim until mid-turn.
+/// Test: this test.
+#[tokio::test]
+async fn setup_opens_a_prompter_claim_stream() {
+    let stub = StubDaemon::start(stub_answers(Some("ws-1")), vec![json!({"seq": 1})]);
+    let engine = stub.engine();
+    let (tx, _rx) = unbounded_channel();
+
+    engine.setup(tx).await.expect("setup against the stub");
+
+    let seen = stub.seen();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("session.create"),
+        "the session must exist before anything can watch it: {seen:?}"
+    );
+    let claim = seen
+        .iter()
+        .position(|m| m == "session.events")
+        .unwrap_or_else(|| panic!("setup must open the prompter-claim stream: {seen:?}"));
+    assert_eq!(
+        claim, 1,
+        "the claim must be the FIRST thing after the session is created, so no \
+         run can precede it: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&"task.run".to_string()),
+        "setup must not run anything: {seen:?}"
+    );
+}
+
 // ── #8184: the interactive session's default agent shape ────────────────────
 
 /// #8184: a plain `tcode tui` session runs the SOLO agent, against the bound

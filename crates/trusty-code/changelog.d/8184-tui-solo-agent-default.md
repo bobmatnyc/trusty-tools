@@ -44,6 +44,16 @@ Changed
   `session.status`/`session.list` would keep reporting as the other one — the
   same record-vs-run divergence the sibling `project` and `workstream_id`
   guards prevent. The shape is reported as `no_delegate` on both methods.
+- **The TUI holds a prompter claim from `setup`, before any run (#8184).** The
+  daemon suspends a tool call on an `ask` rule only while someone is watching
+  that session (#8100), and on this transport the only thing that claims a
+  prompter is an open `session.events` stream. `run_chat_turn` issued
+  `task.run` first and opened its stream afterwards, so the interactive
+  default's first gated `write_file`/`bash` raced the stream open and a call
+  that lost was refused with no prompt to answer — and every reconnect gap
+  reopened the same hole. `setup` now opens a dedicated claim stream and
+  confirms it before returning, held for the TUI's life alongside the per-turn
+  stream, so a gap needs both down at once.
 - **The TUI's connect line states which agent runs and where its file tools are
   rooted (#8184).** It now reads `… (session <id>; solo agent (no delegation),
   file tools rooted at <root>)`, or `… projectless — file tools rooted at a

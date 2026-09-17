@@ -112,19 +112,22 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 /// drop would turn a card that asks into a run that never prompts. Restoring
 /// the source's block here keeps the shipped card authoritative until the
 /// shared emitter carries the key itself.
-/// What: applies ONLY to a file the deployer wrote (`provenance:
-/// framework-owned`) whose stem names a `Direct` embedded agent, and ONLY when
-/// the file declares no block of its own — a hand-authored card, or a deployed
-/// one a user has since given rules, is never second-guessed. A malformed
-/// block in the embedded source is an `Err`, same fail-closed contract as
-/// `parse_permissions` above.
+/// What: applies ONLY to a file the deployer wrote — read as the PARSED
+/// `provenance:` key, not as a substring, so a quoting or ordering change in
+/// the emitter cannot silently turn this into a no-op — whose stem names a
+/// `Direct` embedded agent, and ONLY when the file declares no block of its
+/// own. A hand-authored card, or a deployed one a user has since given rules,
+/// is never second-guessed. A malformed block in the embedded source is an
+/// `Err`, same fail-closed contract as `parse_permissions` above.
 /// Test: `deployed_roster_copy_recovers_the_cards_permissions`,
 /// `hand_authored_file_gets_no_embedded_permissions`.
 fn deployed_roster_permissions(
     name: &str,
     raw: &str,
 ) -> anyhow::Result<Option<crate::permissions::PermissionMap>> {
-    if !raw.contains("provenance: framework-owned") {
+    if agent_metadata_from_str(raw).provenance
+        != Some(trusty_agents_common::agents::provenance::Provenance::FrameworkOwned)
+    {
         return Ok(None);
     }
     let Some(md) = crate::assets::DEFAULT_AGENTS.iter().find_map(|a| match a {

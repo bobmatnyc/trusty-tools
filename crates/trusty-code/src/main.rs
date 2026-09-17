@@ -253,6 +253,13 @@ enum Command {
         /// would get. Applies to both execution paths — the default
         /// thin-client path sends it as `task.run`'s `no_delegate` param, and
         /// `--legacy-in-process` passes it as `RunTaskParams.no_delegate`.
+        ///
+        /// With the default AGENT (`pm`) the stock card ASKS before `bash`,
+        /// `write_file`, `write_files` and `edit` (#3422, #8184), so a run
+        /// with no interactive client to answer refuses those calls. Set
+        /// `TCODE_PERMISSION_MODE=allow-asks` in the daemon's environment —
+        /// or, on `--legacy-in-process`, `--permission-mode allow-asks` — to
+        /// permit them. A `deny` rule is refused regardless.
         #[arg(long)]
         no_delegate: bool,
     },

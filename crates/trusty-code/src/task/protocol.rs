@@ -298,6 +298,12 @@ struct TaskRunRequestParams {
 /// Same rule, same rationale as the `project` and `workstream_id` guards. The
 /// mint path persists this call's own `no_delegate` onto the session it
 /// creates, so the run and the record always agree.
+///
+/// The guard is ONE-DIRECTIONAL by construction: `no_delegate` is a plain
+/// `bool` with a serde default, so an omitted field and an explicit `false`
+/// are the same value on the wire and a request cannot express "I want
+/// delegation" for the daemon to reject. A solo session therefore runs solo
+/// for a caller that asked for either — which is the shape it reports.
 /// Test: `task::protocol::tests::task_run_rejects_empty_task_description`,
 /// `task::protocol::tests::task_run_creates_session_when_none_given`,
 /// `task::protocol::tests::task_run_sessionful_reuses_existing_session`,

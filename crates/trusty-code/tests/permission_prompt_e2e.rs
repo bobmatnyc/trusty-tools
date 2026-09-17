@@ -297,7 +297,11 @@ async fn permission_deny_refuses_the_call_and_the_run_continues() {
 /// user's real project root. The two tests above prove the prompt works for a
 /// hand-written fixture card; only a run against the SHIPPED roster proves a
 /// user actually gets prompted. The project deliberately ships no
-/// `.claude/agents`, so `resolve_agent` falls back to the embedded `pm.md`.
+/// `.claude/agents`, so the run materializes the roster (`serve::run_daemon`)
+/// into `.trusty-code/agents/`, which `paths::agents_dir` prefers — meaning
+/// this exercises the DEPLOYED card, and with it
+/// `md_loader::deployed_roster_permissions`, which is what puts the block back
+/// after the deployer's frontmatter re-emit drops it.
 /// What: `session.create` with no `delegate` (the TUI's own call), `attach`
 /// BEFORE the run so a prompter is watching when the gate evaluates (#8100),
 /// then `task.run` against that session. The `echo` mock's scripted
