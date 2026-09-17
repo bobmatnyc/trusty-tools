@@ -221,9 +221,12 @@ pub fn build_router_with_channel_credential(
         )
         // #8038: update ONE declared channel. Same revision guard, same
         // `channel_auth::ChannelWriter` gate as the whole-list PUT.
+        // #8187: and delete ONE declared channel, which additionally refuses to
+        // orphan a per-assistant overlay unless the caller passes `force=true`.
         .route(
             "/api/channels/{id}",
-            axum::routing::put(super::global_channels::update_route),
+            axum::routing::put(super::global_channels::update_route)
+                .delete(super::global_channels::delete::delete_route),
         )
         // #8036: inject one inbound event into the provider-neutral dispatch
         // path, so #7609's wake/dispatch behaviour is verifiable without a live

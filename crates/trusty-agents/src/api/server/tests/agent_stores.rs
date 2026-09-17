@@ -227,6 +227,179 @@ async fn stores_route_degrades_on_malformed_toml() {
     assert!(body["config_error"].is_string());
 }
 
+/// Point the assistants root at `dir` under `ENV_LOCK`, restoring on drop.
+///
+/// #7902: `search_slots` resolves an assistant's knowledge state out of
+/// `assistants_root()`, so a test that does not redirect it would read the
+/// developer's own provisioned assistants.
+struct AssistantsRoot {
+    prev: Option<std::ffi::OsString>,
+    // Dropped last, so the lock outlives the restore.
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl AssistantsRoot {
+    fn set(dir: &std::path::Path) -> Self {
+        let lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os(crate::assistants::ASSISTANTS_DIR_ENV);
+        // SAFETY: ENV_LOCK is held for this guard's lifetime.
+        unsafe { std::env::set_var(crate::assistants::ASSISTANTS_DIR_ENV, dir) };
+        Self { prev, _lock: lock }
+    }
+}
+
+impl Drop for AssistantsRoot {
+    fn drop(&mut self) {
+        // SAFETY: the lock is still held — it drops after this body.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(crate::assistants::ASSISTANTS_DIR_ENV, v),
+                None => std::env::remove_var(crate::assistants::ASSISTANTS_DIR_ENV),
+            }
+        }
+    }
+}
+
+/// Provision protected knowledge for `izzie` under `root`, recording `legacy`
+/// as the legacy binding. Returns the protected extraction index id.
+fn provision_izzie(root: &std::path::Path, legacy: crate::stores::AgentStoreBinding) -> String {
+    let home = crate::assistants::AssistantHome::under(
+        root.to_path_buf(),
+        crate::assistants::AssistantInstanceId::new("izzie").expect("instance id"),
+    );
+    let store = crate::knowledge::KnowledgeStore::new(home);
+    let state = store
+        .initialize(chrono::Utc::now(), None)
+        .expect("provision knowledge");
+    store
+        .confirm_binding_with_legacy(&state.revision, Some(legacy))
+        .expect("confirm binding");
+    state.store.index_id
+}
+
+/// #7902 closure condition: the response says which index the default
+/// `vector_search` slot resolves to when it is NOT the declared binding.
+///
+/// Here the recorded legacy binding no longer matches the declared one, so the
+/// resolver refuses and the default slot resolves to nothing — while `stores`
+/// beside it still reports `bob-kb` as a live binding. That disagreement was
+/// invisible in this payload, which is the whole of #7902's remainder.
+///
+/// Pre-change this fails on the first assertion: the payload carries no
+/// `search_slot` key at all.
+#[tokio::test]
+async fn stores_route_reports_a_default_slot_that_differs_from_the_declared_index() {
+    let assistants = tempfile::tempdir().unwrap();
+    let root = assistants.path().canonicalize().unwrap();
+    let _root = AssistantsRoot::set(&root);
+    provision_izzie(
+        &root,
+        crate::stores::AgentStoreBinding {
+            name: "other-kb".into(),
+            index: Some("other-kb".into()),
+            ..Default::default()
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("izzie.toml"), BOUND_FIXTURE).unwrap();
+    let resp = stores_at(&[dir.path().to_path_buf()], "izzie", None, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let slot = &body["search_slot"];
+
+    assert_eq!(slot["declared_index"], "bob-kb", "the declared binding");
+    assert!(
+        slot["default_index"].is_null(),
+        "the default slot resolves to nothing: {slot}"
+    );
+    // #7902 (critic round): the resolver failed, so the payload reports that it
+    // does not know — never `differs`, which would claim a comparison against a
+    // default index that was never resolved.
+    assert_eq!(
+        slot["declared_agreement"], "unresolved",
+        "the payload says the slot could not be resolved, not that it differs: {slot}"
+    );
+    assert!(
+        slot["differs_from_declared"].is_null(),
+        "the boolean that could not answer the question is gone: {slot}"
+    );
+    assert!(
+        slot["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("binding changed")),
+        "with the resolver's own reason: {slot}"
+    );
+    assert_eq!(
+        body["stores"][0]["index"], "bob-kb",
+        "the store list still reports the declared index — the two are meant to be comparable"
+    );
+}
+
+/// #7902: the matching case reports no difference, and still names the
+/// protected extraction index the declared one does not displace.
+///
+/// Pre-change this fails on the first assertion: there is no `search_slot`.
+#[tokio::test]
+async fn stores_route_reports_no_difference_when_the_declared_index_answers() {
+    let assistants = tempfile::tempdir().unwrap();
+    let root = assistants.path().canonicalize().unwrap();
+    let _root = AssistantsRoot::set(&root);
+    let protected = provision_izzie(
+        &root,
+        crate::stores::AgentStoreBinding {
+            name: "bob-kb".into(),
+            tree: Some("okg://izzie".into()),
+            index: Some("bob-kb".into()),
+            palace: Some("owner-profile".into()),
+            ..Default::default()
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("izzie.toml"), BOUND_FIXTURE).unwrap();
+    let resp = stores_at(&[dir.path().to_path_buf()], "izzie", None, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let slot = &body["search_slot"];
+
+    assert_eq!(slot["declared_index"], "bob-kb");
+    assert_eq!(
+        slot["default_index"], "bob-kb",
+        "the declared index answers"
+    );
+    assert_eq!(slot["declared_agreement"], "agrees", "{slot}");
+    assert!(slot["error"].is_null(), "nothing to report: {slot}");
+    assert_eq!(
+        slot["protected_index"], protected,
+        "the protected index is named even though it is not the default: {slot}"
+    );
+}
+
+/// #7902 (critic round, MEDIUM): the state the two route tests above cannot
+/// reach — a resolver failure with NOTHING declared beside it.
+///
+/// The retired boolean answered `false` there, which read as "the declared
+/// index answers" from an answer the resolver never gave. Pre-change this test
+/// does not compile: `declared_agreement` did not exist.
+#[test]
+fn an_unresolved_slot_never_reads_as_agreement() {
+    use crate::api::server::agent_stores::declared_agreement;
+    assert_eq!(declared_agreement(true, None, None), "unresolved");
+    assert_eq!(declared_agreement(true, None, Some("bob-kb")), "unresolved");
+    assert_eq!(declared_agreement(false, None, None), "agrees");
+    assert_eq!(
+        declared_agreement(false, Some("bob-kb"), Some("bob-kb")),
+        "agrees"
+    );
+    assert_eq!(
+        declared_agreement(false, Some("other-kb"), Some("bob-kb")),
+        "differs"
+    );
+}
+
 /// Proves the route is wired into `build_router` (not just that the core
 /// function works). Unknown agent under the real agents dirs → 404, never a
 /// 405/404-from-no-such-route.
