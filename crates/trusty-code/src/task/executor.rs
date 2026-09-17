@@ -600,7 +600,12 @@ async fn run_and_record(
         // delegated engineer's turns via the SAME shared `transcript` the
         // engineer's `RecordingLlmClient` records into (`build_engineer_runner`
         // above), rather than the PM's own (bash-less) transcript.
-        .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
+        // #8206: the work root the engineer's tools are scoped to, so the PM's
+        // gate cannot refuse a finish on a root with no detectable test suite.
+        .with_finish_gate(crate::verify_gate::pm_finish_gate(
+            Arc::clone(&transcript),
+            Some(work_root.clone()),
+        ));
 
     // #2345: mark "how much assistant text exists before this run" so the
     // turn recorder can later scope its durable dual-write to just THIS
@@ -763,6 +768,9 @@ fn build_engineer_runner(
         .with_mode(params.mode)
         // #7948: each delegated sub-agent is gated by its own `permissions:`.
         .with_permissions(permissions)
+        // #8206: the same root the tools above are scoped to, so the delegated
+        // engineer's own verify-before-finish gate probes the right directory.
+        .with_work_root(work_root.to_path_buf())
         .with_timeout_secs(resolve_deadline_secs(params.deadline_secs));
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
