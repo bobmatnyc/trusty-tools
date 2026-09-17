@@ -18,6 +18,12 @@
 //! channel exactly as they refuse `notion` — the record cannot be saved, and a
 //! hand-written one wakes nobody. The providers listing omits it too, so the
 //! Channels UI never offers it.
+//!
+//! Recovery (#8037 review): a stub channel LEFT in `config.toml` after
+//! [`ENABLE_ENV`] is unset fails `global_channels::validate_all`, which runs
+//! over the whole stored list, so every channel write answers 400 "Unsupported
+//! channel provider" until the `[[channels]]` entry is deleted — by hand, or
+//! through the API after restarting the daemon with [`ENABLE_ENV`] set again.
 //! Test: `a_default_environment_has_no_stub_provider`,
 //! `the_stub_outbox_round_trips_a_send_into_a_read`,
 //! `stub_receive_builds_the_shared_wake_envelope`.
@@ -62,17 +68,15 @@ pub(crate) fn enabled() -> bool {
 /// round trip proves nothing. Keyed by `target` rather than by binding id so
 /// two assistants bound to one destination see one conversation, which is what
 /// the real providers do.
+///
+/// Never emptied (#8037 review): the map is process-global, so a test-only
+/// `clear_outbox` let one test drop another's traffic mid-run — two tests in
+/// different `serial_test` groups both wrote and cleared destination `desk`,
+/// and the pair failed 9 runs in 20 at `--test-threads=8`. Each test now writes
+/// its OWN destination instead, which are disjoint keys in one map, so no
+/// ordering between them can be observed and neither needs a serial group.
 static OUTBOX: LazyLock<Mutex<HashMap<String, Vec<Value>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Drop every recorded message. Test scaffolding; the outbox is process-global.
-#[cfg(test)]
-pub(crate) fn clear_outbox() {
-    OUTBOX
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
-}
 
 /// The in-process provider a stub channel talks to.
 pub(crate) struct StubAdapter;
@@ -226,12 +230,14 @@ mod tests {
     }
 
     /// A send is readable back through the same binding.
+    ///
+    /// Why the destination names (#8037 review): see [`OUTBOX`] — these two are
+    /// this test's alone, so nothing another test does to the shared map is
+    /// visible here and this test needs no serial group.
     #[tokio::test]
-    #[serial_test::serial(channel_stub_outbox)]
     async fn the_stub_outbox_round_trips_a_send_into_a_read() {
-        clear_outbox();
-        let desk = binding("desk");
-        let other = binding("other-desk");
+        let desk = binding("round-trip-desk");
+        let other = binding("round-trip-other-desk");
         assert!(StubAdapter.read(&desk).await.expect("read").is_empty());
 
         let ack = StubAdapter.send(&desk, "first").await.expect("send");
@@ -249,7 +255,6 @@ mod tests {
             "one destination reads back only its own traffic"
         );
         assert_eq!(StubAdapter.read(&other).await.expect("read").len(), 1);
-        clear_outbox();
     }
 
     /// An inbound stub event carries the shared envelope and names the binding.

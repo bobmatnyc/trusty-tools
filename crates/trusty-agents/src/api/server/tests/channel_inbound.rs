@@ -271,10 +271,13 @@ async fn a_stub_channel_sends_and_reads_back_over_http() {
     let _home_guard = crate::test_env::lock_home();
     let home = seed_home(STUB_CONFIG);
     let _stub = EnvVarGuard::set(stub::ENABLE_ENV, "1");
-    stub::clear_outbox();
 
+    // #8037 review: the stub outbox is process-global and is never emptied, so
+    // this test writes a destination no other test names — see
+    // `crate::channels::stub::OUTBOX`. Clearing it instead raced the stub's own
+    // round-trip test, which sat in a different `serial_test` group.
     let bindings = json!([{
-        "id":"stub-desk","name":"Stub Desk","provider":"stub","target":"desk",
+        "id":"stub-desk","name":"Stub Desk","provider":"stub","target":"http-e2e-desk",
         "enabled":true,"send_enabled":true,"receive_enabled":true
     }]);
     std::fs::write(
@@ -337,5 +340,4 @@ async fn a_stub_channel_sends_and_reads_back_over_http() {
         Some(vec![json!("hello desk")]),
         "the read answers with what the send accepted: {history}"
     );
-    stub::clear_outbox();
 }

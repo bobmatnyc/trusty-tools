@@ -57,10 +57,17 @@ const MAX_HEADER_CHARS: usize = 256;
 /// One inbound event, as a client states it.
 ///
 /// What: the channel supplies the provider, the destination and the routing, so
-/// the body is the message alone. `destination` is an override for a provider
-/// that matches on something other than the stored target — a gworkspace
-/// channel addresses a `from:` correspondent, which is the sender rather than
-/// the channel's own id.
+/// the body is the message alone.
+///
+/// Why no destination override (#8036 review): the field existed and no caller
+/// set it. It would also have escaped this route's containment —
+/// `agent_channels::inbound::receive_selection` picks a per-assistant binding
+/// by `(provider, destination)` and never by channel id, so an injection on
+/// global channel A naming B's destination would wake whatever assistant binds
+/// B over the same provider, which is not what the named channel routes to.
+/// `deny_unknown_fields` makes a body that still carries one a 4xx rather than
+/// a silent ignore.
+/// Test: `an_injection_may_not_name_its_own_destination`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Injection {
@@ -76,9 +83,6 @@ pub(crate) struct Injection {
     /// Subject, as a wake filter's `subject` rule reads it.
     #[serde(default)]
     pub(crate) subject: Option<String>,
-    /// Destination the event arrived on; defaults to the channel's `target`.
-    #[serde(default)]
-    pub(crate) destination: Option<String>,
 }
 
 fn default_event_type() -> String {
@@ -110,7 +114,6 @@ fn validate(injection: &Injection) -> Result<(), Error> {
     for (label, value) in [
         ("Sender", injection.from.as_deref()),
         ("Subject", injection.subject.as_deref()),
-        ("Destination", injection.destination.as_deref()),
     ] {
         if let Some(value) = value
             && !bounded(value)
@@ -224,10 +227,8 @@ pub(crate) async fn inject_with(
     if crate::channels::adapter(&provider).is_none() {
         return Err(bad("Unsupported channel provider"));
     }
-    let destination = injection
-        .destination
-        .clone()
-        .unwrap_or_else(|| channel.target.clone());
+    // The STORED destination, never a client-supplied one — see [`Injection`].
+    let destination = channel.target.clone();
     let event = event_from(channel_id, &provider, &injection);
     let identity = crate::rbac::UserIdentity::from_remote(
         format!("injected:{channel_id}"),
@@ -287,7 +288,6 @@ mod tests {
             event_type: default_event_type(),
             from: None,
             subject: None,
-            destination: None,
         }
     }
 
@@ -312,11 +312,30 @@ mod tests {
         let mut sender = injection("hello");
         sender.from = Some("own\u{0007}er".into());
         assert_eq!(validate(&sender).unwrap_err().0, StatusCode::BAD_REQUEST);
-        let mut destination = injection("hello");
-        destination.destination = Some("x".repeat(MAX_HEADER_CHARS + 1));
-        assert_eq!(
-            validate(&destination).unwrap_err().0,
-            StatusCode::BAD_REQUEST
+        let mut subject = injection("hello");
+        subject.subject = Some("x".repeat(MAX_HEADER_CHARS + 1));
+        assert_eq!(validate(&subject).unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// An injection cannot state the destination it arrived on.
+    ///
+    /// Why (#8036 review): the destination decides which per-assistant binding
+    /// claims the event, so a client-supplied one reaches past the channel the
+    /// route is addressed to — see [`Injection`]. The parse refusing the field
+    /// is what keeps a caller from re-opening it, so that is what is asserted;
+    /// the accepted arm is asserted beside it so the test cannot pass by the
+    /// body being unparseable outright.
+    #[test]
+    fn an_injection_may_not_name_its_own_destination() {
+        let accepted: Injection = serde_json::from_value(json!({"text": "are you there"}))
+            .expect("a message-only body is the whole contract");
+        assert_eq!(accepted.event_type, "message");
+        assert!(
+            serde_json::from_value::<Injection>(
+                json!({"text": "are you there", "destination": "someone-elses-desk"})
+            )
+            .is_err(),
+            "a stated destination is refused, never quietly ignored"
         );
     }
 
