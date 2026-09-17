@@ -1,0 +1,3 @@
+Added
+
+- `writing-assistant`, a third first-class assistant alongside `izzie` and `cto-assistant` (#8186, epic #8183). It ships as a directory package under `.trusty-agents/agents/writing-assistant/` — `agent.toml` plus `persona.md` — extending the base `assistant`, so it resolves through the same loader with no code branch for it and reaches an installed machine through the existing bundled-agent deploy. The persona is written for long-form drafting, editing and review rather than mail triage; it binds its own OKG store (`writing-assistant-kb`), grants `vector_search` and `channel` on top of the base surface, declares no git tools, and carries gmail, slack and telegram channel bindings that ship DISABLED and hold no credential value.

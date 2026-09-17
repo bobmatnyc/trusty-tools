@@ -60,8 +60,8 @@ max_tokens = 1024
 # Conversational mode: block markdown headers and divider rules mid-response.
 stop_sequences = ["\n##", "\n* * *"]
 # OKG STORE BINDING (#3816/#3864, DOC-54 SPEC-AGENTS-04 §5.1) — the FIRST leg
-# of the stores/tools/listeners config triple: what Izzie KNOWS, as opposed to
-# how she ACTS (`[tools].allow`) or REACTS (`[[listeners]]`).
+# of the stores/tools/channels config triple: what Izzie KNOWS, as opposed to
+# how she ACTS (`[tools].allow`) or REACTS (`[[channels]]`).
 #
 # Exactly ONE store per agent (Bob, 2026-07-24). `index` is a trusty-search
 # index id, `palace` a trusty-memory palace; the harness resolves both against
@@ -200,20 +200,38 @@ skills = [
     "cto-bob-voice",
 ]
 
-# --- Listeners (#3820, DOC-54 SPEC-AGENTS-04/06) — the third config-triple
-# leg: what Izzie REACTS to, distinct from `[tools]` (how she ACTS). This
-# binding is INERT until a matching `[[listeners]]` entry named
-# "gmail-personal" exists in `~/.trusty-agents/config.toml` AND that
-# listener is `enabled = true` — see the PR body / #3820 for the exact
-# stanza to paste into config.toml to turn this on live. `event_types`
-# narrows to new-mail-only (no other Gmail event types are emitted by this
-# slice yet); `filter.from` is intentionally broad (`*`) for the demo so any
-# inbound mail can wake her — tighten this once real usage patterns emerge
-# (DOC-54's own example narrows to `*@family.com`).
-[[listeners]]
+# --- Channels (#3820, #7609, DOC-54 SPEC-AGENTS-04/06) — the third
+# config-triple leg: what Izzie REACTS to, distinct from `[tools]` (how she
+# ACTS).
+#
+# #7609 slice 7: this was a `[[listeners]]` table. That spelling is retired —
+# the parse no longer folds it into `channels`, so a residual table is reported
+# as INERT and the binding below would simply never exist on a fresh install.
+# The fields are the same binding under the live spelling, mapped exactly as
+# `Channel::from_agent_binding` mapped a migrated one: the listener `name`
+# becomes `id` (which is what `channels::dispatch::is_overlay` keys on, so it
+# must keep naming the same global channel), and the binding's single `enabled`
+# becomes `enabled` + `receive_enabled` — this is an inbound wake, never a send
+# path. `route_to` is a Global-scope field and is deliberately absent here.
+#
+# Still INERT until a matching global `[[channels]]` entry with `id =
+# "gmail-personal"` exists in `~/.trusty-agents/config.toml` AND is enabled —
+# that global owns the account, the destination and the credential; this file
+# never carries a credential value. `target` stays absent (account-wide) or
+# `api::server::agent_channels::inbound::absorb_overlays` skips the entry.
+# `event_types` narrows to new-mail-only (no other Gmail event types are
+# emitted yet); `wake_filter.from` is intentionally broad (`*`) so any inbound
+# mail can wake her — tighten this once real usage patterns emerge (DOC-54's
+# own example narrows to `*@family.com`).
+[[channels]]
+id = "gmail-personal"
 name = "gmail-personal"
+provider = "gmail"
+enabled = true
+send_enabled = false
+receive_enabled = true
 event_types = ["message.received"]
-filter = { from = ["*"] }
+wake_filter = { from = ["*"] }
 
 # ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
 # sub-agent whitelist.

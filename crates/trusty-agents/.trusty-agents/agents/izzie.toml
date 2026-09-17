@@ -33,8 +33,8 @@ use_anthropic_direct = false
 # from appearing mid-response so replies stay in plain prose.
 stop_sequences = ["\n##", "\n* * *"]
 # OKG STORE BINDING (#3816/#3864, DOC-54 SPEC-AGENTS-04 §5.1) — the FIRST leg
-# of the stores/tools/listeners config triple: what Izzie KNOWS, as opposed to
-# how she ACTS (`[tools].allow`) or REACTS (`[[listeners]]`).
+# of the stores/tools/channels config triple: what Izzie KNOWS, as opposed to
+# how she ACTS (`[tools].allow`) or REACTS (`[[channels]]`).
 #
 # Exactly ONE store per agent (Bob, 2026-07-24). `index` is a trusty-search
 # index id, `palace` a trusty-memory palace; the harness resolves both against

@@ -1,0 +1,3 @@
+Fixed
+
+- The bundled `izzie` persona declared its Gmail binding as a `[[listeners]]` table, the spelling #7609 slice 7 retired (#8186). Since that slice the parse no longer folds the table into `channels`: it is reported once as INERT and its entries dropped, so a fresh install deployed izzie with a warning and no Gmail wake at all. The binding is now an assistant-scope `[[channels]]` entry carrying the same provider, id, event narrowing and inbound-only posture, and the stale `stores/tools/listeners` comments on `izzie` and `cto-assistant` now name the live spelling. A new sweep over the embedded bundle fails on any bundled manifest that ships a `[[listeners]]` table.
