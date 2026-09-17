@@ -206,7 +206,9 @@
    * the draft is kept either way and the operator retries rather than retypes.
    */
   async function create() {
-    if (!configuration || !draft || busy) return;
+    // #8187 (critic LOW): `loading` too — `busy` clears before the reload that
+    // follows a 409, and a second POST then went out at the losing revision.
+    if (!configuration || !draft || busy || loading) return;
     if (listDirty) { draftError = UNSAVED; return; }
     const id = draft.id.trim(), name = draft.name.trim() || id;
     if (!id) { draftError = 'Give the channel an ID.'; return; }
@@ -280,11 +282,13 @@
    *
    * What: the sheet's own enabled buttons are the whole tab ring. Focus leaving
    * either end — or sitting outside the sheet entirely, which is where it lands
-   * after the Delete button behind the backdrop is disabled — wraps back in.
+   * after the Delete button behind the backdrop is disabled — wraps back in. An
+   * EMPTY ring is the in-flight state, where every button is disabled; Tab then
+   * holds on the sheet itself rather than walking out (critic LOW).
    */
   function trapTab(event: KeyboardEvent) {
     const ring = sheet ? [...sheet.querySelectorAll<HTMLButtonElement>('button:not([disabled])')] : [];
-    if (!ring.length) return;
+    if (!ring.length) { event.preventDefault(); sheet?.focus(); return; }
     const first = ring[0], last = ring[ring.length - 1], here = document.activeElement;
     const inside = sheet?.contains(here) ?? false;
     if (inside && here !== (event.shiftKey ? first : last)) return;
@@ -430,7 +434,7 @@
         <p class="muted">A new channel starts switched off with no destination, so it neither polls nor sends. A destination is set in this host's <code>config.toml</code>; enable the channel here once it has one.</p>
         {#if draftError}<p class="error" role="alert">{draftError}</p>{/if}
         <div class="row">
-          <button class="primary" on:click={() => create()} disabled={busy}>{busy ? 'Creating…' : 'Create channel'}</button>
+          <button class="primary" on:click={() => create()} disabled={busy || loading}>{busy ? 'Creating…' : 'Create channel'}</button>
           <button on:click={() => { draft = null; draftError = ''; }} disabled={busy}>Cancel</button>
         </div>
       </div>
@@ -450,7 +454,7 @@
        handled on the window, not here: this element never holds the focus, and
        a handler on it only fired for a click that had already landed on it. -->
   <div class="backdrop" role="dialog" aria-modal="true" aria-label="Delete global channel">
-    <div class="sheet" bind:this={sheet}>
+    <div class="sheet" bind:this={sheet} tabindex="-1">
       <h3>Delete “{pending.name || pending.id}”?</h3>
       {#if referencedBy.length}
         <p role="alert">{referencedBy.join(', ')} {referencedBy.length === 1 ? 'still binds' : 'still bind'} this channel.</p>

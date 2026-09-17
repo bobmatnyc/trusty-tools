@@ -739,6 +739,32 @@ it('takes focus off the destructive button when the refusal offers the force', a
   expect(deletes).toHaveLength(1);
 });
 
+// #8187 (critic LOW): every button in the sheet is disabled while the delete is
+// in flight, so the tab ring is empty and Tab walked out of an `aria-modal`
+// dialog instead of being held in it.
+it('keeps Tab inside the confirmation while every button in it is disabled', async () => {
+  await render();
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'DELETE') await gate;
+    return realFetch(input, init);
+  });
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect([...document.querySelectorAll('.sheet button:not([disabled])')]).toHaveLength(0);
+  const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  document.dispatchEvent(tab);
+  await settle();
+  expect(tab.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(document.querySelector('.sheet'));
+  release();
+  await settle();
+});
+
 // #8187 (critic LOW): Add channel is disabled when the daemon offers no provider
 // this page may pick, so the post-delete focus call landed on `<body>` — outside
 // the panel entirely.
@@ -754,3 +780,24 @@ it('parks focus on the panel when Add channel cannot take it after a delete', as
   expect(document.activeElement).toBe(document.querySelector('[aria-label="Global channels"]'));
 });
 
+// #8187 (critic LOW): `busy` clears before the reload that tells a duplicate id
+// from a lost race, and Create was gated on `busy` alone — so a second POST
+// could go out at the revision that had just lost.
+it('keeps Create disabled while the post-conflict reload is in flight', async () => {
+  await render();
+  await openAdd();
+  writeFailures.push({ status: 409, body: { error: 'Channel settings changed. Reload before saving.' } });
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init?.method && String(input).endsWith('/api/channels')) await gate;
+    return realFetch(input, init);
+  });
+  button('Create channel').click();
+  await settle();
+  expect(posts).toHaveLength(1);
+  expect(button('Create channel').disabled).toBe(true);
+  release();
+  await settle();
+});
