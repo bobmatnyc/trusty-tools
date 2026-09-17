@@ -162,6 +162,21 @@ cargo run -- --version
 
 ## Config reference
 
+### Bundled assistants
+
+Every assistant is a directory package under
+`.trusty-agents/agents/<name>/` — an `agent.toml` plus a `persona.md` — that
+declares `extends = "assistant"`. `crate::agents::bundled` embeds the whole
+tree at build time and deploys it to `~/.trusty-agents/agents/` on first run,
+so an installed `tagent` carries all of them with no extra step.
+
+| Assistant | Purpose |
+|---|---|
+| `assistant` | Base productivity template; the default persona and the `extends` target for the rest. |
+| `izzie` | Personal assistant — mail, calendar, weather, transit. |
+| `cto-assistant` | Duetto org and engineering work — ops data, tickets, git. |
+| `writing-assistant` | Long-form drafting, editing and review (#8186). Binds its own OKG store; ships gmail/slack/telegram channel bindings DISABLED, to be enabled against an operator-defined global channel. |
+
 ### Agent TOML (`.trusty-agents/agents/*.toml`)
 
 ```toml
