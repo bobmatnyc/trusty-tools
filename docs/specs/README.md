@@ -92,6 +92,7 @@ normative grammar — this note does not restate it.
 | DOC-73 | `SPEC-UNIDASH-01~draft` … `-17~draft` | [The Unified mpm/code/agents Dashboard: One Event Stream, List and Tree](./DOC-73-unified-mpm-code-agents-dashboard.md) | `trusty-console` — the two stream routes, the object viewer, the bus reader, console's first SSE surface, and (§§12-17) the console-hosted dashboards for search/memory/analyze/mpm and the new Disk view; `trusty-common` — the `control_bus` home #3157 scoped and this spec's first consumer; `trusty-agents-common` — the `HarnessEvent` envelope, extended with `id` and `parent_id` and a new `Action` payload arm; `trusty-mpm`, `trusty-code`, `trusty-agents` — the three event sources and their adapters; `trusty-search`, `trusty-memory` — new `PushClient` producers for the activity-pulse addendum (§15). Records that ADR-0005's envelope still has zero producers and zero consumers, specifies the typed `ActionEvent` taxonomy the directive of 2026-09-02 asks for, and generalizes [DOC-72](https://github.com/bobmatnyc/trusty-tools/pull/6607) §4's console relay from one daemon to three. DOC-72 remains in open PR #6607 and is not yet a file on `main`. §§12-17 (added 2026-09-06) codify the owner's console-displays/dashboard-manages ruling, the row-click contract, activity pulses, and the Disk dashboard. Tracking issue [#6611](https://github.com/bobmatnyc/trusty-tools/issues/6611); the §§12-17 amendment tracks on epic [#6922](https://github.com/bobmatnyc/trusty-tools/issues/6922) |
 | DOC-74 | `SPEC-SECRETS-01~draft` … `-14~draft` | [Secrets Integration: External Vaults (1Password, Keeper) and the OS Keychain Behind `tm secrets`](./DOC-74-secrets-integration.md) | `trusty-common` — the `secrets` backend trait, project-vault model, session-scoped resolution cache, and the shared subprocess-env delivery seam; `trusty-mpm` — the `tm secrets` CLI group, the session-start preload hook, and the reference-only MCP tools; `trusty-agents`, `trusty-code` — consumers reached through the existing `trusty_common::credentials` surface. Extends [DOC-45](./DOC-45-credential-authority-model.md)'s at-rest storage tier (§11) with project-scoped, multi-backend, externally-managed vaults; does not renegotiate DOC-45's principal/grant/audit model |
 | DOC-75 | `SPEC-TCMVP-01~draft` … `-06~draft` | [trusty-code TUI MVP: Claude Code Interactive-Loop Parity](./DOC-75-tcode-tui-mvp-parity.md) | `trusty-code` — `tcode tui`, `trusty-code-tui` shared REPL crate, `tui_client::engine`, `task::executor` tool registry. Spec of record for milestone [87](https://github.com/bobmatnyc/trusty-tools/milestone/87); narrows epic [#7939](https://github.com/bobmatnyc/trusty-tools/issues/7939) to the solo-agent-default cut over [DOC-50](./DOC-50-tcode-tui-claude-code-clone.md) §4 |
+| DOC-76 | `SPEC-TCPARITY-01~draft` … `-06~draft` | [tcode TUI parity map: zones, messages, interaction, instruction adherence](./DOC-76-tcode-tui-parity-map.md) | `trusty-code` — `tcode tui`, `trusty-code-tui` shared REPL crate, `tui_client::engine`, `task::executor` tool registry; comparison baseline is `trusty-mpm`'s instruction-assembly and delegation stack. The researched, file:line-cited parity map behind [DOC-75](./DOC-75-tcode-tui-mvp-parity.md)'s milestone-87 cut: functional zones, the trusty-mpm instruction-adherence baseline, message handling, the interaction model, a gaps table, and the test surface. Records the owner ruling that #8182's scope is statusline + subagent panel + `/tasks` + shift-tab cycle, and the retargeting of [#8208](https://github.com/bobmatnyc/trusty-tools/issues/8208)/[#8209](https://github.com/bobmatnyc/trusty-tools/issues/8209) to `trusty-agents` |
 
 > **Related catalog — Trusty Code implementation status.** [Trusty Code
 > specification and ADR reconciliation](../trusty-code/spec-adr-reconciliation.md)
@@ -103,11 +104,14 @@ normative grammar — this note does not restate it.
 > **Catalog note — `DOC-73` claim.** `DOC-72` is claimed by open pull request
 > [#6607](https://github.com/bobmatnyc/trusty-tools/pull/6607) on branch
 > `docs/6606-analyze-lsp-spec`, which the note below could not have seen when it
-> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-76`** (updated
-> 2026-09-16 — `DOC-75` claimed by
-> [trusty-code TUI MVP: Claude Code Interactive-Loop Parity](./DOC-75-tcode-tui-mvp-parity.md),
+> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-77`** (updated
+> 2026-09-16 — `DOC-76` claimed by
+> [tcode TUI parity map: zones, messages, interaction, instruction adherence](./DOC-76-tcode-tui-parity-map.md),
 > verified free on `origin/main` per that document's own DOC-N claim line).
-> Prior note, retained for history: 2026-09-11 — `DOC-74` claimed by
+> Prior note, retained for history: 2026-09-16 — `DOC-75` claimed by
+> [trusty-code TUI MVP: Claude Code Interactive-Loop Parity](./DOC-75-tcode-tui-mvp-parity.md),
+> verified free on `origin/main` per that document's own DOC-N claim line.
+> Before that — 2026-09-11 — `DOC-74` claimed by
 > [Secrets Integration](./DOC-74-secrets-integration.md), verified free on
 > `origin/main` per that document's own DOC-N claim line. Before that —
 > 2026-09-02 — `DOC-73` claimed by
