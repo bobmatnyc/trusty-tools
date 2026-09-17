@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { installCommand, TOOLS } from '../src/lib/tools';
-import { RELEASED_FLAGSHIPS } from '../src/lib/site';
+import { RELEASED_FLAGSHIPS, SITE_URL } from '../src/lib/site';
 import { AUDIENCES } from '../src/lib/install/audiences';
 
 /**
@@ -201,6 +201,33 @@ describe('production build', () => {
 		expect(existsSync(path.join(STATIC, 'index.html'))).toBe(true);
 		expect(existsSync(path.join(STATIC, 'docs.html'))).toBe(true);
 		expect(existsSync(path.join(STATIC, 'whats-new.html'))).toBe(true);
+	});
+
+	/**
+	 * Why: `+layout.svelte` sets the canonical link and `og:url` for every
+	 * route from one `SITE_URL` (#8203). A unit test on the layout component
+	 * cannot see what SvelteKit actually serialises into the head of a
+	 * PRERENDERED page — this checks the real static artifact instead, for the
+	 * root route and one hand-authored tool page.
+	 * What: the exact canonical href and `og:url` content per route, plus
+	 * `og:site_name`, read off the built HTML.
+	 */
+	it('emits a canonical link and og:url pointing at trustytools.dev', () => {
+		const tool = TOOLS[0];
+		const pages: [string, string][] = [
+			['/', landingPage],
+			[`/tools/${tool.slug}`, readFileSync(path.join(STATIC, `tools/${tool.slug}.html`), 'utf8')]
+		];
+		for (const [route, html] of pages) {
+			const canonical = `${SITE_URL}${route}`;
+			expect(html, `${route} canonical link`).toContain(
+				`<link rel="canonical" href="${canonical}"`
+			);
+			expect(html, `${route} og:url`).toContain(`<meta property="og:url" content="${canonical}"`);
+			expect(html, `${route} og:site_name`).toContain(
+				'<meta property="og:site_name" content="trustytools.dev"'
+			);
+		}
 	});
 
 	// A page that renders its frame with no data is the failure the changelog
@@ -505,6 +532,9 @@ describe('production build', () => {
 		}
 	});
 
+	// `rel="canonical"` links are excluded from the `<link>` scan below: they are
+	// a reference to this site's own URL (SITE_URL#8203), not a resource the
+	// page fetches, so an absolute href there is correct rather than a leak.
 	it('loads no subresource from a third-party origin', () => {
 		for (const name of [
 			'index.html',
@@ -516,11 +546,16 @@ describe('production build', () => {
 			...toolPages()
 		]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
+			const linkHrefs = [...html.matchAll(/<link\b[^>]*>/g)]
+				.filter((tag) => !/\brel="canonical"/.test(tag[0]))
+				.map((tag) => /\bhref="([^"]+)"/.exec(tag[0])?.[1])
+				.filter((href): href is string => Boolean(href));
 			const subresources = [
-				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g),
-				...html.matchAll(/<link\b[^>]*\bhref="([^"]+)"/g)
+				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g)
 			].map((match) => match[1]);
-			const offSite = subresources.filter((url) => /^(?:https?:)?\/\//.test(url));
+			const offSite = [...subresources, ...linkHrefs].filter((url) =>
+				/^(?:https?:)?\/\//.test(url)
+			);
 			expect(offSite, `${name} loads ${offSite.join(', ')}`).toEqual([]);
 			expect(html).not.toContain('@import url(http');
 		}
