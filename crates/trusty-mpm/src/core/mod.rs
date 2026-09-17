@@ -49,6 +49,11 @@ pub mod binary_provenance;
 // wedged `gh` cannot carry an invocation past its slice into a SIGKILL.
 pub mod bounded_proc;
 pub mod budget;
+// #6868: the machine-level `build:` section — the shared cargo target
+// directory, the job count, and the sccache posture the `rust_build_env` doctor
+// row reports and its `--fix` arm seeds.
+pub mod build_env;
+pub mod build_env_repair;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is
 // still stale, and semver alone cannot say so.
