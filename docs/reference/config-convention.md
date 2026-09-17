@@ -33,7 +33,45 @@ workspace_root_template: ~/trusty-mpm-projects
 auto_resume: false
 # Default model id or tier alias for launched sessions.
 default_model: sonnet
+# Machine-level Rust build settings (#6868). Absent → the defaults below.
+build:
+  # Shared CARGO_TARGET_DIR. Default: ~/.trusty-tools/cargo-target/<owner>/<repo>,
+  # derived from the project's `origin` remote. A leading `~` is expanded.
+  cargo_target_dir: ~/.trusty-tools/cargo-target/bobmatnyc/trusty-tools
+  # CARGO_BUILD_JOBS. Default: half this host's cores, minimum 2.
+  build_jobs: 8
+  # Whether briefs should carry RUSTC_WRAPPER=sccache. Default false.
+  sccache: false
 ```
+
+### The `build:` section and the `rust_build_env` row (#6868)
+
+Every tm-provisioned worktree gets an empty `target/`, so each dispatched
+engineer pays a cold full-workspace build. Measured on the 16-core dev host on
+2026-09-16: ~200 s cold in a fresh worktree, 103 s with `CARGO_TARGET_DIR`
+pointed at a warm shared directory from another worktree, 17 s from that path
+again. sccache was neutral on the same tree, because path crates build
+incrementally and incremental artifacts are not cacheable. Cargo's target lock
+serialises concurrent builds sharing the directory, which is wanted here — six
+concurrent cold builds crashed that host on 2026-08-08.
+
+`tm doctor`'s `rust_build_env` row reports the resolved values for any project
+whose detected stack includes Rust, and closes with the line a PM pastes
+verbatim into an engineer brief:
+
+```
+CARGO_TARGET_DIR=<dir> CARGO_BUILD_JOBS=<n> [RUSTC_WRAPPER=sccache] SKIP_UI_BUILD=1
+```
+
+`RUSTC_WRAPPER=sccache` appears only when `build.sccache` is `true`. The row is
+`Ok` when the directory exists and is writable, `Warn` when it does not exist
+yet, and `Fail` only when it exists and cannot be written.
+`tm doctor --fix --yes` creates the directory and seeds this section when no
+`build` key is present, preserving every key already there. Neither the row nor
+the repair ever writes `~/.cargo/config.toml` — that file is machine-global for
+every Rust project on the host, so wiring `build.rustc-wrapper` there stays an
+operator decision, and the row warns when `sccache: true` sits beside an unwired
+config.
 
 Resolution precedence for the workspace root is:
 
