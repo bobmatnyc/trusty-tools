@@ -36,6 +36,10 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 - Anything else (release builds, feature-gated tests, `--include-ignored`, a
   single test by name) — `Skill(skill="cargo-commands")` rather than guessing.
+- 🔴 **`CARGO_TARGET_DIR` is exported by the repo-local `.envrc`.** Never
+  override it and never point a gate at a worktree-local `target/` — that is a
+  cold build of the whole dependency graph:
+  [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
@@ -58,6 +62,12 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
 `cargo test --workspace` is a publish gate, not inner-loop proof.
+
+🔴 **Markdown under `crates/*/src/assets/**` is rung 3, not rung 1.** It is
+`include_str!`-embedded into the binary and asserted on by bundle tests, so a
+text-only edit recompiles dependents and can go red. Run the named bundle test,
+not the crate suite — which test reads which asset:
+[agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 
 Per-rung commands, CI gates, baseline-red triage:
 [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md),
@@ -159,6 +169,11 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
   local `main` — docs/session notes reach origin only via the fast-path PR
   ([ADR-0061](docs/adr/0061-commits-never-land-on-local-main.md)).
 - 🔴 **`.trusty-mpm/sessions/` is gitignored, local-only** (ruling 2026-09-13).
+- 🔴 **A pre-claim check reads LOCAL state too** — `git worktree list` and
+  `git log --oneline origin/main..<branch>`. `git ls-remote` and `gh pr list`
+  cannot see an unpushed branch, and that gap duplicated a whole
+  implementation (#8250):
+  [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in
   a worktree — bare `git diff`, `bash scripts/…`, a heredoc. Substitute for
   every shape: [worktree-discipline.md](docs/reference/worktree-discipline.md).
