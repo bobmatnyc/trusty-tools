@@ -23,6 +23,8 @@ use teloxide::types::ChatId;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
+use super::bot::BotKey;
+
 /// How long a pairing code remains valid after issuance.
 ///
 /// Why: Bound the window where a leaked code from server logs could be used by
@@ -61,16 +63,30 @@ struct PairedChatsFile {
     paired_chats: Vec<PairedChatRecord>,
 }
 
-/// Resolve the absolute path of the paired-chats state file.
+/// The user-level directory holding every per-bot gateway state file.
 ///
-/// Why: We want the *user-level* `~/.trusty-agents/state/` directory (shared across
-/// projects), NOT the project-local `.trusty-agents/state/`. Falls back to a
-/// relative path when `HOME` is unset so we never panic on weird sandboxes.
-pub(super) fn paired_chats_state_path() -> PathBuf {
+/// Why: we want the *user-level* `~/.trusty-agents/state/` directory (shared
+/// across projects), NOT the project-local `.trusty-agents/state/`. Falls back
+/// to a relative path when `HOME` is unset so we never panic on weird sandboxes.
+/// Test: `telegram_state_file_names_never_contain_the_token`.
+pub(crate) fn gateway_state_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".trusty-agents")
-        .join("state")
-        .join("telegram-paired.json")
+    home.join(".trusty-agents").join("state")
+}
+
+/// The paired-chats state file for ONE bot.
+///
+/// Why (#8190, owner ruling 2026-09-16): each assistant has its own Telegram
+/// bot, so a chat paired to izzie's bot must not count as paired on
+/// cto-assistant's. One shared `telegram-paired.json` made every pairing
+/// machine-wide, which is the grant leak that ruling forbids.
+/// What: `~/.trusty-agents/state/telegram-paired-<key>.json`, where `<key>` is
+/// [`crate::telegram::BotKey`]'s digest — derived from the token, never the
+/// token itself, and never logged.
+/// Test: `telegram_state_file_names_never_contain_the_token`,
+/// `telegram_pairing_state_is_per_bot`.
+pub(super) fn paired_chats_state_path_for(bot: &BotKey) -> PathBuf {
+    gateway_state_dir().join(format!("telegram-paired-{}.json", bot.digest()))
 }
 
 /// Load persisted paired chats from disk.
@@ -81,12 +97,27 @@ pub(super) fn paired_chats_state_path() -> PathBuf {
 /// Parse errors -> log a warning and return empty map (never panic). The
 /// stored `DateTime<Utc>` is discarded; we use `Instant::now()` as a stand-in
 /// since the value is only consumed by diagnostic logging.
+///
+/// #8190: a first run on a host that still has the pre-#8190 shared
+/// `telegram-paired.json` says so once, because "every chat is suddenly
+/// unpaired" is otherwise indistinguishable from a lost state file. The old
+/// file is never read: its pairings were machine-wide, which is the grant leak
+/// the per-bot split closes.
 /// Test: `paired_state_round_trip` covers happy-path; missing-file and
 /// malformed-JSON branches are intentionally fail-open (no panic).
 pub(super) async fn load_paired_chats(state_path: &Path) -> PairedChats {
     let bytes = match tokio::fs::read(state_path).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let legacy = gateway_state_dir().join("telegram-paired.json");
+            if tokio::fs::metadata(&legacy).await.is_ok() {
+                info!(
+                    legacy = %legacy.display(),
+                    "telegram: this bot has no pairing file yet, but the pre-#8190 shared one \
+                     exists; its pairings were machine-wide and are not migrated — pair this bot \
+                     once with /start"
+                );
+            }
             return Arc::new(RwLock::new(HashMap::new()));
         }
         Err(e) => {
@@ -163,99 +194,207 @@ pub(super) async fn save_paired_chats(paired: &PairedChats, state_path: &Path) -
     Ok(())
 }
 
-/// Resolve the absolute path of the Telegram daemon PID file.
+/// Filename prefix every per-bot gateway lock file shares.
+const PID_FILE_PREFIX: &str = "telegram-";
+/// Filename suffix every per-bot gateway lock file shares.
+const PID_FILE_SUFFIX: &str = ".pid";
+
+/// The gateway lock file for ONE bot.
 ///
-/// Why (#single-instance): Multiple `--telegram` processes polling
-/// `getUpdates` concurrently trigger Telegram's `TerminatedByOtherGetUpdates`
-/// error and fight over updates. A PID file in the user-level
-/// `~/.trusty-agents/state/` directory lets a starting daemon detect an
-/// already-running peer. Falls back to a relative path when `HOME` is unset
-/// so we never panic on weird sandboxes.
-/// What: Returns `$HOME/.trusty-agents/state/telegram.pid`.
-pub(super) fn telegram_pid_file_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".trusty-agents")
-        .join("state")
-        .join("telegram.pid")
+/// Why (#single-instance, #8190): two processes polling `getUpdates` for the
+/// SAME bot trigger Telegram's `TerminatedByOtherGetUpdates` and fight over
+/// updates. Two processes polling DIFFERENT bots do not conflict at all, so
+/// the lock is per bot token — one machine-wide lock would have let izzie's
+/// poller lock cto-assistant's out.
+/// What: `~/.trusty-agents/state/telegram-<key>.pid`, `<key>` being
+/// [`crate::telegram::BotKey`]'s digest of the token. The digest is in the
+/// FILE NAME only; nothing renders it.
+/// Test: `telegram_state_file_names_never_contain_the_token`.
+pub(crate) fn telegram_pid_file_path_for(bot: &BotKey) -> PathBuf {
+    gateway_state_dir().join(format!(
+        "{PID_FILE_PREFIX}{}{PID_FILE_SUFFIX}",
+        bot.digest()
+    ))
 }
 
-/// Check whether process `pid` is alive by sending signal 0 (no-op signal).
+/// A live process holding one bot's gateway lock.
 ///
-/// Why: `kill(pid, 0)` performs the permission/existence checks without
-/// delivering a signal — the standard POSIX liveness probe. Used to decide
-/// whether an existing PID file represents a live daemon or a stale lock.
-/// What: Returns `true` iff `libc::kill(pid, 0)` succeeds.
-/// Test: A live process (our own PID) returns true; an absurd PID returns
-/// false — covered by `telegram_pid_alive_*` tests.
-pub(super) fn telegram_pid_alive(pid: i32) -> bool {
-    // SAFETY: `kill` with signal 0 only probes; it never mutates process
-    // state. `pid` is a plain integer and any value is a valid argument —
-    // the kernel rejects invalid ones via errno, which `== 0` filters out.
-    unsafe { libc::kill(pid, 0) == 0 }
+/// Why (#8190 code-critic MEDIUM 2): the old probe read a PID out of the file
+/// and asked `kill(pid, 0)`, which is check-then-act and PID-identity-blind —
+/// two hosts could both read "stale" and both acquire, and a REUSED pid read
+/// live forever. The lock is now `flock`, held by an open descriptor, so the
+/// kernel answers "is it held" directly. The recorded pid survives only as
+/// REPORTING text, which is why it is optional here: a holder that has taken
+/// the lock but not yet written its pid is still a holder.
+/// Test: `telegram_gateway_lock_holder_reports_a_live_holder`,
+/// `telegram_gateway_lock_holder_ignores_an_unlocked_file`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockHolder {
+    /// The holder's PID, when it recorded one.
+    pub pid: Option<i32>,
 }
 
-/// RAII guard that owns the Telegram daemon PID file.
+impl LockHolder {
+    /// The holder's PID as report text, never a panic on an unwritten file.
+    pub fn label(&self) -> String {
+        self.pid
+            .map_or_else(|| "unknown".to_string(), |pid| pid.to_string())
+    }
+}
+
+/// Try to take `file`'s advisory lock without blocking.
 ///
-/// Why: The PID file must be removed on *every* exit path — normal return,
-/// `?` early-return, panic, and SIGINT (the dispatcher's `enable_ctrlc_handler`
-/// terminates the long-poll loop, after which `run_telegram_bot` returns and
-/// this guard drops). A `Drop` impl is the only construct that fires on all
-/// of those without scattering cleanup calls.
-/// What: `acquire()` enforces single-instance semantics and writes the PID
-/// file; `Drop` removes it. Holds the path so `Drop` needs no recomputation.
-/// Test: `telegram_pid_guard_*` tests exercise acquire/stale/drop behavior.
-pub(super) struct TelegramPidGuard {
-    path: PathBuf,
+/// Why: `flock(LOCK_EX|LOCK_NB)` is the whole single-instance mechanism —
+/// atomic, released by the kernel when the descriptor closes (so a crashed
+/// holder leaves no stale lock), and conflicting across two descriptors in ONE
+/// process, which is what makes a two-acquirer test possible in-process.
+/// What: `Ok(true)` when this descriptor now holds the lock, `Ok(false)` when
+/// another descriptor holds it, `Err` for any other `flock` failure.
+/// Test: `telegram_pid_guard_live_conflict_is_rejected`.
+fn try_lock(file: &std::fs::File) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `flock` only manipulates the advisory lock on a descriptor we
+    // own and keep alive for the whole call; it never touches memory.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(false),
+        _ => Err(anyhow!("failed to lock {err}")),
+    }
+}
+
+/// The live holder of the gateway lock at `path`, if any.
+///
+/// Why (#8190): the API host decides BEFORE spawning whether a poller already
+/// owns `getUpdates` for this bot, and the supervisor re-asks on every rescan.
+/// [`TelegramPidGuard::acquire`] answers the same question but TAKES the lock,
+/// which is exactly what a startup decision must not do.
+/// What: opens `path` read-only (BSD `flock` needs no write access) and
+/// attempts the same exclusive lock. Taking it means nobody held it, so the
+/// probe immediately drops the descriptor and answers `None`; a refusal means a
+/// live holder, whose recorded pid is then read for reporting. A missing file
+/// is `None`. The answer is a snapshot — `acquire` remains the authoritative
+/// gate.
+/// Test: `telegram_gateway_lock_holder_reports_a_live_holder`,
+/// `telegram_gateway_lock_holder_ignores_an_unlocked_file`.
+pub fn gateway_lock_holder_at(path: &Path) -> Option<LockHolder> {
+    let file = std::fs::File::open(path).ok()?;
+    match try_lock(&file) {
+        // We took it, so nobody held it. Dropping `file` releases it.
+        Ok(true) => None,
+        Ok(false) => Some(LockHolder {
+            pid: std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok()),
+        }),
+        // #8190 fail-open check: a lock we cannot even probe is reported as
+        // held. Assuming "free" here is what starts a SECOND poller and takes
+        // Telegram down for the first one.
+        Err(e) => {
+            warn!(
+                error = %format!("{e:#}"),
+                "telegram gateway: the gateway lock could not be probed; treating it as held"
+            );
+            Some(LockHolder { pid: None })
+        }
+    }
+}
+
+/// Every bot gateway lock in `dir` that a live process holds.
+///
+/// Why (#8190 code-critic MEDIUM 5): `tagent system status` runs in a DIFFERENT
+/// process from the API host, so it has no in-memory gateway state to read. A
+/// directory scan plus a lock probe is the one signal that crosses the process
+/// boundary, and it is what makes "something is polling Telegram on this
+/// machine" observable without stderr capture.
+/// What: probes every `telegram-*.pid` in `dir` and returns the holders' pids,
+/// sorted. The digest in each file name is never returned — only pids.
+/// Test: `telegram_gateway_status_snapshot_reports_a_live_lock_holder`.
+pub(crate) fn live_gateway_lock_holders_in(dir: &Path) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut pids: Vec<i32> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(PID_FILE_PREFIX) && n.ends_with(PID_FILE_SUFFIX))
+        })
+        .filter_map(|p| gateway_lock_holder_at(&p))
+        .filter_map(|h| h.pid)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// RAII guard holding ONE bot's gateway lock for as long as it polls.
+///
+/// Why (#8190 code-critic MEDIUM 2): the pre-#8190 guard wrote a PID file and
+/// unlinked it on `Drop`, so a loser that started beside a winner removed the
+/// WINNER's file on its way out and left the lock apparently free. An advisory
+/// `flock` on a held descriptor has neither race: the kernel decides who holds
+/// it, and closing the descriptor — on return, on `?`, on panic, on SIGINT, on
+/// process death — releases it.
+/// What: `acquire()` opens the lock file and takes `LOCK_EX|LOCK_NB`, then
+/// records its own pid for reporting. There is deliberately NO `Drop` impl: the
+/// file stays on disk (it is a lock, not a liveness record) and the `File`
+/// field's own drop releases the lock.
+/// Test: `telegram_pid_guard_acquire_writes_and_releases`,
+/// `telegram_pid_guard_live_conflict_is_rejected`,
+/// `telegram_pid_guard_reclaims_a_lock_no_one_holds`.
+pub(crate) struct TelegramPidGuard {
+    /// Holding the descriptor IS holding the lock; closing it releases.
+    _file: std::fs::File,
 }
 
 impl TelegramPidGuard {
-    /// Acquire the single-instance lock for the Telegram daemon.
+    /// Acquire this bot's single-instance lock.
     ///
-    /// Why: Prevents two `--telegram` processes from racing on `getUpdates`.
-    /// What: If a PID file exists and the PID inside is still alive, returns
-    /// an error (caller should exit). A stale PID file (process dead) is
-    /// overwritten. On success, writes the current PID and returns a guard
-    /// whose `Drop` cleans up the file.
-    /// Test: `telegram_pid_guard_acquire_writes_file`,
-    /// `telegram_pid_guard_stale_is_overwritten`.
-    pub(super) fn acquire(path: PathBuf) -> Result<Self> {
+    /// Why: prevents two processes from racing on `getUpdates` for ONE bot.
+    /// What: creates the state dir, opens the lock file, and takes the
+    /// exclusive non-blocking `flock`. A refusal is an error naming the holder.
+    /// On success the file is truncated and the current pid written, purely so
+    /// a probe can report who holds it.
+    /// Test: `telegram_pid_guard_acquire_writes_and_releases`,
+    /// `telegram_pid_guard_live_conflict_is_rejected`.
+    pub(crate) fn acquire(path: PathBuf) -> Result<Self> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow!("failed to create state dir {}: {e}", parent.display()))?;
         }
-
-        // If a PID file exists, decide live vs. stale.
-        if let Ok(contents) = std::fs::read_to_string(&path)
-            && let Ok(existing_pid) = contents.trim().parse::<i32>()
-            && telegram_pid_alive(existing_pid)
-        {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| anyhow!("failed to open gateway lock {}: {e}", path.display()))?;
+        if !try_lock(&file).map_err(|e| anyhow!("gateway lock {}: {e}", path.display()))? {
+            let holder = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
             return Err(anyhow!(
-                "Telegram daemon already running (PID {existing_pid}). \
-                         Stop it before starting another, or delete {} if you \
-                         are sure it is stale.",
+                "another process (PID {holder}) is already polling this Telegram bot. \
+                 Stop it before starting another; the lock at {} releases by itself when \
+                 that process exits.",
                 path.display()
             ));
         }
-        // Stale lock: the recorded process is gone. Fall through to
-        // overwrite it.
-        // Unparseable contents are treated as stale too.
-
-        let pid = std::process::id();
-        std::fs::write(&path, pid.to_string())
-            .map_err(|e| anyhow!("failed to write PID file {}: {e}", path.display()))?;
-
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TelegramPidGuard {
-    /// Best-effort removal of the PID file on daemon exit.
-    ///
-    /// Why: Leaving a stale file behind would force the next start to treat
-    /// it as a stale lock — harmless but noisy. Errors are intentionally
-    /// swallowed: there is nothing useful to do during teardown.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        file.set_len(0)
+            .map_err(|e| anyhow!("failed to reset gateway lock {}: {e}", path.display()))?;
+        write!(file, "{}", std::process::id())
+            .map_err(|e| anyhow!("failed to write gateway lock {}: {e}", path.display()))?;
+        file.flush()
+            .map_err(|e| anyhow!("failed to flush gateway lock {}: {e}", path.display()))?;
+        Ok(Self { _file: file })
     }
 }
 
