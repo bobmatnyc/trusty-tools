@@ -1,0 +1,1 @@
+{"grid": [{"max_task_facts": 4, "unknown_overlap": 1}, {"max_task_facts": 8, "unknown_overlap": 1}, {"max_task_facts": 4, "unknown_overlap": 2}, {"max_task_facts": 8, "unknown_overlap": 2}], "heldout_gold_parsed": false, "selector": {"max_task_facts": 4, "unknown_overlap": 1}}

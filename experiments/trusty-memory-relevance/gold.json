@@ -1,0 +1,1488 @@
+{
+  "gold": [
+    {
+      "query_id": "zephyr-owner",
+      "required": [
+        [
+          "work/zephyr|zephyr-owner|1|owner",
+          "work/zephyr|zephyr-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-owner-copy|1|owner-copy",
+        "work/zephyr|zephyr-owner|1|owner",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-location-release",
+      "required": [
+        [
+          "work/zephyr|zephyr-location|1|location"
+        ],
+        [
+          "work/zephyr|zephyr-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-location|1|location",
+        "work/zephyr|zephyr-release|1|release",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-reason",
+      "required": [
+        [
+          "work/zephyr|zephyr-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-rationale|1|reason",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-route",
+      "required": [
+        [
+          "work/zephyr|zephyr-team|1|team"
+        ],
+        [
+          "work/zephyr|zephyr-pager|1|pager"
+        ],
+        [
+          "work/zephyr|zephyr-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-hours|1|hours",
+        "work/zephyr|zephyr-pager|1|pager",
+        "work/zephyr|zephyr-standing|1|preference",
+        "work/zephyr|zephyr-team|1|team"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-inverse",
+      "required": [
+        [
+          "work/zephyr|zephyr-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference",
+        "work/zephyr|zephyr-team|1|team"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-ambiguity",
+      "required": [
+        [
+          "work/zephyr|zephyr-ambiguous|1|a"
+        ],
+        [
+          "work/zephyr|zephyr-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-ambiguous|1|a",
+        "work/zephyr|zephyr-ambiguous|1|b",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-prefix",
+      "required": [
+        [
+          "work/zephyr|zephyr-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-prefix|1|west",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-conflict",
+      "required": [
+        [
+          "work/zephyr|zephyr-conflict|1|c1"
+        ],
+        [
+          "work/zephyr|zephyr-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-conflict|1|c1",
+        "work/zephyr|zephyr-conflict|1|c2",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-history",
+      "required": [
+        [
+          "work/zephyr|zephyr-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-owner-old|1|owner-old",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-owner-copy|1|owner-copy",
+        "work/zephyr|zephyr-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-revision",
+      "required": [
+        [
+          "work/zephyr|zephyr-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-release|2|release",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-mixed",
+      "required": [
+        [
+          "work/zephyr|zephyr-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-mixed|1|mixed-target",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-partial",
+      "required": [
+        [
+          "work/zephyr|zephyr-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-location|1|location",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-alias",
+      "required": [
+        [
+          "work/zephyr|zephyr-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-alias|1|alias",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-prerequisites",
+      "required": [
+        [
+          "work/zephyr|zephyr-dependency|1|dep"
+        ],
+        [
+          "work/zephyr|zephyr-intake|1|gate"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-dependency|1|dep",
+        "work/zephyr|zephyr-intake|1|gate",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-unknown",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-future",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-expired",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-deleted",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-weather",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-emotion",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-contact",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-date",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-negated",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-owner",
+      "required": [
+        [
+          "work/lumen|lumen-owner|1|owner",
+          "work/lumen|lumen-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-owner-copy|1|owner-copy",
+        "work/lumen|lumen-owner|1|owner",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-location-release",
+      "required": [
+        [
+          "work/lumen|lumen-location|1|location"
+        ],
+        [
+          "work/lumen|lumen-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-location|1|location",
+        "work/lumen|lumen-release|1|release",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-reason",
+      "required": [
+        [
+          "work/lumen|lumen-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-rationale|1|reason",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-route",
+      "required": [
+        [
+          "work/lumen|lumen-team|1|team"
+        ],
+        [
+          "work/lumen|lumen-pager|1|pager"
+        ],
+        [
+          "work/lumen|lumen-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-hours|1|hours",
+        "work/lumen|lumen-pager|1|pager",
+        "work/lumen|lumen-standing|1|preference",
+        "work/lumen|lumen-team|1|team"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-inverse",
+      "required": [
+        [
+          "work/lumen|lumen-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference",
+        "work/lumen|lumen-team|1|team"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-ambiguity",
+      "required": [
+        [
+          "work/lumen|lumen-ambiguous|1|a"
+        ],
+        [
+          "work/lumen|lumen-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-ambiguous|1|a",
+        "work/lumen|lumen-ambiguous|1|b",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-prefix",
+      "required": [
+        [
+          "work/lumen|lumen-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-prefix|1|west",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-conflict",
+      "required": [
+        [
+          "work/lumen|lumen-conflict|1|c1"
+        ],
+        [
+          "work/lumen|lumen-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-conflict|1|c1",
+        "work/lumen|lumen-conflict|1|c2",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-history",
+      "required": [
+        [
+          "work/lumen|lumen-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-owner-old|1|owner-old",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-owner-copy|1|owner-copy",
+        "work/lumen|lumen-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-revision",
+      "required": [
+        [
+          "work/lumen|lumen-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-release|2|release",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-mixed",
+      "required": [
+        [
+          "work/lumen|lumen-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-mixed|1|mixed-target",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-partial",
+      "required": [
+        [
+          "work/lumen|lumen-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-location|1|location",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-alias",
+      "required": [
+        [
+          "work/lumen|lumen-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-alias|1|alias",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-prerequisites",
+      "required": [
+        [
+          "work/lumen|lumen-dependency|1|dep"
+        ],
+        [
+          "work/lumen|lumen-intake|1|gate"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-dependency|1|dep",
+        "work/lumen|lumen-intake|1|gate",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-unknown",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-future",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-expired",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-deleted",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-weather",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-emotion",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-contact",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-date",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-negated",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-owner",
+      "required": [
+        [
+          "work/atlas|atlas-owner|1|owner",
+          "work/atlas|atlas-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-owner-copy|1|owner-copy",
+        "work/atlas|atlas-owner|1|owner",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-location-release",
+      "required": [
+        [
+          "work/atlas|atlas-location|1|location"
+        ],
+        [
+          "work/atlas|atlas-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-location|1|location",
+        "work/atlas|atlas-release|1|release",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-reason",
+      "required": [
+        [
+          "work/atlas|atlas-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-rationale|1|reason",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-route",
+      "required": [
+        [
+          "work/atlas|atlas-team|1|team"
+        ],
+        [
+          "work/atlas|atlas-pager|1|pager"
+        ],
+        [
+          "work/atlas|atlas-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-hours|1|hours",
+        "work/atlas|atlas-pager|1|pager",
+        "work/atlas|atlas-standing|1|preference",
+        "work/atlas|atlas-team|1|team"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-inverse",
+      "required": [
+        [
+          "work/atlas|atlas-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference",
+        "work/atlas|atlas-team|1|team"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-ambiguity",
+      "required": [
+        [
+          "work/atlas|atlas-ambiguous|1|a"
+        ],
+        [
+          "work/atlas|atlas-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-ambiguous|1|a",
+        "work/atlas|atlas-ambiguous|1|b",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-prefix",
+      "required": [
+        [
+          "work/atlas|atlas-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-prefix|1|west",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-conflict",
+      "required": [
+        [
+          "work/atlas|atlas-conflict|1|c1"
+        ],
+        [
+          "work/atlas|atlas-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-conflict|1|c1",
+        "work/atlas|atlas-conflict|1|c2",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-history",
+      "required": [
+        [
+          "work/atlas|atlas-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-owner-old|1|owner-old",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-owner-copy|1|owner-copy",
+        "work/atlas|atlas-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-revision",
+      "required": [
+        [
+          "work/atlas|atlas-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-release|2|release",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-mixed",
+      "required": [
+        [
+          "work/atlas|atlas-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-mixed|1|mixed-target",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-partial",
+      "required": [
+        [
+          "work/atlas|atlas-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-location|1|location",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-alias",
+      "required": [
+        [
+          "work/atlas|atlas-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-alias|1|alias",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-prerequisites",
+      "required": [
+        [
+          "work/atlas|atlas-dependency|1|dep"
+        ],
+        [
+          "work/atlas|atlas-intake|1|gate"
+        ],
+        [
+          "work/atlas|atlas-branch|1|branch"
+        ],
+        [
+          "work/atlas|atlas-branch|1|filtergate"
+        ]
+      ],
+      "acceptable": [
+        "work/atlas|atlas-branch|1|branch",
+        "work/atlas|atlas-branch|1|filtergate",
+        "work/atlas|atlas-dependency|1|dep",
+        "work/atlas|atlas-intake|1|gate",
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "atlas-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-unknown",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-future",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-expired",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-deleted",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow",
+        "work/atlas|atlas-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-weather",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-emotion",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-contact",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-date",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "atlas-negated",
+      "required": [],
+      "acceptable": [
+        "work/atlas|atlas-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/atlas-external|atlas-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-owner",
+      "required": [
+        [
+          "work/meridian|meridian-owner|1|owner",
+          "work/meridian|meridian-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-owner-copy|1|owner-copy",
+        "work/meridian|meridian-owner|1|owner",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-location-release",
+      "required": [
+        [
+          "work/meridian|meridian-location|1|location"
+        ],
+        [
+          "work/meridian|meridian-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-location|1|location",
+        "work/meridian|meridian-release|1|release",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-reason",
+      "required": [
+        [
+          "work/meridian|meridian-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-rationale|1|reason",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-route",
+      "required": [
+        [
+          "work/meridian|meridian-team|1|team"
+        ],
+        [
+          "work/meridian|meridian-pager|1|pager"
+        ],
+        [
+          "work/meridian|meridian-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-hours|1|hours",
+        "work/meridian|meridian-pager|1|pager",
+        "work/meridian|meridian-standing|1|preference",
+        "work/meridian|meridian-team|1|team"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-inverse",
+      "required": [
+        [
+          "work/meridian|meridian-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference",
+        "work/meridian|meridian-team|1|team"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-ambiguity",
+      "required": [
+        [
+          "work/meridian|meridian-ambiguous|1|a"
+        ],
+        [
+          "work/meridian|meridian-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-ambiguous|1|a",
+        "work/meridian|meridian-ambiguous|1|b",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-prefix",
+      "required": [
+        [
+          "work/meridian|meridian-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-prefix|1|west",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-conflict",
+      "required": [
+        [
+          "work/meridian|meridian-conflict|1|c1"
+        ],
+        [
+          "work/meridian|meridian-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-conflict|1|c1",
+        "work/meridian|meridian-conflict|1|c2",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-history",
+      "required": [
+        [
+          "work/meridian|meridian-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-owner-old|1|owner-old",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-owner-copy|1|owner-copy",
+        "work/meridian|meridian-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-revision",
+      "required": [
+        [
+          "work/meridian|meridian-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-release|2|release",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-mixed",
+      "required": [
+        [
+          "work/meridian|meridian-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-mixed|1|mixed-target",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-partial",
+      "required": [
+        [
+          "work/meridian|meridian-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-location|1|location",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-alias",
+      "required": [
+        [
+          "work/meridian|meridian-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-alias|1|alias",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-prerequisites",
+      "required": [
+        [
+          "work/meridian|meridian-dependency|1|dep"
+        ],
+        [
+          "work/meridian|meridian-intake|1|gate"
+        ],
+        [
+          "work/meridian|meridian-branch|1|branch"
+        ],
+        [
+          "work/meridian|meridian-branch|1|filtergate"
+        ]
+      ],
+      "acceptable": [
+        "work/meridian|meridian-branch|1|branch",
+        "work/meridian|meridian-branch|1|filtergate",
+        "work/meridian|meridian-dependency|1|dep",
+        "work/meridian|meridian-intake|1|gate",
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "meridian-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-unknown",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-future",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-expired",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-deleted",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow",
+        "work/meridian|meridian-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-weather",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-emotion",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-contact",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-date",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "meridian-negated",
+      "required": [],
+      "acceptable": [
+        "work/meridian|meridian-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/meridian-external|meridian-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    }
+  ]
+}

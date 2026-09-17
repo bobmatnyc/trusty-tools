@@ -1,0 +1,5 @@
+Scoped artifact audit: 55 files scanned before this audit log; all below1,000,000bytes.
+Frozen input/spec/policy hashes:8 verified.
+Evaluated newsource hashes:11 verified; reused source hashes:8 verified.
+Run complete=true; all gzip results parsed; original result hashes recorded.
+Targeted private-key/GitHub/AWS credential patterns absent, including decompressed packets. Not a comprehensive secret audit.

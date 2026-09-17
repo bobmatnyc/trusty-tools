@@ -1,0 +1,738 @@
+{
+  "gold": [
+    {
+      "query_id": "zephyr-owner",
+      "required": [
+        [
+          "work/zephyr|zephyr-owner|1|owner",
+          "work/zephyr|zephyr-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-owner-copy|1|owner-copy",
+        "work/zephyr|zephyr-owner|1|owner",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-location-release",
+      "required": [
+        [
+          "work/zephyr|zephyr-location|1|location"
+        ],
+        [
+          "work/zephyr|zephyr-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-location|1|location",
+        "work/zephyr|zephyr-release|1|release",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-reason",
+      "required": [
+        [
+          "work/zephyr|zephyr-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-rationale|1|reason",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-route",
+      "required": [
+        [
+          "work/zephyr|zephyr-team|1|team"
+        ],
+        [
+          "work/zephyr|zephyr-pager|1|pager"
+        ],
+        [
+          "work/zephyr|zephyr-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-hours|1|hours",
+        "work/zephyr|zephyr-pager|1|pager",
+        "work/zephyr|zephyr-standing|1|preference",
+        "work/zephyr|zephyr-team|1|team"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-inverse",
+      "required": [
+        [
+          "work/zephyr|zephyr-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference",
+        "work/zephyr|zephyr-team|1|team"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-ambiguity",
+      "required": [
+        [
+          "work/zephyr|zephyr-ambiguous|1|a"
+        ],
+        [
+          "work/zephyr|zephyr-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-ambiguous|1|a",
+        "work/zephyr|zephyr-ambiguous|1|b",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-prefix",
+      "required": [
+        [
+          "work/zephyr|zephyr-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-prefix|1|west",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-conflict",
+      "required": [
+        [
+          "work/zephyr|zephyr-conflict|1|c1"
+        ],
+        [
+          "work/zephyr|zephyr-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-conflict|1|c1",
+        "work/zephyr|zephyr-conflict|1|c2",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-history",
+      "required": [
+        [
+          "work/zephyr|zephyr-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-owner-old|1|owner-old",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-owner-copy|1|owner-copy",
+        "work/zephyr|zephyr-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-revision",
+      "required": [
+        [
+          "work/zephyr|zephyr-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-release|2|release",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-mixed",
+      "required": [
+        [
+          "work/zephyr|zephyr-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-mixed|1|mixed-target",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-partial",
+      "required": [
+        [
+          "work/zephyr|zephyr-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-location|1|location",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-alias",
+      "required": [
+        [
+          "work/zephyr|zephyr-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-alias|1|alias",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-prerequisites",
+      "required": [
+        [
+          "work/zephyr|zephyr-dependency|1|dep"
+        ],
+        [
+          "work/zephyr|zephyr-intake|1|gate"
+        ]
+      ],
+      "acceptable": [
+        "work/zephyr|zephyr-dependency|1|dep",
+        "work/zephyr|zephyr-intake|1|gate",
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "zephyr-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-unknown",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-future",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-expired",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-deleted",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow",
+        "work/zephyr|zephyr-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-weather",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-emotion",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-contact",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-date",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "zephyr-negated",
+      "required": [],
+      "acceptable": [
+        "work/zephyr|zephyr-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/zephyr-external|zephyr-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-owner",
+      "required": [
+        [
+          "work/lumen|lumen-owner|1|owner",
+          "work/lumen|lumen-owner-copy|1|owner-copy"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-owner-copy|1|owner-copy",
+        "work/lumen|lumen-owner|1|owner",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-owner-old|1|owner-old"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-location-release",
+      "required": [
+        [
+          "work/lumen|lumen-location|1|location"
+        ],
+        [
+          "work/lumen|lumen-release|1|release"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-location|1|location",
+        "work/lumen|lumen-release|1|release",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-reason",
+      "required": [
+        [
+          "work/lumen|lumen-rationale|1|reason"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-rationale|1|reason",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-route",
+      "required": [
+        [
+          "work/lumen|lumen-team|1|team"
+        ],
+        [
+          "work/lumen|lumen-pager|1|pager"
+        ],
+        [
+          "work/lumen|lumen-hours|1|hours"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-hours|1|hours",
+        "work/lumen|lumen-pager|1|pager",
+        "work/lumen|lumen-standing|1|preference",
+        "work/lumen|lumen-team|1|team"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-inverse",
+      "required": [
+        [
+          "work/lumen|lumen-team|1|team"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference",
+        "work/lumen|lumen-team|1|team"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-ambiguity",
+      "required": [
+        [
+          "work/lumen|lumen-ambiguous|1|a"
+        ],
+        [
+          "work/lumen|lumen-ambiguous|1|b"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-ambiguous|1|a",
+        "work/lumen|lumen-ambiguous|1|b",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-prefix",
+      "required": [
+        [
+          "work/lumen|lumen-prefix|1|west"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-prefix|1|west",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-conflict",
+      "required": [
+        [
+          "work/lumen|lumen-conflict|1|c1"
+        ],
+        [
+          "work/lumen|lumen-conflict|1|c2"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-conflict|1|c1",
+        "work/lumen|lumen-conflict|1|c2",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-history",
+      "required": [
+        [
+          "work/lumen|lumen-owner-old|1|owner-old"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-owner-old|1|owner-old",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-owner-copy|1|owner-copy",
+        "work/lumen|lumen-owner|1|owner"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-revision",
+      "required": [
+        [
+          "work/lumen|lumen-release|2|release"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-release|2|release",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-release|1|release"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-mixed",
+      "required": [
+        [
+          "work/lumen|lumen-mixed|1|mixed-target"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-mixed|1|mixed-target",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-partial",
+      "required": [
+        [
+          "work/lumen|lumen-location|1|location"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-location|1|location",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-alias",
+      "required": [
+        [
+          "work/lumen|lumen-alias|1|alias"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-alias|1|alias",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-prerequisites",
+      "required": [
+        [
+          "work/lumen|lumen-dependency|1|dep"
+        ],
+        [
+          "work/lumen|lumen-intake|1|gate"
+        ]
+      ],
+      "acceptable": [
+        "work/lumen|lumen-dependency|1|dep",
+        "work/lumen|lumen-intake|1|gate",
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "lumen-no-rationale",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-unknown",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-future",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-future|1|future"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-expired",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-expired|1|expired"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-deleted",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow",
+        "work/lumen|lumen-deleted|1|deleted"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-weather",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-emotion",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-contact",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-date",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "lumen-negated",
+      "required": [],
+      "acceptable": [
+        "work/lumen|lumen-standing|1|preference"
+      ],
+      "forbidden": [
+        "work/lumen-external|lumen-shadow|1|shadow"
+      ],
+      "expected_empty": true
+    }
+  ]
+}

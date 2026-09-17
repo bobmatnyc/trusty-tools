@@ -1,0 +1,7 @@
+# Reuse imports the old model adapter's types, but this experiment never constructs it.
+numpy==2.4.6
+onnxruntime==1.30.0
+tokenizers==0.23.2
+tiktoken==0.14.0
+pytest==9.1.1
+mypy==2.3.1

@@ -1,0 +1,16 @@
+tune 0: {'query_budget_cases': 96, 'unique_queries': 48, 'positive_cases': 56, 'negative_cases': 40, 'positive_precision': 0.6071428571428571, 'positive_coverage': 0.6071428571428571, 'positive_f1': 0.6071428571428571, 'all_required': 0.5714285714285714, 'candidate_coverage': 1.0, 'postselection_coverage': 0.6071428571428571, 'negative_abstention': 0.8, 'standing_coverage': 1.0, 'mean_tokens': 34.1875, 'redundant_assertions': 0, 'unsupported_tokens': 180, 'safety_violations': 0, 'adoption_target_met': False, 'p50_ns': 578833, 'p95_ns': 757000, 'timing_samples': 288, 'duplicate_token_difference': 0}
+tune 1: {'query_budget_cases': 96, 'unique_queries': 48, 'positive_cases': 56, 'negative_cases': 40, 'positive_precision': 0.6071428571428571, 'positive_coverage': 0.6071428571428571, 'positive_f1': 0.6071428571428571, 'all_required': 0.5714285714285714, 'candidate_coverage': 1.0, 'postselection_coverage': 0.6071428571428571, 'negative_abstention': 0.8, 'standing_coverage': 1.0, 'mean_tokens': 34.1875, 'redundant_assertions': 0, 'unsupported_tokens': 180, 'safety_violations': 0, 'adoption_target_met': False, 'p50_ns': 510750, 'p95_ns': 673792, 'timing_samples': 288, 'duplicate_token_difference': 0}
+tune 2: {'query_budget_cases': 96, 'unique_queries': 48, 'positive_cases': 56, 'negative_cases': 40, 'positive_precision': 0.5357142857142857, 'positive_coverage': 0.5357142857142857, 'positive_f1': 0.5357142857142857, 'all_required': 0.5, 'candidate_coverage': 1.0, 'postselection_coverage': 0.5357142857142857, 'negative_abstention': 0.8, 'standing_coverage': 1.0, 'mean_tokens': 33.104166666666664, 'redundant_assertions': 0, 'unsupported_tokens': 180, 'safety_violations': 0, 'adoption_target_met': False, 'p50_ns': 503937, 'p95_ns': 661833, 'timing_samples': 288, 'duplicate_token_difference': 0}
+tune 3: {'query_budget_cases': 96, 'unique_queries': 48, 'positive_cases': 56, 'negative_cases': 40, 'positive_precision': 0.5357142857142857, 'positive_coverage': 0.5357142857142857, 'positive_f1': 0.5357142857142857, 'all_required': 0.5, 'candidate_coverage': 1.0, 'postselection_coverage': 0.5357142857142857, 'negative_abstention': 0.8, 'standing_coverage': 1.0, 'mean_tokens': 33.104166666666664, 'redundant_assertions': 0, 'unsupported_tokens': 180, 'safety_violations': 0, 'adoption_target_met': False, 'p50_ns': 567604, 'p95_ns': 749875, 'timing_samples': 288, 'duplicate_token_difference': 0}
+heldout budget=128 arm=baseline complete
+heldout budget=128 arm=selector complete
+heldout budget=128 arm=relation_graph complete
+heldout budget=128 arm=claim_index complete
+heldout budget=128 arm=cleanup complete
+heldout budget=128 arm=combined complete
+heldout budget=256 arm=combined complete
+heldout budget=256 arm=cleanup complete
+heldout budget=256 arm=claim_index complete
+heldout budget=256 arm=relation_graph complete
+heldout budget=256 arm=selector complete
+heldout budget=256 arm=baseline complete
