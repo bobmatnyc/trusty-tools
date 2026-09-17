@@ -381,8 +381,11 @@ impl ActivityLog {
     /// cap is enforced on every write; tests can also call it directly.
     /// What: counts rows, computes the overflow, and removes the lowest-id
     /// rows in batches of [`EVICTION_BATCH`]. On the `Discard` variant,
-    /// returns immediately — there is nothing to evict.
-    /// Test: `appends_evict_oldest_when_capped`.
+    /// returns immediately — there is nothing to evict. The id collection is
+    /// [`oldest_ids`], which propagates a storage error rather than committing
+    /// an empty batch and spinning this loop (#8254).
+    /// Test: `appends_evict_oldest_when_capped`,
+    /// `prune_propagates_a_storage_error_instead_of_dropping_the_batch`.
     pub fn prune(&self) -> Result<()> {
         let db = match self {
             Self::Redb { db, .. } => db,
@@ -403,12 +406,7 @@ impl ActivityLog {
                     .context("open_table activity (prune)")?;
                 // Collect the oldest ids first so the borrow of `table`
                 // doesn't overlap the remove calls.
-                let oldest: Vec<u64> = table
-                    .iter()
-                    .context("iter activity for prune")?
-                    .take(to_drop as usize)
-                    .filter_map(|res| res.ok().map(|(k, _)| k.value()))
-                    .collect();
+                let oldest = oldest_ids(&table, to_drop as usize)?;
                 for id in oldest {
                     let _ = table.remove(&id).context("remove activity entry")?;
                 }
@@ -447,10 +445,14 @@ impl ActivityLog {
     /// is the simplest correct strategy), and returns at most `limit` rows
     /// starting at `offset`. `limit` is clamped at the call site by the
     /// handler; this method does not clamp so tests can exercise edge cases.
-    /// On the `Discard` variant, returns an empty vec.
+    /// On the `Discard` variant, returns an empty vec. A storage error from the
+    /// iterator propagates rather than truncating the feed (#8254); a single
+    /// row whose JSON body fails to decode is still skipped with a warning,
+    /// which is a payload fault, not a storage one.
     /// Test: `list_returns_newest_first`,
     /// `list_filters_by_source_palace_and_time`,
-    /// `discard_variant_drops_writes_and_returns_empty_reads`.
+    /// `discard_variant_drops_writes_and_returns_empty_reads`,
+    /// `list_propagates_a_storage_error_instead_of_truncating`.
     pub fn list(
         &self,
         filter: &ActivityFilter,
@@ -470,13 +472,12 @@ impl ActivityLog {
         let mut skipped: usize = 0;
 
         // redb tables iterate ascending; `.rev()` walks descending.
-        for res in table
-            .iter()
-            .context("iter activity (list)")?
-            .rev()
-            .flatten()
-        {
-            let (_, bytes) = res;
+        // #8254: `.flatten()` here dropped every `Err` row, so a storage
+        // failure truncated the feed and reported success. redb 4.3.0 keeps
+        // returning an error after the first one, which turned that into the
+        // silent loss of the whole remaining feed.
+        for res in table.iter().context("iter activity (list)")?.rev() {
+            let (_, bytes) = res.context("read activity row (list)")?;
             let entry: ActivityEntry = match serde_json::from_slice(bytes.value().as_slice()) {
                 Ok(e) => e,
                 Err(e) => {
@@ -500,6 +501,29 @@ impl ActivityLog {
         }
         Ok(out)
     }
+}
+
+/// Ids of the `limit` lowest-keyed rows, in ascending key order.
+///
+/// Why: [`ActivityLog::prune`]'s FIFO eviction needs the oldest ids before it
+/// can remove them, and the borrow of `table` must end before the removes
+/// start. #8254: this used to be `filter_map(|res| res.ok())`, which discarded
+/// a `StorageError` from the iterator — prune then collected no ids, removed
+/// nothing, and committed, so `count()` was unchanged and prune's `loop` spun
+/// forever. redb 4.3.0 makes a failed iterator keep failing rather than
+/// silently skipping the unreadable entries, which turned that from a chance
+/// hang into a certain one.
+/// What: walks the table ascending, stopping after `limit` rows, and propagates
+/// the first read error instead of yielding a short batch.
+/// Test: `prune_propagates_a_storage_error_instead_of_dropping_the_batch`,
+/// `appends_evict_oldest_when_capped`.
+fn oldest_ids(table: &impl ReadableTable<u64, Vec<u8>>, limit: usize) -> Result<Vec<u64>> {
+    let mut out: Vec<u64> = Vec::with_capacity(limit);
+    for res in table.iter().context("iter activity for prune")?.take(limit) {
+        let (k, _) = res.context("read activity row for prune")?;
+        out.push(k.value());
+    }
+    Ok(out)
 }
 
 /// Predicate implementing the filter combination used by [`ActivityLog::list`].
@@ -804,5 +828,316 @@ mod tests {
         // Exercise prune at the real cap — it should be a no-op when below.
         log.prune().unwrap();
         assert_eq!(log.count().unwrap(), 10);
+    }
+
+    // ---- #8254: redb iterator errors must not be swallowed ---------------
+    //
+    // redb 4.3.0 fixed iterators SILENTLY OMITTING data after an error: an
+    // iterator that yielded `Err` used to carry on and skip the unreadable
+    // entries, and now keeps returning an error instead. Both call sites below
+    // consumed that `Result` with a combinator that discarded the `Err`, so the
+    // upgrade turns a partial read into a total one. These tests pin the
+    // propagation contract.
+
+    use std::io;
+    use std::sync::Mutex;
+
+    /// Disarmed sentinel for [`FaultBackend::fail_from`].
+    const NEVER: u64 = u64::MAX;
+
+    /// In-memory redb `StorageBackend` that starts failing reads after a chosen
+    /// number of them.
+    ///
+    /// Why: the only way to make a redb table iterator yield `Err` mid-traversal
+    /// is to fail the underlying storage read for a page the iterator needs, and
+    /// no public redb API injects that. Counting reads rather than matching byte
+    /// offsets is what makes the fault land where it is aimed: redb reads the
+    /// same offsets during an open that it reads during a scan, so an
+    /// offset-based fault cannot tell the two apart, while the COUNT of reads an
+    /// open performs is fixed given identical starting bytes.
+    /// What: reads and writes a shared byte vector; every read increments a
+    /// shared counter, and any read whose index is at or past `fail_from`
+    /// returns `io::Error` instead of data.
+    /// Test: `list_propagates_a_storage_error_instead_of_truncating`.
+    #[derive(Debug)]
+    struct FaultBackend {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        reads: Arc<AtomicU64>,
+        fail_from: Arc<AtomicU64>,
+    }
+
+    impl FaultBackend {
+        fn new(
+            bytes: Arc<Mutex<Vec<u8>>>,
+            reads: Arc<AtomicU64>,
+            fail_from: Arc<AtomicU64>,
+        ) -> Self {
+            Self {
+                bytes,
+                reads,
+                fail_from,
+            }
+        }
+    }
+
+    impl redb::StorageBackend for FaultBackend {
+        fn len(&self) -> std::result::Result<u64, io::Error> {
+            Ok(self.bytes.lock().expect("bytes lock").len() as u64)
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error> {
+            let index = self.reads.fetch_add(1, Ordering::SeqCst);
+            if index >= self.fail_from.load(Ordering::SeqCst) {
+                return Err(io::Error::other("#8254 injected storage fault"));
+            }
+            let bytes = self.bytes.lock().expect("bytes lock");
+            let start = offset as usize;
+            let end = start + out.len();
+            if end > bytes.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past end"));
+            }
+            out.copy_from_slice(&bytes[start..end]);
+            Ok(())
+        }
+
+        fn set_len(&self, len: u64) -> std::result::Result<(), io::Error> {
+            self.bytes
+                .lock()
+                .expect("bytes lock")
+                .resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn sync_data(&self) -> std::result::Result<(), io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error> {
+            let mut bytes = self.bytes.lock().expect("bytes lock");
+            let end = offset as usize + data.len();
+            if end > bytes.len() {
+                bytes.resize(end, 0);
+            }
+            bytes[offset as usize..end].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    /// Shared state for a fault-injectable activity log.
+    struct Fault {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        reads: Arc<AtomicU64>,
+        fail_from: Arc<AtomicU64>,
+    }
+
+    impl Fault {
+        fn new() -> Self {
+            Self {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+                reads: Arc::new(AtomicU64::new(0)),
+                fail_from: Arc::new(AtomicU64::new(NEVER)),
+            }
+        }
+
+        /// Open the shared bytes as a fresh `ActivityLog`, resetting the read
+        /// counter so the next `reads_so_far` measures this open alone.
+        fn open(&self) -> ActivityLog {
+            self.reads.store(0, Ordering::SeqCst);
+            let backend = FaultBackend::new(
+                Arc::clone(&self.bytes),
+                Arc::clone(&self.reads),
+                Arc::clone(&self.fail_from),
+            );
+            // The smallest cache redb accepts: with the default cache the whole
+            // fixture fits in memory after `open`, the traversal issues no
+            // backend read at all, and an injected read fault can never fire.
+            let db = Database::builder()
+                .set_cache_size(0)
+                .create_with_backend(backend)
+                .expect("open fault-backed database");
+            // Match `ActivityLog::open`'s table initialisation.
+            let write = db.begin_write().expect("begin_write");
+            {
+                let _t = write.open_table(ACTIVITY_TABLE).expect("open_table");
+            }
+            write.commit().expect("commit");
+            let last = {
+                let read = db.begin_read().expect("begin_read");
+                let table = read.open_table(ACTIVITY_TABLE).expect("open_table");
+                let key = table.last().expect("last").map(|(k, _)| k.value());
+                key.unwrap_or(0)
+            };
+            ActivityLog::Redb {
+                db: Arc::new(db),
+                next_id: Arc::new(AtomicU64::new(last.saturating_add(1))),
+            }
+        }
+
+        /// Reads performed since the last [`Self::open`].
+        fn reads_so_far(&self) -> u64 {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        /// Copy of the current bytes, to be replayed by [`Self::restore`].
+        ///
+        /// Why: `open` runs a table-init write transaction, which relocates
+        /// pages. Without replaying identical starting bytes before each run,
+        /// an offset calibrated in one run names a different page in the next —
+        /// and the injected fault then lands on `open` rather than on the
+        /// traversal it was aimed at.
+        fn snapshot(&self) -> Vec<u8> {
+            self.bytes.lock().expect("bytes lock").clone()
+        }
+
+        fn restore(&self, snap: &[u8]) {
+            let mut bytes = self.bytes.lock().expect("bytes lock");
+            bytes.clear();
+            bytes.extend_from_slice(snap);
+        }
+
+        /// Fail every read from index `from` onward (0-based, counted from the
+        /// most recent `open`).
+        fn arm(&self, from: u64) {
+            self.fail_from.store(from, Ordering::SeqCst);
+        }
+
+        fn disarm(&self) {
+            self.fail_from.store(NEVER, Ordering::SeqCst);
+        }
+    }
+
+    /// Seed `rows` entries and return the resulting bytes, to be replayed
+    /// before every calibration and armed run.
+    fn seed(fault: &Fault, rows: u64) -> Vec<u8> {
+        let log = fault.open();
+        for n in 1..=rows {
+            log.append(ActivitySource::Http, None, format!("e{n}"), json!({"n": n}))
+                .expect("append");
+        }
+        assert_eq!(log.count().expect("count"), rows);
+        drop(log);
+        fault.snapshot()
+    }
+
+    /// Reads performed by [`Fault::open`] plus a read transaction that opens the
+    /// table but iterates nothing — i.e. everything a traversal does BEFORE its
+    /// first row.
+    ///
+    /// Why: the fault must land INSIDE the traversal. Arming any earlier fails
+    /// `open` or `begin_read`, and both of those already propagated before this
+    /// change, so such a test would pass with or without the fix. `count()` is
+    /// the traversal-free stand-in: same `begin_read` + `open_table` prologue,
+    /// then a metadata-only `len()`.
+    /// What: replays `snap` — `open`'s table-init write relocates pages, so the
+    /// count is only reproducible from identical starting bytes — runs the
+    /// prologue once, and reports the counter.
+    fn reads_before_first_row(fault: &Fault, snap: &[u8]) -> u64 {
+        fault.restore(snap);
+        let log = fault.open();
+        let _ = log.count().expect("count");
+        let n = fault.reads_so_far();
+        drop(log);
+        assert!(n > 0, "the prologue must perform at least one read");
+        n
+    }
+
+    /// Why: `list` consumed the redb iterator with `.flatten()`, which dropped
+    /// every `Err` row. A storage failure therefore truncated the feed and
+    /// reported success — and under redb 4.3.0, where the iterator keeps
+    /// erroring after the first fault, it silently dropped the whole remainder.
+    /// What: injects a read fault at an offset only a full traversal touches and
+    /// asserts `list` returns `Err` rather than a short `Ok`.
+    /// Test: this test.
+    #[test]
+    fn list_propagates_a_storage_error_instead_of_truncating() {
+        let fault = Fault::new();
+        let rows = 400;
+        let snap = seed(&fault, rows);
+
+        // Control: disarmed, the same traversal reads every row. Without it a
+        // green assertion below could mean the fault never fired at all.
+        fault.restore(&snap);
+        let log = fault.open();
+        let listed = log
+            .list(&ActivityFilter::default(), rows as usize, 0)
+            .expect("control: a clean list must succeed");
+        assert_eq!(listed.len(), rows as usize, "control: every row is read");
+        drop(log);
+
+        let after_prologue = reads_before_first_row(&fault, &snap);
+        fault.restore(&snap);
+        fault.arm(after_prologue);
+        let log = fault.open();
+        let got = log.list(&ActivityFilter::default(), rows as usize, 0);
+        fault.disarm();
+
+        let err = got.err().unwrap_or_else(|| {
+            panic!("a storage error during iteration must propagate, not truncate the feed")
+        });
+        assert!(
+            format!("{err:#}").contains("read activity row (list)"),
+            "the error must come from the iterator arm, got: {err:#}"
+        );
+    }
+
+    /// Why: `prune`'s id collection used `filter_map(|res| res.ok())`, so a
+    /// storage error yielded an empty batch, removed nothing, and committed —
+    /// leaving `count()` unchanged and spinning prune's `loop` forever. redb
+    /// 4.3.0 makes a failed iterator keep failing, turning a chance hang into a
+    /// certain one.
+    /// What: drives the production [`oldest_ids`] helper `prune` calls against a
+    /// read fault and asserts it returns `Err` rather than a short batch.
+    /// `prune` itself only reaches this step above `MAX_ENTRIES` (100k rows),
+    /// far too slow to seed in a unit test, so the helper is the seam.
+    /// Test: this test.
+    #[test]
+    fn prune_propagates_a_storage_error_instead_of_dropping_the_batch() {
+        let fault = Fault::new();
+        let rows = 400;
+        let snap = seed(&fault, rows);
+
+        // Control: disarmed, the helper fills a whole batch, so the armed
+        // assertion below can tell a propagated error from a short batch.
+        fault.restore(&snap);
+        let log = fault.open();
+        {
+            let db = match &log {
+                ActivityLog::Redb { db, .. } => Arc::clone(db),
+                ActivityLog::Discard => panic!("fault log must be the Redb variant"),
+            };
+            let read = db.begin_read().expect("begin_read");
+            let table = read.open_table(ACTIVITY_TABLE).expect("open_table");
+            let ids = oldest_ids(&table, EVICTION_BATCH as usize).expect("control: clean read");
+            assert_eq!(
+                ids.len(),
+                EVICTION_BATCH as usize,
+                "control: a clean read must fill the batch"
+            );
+            assert_eq!(ids[0], 1, "control: ids ascend from the oldest row");
+        }
+        drop(log);
+
+        let after_prologue = reads_before_first_row(&fault, &snap);
+        fault.restore(&snap);
+        fault.arm(after_prologue);
+        let log = fault.open();
+        let db = match &log {
+            ActivityLog::Redb { db, .. } => Arc::clone(db),
+            ActivityLog::Discard => panic!("fault log must be the Redb variant"),
+        };
+        let collected = {
+            let read = db.begin_read().expect("begin_read");
+            let table = read.open_table(ACTIVITY_TABLE).expect("open_table");
+            oldest_ids(&table, EVICTION_BATCH as usize)
+        };
+        fault.disarm();
+
+        let err = collected.err().unwrap_or_else(|| {
+            panic!("a storage error must propagate out of prune's id collection")
+        });
+        assert!(
+            format!("{err:#}").contains("read activity row for prune"),
+            "the error must come from prune's iterator arm, got: {err:#}"
+        );
     }
 }

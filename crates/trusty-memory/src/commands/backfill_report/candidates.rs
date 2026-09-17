@@ -318,7 +318,13 @@ fn read_palace_drawers(
     }
     let drawers = store.load_drawers().context("load drawers")?;
     let store = Arc::new(store);
-    let rooms = list_room_summaries(&store).unwrap_or_default();
+    // #8254: an unreadable ROOMS scan is reported, not defaulted to an empty
+    // list. `list_rooms` propagates a redb iterator error (it only skips rows
+    // that fail to DECODE), so `unwrap_or_default()` here turned a storage
+    // failure into every drawer silently rendering a short id in place of its
+    // room label.
+    let rooms =
+        list_room_summaries(&store).context("list room summaries for the backfill report")?;
     Ok((drawers, rooms))
 }
 

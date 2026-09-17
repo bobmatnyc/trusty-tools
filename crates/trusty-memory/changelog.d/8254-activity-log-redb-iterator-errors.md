@@ -1,0 +1,3 @@
+Fixed
+
+- The activity log now reports a storage error from redb instead of hiding it. `ActivityLog::list` consumed the table iterator with `.flatten()`, so an unreadable row was dropped and a truncated feed was returned as a success; the FIFO eviction in `ActivityLog::prune` collected its batch of ids with `filter_map(|res| res.ok())`, so the same fault yielded an empty batch, removed nothing, committed, and left `prune`'s loop spinning on an unchanged row count. Both now propagate the error. redb 4.3.0 makes a failed iterator keep failing rather than silently skipping the unreadable entries, which turned the first into the silent loss of a whole feed and the second from a chance hang into a certain one (#8254).

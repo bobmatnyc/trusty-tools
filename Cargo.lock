@@ -8264,9 +8264,9 @@ dependencies = [
 
 [[package]]
 name = "redb"
-version = "4.1.0"
+version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
+checksum = "fb338a6c67830a61bed824b78c2bb034ab1ff401a20616bd7957524f4fdc2f22"
 dependencies = [
  "libc",
 ]
@@ -11340,7 +11340,7 @@ dependencies = [
  "petgraph 0.8.3",
  "rand 0.8.6",
  "ratatui",
- "redb 4.1.0",
+ "redb 4.3.0",
  "regex",
  "reqwest 0.12.28",
  "rust-embed",
@@ -11457,7 +11457,7 @@ dependencies = [
  "open",
  "ort",
  "protobuf",
- "redb 4.1.0",
+ "redb 4.3.0",
  "reqwest 0.12.28",
  "scip",
  "serde",
@@ -11684,7 +11684,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "ratatui",
- "redb 4.1.0",
+ "redb 4.3.0",
  "regex",
  "reqwest 0.12.28",
  "rpassword",
@@ -11910,7 +11910,7 @@ dependencies = [
  "open",
  "parking_lot",
  "postcard",
- "redb 4.1.0",
+ "redb 4.3.0",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -12045,7 +12045,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "jsonwebtoken",
- "redb 4.1.0",
+ "redb 4.3.0",
  "regex",
  "reqwest 0.12.28",
  "semver",
@@ -12113,7 +12113,7 @@ dependencies = [
  "rand 0.8.6",
  "rayon",
  "redb 2.6.3",
- "redb 4.1.0",
+ "redb 4.3.0",
  "regex",
  "reqwest 0.12.28",
  "scraper",
