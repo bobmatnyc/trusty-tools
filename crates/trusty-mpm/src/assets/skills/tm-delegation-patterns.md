@@ -253,6 +253,7 @@ record each round.
 | "Both arrival orders converge" | Sequential calls on one thread, no mutex | Two threads, same key, N rounds, exactly one record per round |
 | "The bypass is closed" | A guard that closes only the command you named | Name the class: every segment must be a `cd` or THE one commit |
 | "Tests pass" | A change that added no test able to fail | One regression test that provably FAILED against the pre-fix commit |
+| "23 criteria pass" on a `count` gate flipping 0 → 1 | Nobody reads the first plan's computed attribute values; a duplicated resource name ships because the count was never 1 before | Read the first plan's computed attribute values — names in particular — for any first-time-created resource, not only the count (#8130) |
 
 Row three is the Fail-Open Check the instruction package already puts in
 `code-analyzer` / `code-critic` briefs, applied to your own criteria.
