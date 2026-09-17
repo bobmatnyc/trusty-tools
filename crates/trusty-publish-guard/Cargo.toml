@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Detects unpublished source drift under an already-published crate version across the trusty-tools workspace (issue #3366)."
 keywords = ["release", "publish", "ci", "guard"]
 categories = ["development-tools"]
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 # Internal CI/release tool, never itself published to crates.io — publishing
 # it would just create a second instance of the exact defect it exists to
 # catch (a tool crate nobody depends on, going stale under its own version).

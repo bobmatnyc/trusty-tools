@@ -7,7 +7,7 @@ license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Unified ONNX embedding daemon with stdio + Unix-socket transports and BatchQueue (issue #164)."
 readme = "README.md"
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 keywords = ["onnx", "embeddings", "daemon", "ml", "nlp"]
 categories = ["artificial-intelligence", "network-programming"]
 
