@@ -92,6 +92,14 @@ Inline on every command, because an agent's shell environment does not persist
 between tool calls. An `export` in one call is gone by the next, so a single
 `export CARGO_BUILD_JOBS=2` at the top of a task silently protects nothing.
 
+Pointing every worktree at one shared `CARGO_TARGET_DIR` per repo is the knob
+that actually pays: a fresh worktree's cold full-workspace build took ~200 s on
+the 16-core reference host, 103 s against a target directory another worktree
+had warmed, and 17 s from that path again. `tm doctor`'s `rust_build_env` row
+prints the whole prefix — `CARGO_TARGET_DIR=<dir> CARGO_BUILD_JOBS=<n>
+[RUSTC_WRAPPER=sccache] SKIP_UI_BUILD=1` — so take it from there rather than
+assembling it by hand.
+
 ## 5. Gate-Output Economy
 
 A gate is a declarative process. It owes you a verdict, not a play-by-play.
@@ -123,6 +131,13 @@ The process rule is the one this skill adds: recommend sccache to the
 operator, never silently enable it. Writing a `rustc-wrapper` into a shared
 config changes every build on the machine, including builds you did not run,
 so it is an operator decision and not a side effect of an unrelated task.
+
+Measured on this workspace, sccache was NEUTRAL — a cold worktree build took
+~200 s with it and without it, because path crates dominate the graph and their
+incremental artifacts are not cacheable. `tm doctor`'s `rust_build_env` row
+reports whether sccache is on `PATH` and wired as `build.rustc-wrapper`, and
+emits `RUSTC_WRAPPER=sccache` in the prefix line only when the operator's
+`build.sccache` config asked for it; it never writes `~/.cargo/config.toml`.
 
 ## 7. Batch Merges, Then One Install and One Probe
 
