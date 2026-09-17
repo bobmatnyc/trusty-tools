@@ -37,7 +37,7 @@ The combined arm's task F1 rose from .176 to .636 and useful unique task facts p
 
 ## Specific remaining failures
 
-The same failure types occurred in both heldout families. These are post-run diagnosis, not changes applied to the tested policy.
+The same failure types occurred in both heldout families. These are post-run diagnosis, not changes applied to the tested policy. One implementation deviation matters: when no known intent phrase matched, the evaluated parser rejected a clause containing any negation word. The interface described a narrower three-token negation window before recognized phrases. That broader unknown-intent veto contributed to false abstentions; it is a defect of this tested implementation, not evidence that deterministic query interpretation cannot work. The frozen code and results are retained unchanged.
 
 | Failure | Observed behavior | Needed capability |
 |---|---|---|
