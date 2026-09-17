@@ -315,9 +315,16 @@ async fn stores_route_reports_a_default_slot_that_differs_from_the_declared_inde
         slot["default_index"].is_null(),
         "the default slot resolves to nothing: {slot}"
     );
+    // #7902 (critic round): the resolver failed, so the payload reports that it
+    // does not know — never `differs`, which would claim a comparison against a
+    // default index that was never resolved.
     assert_eq!(
-        slot["differs_from_declared"], true,
-        "and the payload says so rather than leaving a reader to compare: {slot}"
+        slot["declared_agreement"], "unresolved",
+        "the payload says the slot could not be resolved, not that it differs: {slot}"
+    );
+    assert!(
+        slot["differs_from_declared"].is_null(),
+        "the boolean that could not answer the question is gone: {slot}"
     );
     assert!(
         slot["error"]
@@ -363,11 +370,33 @@ async fn stores_route_reports_no_difference_when_the_declared_index_answers() {
         slot["default_index"], "bob-kb",
         "the declared index answers"
     );
-    assert_eq!(slot["differs_from_declared"], false, "{slot}");
+    assert_eq!(slot["declared_agreement"], "agrees", "{slot}");
     assert!(slot["error"].is_null(), "nothing to report: {slot}");
     assert_eq!(
         slot["protected_index"], protected,
         "the protected index is named even though it is not the default: {slot}"
+    );
+}
+
+/// #7902 (critic round, MEDIUM): the state the two route tests above cannot
+/// reach — a resolver failure with NOTHING declared beside it.
+///
+/// The retired boolean answered `false` there, which read as "the declared
+/// index answers" from an answer the resolver never gave. Pre-change this test
+/// does not compile: `declared_agreement` did not exist.
+#[test]
+fn an_unresolved_slot_never_reads_as_agreement() {
+    use crate::api::server::agent_stores::declared_agreement;
+    assert_eq!(declared_agreement(true, None, None), "unresolved");
+    assert_eq!(declared_agreement(true, None, Some("bob-kb")), "unresolved");
+    assert_eq!(declared_agreement(false, None, None), "agrees");
+    assert_eq!(
+        declared_agreement(false, Some("bob-kb"), Some("bob-kb")),
+        "agrees"
+    );
+    assert_eq!(
+        declared_agreement(false, Some("other-kb"), Some("bob-kb")),
+        "differs"
     );
 }
 

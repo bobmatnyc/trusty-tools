@@ -180,14 +180,13 @@ pub(super) async fn stores_at(
 /// `default_index` the slot an unqualified `vector_search` uses,
 /// `protected_index` the provisioned extraction index (`null` before
 /// provisioning, and reachable by id rather than by default whenever it is not
-/// the default itself), and `differs_from_declared` whether the first two
-/// disagree.
+/// the default itself), and `declared_agreement` whether the first two agree.
 ///
 /// FAIL-VISIBLE, not fail-open: a resolution failure is reported as `error`
-/// with `default_index: null`, which a declared store makes
-/// `differs_from_declared: true` — the slot resolves to NOTHING while the
-/// store beside it still reads as connected, and that is exactly the state an
-/// operator has to be told about. It is not an
+/// with `default_index: null` and `declared_agreement: "unresolved"` — the
+/// slot resolves to NOTHING while the store beside it still reads as
+/// connected, and that is exactly the state an operator has to be told about.
+/// It is not an
 /// HTTP error, because this route's contract is `200` whenever the agent
 /// resolves at all; the same failure reaches the CLI as
 /// `search_binding_error` (#7903).
@@ -213,12 +212,48 @@ fn search_slot(name: &str, stores: &StoresConfig) -> serde_json::Value {
         "declared_index": declared,
         "default_index": slots.default_index,
         "protected_index": slots.protected_index,
-        "differs_from_declared": slots.default_index.as_deref() != declared,
+        // #7902: three-state, never a boolean — see `declared_agreement`.
+        "declared_agreement": declared_agreement(
+            error.is_some(),
+            slots.default_index.as_deref(),
+            declared,
+        ),
     });
     if let Some(error) = error {
         slot["error"] = serde_json::Value::String(error);
     }
     slot
+}
+
+/// Whether the default `vector_search` slot agrees with the declared binding
+/// (#7902).
+///
+/// Why (critic round, MEDIUM): the boolean this replaces answered "the two
+/// disagree" from a comparison against `None` whenever the resolver had in
+/// fact answered NOTHING. That made the field's meaning depend on whether a
+/// store happened to be declared — an unresolvable slot read `true` beside a
+/// declared store and `false` beside none, so `false` could not be read as
+/// "agrees" and the operator question ("is what I declared what answers?") had
+/// no answer in the payload.
+/// What: `"unresolved"` whenever `error` is set, because the payload must not
+/// claim agreement or disagreement from an answer it never got; otherwise
+/// `"agrees"` or `"differs"` by comparing the two ids. Two absent ids agree —
+/// an assistant that declares no store and resolves no default is consistent,
+/// not broken.
+/// Test: `super::tests::agent_stores::stores_route_reports_a_default_slot_that_differs_from_the_declared_index`,
+/// `super::tests::agent_stores::stores_route_reports_no_difference_when_the_declared_index_answers`.
+pub(super) fn declared_agreement(
+    unresolved: bool,
+    default: Option<&str>,
+    declared: Option<&str>,
+) -> &'static str {
+    if unresolved {
+        "unresolved"
+    } else if default == declared {
+        "agrees"
+    } else {
+        "differs"
+    }
 }
 
 /// The attached tier-2 indexes MINUS any id already bound as an OKG store

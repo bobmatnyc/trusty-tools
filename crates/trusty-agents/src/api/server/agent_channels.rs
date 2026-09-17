@@ -278,17 +278,55 @@ pub(super) async fn overlaid_global_ids(
     dirs: &[PathBuf],
     name: &str,
 ) -> Result<Vec<String>, Error> {
+    Ok(stored_bindings(dirs, name)
+        .await?
+        .into_iter()
+        .filter(|binding| binding.target.is_empty())
+        .map(|binding| binding.id)
+        .collect())
+}
+
+/// One assistant's channels file parsed but NOT validated.
+///
+/// Why: [`overlaid_global_ids`] and [`inert_overlays_at`] both need the STORED
+/// records rather than the loadable ones, and two copies of the read would let
+/// them disagree about what is on disk. A missing file is no bindings; an
+/// unreadable or unparseable one is an `Err` no caller may read as "empty".
+/// Test: `an_inert_overlay_is_reported_and_survives_a_whole_list_save`.
+async fn stored_bindings(dirs: &[PathBuf], name: &str) -> Result<Vec<Binding>, Error> {
     let path = config_path(dirs, name)?;
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(internal(e)),
     };
-    let stored: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
-    Ok(stored
+    serde_json::from_str(&raw).map_err(internal)
+}
+
+/// The STORED overlay records that resolve against no declared global (#8187).
+///
+/// Why: [`load_at_with`] drops such a record so the rest of the file still
+/// loads (#7609), which leaves a destination that is on disk, inert, and
+/// invisible to every client. `DELETE /api/channels/{id}` names it once, at the
+/// moment it is orphaned, and after that nothing did — so the operator had no
+/// way to see it and a whole-list save would delete it unread. This is how the
+/// view reports it and how [`write_at`] knows to carry it through.
+/// What: [`stored_bindings`] narrowed to blank-target records that
+/// [`crate::channels::dispatch::is_overlay`] does not resolve against
+/// `globals` — exactly the records `load_at_with` drops.
+/// Test: `an_inert_overlay_is_reported_and_survives_a_whole_list_save`.
+async fn inert_overlays_at(
+    dirs: &[PathBuf],
+    name: &str,
+    globals: &[crate::channels::Channel],
+) -> Result<Vec<Binding>, Error> {
+    Ok(stored_bindings(dirs, name)
+        .await?
         .into_iter()
-        .filter(|binding| binding.target.is_empty())
-        .map(|binding| binding.id)
+        .filter(|binding| {
+            binding.target.is_empty()
+                && !crate::channels::dispatch::is_overlay(&binding.id, &binding.target, globals)
+        })
         .collect())
 }
 
@@ -302,23 +340,48 @@ fn revision(raw: &str) -> String {
 /// hand-written literal, and `status` publishes the per-binding
 /// dispatch-failure counter so a binding that is dropping inbound wakes says so
 /// instead of reading as healthy.
+///
+/// #8187: `inert_overlays` names every stored overlay [`load_at_with`] had to
+/// drop, so a record the operator cannot see in `bindings` is at least visible
+/// as damage they can repair — re-declaring the global brings the binding back.
 /// Test: `channel_providers_json_reports_registry_capabilities`,
-/// `channel_dispatch_failure_is_counted_per_binding`.
+/// `channel_dispatch_failure_is_counted_per_binding`,
+/// `the_assistant_channel_view_names_its_inert_overlays`.
 pub(crate) async fn read(name: &str) -> Result<Value, Error> {
-    let (_, raw, bindings) = load_at(&crate::agents::agents_dir_candidates(), name).await?;
+    let dirs = crate::agents::agents_dir_candidates();
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    let (_, raw, bindings) = load_at_with(&dirs, name, &globals).await?;
+    let inert: Vec<String> = inert_overlays_at(&dirs, name, &globals)
+        .await?
+        .into_iter()
+        .map(|binding| binding.id)
+        .collect();
     let listeners = agent_listeners::read(name).await?;
     Ok(
-        json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"providers":crate::channels::providers_json(),"listeners":listeners,"status":crate::channels::status::status_json(name)}),
+        json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"inert_overlays":inert,"providers":crate::channels::providers_json(),"listeners":listeners,"status":crate::channels::status::status_json(name)}),
     )
 }
 /// Replace one assistant's stored bindings, under compare-and-swap.
 ///
 /// Why (#7609): the caller audits the write, and an audit line that cannot say
 /// how many bindings there were before is not much of a record.
-/// What: returns `(before, after)` — the stored count either side of the write.
-/// Every refusal (stale revision, invalid binding, duplicate id) writes
-/// nothing.
-/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
+/// What: returns `(before, after)` — the ON-DISK record count either side of
+/// the write, which is not the count the client saw whenever an inert overlay
+/// is being carried through. Every refusal (stale revision, invalid binding,
+/// duplicate id) writes nothing.
+///
+/// #8187 (critic round, HIGH): the client's list is everything it COULD see,
+/// and [`load_at_with`] hides an overlay whose global is gone. Writing that
+/// list back verbatim deleted the hidden record — the operator's only copy of a
+/// binding they never chose to remove, and the revision hashes the raw file so
+/// nothing detected it. Those records are carried through the save instead.
+/// Preserving rather than REFUSING the save is deliberate: a refusal would put
+/// every other destination on this assistant out of reach of the UI until
+/// someone hand-edited the file, which is the exact failure #7609 fixed by
+/// dropping the record from the READ rather than failing it. A client that
+/// reuses the id wins — its own record is the one it asked for.
+/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`,
+/// `an_inert_overlay_is_reported_and_survives_a_whole_list_save`.
 async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(usize, usize), Error> {
     let _guard = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
     let (manifest, _) = resolve_agent_paths(dirs, name)
@@ -341,15 +404,25 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(usize
     for binding in &update.bindings {
         // #7609: an overlay of a global channel saves through the UI too.
         binding.validate_in(&globals)?;
-        if !ids.insert(&binding.id) {
+        if !ids.insert(binding.id.clone()) {
             return Err(bad("Channel binding IDs must be unique"));
         }
     }
-    let bytes = serde_json::to_vec_pretty(&update.bindings).map_err(internal)?;
+    // #8187: the records the client could not see, carried through — see above.
+    // They are NOT revalidated: an inert overlay resolves against no global, so
+    // `validate_in` would refuse the very record this is preserving.
+    let inert = inert_overlays_at(dirs, name, &globals).await?;
+    let mut to_write = update.bindings;
+    for overlay in &inert {
+        if ids.insert(overlay.id.clone()) {
+            to_write.push(overlay.clone());
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&to_write).map_err(internal)?;
     agent_listeners::atomic_write(&path, &bytes)
         .await
         .map_err(internal)?;
-    Ok((stored.len(), update.bindings.len()))
+    Ok((stored.len() + inert.len(), to_write.len()))
 }
 async fn bound(name: &str, id: &str, send: bool) -> Result<Binding, Error> {
     let (_, _, bindings) = load_at(&crate::agents::agents_dir_candidates(), name).await?;
@@ -802,6 +875,11 @@ mod tests {
 #[cfg(test)]
 #[path = "agent_channels/round_trip_tests.rs"]
 mod round_trip_tests;
+
+// #8187: the inert-overlay contract, in its own file for the same reason.
+#[cfg(test)]
+#[path = "agent_channels/inert_overlay_tests.rs"]
+mod inert_overlay_tests;
 
 #[cfg(test)]
 mod stale_send_tests {
