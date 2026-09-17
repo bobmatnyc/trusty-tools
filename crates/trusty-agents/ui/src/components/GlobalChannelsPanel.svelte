@@ -36,7 +36,7 @@
    * field edit would mean two drafts of one list.
    * Test: `GlobalChannelsPanel.test.ts`.
    */
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { Plus, RefreshCw, Trash2 } from 'lucide-svelte';
   import { catalogAgents, fetchAgentCatalog } from '../stores/app';
   import {
@@ -67,6 +67,8 @@
   let pending: GlobalChannel | null = null;
   let referencedBy: string[] = [];
   let draftError = '', pendingError = '', busy = false;
+  /** The Delete button that opened the confirmation, so focus can go back to it. */
+  let invoker: HTMLElement | null = null;
   /**
    * An open Add form or delete confirmation counts as an unsaved edit: the
    * parent pins the assistant selector on this flag, and the list Save must not
@@ -74,6 +76,14 @@
    */
   $: listDirty = JSON.stringify(channels) !== baseline;
   $: dirty = draft !== null || pending !== null || listDirty;
+  /**
+   * The stored list is read-only while either editor is open (critic HIGH).
+   *
+   * Why: both writes finish by calling `apply`, which REPLACES `channels`. A
+   * field edit made after the Add form opened would be thrown away by the
+   * create that follows it, under a notice announcing a success.
+   */
+  $: listLocked = saving || draft !== null || pending !== null;
   $: assistantNames = $catalogAgents.map(agent => agent.name);
   // #8187: the daemon's own provider table, minus the test-only adapters, and
   // the dispatch roster the server validates `route_to` against — which is NOT
@@ -128,10 +138,18 @@
     }
   }
   /** Close both editors and show what is actually stored. */
-  function reload() { draft = null; pending = null; draftError = ''; pendingError = ''; referencedBy = []; void load(); }
+  function reload() { draft = null; draftError = ''; void closeDelete(); void load(); }
   /** One sentence for every lost compare-and-swap, in all three writes (#8187). */
   const RELOADED = 'Another writer changed the global channels. The list has been reloaded; make your change again and save.';
   const DUPLICATE = 'A global channel with this ID already exists. Give this one a different ID.';
+  /**
+   * What a create or delete says when the list under it has unsaved changes.
+   *
+   * Why the buttons are not enough (critic HIGH): a change event already in
+   * flight when an editor opened still reaches the binding, so both writes
+   * re-check immediately before going to the wire.
+   */
+  const UNSAVED = 'The list below has unsaved changes. Save or discard them first — adding or deleting publishes the stored list, which would throw those changes away.';
   /** Open the Add form on a channel that does nothing until it is enabled. */
   function beginAdd() {
     const provider = providerOptions[0];
@@ -157,6 +175,7 @@
    */
   async function create() {
     if (!configuration || !draft || busy) return;
+    if (listDirty) { draftError = UNSAVED; return; }
     const id = draft.id.trim(), name = draft.name.trim() || id;
     if (!id) { draftError = 'Give the channel an ID.'; return; }
     if (channels.some(channel => channel.id === id)) { draftError = DUPLICATE; return; }
@@ -171,7 +190,10 @@
       if (token !== generation) return;
       if (isChannelConflict(cause)) {
         busy = false;
-        if (!(await load())) return;
+        // The reload is what tells a duplicate id from a lost race; when it
+        // fails too, the create's own refusal is all there is to say about it
+        // (critic LOW).
+        if (!(await load())) { draftError = channelErrorMessage(cause); return; }
         if (channels.some(channel => channel.id === id)) draftError = DUPLICATE; else error = RELOADED;
         return;
       }
@@ -180,8 +202,31 @@
       if (token === generation) busy = false;
     }
   }
-  function beginDelete(channel: GlobalChannel) {
+  /** `source` is the button clicked, kept so closing can give focus back to it. */
+  function beginDelete(channel: GlobalChannel, source: HTMLElement | null) {
+    invoker = source;
     pending = channel; referencedBy = []; pendingError = ''; error = ''; notice = '';
+  }
+  /**
+   * Dismiss the confirmation and return focus to the Delete button that raised
+   * it (critic MEDIUM-2).
+   *
+   * What: the focus call waits a tick. The list `fieldset` is disabled while
+   * the dialog is up, and a disabled button cannot take focus, so restoring it
+   * before the DOM re-renders would silently land on `<body>`.
+   */
+  async function closeDelete() {
+    pending = null; referencedBy = []; pendingError = '';
+    const target = invoker;
+    invoker = null;
+    await tick();
+    target?.focus();
+  }
+  /** Escape dismisses the confirmation wherever focus is — never mid-write. */
+  function onWindowKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || !pending || busy) return;
+    event.preventDefault();
+    void closeDelete();
   }
   /**
    * `DELETE /api/channels/{id}`, forced only after the server has named what
@@ -194,13 +239,14 @@
    */
   async function confirmDelete(force: boolean) {
     if (!configuration || !pending || busy) return;
+    if (listDirty) { pendingError = UNSAVED; return; }
     const token = generation, revision = configuration.revision, victim = pending;
     const label = victim.name || victim.id;
     busy = true; pendingError = ''; error = ''; notice = '';
     try {
       const result = await deleteGlobalChannel(revision, victim.id, force);
       if (token !== generation) return;
-      apply(result); pending = null; referencedBy = [];
+      apply(result); void closeDelete();
       const inert = result.inert_bindings ?? [];
       notice = inert.length
         ? `${label} deleted. ${inert.join(', ')} still carry a binding for it; those bindings now address nothing until they are removed.`
@@ -211,7 +257,7 @@
       const named = channelReferences(cause);
       if (named) { referencedBy = named; return; }
       if (isChannelConflict(cause)) {
-        busy = false; pending = null; referencedBy = [];
+        busy = false; void closeDelete();
         if (await load()) error = RELOADED;
         return;
       }
@@ -228,7 +274,10 @@
     void fetchAgentCatalog().catch(cause => { catalogError = cause instanceof Error ? cause.message : String(cause); });
   });
   onDestroy(() => { generation++; });
+  /** Give the confirmation the focus on open, so Escape and Tab act on IT. */
+  const focusOnMount = (node: HTMLElement) => { node.focus(); };
 </script>
+<svelte:window on:keydown={onWindowKeydown} />
 <div class="global" aria-label="Global channels">
   <p class="muted">These channels belong to this host, not to one assistant. Each one fans its incoming updates out to the assistants selected below. An assistant's own channel for the same service and destination takes precedence over the global one.</p>
   {#if loading}<p role="status">Loading global channels…</p>{/if}
@@ -237,7 +286,7 @@
   {#if notice}<p role="status">{notice}</p>{/if}
   {#if configuration}
     {#if channels.length === 0}<p>No global channels are declared on this host.</p>{/if}
-    <fieldset disabled={saving}>
+    <fieldset disabled={listLocked}>
       {#each channels as channel (channel.id)}
         {@const options = optionsFor(channel.id, assistantNames)}
         <article aria-label={`Global channel ${channel.name || channel.id}`}>
@@ -245,7 +294,7 @@
             <!-- #8187: a delete publishes the STORED list without this channel,
                  so an unsaved field edit would be thrown away by it rather than
                  carried along. Save or discard first. -->
-            <button class="delete" aria-label={`Delete ${channel.name || channel.id}`} on:click={() => beginDelete(channel)} disabled={busy || loading || listDirty}><Trash2 size={14} />Delete</button>
+            <button class="delete" aria-label={`Delete ${channel.name || channel.id}`} on:click={event => beginDelete(channel, event.currentTarget)} disabled={busy || loading || listDirty}><Trash2 size={14} />Delete</button>
           </header>
           <div class="row">
             <label><input type="checkbox" aria-label={`${channel.id} enabled`} bind:checked={channel.enabled} />Enabled</label>
@@ -309,8 +358,10 @@
 {#if pending}
   <!-- #8187: the same confirmation shape ProjectsView's modal uses — a backdrop
        and a sheet, no dialog library. `referencedBy` is what the server refused
-       with, so the consequence named here is the one it measured. -->
-  <div class="backdrop" role="dialog" aria-modal="true" aria-label="Delete global channel" tabindex="-1" on:keydown={event => { if (event.key === 'Escape' && !busy) { pending = null; referencedBy = []; } }}>
+       with, so the consequence named here is the one it measured. Escape is
+       handled on the window, not here: this element never holds the focus, and
+       a handler on it only fired for a click that had already landed on it. -->
+  <div class="backdrop" role="dialog" aria-modal="true" aria-label="Delete global channel">
     <div class="sheet">
       <h3>Delete “{pending.name || pending.id}”?</h3>
       {#if referencedBy.length}
@@ -322,7 +373,7 @@
       {#if pendingError}<p class="error" role="alert">{pendingError}</p>{/if}
       <div class="row">
         <button class="danger" on:click={() => confirmDelete(referencedBy.length > 0)} disabled={busy}>{busy ? 'Deleting…' : referencedBy.length ? 'Delete anyway' : 'Delete channel'}</button>
-        <button on:click={() => { pending = null; referencedBy = []; pendingError = ''; }} disabled={busy}>Cancel</button>
+        <button use:focusOnMount on:click={() => closeDelete()} disabled={busy}>Cancel</button>
       </div>
     </div>
   </div>

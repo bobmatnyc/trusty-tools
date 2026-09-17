@@ -193,8 +193,12 @@ describe('per-channel global writes', () => {
   test('only the providers the daemon serves are offered, never the test-only stub', async () => {
     const provider = (id: string): ChannelProvider =>
       ({ id, name: id, configured: true, can_send: true, can_read: false } as unknown as ChannelProvider);
-    const served = [provider('telegram'), provider('stub'), provider('gworkspace')];
-    expect(offerableProviders(served).map(p => p.id)).toEqual(['telegram', 'gworkspace']);
+    // `discord` is in no type, constant or list this build carries: the only
+    // subtraction is `stub`, so an adapter that ships after this bundle is
+    // offered without a UI release. An allow-list here would keep the `stub`
+    // assertion green and drop this one (critic MEDIUM-3).
+    const served = [provider('telegram'), provider('stub'), provider('discord')];
+    expect(offerableProviders(served).map(p => p.id)).toEqual(['telegram', 'discord']);
     expect(offerableProviders(undefined)).toEqual([]);
   });
 });
