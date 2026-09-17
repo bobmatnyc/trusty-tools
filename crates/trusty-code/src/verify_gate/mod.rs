@@ -45,6 +45,7 @@
 //! [`is_test_command`]: crate::verify_gate::is_test_command
 //! [`default_finish_gate`]: crate::verify_gate::default_finish_gate
 //! [`pm_finish_gate`]: crate::verify_gate::pm_finish_gate
+//! [`detect::detect_test_command`]: crate::verify_gate::detect::detect_test_command
 
 pub mod detect;
 
