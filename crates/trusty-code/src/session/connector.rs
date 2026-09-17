@@ -269,6 +269,12 @@ impl WorkstreamConnector for TcodeConnector {
             "task": task,
             "agent": agent,
             "project": project.to_string_lossy(),
+            // #8184: `session.create` now defaults to the SOLO agent for the
+            // interactive TUI. This connector provisions sessions
+            // PROGRAMMATICALLY, with no client attached to answer a permission
+            // prompt, so it keeps the pre-#8184 delegating shape explicitly
+            // rather than inheriting a default aimed at a human at a terminal.
+            "delegate": true,
         });
         let url = format!("{}/sessions", self.daemon_url);
         let resp = self

@@ -5,7 +5,7 @@ edition = "2024" # edition 2024 required: let-chains used in api/client.rs, api/
 description = "Google Workspace MCP server for the Trusty suite"
 license.workspace = true
 repository.workspace = true
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 
 [lib]
 crate-type = ["rlib"]

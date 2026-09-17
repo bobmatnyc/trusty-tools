@@ -24,6 +24,16 @@ import { TOOLS, type Tool } from './tools';
 export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-tools';
 
 /**
+ * Why: the canonical link and `og:url` on every page need one origin, set
+ * once, so a future domain change is a single edit rather than a grep-and-fix
+ * across every route (#8203).
+ * What: the production origin, owner-assigned in the Vercel project's Domains
+ * setting — no `www.`, no trailing slash. `src/routes/+layout.svelte`
+ * appends `$page.url.pathname` to build the per-page canonical URL.
+ */
+export const SITE_URL = 'https://trustytools.dev';
+
+/**
  * Rendered by both `SiteHeader.svelte` and `SiteFooter.svelte`, which is why
  * the list lives here rather than in `+layout.svelte`.
  */

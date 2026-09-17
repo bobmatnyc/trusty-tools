@@ -121,6 +121,90 @@ async fn create_rejects_empty_task() {
     assert_eq!(err.code, -32003);
 }
 
+/// #8184: a `session.create` with no explicit choice mints the SOLO agent.
+///
+/// Why: `tcode tui`'s interactive session is minted through this method with
+/// no `delegate` param, and the whole point of the issue is that such a
+/// session reads and edits files itself instead of delegating. The default
+/// lives HERE, on the daemon, so every client inherits it.
+/// What: calls `create` with `task` only and asserts the returned session
+/// reports `no_delegate: true`. FAILS before #8184 — the field did not exist,
+/// so the assertion reads `null`.
+/// Test: this test.
+#[tokio::test]
+async fn create_defaults_to_the_solo_agent() {
+    let registry = SessionRegistry::new();
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let value = create(
+        &registry,
+        &workstreams,
+        json!({"task": "add a doc comment to fn X"}),
+        test_ctx(),
+    )
+    .await
+    .expect("create must succeed");
+    assert_eq!(
+        value["no_delegate"],
+        json!(true),
+        "an interactive session defaults to the solo agent; got {value}"
+    );
+}
+
+/// #8184 companion: `delegate: true` is the opt-in back to the PM.
+///
+/// Why: without this, `create_defaults_to_the_solo_agent` would also pass if
+/// the flag were hard-wired to `true` and delegation became unreachable — the
+/// fix would be indistinguishable from a regression.
+/// What: the same call with `delegate: true`, asserting `no_delegate: false`.
+/// FAILS before #8184 — the param was unknown and the field absent.
+/// Test: this test.
+#[tokio::test]
+async fn create_with_delegate_true_keeps_the_delegating_pm() {
+    let registry = SessionRegistry::new();
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let value = create(
+        &registry,
+        &workstreams,
+        json!({"task": "ship the feature", "delegate": true}),
+        test_ctx(),
+    )
+    .await
+    .expect("create must succeed");
+    assert_eq!(
+        value["no_delegate"],
+        json!(false),
+        "delegate: true must mint the PM shape; got {value}"
+    );
+}
+
+/// #8184: a PROJECTLESS default session still succeeds, and still runs solo.
+///
+/// Why: `tcode tui` without `--project` is a first-class state (the run works
+/// in the executor's ephemeral scratch root), so the new default must not have
+/// made the projectless mint conditional on a binding.
+/// What: `create` with `task` only, asserting both the projectless binding and
+/// `no_delegate: true`. FAILS before #8184 on the second assertion.
+/// Test: this test.
+#[tokio::test]
+async fn create_without_project_defaults_to_the_solo_agent() {
+    let registry = SessionRegistry::new();
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let value = create(
+        &registry,
+        &workstreams,
+        json!({"task": "just chat"}),
+        test_ctx(),
+    )
+    .await
+    .expect("a projectless create must stay valid");
+    assert_eq!(value["binding"]["state"], "projectless");
+    assert_eq!(
+        value["no_delegate"],
+        json!(true),
+        "a projectless session runs solo against the scratch root; got {value}"
+    );
+}
+
 /// A well-formed `session.create` call must return a running session.
 #[tokio::test]
 async fn create_returns_running_session() {

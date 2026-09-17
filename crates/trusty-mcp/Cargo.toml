@@ -23,7 +23,7 @@ description = "Shared JSON-RPC 2.0 / MCP protocol primitives for the trusty-* ec
 readme = "README.md"
 keywords = ["mcp", "json-rpc", "openrpc", "daemon"]
 categories = ["network-programming"]
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 
 [lib]
 crate-type = ["rlib"]

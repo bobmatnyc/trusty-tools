@@ -38,7 +38,7 @@ description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 keywords = ["mcp", "memory", "vector-search", "knowledge-graph", "embeddings"]
 categories = ["command-line-utilities", "development-tools"]
 

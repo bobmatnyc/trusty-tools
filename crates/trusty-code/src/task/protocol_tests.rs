@@ -865,6 +865,336 @@ fn task_run_params_parse_max_turns() {
     assert!(unset.max_turns.is_none());
 }
 
+// ── #8184: a `session.create`d session's agent shape drives its turns ────────
+
+/// Mint a session through the REAL `session.create` handler and return its id.
+///
+/// Why (#8184): the tests below have to observe what a session minted the way
+/// `tcode tui` mints one actually runs, so they must go through
+/// `session::protocol`'s own handler rather than `SessionRegistry::create` —
+/// the default they are asserting lives in that handler.
+/// What: registers `session.*` on a throwaway `Router` and dispatches
+/// `session.create` with `extra` merged into the params.
+/// Test: `task_run_on_a_default_session_never_delegates`,
+/// `task_run_on_a_delegating_session_still_delegates`.
+async fn create_session(
+    registry: Arc<SessionRegistry>,
+    workstreams: crate::workstreams::SharedWorkstreamStore,
+    project: &std::path::Path,
+    extra: Value,
+) -> String {
+    let mut router = Router::new();
+    crate::session::protocol::register(&mut router, registry, workstreams);
+    let mut params = json!({"task": "tcode tui session", "project": project});
+    for (k, v) in extra.as_object().expect("extra must be an object") {
+        params[k] = v.clone();
+    }
+    let resp = router
+        .dispatch(
+            Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: "session.create".to_string(),
+                params: Some(params),
+            },
+            &test_ctx(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "session.create: {:?}", resp.error);
+    resp.result.expect("result")["id"]
+        .as_str()
+        .expect("id")
+        .to_string()
+}
+
+/// Block until `id`'s run reaches a terminal state.
+async fn await_terminal(registry: &SessionRegistry, id: &str) {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(20);
+    loop {
+        if registry
+            .status(id)
+            .expect("session must exist")
+            .status
+            .is_terminal()
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "run did not reach a terminal state within 20s"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Every sub-agent this session's run spawned, and every `(agent, tool)` pair
+/// it started.
+///
+/// Why (#8184): "did this turn delegate" is answered by `AgentSpawned`, not by
+/// `ToolStarted` — the loop emits a `ToolStarted` for a requested tool even
+/// when the registry does not carry it, so a scripted `delegate_to_agent` call
+/// against the solo registry still shows up as a started (and immediately
+/// failed) call. A sub-agent is spawned only when the tool really ran, and the
+/// tool attribution says who did the work.
+/// Test: `task_run_on_a_default_session_never_delegates`,
+/// `task_run_on_a_delegating_session_still_delegates`.
+fn spawns_and_tool_calls(
+    registry: &SessionRegistry,
+    id: &str,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut spawned = Vec::new();
+    let mut calls = Vec::new();
+    for e in registry.replay(id).expect("session must exist") {
+        match &e.event {
+            crate::events::Event::AgentSpawned { agent, .. } => spawned.push(agent.clone()),
+            crate::events::Event::ToolStarted { agent, tool, .. } => {
+                calls.push((agent.clone(), tool.clone()))
+            }
+            _ => {}
+        }
+    }
+    (spawned, calls)
+}
+
+/// #8184 CLOSURE TEST: a turn on a DEFAULT `session.create`d session issues
+/// ZERO `delegate_to_agent` calls.
+///
+/// Why: this is the issue's stated must-be-true, driven through the two real
+/// handlers `tcode tui` drives — `session.create` (no `delegate` param, the
+/// TUI's own call) then `task.run` (no `no_delegate` param, exactly what
+/// `run_chat_turn` sends). A unit test on either handler alone would not show
+/// that the session's shape survives the hop between them.
+/// What: mints a default session, runs one turn under the `echo` mock whose
+/// FIRST scripted response is a `delegate_to_agent` call, and asserts NO
+/// sub-agent was spawned and that the run's own `bash` call was made by the
+/// top-level agent itself. FAILS before #8184: the session was delegating, the
+/// tool was registered, and `python-engineer` ran the turn.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_on_a_default_session_never_delegates() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation; serialized by the lock above.
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let session_id = create_session(
+        Arc::clone(&registry),
+        workstreams.clone(),
+        project.path(),
+        json!({}),
+    )
+    .await;
+
+    let value = task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "add a doc comment to fn X", "session_id": session_id}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams,
+    )
+    .await
+    .expect("task.run should succeed");
+    assert_eq!(value["status"], "running");
+    await_terminal(&registry, &session_id).await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+
+    let (spawned, calls) = spawns_and_tool_calls(&registry, &session_id);
+    assert!(
+        spawned.is_empty(),
+        "a default TUI session must spawn no sub-agent; got {spawned:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(agent, tool)| agent == "pm" && tool == "bash"),
+        "the top-level agent must run the tool itself; got {calls:?}"
+    );
+}
+
+/// #8184 companion: a session created with `delegate: true` still delegates.
+///
+/// Why: without this, `task_run_on_a_default_session_never_delegates` would
+/// also pass if delegation had been removed outright — the default change
+/// would be indistinguishable from losing the PM entirely.
+/// What: the same flow with `delegate: true` on `session.create`, asserting the
+/// scripted `delegate_to_agent` call really spawns `python-engineer`.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_on_a_delegating_session_still_delegates() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation; serialized by the lock above.
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let session_id = create_session(
+        Arc::clone(&registry),
+        workstreams.clone(),
+        project.path(),
+        json!({"delegate": true}),
+    )
+    .await;
+
+    task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "ship the feature", "session_id": session_id}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams,
+    )
+    .await
+    .expect("task.run should succeed");
+    await_terminal(&registry, &session_id).await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+
+    let (spawned, calls) = spawns_and_tool_calls(&registry, &session_id);
+    assert!(
+        spawned.iter().any(|a| a == "python-engineer"),
+        "delegate: true must keep the PM's delegation; spawned {spawned:?}, calls {calls:?}"
+    );
+}
+
+/// #8184: `no_delegate: true` against a DELEGATING session is rejected, and
+/// the session's reported shape is what the run would have used.
+///
+/// Why: the effective shape and the persisted one must never diverge —
+/// `session.status`/`session.list` keep reporting the persisted value, so a
+/// call that silently ran the other shape is the record-vs-run divergence the
+/// sibling `project` guard exists to prevent (PR #3189). Rejecting is what
+/// makes "a session's reported shape IS the shape it runs" true by
+/// construction.
+/// What: mints a delegating session through `session.create`, then asserts
+/// (a) `task.run` with `no_delegate: true` is `-32003 invalid_argument`,
+/// (b) the session still reports `no_delegate: false`, and (c) the same call
+/// WITHOUT the param is accepted, so the guard rejects only the mismatch.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_no_delegate_against_a_delegating_session_is_rejected() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation; serialized by the lock above.
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let session_id = create_session(
+        Arc::clone(&registry),
+        workstreams.clone(),
+        project.path(),
+        json!({"delegate": true}),
+    )
+    .await;
+
+    let err = task_run(
+        Arc::clone(&registry),
+        json!({
+            "task_description": "say hi",
+            "session_id": session_id,
+            "no_delegate": true,
+        }),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams.clone(),
+    )
+    .await
+    .expect_err("a shape mismatch must be rejected");
+    assert_eq!(err.code, -32003);
+
+    let session = serde_json::to_value(registry.status(&session_id).expect("session must exist"))
+        .expect("serialize");
+    assert_eq!(
+        session["no_delegate"],
+        json!(false),
+        "the rejected call must not have changed the reported shape: {session}"
+    );
+
+    // The guard rejects the MISMATCH, not the session.
+    task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi", "session_id": session_id}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams,
+    )
+    .await
+    .expect("restating the session's own shape must be accepted");
+    await_terminal(&registry, &session_id).await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+}
+
+/// #8184: a `task.run` that mints its OWN session records that call's shape.
+///
+/// Why: the inheritance above only works if the mint path persists what it
+/// was asked for — otherwise a `tcode run-task --no-delegate` session would
+/// silently regain `delegate_to_agent` on its second turn.
+/// What: `task.run` with `no_delegate: true` and no `session_id`, asserting
+/// the minted session reports `no_delegate: true`. FAILS before #8184 — the
+/// field did not exist, so the assertion reads `null`.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_minted_session_records_its_no_delegate() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation; serialized by the lock above.
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let value = task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi", "no_delegate": true}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
+    )
+    .await
+    .expect("task.run should succeed");
+    let session_id = value["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+    await_terminal(&registry, &session_id).await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+
+    let session = serde_json::to_value(registry.status(&session_id).expect("session must exist"))
+        .expect("serialize");
+    assert_eq!(
+        session["no_delegate"],
+        json!(true),
+        "a --no-delegate run's session must remember it; got {session}"
+    );
+}
+
 /// #8128: `max_turns: 0` is rejected with `-32003 invalid_argument` before a
 /// session is minted.
 ///

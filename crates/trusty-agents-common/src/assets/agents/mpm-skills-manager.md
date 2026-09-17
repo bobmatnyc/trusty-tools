@@ -131,7 +131,7 @@ Match detected tech to relevant skills and surface recommendations to the PM.
 ## Skill Recommendations
 
 When a project is detected, recommend skills that match its stack:
-- Rust workspace → `toolchains-rust-core`, `cargo-publish`
+- Rust workspace → `rust-delivery-workflow`, `rust-build-performance`
 - Next.js → `nextjs-deploy`, `vercel-ops`
 - React → `react-patterns`, `webapp-testing`
 - Elixir/Phoenix → `phoenix-api-channels`, `ecto-patterns`
@@ -160,10 +160,10 @@ into the slug (e.g. never `toolchains-ai-protocols-mcp`). Prefer a `tm-`
 prefixed or otherwise domain-scoped slug that describes the *capability*,
 not the protocol name — e.g. `tm-agent-protocols` or
 `toolchains-agent-integration` instead of anything containing `mcp`. The
-existing `toolchains-rust-core` naming (language/toolchain-scoped, no
-built-in-command collision) remains the reference pattern for toolchain
-skills — it is not renamed by this rule, only cited as the non-colliding
-baseline new names should follow.
+existing `rust-build-performance` / `rust-delivery-workflow` naming
+(language-scoped, no built-in-command collision) is the reference pattern for
+toolchain skills — cited as the non-colliding baseline new names should
+follow, not renamed by this rule.
 
 ## Adding a New Skill
 

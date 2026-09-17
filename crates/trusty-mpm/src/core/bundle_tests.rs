@@ -524,11 +524,14 @@ fn bundle_table_is_complete() {
     // Issue #7727 (+2): `tm-ticketing` and `tm-workflow` gain a
     //   `references/README.md` each — the folders no-`Skill` agents reach by a
     //   `{{TM_SKILLS}}` Read path. 182 + 2 = 184.
-    assert_eq!(ALL.len(), 184);
+    // Issue #8192 (+1): `skills/rust-delivery-workflow.md` is NEW — the Rust
+    //   DELIVERY-PROCESS half split out from `rust-build-performance`'s
+    //   build-speed scope, declared by `rust-engineer`. 184 + 1 = 185.
+    assert_eq!(ALL.len(), 185);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 184, "artifact paths must be unique");
+    assert_eq!(paths.len(), 185, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1348,6 +1351,66 @@ fn rust_build_performance_skill_is_in_bundle() {
 }
 
 #[test]
+fn rust_delivery_workflow_skill_is_in_bundle() {
+    // Issue #8192: same reachability contract as the sibling above — the asset
+    // file under `src/assets/skills/` only ships once `ALL` names it.
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/rust-delivery-workflow.md"),
+        "rust-delivery-workflow.md must be present in the ALL bundle table"
+    );
+    assert!(RUST_DELIVERY_WORKFLOW.starts_with("---\n"));
+    assert!(RUST_DELIVERY_WORKFLOW.contains("name: rust-delivery-workflow"));
+}
+
+#[test]
+fn rust_delivery_workflow_states_each_delivery_rule() {
+    // Issue #8192: the skill exists to carry rules that previously lived only
+    // in incident prose. A body that dropped one would still pass the
+    // reachability test above, so pin the rule set itself — one needle per
+    // section that a rewrite must not silently lose.
+    for (fact, needle) in [
+        (
+            "it defers build speed to the sibling skill",
+            "rust-build-performance",
+        ),
+        (
+            "the gate chain is preceded by a commit",
+            "Commit and push the branch",
+        ),
+        (
+            "CI's workflow file is the clippy pin's source",
+            "CI workflow file is the source of truth",
+        ),
+        (
+            "a crate-scoped local pass is not CI evidence",
+            "is not evidence",
+        ),
+        (
+            "concurrent builds contend for RAM, not just the build lock",
+            "CPU and RAM bound",
+        ),
+        ("the job cap is read off the machine", "CARGO_BUILD_JOBS"),
+        (
+            "env must be prefixed inline per command",
+            "does not persist",
+        ),
+        ("gate output is a verdict", "EXIT=$?"),
+        (
+            "sccache is recommended, never silently enabled",
+            "never silently enable",
+        ),
+        ("installs batch across a merge batch", "one `cargo install`"),
+        ("test scope widens by stage", "Test Scope Widens by Stage"),
+    ] {
+        assert!(
+            RUST_DELIVERY_WORKFLOW.contains(needle),
+            "`rust-delivery-workflow.md` must state that {fact} (#8192)"
+        );
+    }
+}
+
+#[test]
 fn self_improvement_loop_skill_is_in_bundle() {
     // Issue #7723: the self-improvement-loop entry SKILL.md must be present
     // in `ALL` — a source file existing under `src/assets/skills/` is not
@@ -1434,6 +1497,33 @@ fn rust_build_performance_declared_by_rust_family_agents() {
              rust-build-performance skill: {composed}"
         );
     }
+}
+
+#[test]
+fn rust_engineer_declares_delivery_workflow_and_names_no_absent_skill() {
+    // Issue #8192, two halves of one contract. (1) `rust-engineer` declares
+    // `rust-delivery-workflow` in its own `skills:` (not via BASE-ENGINEER —
+    // no other engineer runs cargo gates). (2) The body's first-action
+    // instruction no longer names `toolchains-rust-core`, which ships in no
+    // bundle: #2904 claimed to port it and never did, so every dispatched
+    // rust-engineer was told to load a skill that does not exist.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let composed = compose_agent("rust-engineer", assets_dir)
+        .expect("compose_agent(rust-engineer) must succeed");
+
+    assert!(
+        composed.contains("rust-delivery-workflow"),
+        "composed rust-engineer is missing its own declared \
+         rust-delivery-workflow skill: {composed}"
+    );
+    assert!(
+        !composed.contains("toolchains-rust-core"),
+        "composed rust-engineer still names `toolchains-rust-core`, a skill \
+         present in no bundle (#8192)"
+    );
 }
 
 #[test]

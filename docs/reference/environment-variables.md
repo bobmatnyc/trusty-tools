@@ -130,6 +130,23 @@ cannot produce a number exits 2 instead of reporting 0. Fixtures:
 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Set BY `tm` on every managed `claude` spawn (issue [#7685](https://github.com/bobmatnyc/trusty-tools/issues/7685)) — not read by any trusty binary | Claude Code's own switch for auto memory (`MEMORY.md`), documented at <https://code.claude.com/docs/en/memory#enable-or-disable-auto-memory>. `core::runtime::claude_code::env_bin_prefix` assigns `=1` on the `env` prefix of every spawn and resume WHEN AND ONLY WHEN trusty-memory answered a health probe at launch (`core::memory_reachable`): `trusty-memory` is the memory, and auto memory is the fallback that carries a session while trusty-memory is down (owner ruling 2026-09-12). Per those docs the variable also wins over a subagent's own `memory:` frontmatter field, so when present it forecloses an agent asset opting back in. It reaches only the `claude` child tm spawns; the project-tier `autoMemoryEnabled: false` key `core::session_launch::settings` writes — under the same condition — covers a bare `claude` launched in the same project. `tm doctor`'s `auto_memory` row grades both halves against its own reachability probe, `tm doctor --fix --yes` writes the settings half, and `tm memory import-auto-memory` migrates an existing `MEMORY.md` into the palace. |
 | `TRUSTY_MPM_URL` | `tm` / `trusty-mpm` CLI (all subcommand families) | Explicit override for the daemon base URL every `tm` subcommand talks to. **Always wins outright** when set to a non-empty value — bypassing the trusty-console gateway proxy, the `daemon.lock` file, and the compiled-in default (`http://127.0.0.1:7880`) unconditionally, even when the value you set happens to equal that default verbatim. Precedence: (1) `--url` flag / `TRUSTY_MPM_URL` env var, if actually supplied; (2) the trusty-console gateway (`http://{console}/api/mpm`) if the console is running and reachable — when trusty-console is up, it proxies `ANY /api/mpm/{path}` to the daemon so all `tm` traffic can flow through the unified web UI (audit logging, future auth); (3) `~/.trusty-mpm/daemon.lock` (records the daemon's actual bound address, which may be an ephemeral port); (4) the compiled-in default. Set `TRUSTY_MPM_URL` explicitly to bypass the console proxy for a specific invocation. See [#2487](https://github.com/bobmatnyc/trusty-tools/issues/2487). |
 
+## Cargo build environment for a dispatched engineer (#6868)
+
+Not read by any trusty binary — these are the cargo/workspace variables
+`tm doctor`'s `rust_build_env` row RESOLVES and prints, for a PM to paste into
+an engineer brief. An agent's shell environment does not persist between tool
+calls, so they are prefixed inline on every cargo invocation, never `export`ed.
+
+| Variable | Resolved from | Purpose |
+|---|---|---|
+| `CARGO_TARGET_DIR` | `build.cargo_target_dir` in `~/.trusty-tools/trusty-mpm/config.yaml`, defaulting to `~/.trusty-tools/cargo-target/<owner>/<repo>` derived from the project's `origin` remote | One shared target directory per repo, so every worktree of that repo reuses warm artifacts instead of building cold. Cargo's target lock serialises concurrent builds sharing it, which is wanted — six concurrent cold builds crashed the reference host on 2026-08-08. |
+| `CARGO_BUILD_JOBS` | `build.build_jobs`, defaulting to half the host's cores with a floor of 2 | Caps one build's CPU and RAM so a sibling agent's build is not starved or OOM-killed (the exit-137 shape in [common-pitfalls.md](common-pitfalls.md)). |
+| `RUSTC_WRAPPER` | `build.sccache`; emitted as `RUSTC_WRAPPER=sccache` only when that key is `true` | Opt-in shared compilation cache. Measured neutral on this path-crate-heavy workspace, because incremental artifacts are not cacheable. tm reports whether `build.rustc-wrapper` is wired in `~/.cargo/config.toml` and never writes it — that file is machine-global for every Rust project on the host. |
+| `SKIP_UI_BUILD` | Always `1` on the printed line | Skips the Svelte UI build step in the crates that embed one, which a Rust-only gate never needs. |
+
+The full `build:` section, its defaults and the row's status rules are in
+[config-convention.md](config-convention.md#the-build-section-and-the-rust_build_env-row-6868).
+
 ## Active-project residency (`trusty_common::residency`)
 
 Shared contract for pinning trusty-mpm's active-project set against a

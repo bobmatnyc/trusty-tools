@@ -134,7 +134,7 @@ async fn stream_client_reconnects_after_a_truncated_tail() {
     let seen: SeenCursors = Arc::new(Mutex::new(Vec::new()));
     spawn_truncating_daemon(socket.clone(), seen.clone()).await;
 
-    let state = EngineState::new(UdsRpcClient::new(socket), None);
+    let state = EngineState::new(UdsRpcClient::new(socket), None, false);
     let (tx, mut rx) = unbounded_channel();
     timeout(
         Duration::from_secs(30),
@@ -193,6 +193,7 @@ async fn session_stream_silence_is_bounded_not_infinite() {
     let state = EngineState::new(
         UdsRpcClient::new(socket).with_stream_frame_timeout(Duration::from_millis(200)),
         None,
+        false,
     );
     let (tx, mut rx) = unbounded_channel();
     let result = timeout(

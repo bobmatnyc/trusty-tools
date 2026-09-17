@@ -87,7 +87,7 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
 | `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
 | `ticketing` | every Issue operation — create, update, close, label, assign, milestone, comment, dedupe (P6) | sonnet | Route by artifact: the Issue is always ticketing's, and no PR mutation ever is. See `tm-ticketing` |
-| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge, complex git, stacked PRs, post-merge verification, and reclaiming merged worktrees (P7). A plain annotated tag on explicit PM instruction is version-control's; a release tag bound to a `cargo publish` is `local-ops`'s | sonnet | Check git user for main-branch access. Dispatch it WITHOUT `isolation` — ADR-0056 leaves it in the checkout it is given. Policy comes from `tm-workflow` via the PM |
+| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge, complex git, stacked PRs, post-merge verification, and reclaiming merged worktrees (P7). A plain annotated tag on explicit PM instruction is version-control's; a release tag bound to a `cargo publish` is `local-ops`'s | sonnet | Check git user for main-branch access. Dispatch it WITHOUT `isolation` — ADR-0056 leaves it in the checkout it is given — EXCEPT a dispatch that commits source, which declares `isolation: "worktree"` (#8156). Policy comes from `tm-workflow` via the PM |
 | `security` | pre-push credential scan, vulnerability assessment | sonnet | Secret scanning, attack-vector detection |
 | `mpm-skills-manager` | creating/improving skills, recommending skills, stack detection | sonnet | Triggers: "skill", "stack", "framework" |
 
@@ -194,6 +194,15 @@ Requirements:
   Constraints: [Performance, security, timeline]
   Verification: Evidence of criteria met
 ```
+
+**Rust-conditional line (#8192).** When the Detected Project Stack includes
+`rust-engineer`, the brief must instruct the agent to prefix
+`RUSTC_WRAPPER=sccache CARGO_BUILD_JOBS=<n>` inline on every cargo command,
+taking `<n>` from this machine's `tm doctor` output and defaulting to `2`.
+Inline per command, because an agent's shell environment does not persist
+between Bash calls — a single `export` at the top of the task protects
+nothing. The rule itself lives in the `rust-delivery-workflow` skill; the
+brief carries the number, which is machine-local.
 
 ## What a Brief Carries — and What It Must Not
 
@@ -323,12 +332,26 @@ as a writer the guard didn't grant for. This tightens, not contradicts, the
 automatic-grant behavior above: declaring it costs nothing when the guard
 would grant it anyway, and covers the case where it doesn't.
 
-🔴 **Do not declare `isolation` on a `version-control` dispatch (ADR-0056).** It
-merges into main and reclaims merged worktrees; a worktree removes the tree that
-work needs, and the isolation fences have hidden a branch ref badly enough to
-force a push by SHA. The guard leaves it where it is, single or parallel, and
-declaring isolation yourself overrides that. Every other writer is unchanged:
-an engineer dispatched into the same directory beside it is still denied.
+🔴 **Do not declare `isolation` on a `version-control` dispatch (ADR-0056) —
+except when the dispatch itself commits source.** For merge, push/rebase, PR
+lifecycle, and worktree reclamation, `version-control` needs the checkout it
+is given: a worktree removes the tree that work needs, and the isolation
+fences have hidden a branch ref badly enough to force a push by SHA. The
+guard leaves it where it is, single or parallel, and declaring isolation
+yourself overrides that. Every other writer is unchanged: an engineer
+dispatched into the same directory beside it is still denied.
+
+🔴 **A `version-control` dispatch asked to commit a source change declares
+`isolation: "worktree"` (#8156).** ADR-0044, amended by ADR-0049, forbids a
+source commit in a main checkout outright; `tm hook --pm-guard` denies it
+regardless of who dispatched the agent or why. Dispatching `version-control`
+without `isolation` to commit source that is sitting as uncommitted edits in
+the main checkout (e.g. handed back from an engineer dispatch that itself ran
+without `isolation`) reaches that denial every time — the source-commit rule
+above has no carve-out for it. Prefer routing the diff through the engineer's
+own worktree branch so no diff goes back to the main checkout at all; when
+`version-control` must make the commit itself, dispatch it with
+`isolation: "worktree"` for that commit.
 
 **From inside a worktree, pass it yourself for concurrency.** Pass
 `isolation: "worktree"` on Agent tool calls when spawning 2+ parallel agents
