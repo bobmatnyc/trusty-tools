@@ -576,6 +576,10 @@ pub const ALL: &[BundledArtifact] = &[
     // 2026-07-17; append-only) ---
     overwrite("skills/rust-build-performance.md", RUST_BUILD_PERFORMANCE),
     // --- END rust-build-performance ---
+    // --- BEGIN rust-delivery-workflow bundled skill (issue #8192;
+    // append-only) ---
+    overwrite("skills/rust-delivery-workflow.md", RUST_DELIVERY_WORKFLOW),
+    // --- END rust-delivery-workflow ---
     // --- BEGIN self-improvement-loop bundled skill (issue #7723;
     // append-only) ---
     overwrite("skills/self-improvement-loop.md", SELF_IMPROVEMENT_LOOP),

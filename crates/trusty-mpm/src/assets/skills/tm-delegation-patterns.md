@@ -195,6 +195,15 @@ Requirements:
   Verification: Evidence of criteria met
 ```
 
+**Rust-conditional line (#8192).** When the Detected Project Stack includes
+`rust-engineer`, the brief must instruct the agent to prefix
+`RUSTC_WRAPPER=sccache CARGO_BUILD_JOBS=<n>` inline on every cargo command,
+taking `<n>` from this machine's `tm doctor` output and defaulting to `2`.
+Inline per command, because an agent's shell environment does not persist
+between Bash calls — a single `export` at the top of the task protects
+nothing. The rule itself lives in the `rust-delivery-workflow` skill; the
+brief carries the number, which is machine-local.
+
 ## What a Brief Carries — and What It Must Not
 
 The resident rule is in the instruction package: a brief carries findings,
