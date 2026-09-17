@@ -125,23 +125,33 @@ pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) ->
 /// still forbidden from implicitly binding a CWD it was never told about
 /// (see `ProjectBinding::agents_dir`).
 ///
+/// An IMPLICIT bind requires an enclosing git root (PM ruling, 2026-09-16).
+/// A bound binding passes `task::executor`'s `should_index` and reaches
+/// `run_task`'s `ensure_project_indexed_in_background` with
+/// `allow_sensitive_path: true`, so homing on any directory at all would
+/// make `cd ~/Downloads && tcode tui` index Downloads. DOC-75's MVP is
+/// "sits in a repo", and a repository is the one thing that says "this
+/// directory is a project" without the operator saying it. An EXPLICIT
+/// `--project <dir>` still binds a non-repo directory — git stays a
+/// nice-to-have there (owner directive, `run_task::tests` ~1996).
+///
 /// What, in precedence order:
 /// 1. `--project <path>` wins, canonicalized here so an unusable path fails
 ///    with the flag's name rather than as a confusing `-32003
 ///    invalid_argument` from `session.create` after the TUI has started.
+///    Binds whether or not the path is a repository.
 /// 2. `--projectless` yields `None` — today's behaviour, opted into.
 /// 3. Otherwise the session homes on `cwd`'s enclosing git toplevel
-///    ([`trusty_common::find_git_root`]), or on `cwd` itself when no
-///    repository encloses it. That walk is the SAME one trusty-search
-///    derives an index id from, so the bound root and the index
-///    `search_code` queries cannot disagree.
-/// 4. `home` and the filesystem root are refused as a default home and stay
-///    projectless: neither is a project, and binding one would ask
-///    trusty-search to index an entire home directory. An explicit
-///    `--project ~` still works — rule 1 outranks this.
+///    ([`trusty_common::find_git_root`]). That walk is the SAME one
+///    trusty-search derives an index id from, so the bound root and the
+///    index `search_code` queries cannot disagree. No enclosing repository
+///    means no implicit bind: projectless.
+/// 4. `home` is refused even when it IS a repository, and stays projectless:
+///    binding it would ask trusty-search to index an entire home directory.
+///    An explicit `--project ~` still works — rule 1 outranks this.
 ///
 /// Test: `tui_tests::resolve_project_defaults_to_the_enclosing_git_repo`,
-/// `tui_tests::resolve_project_without_a_repo_binds_the_directory_itself`,
+/// `tui_tests::resolve_project_without_a_repo_stays_projectless`,
 /// `tui_tests::resolve_project_projectless_opts_out_of_homing`,
 /// `tui_tests::resolve_project_refuses_to_home_on_the_home_directory`,
 /// `tui_tests::resolve_project_canonicalizes_a_real_directory`,
@@ -164,7 +174,10 @@ fn resolve_project(
     let cwd = cwd
         .canonicalize()
         .with_context(|| format!("resolve the launch directory '{}'", cwd.display()))?;
-    let root = trusty_common::find_git_root(&cwd).unwrap_or(cwd);
+    // #8205: no enclosing repository, no implicit bind — see the ruling above.
+    let Some(root) = trusty_common::find_git_root(&cwd) else {
+        return Ok(None);
+    };
     if root.parent().is_none() || home.is_some_and(|h| h == root) {
         return Ok(None);
     }
@@ -213,17 +226,28 @@ mod tui_tests {
         assert_eq!(resolved, root);
     }
 
-    /// Outside any repository the launch directory itself is the project —
-    /// a directory with no `.git` is still a place to work and still
-    /// indexable by its own basename.
+    /// Outside any repository there is no implicit bind: a bound binding is
+    /// indexed with `allow_sensitive_path: true`, so homing on any directory
+    /// would make `cd ~/Downloads && tcode tui` index Downloads. `--project`
+    /// is how a non-repo directory becomes a project.
     #[test]
-    fn resolve_project_without_a_repo_binds_the_directory_itself() {
+    fn resolve_project_without_a_repo_stays_projectless() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = dir.path().canonicalize().expect("canonicalize");
-        let resolved = resolve_project(None, false, &cwd, None)
-            .expect("resolve")
-            .expect("a plain directory must bind");
-        assert_eq!(resolved, cwd);
+        assert!(
+            resolve_project(None, false, &cwd, None)
+                .expect("resolve")
+                .is_none(),
+            "a directory with no enclosing repository must not bind implicitly"
+        );
+        // …but naming it explicitly still binds it (git is a nice-to-have for
+        // an explicit `--project`, never a requirement).
+        assert_eq!(
+            resolve_project(Some(cwd.clone()), false, &cwd, None)
+                .expect("resolve")
+                .expect("--project must bind a non-repo directory"),
+            cwd
+        );
     }
 
     /// The opt-out keeps the pre-#8205 behaviour — a projectless session is
@@ -238,13 +262,13 @@ mod tui_tests {
         );
     }
 
-    /// `$HOME` and the filesystem root are not projects: homing on either
-    /// would hand trusty-search an entire home directory to index, so both
-    /// stay projectless.
+    /// `$HOME` is not a project even when it IS a repository — some operators
+    /// keep a dotfiles repo there, and homing on it would hand trusty-search
+    /// an entire home directory to index. The home here is a real repo, so
+    /// the git-root rule alone cannot account for the `None`.
     #[test]
     fn resolve_project_refuses_to_home_on_the_home_directory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = dir.path().canonicalize().expect("canonicalize");
+        let (_guard, home, nested) = repo_with_subdir();
         assert!(
             resolve_project(None, false, &home, Some(&home))
                 .expect("resolve")
@@ -252,10 +276,10 @@ mod tui_tests {
             "$HOME must not become the default project"
         );
         assert!(
-            resolve_project(None, false, Path::new("/"), None)
+            resolve_project(None, false, &nested, Some(&home))
                 .expect("resolve")
                 .is_none(),
-            "the filesystem root must not become the default project"
+            "a subdirectory of a $HOME repo resolves to $HOME, and is refused too"
         );
     }
 

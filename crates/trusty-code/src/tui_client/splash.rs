@@ -62,6 +62,7 @@ pub(super) struct SplashFacts<'a> {
 /// `tests::splash_says_projectless_when_unbound`,
 /// `tests::splash_warns_when_the_daemon_is_a_different_build`,
 /// `tests::splash_is_silent_when_the_daemon_build_is_unknown`,
+/// `tests::splash_notes_a_daemon_that_predates_build_reporting`,
 /// `tests::splash_omits_an_unbound_workstream`.
 pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
     let mut lines = vec![
@@ -81,15 +82,22 @@ pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
         lines.push(format!("workstream {ws}"));
     }
     lines.push(format!("agent {}", facts.shape));
-    if let Some(daemon_build) = facts.daemon_build
-        && daemon_build != facts.client_build
-    {
-        // #8164: detection only — restarting the daemon is #8203's job.
-        lines.push(format!(
-            "warning: this client is build {}, the daemon is build {daemon_build} — \
-             restart the daemon to match",
+    match (facts.daemon_version, facts.daemon_build) {
+        // #8164: detection only — restarting the daemon is #8203's job. Kept
+        // short: the banner's right column is ~57 columns on an 80-column
+        // terminal, and this is the line that must stay readable there.
+        (_, Some(build)) if build != facts.client_build => lines.push(format!(
+            "warning: daemon build {build} ≠ client {} — restart the daemon",
             facts.client_build
-        ));
+        )),
+        // A daemon that answered `health` but reported no `build` predates
+        // #8164 and is therefore older than this client BY DEFINITION — that
+        // is a fact, not merely missing data, so it is said rather than left
+        // to read as neutral.
+        (Some(_), None) => {
+            lines.push("note: daemon predates build reporting; it is older than this client".into())
+        }
+        _ => {}
     }
     lines
 }
@@ -104,7 +112,8 @@ pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
 /// What: `"<version> (<build>)"` when both are known, degrading one field at
 /// a time to `"<version> (build unreported)"` and finally to
 /// `"(unreachable)"` when `health` itself did not answer.
-/// Test: `tests::splash_is_silent_when_the_daemon_build_is_unknown`,
+/// Test: `tests::splash_notes_a_daemon_that_predates_build_reporting`,
+/// `tests::splash_is_silent_when_health_did_not_answer`,
 /// `tests::daemon_description_degrades_field_by_field`.
 fn describe_daemon_build(version: Option<&str>, build: Option<&str>) -> String {
     match (version, build) {
@@ -178,6 +187,37 @@ mod tests {
         assert_eq!(warnings.len(), 1, "exactly one warning line: {lines:?}");
         assert!(warnings[0].contains("ea6a1a9e"), "{warnings:?}");
         assert!(warnings[0].contains("deadbeef"), "{warnings:?}");
+        // The banner's right column is ~57 columns on an 80-column terminal
+        // and wraps at ~54; two rows is the budget before this scrolls the
+        // rest of the splash off a short screen.
+        assert!(
+            warnings[0].chars().count() <= 108,
+            "the warning must stay within two wrapped rows: {}",
+            warnings[0].chars().count()
+        );
+    }
+
+    /// A daemon that answers `health` with no `build` predates #8164, so it
+    /// is older than this client by definition — the splash says so instead
+    /// of leaving "(build unreported)" to read as neutral.
+    #[test]
+    fn splash_notes_a_daemon_that_predates_build_reporting() {
+        let lines = splash_lines(&facts(Some("/repo"), None));
+        let notes: Vec<&String> = lines.iter().filter(|l| l.starts_with("note:")).collect();
+        assert_eq!(notes.len(), 1, "exactly one note line: {lines:?}");
+        assert!(notes[0].contains("older than this client"), "{notes:?}");
+    }
+
+    /// An UNREACHABLE daemon gets neither warning nor note: `health` not
+    /// answering says nothing about the daemon's age.
+    #[test]
+    fn splash_is_silent_when_health_did_not_answer() {
+        let mut f = facts(Some("/repo"), None);
+        f.daemon_version = None;
+        let text = rendered(&splash_lines(&f));
+        assert!(!text.contains("warning:"), "{text}");
+        assert!(!text.contains("note:"), "{text}");
+        assert!(text.contains("(unreachable)"), "{text}");
     }
 
     /// An unknown daemon build must not warn: "cannot compare" is not

@@ -409,6 +409,56 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
     }
 }
 
+/// #8205: the refusal must name the FLAG that resolves it.
+///
+/// Why: a bare `tcode tui` in a repository now derives its own project, so an
+/// operator who typed no flag at all can hit this refusal against a
+/// projectless daemon — and "relaunch this TUI against <projectless>" is not
+/// a command anyone can run. The message has to carry `--projectless` for one
+/// mismatch class and `--project <root>` for the other.
+/// What: a repo-derived `wanted` against a projectless daemon, then the
+/// inverse, asserting each error names its own flag.
+/// Test: this test.
+#[tokio::test]
+async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let ours = project.path().canonicalize().expect("canonicalize");
+
+    {
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("spawned");
+        let stub = marker_stub(dir.path(), &marker);
+        let err = ensure_daemon_with(Some(&ours), &stub, &socket)
+            .await
+            .expect_err("a repo-homed TUI must not attach to a projectless daemon");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("tcode tui --projectless"),
+            "the refusal must name the flag that matches a projectless daemon: {rendered}"
+        );
+    }
+
+    {
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&ours))));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("spawned");
+        let stub = marker_stub(dir.path(), &marker);
+        let err = ensure_daemon_with(None, &stub, &socket)
+            .await
+            .expect_err("a projectless TUI must not inherit a daemon's project");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(&format!("tcode tui --project {}", ours.display())),
+            "the refusal must name the flag and the root: {rendered}"
+        );
+    }
+}
+
 /// A daemon too old to report its binding cannot be verified, so it is
 /// refused — failing CLOSED, since "old build" is no evidence that its
 /// project is the right one.

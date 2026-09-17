@@ -224,9 +224,14 @@ async fn reported_binding(socket: &Path) -> ReportedBinding {
 /// What: `Ok(())` when both sides name the same project or both are
 /// projectless; otherwise an error naming `socket`, both projects, and the
 /// ways forward.
+/// #8205 made this reachable without any flag at all: a bare `tcode tui` in a
+/// repository now WANTS that repository, so an operator who never typed
+/// `--project` can meet this refusal against a projectless daemon. The message
+/// therefore names the flag that resolves it — see [`rematch_hint`].
 /// Test: `daemon_autospawn_tests::{refuses_a_daemon_bound_to_another_project,
 /// refuses_a_project_bound_client_against_a_projectless_daemon,
 /// refuses_a_daemon_that_cannot_report_its_binding,
+/// refusal_against_a_projectless_daemon_names_the_projectless_flag,
 /// attaches_to_a_live_daemon_without_spawning}`.
 fn check_binding(socket: &Path, reported: &ReportedBinding, wanted: Option<&Path>) -> Result<()> {
     let wanted_label = wanted
@@ -247,10 +252,35 @@ fn check_binding(socket: &Path, reported: &ReportedBinding, wanted: Option<&Path
              daemon = {daemon}, requested = {wanted_label}. `tcode tui` will not \
              attach to it (every session would run against the wrong project) and \
              will not start a competing daemon on a socket that is already bound. \
-             Either relaunch this TUI against {daemon}, or stop that daemon and \
-             let this one start its own.",
+             Either relaunch this TUI to match it ({rematch}), or stop that daemon \
+             and let this one start its own.",
             daemon = reported.describe(),
+            rematch = rematch_hint(reported),
         )),
+    }
+}
+
+/// The exact command that relaunches this TUI to match `reported` (#8205).
+///
+/// Why: "relaunch this TUI against <daemon>" told an operator what to achieve
+/// but not how, and since #8205 a bare `tcode tui` picks its own project from
+/// the current directory — so "just run it again" reproduces the refusal. The
+/// two mismatch classes need two different flags, and neither is guessable
+/// from the old message.
+/// What: `tcode tui --projectless` for a projectless daemon, `tcode tui
+/// --project <root>` for a bound one. An [`ReportedBinding::Unreported`]
+/// daemon reaches its own arm of `check_binding` and never this one, so it
+/// falls back to the generic phrasing rather than naming a flag that would
+/// not help.
+/// Test: `daemon_autospawn_tests::refusal_against_a_projectless_daemon_names_the_projectless_flag`,
+/// `daemon_autospawn_tests::refuses_a_daemon_bound_to_another_project`.
+fn rematch_hint(reported: &ReportedBinding) -> String {
+    match reported {
+        ReportedBinding::Projectless => "run `tcode tui --projectless`".to_string(),
+        ReportedBinding::Bound(root) => {
+            format!("run `tcode tui --project {}`", root.display())
+        }
+        ReportedBinding::Unreported => "relaunch it against that daemon's project".to_string(),
     }
 }
 

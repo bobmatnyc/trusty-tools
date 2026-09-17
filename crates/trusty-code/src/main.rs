@@ -139,10 +139,13 @@ enum Command {
     Tui {
         /// Path to the project root the REPL's session binds to.
         ///
-        /// OPTIONAL: omit it and the session homes on the repository
-        /// enclosing the current directory (#8205) — pass `--projectless`
-        /// for the unbound session this used to default to. Must name an
-        /// existing directory when given.
+        /// OPTIONAL: omit it and the session homes on the git repository
+        /// enclosing the current directory (#8205); with no enclosing
+        /// repository the session is projectless, since an implicit bind
+        /// indexes what it binds and a plain directory never asked for
+        /// that. Naming a path here binds it whether or not it is a
+        /// repository. Pass `--projectless` for an unbound session. Must
+        /// name an existing directory when given.
         #[arg(long, short, value_name = "PATH")]
         project: Option<PathBuf>,
 

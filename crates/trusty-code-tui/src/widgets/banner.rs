@@ -34,6 +34,72 @@ const MAX_RECENT_ACTIVITY: usize = 3;
 /// glance-able splash, not a full `/help` listing).
 const MAX_COMMANDS: usize = 4;
 
+/// Leading whitespace on a wrapped splash row, so a continuation reads as
+/// part of the line above it rather than as a new fact.
+const SPLASH_CONTINUATION_INDENT: &str = "   ";
+
+/// Break one splash line into rows that each fit `width` columns.
+///
+/// Why (#8164): the right column is `width - width/4 - 3` columns wide, so an
+/// 80-column terminal gives it ~57 — less than a build-mismatch warning or an
+/// absolute project path needs. The surrounding renderer CLIPS a row's tail,
+/// which is the half of those two lines carrying the daemon's sha, the remedy,
+/// and a path's final components. Wrapping keeps every character.
+/// What: greedy word wrap on whitespace; a single token too long to fit on a
+/// row of its own is middle-elided by [`elide_middle`] rather than clipped, so
+/// both ends of a path survive. Always returns at least one row.
+/// Test: `tests::fit_splash_line_wraps_rather_than_clipping`,
+/// `tests::fit_splash_line_elides_the_middle_of_an_unbreakable_token`,
+/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
+fn fit_splash_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let word = elide_middle(word, width);
+        let current_len = current.chars().count();
+        if current_len > 0 && current_len + 1 + word.chars().count() > width {
+            rows.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&word);
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+/// Shorten `text` to `width` columns by replacing its middle with `…`.
+///
+/// Why: clipping a path's tail hides the repository name, which is the one
+/// component a reader is checking. Keeping both ends answers "which repo,
+/// under which root" even when the middle is gone.
+/// What: returns `text` unchanged when it already fits; otherwise
+/// `head…tail`, splitting the remaining budget with the extra character going
+/// to the head. Counts chars, not bytes.
+/// Test: `tests::fit_splash_line_elides_the_middle_of_an_unbreakable_token`.
+fn elide_middle(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return "…".to_string();
+    }
+    let keep = width - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 /// Produce the welcome banner as a `Vec<Line<'static>>` so it can be
 /// prepended to the chat scroll buffer instead of occupying its own layout
 /// chunk.
@@ -51,7 +117,8 @@ const MAX_COMMANDS: usize = 4;
 /// `tests::banner_lines_includes_identity_and_title`,
 /// `tests::banner_lines_lists_recent_activity_and_commands`,
 /// `tests::banner_lines_renders_with_no_art_or_commands`,
-/// `tests::banner_lines_splash_replaces_the_identity_row`.
+/// `tests::banner_lines_splash_replaces_the_identity_row`,
+/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
 pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let art_width = app
         .banner_art
@@ -83,9 +150,21 @@ pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     if app.splash.is_empty() {
         right_rows.push((format!(" {} v{}", app.banner_title, app.version), header));
     } else {
+        // #8164: splash rows WRAP rather than clip — the right column is only
+        // ~57 columns on an 80-column terminal, and the tail of a build
+        // mismatch warning (the daemon's sha and what to do about it) is the
+        // part that matters most.
+        let wrap_w = right_w.saturating_sub(SPLASH_CONTINUATION_INDENT.len());
         for (idx, line) in app.splash.iter().enumerate() {
             let style = if idx == 0 { header } else { Style::default() };
-            right_rows.push((format!(" {line}"), style));
+            for (row, text) in fit_splash_line(line, wrap_w).into_iter().enumerate() {
+                let indent = if row == 0 {
+                    " "
+                } else {
+                    SPLASH_CONTINUATION_INDENT
+                };
+                right_rows.push((format!("{indent}{text}"), style));
+            }
         }
     }
     right_rows.push((String::new(), Style::default()));
@@ -245,6 +324,70 @@ mod tests {
             !rows.iter().any(|r| r.contains("tcode v9.9.9")),
             "the generic identity row must be gone: {text}"
         );
+    }
+
+    /// #8164: on an 80-column terminal the right column is ~57 wide, so a
+    /// build-mismatch warning and a real project path BOTH overflow it. The
+    /// facts that must survive are the daemon's sha, the remedy, and the
+    /// path's final components — exactly what a tail clip destroys.
+    #[test]
+    fn banner_lines_keep_the_mismatch_warning_readable_at_80_columns() {
+        let mut app = ReplApp::new("tcode", "masa");
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0 (ea6a1a9e 2026-09-16)".to_string(),
+            "project /Users/masa/trusty-mpm-projects/bobmatnyc/bakeoff-l1".to_string(),
+            "warning: daemon build deadbeef ≠ client ea6a1a9e — restart the daemon".to_string(),
+        ];
+        let lines = banner_lines(&app, 80);
+        let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(
+            text.contains("deadbeef"),
+            "the daemon sha must survive: {text}"
+        );
+        assert!(
+            text.contains("ea6a1a9e"),
+            "the client sha must survive: {text}"
+        );
+        assert!(
+            text.contains("restart the daemon"),
+            "the remedy must survive: {text}"
+        );
+        assert!(
+            text.contains("/Users/masa/") && text.contains("bakeoff-l1"),
+            "both ends of the project path must survive: {text}"
+        );
+        // Wrapping must not widen the frame: every row still fits 80 columns.
+        for line in &lines {
+            assert!(
+                line_text(line).chars().count() <= 80,
+                "a wrapped row must not overflow the frame: {}",
+                line_text(line)
+            );
+        }
+    }
+
+    /// A line longer than the column becomes more rows, never a clipped one.
+    #[test]
+    fn fit_splash_line_wraps_rather_than_clipping() {
+        let rows = fit_splash_line("alpha bravo charlie delta", 12);
+        assert!(rows.len() > 1, "{rows:?}");
+        assert_eq!(rows.join(" "), "alpha bravo charlie delta");
+        for row in &rows {
+            assert!(row.chars().count() <= 12, "{row:?}");
+        }
+    }
+
+    /// A path has no spaces to wrap on, so it is elided in the MIDDLE — the
+    /// repository name at the end is the component a reader is checking.
+    #[test]
+    fn fit_splash_line_elides_the_middle_of_an_unbreakable_token() {
+        let rows = fit_splash_line("/Users/masa/trusty-mpm-projects/bobmatnyc/bakeoff-l1", 24);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].chars().count(), 24, "{rows:?}");
+        assert!(rows[0].starts_with("/Users/masa"), "{rows:?}");
+        assert!(rows[0].ends_with("bakeoff-l1"), "{rows:?}");
+        assert!(rows[0].contains('…'), "{rows:?}");
     }
 
     #[test]
