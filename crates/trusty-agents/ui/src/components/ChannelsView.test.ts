@@ -5,10 +5,10 @@ import { writable } from 'svelte/store';
 // (`channelErrorMessage`, `isChannelConflict`) are the real thing — this file
 // asserts the view's behaviour, and re-declaring the error mapping in a mock
 // would let the two drift apart silently.
-vi.mock('../stores/app', () => ({ activeAgentId:writable<string|null>('alice'),agentRoster:writable([{id:'alice',label:'Alice'},{id:'bob',label:'Bob'}]),catalogAgents:writable([]),fetchAgentCatalog:vi.fn(),tmApi:vi.fn() }));
+vi.mock('../stores/app', () => ({ activeAgentId:writable<string|null>('alice'),agentRoster:writable([{id:'alice',label:'Alice'},{id:'bob',label:'Bob'}]),catalogAgents:writable([]),fetchAgentCatalog:vi.fn(async()=>{}),tmApi:vi.fn() }));
 vi.mock('../lib/channels',async importOriginal=>({...await importOriginal<typeof import('../lib/channels')>(),fetchChannels:vi.fn(),saveChannels:vi.fn(),fetchChannelMessages:vi.fn(),sendChannelMessage:vi.fn(),fetchGlobalChannels:vi.fn()}));
 import ChannelsView from './ChannelsView.svelte';
-import { activeAgentId } from '../stores/app';
+import { activeAgentId,fetchAgentCatalog } from '../stores/app';
 import { fetchChannels,saveChannels,fetchChannelMessages,sendChannelMessage,fetchGlobalChannels,type ChannelConfiguration } from '../lib/channels';
 const filter={from:[],include_labels:[],exclude_labels:[],subject_contains:[],snippet_contains:[]};
 // #7427: telegram reports can_receive true and the listing carries gworkspace,
@@ -19,7 +19,10 @@ async function settle(){await Promise.resolve();await tick();await Promise.resol
 function button(text:string){return [...document.querySelectorAll('button')].find(b=>b.textContent?.includes(text))!;}
 function input(selector:string,text:string){const el=document.querySelector(selector) as HTMLInputElement;el.value=text;el.dispatchEvent(new Event('input',{bubbles:true}));}
 async function render(){view=mount(ChannelsView,{target:document.body});await settle();}
-beforeEach(()=>{activeAgentId.set('alice');vi.mocked(fetchChannels).mockImplementation(async agent=>config(agent));vi.mocked(fetchChannelMessages).mockResolvedValue({available:true,messages:[]});vi.mocked(sendChannelMessage).mockResolvedValue({ok:true});vi.mocked(fetchGlobalChannels).mockResolvedValue({scope:'global',revision:'g1',channels:[],providers:[]});});
+// #8187: the Global panel calls `fetchAgentCatalog().catch(...)` on mount, so
+// the double has to return a promise — `vi.resetAllMocks()` in `afterEach`
+// wipes the factory's implementation, which is why this is re-set per test.
+beforeEach(()=>{activeAgentId.set('alice');vi.mocked(fetchAgentCatalog).mockResolvedValue(undefined);vi.mocked(fetchChannels).mockImplementation(async agent=>config(agent));vi.mocked(fetchChannelMessages).mockResolvedValue({available:true,messages:[]});vi.mocked(sendChannelMessage).mockResolvedValue({ok:true});vi.mocked(fetchGlobalChannels).mockResolvedValue({scope:'global',revision:'g1',channels:[],providers:[]});});
 afterEach(async()=>{if(view)await unmount(view);view=undefined;document.body.innerHTML='';vi.resetAllMocks();});
 it('ignores old assistant results after a clean assistant switch',async()=>{
  let finish!:(v:ChannelConfiguration)=>void;vi.mocked(fetchChannels).mockReturnValueOnce(new Promise(resolve=>finish=resolve));await render();activeAgentId.set('bob');await settle();finish(config('alice'));await settle();expect((document.querySelector('[aria-label="Channel name"]') as HTMLInputElement).value).toBe('bob updates');expect(document.body.textContent).not.toContain('alice updates');
@@ -73,6 +76,20 @@ it('offers gworkspace with its own destination placeholder',async()=>{
  const target=[...document.querySelectorAll('input')].find(i=>i.placeholder.includes('from:'))!;expect(target.placeholder).toBe('from:someone@example.com or label:INBOX');expect(target.value).toBe('from:alice@example.com');
  expect(document.body.textContent).toContain('Gmail listener polling the bound mailbox');
  const receive=[...document.querySelectorAll('label')].find(label=>label.textContent?.trim()==='Receive updates')!.querySelector('input') as HTMLInputElement;expect(receive.disabled).toBe(false);
+});
+// #8187 (critic MEDIUM): the scope toggle hides the Global panel with
+// `display:none` and never unmounts it, so an open delete confirmation went
+// invisible while staying armed — Escape still answered for it and its `dirty`
+// still pinned the assistant selector, with nothing on screen saying why.
+it('closes an open global delete confirmation when the scope switches away',async()=>{
+ vi.mocked(fetchGlobalChannels).mockResolvedValue({scope:'global',revision:'g1',providers:[{id:'slack',name:'Slack',configured:true,can_send:true,can_read:true}],routable_assistants:['alice'],channels:[{id:'ops-slack',name:'Ops',provider:'slack',target:'C123',enabled:true,send_enabled:true,receive_enabled:false,transport:'slack',poll_interval_secs:60,instructions:'',event_types:[],route_to:[],ingest_filter:{label_ids:[]},wake_filter:filter}]});
+ await render();button('Global').click();await settle();
+ (document.querySelector('[aria-label="Delete Ops"]') as HTMLButtonElement).click();await settle();
+ expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+ button('Assistant').click();await settle();
+ expect(document.querySelector('[role="dialog"]')).toBeNull();
+ // And the pin it held is released, so the assistant selector works again.
+ expect((document.querySelector('[aria-label="Channel assistant"]') as HTMLSelectElement).disabled).toBe(false);
 });
 it('keeps a draft visible and editable when reload removes every binding',async()=>{
  await render();input('[aria-label="Channel message"]','Keep this draft');await settle();vi.mocked(fetchChannels).mockResolvedValue({...config(),revision:'r2',bindings:[]});button('Reload').click();await settle();const composer=document.querySelector('[aria-label="Channel message"]') as HTMLTextAreaElement;expect(composer.value).toBe('Keep this draft');expect(composer.disabled).toBe(false);expect((document.querySelector('[aria-label="Send channel message"]') as HTMLButtonElement).disabled).toBe(true);

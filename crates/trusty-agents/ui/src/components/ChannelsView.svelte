@@ -3,11 +3,13 @@
   import { Plus, RefreshCw, Trash2, ArrowUp } from 'lucide-svelte';
   import { activeAgentId, agentRoster } from '../stores/app';
   import { CONCIERGE_AGENT_ID, rosterDisplayName } from '../lib/roster';
-  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, channelErrorMessage, isChannelConflict, type ChannelConfiguration, type ChannelBinding, type ChannelMessages, type ChannelProviderId } from '../lib/channels';
+  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, channelErrorMessage, isChannelConflict, type ChannelConfiguration, type ChannelBinding, type ChannelMessages } from '../lib/channels';
   // #7427: a gworkspace target is a correspondent or a label, so the hint text
   // cannot be one Slack-or-Telegram ternary any more.
-  const targetHints:Record<ChannelProviderId,string>={slack:'Slack channel ID',telegram:'Telegram chat ID',gworkspace:'from:someone@example.com or label:INBOX'};
-  const targetHint=(provider:ChannelProviderId)=>targetHints[provider]??'Destination';
+  // #8187: keyed by the daemon's provider id, which is an open set — an adapter
+  // this table has no hint for falls back rather than failing to type-check.
+  const targetHints:Record<string,string>={slack:'Slack channel ID',telegram:'Telegram chat ID',gworkspace:'from:someone@example.com or label:INBOX'};
+  const targetHint=(provider:string)=>targetHints[provider]??'Destination';
   // #7609 slice 6: the view now has two scopes. Assistant is the per-assistant
   // bindings this file has always edited; Global is the host-wide
   // `[[channels]]` table, whose editor is its own component because the two
@@ -83,7 +85,10 @@
     <div class="scope" role="group" aria-label="Channel scope"><button class:on={scope==='assistant'} aria-pressed={scope==='assistant'} on:click={()=>scope='assistant'}>Assistant</button><button class:on={scope==='global'} aria-pressed={scope==='global'} on:click={()=>scope='global'}>Global</button></div>
     {#if scope==='assistant'}<select aria-label="Channel assistant" value={viewAgent??''} disabled={protectedEdits} on:change={e=>activeAgentId.set(e.currentTarget.value||null)}><option value="">Select an assistant</option>{#each $agentRoster.filter(a=>a.id!==CONCIERGE_AGENT_ID) as agent (agent.id)}<option value={agent.id}>{rosterDisplayName($agentRoster,agent.id)}</option>{/each}</select>{/if}</header>
   <div class="body">
-    {#if globalVisited}<div style:display={scope==='global'?'block':'none'} data-global-channels><GlobalChannelsPanel bind:dirty={globalDirty} bind:saving={globalSaving} onSaved={()=>routedReload++}/></div>{/if}
+    <!-- #8187: `visible` is this `display:none`, told to the panel — hiding it
+         does not unmount it, and its delete confirmation must not stay armed
+         behind a hidden ancestor. -->
+    {#if globalVisited}<div style:display={scope==='global'?'block':'none'} data-global-channels><GlobalChannelsPanel visible={scope==='global'} bind:dirty={globalDirty} bind:saving={globalSaving} onSaved={()=>routedReload++}/></div>{/if}
     <div style:display={scope==='assistant'?'contents':'none'}>
     {#if !viewAgent}<p>Select an assistant to configure its channels.</p>{/if}
     {#if viewAgent!==$activeAgentId&&protectedEdits}<p role="status" class="muted">{#if assistantEdits}Finish or discard the changes for {rosterDisplayName($agentRoster,viewAgent)} before switching assistants.{:else}Finish or discard the unsaved global channel changes before switching assistants.{/if}</p>{/if}

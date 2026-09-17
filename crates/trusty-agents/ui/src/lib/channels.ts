@@ -7,9 +7,9 @@
 // request shape from drifting between the two views that call them.
 //
 // What: the per-assistant half is unchanged. The global half adds
-// `fetchGlobalChannels`/`saveGlobalChannels`, and #8187 the three per-channel
-// writes beside them — `createGlobalChannel`, `updateGlobalChannel`,
-// `deleteGlobalChannel` — which take the same credential and the same revision
+// `fetchGlobalChannels`/`saveGlobalChannels`, and #8187 the two per-channel
+// writes the editor issues — `createGlobalChannel` and `deleteGlobalChannel` —
+// which take the same credential and the same revision
 // compare-and-swap as the whole-list write; the PUT body is exactly
 // `{revision, channels}` because `GlobalUpdate` is `deny_unknown_fields` and
 // echoing back the `providers`/`scope` the GET carries is a 422. The filter
@@ -31,9 +31,14 @@ export interface ChannelIngestFilter { label_ids:string[]; }
 // as a two-way channel; its target is a correspondent (`from:someone@example.com`)
 // or a label (`label:INBOX`), not a destination id, so the placeholder is per
 // provider.
-export type ChannelProviderId='slack'|'telegram'|'gworkspace';
-export interface ChannelBinding { id:string; name:string; provider:ChannelProviderId; target:string; enabled:boolean; send_enabled:boolean; receive_enabled:boolean; filter:ChannelFilter; instructions:string; credential_ref?:string; }
-export interface ChannelProvider {id:ChannelProviderId;name:string;configured:boolean;can_send:boolean;can_read:boolean;can_receive?:boolean;receive_reason?:string;}
+// #8187 (critic LOW): a provider id is the string the daemon serves, in BOTH
+// records. A closed union here was a claim this bundle cannot keep: the table
+// carries whatever adapters the daemon has — the opt-in `stub`, the connector
+// id `gmail` a migrated listener declares, an adapter shipped after this bundle
+// was built — and a binding's provider is picked out of that table. Unknown ids
+// are handled where it matters, in `targetHint` and [`offerableProviders`].
+export interface ChannelBinding { id:string; name:string; provider:string; target:string; enabled:boolean; send_enabled:boolean; receive_enabled:boolean; filter:ChannelFilter; instructions:string; credential_ref?:string; }
+export interface ChannelProvider {id:string;name:string;configured:boolean;can_send:boolean;can_read:boolean;can_receive?:boolean;receive_reason?:string;}
 export interface ChannelBindingStatus {dispatch_failures:number;last_error:string|null;}
 export interface ChannelConfiguration {agent:string;revision:string;bindings:ChannelBinding[];providers:ChannelProvider[];status?:Record<string,ChannelBindingStatus>;}
 export interface ChannelMessages {available:boolean;messages:{id:string;text:string;from?:string;timestamp?:string|number}[];reason?:string;}
@@ -53,9 +58,9 @@ export const sendChannelMessage=(agent:string,id:string,text:string,revision:str
  * is what lets a save round-trip `transport`, `poll_interval_secs`, the two
  * filters and the event types the operator (or the migration) set, instead of
  * silently resetting them to the server's defaults.
- * What: `provider` is a plain string, not `ChannelProviderId`: a migrated Gmail
- * listener declares the CONNECTOR id (`gmail`), which the server resolves to
- * the `gworkspace` adapter. `scope` is `#[serde(skip)]` server-side and so
+ * What: `provider` is whatever the daemon serves — a migrated Gmail listener
+ * declares the CONNECTOR id (`gmail`), which the server resolves to the
+ * `gworkspace` adapter. `scope` is `#[serde(skip)]` server-side and so
  * appears on neither side of the wire.
  */
 export interface GlobalChannel {
@@ -100,8 +105,16 @@ export const saveGlobalChannels=(revision:string,channels:GlobalChannel[])=>with
  */
 export type NewGlobalChannel=Omit<GlobalChannel,'transport'|'poll_interval_secs'>;
 
-/** What `DELETE /api/channels/{id}` answers with, on top of the stored view. */
-export interface GlobalChannelDeletion extends GlobalChannelConfiguration {deleted:string;inert_bindings:string[];}
+/**
+ * What `DELETE /api/channels/{id}` answers with, on top of the stored view.
+ *
+ * `receiving_until_restart` is the one consequence the route CANNOT undo: it
+ * removes the declaration, but a receiver already polling keeps polling until
+ * the daemon restarts. The server sets it on every response, so `false` is the
+ * proof that nothing was left running rather than an absent key (#8187).
+ * Test: `GlobalChannelsPanel.test.ts::says a deleted receiver keeps polling until the daemon restarts`.
+ */
+export interface GlobalChannelDeletion extends GlobalChannelConfiguration {deleted:string;inert_bindings:string[];receiving_until_restart:boolean;}
 
 const channelPath=(id:string)=>`/api/channels/${encodeURIComponent(id)}`;
 
@@ -115,16 +128,6 @@ const channelPath=(id:string)=>`/api/channels/${encodeURIComponent(id)}`;
  * Test: `channels.global.test.ts`, `GlobalChannelsPanel.test.ts`.
  */
 export const createGlobalChannel=(revision:string,channel:NewGlobalChannel)=>withChannelWriteAuth(headers=>tmApi<GlobalChannelConfiguration>('/api/channels',{method:'POST',headers,body:JSON.stringify({revision,channel})}));
-
-/**
- * `PUT /api/channels/{id}` — replace ONE declared global channel (#8038).
- *
- * What: the path id and `channel.id` must agree — the server answers 400 on a
- * rename, because a rename orphans every per-assistant overlay keyed on the old
- * id — so the id is taken from the record rather than passed separately.
- * Test: `channels.global.test.ts`.
- */
-export const updateGlobalChannel=(revision:string,channel:GlobalChannel)=>withChannelWriteAuth(headers=>tmApi<GlobalChannelConfiguration>(channelPath(channel.id),{method:'PUT',headers,body:JSON.stringify({revision,channel})}));
 
 /**
  * `DELETE /api/channels/{id}` — remove ONE declared global channel (#8187).

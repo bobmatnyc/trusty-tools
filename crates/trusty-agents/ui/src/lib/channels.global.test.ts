@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   CHANNEL_WRITE_CREDENTIAL_MESSAGE, channelErrorMessage, channelReferences,
   createGlobalChannel, deleteGlobalChannel, fetchGlobalChannels, isChannelConflict,
-  offerableProviders, saveGlobalChannels, updateGlobalChannel,
+  offerableProviders, saveGlobalChannels,
   type ChannelProvider, type GlobalChannel,
 } from './channels';
 import { resetChannelWriteToken } from './channel-auth';
@@ -157,17 +157,14 @@ describe('per-channel global writes', () => {
     expect(body.channel).not.toHaveProperty('poll_interval_secs');
   });
 
-  test('an update puts to the channel-s own path, id taken from the record', async () => {
-    await updateGlobalChannel('r1', channelFixture({ id: 'mail/personal' }));
-    // The id is percent-encoded, and the body repeats it — the server answers
-    // 400 when the two disagree, so they cannot be passed separately.
-    expect(sent('PUT')?.url).toMatch(/\/api\/channels\/mail%2Fpersonal$/);
-    expect(JSON.parse(sent('PUT')?.body ?? '{}').channel.id).toBe('mail/personal');
-  });
-
-  test('a delete carries the revision in the query and omits force unless asked', async () => {
+  // #8187: the id is percent-encoded into the path, which is why a channel id
+  // carrying a slash still addresses one route rather than two segments.
+  test('a delete carries the revision in the query, its id encoded, and omits force unless asked', async () => {
+    await deleteGlobalChannel('r1', 'mail/personal');
     await deleteGlobalChannel('r1', 'gmail-personal');
-    expect(sent('DELETE')?.url).toMatch(/\/api\/channels\/gmail-personal\?revision=r1$/);
+    const urls = recorded.filter(r => r.method === 'DELETE').map(r => r.url);
+    expect(urls[0]).toMatch(/\/api\/channels\/mail%2Fpersonal\?revision=r1$/);
+    expect(urls[1]).toMatch(/\/api\/channels\/gmail-personal\?revision=r1$/);
     expect(sent('DELETE')?.authorization).toBe(`Bearer ${MINTED}`);
     expect(sent('DELETE')?.url).not.toContain('force');
   });
@@ -191,8 +188,10 @@ describe('per-channel global writes', () => {
   });
 
   test('only the providers the daemon serves are offered, never the test-only stub', async () => {
+    // #8187 (critic LOW): no cast — `ChannelProvider.id` is the string the
+    // daemon serves, so an unknown adapter id is expressible in the type.
     const provider = (id: string): ChannelProvider =>
-      ({ id, name: id, configured: true, can_send: true, can_read: false } as unknown as ChannelProvider);
+      ({ id, name: id, configured: true, can_send: true, can_read: false });
     // `discord` is in no type, constant or list this build carries: the only
     // subtraction is `stub`, so an adapter that ships after this bundle is
     // offered without a UI release. An allow-list here would keep the `stub`

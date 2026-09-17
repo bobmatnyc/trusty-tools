@@ -69,6 +69,20 @@
   let draftError = '', pendingError = '', busy = false;
   /** The Delete button that opened the confirmation, so focus can go back to it. */
   let invoker: HTMLElement | null = null;
+  /** Where focus goes when the row that raised the confirmation is deleted (#8187). */
+  let addButton: HTMLButtonElement | null = null;
+  /** The confirmation's sheet, so Tab can be kept inside it (#8187). */
+  let sheet: HTMLElement | null = null;
+  /**
+   * False while the parent's scope toggle hides this panel (#8187).
+   *
+   * Why: the toggle hides the panel with `display:none` on an ancestor
+   * (`ChannelsView.svelte`), which does not unmount it. An open confirmation
+   * hidden that way stayed ARMED — the window Escape handler still answered for
+   * it and `dirty` still pinned the assistant selector — with nothing on screen
+   * to explain either (critic MEDIUM).
+   */
+  export let visible = true;
   /**
    * An open Add form or delete confirmation counts as an unsaved edit: the
    * parent pins the assistant selector on this flag, and the list Save must not
@@ -84,6 +98,9 @@
    * create that follows it, under a notice announcing a success.
    */
   $: listLocked = saving || draft !== null || pending !== null;
+  // #8187: hidden and armed is the state the critic named; closing on hide ends
+  // it, and the delete has not been issued so nothing is lost by closing.
+  $: if (!visible && pending) void closeDelete();
   $: assistantNames = $catalogAgents.map(agent => agent.name);
   // #8187: the daemon's own provider table, minus the test-only adapters, and
   // the dispatch roster the server validates `route_to` against — which is NOT
@@ -116,7 +133,9 @@
     }
   }
   async function save() {
-    if (!configuration || saving || !dirty) return;
+    // #8187 (critic LOW): `listDirty`, not `dirty` — the button's own guard. An
+    // open editor makes `dirty` true with nothing for this PUT to publish.
+    if (!configuration || saving || !listDirty) return;
     const token = generation, revision = configuration.revision;
     saving = true; error = ''; notice = '';
     try {
@@ -150,6 +169,9 @@
    * re-check immediately before going to the wire.
    */
   const UNSAVED = 'The list below has unsaved changes. Save or discard them first — adding or deleting publishes the stored list, which would throw those changes away.';
+  // #8187 (critic HIGH): said only when the server reports it, and in the same
+  // words the confirmation warned with.
+  const RECEIVER_LIVES = 'Its receiver keeps polling until the daemon restarts. Restarting it stops the receiver.';
   /** Open the Add form on a channel that does nothing until it is enabled. */
   function beginAdd() {
     const provider = providerOptions[0];
@@ -208,23 +230,41 @@
     pending = channel; referencedBy = []; pendingError = ''; error = ''; notice = '';
   }
   /**
-   * Dismiss the confirmation and return focus to the Delete button that raised
-   * it (critic MEDIUM-2).
+   * Dismiss the confirmation and give focus to `target`, the Delete button that
+   * raised it unless a caller names another (critic MEDIUM-2, LOW).
    *
    * What: the focus call waits a tick. The list `fieldset` is disabled while
    * the dialog is up, and a disabled button cannot take focus, so restoring it
-   * before the DOM re-renders would silently land on `<body>`.
+   * before the DOM re-renders would silently land on `<body>`. A landed delete
+   * passes the Add button, because its own row — and the button in it — is gone.
    */
-  async function closeDelete() {
+  async function closeDelete(target: HTMLElement | null = invoker) {
     pending = null; referencedBy = []; pendingError = '';
-    const target = invoker;
     invoker = null;
     await tick();
     target?.focus();
   }
+  /**
+   * The confirmation claims `aria-modal`, so Tab stays inside it (critic LOW).
+   *
+   * What: the sheet's own enabled buttons are the whole tab ring. Focus leaving
+   * either end — or sitting outside the sheet entirely, which is where it lands
+   * after the Delete button behind the backdrop is disabled — wraps back in.
+   */
+  function trapTab(event: KeyboardEvent) {
+    const ring = sheet ? [...sheet.querySelectorAll<HTMLButtonElement>('button:not([disabled])')] : [];
+    if (!ring.length) return;
+    const first = ring[0], last = ring[ring.length - 1], here = document.activeElement;
+    const inside = sheet?.contains(here) ?? false;
+    if (inside && here !== (event.shiftKey ? first : last)) return;
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
   /** Escape dismisses the confirmation wherever focus is — never mid-write. */
   function onWindowKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Escape' || !pending || busy) return;
+    if (!pending) return;
+    if (event.key === 'Tab') { trapTab(event); return; }
+    if (event.key !== 'Escape' || busy) return;
     event.preventDefault();
     void closeDelete();
   }
@@ -246,11 +286,17 @@
     try {
       const result = await deleteGlobalChannel(revision, victim.id, force);
       if (token !== generation) return;
-      apply(result); void closeDelete();
+      apply(result);
+      // #8187 (critic LOW): the row's own Delete button is gone with the row,
+      // so focus goes somewhere that still exists rather than to a detached node.
+      void closeDelete(addButton ?? null);
       const inert = result.inert_bindings ?? [];
-      notice = inert.length
-        ? `${label} deleted. ${inert.join(', ')} still carry a binding for it; those bindings now address nothing until they are removed.`
-        : `${label} deleted.`;
+      const said = [`${label} deleted.`];
+      if (inert.length) said.push(`${inert.join(', ')} still carry a binding for it; those bindings now address nothing until they are removed.`);
+      // #8187 (critic HIGH): the route removed the declaration; it cannot stop a
+      // poll loop already running, and only the server knows one was.
+      if (result.receiving_until_restart) said.push(RECEIVER_LIVES);
+      notice = said.join(' ');
       onSaved();
     } catch (cause) {
       if (token !== generation) return;
@@ -339,7 +385,9 @@
             </select>
           </label>
         {:else}<p class="muted">No assistants are configured on this host, so there is nothing to route to yet.</p>{/if}
-        <p class="muted">A new channel starts switched off with no destination. Give it one above and enable it once it is created.</p>
+        <!-- #8187 (critic MEDIUM): this panel has no destination control, so
+             the copy names where a destination is actually set. -->
+        <p class="muted">A new channel starts switched off with no destination, so it neither polls nor sends. A destination is set in this host's <code>config.toml</code>; enable the channel here once it has one.</p>
         {#if draftError}<p class="error" role="alert">{draftError}</p>{/if}
         <div class="row">
           <button class="primary" on:click={() => create()} disabled={busy}>{busy ? 'Creating…' : 'Create channel'}</button>
@@ -348,7 +396,7 @@
       </div>
     {/if}
     <div class="row">
-      <button on:click={beginAdd} disabled={busy || saving || loading || listDirty || draft !== null || providerOptions.length === 0}><Plus size={14} />Add channel</button>
+      <button bind:this={addButton} on:click={beginAdd} disabled={busy || saving || loading || listDirty || draft !== null || providerOptions.length === 0}><Plus size={14} />Add channel</button>
       <button class="primary" on:click={save} disabled={!listDirty || saving || loading || busy}>{saving ? 'Saving…' : 'Save channels'}</button>
       <button on:click={reload} disabled={saving || loading || busy}><RefreshCw size={14} />{dirty ? 'Discard changes and reload' : 'Reload'}</button>
     </div>
@@ -362,11 +410,15 @@
        handled on the window, not here: this element never holds the focus, and
        a handler on it only fired for a click that had already landed on it. -->
   <div class="backdrop" role="dialog" aria-modal="true" aria-label="Delete global channel">
-    <div class="sheet">
+    <div class="sheet" bind:this={sheet}>
       <h3>Delete “{pending.name || pending.id}”?</h3>
       {#if referencedBy.length}
         <p role="alert">{referencedBy.join(', ')} {referencedBy.length === 1 ? 'still binds' : 'still bind'} this channel.</p>
         <p>Deleting it anyway keeps {referencedBy.length === 1 ? 'that binding' : 'those bindings'} on the assistant, but inert: {referencedBy.length === 1 ? 'it addresses' : 'they address'} nothing, send nothing and receive nothing until {referencedBy.length === 1 ? 'it is' : 'they are'} removed there. Removing the binding first avoids that.</p>
+      {:else if pending.receive_enabled}
+        <!-- #8187 (critic HIGH): a receiving channel's poll loop outlives the
+             delete, so this branch never claims the change is immediate. -->
+        <p>This removes the channel from this host and is not covered by Save. Anything it routes to stops receiving its updates. {RECEIVER_LIVES}</p>
       {:else}
         <p>This removes the channel from this host. Anything it routes to stops receiving its updates. The change is immediate and is not covered by Save.</p>
       {/if}

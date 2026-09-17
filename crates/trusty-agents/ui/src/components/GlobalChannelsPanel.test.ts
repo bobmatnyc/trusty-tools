@@ -39,6 +39,10 @@ let writeFailures: { status: number; body: Record<string, unknown> }[] = [];
 let providers: { id: string; name: string }[] = [];
 let routable: string[] = [];
 let inertBindings: string[] = [];
+// #8187: the real `DELETE /api/channels/{id}` sets this on every response — the
+// route removes the declaration but cannot stop a poll loop already running, so
+// a receiving channel's receiver survives until the daemon restarts.
+let receivingUntilRestart = false;
 
 // A refused write runs probe -> PUT -> 401 -> re-probe -> PUT, so the
 // microtask budget has to cover four network round trips, not one.
@@ -58,6 +62,7 @@ beforeEach(() => {
   deletes = [];
   writeFailures = [];
   inertBindings = [];
+  receivingUntilRestart = false;
   providers = [{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'gworkspace', name: 'Google Workspace' }];
   routable = ['izzie', 'cto-assistant', 'pm'];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -86,7 +91,7 @@ beforeEach(() => {
       const id = decodeURIComponent(url.split('/api/channels/')[1].split('?')[0]);
       channels = channels.filter(channel => channel.id !== id);
       revision = 'r2';
-      return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings }), { status: 200 });
+      return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings, receiving_until_restart: receivingUntilRestart }), { status: 200 });
     } else {
       reads += 1;
       if (readFails) return new Response(JSON.stringify({ error: 'read refused' }), { status: 503 });
@@ -388,6 +393,33 @@ it('deletes one channel through DELETE at the current revision', async () => {
   expect(document.body.textContent).not.toContain('slack · C123');
 });
 
+// The route deletes the DECLARATION; a receiver already polling keeps polling
+// until the daemon restarts (`delete.rs`, server test
+// `a_deleted_receiving_channel_says_its_receiver_runs_until_restart`). The
+// panel said "the change is immediate" and then "Ops deleted." — both untrue
+// for a receiving channel (critic HIGH-1).
+it('says a deleted receiver keeps polling until the daemon restarts', async () => {
+  receivingUntilRestart = true;
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain('The change is immediate');
+  button('Delete channel').click();
+  await settle();
+  expect(document.body.textContent).toContain('keeps polling until the daemon restarts');
+  expect(document.body.textContent).toContain('Restarting it stops the receiver');
+});
+
+it('says nothing about a restart when no receiver was left running', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(document.body.textContent).toContain('Ops deleted.');
+  expect(document.body.textContent).not.toContain('keeps polling until the daemon restarts');
+});
+
 it('names the assistants a refused delete would strand, then forces explicitly', async () => {
   await render();
   writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie', 'cto-assistant'] } });
@@ -533,6 +565,75 @@ it('leaves the confirmation open on Escape while the delete is in flight', async
   expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   release();
   await settle();
+});
+
+// A refusal that is neither a 409 nor a named-reference case still has to reach
+// the operator, and must not cost them the row or the draft (critic MEDIUM).
+it('keeps the row and shows the server sentence when a delete is refused outright', async () => {
+  await render();
+  writeFailures.push({ status: 500, body: { error: 'The channel store could not be written.' } });
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(alerts()).toContain('The channel store could not be written.');
+  // The confirmation stays up with the row behind it: nothing was deleted.
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(document.body.textContent).toContain('slack · C123');
+});
+
+it('keeps the draft and shows the server sentence when a create is refused outright', async () => {
+  await render();
+  await openAdd();
+  writeFailures.push({ status: 500, body: { error: 'The channel store could not be written.' } });
+  button('Create channel').click();
+  await settle();
+  expect(alerts()).toContain('The channel store could not be written.');
+  expect((document.querySelector('[aria-label="New channel ID"]') as HTMLInputElement).value).toBe('ops-telegram');
+});
+
+// Hiding the panel is the parent's `display:none`, which does not unmount it;
+// the sequence that produced the bug is driven end to end in
+// `ChannelsView.test.ts::closes an open global delete confirmation when the
+// scope switches away` (critic MEDIUM). Here: a confirmation cannot be OPEN
+// while this panel is hidden, whichever of the two changed last.
+it('never leaves a delete confirmation open while it is hidden', async () => {
+  view = mount(GlobalChannelsPanel, { target: document.body, props: { visible: false } });
+  await settle();
+  deleteButton('Ops').click();
+  await settle();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  // And nothing stayed armed behind it: Escape reaches no pending delete.
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  expect(deletes).toHaveLength(0);
+});
+
+// `aria-modal` without a trap is a claim the page does not honour: Tab walked
+// straight out of the sheet and behind the backdrop (critic LOW).
+it('keeps Tab inside the confirmation', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  const [confirm, cancel] = [...document.querySelectorAll('.sheet button')] as HTMLButtonElement[];
+  expect(document.activeElement).toBe(cancel);
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  await settle();
+  expect(document.activeElement).toBe(confirm);
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+  await settle();
+  expect(document.activeElement).toBe(cancel);
+});
+
+// Focus went back to the Delete button of the row the delete had just removed —
+// a detached node, so it landed on `<body>` (critic LOW).
+it('moves focus to Add channel after the row it came from is deleted', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(document.activeElement).toBe(button('Add channel'));
 });
 
 it('states why the create failed when the reload after the conflict also fails', async () => {
