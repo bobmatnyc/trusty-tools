@@ -74,7 +74,11 @@ name = "trusty-mpm"
 # 1.5.38 (owner-authorized reinstall, 2026-09-15): patch, version-only — 1.5.37
 # is the in-tree tip (crates.io is still at 1.5.36) and this bump exists solely
 # so `tm --version` identifies the locally reinstalled build. Not published.
-version = "1.6.0"
+# 1.6.1 (#8192): patch — 1.6.0 is already published on crates.io and this PR
+# bundles the rust-delivery-workflow skill and wires it to rust-engineer,
+# touching src/**, so the "PR version bump vs crates.io" check (#4421)
+# requires the bump. Patch: additive skill bundling, no breaking change.
+version = "1.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
