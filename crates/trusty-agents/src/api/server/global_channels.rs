@@ -32,6 +32,11 @@
 //! [`ChannelWriter`] gate; see [`amend`].
 //! Test: `crate::api::server::tests::global_channels` — the whole module.
 
+// #8187: `DELETE /api/channels/{id}` is the third per-channel write and the
+// only one whose blast radius reaches another file, so it lives beside this
+// module rather than in it.
+pub(super) mod delete;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;

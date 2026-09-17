@@ -76,6 +76,16 @@ fn post(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
     with_body(Method::POST, uri, token, body)
 }
 
+/// #8187: the per-channel delete carries its revision and `force` flag in the
+/// query string, because a `DELETE` body is not something a client can rely on.
+fn delete_req(uri: &str, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method(Method::DELETE).uri(uri);
+    if let Some(t) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
 fn with_body(method: Method, uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
@@ -809,6 +819,204 @@ async fn an_unauthenticated_create_is_refused() {
             "wrong bearer on {method} {uri}"
         );
     }
+}
+
+/// #8187: a global channel a per-assistant binding overlays is NOT deleted
+/// until the operator asks twice, and the forced delete says what it orphaned.
+///
+/// Why this is the interesting case: an overlay is a binding with a blank
+/// target whose `id` names the global (`channels::dispatch::is_overlay`).
+/// Delete the global and `agent_channels::load_at_with` drops that record with
+/// a log line nobody reads, so the assistant loses a destination silently.
+///
+/// Pre-change this fails at the first DELETE: no delete route is registered on
+/// `/api/channels/{id}`, so the request answers 405 rather than 409.
+#[tokio::test]
+async fn a_referenced_global_channel_is_not_deleted_without_force() {
+    let _home_guard = crate::test_env::lock_home();
+    let (home, config_path) = seed_home();
+    let agent_dir = home
+        .path()
+        .join(".trusty-agents/agents")
+        .join("overlay-assistant");
+    std::fs::create_dir_all(&agent_dir).expect("assistant dir");
+    std::fs::write(
+        agent_dir.join("agent.toml"),
+        "[agent]\nname = \"overlay-assistant\"\n",
+    )
+    .expect("assistant manifest");
+    let overlay = json!([{
+        "id": "gmail-personal",
+        "name": "Personal mail",
+        "provider": "gmail",
+        "target": "",
+        "enabled": true,
+        "receive_enabled": true
+    }]);
+    let bindings_path = agent_dir.join("agent.channels.json");
+    std::fs::write(&bindings_path, overlay.to_string()).expect("assistant bindings");
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let view = body_json(
+        app.oneshot(get("/api/channels", Some(TOKEN)))
+            .await
+            .expect("get"),
+    )
+    .await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(
+            &format!("/api/channels/gmail-personal?revision={revision}"),
+            Some(TOKEN),
+        ))
+        .await
+        .expect("unforced delete");
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "a bound channel is refused"
+    );
+    let refusal = body_json(response).await;
+    assert_eq!(
+        refusal["referenced_by"],
+        json!(["overlay-assistant"]),
+        "the refusal names who still binds it: {refusal}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read back")
+            .contains("gmail-personal"),
+        "the refused delete wrote nothing"
+    );
+
+    // Forced: the channel goes, the binding stays on disk and is reported.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(
+            &format!("/api/channels/gmail-personal?revision={revision}&force=true"),
+            Some(TOKEN),
+        ))
+        .await
+        .expect("forced delete");
+    assert_eq!(response.status(), StatusCode::OK, "force deletes");
+    let deleted = body_json(response).await;
+    assert_eq!(
+        deleted["inert_bindings"],
+        json!(["overlay-assistant"]),
+        "the forced delete reports what it left inert: {deleted}"
+    );
+    assert_eq!(deleted["channels"].as_array().map(Vec::len), Some(0));
+    let raw = std::fs::read_to_string(&config_path).expect("read back");
+    assert!(!raw.contains("gmail-personal"), "the channel is gone:\n{raw}");
+    assert_eq!(
+        std::fs::read_to_string(&bindings_path).expect("bindings"),
+        overlay.to_string(),
+        "this route never edits another assistant's file"
+    );
+}
+
+/// #8187: the unbound delete path — unknown id 404, stale revision 409, and an
+/// accepted delete that leaves the rest of `config.toml` alone.
+///
+/// Pre-change this fails at the first assertion: `/api/channels/{id}` answers
+/// PUT only, so a DELETE is a 405.
+#[tokio::test]
+async fn a_global_channel_is_deleted_and_an_unknown_id_is_404() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, config_path) = seed_home();
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let view = body_json(
+        app.oneshot(get("/api/channels", Some(TOKEN)))
+            .await
+            .expect("get"),
+    )
+    .await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(
+            &format!("/api/channels/no-such-channel?revision={revision}"),
+            Some(TOKEN),
+        ))
+        .await
+        .expect("unknown id");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(
+            "/api/channels/gmail-personal?revision=0000",
+            Some(TOKEN),
+        ))
+        .await
+        .expect("stale revision");
+    assert_eq!(response.status(), StatusCode::CONFLICT, "stale revision");
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(
+            &format!("/api/channels/gmail-personal?revision={revision}"),
+            Some(TOKEN),
+        ))
+        .await
+        .expect("delete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted = body_json(response).await;
+    assert_eq!(deleted["deleted"], json!("gmail-personal"));
+    assert_eq!(
+        deleted["inert_bindings"],
+        json!([]),
+        "nothing bound it: {deleted}"
+    );
+    assert_eq!(deleted["channels"].as_array().map(Vec::len), Some(0));
+
+    let raw = std::fs::read_to_string(&config_path).expect("read back");
+    assert!(
+        raw.contains("# operator comment that must survive a channel write"),
+        "unrelated comments survive a delete:\n{raw}"
+    );
+    assert!(raw.contains("[mcp]"), "unrelated tables survive:\n{raw}");
+}
+
+/// #8187: the delete takes the SAME [`ChannelWriter`] gate the create and the
+/// update take — removing a destination is at least as consequential as adding
+/// one.
+///
+/// Pre-change this fails: the route is unregistered, so both cases answer 405
+/// rather than 401.
+///
+/// [`ChannelWriter`]: super::super::channel_auth::ChannelWriter
+#[tokio::test]
+async fn an_unauthenticated_delete_is_refused() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+    let uri = "/api/channels/gmail-personal?revision=0000";
+
+    let app = build_router(AppState::default());
+    let response = app
+        .oneshot(delete_req(uri, None))
+        .await
+        .expect("tokenless delete");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a tokenless daemon refuses the delete"
+    );
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(delete_req(uri, Some("not-the-token")))
+        .await
+        .expect("wrong credential");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a wrong bearer is refused exactly as a missing one is"
+    );
 }
 
 /// A `config.toml` that will not parse is REPORTED, never read as "no channels

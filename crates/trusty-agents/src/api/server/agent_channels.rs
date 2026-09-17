@@ -260,6 +260,38 @@ pub(crate) async fn load_at_with(
     }
     Ok((path, raw, bindings))
 }
+/// The global-channel ids one assistant's STORED bindings overlay (#8187).
+///
+/// Why: deleting a global channel orphans every overlay of it — `load_at_with`
+/// drops such a record with a warning, so the assistant loses that destination
+/// with nothing said to whoever deleted it.
+/// [`super::global_channels::delete`] asks this first so it can name the
+/// assistants an operator is about to affect.
+/// What: the stored file parsed but NOT validated, because an overlay's
+/// legitimacy depends on the very global list the caller is about to change.
+/// An overlay is a binding with a blank target, keyed by `id` — the key
+/// [`crate::channels::dispatch::is_overlay`] matches on. A missing file is no
+/// overlays; an unreadable or unparseable one is an `Err` the caller must not
+/// read as "no references".
+/// Test: `super::tests::global_channels::a_referenced_global_channel_is_not_deleted_without_force`.
+pub(super) async fn overlaid_global_ids(
+    dirs: &[PathBuf],
+    name: &str,
+) -> Result<Vec<String>, Error> {
+    let path = config_path(dirs, name)?;
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(internal(e)),
+    };
+    let stored: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
+    Ok(stored
+        .into_iter()
+        .filter(|binding| binding.target.is_empty())
+        .map(|binding| binding.id)
+        .collect())
+}
+
 fn revision(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
 }
