@@ -67,7 +67,9 @@ fn secrets_add_never_prints_the_value() {
     assert_eq!(store.get("API_KEY").as_deref(), Some(FAKE_VALUE));
 
     // The failure path must not quote the value either.
-    let err = add_into(&backend, "bad key", FAKE_VALUE).unwrap_err().to_string();
+    let err = add_into(&backend, "bad key", FAKE_VALUE)
+        .unwrap_err()
+        .to_string();
     assert!(!err.contains(FAKE_VALUE), "error leaked the value: {err}");
 }
 
@@ -90,7 +92,9 @@ fn secrets_add_refuses_when_no_tty_and_no_stdin_flag() {
 /// Test: itself.
 #[test]
 fn secrets_add_refuses_a_literal_value_argument() {
-    let err = value_source(Some(FAKE_VALUE), true).unwrap_err().to_string();
+    let err = value_source(Some(FAKE_VALUE), true)
+        .unwrap_err()
+        .to_string();
     assert!(!err.contains(FAKE_VALUE), "refusal leaked the value: {err}");
     assert!(err.contains("never accepted as a command argument"));
 }
@@ -105,7 +109,10 @@ fn secrets_list_prints_names_only() {
     add_into(&backend, "A_KEY", FAKE_VALUE).unwrap();
 
     let rendered = list_lines(&backend).unwrap().join("\n");
-    assert!(!rendered.contains(FAKE_VALUE), "list leaked a value: {rendered}");
+    assert!(
+        !rendered.contains(FAKE_VALUE),
+        "list leaked a value: {rendered}"
+    );
     assert!(rendered.contains("A_KEY") && rendered.contains("B_KEY"));
     assert!(rendered.contains("2 keys"));
 }
@@ -161,6 +168,13 @@ fn secrets_doctor_reports_probe_result_without_prompting() {
         keychain_reachable: false,
         ..healthy
     };
-    assert!(!unreachable.healthy(), "an unreachable probe is not healthy");
-    assert!(doctor_lines(&unreachable).join("\n").contains("UNREACHABLE"));
+    assert!(
+        !unreachable.healthy(),
+        "an unreachable probe is not healthy"
+    );
+    assert!(
+        doctor_lines(&unreachable)
+            .join("\n")
+            .contains("UNREACHABLE")
+    );
 }

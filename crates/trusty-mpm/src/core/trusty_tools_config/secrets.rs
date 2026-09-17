@@ -189,8 +189,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("config.yaml");
 
-        let mut pre = TrustyToolsConfig::default();
-        pre.default_model = Some("opus".to_string());
+        let pre = TrustyToolsConfig {
+            default_model: Some("opus".to_string()),
+            ..Default::default()
+        };
         trusty_common::crate_config::save_at(&path, &pre).unwrap();
 
         save_at(

@@ -21,7 +21,7 @@
 //! test can inject [`super::MemoryKeyStore`] and no unit test ever touches a
 //! real keychain.
 //!
-//! Test: `keychain_backend_tests` (sibling file) —
+//! Test: the sibling keychain_backend_tests.rs file —
 //! `keychain_backend_namespaces_by_group_and_key`,
 //! `keychain_backend_list_reads_index_names_only`,
 //! `keychain_backend_remove_deletes_entry_and_index_row`,
@@ -284,8 +284,9 @@ impl KeychainBackend {
     /// What: delegates to [`KeyringStore::probe_available`], whose sentinel
     /// account can never collide with a stored credential and whose result is
     /// cached process-wide.
-    /// Test: `secrets_doctor_reports_probe_result_without_prompting` covers
-    /// the rendering; the probe itself is pinned by `probe_does_not_panic`.
+    /// Test: `probe_does_not_panic` pins the probe itself; trusty-mpm's
+    /// secrets_doctor_reports_probe_result_without_prompting covers what
+    /// `tm secrets doctor` renders from the result.
     pub fn keychain_reachable() -> bool {
         KeyringStore::new().probe_available()
     }

@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-63 top-level commands.
+64 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -121,6 +121,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
+- `secrets` — Store a project's API keys in the OS keychain (#7521, DOC-74)
+  - `add` — Add or replace one key's value in the configured vault
+  - `configure` — Record which backend and group this machine's `tm secrets` uses
+  - `doctor` — Report backend, group, keychain reachability, and indexed-name count
+  - `list` — List the key NAMES stored for the configured group — never values
+  - `remove` — Remove one key from the configured vault
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL
