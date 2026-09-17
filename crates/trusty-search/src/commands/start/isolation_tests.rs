@@ -163,12 +163,10 @@ fn socket_path_follows_trusty_data_dir_not_home() {
     let first = tmp.path().join("instance-one");
     let second = tmp.path().join("instance-two");
 
-    let effective = resolve_data_dir_override(
-        Some(first.clone().into_os_string()),
-        Some(second.as_path()),
-    )
-    .expect("two absolute paths must resolve")
-    .expect("a data dir was supplied");
+    let effective =
+        resolve_data_dir_override(Some(first.clone().into_os_string()), Some(second.as_path()))
+            .expect("two absolute paths must resolve")
+            .expect("a data dir was supplied");
 
     let socket = crate::service::socket::resolve_socket_path(Some(effective.as_os_str()))
         .expect("an absolute data dir must yield a socket");
@@ -189,8 +187,8 @@ fn socket_path_follows_trusty_data_dir_not_home() {
 
     // Nor under the HOME-derived shared location every daemon would otherwise
     // share. `resolve_socket_path(None)` IS that location.
-    let shared = crate::service::socket::resolve_socket_path(None)
-        .expect("the shared path must resolve");
+    let shared =
+        crate::service::socket::resolve_socket_path(None).expect("the shared path must resolve");
     assert_ne!(
         socket, shared,
         "an isolated instance must not fall back to the HOME-derived socket"

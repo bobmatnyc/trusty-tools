@@ -85,32 +85,30 @@ pub async fn handle_index_remove(
     // Issue #1087 / #8175: an explicit `-i`/`--index` still beats CWD detection,
     // but an explicit PATH argument now beats BOTH — and a PATH that resolves to
     // a different index than `-i` names is refused rather than guessed at.
-    let (index_id, registered_path) = match resolve_removal_target(
-        cli_path,
-        explicit_index_id.as_deref(),
-    ) {
-        RemovalTarget::Id(id) => {
-            // Fetch the root_path for this explicit id so we can clean up the
-            // global config and allowlist (same post-delete steps as the path
-            // path).
-            find_index_by_id(&client, &base, &id).await?
-        }
-        RemovalTarget::Path(target_path) => {
-            let found = find_index_by_path(&client, &base, &target_path).await?;
-            // #8175: fail closed on disagreement — never remove the env-selected
-            // index because a PATH was also typed.
-            refuse_on_selector_disagreement(
-                &target_path,
-                &found.0,
-                explicit_index_id.as_deref(),
-            )?;
-            found
-        }
-        RemovalTarget::DetectFromCwd => {
-            let target_path = resolve_target_path(None)?;
-            find_index_by_path(&client, &base, &target_path).await?
-        }
-    };
+    let (index_id, registered_path) =
+        match resolve_removal_target(cli_path, explicit_index_id.as_deref()) {
+            RemovalTarget::Id(id) => {
+                // Fetch the root_path for this explicit id so we can clean up the
+                // global config and allowlist (same post-delete steps as the path
+                // path).
+                find_index_by_id(&client, &base, &id).await?
+            }
+            RemovalTarget::Path(target_path) => {
+                let found = find_index_by_path(&client, &base, &target_path).await?;
+                // #8175: fail closed on disagreement — never remove the env-selected
+                // index because a PATH was also typed.
+                refuse_on_selector_disagreement(
+                    &target_path,
+                    &found.0,
+                    explicit_index_id.as_deref(),
+                )?;
+                found
+            }
+            RemovalTarget::DetectFromCwd => {
+                let target_path = resolve_target_path(None)?;
+                find_index_by_path(&client, &base, &target_path).await?
+            }
+        };
 
     // #6422: the confirmation gate. It runs after resolution so the prompt can
     // name the exact index and root path the operator is about to destroy.
