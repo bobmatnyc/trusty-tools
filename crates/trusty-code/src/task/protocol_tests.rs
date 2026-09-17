@@ -1071,6 +1071,81 @@ async fn task_run_on_a_delegating_session_still_delegates() {
     );
 }
 
+/// #8184: `no_delegate: true` against a DELEGATING session is rejected, and
+/// the session's reported shape is what the run would have used.
+///
+/// Why: the effective shape and the persisted one must never diverge —
+/// `session.status`/`session.list` keep reporting the persisted value, so a
+/// call that silently ran the other shape is the record-vs-run divergence the
+/// sibling `project` guard exists to prevent (PR #3189). Rejecting is what
+/// makes "a session's reported shape IS the shape it runs" true by
+/// construction.
+/// What: mints a delegating session through `session.create`, then asserts
+/// (a) `task.run` with `no_delegate: true` is `-32003 invalid_argument`,
+/// (b) the session still reports `no_delegate: false`, and (c) the same call
+/// WITHOUT the param is accepted, so the guard rejects only the mismatch.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_no_delegate_against_a_delegating_session_is_rejected() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation; serialized by the lock above.
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let session_id = create_session(
+        Arc::clone(&registry),
+        workstreams.clone(),
+        project.path(),
+        json!({"delegate": true}),
+    )
+    .await;
+
+    let err = task_run(
+        Arc::clone(&registry),
+        json!({
+            "task_description": "say hi",
+            "session_id": session_id,
+            "no_delegate": true,
+        }),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams.clone(),
+    )
+    .await
+    .expect_err("a shape mismatch must be rejected");
+    assert_eq!(err.code, -32003);
+
+    let session = serde_json::to_value(registry.status(&session_id).expect("session must exist"))
+        .expect("serialize");
+    assert_eq!(
+        session["no_delegate"],
+        json!(false),
+        "the rejected call must not have changed the reported shape: {session}"
+    );
+
+    // The guard rejects the MISMATCH, not the session.
+    task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi", "session_id": session_id}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams,
+    )
+    .await
+    .expect("restating the session's own shape must be accepted");
+    await_terminal(&registry, &session_id).await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+}
+
 /// #8184: a `task.run` that mints its OWN session records that call's shape.
 ///
 /// Why: the inheritance above only works if the mint path persists what it

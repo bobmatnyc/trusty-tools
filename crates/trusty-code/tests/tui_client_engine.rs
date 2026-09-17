@@ -717,7 +717,7 @@ async fn tui_projectless_default_session_runs_solo_in_a_scratch_root() {
     );
     let line = connect_line(&mut rx);
     assert!(
-        line.contains("projectless — editing in a scratch workspace"),
+        line.contains("projectless — file tools rooted at a scratch workspace"),
         "the connect line must say where a projectless session edits: {line}"
     );
 }

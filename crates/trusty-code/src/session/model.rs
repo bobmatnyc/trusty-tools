@@ -333,6 +333,9 @@ mod tests {
         let parsed: Session = serde_json::from_value(legacy).expect("legacy payload deserialises");
         assert_eq!(parsed.id, "s-1");
         assert!(parsed.result.is_none());
+        // #8184: a payload predating the field reads back DELEGATING — the
+        // pre-#8184 shape, never the new solo default.
+        assert!(!parsed.no_delegate);
 
         let re_encoded = serde_json::to_value(&parsed).expect("serialize");
         assert!(

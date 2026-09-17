@@ -289,3 +289,97 @@ async fn permission_deny_refuses_the_call_and_the_run_continues() {
         observed.kinds()
     );
 }
+
+/// #8184 SAFETY GATE, end to end: a DEFAULT `session.create`d session runs the
+/// STOCK `pm` solo, and its own `bash` call suspends on the #3422 prompt.
+///
+/// Why: #8184 made the interactive default an agent that runs shell in the
+/// user's real project root. The two tests above prove the prompt works for a
+/// hand-written fixture card; only a run against the SHIPPED roster proves a
+/// user actually gets prompted. The project deliberately ships no
+/// `.claude/agents`, so `resolve_agent` falls back to the embedded `pm.md`.
+/// What: `session.create` with no `delegate` (the TUI's own call), `attach`
+/// BEFORE the run so a prompter is watching when the gate evaluates (#8100),
+/// then `task.run` against that session. The `echo` mock's scripted
+/// `delegate_to_agent` call has no tool to land on in a solo registry, so its
+/// second scripted response — the `bash` call — is issued by `pm` itself.
+/// Answers `deny` and asserts the command never ran. FAILS without `pm.md`'s
+/// `permissions:` block: nothing suspends and `bash` dispatches unprompted.
+/// Test: this test.
+#[tokio::test]
+async fn stock_solo_session_asks_before_the_pm_runs_bash() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let mut daemon = StdioSession::spawn_with_mock_llm(project.path());
+
+    let create_resp = daemon
+        .call(1, "session.create", json!({"task": "tcode tui session"}))
+        .await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session.create failed: {create_resp}"
+    );
+    assert_eq!(
+        create_resp["result"]["no_delegate"], true,
+        "the default session must be solo: {create_resp}"
+    );
+    let session_id = create_resp["result"]["id"]
+        .as_str()
+        .expect("session.create must return an id")
+        .to_string();
+
+    let attach_resp = daemon
+        .call(2, "session.attach", json!({"session_id": &session_id}))
+        .await;
+    assert!(
+        attach_resp["error"].is_null(),
+        "attach failed: {attach_resp}"
+    );
+    let mut observed = Observed {
+        events: attach_resp["result"]["events"]
+            .as_array()
+            .expect("attach must return a replay events array")
+            .clone(),
+        responses: Vec::new(),
+    };
+
+    let run_resp = daemon
+        .call(
+            4,
+            "task.run",
+            json!({"task_description": "say hi", "session_id": &session_id}),
+        )
+        .await;
+    assert!(run_resp["error"].is_null(), "task.run failed: {run_resp}");
+
+    let requested = pump_until(
+        &mut daemon,
+        &session_id,
+        &mut observed,
+        "permission_requested",
+    )
+    .await;
+    let event = &requested["event"];
+    assert_eq!(event["tool"], "bash", "the suspended call: {event}");
+    assert_eq!(
+        event["agent"], "pm",
+        "the STOCK top-level agent must be the one asking: {event}"
+    );
+    let request_id = event["request_id"]
+        .as_str()
+        .expect("permission_requested must carry a request_id")
+        .to_string();
+
+    respond(&mut daemon, &session_id, &mut observed, &request_id, "deny").await;
+    pump_until(&mut daemon, &session_id, &mut observed, "session_done").await;
+
+    let dispatched = observed.events.iter().any(|e| {
+        e["kind"] == "tool_finished"
+            && e["event"]["tool"] == "bash"
+            && e["event"]["success"] == true
+    });
+    assert!(
+        !dispatched,
+        "a denied `bash` must never dispatch; kinds: {:?}",
+        observed.kinds()
+    );
+}

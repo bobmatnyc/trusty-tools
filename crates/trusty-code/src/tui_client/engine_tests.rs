@@ -780,7 +780,10 @@ fn session_shape_summary_names_the_solo_agent_and_root() {
         "no_delegate": true,
         "binding": {"state": "directory", "root": "/tmp/proj"},
     }));
-    assert_eq!(summary, "solo agent (no delegation), editing in /tmp/proj");
+    assert_eq!(
+        summary,
+        "solo agent (no delegation), file tools rooted at /tmp/proj"
+    );
 }
 
 /// A projectless session says so, and names the scratch workspace — the TUI's
@@ -793,7 +796,7 @@ fn session_shape_summary_names_the_projectless_scratch_root() {
     }));
     assert_eq!(
         summary,
-        "solo agent (no delegation), projectless — editing in a scratch workspace"
+        "solo agent (no delegation), projectless — file tools rooted at a scratch workspace"
     );
 }
 
@@ -805,5 +808,5 @@ fn session_shape_summary_names_the_delegating_pm() {
         "no_delegate": false,
         "binding": {"state": "git_repo", "root": "/tmp/repo"},
     }));
-    assert_eq!(summary, "delegating PM, editing in /tmp/repo");
+    assert_eq!(summary, "delegating PM, file tools rooted at /tmp/repo");
 }

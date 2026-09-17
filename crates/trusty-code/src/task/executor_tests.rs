@@ -1360,56 +1360,96 @@ async fn solo_run_of_the_stock_pm_advertises_the_file_tools() {
     );
 }
 
-/// #8184 / #3422: the solo agent's OWN tool calls go through the permission
-/// gate, and a deny stops the write.
+/// The `request_id` of the first `permission_requested` this session recorded.
 ///
-/// Why: giving the top-level agent `write_file`/`bash` in an interactive
-/// session widens what one un-gated call can do, so the merged tools must be
-/// gated exactly like a delegated agent's. This is the daemon path the TUI
-/// drives (`spawn_task_run`), not a gate unit test — the same
-/// `PermissionContext` whose `ask` branch suspends against the broker
-/// `session.permission.respond` answers (`tests/tui_client_engine.rs::
-/// respond_permission_releases_a_suspended_call`).
-/// What: a solo `engineer` whose front matter denies `write_file`, scripted to
-/// call it anyway. Asserts the tool was advertised (so absence of the file is
-/// the gate's doing, not a missing tool) and that nothing was written.
+/// Why (#8184): the ask suspends the run inside the gate, so the answer has to
+/// come from a concurrent task reading the session's own event ring — the same
+/// place a real client reads it from.
+/// Test: `solo_run_of_the_stock_pm_asks_before_write_file`.
+async fn await_permission_request(registry: &SessionRegistry, id: &str) -> (String, String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for e in registry.replay(id).expect("session must exist") {
+            if let crate::events::Event::PermissionRequested {
+                request_id, tool, ..
+            } = &e.event
+            {
+                return (request_id.clone(), tool.clone());
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no permission request arrived within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// #8184 / #3422 SAFETY GATE: the STOCK `pm` agent — the one a default
+/// interactive session runs — asks before writing a file, and a deny keeps it
+/// off disk.
+///
+/// Why: #8184 gives the top-level agent `write_file`/`edit`/`bash` in the
+/// user's real project root. That is only safe if the SHIPPED agent card asks
+/// first; a bespoke fixture card with a hand-written rule would prove nothing
+/// about what a user gets. This drives the daemon path the TUI drives
+/// (`spawn_task_run` with a broker), so the ask, the published event, and the
+/// answer are the real ones.
+/// What: an EMPTY agents dir, so `resolve_agent` falls back to the embedded
+/// `pm.md`; a broker plus a claimed prompter (#8100, or the ask would resolve
+/// headless without ever publishing); a concurrent task answers `deny`.
+/// Asserts the request named `write_file` and that nothing was written. FAILS
+/// without `pm.md`'s `permissions:` block — no request is ever published and
+/// the file lands.
 /// Test: this test.
 #[tokio::test]
-async fn solo_run_honours_a_deny_rule_on_its_own_tools() {
+async fn solo_run_of_the_stock_pm_asks_before_write_file() {
     let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let agents = agents_dir();
-    std::fs::write(
-        agents.path().join("engineer.md"),
-        "---\nname: engineer\nmodel: openai/gpt-4o-mini\n\
-         tcode_tools: [read_file, write_file, finish_task]\n\
-         permissions:\n  write_file: deny\n---\n\nYou are the engineer.\n",
-    )
-    .expect("write engineer.md");
+    let agents = tempfile::tempdir().expect("empty agents tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
+    let broker = Arc::new(crate::permissions::PermissionBroker::new());
+    // #8100: an ask only suspends while someone is watching THIS session.
+    let _prompter = registry
+        .claim_prompter(&session.id)
+        .expect("session must exist");
 
     let mock = Arc::new(ScriptedLlm::from_json(&[
-        write_file_tool_call_response("call_1", "denied.txt", "nope"),
-        stop_response("engineer: the write was denied"),
+        write_file_tool_call_response("call_1", "asked.txt", "nope"),
+        stop_response("pm: the write was refused"),
     ]));
     let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
     let p = TaskRunParams {
         no_delegate: true,
-        agent_name: "engineer".to_string(),
-        task: "create denied.txt".to_string(),
+        task: "create asked.txt".to_string(),
+        permission_broker: Some(Arc::clone(&broker)),
         ..params(&agents, &project, &session.id)
     };
 
+    let answering = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        let broker = Arc::clone(&broker);
+        let session_id = session.id.clone();
+        async move {
+            let (request_id, tool) = await_permission_request(&registry, &session_id).await;
+            broker
+                .session(&session_id)
+                .respond(&request_id, crate::permissions::PermissionDecision::Deny)
+                .expect("the request must still be waiting");
+            tool
+        }
+    });
+
     spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    let tool = answering.await.expect("the answering task must not panic");
     wait_for_terminal(&registry, &session.id).await;
 
-    let advertised = mock.first_tool_names();
-    assert!(
-        advertised.contains(&"write_file".to_string()),
-        "the tool must be advertised, so the gate is what stops it; got {advertised:?}"
+    assert_eq!(
+        tool, "write_file",
+        "the stock pm must ask before writing a file"
     );
     assert!(
-        !project.path().join("denied.txt").exists(),
+        !project.path().join("asked.txt").exists(),
         "a denied write_file must not reach the disk"
     );
 }

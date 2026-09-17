@@ -9,18 +9,43 @@ Changed
   PM registry — which had no filesystem tools at all — could not reach. The
   default lives on the daemon, in `session.create`, so every interactive client
   inherits it; `task.run`'s own mint path is unchanged and still delegates
-  unless asked not to. A session's shape is fixed at creation and is
-  authoritative for every later turn, and is reported on
-  `session.status`/`session.list` as `no_delegate`.
+  unless asked not to.
+- **The stock `pm` agent now asks before it writes or runs shell (#8184,
+  #3422).** `assets/agents/pm.md` gained a `permissions:` block marking `bash`,
+  `write_file`, `write_files` and `edit` as `ask`; reads stay unprompted. This
+  is what gates the new default: before it, the shipped card declared no
+  `permissions:` at all and an agent with no map is allowed everything, so a
+  solo session would have written and run shell in the user's project root with
+  no prompt. An `ask` needs a client watching that session to answer it — a
+  headless run (no attached client) resolves it to deny per #8100, so a
+  non-interactive `tcode run-task pm --no-delegate` now needs
+  `TCODE_PERMISSION_MODE=allow-asks`. Only the four tools above gate; the
+  agent's own `tcode_tools` allowlist still decides what exists at all.
+- **A deployed roster card keeps the `permissions:` block its source declared
+  (#8184).** The roster deployer re-emits frontmatter from a fixed key list
+  that does not include `permissions:`, so the materialized
+  `<project>/.trusty-code/agents/<name>.md` — which wins agent resolution over
+  the embedded copy — silently lost the block, and an agent with no block is
+  allowed everything. `md_loader` now restores the embedded source's block when
+  a file the deployer wrote (`provenance: framework-owned`) carries none of its
+  own; a hand-authored card, or a deployed one a user has since given rules, is
+  left alone. The shared emitter still drops the key — that is worth fixing at
+  the source, in `trusty_agents_common::agents::builder`.
 - **PM/delegation mode is reachable by an explicit opt-in (#8184).**
   `session.create`'s new `delegate: true` param mints the pre-#8184 delegating
-  PM, and `tcode tui --delegate` is the CLI surface that sends it. Note this
-  changes the default for every `session.create` caller, including the GUI's
-  `POST /sessions` bridge; a caller that wants delegation must now ask for it.
-- **The TUI's connect line states which agent runs and where it edits
-  (#8184).** It now reads `… (session <id>; solo agent (no delegation), editing
-  in <root>)`, or `… projectless — editing in a scratch workspace` for a
-  session with no `--project`, whose run works in an ephemeral scratch root
-  rather than the directory the TUI was launched from. Every tool call the solo
-  agent makes still goes through the #3422 permission prompt and the agent's own
-  `tcode_tools`/`permissions:` gating.
+  PM, `POST /sessions` forwards it, and `tcode tui --delegate` is the CLI
+  surface that sends it. `TcodeConnector::create_session` — which provisions
+  fleet/automation sessions with no client to answer a prompt — sends
+  `delegate: true` itself, so programmatic provisioning keeps its pre-#8184
+  semantics rather than inheriting a default aimed at a human at a terminal.
+- **A session's agent shape is immutable, like its project binding (#8184).**
+  `task.run` with `no_delegate: true` against a session minted delegating is
+  rejected with `-32003 invalid_argument` instead of running a shape
+  `session.status`/`session.list` would keep reporting as the other one — the
+  same record-vs-run divergence the sibling `project` and `workstream_id`
+  guards prevent. The shape is reported as `no_delegate` on both methods.
+- **The TUI's connect line states which agent runs and where its file tools are
+  rooted (#8184).** It now reads `… (session <id>; solo agent (no delegation),
+  file tools rooted at <root>)`, or `… projectless — file tools rooted at a
+  scratch workspace` for a session with no `--project`, whose run works in an
+  ephemeral scratch root rather than the directory the TUI was launched from.

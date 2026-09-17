@@ -90,7 +90,7 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
 /// `session.create` just returned (#8184).
 ///
 /// Why: the two facts that decide what a turn can actually do — whether the
-/// agent edits files itself or delegates, and WHERE it edits them — were
+/// agent edits files itself or delegates, and WHERE its file tools are rooted — were
 /// invisible from the TUI, so a projectless session (which works in a
 /// throwaway scratch directory, never the launch directory) looked exactly
 /// like a bound one. Kept pure (no `&self`) so it is unit-testable without a
@@ -116,8 +116,11 @@ fn session_shape_summary(session: &Value) -> String {
         .and_then(|b| b.get("root"))
         .and_then(Value::as_str)
     {
-        Some(root) => format!("{agent}, editing in {root}"),
-        None => format!("{agent}, projectless — editing in a scratch workspace"),
+        // #8184: "file tools rooted at", not "editing in" — `tools::fs` scopes
+        // its paths to this root, but `bash` only sets the child's working
+        // directory, so this states where the agent works, never a sandbox.
+        Some(root) => format!("{agent}, file tools rooted at {root}"),
+        None => format!("{agent}, projectless — file tools rooted at a scratch workspace"),
     }
 }
 

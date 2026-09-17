@@ -148,8 +148,9 @@ enum Command {
         /// Run the DELEGATING PM instead of the solo agent (#8184).
         ///
         /// An interactive session runs one agent that reads, edits and runs
-        /// commands itself — every tool call still goes through the
-        /// permission prompt. This flag restores the pre-#8184 shape: the
+        /// commands itself; the stock `pm` card asks before `bash`,
+        /// `write_file`, `write_files` and `edit` (#3422), and reads are
+        /// unprompted. This flag restores the pre-#8184 shape: the
         /// top-level agent gets `delegate_to_agent` and hands implementation
         /// work to a sub-agent instead of doing it. Sent as
         /// `session.create`'s `delegate` param.
