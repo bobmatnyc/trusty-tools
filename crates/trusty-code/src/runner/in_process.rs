@@ -169,6 +169,13 @@ pub struct InProcessAgentRunner {
     /// minted per delegation in `run_pipeline` from the DELEGATED agent's own
     /// config. `None` means no gate, exactly as before #7948.
     permissions: Option<crate::permissions::PermissionContext>,
+    /// (#8206) The directory this runner's delegated agents' fs/bash tools are
+    /// scoped to — the bound project root, or the run's scratch root when
+    /// projectless. Read only by the verify-before-finish gate, which must not
+    /// refuse a finish over a test suite that demonstrably is not there.
+    /// `None` (the default) means no project is bound, which makes the gate's
+    /// refusal arm unreachable — see `verify_gate::default_finish_gate`.
+    work_root: Option<PathBuf>,
 }
 
 impl InProcessAgentRunner {
@@ -197,6 +204,7 @@ impl InProcessAgentRunner {
             mode: HarnessMode::default(),
             skills_catalog: None,
             permissions: None,
+            work_root: None,
         }
     }
 
@@ -279,6 +287,20 @@ impl InProcessAgentRunner {
     /// `runner::tests::skills_catalog_ignored_in_parity`.
     pub fn with_skills_catalog(mut self, catalog: impl Into<String>) -> Self {
         self.skills_catalog = Some(catalog.into());
+        self
+    }
+
+    /// Bind the work root the verify-before-finish gate probes for a
+    /// detectable test suite (#8206).
+    ///
+    /// Why: Without it the gate refused a `finish_task` on an empty
+    /// projectless scratch root, where no test command could ever have run —
+    /// the live #8206 transcript wedged on exactly that refusal.
+    /// What: The SAME directory the caller scoped this runner's fs/bash tools
+    /// to. Unset leaves the gate's refusal arm unreachable.
+    /// Test: `runner::tests::work_root_reaches_the_finish_gate`.
+    pub fn with_work_root(mut self, work_root: impl Into<PathBuf>) -> Self {
+        self.work_root = Some(work_root.into());
         self
     }
 
@@ -371,6 +393,10 @@ impl InProcessAgentRunner {
         // single-agent run and a delegated one can never assemble the set
         // differently.
         let registry = agent_registry(self.registry_factory.as_ref(), &agent, ctx).await;
+        // #8206: read BEFORE the registry moves into the loop below. An agent
+        // whose `tools.allowed` gated `bash` out cannot run any test command,
+        // so its verify-before-finish gate must never refuse it for not having.
+        let registry_has_bash = registry.contains(crate::tools::BASH_TOOL_NAME);
 
         // Resolve the model and the per-call turn cap (RunContext wins).
         let model = resolve_model(&agent, Some(ctx));
@@ -410,12 +436,15 @@ impl InProcessAgentRunner {
         // project ctx) — see `assemble_system_prompt_for_mode`'s docs (#2059).
         // Fallback guidance (the #1023 per-tier seam) is not wired here yet.
         // `skills_catalog` (#2069) is appended only in `HarnessMode::DailyDriver`.
+        // #4602: gated on THIS delegation's registry, so an agent narrowed by
+        // `tools.allowed` is never told to call a tool the gate removed.
         let system = assemble_system_prompt_for_mode(
             self.mode,
             &agent,
             self.project_context.as_deref(),
             None,
             self.skills_catalog.as_deref(),
+            Some(registry.as_ref()),
         );
 
         // (DOC-39 AC-13.1/13.2) Mint a fresh, per-spawn stable id for THIS
@@ -438,7 +467,16 @@ impl InProcessAgentRunner {
             // sub-agent loop (both `run_task` and `task::executor` delegate
             // through this runner), so wiring it here covers both entry
             // points without duplicating the attachment at each call site.
-            .with_finish_gate(crate::verify_gate::default_finish_gate())
+            // #8206: the gate additionally needs this delegation's own
+            // registry (does it even have `bash`?) and the bound work root
+            // (is there a test suite to detect?) — both resolved right here,
+            // so a refusal is only ever raised where the agent could comply.
+            .with_finish_gate(crate::verify_gate::default_finish_gate(
+                crate::verify_gate::VerifyGateContext::new(
+                    self.work_root.clone(),
+                    registry_has_bash,
+                ),
+            ))
             // #2682: the complement to the verify gate above — suppress a
             // redundant full-suite re-run once the suite has passed and nothing
             // has changed since, so the engineer stops burning turns on

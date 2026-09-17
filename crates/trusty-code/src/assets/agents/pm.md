@@ -5,6 +5,11 @@ description: General-purpose orchestrator and default agent — plans the work, 
 model: sonnet
 max_tokens: 8192
 tcode_tools: [read_file, write_file, write_files, edit, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
+permissions:
+  bash: ask
+  write_file: ask
+  write_files: ask
+  edit: ask
 skills: [writing-plans, brainstorming, requesting-code-review]
 ---
 

@@ -369,6 +369,16 @@ fn channel_failure(binding_id: &str, error: crate::channels::ChannelError) -> Er
             tracing::warn!(binding = binding_id, %error, "channel operation failed");
             bad("This provider does not deliver incoming updates")
         }
+        // #8037: a provider whose capabilities CLAIM readable history and whose
+        // adapter implements none is a build defect, not a configuration one —
+        // it is logged at error level and never rendered as an empty inbox.
+        crate::channels::ChannelError::ReadUnsupported(_) => {
+            tracing::error!(binding = binding_id, %error, "channel history was claimed available and could not be served");
+            err(
+                StatusCode::BAD_GATEWAY,
+                "Channel history could not be read; check connection and access",
+            )
+        }
         // #7427: a credential that will not resolve stops delivery outright and
         // keeps stopping it until an operator changes the binding or the store.
         // `warn` put it below the default filter of a daemon that is otherwise
@@ -467,29 +477,30 @@ pub(crate) async fn send(
         .await
         .map_err(|e| channel_failure(&binding.id, e))
 }
+/// Prior messages on a bound destination.
+///
+/// Why (#8037): the Slack Web API call used to be written out here, which is
+/// why no other provider could serve history — the stub provider included. The
+/// body is now the permission gate plus one adapter call, and
+/// `ChannelAdapter::read` owns the provider work.
+/// What: a provider whose `can_read` is unset answers `available: false` with
+/// the adapter's own reason and never reaches the network. Every other failure
+/// maps through [`channel_failure`], so an unresolvable credential is
+/// distinguishable from an upstream refusal.
+/// Test: `a_stub_channel_sends_and_reads_back_over_http`,
+/// `channel_adapter_read_defaults_to_unsupported`.
 pub(crate) async fn messages(name: &str, id: &str) -> Result<Value, Error> {
     let binding = bound(name, id, false).await?;
-    let capabilities = crate::channels::require_adapter(&binding.provider)
-        .map_err(|e| channel_failure(&binding.id, e))?
-        .capabilities();
+    let adapter = crate::channels::require_adapter(&binding.provider)
+        .map_err(|e| channel_failure(&binding.id, e))?;
+    let capabilities = adapter.capabilities();
     if !capabilities.can_read {
         return Ok(json!({"available":false,"messages":[],"reason":capabilities.read_reason}));
     }
-    let failure = || {
-        err(
-            StatusCode::BAD_GATEWAY,
-            "Channel history could not be read; check connection and access",
-        )
-    };
-    let client = trusty_channels::slack::api::client::BaseClient::new().map_err(|_| failure())?;
-    let result = client
-        .call_method(
-            "conversations.history",
-            &json!({"channel":binding.target,"limit":30}),
-        )
+    let messages = adapter
+        .read(&binding)
         .await
-        .map_err(|_| failure())?;
-    let messages=result["messages"].as_array().into_iter().flatten().map(|v|json!({"id":v["ts"],"text":v["text"].as_str().unwrap_or("").chars().take(8000).collect::<String>(),"from":v["user"],"timestamp":v["ts"]})).collect::<Vec<_>>();
+        .map_err(|e| channel_failure(&binding.id, e))?;
     Ok(json!({"available":true,"messages":messages}))
 }
 pub(super) async fn get_route(AxumPath(name): AxumPath<String>) -> Result<Json<Value>, Error> {

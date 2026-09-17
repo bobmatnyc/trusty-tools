@@ -746,7 +746,7 @@ fn picker_unknown_name_is_none() {
 /// workstream, clearing on deactivation rather than showing stale text.
 #[test]
 fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
-    let state = EngineState::new(UdsRpcClient::new("/nonexistent/tcode.sock"), None);
+    let state = EngineState::new(UdsRpcClient::new("/nonexistent/tcode.sock"), None, false);
     assert!(
         state.statusline_segments().is_empty(),
         "no active workstream observed yet -> no segments"
@@ -769,4 +769,44 @@ fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
         state.statusline_segments().is_empty(),
         "deactivation must clear the segment, not leave a stale one"
     );
+}
+
+// ── #8184: the connect line names the agent shape and the working root ──────
+
+/// A bound session's summary names the solo agent and the project root.
+#[test]
+fn session_shape_summary_names_the_solo_agent_and_root() {
+    let summary = session_shape_summary(&json!({
+        "no_delegate": true,
+        "binding": {"state": "directory", "root": "/tmp/proj"},
+    }));
+    assert_eq!(
+        summary,
+        "solo agent (no delegation), file tools rooted at /tmp/proj"
+    );
+}
+
+/// A projectless session says so, and names the scratch workspace — the TUI's
+/// launch directory is NOT where its edits land.
+#[test]
+fn session_shape_summary_names_the_projectless_scratch_root() {
+    let summary = session_shape_summary(&json!({
+        "no_delegate": true,
+        "binding": {"state": "projectless", "root": null},
+    }));
+    assert_eq!(
+        summary,
+        "solo agent (no delegation), projectless — file tools rooted at a scratch workspace"
+    );
+}
+
+/// `--delegate` reads as the PM, so the two modes are distinguishable on the
+/// connect line.
+#[test]
+fn session_shape_summary_names_the_delegating_pm() {
+    let summary = session_shape_summary(&json!({
+        "no_delegate": false,
+        "binding": {"state": "git_repo", "root": "/tmp/repo"},
+    }));
+    assert_eq!(summary, "delegating PM, file tools rooted at /tmp/repo");
 }

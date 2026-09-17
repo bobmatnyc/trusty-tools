@@ -843,7 +843,11 @@ Agent skills may carry executable code — Python packages, binaries, or other i
 > per-assistant bindings in the Channels view's Assistant scope, host-wide
 > sources in its Global scope. Nothing below governs a shipped surface; the
 > replacement is §8.4's amendment and the `[[channels]]` model in
-> `crates/trusty-agents/src/channels/model.rs`.
+> `crates/trusty-agents/src/channels/model.rs`. Per-assistant bot identity for
+> a Telegram channel binding — one bot token per assistant, a per-binding
+> credential reference, one gateway per distinct token — is specified in
+> [DOC-54](./trusty-agents-product-spec.md) §9a
+> (`SPEC-AGENTS-09~draft`).
 
 ### 6.1 Substance unchanged
 

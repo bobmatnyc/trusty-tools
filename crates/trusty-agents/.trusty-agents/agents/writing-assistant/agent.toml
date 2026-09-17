@@ -1,0 +1,171 @@
+# Writing Assistant — long-form drafting and editing overlay over the base
+# `assistant` agent (#8186, epic #8183).
+#
+# Third first-class assistant alongside `../izzie/` and `../cto-assistant/`,
+# built on the SAME machinery: a directory package (`agent.toml` +
+# `persona.md`) declaring `extends = "assistant"`, so the base's curated
+# gworkspace surface, black-box tool posture and persona body all arrive by
+# union (`crate::agents::extends::merge_extends`, base-first, deduped). There
+# is no code branch for this persona anywhere — it resolves through
+# `AgentConfig::by_name` exactly as izzie does, and reaches an installed
+# machine through `crate::agents::bundled`, which embeds this whole directory
+# with `rust-embed` and deploys it to `~/.trusty-agents/agents/`.
+#
+# This overlay declares DELTAS ONLY. Do not re-list a tool, scope or skill the
+# base already grants — `../assistant/agent.toml` is the single source of truth
+# for the shared surface, and a re-listed entry is deduped away rather than
+# enforced. The three exceptions below say in place why they are declared.
+
+[agent]
+name = "writing-assistant"
+role = "assistant"
+extends = "assistant"
+# #8186: no `runner` and no `provider_id` — same ambient resolution as izzie
+# (`pick_credentials()` in `src/llm/credentials.rs`), so an operator's
+# `[llm] provider` policy reaches this template (`llm::provider_policy`).
+model = "claude-sonnet-4-6"
+description = "Writing Assistant — long-form drafting and editing (personalization overlay over `assistant`)"
+display_name = "Writing Assistant"
+prompt_label = "writer"
+
+[llm]
+# #8186: lower than the base's 0.7. Drafting and editing want a steady voice
+# across a long passage, not per-paragraph variety.
+temperature = 0.5
+# #8186: the base's 1024 truncates a section-length draft mid-sentence. A
+# long-form persona whose whole output is prose needs the room.
+max_tokens = 8192
+# #8186: THE ONE INHERITED VALUE THIS OVERLAY MUST OVERRIDE. The base blocks
+# `"\n##"` and `"\n* * *"` so conversational replies stay in plain prose —
+# correct for a chat assistant, fatal here: a markdown heading is normal
+# structure in a long draft, and inheriting the base's list would stop
+# generation at the first section break. An empty list is a DECLARED value
+# under per-key `[llm]` merge (`extends::declared::merge_llm` keys on
+# `DeclaredKeys`), so it wins over the base's rather than reading as "omitted".
+stop_sequences = []
+
+# OKG STORE BINDING (#3816/#3864, DOC-54 SPEC-AGENTS-04 §5.1) — the FIRST leg
+# of the stores/tools/channels config triple: what this assistant KNOWS, as
+# opposed to how it ACTS (`[tools].allow`) or REACTS (`[[channels]]`).
+#
+# Exactly ONE store per agent (Bob, 2026-07-24). `index` is a trusty-search
+# index id, `palace` a trusty-memory palace; the harness resolves both against
+# the live daemons at boot and reports each as connected / not-connected with a
+# reason (`crate::stores::status`) — a missing index degrades the store, it
+# never blocks the agent from booting. `index` is also the DEFAULT target for
+# an unqualified `vector_search(query)` call (#3864), which is what makes
+# "find what I already wrote about this" search the writing corpus rather than
+# whatever code index happens to sit under the process CWD.
+[[stores]]
+name = "writing-assistant-kb"
+tree = "okg://writing-assistant"
+index = "writing-assistant"
+palace = "writing"
+
+[tools]
+# Drafting/editing/research DELTAS only. The base `assistant` already grants
+# the whole Google Docs/Drive/Gmail surface (`create_document`,
+# `insert_text_in_document`, `replace_text_in_document`,
+# `manage_document_comments`, `publish_markdown_to_doc`, …), `web_search`,
+# `granola_*`, `memory_recall`/`memory_remember`, the four `okg_*` tools and
+# `delegate_to_agent`; all of it arrives by union.
+#
+# BLACK-BOX POSTURE (PR A, epic #3052): `session_*`, `project_list`,
+# `console_metrics`, `system_status` and `mcp_list`/`mcp_enable`/`mcp_disable`
+# are DELIBERATELY EXCLUDED — do not re-add them here.
+#
+# NO git tools (owner, 2026-07-30). This persona ingests untrusted prose from
+# mail, Drive and the web, which is the exact shape the base's git strip
+# exists to keep away from a cross-project read primitive. Pinned by
+# `bundled_personas_pin_git_reach` (agents/tests/loading.rs).
+allow = [
+  # #8186: semantic search over this assistant's own bound store
+  # (`writing-assistant`). Not on the base, and the reason this overlay
+  # declares a store at all: an unqualified `vector_search(query)` is how a
+  # draft reaches earlier drafts, briefs and source notes.
+  "vector_search",
+  # #8186: a draft is written in a chat channel and finished somewhere else.
+  # `channel` reads and sends only on destinations already saved for THIS
+  # assistant (`tools::channel`, fixed to the executing agent), so the grant
+  # widens nothing beyond `writing-assistant.channels.json` — the same
+  # reasoning #7880 used for cto-assistant.
+  "channel",
+]
+# #8186: NO `scopes` line. The base's family grants
+# (`google.docs.*`, `google.drive.*`, `google.gmail.*`, …) are exactly the
+# surface this persona drafts into, and it opts into nothing beyond them —
+# deliberately not izzie's blanket `google.*`, which would hand a
+# prose-ingesting persona every Google family that ever ships.
+
+[system_prompt]
+# Writing-specific skill DELTAS only; the base already supplies the
+# gworkspace/memory set. Each name must be on the assistant skill floor
+# (`agents::skill_floor::ASSISTANT_REACHABLE_SKILLS`) or it is stripped before
+# injection — see `bundled_assistant_personas_declare_only_reachable_skills`.
+#   cto-bob-voice  — the owner's own writing voice, for drafting on his behalf
+#   tm-prose-style — the plain-prose rules this persona edits against
+#   web-search     — how to use `web_search` for source-gathering
+# #482: the system prompt body lives in persona.md.
+skills = [
+    "cto-bob-voice",
+    "tm-prose-style",
+    "web-search",
+]
+
+# CHANNEL BINDINGS (#7609, #8186) — the THIRD config-triple leg: what this
+# assistant REACTS to. All three ship DISABLED.
+#
+# Disabled is the shipped default and not a placeholder: every one of these
+# binds a GLOBAL channel the operator defines in
+# `~/.trusty-agents/config.toml`, and that global channel is where the account,
+# the destination and the credential live. Nothing in this repository ever
+# carries a credential value — `Channel::credential_ref` holds a
+# `trusty_common::credentials::CredentialRef` NAME (`provider` or
+# `provider/qualifier`) and is deliberately absent here, because the qualifier
+# is the operator's profile name, not ours to guess. Pinned by
+# `bundled_persona_channels_carry_no_credential_value`
+# (agents/tests/loading.rs).
+#
+# To turn one on: define the matching global channel, set `enabled`/
+# `receive_enabled`/`send_enabled` there or in this assistant's
+# `writing-assistant.channels.json`, and name `writing-assistant` in the global
+# channel's `route_to`. `target` stays empty (account-wide) so
+# `api::server::agent_channels::inbound::absorb_overlays` treats each entry as
+# a binding to the global channel of the same `id`.
+[[channels]]
+id = "gmail"
+name = "gmail"
+provider = "gmail"
+enabled = false
+send_enabled = false
+receive_enabled = false
+event_types = ["message.received"]
+instructions = "Inbound mail asking for a draft, an edit or a review. Reply with the draft inline; never send anything onward without an explicit go-ahead."
+
+[[channels]]
+id = "slack"
+name = "slack"
+provider = "slack"
+enabled = false
+send_enabled = false
+receive_enabled = false
+instructions = "Short-form drafting in a thread: reply in the thread, match the thread's register, and keep the draft in the message rather than linking out."
+
+[[channels]]
+id = "telegram"
+name = "telegram"
+provider = "telegram"
+enabled = false
+send_enabled = false
+receive_enabled = false
+instructions = "Dictation and quick capture. Treat an inbound message as raw material for a draft, not as an instruction to publish."
+
+# ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
+# sub-agent whitelist. `delegate_allowed` is intersected with a server-owned
+# floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`), so editing this
+# list can only ever NARROW it. ABSENT MEANS NOTHING, NOT EVERYTHING — an
+# assistant with no `delegate_allowed` key reaches zero sub-agents, so the seed
+# is what keeps fail-closed from being a silent capability loss. Pinned by
+# `bundled_assistant_personas_seed_the_reachable_subagent_whitelist`.
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]

@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-54 bundled skills.
+55 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -24,6 +24,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks. |
+| `rust-delivery-workflow` | agent-reference | no | Rust delivery process under agent dispatch: commit before the gate chain, match the local toolchain to CI's clippy pin, cap concurrent cargo builds, keep gate output to a verdict, and batch installs before live verification. Use when planning or running the gates for a Rust change, not when a build feels slow. |
 | `security-scanning` | agent-reference | no | CI security scanning: secrets, deps, SAST, triage, expiring exceptions |
 | `self-improvement-loop` | agent-reference | no | Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now |
 | `software-patterns` | agent-reference | no | Compare tradeoffs and recommend architectural patterns — dependency injection, service-oriented architecture, repository, domain events, circuit breaker, and anti-corruption layer. Use when choosing between design patterns, planning microservices boundaries, evaluating system design alternatives, or asking 'which pattern should I use' for a specific coupling or resilience problem. |

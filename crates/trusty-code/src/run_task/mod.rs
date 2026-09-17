@@ -420,12 +420,15 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // #2924: mirrors `task::executor::run_and_record` — always resolves as
     // `HarnessMode::DailyDriver` (see `daily_driver_skills_catalog`'s docs
     // for why this path never needs to resolve `Parity`).
+    // #4602: gated on the PM's OWN registry — a delegating PM carries harness
+    // tools only, so it must not be told to call `glob`/`grep`/`list_dir`.
     let pm_system = assemble_system_prompt_for_mode(
         HarnessMode::DailyDriver,
         &pm_config,
         project_context.as_deref(),
         catchup_ctx.as_deref(),
         skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
+        Some(&pm_registry),
     );
     // (#2265 fix #5, re-scoped by #2852) Once the shared cap latches, every
     // further `delegate_to_agent` call the PM might issue is a guaranteed dead
@@ -511,7 +514,12 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
         // own — `verify_gate::pm_finish_gate` does exactly that against the
         // SAME shared `transcript` the engineer's `RecordingLlmClient` records
         // into (see `build_engineer_runner` above).
-        .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
+        // #8206: the bound project root, so the PM's gate cannot refuse a
+        // finish on a root with no detectable test suite.
+        .with_finish_gate(crate::verify_gate::pm_finish_gate(
+            Arc::clone(&transcript),
+            Some(params.project.clone()),
+        ));
 
     // Snapshot before, run the PM, snapshot after.
     let before = diff::capture_snapshot(&params.project);
@@ -594,6 +602,9 @@ fn build_engineer_runner(
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
         .with_timeout_secs(deadline_secs)
+        // #8206: the project the engineer's tools are scoped to, so its own
+        // verify-before-finish gate probes the right directory.
+        .with_work_root(params.project.clone())
         // #2924: mirrors `task::executor::build_engineer_runner` — this path
         // always resolves as `HarnessMode::DailyDriver` (see
         // `daily_driver_skills_catalog`'s docs).

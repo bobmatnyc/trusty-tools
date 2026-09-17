@@ -264,6 +264,51 @@ fn recording_factory(
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+/// A response in which the assistant calls `finish_task` with `arguments`.
+///
+/// Why: `work_root_reaches_the_finish_gate` needs a finish call the loop will
+/// actually accept, which `tool_call_response`'s empty `{}` arguments cannot
+/// be — `finish_task`'s schema marks `status` and `summary` required.
+fn finish_task_call_response(call_id: &str, arguments: &str) -> Value {
+    json!({
+        "id": "gen-finish",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": "finish_task", "arguments": arguments }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 }
+    })
+}
+
+/// A registry factory yielding the real `finish_task` and `bash` tools.
+///
+/// Why: The #8206 gate consults `registry.contains("bash")`, and the loop
+/// only terminates on a `finish_task` whose arguments deserialise — so this
+/// pair must be the production tools, not recording stubs.
+fn finish_and_bash_factory() -> impl Fn(
+    AgentConfig,
+    RunContext,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Arc<ToolRegistry>> + Send>,
+> {
+    move |_agent: AgentConfig, _ctx: RunContext| {
+        Box::pin(async move {
+            let mut reg = ToolRegistry::new();
+            reg.register(Arc::new(crate::tools::FinishTaskTool::new()));
+            reg.register(Arc::new(crate::tools::BashTool::default_config()));
+            Arc::new(reg)
+        })
+    }
+}
+
 /// Default config is sane.
 ///
 /// Why: Defaults are the most-used construction path; guard them.
@@ -1460,5 +1505,65 @@ async fn cancel_flag_reaches_delegated_loop() {
         llm.calls(),
         0,
         "cancellation must be observed before any chat call"
+    );
+}
+
+/// [`InProcessAgentRunner::with_work_root`] reaches the delegated agent's
+/// verify-before-finish gate (#8206).
+///
+/// Why: The gate's refusal arm is reachable only when a project root is
+/// bound. Without this wiring every delegation would look projectless, and
+/// #2279's gate would be silently dead on the runner path — the opposite
+/// failure from the one #8206 fixes.
+/// What: An engineer whose registry carries `bash` and `finish_task`, a work
+/// root holding a `Cargo.toml`, and a script of [premature `finish_task`,
+/// stop]. The gate must refuse turn 1's finish, forcing a SECOND chat call;
+/// the same script against an unbound runner terminates after one.
+/// Test: this test.
+#[tokio::test]
+async fn work_root_reaches_the_finish_gate() {
+    let body = "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\n\
+                You are a Python engineer.\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let project = tempfile::tempdir().expect("tempdir for the work root");
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\n",
+    )
+    .expect("write Cargo.toml");
+
+    let script = [
+        finish_task_call_response(
+            "c1",
+            r#"{"status": "completed", "summary": "done (premature)"}"#,
+        ),
+        stop_response("engineer done"),
+    ];
+
+    let factory: Arc<dyn super::in_process::RegistryFactory> = Arc::new(finish_and_bash_factory());
+    let bound = Arc::new(ScriptedLlm::from_json(&script));
+    let runner = InProcessAgentRunner::new(bound.clone(), Arc::clone(&factory), tmp.path())
+        .with_work_root(project.path());
+    runner
+        .run("python-engineer", "run cargo test before finishing")
+        .await
+        .expect("the loop must recover after the gate's refusal");
+    assert_eq!(
+        bound.calls(),
+        2,
+        "a bound work root with a Cargo.toml must let the gate refuse turn 1's finish"
+    );
+
+    let unbound = Arc::new(ScriptedLlm::from_json(&script));
+    let runner = InProcessAgentRunner::new(unbound.clone(), factory, tmp.path());
+    runner
+        .run("python-engineer", "run cargo test before finishing")
+        .await
+        .expect("an unbound runner must accept the finish");
+    assert_eq!(
+        unbound.calls(),
+        1,
+        "with no work root there is nothing to detect, so the finish stands"
     );
 }

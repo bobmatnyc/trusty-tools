@@ -793,7 +793,9 @@ fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
         "agent_delegate",
     ];
 
-    for agent_name in ["assistant", "izzie", "cto-assistant"] {
+    // #8186: `writing-assistant` is the third first-class assistant and
+    // extends the same base, so both halves of this claim must hold for it.
+    for agent_name in ["assistant", "izzie", "cto-assistant", "writing-assistant"] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
         unsafe {
@@ -867,7 +869,9 @@ fn assistant_tier_persona_carries_curated_worker_routing_list() {
     // this is enforced structurally above, not via a substring-absence
     // check on the whole persona body).
 
-    for agent_name in ["assistant", "izzie", "cto-assistant"] {
+    // #8186: the routing prose reaches `writing-assistant` by the same
+    // concatenation, so the dead-instruction absence claim covers it too.
+    for agent_name in ["assistant", "izzie", "cto-assistant", "writing-assistant"] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
         unsafe {
@@ -2107,9 +2111,11 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
     }
 
     // The roster the owner named, verified rather than assumed. `researcher`
-    // and `writing-assistant` are NOT in it: `research-agent` declares
-    // `role = "researcher"` (a sub-agent role) and no `writing-assistant`
-    // exists anywhere in the roster.
+    // is NOT in it: `research-agent` declares `role = "researcher"`, a
+    // sub-agent role.
+    // #8186: `writing-assistant` joined it — the reviewed addition this
+    // assertion exists to force. It is the third first-class assistant (epic
+    // #8183) and reaches L0 the same way the other four do, by KIND.
     assistants.sort();
     assert_eq!(
         assistants,
@@ -2119,6 +2125,7 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
             "ctrl".to_string(),
             "izzie".to_string(),
             "personal-assistant".to_string(),
+            "writing-assistant".to_string(),
         ],
         "the assistant-kind population is fixed by role, not by a guessed \
          filename list; a new one must be a reviewed addition"
@@ -2303,9 +2310,9 @@ fn bundled_agent_tier_table_is_pinned() {
 /// The pinned `name<TAB>role<TAB>tier` table asserted by
 /// [`bundled_agent_tier_table_is_pinned`]. Sorted by name.
 ///
-/// The L0 population is exactly the five assistant-kind personas (ADR-0024
+/// The L0 population is exactly the assistant-kind personas (ADR-0024
 /// decision 3) plus `pm`, the one orchestrator-kind agent (#4497). Every
-/// specialist stays L1.
+/// specialist stays L1. #8186 added the sixth assistant, `writing-assistant`.
 const TIER_TABLE: &[&str] = &[
     "analysis-agent\tanalysis\tl1",
     "assistant\tassistant\tl0",
@@ -2329,6 +2336,9 @@ const TIER_TABLE: &[&str] = &[
     "qa-agent\tqa\tl1",
     "research-agent\tresearcher\tl1",
     "ticketing-agent\tticketing\tl1",
+    // #8186: the third first-class assistant. L0 by KIND, like every other
+    // `role = "assistant"` entry above — it hand-declares no `tier`.
+    "writing-assistant\tassistant\tl0",
 ];
 
 /// The owner's 2026-07-30 decision on git reach, pinned against the REAL
@@ -2371,10 +2381,15 @@ fn bundled_personas_pin_git_reach() {
     let _guard = ENV_LOCK.blocking_lock();
 
     // (persona, the git tools it is intended to reach — exhaustive)
-    let expected: [(&str, &[&str]); 4] = [
+    // #8186: `writing-assistant` joins the "reaches nothing" side. It ingests
+    // untrusted prose from mail, Drive and the web, which is the izzie shape
+    // the base's git strip exists for — its own manifest says so, and this is
+    // what makes that claim executable.
+    let expected: [(&str, &[&str]); 5] = [
         ("izzie", &[]),
         ("personal-assistant", &[]),
         ("assistant", &[]),
+        ("writing-assistant", &[]),
         (
             "cto-assistant",
             &[
@@ -2570,6 +2585,9 @@ fn bundled_assistant_personas_seed_the_reachable_subagent_whitelist() {
         "cto-assistant",
         "ctrl",
         "personal-assistant",
+        // #8186: the seed is exactly the thing "a later persona addition
+        // silently forgets", so the new persona joins this loop with the file.
+        "writing-assistant",
     ] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
@@ -2639,4 +2657,382 @@ fn assistant_reachable_floor_names_resolve_in_the_bundled_roster() {
             parsed.agent.role
         );
     }
+}
+
+/// Every directory-package persona the bundled roster ships, as
+/// `(name, agent.toml path)`.
+///
+/// Why (#8186): the acceptance claim for a new first-class assistant is that it
+/// loads through the SAME machinery as izzie, with no code branch for it. A
+/// test that named one file could not state that; enumerating the packages and
+/// then looking the new one up inside the enumeration can.
+fn bundled_packages() -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(bundled_agents_dir()).expect("bundled agents dir") {
+        let path = entry.expect("dir entry").path();
+        let manifest = path.join("agent.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        out.push((name.to_string(), manifest));
+    }
+    out.sort();
+    assert!(
+        out.len() >= 4,
+        "sanity: the package roster should hold assistant/ctrl/izzie/cto-assistant \
+         at minimum, got {out:?}"
+    );
+    out
+}
+
+/// #8186 (epic #8183): `writing-assistant` is a first-class assistant built
+/// entirely out of the existing package machinery.
+///
+/// Why: the issue's acceptance is three claims, and each one fails silently on
+/// its own. (a) The package must be found by the SAME enumeration that finds
+/// izzie and loaded by the SAME `AgentConfig::by_name` dispatch loader — a
+/// persona reachable only through a special case would satisfy a hand-written
+/// path assertion and nothing else. (b) `extends = "assistant"` must actually
+/// RESOLVE, which is the bug #3052 caught on izzie: the key parsed, serde
+/// dropped it, and the overlay inherited nothing while every comment claimed it
+/// did — so the test reads the declaration from the file AND checks for content
+/// only the base supplies. (c) The store binding and the three channel bindings
+/// are the config triple the milestone checklist verifies live; shipping them
+/// disabled is what keeps a repository-resident persona from opening a channel
+/// on an operator's account by itself.
+///
+/// What: enumerates the bundled packages, asserts `writing-assistant` is one,
+/// resolves it through `AgentConfig::by_name` against the bundled agents dir,
+/// and asserts the declared `extends`, the inherited-plus-own tool surface, the
+/// primary store binding, and three Assistant-scope channels — gmail, slack and
+/// telegram — with every enable flag off.
+/// Test: This function IS the test.
+#[test]
+fn writing_assistant_package_resolves_with_its_store_and_disabled_channels() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    let packages = bundled_packages();
+    let manifest = packages
+        .iter()
+        .find(|(name, _)| name == "writing-assistant")
+        .map(|(_, path)| path.clone())
+        .expect("writing-assistant must ship as a directory package, like izzie");
+    assert!(
+        manifest.with_file_name("persona.md").is_file(),
+        "the package's prompt body must live in persona.md (#482 MD-package form)"
+    );
+
+    // (b), first half: the declaration is in the file, inside `[agent]`. The
+    // #3052 bug put it at top level, where serde silently dropped it.
+    let raw = std::fs::read_to_string(&manifest).expect("the package must be readable");
+    let doc: toml::Value = toml::from_str(&raw).expect("the package must parse");
+    assert_eq!(
+        doc.get("agent")
+            .and_then(|a| a.get("extends"))
+            .and_then(toml::Value::as_str),
+        Some("assistant"),
+        "`extends` must sit inside [agent]; a top-level key parses and is dropped"
+    );
+
+    clear_model_env("writing-assistant");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+    }
+    let cfg = AgentConfig::by_name("writing-assistant");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("writing-assistant must resolve through the dispatch loader");
+    assert_eq!(cfg.agent.role, "assistant");
+    assert_eq!(cfg.agent.display_label(), "Writing Assistant");
+
+    // (b), second half: the chain RESOLVED. `create_document` comes only from
+    // the base's allowlist and `vector_search` only from this overlay's, so
+    // requiring both is requiring the union to have happened.
+    let allow = cfg
+        .tools
+        .allow
+        .as_deref()
+        .expect("an absent allowlist means UNRESTRICTED, which must never ship");
+    for inherited in ["create_document", "search_drive_files", "delegate_to_agent"] {
+        assert!(
+            allow.iter().any(|t| t == inherited),
+            "'{inherited}' is base-only; its absence means `extends` did not resolve"
+        );
+    }
+    assert!(
+        allow.iter().any(|t| t == "vector_search"),
+        "the overlay's own delta must survive the union"
+    );
+
+    // (c), first leg: the bound store, which is also `vector_search`'s default
+    // target for this persona (#3864).
+    let store = cfg
+        .stores
+        .primary()
+        .expect("writing-assistant must bind exactly one OKG store");
+    assert_eq!(store.name, "writing-assistant-kb");
+    assert_eq!(
+        store.resolved_tree("writing-assistant"),
+        "okg://writing-assistant"
+    );
+    assert_eq!(
+        cfg.stores.default_search_index(),
+        Some("writing-assistant"),
+        "an unqualified vector_search must default to this persona's own index"
+    );
+
+    // (c), third leg: three channels, present and inert.
+    let providers: Vec<&str> = cfg.channels.iter().map(|c| c.provider.as_str()).collect();
+    assert_eq!(
+        providers,
+        vec!["gmail", "slack", "telegram"],
+        "the milestone checklist verifies all three providers; a missing one is a \
+         binding nobody can turn on"
+    );
+    for channel in &cfg.channels {
+        assert_eq!(
+            channel.scope,
+            crate::channels::ChannelScope::Assistant,
+            "a channel read out of agent.toml is the assistant's own"
+        );
+        assert!(
+            channel.target.is_empty(),
+            "'{}' must stay account-wide, or `absorb_overlays` skips it",
+            channel.id
+        );
+        assert!(
+            !channel.enabled && !channel.send_enabled && !channel.receive_enabled,
+            "'{}' must ship disabled — the repository holds no account and no \
+             credential to turn it on with",
+            channel.id
+        );
+    }
+    assert_eq!(
+        cfg.listeners().len(),
+        3,
+        "the wake path reads the same three through the projection"
+    );
+}
+
+/// #8186: no bundled persona's channel table carries a credential VALUE.
+///
+/// Why: this is the failure a wrong implementation of #8186 actually produces.
+/// A channel binding needs an account to be useful, and the shortest way to
+/// make one work on a developer's machine is to paste the bot token or app
+/// password into `agent.toml` — which then ships inside the `tagent` binary
+/// (`agents::bundled` embeds this whole tree) and is written into every user's
+/// `~/.trusty-agents/agents/`. The model forbids it: `Channel::credential_ref`
+/// holds a `trusty_common::credentials::CredentialRef` NAME, `provider` or
+/// `provider/qualifier`, and the value itself lives in the operator's secret
+/// store. A comment saying so is not a gate.
+///
+/// The check is shown able to fail rather than assumed: it rejects a
+/// credential-shaped VALUE anywhere in a channel table, including under a key
+/// the schema does not define, and `a_pasted_channel_token_is_rejected` runs
+/// the same predicate over a manifest that does carry one.
+/// What: walks every bundled `agent.toml`, and for each `[[channels]]` entry
+/// requires `credential_ref` to be a bare `provider` or `provider/qualifier`
+/// name and every string in the table to clear
+/// [`value_looks_like_a_credential`].
+/// Test: This function IS the test.
+#[test]
+fn bundled_persona_channels_carry_no_credential_value() {
+    let mut checked = 0usize;
+    for (name, manifest) in bundled_packages() {
+        let raw = std::fs::read_to_string(&manifest).expect("readable");
+        let doc: toml::Value = toml::from_str(&raw).expect("the package must parse");
+        let Some(channels) = doc.get("channels").and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for channel in channels {
+            checked += 1;
+            let table = channel.as_table().expect("a [[channels]] entry is a table");
+            if let Some(reference) = table.get("credential_ref").and_then(toml::Value::as_str) {
+                assert!(
+                    reference.split('/').count() <= 2 && !value_looks_like_a_credential(reference),
+                    "{name}: `credential_ref` must be a CredentialRef name \
+                     (`provider` or `provider/qualifier`), never a value"
+                );
+            }
+            for (key, value) in table {
+                let Some(text) = value.as_str() else { continue };
+                assert!(
+                    !value_looks_like_a_credential(text),
+                    "{name}: channel key `{key}` holds a credential-shaped value. \
+                     Bundled personas ship inside the binary and are written into \
+                     every user's home — name the secret, never carry it."
+                );
+            }
+        }
+    }
+    assert!(
+        checked >= 3,
+        "expected the bundled channel bindings to be scanned, saw {checked}"
+    );
+}
+
+/// Does `value` look like a secret rather than a name?
+///
+/// Why: the predicate behind [`bundled_persona_channels_carry_no_credential_value`],
+/// split out so the negative case can exercise the same code the sweep runs.
+/// What: matches the vendor prefixes the three shipped providers actually issue
+/// — Slack (`xoxb-`/`xoxp-`/`xapp-`), Google/Anthropic/OpenAI style
+/// (`sk-`/`ya29.`), GitHub (`ghp_`/`gho_`) — plus Telegram's
+/// `<digits>:<35-char blob>` bot-token shape, plus any long unbroken
+/// high-entropy-looking run. Deliberately shape-based: a name is short and
+/// readable, a secret is neither.
+fn value_looks_like_a_credential(value: &str) -> bool {
+    let trimmed = value.trim();
+    const PREFIXES: [&str; 8] = [
+        "xoxb-", "xoxp-", "xapp-", "sk-", "ya29.", "ghp_", "gho_", "AIza",
+    ];
+    if PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // Telegram bot token: `123456789:AA…` — digits, a colon, then a long blob.
+    if let Some((left, right)) = trimmed.split_once(':')
+        && left.len() >= 6
+        && left.chars().all(|c| c.is_ascii_digit())
+        && right.len() >= 20
+        && right
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return true;
+    }
+    // Any single unbroken token long enough to be a secret and not a name.
+    trimmed.len() >= 32
+        && !trimmed.contains(' ')
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+' | '='))
+}
+
+/// The falsifying case for [`bundled_persona_channels_carry_no_credential_value`]:
+/// the wrong implementation it is written to catch must actually be caught.
+///
+/// Why: a sweep that only ever runs over correct files proves the files are
+/// there, not that the rule bites. Each value below is a real vendor token
+/// shape for one of the three providers this persona binds, and each name below
+/// is what a correct manifest carries instead.
+/// Test: This function IS the test.
+#[test]
+fn a_pasted_channel_token_is_rejected() {
+    // #8186: each row is a (prefix, body) pair joined at runtime, so the file
+    // holds no contiguous vendor-token literal for a secret scanner to flag.
+    // `pasted` is byte-identical to the paste this test guards against.
+    for (prefix, body) in [
+        ("xoxb", "-2939103948-3910394810-KDjfkeJDKfjeKDJfkejDKfje"),
+        ("sk", "-ant-api03-Jf93kdMfjekDJfke93kdMfjekDJfke93kd"),
+        ("123456789", ":AAH9fkeJDKfjeKDJfkejDKfjeKDJfkejDK"),
+        ("ghp", "_Jf93kdMfjekDJfke93kdMfjekDJfke93kd"),
+    ] {
+        let pasted = format!("{prefix}{body}");
+        assert!(
+            value_looks_like_a_credential(&pasted),
+            "'{pasted}' is a credential value and must be refused"
+        );
+    }
+    for name in [
+        "gmail",
+        "slack",
+        "telegram",
+        "gmail/bob-personal",
+        "slack/work",
+    ] {
+        assert!(
+            !value_looks_like_a_credential(name),
+            "'{name}' is a CredentialRef name and must be accepted"
+        );
+    }
+}
+
+/// #7609 slice 7 (#8186): izzie's bundled Gmail binding survived the rewrite as
+/// a live `[[channels]]` entry.
+///
+/// Why: this is the other half of
+/// `crate::agents::bundled::tests::no_bundled_persona_ships_a_retired_listeners_table`,
+/// which on its own is satisfied by DELETING the table. The defect being fixed
+/// is a binding that does nothing, so the fix is only correct if the binding
+/// still exists with the semantics the retired table carried — a wrong
+/// implementation drops it, renames its `id` (which
+/// `channels::dispatch::is_overlay` keys on, so a renamed one stops naming the
+/// operator's global channel), gives it a `target` (which makes
+/// `api::server::agent_channels::inbound::absorb_overlays` skip it), or turns
+/// an inbound wake into a send path.
+/// What: resolves the izzie package through `AgentConfig::by_name` against the
+/// bundled agents dir and asserts exactly one Assistant-scope Gmail channel
+/// whose id still names the global listener, whose target is empty, whose flags
+/// are what `Channel::from_agent_binding` produced from the old `enabled = true`
+/// binding — receive on, send off — and which carries no credential value.
+/// Test: This function IS the test.
+#[test]
+fn izzie_package_resolves_with_its_gmail_channel_binding() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    clear_model_env("izzie");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+    }
+    let cfg = AgentConfig::by_name("izzie");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("izzie must resolve through the dispatch loader");
+
+    assert_eq!(
+        cfg.channels.len(),
+        1,
+        "izzie binds exactly the one Gmail channel the retired table declared, \
+         got {:?}",
+        cfg.channels
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let channel = &cfg.channels[0];
+    assert_eq!(
+        channel.id, "gmail-personal",
+        "the id must keep naming the operator's global channel — `is_overlay` \
+         matches on it"
+    );
+    assert_eq!(channel.name, "gmail-personal");
+    assert_eq!(channel.provider, "gmail");
+    assert_eq!(
+        channel.scope,
+        crate::channels::ChannelScope::Assistant,
+        "a channel read out of agent.toml is the assistant's own"
+    );
+    assert!(
+        channel.target.is_empty(),
+        "an account-wide target is what makes this an overlay of the global \
+         channel; a non-empty one is skipped by `absorb_overlays`"
+    );
+    assert!(
+        channel.enabled && channel.receive_enabled && !channel.send_enabled,
+        "the retired binding's single `enabled` mapped to enabled + \
+         receive_enabled and nothing else — this is an inbound wake, never a \
+         send path"
+    );
+    assert_eq!(channel.event_types, vec!["message.received".to_string()]);
+    assert_eq!(channel.wake_filter.from, vec!["*".to_string()]);
+    assert!(
+        channel.credential_ref.is_none(),
+        "the account and its credential live on the operator's global channel"
+    );
+
+    // The legacy projection still answers what the removed table held, which is
+    // what the wake path reads.
+    let projected = cfg.listeners();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].name, "gmail-personal");
+    assert_eq!(projected[0].filter.from, vec!["*".to_string()]);
 }

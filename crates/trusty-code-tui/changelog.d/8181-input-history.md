@@ -1,0 +1,3 @@
+Changed
+
+- Up/Down arrows walk the whole session's prompt history in the input line, instead of Up recalling only the single most recent submission and Down doing nothing. Up steps older, Down steps newer, and stepping past the newest entry hands back the draft that was in progress. Consecutive duplicate submissions are stored once (readline's `ignoredups`). The input is a single line, so readline's "history only from the first/last line" rule is satisfied unconditionally — Up/Down are always history. History is per TUI process: persisting it across launches would need a store this crate cannot reach (it must not depend on `trusty_common` and owns no state directory), so a product that wants cross-launch history seeds `ReplApp::history` at construction (#8181).

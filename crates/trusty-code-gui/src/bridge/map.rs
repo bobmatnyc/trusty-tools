@@ -150,7 +150,9 @@ pub fn map_request(
         // off the body object the REST handler rebuilt field by field; passing
         // the parsed body straight through is the same document with one fewer
         // place to drop a field.
-        (&Method::POST, ["sessions"]) => created("session.create", body_json(body)?),
+        (&Method::POST, ["sessions"]) => {
+            created("session.create", default_delegating(body_json(body)?))
+        }
         (&Method::POST, ["sessions", id, "messages"]) => Ok(Call::Unary {
             method: "session.send",
             params: with_id("session_id", id, body_json(body)?)?,
@@ -263,6 +265,28 @@ fn body_json(body: &[u8]) -> Result<Value, String> {
         return Ok(json!({}));
     }
     serde_json::from_slice(body).map_err(|e| format!("request body is not JSON: {e}"))
+}
+
+/// Default this `session.create` body to the DELEGATING PM (#8184).
+///
+/// Why: `session.create` defaults to the solo agent, which reads, edits and
+/// runs shell itself and asks before each mutating call (#3422). This GUI has
+/// no permission-prompt UI at all, so a solo session here would stall on an
+/// ask nobody can answer, or run unprompted if the ask were widened. Until the
+/// GUI ships its own opt-in and prompt surface, its sessions keep the
+/// pre-#8184 shape.
+/// What: inserts `delegate: true` only when the webview said nothing, so a
+/// future GUI build can still ask for a solo session explicitly. A non-object
+/// body is returned untouched — `session.create` rejects it either way.
+/// Test: `map_tests::post_sessions_defaults_to_the_delegating_pm`,
+/// `map_tests::post_sessions_keeps_an_explicit_delegate_choice`.
+fn default_delegating(mut body: Value) -> Value {
+    if let Some(obj) = body.as_object_mut()
+        && !obj.contains_key("delegate")
+    {
+        obj.insert("delegate".to_string(), json!(true));
+    }
+    body
 }
 
 /// Put the path's id onto the body object under `key`.
@@ -648,6 +672,39 @@ mod tests {
             panic!("expected a stream call");
         };
         assert_eq!(params, json!({ "session_id": "s1", "after_seq": 12 }));
+    }
+
+    /// #8184: the GUI has no permission-prompt UI, so a session it creates
+    /// keeps the delegating PM rather than inheriting `session.create`'s new
+    /// solo default. FAILS before #8184's bridge fix — the body went through
+    /// untouched and the daemon minted a solo session.
+    /// Test: this is the test.
+    #[test]
+    fn post_sessions_defaults_to_the_delegating_pm() {
+        let call = map_request(&Method::POST, "sessions", None, br#"{"task":"t"}"#).expect("maps");
+        let Call::Unary { params, .. } = call else {
+            panic!("expected a unary call");
+        };
+        assert_eq!(params["delegate"], json!(true));
+        assert_eq!(params["task"], json!("t"), "the body must survive");
+    }
+
+    /// The default must not overwrite a webview that asked for a solo session
+    /// — otherwise the GUI could never opt in once it grows a prompt UI.
+    /// Test: this is the test.
+    #[test]
+    fn post_sessions_keeps_an_explicit_delegate_choice() {
+        let call = map_request(
+            &Method::POST,
+            "sessions",
+            None,
+            br#"{"task":"t","delegate":false}"#,
+        )
+        .expect("maps");
+        let Call::Unary { params, .. } = call else {
+            panic!("expected a unary call");
+        };
+        assert_eq!(params["delegate"], json!(false));
     }
 
     /// Why: `GET /fs?path=` carries a filesystem path, and axum's `Query`

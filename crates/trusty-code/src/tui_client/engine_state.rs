@@ -47,6 +47,10 @@ pub(super) struct EngineState {
     /// Project root to bind the session to, if any (mirrors `session.create`'s
     /// `project` param — see `crate::session::protocol::create`'s docs).
     pub(super) project_path: Option<PathBuf>,
+    /// (#8184) Whether this TUI session opts INTO the delegating PM
+    /// (`tcode tui --delegate`). Default `false` — the solo agent, which is
+    /// also `session.create`'s own default; see `engine.rs`'s `setup`.
+    pub(super) delegate: bool,
     pub(super) session_id: Mutex<Option<String>>,
     pub(super) active_workstream: Mutex<Option<WorkstreamSummary>>,
     /// Ahead-of-Slice-1.5 cache for `TuiEngine::commands()` (#3428) — see
@@ -65,10 +69,11 @@ pub(super) struct EngineState {
 }
 
 impl EngineState {
-    pub(super) fn new(rpc: UdsRpcClient, project_path: Option<PathBuf>) -> Self {
+    pub(super) fn new(rpc: UdsRpcClient, project_path: Option<PathBuf>, delegate: bool) -> Self {
         Self {
             rpc,
             project_path,
+            delegate,
             session_id: Mutex::new(None),
             active_workstream: Mutex::new(None),
             commands_cache: Mutex::new(Vec::new()),

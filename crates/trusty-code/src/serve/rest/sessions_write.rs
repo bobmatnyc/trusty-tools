@@ -101,6 +101,11 @@ struct CreateBody {
     /// the explicit-vs-ambient resolution rules.
     #[serde(default)]
     workstream_id: Option<String>,
+    /// (#8184) Forwarded to `session.create`'s own `delegate` param. `None`
+    /// forwards `false` — the solo default — rather than `null`, which that
+    /// param's plain `bool` would reject.
+    #[serde(default)]
+    delegate: Option<bool>,
 }
 
 /// Request body for `POST /sessions/{id}/messages` — `session_id` comes
@@ -175,6 +180,8 @@ async fn create_session(
             "agent": body.agent,
             "project": body.project,
             "workstream_id": body.workstream_id,
+            // #8184: a REST client that says nothing gets the solo default.
+            "delegate": body.delegate.unwrap_or(false),
         }),
     )
     .await

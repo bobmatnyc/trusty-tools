@@ -214,7 +214,23 @@ pub fn build_router_with_channel_credential(
         // admits.
         .route(
             "/api/channels",
-            get(super::global_channels::get_route).put(super::global_channels::put_route),
+            get(super::global_channels::get_route)
+                .put(super::global_channels::put_route)
+                // #8038: create ONE channel without echoing the whole list.
+                .post(super::global_channels::create_route),
+        )
+        // #8038: update ONE declared channel. Same revision guard, same
+        // `channel_auth::ChannelWriter` gate as the whole-list PUT.
+        .route(
+            "/api/channels/{id}",
+            axum::routing::put(super::global_channels::update_route),
+        )
+        // #8036: inject one inbound event into the provider-neutral dispatch
+        // path, so #7609's wake/dispatch behaviour is verifiable without a live
+        // Slack, Telegram or Gmail credential. Gated like every channel write.
+        .route(
+            "/api/channels/{id}/inbound",
+            post(super::channel_inbound::post_route),
         )
         .route("/api/project-tools", get(get_project_tools))
         .route(

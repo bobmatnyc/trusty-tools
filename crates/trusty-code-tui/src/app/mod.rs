@@ -33,18 +33,9 @@
 //! tagent's actual `keys.rs`/`app.rs`, not just its doc comments — one round
 //! of review on this slice caught a doc/reality drift in tagent itself, see
 //! history below):
-//! - Up-arrow recalls `Self::last_prompt` (the single most recent
-//!   submission) and, when `Self::busy`, ALSO sets
-//!   `Self::pending_cancel` — mirrors
-//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm,
-//!   not the multi-level `history_prev`/`history_next` `#[allow(dead_code)]`
-//!   helpers tagent's own doc comment (misleadingly) attributes to
-//!   production Up-handling.
-//! - Down-arrow calls `Self::history_next` — tagent's real `KeyCode::Down`
-//!   arm does exactly this, even though nothing (including this crate's Up
-//!   handler) ever sets `history_idx`, making it a functional no-op today in
-//!   both tagent and here. Ported for fidelity, not because it currently
-//!   does anything.
+//! - Up-arrow, when `Self::busy`, sets `Self::pending_cancel` — mirrors
+//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm.
+//!   What Up RECALLS diverges (#8181, see the divergence list below).
 //! - Ctrl-E, with an empty input buffer and a non-`None`
 //!   `Self::last_bash_block`, pastes only that block's first non-blank
 //!   line (not the whole block) — matches
@@ -102,6 +93,14 @@
 //!   (the conventional terminal interrupt), which this crate implements as
 //!   written; Up-arrow-while-busy ALSO still signals cancel here (ported
 //!   faithfully from tagent, see above), so both triggers work.
+//! - **Up/Down walk the whole session's prompt history** (#8181). Tagent's
+//!   real `KeyCode::Up` arm recalls only `last_prompt` — one snapshot,
+//!   overwritten every submit — and its `KeyCode::Down` arm calls
+//!   `history_next` against a `history_idx` nothing ever sets, so Down is a
+//!   no-op there. This crate wires Up to `Self::history_prev` instead, which
+//!   makes both arms live: Up steps older through `Self::history`, Down
+//!   steps newer and restores the in-progress draft at the end. The
+//!   busy-cancel half of Up is unchanged.
 //!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer.
@@ -161,6 +160,41 @@ pub struct ToolCard {
     pub args: serde_json::Value,
     /// The tool's output; `None` while the call is still running.
     pub result: Option<String>,
+    /// The backend's own verdict that this call failed (#4596), copied from
+    /// [`crate::event::ReplEvent::ToolInvocation`]'s `failed`. `false` while
+    /// the call is still running.
+    pub failed: bool,
+    /// Whether the card draws as a one-line summary rather than its full
+    /// result body (#4596).
+    ///
+    /// Why: a successful `read_file` or `cargo test` buries the conversation
+    /// under dozens of rows nobody asked to re-read. A collapsed card keeps
+    /// the call visible and costs one row.
+    /// What: `false` while the call is in flight (the body is a single
+    /// `running…` row anyway); set by the reducer when the result lands —
+    /// `true` on success, `false` on an error, so a failure is never hidden.
+    /// Ctrl-O toggles it (`reduce::apply_key`).
+    pub collapsed: bool,
+}
+
+impl ToolCard {
+    /// Whether this call failed (#4596).
+    ///
+    /// Why: an error must be impossible to hide. An earlier revision read
+    /// the `FAILED:` / `ERROR:` prefix trusty-code writes into the result
+    /// text, which made a producer reword silently render a failed call as
+    /// a collapsed green `· ok` card. The verdict now travels as data —
+    /// [`crate::event::ReplEvent::ToolInvocation`]'s `failed` — and the
+    /// prefix is display text only.
+    /// What: [`Self::failed`], AND a result having arrived. A producer is
+    /// contracted to leave `failed` false on a start event; requiring the
+    /// result too means a slip there cannot paint an in-flight card red.
+    /// Test: `widgets::tool_card::tests::errored_card_renders_expanded_by_default`,
+    /// `widgets::tool_card::tests::failure_flag_alone_drives_the_error_render`,
+    /// `reduce::tests::tool_card_is_error_reads_the_event_failure_flag`.
+    pub fn is_error(&self) -> bool {
+        self.failed && self.result.is_some()
+    }
 }
 
 /// Source/role of a chat line — drives the leader glyph and color chosen by
@@ -232,11 +266,22 @@ pub struct ReplApp {
     /// snapshot and the authoritative instance behind a caller's mutex (if
     /// any) share the same cell — mirrors tagent's `last_max_scroll`.
     pub last_max_scroll: Arc<AtomicUsize>,
-    /// In-memory input history (Up-arrow recall).
+    /// Every prompt submitted this session, oldest first, with adjacent
+    /// duplicates collapsed ([`Self::remember_input`]). Up/Down walk it
+    /// (#8181).
+    ///
+    /// Why: scoped to one TUI process deliberately. Persisting across
+    /// launches would need a store this crate cannot reach — it must not
+    /// depend on `trusty_common` (see the crate-level doc comment's
+    /// dependency-direction constraint) and has no product-specific state
+    /// directory of its own — so cross-launch history stays with whichever
+    /// product wants it, seeding this field at construction.
     pub history: Vec<String>,
     /// Index into `history` while navigating. `None` when not navigating.
     pub history_idx: Option<usize>,
-    /// Saved current input while navigating history.
+    /// The in-progress draft stashed by [`Self::history_prev`]'s first step
+    /// and restored by [`Self::history_next`] at the newest end (#8181).
+    /// `None` when not navigating.
     pub saved_input: Option<String>,
     /// Whether to show the welcome banner in the scrollback.
     pub show_banner: bool,
@@ -348,11 +393,12 @@ pub struct ReplApp {
     /// call `TuiEngine::cancel_session` (thin-client axiom C-2 — cancellation
     /// is the backend's job, not just clearing local UI state).
     pub pending_cancel: bool,
-    /// The most recently submitted line, restored to `input_buf` on
-    /// Up-arrow. Direct port of tagent's `last_prompt` (single-level recall,
-    /// not the multi-level `history`/`history_idx` browser — see the module
-    /// doc comment's disclosure list for why Up uses this field and not
-    /// `history_prev`).
+    /// The most recently submitted line. Direct port of tagent's
+    /// `last_prompt`, kept as a plain snapshot a product can read.
+    ///
+    /// Why: Up-arrow no longer reads it (#8181 moved recall to
+    /// [`Self::history`]/[`Self::history_idx`]); the field stays because it
+    /// is published API and costs one `String` clone per submit.
     pub last_prompt: String,
     /// The most recently seen executable-shell (bash/sh/zsh/fish) fenced
     /// code block across all assistant messages, updated by
@@ -532,6 +578,30 @@ impl ReplApp {
         self.delegations.last().map(|d| d.agent.as_str())
     }
 
+    /// Expand or collapse the newest tool-call card in the scrollback
+    /// (#4596).
+    ///
+    /// Why: this TUI has no card-focus concept — nothing moves a selection
+    /// between scrollback entries — so "the focused card" is the most recent
+    /// one, which is also the one the user just watched arrive and the only
+    /// one still on screen at scroll offset 0. A focus ring would be a
+    /// bigger surface than the toggle it serves.
+    /// What: walks `chat` newest-first for the first entry carrying a
+    /// [`ChatLine::tool`] and flips its [`ToolCard::collapsed`]. No-op when
+    /// no card exists. Returns `true` when a card was toggled, so a caller
+    /// can tell "nothing to toggle" from "toggled".
+    /// Test: `reduce::tests::ctrl_o_toggles_the_newest_tool_card_round_trip`,
+    /// `reduce::tests::ctrl_o_is_a_noop_when_no_tool_card_exists`.
+    pub fn toggle_last_tool_card(&mut self) -> bool {
+        for entry in self.chat.iter_mut().rev() {
+            if let Some(card) = entry.tool.as_mut() {
+                card.collapsed = !card.collapsed;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Open an inline picker (DOC-50 §3.2/§6 Q6), staged by
     /// [`crate::commands::dispatch_forward`] for a bare command matching
     /// `TuiEngine::picker(name)`.
@@ -670,7 +740,16 @@ impl ReplApp {
         self.pending_permission_response = Some(PermissionResponse { pending, answer });
     }
 
-    /// Push a line onto `history`, deduping an immediate repeat.
+    /// Push a line onto [`Self::history`], deduping an immediate repeat
+    /// (readline's `ignoredups` convention, #8181).
+    ///
+    /// Why: submitting the same prompt twice in a row should cost one Up
+    /// press to recall, not two.
+    /// What: blank/whitespace-only lines are never recorded; a line equal to
+    /// the current newest entry is dropped. A repeat that is NOT adjacent is
+    /// kept, so the walk order still reflects what was actually run.
+    /// Test: `reduce::tests::consecutive_duplicate_submissions_are_stored_once`,
+    /// `reduce::tests::submitting_appends_to_history_and_resets_the_cursor`.
     pub fn remember_input(&mut self, line: &str) {
         if line.trim().is_empty() {
             return;
@@ -688,10 +767,18 @@ impl ReplApp {
     }
 
     /// Insert a single character at the cursor.
+    ///
+    /// Why: editing does NOT end history navigation (#8181). It used to
+    /// clear [`Self::history_idx`] while leaving [`Self::saved_input`] set,
+    /// so Up-then-type stranded the draft with no way back — and Backspace
+    /// and Ctrl-U never cleared it at all, making the same gesture behave
+    /// three ways. Readline's rule is the consistent one: the draft is
+    /// yours until you submit, and Down always walks back to it. Editing a
+    /// RECALLED entry still discards that edit when you navigate away;
+    /// per-entry edit buffers are not worth the state.
     pub fn insert_char(&mut self, c: char) {
         self.input_buf.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
-        self.history_idx = None;
     }
 
     /// Backspace: delete the char before the cursor.
@@ -731,7 +818,25 @@ impl ReplApp {
         self.cursor_pos = next;
     }
 
-    /// Up-arrow history navigation.
+    /// Up-arrow history navigation: step one entry older, saving the
+    /// in-progress draft on the first step (#8181).
+    ///
+    /// Why: the draft the user was typing must survive a walk through
+    /// history and come back when they walk forward past the newest entry —
+    /// losing it is the failure readline's `saved_input` slot exists to
+    /// prevent.
+    /// What: no-op on an empty history. The first step (`history_idx ==
+    /// None`) stashes `input_buf` into [`Self::saved_input`] and lands on the
+    /// newest entry; later steps move one older. At the oldest entry the key
+    /// does NOTHING rather than re-reading `history[0]` into the buffer —
+    /// since #8181 made editing keep you in history, a clamp that still
+    /// called `set_input` silently destroyed an in-place edit of the oldest
+    /// entry. The cursor moves to the end of a recalled line
+    /// ([`Self::set_input`]).
+    /// Test: `reduce::tests::apply_up_walks_back_through_submitted_prompts`,
+    /// `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
+    /// `reduce::tests::apply_up_clamps_at_the_oldest_entry`,
+    /// `reduce::tests::apply_up_at_the_oldest_entry_keeps_an_in_place_edit`.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
@@ -741,14 +846,30 @@ impl ReplApp {
                 self.saved_input = Some(self.input_buf.clone());
                 self.history.len() - 1
             }
-            Some(i) => i.saturating_sub(1),
+            // #8181: the floor is a true no-op, not a re-recall.
+            Some(0) => return,
+            Some(i) => i - 1,
         };
         self.history_idx = Some(new_idx);
         let entry = self.history[new_idx].clone();
         self.set_input(entry);
     }
 
-    /// Down-arrow history navigation.
+    /// Down-arrow history navigation: step one entry newer, restoring the
+    /// saved draft once past the newest entry (#8181).
+    ///
+    /// Why: the other half of [`Self::history_prev`]'s contract — walking
+    /// forward off the newest entry returns the user to what they were
+    /// typing, not to an empty line.
+    /// What: no-op when not navigating (`history_idx == None`), so Down on a
+    /// freshly typed line never clobbers it. Stepping past the newest entry
+    /// clears `history_idx` and restores [`Self::saved_input`] (empty string
+    /// when the draft was empty). Editing while navigating does not end
+    /// navigation — see [`Self::insert_char`] — so the draft survives
+    /// typing, Backspace and Ctrl-U alike.
+    /// Test: `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
+    /// `reduce::tests::apply_down_is_noop_when_not_navigating_history`,
+    /// `reduce::tests::editing_a_recalled_entry_still_leaves_down_the_draft`.
     pub fn history_next(&mut self) {
         let Some(i) = self.history_idx else { return };
         if i + 1 >= self.history.len() {

@@ -154,19 +154,35 @@ pub fn route(line: &str) -> Route {
     }
 }
 
+/// Key bindings `/help` lists below the command table (#4596).
+///
+/// Why: a binding nobody can discover is a binding nobody uses, and `/help`
+/// is the only place this TUI documents itself at runtime. Only the
+/// non-obvious bindings are listed — the readline motions (Ctrl-a/e/u) are
+/// muscle memory and would crowd out the ones that are not.
+const KEY_BINDINGS: [(&str, &str); 4] = [
+    ("↑ / ↓", "Walk this session's prompt history"),
+    ("Ctrl-O", "Expand or collapse the newest tool-call card"),
+    ("Ctrl-C", "Cancel the in-flight request"),
+    ("Ctrl-D", "Exit (empty input line)"),
+];
+
 /// Render `/help`'s output: the built-ins plus every engine-supplied
-/// command, one line each.
+/// command, one line each, then the key bindings.
 ///
 /// Why: DOC-50 §5 Slice 7 requires `/help` to enumerate both sides of the
 /// routing split — `engine_commands` is expected to be
 /// [`crate::app::ReplApp::commands`] (the cache a product populates from
 /// `TuiEngine::commands()` during setup; see that field's doc comment).
+/// #4596 adds the [`KEY_BINDINGS`] section, because Ctrl-O is otherwise
+/// undiscoverable.
 /// What: one `"  /{name}{ args_hint} — {summary}"` line per command,
-/// built-ins first. Pure string formatting — no ratatui dependency, so this
-/// stays usable from both the plain-text scrollback path and a future
-/// richer help widget.
+/// built-ins first, then one `"  {keys} — {what}"` line per binding. Pure
+/// string formatting — no ratatui dependency, so this stays usable from both
+/// the plain-text scrollback path and a future richer help widget.
 /// Test: `tests::render_help_lists_builtins_and_engine_commands`,
-/// `tests::render_help_includes_args_hint_when_present`.
+/// `tests::render_help_includes_args_hint_when_present`,
+/// `tests::render_help_lists_the_tool_card_toggle_key`.
 pub fn render_help(engine_commands: &[CommandDescriptor]) -> String {
     let mut lines = vec!["Available commands:".to_string()];
     for cmd in built_in_commands().iter().chain(engine_commands.iter()) {
@@ -176,6 +192,10 @@ pub fn render_help(engine_commands: &[CommandDescriptor]) -> String {
             .map(|h| format!(" {h}"))
             .unwrap_or_default();
         lines.push(format!("  /{}{} — {}", cmd.name, hint, cmd.summary));
+    }
+    lines.push("Keys:".to_string());
+    for (keys, what) in KEY_BINDINGS {
+        lines.push(format!("  {keys} — {what}"));
     }
     lines.join("\n")
 }

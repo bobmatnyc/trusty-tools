@@ -32,6 +32,19 @@ fn rows(app: &ReplApp) -> Vec<String> {
 }
 
 fn tool(id: &str, agent_id: &str, name: &str, args: &str, result: Option<&str>) -> ReplEvent {
+    tool_outcome(id, agent_id, name, args, result, false)
+}
+
+/// Same as [`tool`], with the backend's `failed` verdict spelled out
+/// (#4596).
+fn tool_outcome(
+    id: &str,
+    agent_id: &str,
+    name: &str,
+    args: &str,
+    result: Option<&str>,
+    failed: bool,
+) -> ReplEvent {
     ReplEvent::ToolInvocation {
         id: id.into(),
         agent_id: agent_id.into(),
@@ -43,6 +56,7 @@ fn tool(id: &str, agent_id: &str, name: &str, args: &str, result: Option<&str>) 
             serde_json::json!(args)
         },
         result: result.map(str::to_string),
+        failed,
     }
 }
 
@@ -50,6 +64,18 @@ fn app() -> ReplApp {
     let mut app = ReplApp::new("demo", "u");
     app.show_banner = false;
     app
+}
+
+/// Ctrl-O, the expand/collapse toggle (#4596).
+fn toggle() -> ReplEvent {
+    ReplEvent::Key(crate::event::KeyInput {
+        code: crate::event::KeyCode::Char('o'),
+        modifiers: crate::event::KeyModifiers {
+            ctrl: true,
+            alt: false,
+            shift: false,
+        },
+    })
 }
 
 /// The start event draws a pending card; its completion fills that same card
@@ -72,6 +98,7 @@ fn tool_call_and_result_render_as_one_card() {
         &mut app,
         tool("c1", "", "git.checkout", "", Some("switched to main")),
     );
+    apply(&mut app, toggle()); // expand the now-collapsed card (#4596)
     let done = rows(&app);
     let headers = done.iter().filter(|r| r.contains("git.checkout")).count();
     assert_eq!(headers, 1, "one card, not two: {done:#?}");
@@ -83,13 +110,126 @@ fn tool_call_and_result_render_as_one_card() {
     assert!(!done.iter().any(|r| r.contains("running…")), "{done:#?}");
 }
 
-/// Each line of a multi-line result lands on its own row, in order.
+/// #4596: a call that succeeded draws as ONE row — name, args, status and
+/// the hidden line count — not as its whole result body.
+#[test]
+fn completed_card_collapses_to_a_one_line_summary() {
+    let mut app = app();
+    apply(&mut app, tool("r1", "", "read_file", "src/lib.rs", None));
+    let body = "pub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}";
+    apply(&mut app, tool("r1", "", "read_file", "", Some(body)));
+
+    let out = rows(&app);
+    assert!(
+        out.contains(&"⏺ read_file(src/lib.rs) · ok · 3 lines".to_string()),
+        "{out:#?}"
+    );
+    assert!(
+        !out.iter().any(|r| r.contains("pub fn add")),
+        "the body must be hidden while collapsed: {out:#?}"
+    );
+}
+
+/// #4596: the toggle round-trips — Ctrl-O shows the full body, Ctrl-O again
+/// returns the one-line summary.
+#[test]
+fn toggle_round_trips_between_summary_and_full_body() {
+    let mut app = app();
+    apply(&mut app, tool("r1", "", "read_file", "src/lib.rs", None));
+    apply(&mut app, tool("r1", "", "read_file", "", Some("a\nb")));
+    assert!(rows(&app).iter().any(|r| r.contains("· ok · 2 lines")));
+
+    apply(&mut app, toggle());
+    let open = rows(&app);
+    assert!(open.contains(&"  ⎿  a".to_string()), "{open:#?}");
+    assert!(open.contains(&"     b".to_string()), "{open:#?}");
+    assert!(
+        !open.iter().any(|r| r.contains("· ok ·")),
+        "expanded header drops the summary suffix: {open:#?}"
+    );
+
+    apply(&mut app, toggle());
+    let shut = rows(&app);
+    assert!(
+        shut.iter().any(|r| r.contains("· ok · 2 lines")),
+        "{shut:#?}"
+    );
+    assert!(!shut.contains(&"  ⎿  a".to_string()), "{shut:#?}");
+}
+
+/// #4596: a failed call is expanded from the start — its error text is the
+/// one thing that must never need a keystroke to read.
+#[test]
+fn errored_card_renders_expanded_by_default() {
+    let mut app = app();
+    apply(&mut app, tool("e1", "", "read_file", "missing.rs", None));
+    apply(
+        &mut app,
+        tool_outcome("e1", "", "read_file", "", Some("ERROR: no such file"), true),
+    );
+    let out = rows(&app);
+    assert!(
+        out.contains(&"  ⎿  ERROR: no such file".to_string()),
+        "the error body must be visible without a keystroke: {out:#?}"
+    );
+    assert!(
+        !out.iter().any(|r| r.contains("· ok")),
+        "an errored card is not summarized as ok: {out:#?}"
+    );
+}
+
+/// The HIGH finding #4596 closed: the render keys on the `failed` flag, not
+/// on the result text. A producer that rewords its marker (or never writes
+/// one) still gets an expanded, red card; a successful call whose output
+/// merely CONTAINS `ERROR:` still collapses as `ok`.
+#[test]
+fn failure_flag_alone_drives_the_error_render() {
+    let mut flagged = app();
+    let mut noisy = app();
+
+    apply(&mut flagged, tool("f1", "", "bash", "cargo test", None));
+    apply(
+        &mut flagged,
+        tool_outcome("f1", "", "bash", "", Some("exit status 1"), true),
+    );
+    let out = rows(&flagged);
+    assert!(
+        out.contains(&"  ⎿  exit status 1".to_string()),
+        "a flagged failure expands with no marker in the body: {out:#?}"
+    );
+    let card = flagged
+        .chat
+        .last()
+        .and_then(|c| c.tool.as_ref())
+        .expect("a card");
+    assert!(card.is_error());
+    assert_eq!(
+        super::tool_card_lines(card, false)[0].spans[0].style.fg,
+        Some(ratatui::style::Color::Red),
+        "a flagged failure paints its glyph red"
+    );
+
+    apply(&mut noisy, tool("s1", "", "grep", "ERROR", None));
+    apply(
+        &mut noisy,
+        tool("s1", "", "grep", "", Some("ERROR: found in log.txt")),
+    );
+    let out = rows(&noisy);
+    assert!(
+        out.iter().any(|r| r.contains("· ok")),
+        "an unflagged result is output, however it reads: {out:#?}"
+    );
+}
+
+/// Each line of a multi-line result lands on its own row, in order, once
+/// the card is expanded.
 #[test]
 fn multi_line_result_keeps_its_line_breaks() {
     let mut app = app();
     apply(&mut app, tool("r1", "", "read_file", "src/lib.rs", None));
     let body = "pub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}";
     apply(&mut app, tool("r1", "", "read_file", "", Some(body)));
+    apply(&mut app, toggle());
     let out = rows(&app);
     let at = out
         .iter()
@@ -117,6 +257,9 @@ fn delegated_card_is_guttered_and_top_level_card_is_not() {
         &mut app,
         tool("d1", "eng-1", "bash", "", Some("ok\n2 passed")),
     );
+    // #4596: expand it while it is still the newest card, so the gutter is
+    // asserted against every body row and not just the summary.
+    apply(&mut app, toggle());
     apply(
         &mut app,
         tool("p1", "pm-1", "delegate_to_agent", "engineer", None),

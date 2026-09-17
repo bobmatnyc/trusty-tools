@@ -134,6 +134,25 @@ async fn create_session_full_lifecycle() {
         "the kit's lifecycle assertion doesn't check task content — do it here"
     );
 
+    // #8184: `session.create` defaults to the SOLO agent for the interactive
+    // TUI. A connector-provisioned session has no client to answer a
+    // permission prompt, so it must keep the delegating shape — read back off
+    // the daemon's own `GET /sessions/{id}`, since `SessionInfo` does not
+    // model the field.
+    let status: serde_json::Value = daemon
+        .client()
+        .get(format!("{}/sessions/{}", daemon.base_url, info.id))
+        .send()
+        .await
+        .expect("GET /sessions/{id}")
+        .json()
+        .await
+        .expect("session json");
+    assert_eq!(
+        status["no_delegate"], false,
+        "a connector-provisioned session must stay delegating: {status}"
+    );
+
     let attach = connector.attach(&info.id).await.expect("attach");
     match attach {
         AttachHandle::EventStream {

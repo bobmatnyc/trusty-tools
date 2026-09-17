@@ -14,9 +14,12 @@
 //! `install_to` then `deploy_all_skill_tiers` against a temp framework root,
 //! then reads back the deployed `SKILL.md` and asserts it's byte-identical
 //! to the `include_str!`-embedded constant.
+//! `rust_delivery_workflow_lands_in_deployed_dot_claude_skills` (#8192) proves
+//! the same for the rust family's second bundled skill — both live here rather
+//! than in a second near-identical file.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::RUST_BUILD_PERFORMANCE;
+use trusty_mpm::core::bundle::{RUST_BUILD_PERFORMANCE, RUST_DELIVERY_WORKFLOW};
 
 use crate::commands::install::install_to;
 
@@ -55,5 +58,40 @@ fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
     assert_eq!(
         std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
         RUST_BUILD_PERFORMANCE,
+    );
+}
+
+#[test]
+fn rust_delivery_workflow_lands_in_deployed_dot_claude_skills() {
+    // #8192: identical reachability proof for the delivery-process skill.
+    // `rust-engineer` declares it, so a missing `ALL` entry would strand every
+    // dispatched Rust agent on a skill reference that resolves nowhere — the
+    // exact failure `toolchains-rust-core` shipped with for months.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
+
+    install_to(&paths, false).unwrap();
+
+    let result = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
+        &paths.skill_source_dir(),
+        &paths.user_skill_source_dir(),
+        &paths.claude_skills_dir(),
+        |_| true,
+    )
+    .unwrap()
+    .stats;
+
+    assert!(
+        result
+            .deployed
+            .contains(&"rust-delivery-workflow".to_string()),
+        "rust-delivery-workflow must be deployed; got {:?}",
+        result.deployed
+    );
+
+    let skill_dir = paths.claude_skills_dir().join("rust-delivery-workflow");
+    assert_eq!(
+        std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+        RUST_DELIVERY_WORKFLOW,
     );
 }

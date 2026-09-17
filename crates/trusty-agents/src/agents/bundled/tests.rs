@@ -1304,3 +1304,56 @@ fn every_source_file_is_a_bundled_asset_or_known_junk() {
          bundle, or delete them (#5226): {unrecognised:?}"
     );
 }
+
+/// #7609 slice 7 (#8186): no bundled persona ships a retired `[[listeners]]`
+/// table.
+///
+/// Why: since slice 7 the parse no longer folds `[[listeners]]` into
+/// `channels` — `AgentConfig::report_residual_listeners` reports the table
+/// once as INERT and drops its entries. A table left behind
+/// in a bundled manifest is therefore not a stale spelling of a working
+/// binding, it is no binding at all, and this tree is deployed verbatim into
+/// every fresh install's `~/.trusty-agents/agents/`: izzie's Gmail binding
+/// reached new machines as a warning plus nothing. A comment saying "use
+/// `[[channels]]`" is not a gate.
+/// What: reads the EMBEDDED bytes rather than the source tree — the embed is
+/// what [`deploy_bundled_agents`] actually writes — parses every `*.toml` in
+/// it, and fails on a top-level `listeners` key, naming every file that has
+/// one. The live binding's other half is
+/// `crate::agents::tests::loading::izzie_package_resolves_with_its_gmail_channel_binding`,
+/// without which deleting the table would satisfy this test.
+/// Test: This function IS the test.
+#[test]
+fn no_bundled_persona_ships_a_retired_listeners_table() {
+    let mut parsed = 0usize;
+    let mut residual: Vec<String> = Vec::new();
+    for entry in BundledAgents::iter() {
+        let rel = entry.to_string();
+        if !rel.ends_with(".toml") {
+            continue;
+        }
+        let file =
+            BundledAgents::get(&rel).unwrap_or_else(|| panic!("bundled asset missing: {rel}"));
+        let raw = std::str::from_utf8(file.data.as_ref())
+            .unwrap_or_else(|e| panic!("{rel}: a bundled manifest must be UTF-8: {e}"));
+        let doc: toml::Value = toml::from_str(raw)
+            .unwrap_or_else(|e| panic!("{rel}: a bundled manifest must parse: {e}"));
+        parsed += 1;
+        if doc.get("listeners").is_some() {
+            residual.push(rel);
+        }
+    }
+    assert!(
+        parsed >= 20,
+        "sanity: the embedded roster should hold the flat personas plus the \
+         packages, parsed only {parsed}"
+    );
+    residual.sort();
+    assert!(
+        residual.is_empty(),
+        "`[[listeners]]` is retired and INERT (#7609 slice 7) — these bundled \
+         manifests declare a binding that will never be absorbed, and ship it \
+         into every fresh install: {residual:?}. Rewrite each as an \
+         assistant-scope `[[channels]]` entry."
+    );
+}

@@ -104,3 +104,33 @@ never blocks merge. PR #6981 merged with `Public API / SemVer` and its own
 break self-test failing; #6981 and #6978 both merged with `Rustdoc intra-doc
 links` failing. The one actual stop for a public-API break is
 `preflight-publish.sh` CHECK 5 at release, run by `local-ops`.
+
+## Running CI's clippy locally
+
+🔴 **A crate-scoped local `cargo clippy -p <crate>` exit 0 is not CI
+evidence.** The `clippy` job in
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is the source of
+truth for the pin, and today it installs `dtolnay/rust-toolchain@stable` — a
+floating pin, not a version literal — then lints the whole workspace. A local
+pass over one crate, or on a different rustc, proves neither half. PR #5488 is
+the incident: local clippy green, CI clippy red.
+
+The local `cargo` resolves to the MSRV toolchain, not CI's. On this machine
+`RUSTUP_TOOLCHAIN=1.94.1` is exported into the shell, and both the rustup
+proxy at `~/.cargo/bin/cargo` and the mise-shimmed `cargo` land on MSRV
+regardless of `rustup default`. `rustup run <pin>` is what overrides it.
+
+```bash
+# Confirm which clippy you are about to run. 2026-09-16: clippy 0.1.98.
+rustup run stable cargo clippy --version
+
+# The CI job's own invocation, copied from ci.yml's clippy step.
+rustup run stable cargo clippy --workspace --all-targets \
+  --exclude trusty-mpm-gui --exclude trusty-code-gui \
+  --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
+```
+
+Re-read the pin from `ci.yml` each time rather than trusting this snippet:
+`@stable` moves on its own, and the exclude list grows with each new Tauri UI
+crate (four today). If the job is ever pinned to a literal, substitute it —
+`rustup run 1.97.1 cargo clippy …`.

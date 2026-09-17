@@ -68,8 +68,17 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
 }
 
 fn put(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
+    with_body(Method::PUT, uri, token, body)
+}
+
+/// #8038: the per-channel create takes the same shape as [`put`].
+fn post(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
+    with_body(Method::POST, uri, token, body)
+}
+
+fn with_body(method: Method, uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
     let mut builder = Request::builder()
-        .method(Method::PUT)
+        .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(t) = token {
@@ -614,6 +623,192 @@ async fn the_retired_listener_routes_are_unregistered() {
         StatusCode::METHOD_NOT_ALLOWED,
         "the successor route accepts the method the retired one no longer does"
     );
+}
+
+/// `POST /api/channels` declares ONE channel and `PUT /api/channels/{id}`
+/// replaces ONE, both under the revision the client read.
+///
+/// Why (#8038): the whole-list `PUT` made a scripted create mean "send back
+/// every channel you did not intend to touch" — omit one and it is deleted.
+/// These two routes do the read-modify-write server-side, so the refusals worth
+/// pinning are the ones the list shape never had: a duplicate ID, an unknown
+/// ID, and a body that renames the channel in the path.
+///
+/// Pre-change this fails on the first assertion: `POST /api/channels` is not
+/// registered, so the router answers 405.
+#[tokio::test]
+async fn a_global_channel_is_created_and_updated_one_at_a_time() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, config_path) = seed_home();
+
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let view = body_json(
+        app.oneshot(get("/api/channels", Some(TOKEN)))
+            .await
+            .expect("get"),
+    )
+    .await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+
+    // A stale revision is refused before anything is written.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(post(
+            "/api/channels",
+            Some(TOKEN),
+            &json!({"revision": "0000", "channel": slack_channel()}),
+        ))
+        .await
+        .expect("stale create");
+    assert_eq!(response.status(), StatusCode::CONFLICT, "stale revision");
+
+    // The create keeps the channel that was already declared.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(post(
+            "/api/channels",
+            Some(TOKEN),
+            &json!({"revision": revision, "channel": slack_channel()}),
+        ))
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK, "the create is accepted");
+    let created = body_json(response).await;
+    assert_eq!(
+        created["channels"]
+            .as_array()
+            .map(|c| c.iter().map(|v| v["id"].clone()).collect::<Vec<_>>()),
+        Some(vec![json!("gmail-personal"), json!("team")]),
+        "the new channel is appended, the declared one survives: {created}"
+    );
+    let revision = created["revision"].as_str().expect("revision").to_owned();
+
+    // A second create of the same ID is a conflict, not a silent replacement.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(post(
+            "/api/channels",
+            Some(TOKEN),
+            &json!({"revision": revision, "channel": slack_channel()}),
+        ))
+        .await
+        .expect("duplicate create");
+    assert_eq!(response.status(), StatusCode::CONFLICT, "duplicate ID");
+
+    // The update replaces that one channel and leaves the other alone.
+    let mut renamed = slack_channel();
+    renamed["name"] = json!("Team (renamed)");
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put(
+            "/api/channels/team",
+            Some(TOKEN),
+            &json!({"revision": revision, "channel": renamed}),
+        ))
+        .await
+        .expect("update");
+    assert_eq!(response.status(), StatusCode::OK, "the update is accepted");
+    let updated = body_json(response).await;
+    assert_eq!(
+        updated["channels"]
+            .as_array()
+            .and_then(|c| c.iter().find(|v| v["id"] == json!("team")))
+            .map(|v| v["name"].clone()),
+        Some(json!("Team (renamed)")),
+        "the named channel changed: {updated}"
+    );
+    assert_eq!(
+        updated["channels"].as_array().map(Vec::len),
+        Some(2),
+        "and nothing else was dropped: {updated}"
+    );
+    let revision = updated["revision"].as_str().expect("revision").to_owned();
+
+    // An unknown ID is a 404; a body that renames the channel is a 400.
+    let mut absent = slack_channel();
+    absent["id"] = json!("no-such-channel");
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put(
+            "/api/channels/no-such-channel",
+            Some(TOKEN),
+            &json!({"revision": revision, "channel": absent}),
+        ))
+        .await
+        .expect("unknown id");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let mut mismatched = slack_channel();
+    mismatched["id"] = json!("somewhere-else");
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put(
+            "/api/channels/team",
+            Some(TOKEN),
+            &json!({"revision": revision, "channel": mismatched}),
+        ))
+        .await
+        .expect("renamed body");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Everything unrelated to channels is still in the file.
+    let raw = std::fs::read_to_string(&config_path).expect("read back");
+    assert!(
+        raw.contains("# operator comment that must survive a channel write"),
+        "unrelated comments survive a per-channel write:\n{raw}"
+    );
+    assert!(raw.contains("[mcp]"), "unrelated tables survive:\n{raw}");
+}
+
+/// The per-channel writes take the SAME gate the whole-list `PUT` takes.
+///
+/// Why (#8038): a create is a channel write — it decides which destination an
+/// assistant reaches and which one reaches it — so a route that accepted one
+/// without a credential would be a hole beside a guarded door.
+///
+/// Pre-change this fails: neither route exists, so both answer 405 rather than
+/// 401.
+#[tokio::test]
+async fn an_unauthenticated_create_is_refused() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+    let body = json!({"revision": "0000", "channel": slack_channel()});
+
+    for (method, uri) in [
+        (Method::POST, "/api/channels"),
+        (Method::PUT, "/api/channels/team"),
+    ] {
+        // A daemon with no credential at all refuses.
+        let app = build_router(AppState::default());
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let response = app.oneshot(request).await.expect("tokenless write");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "tokenless {method} {uri}"
+        );
+
+        // And a wrong bearer is refused exactly as a missing one is.
+        let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer not-the-token")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let response = app.oneshot(request).await.expect("wrong credential");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "wrong bearer on {method} {uri}"
+        );
+    }
 }
 
 /// A `config.toml` that will not parse is REPORTED, never read as "no channels
