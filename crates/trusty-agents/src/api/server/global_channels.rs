@@ -1,5 +1,5 @@
-//! `GET`/`PUT /api/channels` — the harness-wide `[[channels]]` table (#7609
-//! slice 5).
+//! `GET`/`PUT /api/channels` and the per-channel `POST`/`PUT /api/channels/{id}`
+//! — the harness-wide `[[channels]]` table (#7609 slice 5, #8038).
 //!
 //! Why: slices 1–4 gave global channels a model, a storage migration and an
 //! inbound dispatch path, but no way to see or change one short of hand-editing
@@ -25,6 +25,11 @@
 //! authoritative and there is no key-level correspondence to merge against. The
 //! deprecated `[[listeners]]` table is dropped by the same write: leaving it
 //! would let the startup drain re-add a channel the operator just deleted.
+//! #8038: the whole-list `PUT` is the UI's shape and a poor fit for a script,
+//! which would have to echo every unrelated channel back to add one.
+//! `POST /api/channels` and `PUT /api/channels/{id}` do the read-modify-write
+//! here instead, under the SAME revision guard and the SAME
+//! [`ChannelWriter`] gate; see [`amend`].
 //! Test: `crate::api::server::tests::global_channels` — the whole module.
 
 use std::path::{Path, PathBuf};
@@ -59,6 +64,21 @@ const MAX_CHANNELS: usize = 32;
 pub(crate) struct GlobalUpdate {
     revision: String,
     channels: Vec<Channel>,
+}
+
+/// One channel to create or update, guarded by the revision the client read.
+///
+/// Why (#8038): the whole-list `PUT` is the shape the UI wants — it holds the
+/// entire list already — and the shape a script does NOT want, because adding
+/// one channel means reproducing every other channel byte-for-byte or deleting
+/// them by omission. One channel plus the same revision is the same
+/// compare-and-swap with the read-modify-write done here instead of by every
+/// caller.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChannelWrite {
+    revision: String,
+    channel: Channel,
 }
 
 /// The compare-and-swap token for the global list.
@@ -461,6 +481,122 @@ pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error
         "in-process",
     );
     Ok(stored)
+}
+
+/// The global channel list as stored, with no view wrapper.
+///
+/// Why (#8036): the injection route resolves a channel by id and needs its
+/// provider, target and `route_to` — the same records `get_route` serves, read
+/// through the same loader so the two cannot disagree about what is declared.
+/// Test: `an_injected_event_wakes_only_the_routed_assistant`.
+pub(super) async fn stored() -> Result<Vec<Channel>, Error> {
+    load(&config_path()?).await
+}
+
+/// `POST /api/channels` — declare ONE new global channel.
+///
+/// Why (#8038): see [`ChannelWrite`].
+/// What: 409 when a channel already carries this ID, and the same 409 as the
+/// whole-list write when the client's revision is stale. Answers with the full
+/// stored view, so the client continues from the new revision.
+/// Test: `a_global_channel_is_created_and_updated_one_at_a_time`,
+/// `an_unauthenticated_create_is_refused`.
+pub(super) async fn create_route(
+    writer: ChannelWriter,
+    Json(write): Json<ChannelWrite>,
+) -> Result<Json<Value>, Error> {
+    let id = write.channel.id.clone();
+    let (stored, before, after) = amend(write.revision, move |channels| {
+        if channels
+            .iter()
+            .any(|channel| channel.id == write.channel.id)
+        {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "A global channel with this ID already exists",
+            ));
+        }
+        channels.push(write.channel);
+        Ok(())
+    })
+    .await?;
+    writer.audit(
+        "POST /api/channels",
+        "global",
+        Some(&id),
+        Some(before),
+        after,
+    );
+    Ok(Json(stored))
+}
+
+/// `PUT /api/channels/{id}` — replace ONE declared global channel.
+///
+/// What: 404 when no channel carries `id`, 400 when the body renames it (a
+/// rename is a delete plus a create, and doing it silently would orphan every
+/// per-assistant overlay keyed on the old id), and 409 on a stale revision.
+/// Test: `a_global_channel_is_created_and_updated_one_at_a_time`,
+/// `an_unauthenticated_create_is_refused`.
+pub(super) async fn update_route(
+    writer: ChannelWriter,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(write): Json<ChannelWrite>,
+) -> Result<Json<Value>, Error> {
+    let audited = id.clone();
+    let (stored, before, after) = amend(write.revision, move |channels| {
+        if write.channel.id != id {
+            return Err(bad(
+                "The channel ID in the body must match the one in the path; rename by deleting and re-creating",
+            ));
+        }
+        let slot = channels
+            .iter_mut()
+            .find(|channel| channel.id == id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "No global channel has this ID"))?;
+        *slot = write.channel;
+        Ok(())
+    })
+    .await?;
+    writer.audit(
+        "PUT /api/channels/{id}",
+        "global",
+        Some(&audited),
+        Some(before),
+        after,
+    );
+    Ok(Json(stored))
+}
+
+/// Read the stored list, apply `edit`, and publish it under the same
+/// compare-and-swap the whole-list write takes.
+///
+/// Why the revision is checked HERE as well as inside [`persist`]: `edit` runs
+/// against the list this function read, and [`persist`] compares the client's
+/// revision against the list it reads under the lock. Without this check those
+/// two lists could differ — a write landing and being reverted between them
+/// would let an edit computed on the intermediate list publish under a revision
+/// that describes the original. Refusing unless what we edit is what the client
+/// read closes that window; `persist` then re-verifies under the lock, so the
+/// guarantee does not rest on this unlocked read.
+/// What: `(stored view, count before, count after)`, exactly as [`apply`].
+/// Test: `a_global_channel_is_created_and_updated_one_at_a_time`.
+async fn amend(
+    revision_read: String,
+    edit: impl FnOnce(&mut Vec<Channel>) -> Result<(), Error>,
+) -> Result<(Value, usize, usize), Error> {
+    let mut channels = load(&config_path()?).await?;
+    if revision(&channels)? != revision_read {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Channel settings changed. Reload before saving.",
+        ));
+    }
+    edit(&mut channels)?;
+    apply(GlobalUpdate {
+        revision: revision_read,
+        channels,
+    })
+    .await
 }
 
 /// The read half, for a caller with no request of its own.

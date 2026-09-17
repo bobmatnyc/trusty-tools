@@ -126,7 +126,7 @@ impl DispatchBudget {
 /// from one the budget refused — and `poll_once` needs exactly that difference
 /// to know whether the cycle's dispatch is still available.
 /// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct InboundOutcome {
     /// A binding addresses this event, dispatched or not — so the caller's own
     /// fallback stands down either way.
@@ -145,6 +145,15 @@ pub(crate) struct InboundOutcome {
     /// selected — a disabled binding, or a filter that rejected the event.
     /// Test: `the_izzie_fixture_wakes_once_for_an_inbox_message`.
     pub(crate) source: Option<crate::channels::dispatch::WakeSource>,
+    /// Assistants a wake dispatch actually started for, in enumeration order.
+    ///
+    /// Why (#8036): `dispatched` is a bool, and an injected event has to be
+    /// verifiable over HTTP — "one assistant woke" is not the claim worth
+    /// testing, "THIS assistant woke and that one did not" is. The names are
+    /// this host's own assistant names, which the caller already had to supply
+    /// or enumerate; nothing about the event is echoed here.
+    /// Test: `an_injected_event_wakes_only_the_routed_assistant`.
+    pub(crate) woken: Vec<String>,
 }
 
 /// Starting the assistant turn one prepared inbound event becomes.
@@ -153,9 +162,14 @@ pub(crate) struct InboundOutcome {
 /// spawns `run_pm_task_with_persona`, which needs model credentials and a real
 /// agent directory, so a test that asserted "two messages, one dispatch" against
 /// it would be asserting against the network.
-/// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`.
+///
+/// #8036: `pub(crate)` so `super::super::channel_inbound` can hand in the live
+/// dispatcher for a real injection and a recording one for a test, without a
+/// second copy of the load-and-select body.
+/// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`,
+/// `an_injected_event_wakes_only_the_routed_assistant`.
 #[async_trait::async_trait]
-trait InboundDispatch: Sync {
+pub(crate) trait InboundDispatch: Sync {
     /// Build the wake prompt this event becomes, or `Ok(None)` when it earns
     /// none.
     ///
@@ -203,7 +217,10 @@ async fn prepare_via_adapter(
 }
 
 /// The live dispatcher: a detached persona turn, its result recorded.
-struct SpawnDispatch;
+///
+/// #8036: `pub(crate)` so the injection route can name the same dispatcher the
+/// three provider paths use, rather than a look-alike of its own.
+pub(crate) struct SpawnDispatch;
 
 #[async_trait::async_trait]
 impl InboundDispatch for SpawnDispatch {
@@ -282,6 +299,41 @@ pub(crate) async fn receive_inbound(
     allowed_personas: Option<&[String]>,
     budget: &mut DispatchBudget,
 ) -> InboundOutcome {
+    receive_inbound_with(
+        provider,
+        channel,
+        event,
+        root,
+        user,
+        allowed_personas,
+        budget,
+        &SpawnDispatch,
+    )
+    .await
+}
+
+/// [`receive_inbound`] with the dispatcher named by the caller (#8036).
+///
+/// Why: `POST /api/channels/{id}/inbound` has to travel THIS path — the same
+/// roster read, the same global-config read, the same
+/// [`crate::channels::dispatch::select_source`] decision — or an injected event
+/// proves nothing about what a real one does. A test cannot let the live
+/// dispatcher run, because it spawns `run_pm_task_with_persona` and needs model
+/// credentials, so the dispatcher is the one thing the caller substitutes. Every
+/// decision above it is shared.
+/// What: identical to [`receive_inbound`] except for the last argument.
+/// Test: `an_injected_event_wakes_only_the_routed_assistant`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn receive_inbound_with(
+    provider: &str,
+    channel: &str,
+    event: &crate::listeners::store::StoredEvent,
+    root: &std::path::Path,
+    user: &crate::rbac::UserIdentity,
+    allowed_personas: Option<&[String]>,
+    budget: &mut DispatchBudget,
+    dispatcher: &dyn InboundDispatch,
+) -> InboundOutcome {
     let dirs = crate::agents::agents_dir_candidates();
     let Some(names) = roster_or_warn(
         crate::listeners::wake::candidate_agent_names().await,
@@ -322,7 +374,7 @@ pub(crate) async fn receive_inbound(
         allowed_personas,
         budget,
         &globals,
-        &SpawnDispatch,
+        dispatcher,
     )
     .await
 }
@@ -532,6 +584,9 @@ async fn receive_inbound_at(
             continue;
         }
         outcome.dispatched = true;
+        // #8036: recorded beside the flag, so an injected event can say WHICH
+        // assistant it woke rather than only that something did.
+        outcome.woken.push(name.clone());
         dispatcher
             .dispatch(name, &binding_id, wake, root, user)
             .await;
@@ -811,6 +866,7 @@ mod receive_tests {
                 dispatched: true,
                 rate_limited: 0,
                 source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
+                woken: vec![agent.to_string()],
             }
         );
         assert_eq!(
@@ -820,6 +876,7 @@ mod receive_tests {
                 dispatched: false,
                 rate_limited: 1,
                 source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
+                woken: vec![],
             },
             "the second message belongs to the binding but must not buy a turn"
         );
@@ -910,6 +967,7 @@ mod receive_tests {
                 dispatched: true,
                 rate_limited: 0,
                 source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
+                woken: vec![healthy.to_string()],
             },
             "the failed prompt must not be charged to the cycle, and must not \
              rate-limit the binding behind it"
@@ -1074,6 +1132,7 @@ mod receive_tests {
                 dispatched: true,
                 rate_limited: 0,
                 source: Some(WakeSource::LegacyBinding),
+                woken: vec!["fixture-izzie-legacy".to_string()],
             }
         );
         assert_eq!(
@@ -1093,6 +1152,7 @@ mod receive_tests {
                 dispatched: false,
                 rate_limited: 0,
                 source: None,
+                woken: vec![],
             },
             "#7609 review: the overlay OWNS this channel, so the excluded label \
              is answered HERE — the listener wake no longer gets a second \
@@ -1130,6 +1190,7 @@ mod receive_tests {
                 dispatched: true,
                 rate_limited: 0,
                 source: Some(WakeSource::GlobalRouteTo),
+                woken: vec!["fixture-izzie-routed".to_string()],
             },
             "the routed global is the one source that fires"
         );
@@ -1154,6 +1215,7 @@ mod receive_tests {
                 dispatched: false,
                 rate_limited: 0,
                 source: None,
+                woken: vec![],
             }
         );
         assert!(dispatched.is_empty());
@@ -1264,6 +1326,7 @@ mod receive_tests {
             dispatched: false,
             rate_limited: 0,
             source: None,
+            woken: vec![],
         };
         // Backfilled: the global routes to her AND she still has the overlay.
         let loaded = vec![("fixture-izzie-off".to_string(), vec![off()])];
@@ -1342,6 +1405,7 @@ mod receive_tests {
                 dispatched: false,
                 rate_limited: 0,
                 source: None,
+                woken: vec![],
             }
         );
         assert!(dispatched.is_empty());

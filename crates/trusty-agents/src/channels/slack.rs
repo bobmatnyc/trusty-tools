@@ -65,6 +65,40 @@ async fn post_message(
     Ok(json!({"ok":true,"message_id":result["ts"]}))
 }
 
+/// `conversations.history` against `base_url`. [`ChannelAdapter::read`] is this
+/// with the real API root.
+///
+/// What: the 30 most recent messages, projected onto the shape the channel view
+/// renders. Message text is truncated at 8,000 characters, exactly as the
+/// pre-#8037 inline body truncated it.
+/// Test: `slack_adapter_read_uses_the_credential_the_binding_names`.
+async fn conversation_history(
+    binding: &Binding,
+    base_url: &str,
+) -> Result<Vec<Value>, ChannelError> {
+    let client = client_at(binding, base_url)?;
+    let result = client
+        .call_method(
+            "conversations.history",
+            &json!({"channel":binding.target,"limit":30}),
+        )
+        .await
+        .map_err(|_| ChannelError::Provider { provider: "slack" })?;
+    Ok(result["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| {
+            json!({
+                "id": v["ts"],
+                "text": v["text"].as_str().unwrap_or("").chars().take(8000).collect::<String>(),
+                "from": v["user"],
+                "timestamp": v["ts"],
+            })
+        })
+        .collect())
+}
+
 #[async_trait::async_trait]
 impl ChannelAdapter for SlackAdapter {
     fn provider(&self) -> &'static str {
@@ -111,6 +145,19 @@ impl ChannelAdapter for SlackAdapter {
         post_message(binding, text, SLACK_API_BASE).await
     }
 
+    /// `conversations.history` for the bound channel, newest last.
+    ///
+    /// Why (#8037): this body was `agent_channels::messages`'s inline Slack
+    /// client — the last provider arm left in the HTTP layer. It also built its
+    /// client with `BaseClient::new()`, so a read authenticated as the PROCESS
+    /// default while a send on the same binding authenticated as
+    /// `credential_ref`; going through [`client_at`] makes one binding one
+    /// identity.
+    /// Test: `slack_adapter_read_uses_the_credential_the_binding_names`.
+    async fn read(&self, binding: &Binding) -> Result<Vec<Value>, ChannelError> {
+        conversation_history(binding, SLACK_API_BASE).await
+    }
+
     async fn receive(
         &self,
         binding: &Binding,
@@ -151,18 +198,36 @@ mod tests {
     /// Why: `BaseClient` exposes only `has_token()`, so the only way to prove
     /// which credential a send actually used is to read it off the wire.
     async fn mock_slack(seen: Arc<Mutex<Option<String>>>) -> String {
-        let app = axum::Router::new().route(
-            "/chat.postMessage",
-            axum::routing::post(
-                move |headers: axum::http::HeaderMap, _body: String| async move {
-                    *seen.lock().unwrap() = headers
-                        .get(axum::http::header::AUTHORIZATION)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string);
-                    axum::Json(json!({"ok":true,"ts":"1700000000.000100"}))
-                },
-            ),
-        );
+        let history_seen = Arc::clone(&seen);
+        let app = axum::Router::new()
+            .route(
+                "/chat.postMessage",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, _body: String| async move {
+                        *seen.lock().unwrap() = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        axum::Json(json!({"ok":true,"ts":"1700000000.000100"}))
+                    },
+                ),
+            )
+            // #8037: the history read moved out of `agent_channels::messages`
+            // into `conversation_history`, so the mock has to serve it too.
+            .route(
+                "/conversations.history",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, _body: String| async move {
+                        *history_seen.lock().unwrap() = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        axum::Json(json!({"ok":true,"messages":[
+                            {"ts":"1700000000.000100","text":"hello there","user":"U1"}
+                        ]}))
+                    },
+                ),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -196,6 +261,37 @@ mod tests {
             seen.lock().unwrap().clone(),
             Some("Bearer xapp-7427-named".to_string())
         );
+    }
+
+    /// The history read authenticates as the binding, not the process default.
+    ///
+    /// Why (#8037): the pre-change body in `agent_channels::messages` built its
+    /// client with `BaseClient::new()`, so one binding read as one identity and
+    /// sent as another. Pre-change this test cannot even be written — there was
+    /// no `read` on the adapter to call.
+    #[tokio::test]
+    #[serial_test::serial(channel_credentials)]
+    async fn slack_adapter_read_uses_the_credential_the_binding_names() {
+        let _bot = EnvVarGuard::set("SLACK_BOT_TOKEN", "xoxb-8037-default");
+        let _app = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-8037-named");
+        let seen = Arc::new(Mutex::new(None));
+        let base = mock_slack(Arc::clone(&seen)).await;
+
+        let messages = conversation_history(&binding_with(Some("slack-app")), &base)
+            .await
+            .expect("history");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some("Bearer xapp-8037-named".to_string())
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m["text"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("hello there")]
+        );
+        assert_eq!(messages[0]["from"], json!("U1"));
     }
 
     #[test]
