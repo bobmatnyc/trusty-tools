@@ -3,9 +3,9 @@ spec_refs:
   - id: SPEC-TTUI-04~draft
     path: docs/specs/DOC-50-tcode-tui-claude-code-clone.md
     anchor: SPEC-TTUI-04~draft
-  - id: SPEC-TCPARITY-03~draft
-    path: docs/specs/DOC-76-tcode-tui-claude-code-parity-map.md
-    anchor: SPEC-TCPARITY-03~draft
+  - id: SPEC-TCPARITY-01~draft
+    path: docs/specs/DOC-76-tcode-tui-parity-map.md
+    anchor: SPEC-TCPARITY-01~draft
 ---
 
 # DOC-75 — trusty-code TUI MVP: Claude Code Interactive-Loop Parity
@@ -16,7 +16,7 @@ spec_refs:
 **Owner:** Engineering (trusty-code)
 **Last-updated:** 2026-09-16
 **DOC-N claim:** `DOC-75`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s catalog note ("Next free `DOC-N` = `DOC-75`", recorded 2026-09-11) is current — the only hit for `DOC-75` under `docs/specs/**` was that note itself, and no open pull request claims it.
-**Builds on:** [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md) — the TUI is trusty-code's primary interactive surface. [DOC-50](./DOC-50-tcode-tui-claude-code-clone.md) §4 ([`SPEC-TTUI-04~draft`](./DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-04~draft)) — the TUI's own phasing/MVP-scope section, which this document narrows to a milestone cut. [DOC-76](./DOC-76-tcode-tui-claude-code-parity-map.md) — the full Claude Code parity map this document's cut is drawn from; see it for the underlying comparison, not repeated here. Epic [#7939](https://github.com/bobmatnyc/trusty-tools/issues/7939) — the tracking issue this spec is the record for. [#2063](https://github.com/bobmatnyc/trusty-tools/issues/2063) — daemon hardening the interactive loop depends on.
+**Builds on:** [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md) — the TUI is trusty-code's primary interactive surface. [DOC-50](./DOC-50-tcode-tui-claude-code-clone.md) §4 ([`SPEC-TTUI-04~draft`](./DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-04~draft)) — the TUI's own phasing/MVP-scope section, which this document narrows to a milestone cut. [DOC-76](./DOC-76-tcode-tui-parity-map.md) — the researched, file:line-cited parity map this document's cut is drawn from; see it for the underlying comparison, not repeated here. Epic [#7939](https://github.com/bobmatnyc/trusty-tools/issues/7939) — the tracking issue this spec is the record for. [#2063](https://github.com/bobmatnyc/trusty-tools/issues/2063) — daemon hardening the interactive loop depends on.
 **Milestone:** [trusty-code MVP · Claude Code TUI parity](https://github.com/bobmatnyc/trusty-tools/milestone/87)
 
 ---
@@ -58,7 +58,8 @@ with real tools in hand, not a router.
 
 State as of 2026-09-16. This table is the MVP-relevant slice; the full
 comparison it is drawn from, including rows not in the MVP cut, lives in
-[DOC-76](./DOC-76-tcode-tui-claude-code-parity-map.md) §3.
+[DOC-76](./DOC-76-tcode-tui-parity-map.md) §1 (functional zones) and §5
+(gaps table).
 
 | Capability | Claude Code behavior | tcode state | Issue |
 |---|---|---|---|
@@ -97,7 +98,7 @@ Two capabilities retargeted off `trusty-code` on owner confirmation
 heartbeat frames
 ([#8209](https://github.com/bobmatnyc/trusty-tools/issues/8209)). Both now
 track against `trusty-agents`; see
-[DOC-76](./DOC-76-tcode-tui-claude-code-parity-map.md) §4.
+[DOC-76](./DOC-76-tcode-tui-parity-map.md) §4.
 
 ## 6. Exit criterion {#SPEC-TCMVP-06~draft}
 
@@ -109,8 +110,8 @@ relaunch, resume — is recorded against that build.
 
 ## Related
 
-[DOC-76](./DOC-76-tcode-tui-claude-code-parity-map.md) — the full Claude Code
-parity map this document's cut is drawn from. [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md)
+[DOC-76](./DOC-76-tcode-tui-parity-map.md) — the researched parity map this
+document's cut is drawn from. [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md)
 — TUI as primary surface. [DOC-50](./DOC-50-tcode-tui-claude-code-clone.md) —
 the TUI's own functional spec. Epic
 [#7939](https://github.com/bobmatnyc/trusty-tools/issues/7939) — tracking
