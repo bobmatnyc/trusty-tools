@@ -204,6 +204,12 @@ pub use skills_documentation_style_inner::{
 mod skills_rust_build_performance_inner;
 pub use skills_rust_build_performance_inner::RUST_BUILD_PERFORMANCE;
 
+// --- Rust delivery-workflow bundled skill (issue #8192) — own module,
+// declared by rust-engineer's `skills:`; process rules, not build speed.
+#[path = "bundle_skills_rust_delivery_workflow.rs"]
+mod skills_rust_delivery_workflow_inner;
+pub use skills_rust_delivery_workflow_inner::RUST_DELIVERY_WORKFLOW;
+
 // --- `self-improvement-loop` bundled skill (issue #7723) — own module,
 // on-demand only (not declared in any agent's `skills:` frontmatter).
 #[path = "bundle_skills_self_improvement_loop.rs"]

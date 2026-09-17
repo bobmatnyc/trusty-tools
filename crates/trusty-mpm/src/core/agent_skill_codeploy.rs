@@ -230,7 +230,11 @@ mod tests {
         // recorded in `rust_build_performance_declared_by_rust_family_agents`.
         // #4642 does not get to reverse that, so the exception is explicit and
         // named here rather than hidden by a blanket budget raise.
-        const RUST_FAMILY_BUDGET_BYTES: u64 = 34_000;
+        // #8192 raised this from 34,000: `rust-engineer` additionally declares
+        // `rust-delivery-workflow` (~7,000 bytes), the delivery-process half of
+        // the split this issue made. Same rule as before — the budget sits just
+        // above today's worst case so the next addition is a deliberate act.
+        const RUST_FAMILY_BUDGET_BYTES: u64 = 44_000;
         const RUST_FAMILY: &[&str] = &["rust-engineer", "tauri-engineer"];
 
         let mut over: Vec<String> = Vec::new();

@@ -278,6 +278,7 @@ universal = [
   "requesting-code-review",
   "root-cause-tracing",
   "rust-build-performance",
+  "rust-delivery-workflow",
   "security-scanning",
   "self-improvement-loop",
   "software-patterns",
