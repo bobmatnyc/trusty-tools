@@ -326,7 +326,10 @@ async fn m1_cutline_full_scenario_over_stdio() {
         .call(
             1,
             "session.create",
-            json!({"task": "M1 cut-line acceptance task"}),
+            // #8184: this baseline pins the PM -> engineer DELEGATION taxonomy,
+            // and `session.create` now defaults to the solo agent, so the
+            // scenario asks for the delegating shape explicitly.
+            json!({"task": "M1 cut-line acceptance task", "delegate": true}),
         )
         .await;
     assert!(
@@ -514,7 +517,9 @@ async fn m1_cutline_full_scenario_over_http() {
     let create_resp = post(
         1,
         "session.create",
-        json!({"task": "M1 cut-line http task"}),
+        // #8184: same as the stdio scenario above — the baseline is the
+        // delegating taxonomy, which is now an explicit opt-in.
+        json!({"task": "M1 cut-line http task", "delegate": true}),
     )
     .await;
     assert!(

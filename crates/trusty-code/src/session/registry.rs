@@ -320,7 +320,35 @@ impl SessionRegistry {
     /// a fully supported binding, not a missing one.
     /// Test: `registry_tests::create_publishes_started_and_status_events`,
     /// `registry_tests::create_derives_project_label_from_binding`.
+    ///
+    /// (#8184) Mints a DELEGATING session — use
+    /// [`SessionRegistry::create_with_delegation`] to mint the solo
+    /// (`no_delegate`) shape. A wrapper rather than a fifth parameter because
+    /// every other call site here wants this same default.
     pub fn create(&self, task: String, agent: Option<String>, binding: ProjectBinding) -> Session {
+        self.create_with_delegation(task, agent, binding, false)
+    }
+
+    /// [`SessionRegistry::create`] with this session's agent shape chosen
+    /// explicitly (#8184).
+    ///
+    /// Why: `session.create` defaults to the SOLO agent (the interactive TUI's
+    /// default, issue #8184) while `task.run`'s own mint path keeps the
+    /// pre-#8184 delegating default unless its `no_delegate` param says
+    /// otherwise. Both need the same mint, so the flag is a parameter here
+    /// rather than two divergent copies of the body.
+    /// What: `no_delegate` is persisted onto [`Session::no_delegate`] and is
+    /// immutable afterwards — there is no setter, mirroring `binding`'s own
+    /// once-at-creation convention.
+    /// Test: `session::protocol::tests::create_defaults_to_the_solo_agent`,
+    /// `task::protocol::tests::task_run_minted_session_records_its_no_delegate`.
+    pub fn create_with_delegation(
+        &self,
+        task: String,
+        agent: Option<String>,
+        binding: ProjectBinding,
+        no_delegate: bool,
+    ) -> Session {
         let id = Uuid::new_v4().to_string();
         let session = Session {
             id: id.clone(),
@@ -333,6 +361,7 @@ impl SessionRegistry {
             mode: None,
             workstream_id: None,
             result: None,
+            no_delegate,
         };
         {
             let mut sessions = self.lock();

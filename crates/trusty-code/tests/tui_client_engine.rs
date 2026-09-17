@@ -91,9 +91,47 @@ impl RealDaemon {
         CodeEngine::with_socket(self.socket.clone(), Some(self.project.clone()))
     }
 
+    /// (#8184) `tcode tui --delegate` — the PM opt-in.
+    fn delegating_engine(&self) -> CodeEngine {
+        CodeEngine::with_socket_delegating(self.socket.clone(), Some(self.project.clone()))
+    }
+
+    /// (#8184) `tcode tui` with no `--project`.
+    fn projectless_engine(&self) -> CodeEngine {
+        CodeEngine::with_socket(self.socket.clone(), None)
+    }
+
     fn client(&self) -> UdsRpcClient {
         UdsRpcClient::new(self.socket.clone())
     }
+}
+
+/// The one session `setup` created, read back over the socket.
+async fn only_session(daemon: &RealDaemon) -> Value {
+    let listed = daemon
+        .client()
+        .call("session.list", json!({}))
+        .await
+        .expect("session.list over the socket");
+    let sessions = listed["sessions"]
+        .as_array()
+        .expect("session.list returns an array")
+        .clone();
+    assert_eq!(sessions.len(), 1, "setup must have created one session");
+    sessions[0].clone()
+}
+
+/// The `connected to tcode daemon` line `setup` published.
+fn connect_line(rx: &mut UnboundedReceiver<ReplEvent>) -> String {
+    drain(rx)
+        .iter()
+        .find_map(|event| match event {
+            ReplEvent::StatusMessage(text) if text.contains("connected to tcode daemon") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("setup must report the daemon it connected to")
 }
 
 impl Drop for RealDaemon {
@@ -268,7 +306,27 @@ struct StubDaemon {
 }
 
 impl StubDaemon {
+    /// A stub that serves the TUI's prompter-claim stream (#8184).
+    ///
+    /// Why: `setup` now opens a `session.events` stream and REFUSES to return
+    /// until a frame confirms the daemon took the claim, so every stub test
+    /// needs that one frame — and it must not come out of `stream_frames`,
+    /// which is what the TAIL under test is meant to see (the reconnect
+    /// -exhaustion case, for one, depends on that tail being empty).
+    /// What: a claim request is a `session.events` with NO `after_seq` key —
+    /// `prompter_claim::open` omits it, `pump_session_events` always sends it
+    /// — and gets one synthetic frame; every other stream, `workstream.events`
+    /// included, gets `stream_frames` unchanged.
     fn start(answers: Value, stream_frames: Vec<Value>) -> Self {
+        Self::start_inner(answers, stream_frames, true)
+    }
+
+    /// A stub that serves NOTHING on any stream, so the claim cannot confirm.
+    fn start_refusing_the_claim(answers: Value) -> Self {
+        Self::start_inner(answers, Vec::new(), false)
+    }
+
+    fn start_inner(answers: Value, stream_frames: Vec<Value>, serve_claim: bool) -> Self {
         let dir = tempfile::tempdir().expect("socket tempdir");
         let socket = dir.path().join("stub.sock");
         // `connect_hardened` refuses a socket whose containing directory is
@@ -286,6 +344,7 @@ impl StubDaemon {
             while let Ok((stream, _)) = listener.accept().await {
                 let answers = answers.clone();
                 let frames = stream_frames.clone();
+                let serve_claim = serve_claim;
                 let recorded = recorded.clone();
                 let recorded_requests = recorded_requests.clone();
                 tokio::spawn(async move {
@@ -310,6 +369,19 @@ impl StubDaemon {
                     let id = request["id"].clone();
 
                     if request["stream"] == json!(true) {
+                        // #8184: the prompter claim asks for a bare tail; the
+                        // per-turn pump always carries `after_seq`.
+                        let is_claim = method == "session.events"
+                            && request["params"].get("after_seq").is_none();
+                        let frames = if is_claim {
+                            if serve_claim {
+                                vec![json!({"session_id": "sess-1", "seq": 1})]
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            frames
+                        };
                         for frame in frames {
                             let body = format!(
                                 "{}\n",
@@ -580,5 +652,185 @@ async fn respond_permission_without_a_session_is_a_noop() {
         stub.request_for("session.permission.respond").is_none(),
         "no session means nothing to answer: {:?}",
         stub.seen()
+    );
+}
+
+/// #8184: `setup` claims a prompter BEFORE any run can issue a gated call.
+///
+/// Why: the daemon suspends an `ask` only while someone is watching that
+/// session (#8100), and on this transport the only thing that claims a
+/// prompter is an open `session.events` stream. `run_chat_turn` issued
+/// `task.run` first and opened its stream afterwards, so the interactive
+/// default's first `write_file`/`bash` — gated since #8184 — raced the stream
+/// open and a call that lost was DENIED with no prompt to answer. Ordering the
+/// claim into `setup` makes the race unreachable for every later turn.
+/// What: drives `setup` against the stub and asserts the claim stream was
+/// opened, right after the session was created and before anything else. FAILS
+/// before this change: `setup` requested `session.create` and never a
+/// `session.events`, so nothing held a claim until mid-turn.
+/// Test: this test.
+#[tokio::test]
+async fn setup_opens_a_prompter_claim_stream() {
+    let stub = StubDaemon::start(stub_answers(Some("ws-1")), vec![json!({"seq": 1})]);
+    let engine = stub.engine();
+    let (tx, _rx) = unbounded_channel();
+
+    engine.setup(tx).await.expect("setup against the stub");
+
+    let seen = stub.seen();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("session.create"),
+        "the session must exist before anything can watch it: {seen:?}"
+    );
+    let claim = seen
+        .iter()
+        .position(|m| m == "session.events")
+        .unwrap_or_else(|| panic!("setup must open the prompter-claim stream: {seen:?}"));
+    assert_eq!(
+        claim, 1,
+        "the claim must be the FIRST thing after the session is created, so no \
+         run can precede it: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&"task.run".to_string()),
+        "setup must not run anything: {seen:?}"
+    );
+}
+
+/// #8184: a claim stream the daemon does not serve must FAIL `setup`.
+///
+/// Why: `open_stream` returns once the request is written, so a successful
+/// dial proves nothing about the daemon having run the handler that takes the
+/// claim — and a refusal (`session_not_found`) arrives as a terminal frame on
+/// the stream, never as a dial error. A `setup` that ignored the first frame
+/// would report success over a session nothing is watching, and every gated
+/// call in it would then be denied with no prompt: the precise failure the
+/// claim exists to prevent, reintroduced silently.
+/// What: a stub that serves the session but closes the stream with no frame.
+/// Asserts `setup` errors. FAILS while the first frame is discarded: `setup`
+/// returned `Ok`.
+/// Test: this test.
+#[tokio::test]
+async fn setup_fails_when_the_claim_stream_is_refused() {
+    let stub = StubDaemon::start_refusing_the_claim(stub_answers(None));
+    let engine = stub.engine();
+    let (tx, _rx) = unbounded_channel();
+
+    let err = engine
+        .setup(tx)
+        .await
+        .expect_err("an unwatchable session must not report a successful setup");
+
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("closed"),
+        "the failure must name the stream that never opened: {rendered}"
+    );
+    assert!(
+        stub.seen().contains(&"session.events".to_string()),
+        "the claim must have been attempted: {:?}",
+        stub.seen()
+    );
+}
+
+// ── #8184: the interactive session's default agent shape ────────────────────
+
+/// #8184: a plain `tcode tui` session runs the SOLO agent, against the bound
+/// project root — end to end, against a real daemon.
+///
+/// Why: this is the wiring the unit tests cannot see — that the engine's
+/// `session.create` really produces the solo shape on the daemon, and that the
+/// connect line the user reads says so and names where edits will land.
+/// What: `setup` against a project-bound daemon, then reads the session back
+/// over the socket.
+/// Test: this test.
+#[tokio::test]
+async fn tui_default_session_runs_the_solo_agent() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(
+        session["no_delegate"],
+        json!(true),
+        "a default TUI session runs the solo agent: {session}"
+    );
+    assert_eq!(
+        session["binding"]["root"],
+        json!(daemon.project.display().to_string()),
+        "the session must be scoped to the bound project root: {session}"
+    );
+
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("solo agent (no delegation)"),
+        "the connect line must state the agent shape: {line}"
+    );
+    assert!(
+        line.contains(&daemon.project.display().to_string()),
+        "the connect line must name the working root: {line}"
+    );
+}
+
+/// #8184: `tcode tui --delegate` still gets the delegating PM.
+///
+/// Why: the opt-in has to survive the same hop, or PM mode is unreachable from
+/// the TUI and the default change becomes a removal.
+/// What: the same flow through `CodeEngine::with_socket_delegating`.
+/// Test: this test.
+#[tokio::test]
+async fn tui_delegate_opt_in_creates_a_delegating_session() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.delegating_engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(
+        session["no_delegate"],
+        json!(false),
+        "--delegate must mint the PM shape: {session}"
+    );
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("delegating PM"),
+        "the connect line must state the agent shape: {line}"
+    );
+}
+
+/// #8184: `tcode tui` with no `--project` still succeeds, still runs solo, and
+/// says its edits land in a scratch workspace.
+///
+/// Why: a projectless session is a first-class state, and its run works in the
+/// executor's ephemeral scratch root — never the launch directory. A user who
+/// is not told that would read an "edited the file" report as a claim about
+/// their own tree.
+/// What: `setup` with `project_path: None`, asserting the projectless binding,
+/// the solo shape, and the connect line's wording.
+/// Test: this test.
+#[tokio::test]
+async fn tui_projectless_default_session_runs_solo_in_a_scratch_root() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.projectless_engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine
+        .setup(tx)
+        .await
+        .expect("a projectless setup must succeed");
+
+    let session = only_session(&daemon).await;
+    assert_eq!(session["binding"]["state"], json!("projectless"));
+    assert_eq!(
+        session["no_delegate"],
+        json!(true),
+        "a projectless TUI session runs solo too: {session}"
+    );
+    let line = connect_line(&mut rx);
+    assert!(
+        line.contains("projectless — file tools rooted at a scratch workspace"),
+        "the connect line must say where a projectless session edits: {line}"
     );
 }
