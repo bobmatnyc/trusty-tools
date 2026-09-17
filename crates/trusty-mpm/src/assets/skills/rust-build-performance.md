@@ -1,6 +1,6 @@
 ---
 name: rust-build-performance
-description: "Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks."
+description: "Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, share one CARGO_TARGET_DIR across worktrees, keep build output small with --message-format=short and -q, and never nice a build on Apple Silicon. Use when a Rust build feels slow, when a build log is flooding an agent's context, or before reaching for compiler-flag tricks."
 user-invocable: false
 version: "1.0.0"
 category: agent-reference
@@ -126,15 +126,34 @@ Treat this as a **local, uncommitted** override
 profile changes to the workspace root `Cargo.toml` without explicit team
 approval; it affects every contributor's build and debugging experience.
 
-**Worktree-lifecycle note:** this project's parallel-worktree discipline
-means every fresh `git worktree add` is a cold build — there is no shared
-`target/` to inherit. Don't delete a *live* worktree's `target/` mid-task
-expecting a quick rebuild. Reclaiming a merged worktree (and the `target/`
-inside it) is the PM's to run, never an agent's (#5791): `tm session
-prune-worktrees --merged-prs --force` sweeps the trees whose PR has landed
-(#2919), sparing any that still holds unsaved work or a live owner. Nothing
-runs it automatically, so a machine that has not had it run still carries every
-merged worktree's `target/`.
+**Worktree-lifecycle note:** a fresh `git worktree add` starts with an empty
+`target/`, and a cold build of a large workspace is the single dominant cost an
+agent pays there — hours of wall clock before one test runs. Pointing every
+worktree at one shared `CARGO_TARGET_DIR` per repo is the fix;
+`rust-delivery-workflow` section 4 carries the mechanism and the measured
+numbers, and `tm doctor`'s `rust_build_env` row prints the prefix to use. Do not
+assemble one by hand.
+
+Three consequences of sharing that directory, stated plainly because two of
+them are costs:
+
+- **Registry dependencies are reused.** This is where the win is. The whole
+  `Cargo.lock`-pinned graph builds once per machine instead of once per tree.
+- **Workspace path crates still rebuild per tree.** Cargo fingerprints a path
+  crate by its absolute source path, so two worktrees at different paths are
+  two different fingerprints. Sharing removes the dependency-graph cost, not
+  the workspace-crate cost.
+- **Cargo's build lock serialises every build sharing the directory.** A second
+  build blocks on the first with `Blocking waiting for file lock on build
+  directory`. That is the intended trade — it is also a real wait, so do not
+  read a stalled gate as a hang.
+
+Don't delete a *live* worktree's `target/` mid-task expecting a quick rebuild.
+Reclaiming a merged worktree (and the `target/` inside it) is the PM's to run,
+never an agent's (#5791): `tm session prune-worktrees --merged-prs --force`
+sweeps the trees whose PR has landed (#2919), sparing any that still holds
+unsaved work or a live owner. Nothing runs it automatically, so a machine that
+has not had it run still carries every merged worktree's `target/`.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html#incremental>
 
@@ -223,3 +242,51 @@ something fixable by §4/§5/§6:
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html>,
 <https://doc.rust-lang.org/cargo/reference/build-scripts.html>
+
+## 8. Build Output Volume
+
+Compile time is not the only cost of a build. For an agent, the log itself is
+charged: a tool result stays in the transcript and the transcript is re-sent on
+every later round, so a build log is paid again and again. BASE-AGENT's
+"Context Cost of Tool Output" states the rule; this section is the Rust flags
+that make it cheap to obey.
+
+- **`cargo check -p <crate>` before any build or clippy run.** It does the
+  type- and borrow-checking with no codegen (§1, §2), so it both finishes
+  sooner and prints far less. Most errors you were going to hit surface here.
+- **`--message-format=short`** collapses each diagnostic from a multi-line
+  rendering with source snippets and carets to one `file:line:col: message`
+  line. On a run with many errors this is the difference between pages and a
+  screenful.
+- **`-q` / `--quiet`** suppresses cargo's own progress lines — the
+  `Compiling`/`Downloading` stream that is most of a cold build's output and
+  proves nothing. On `cargo test` it also prints one character per test instead
+  of one line per test.
+- **Redirect, then read.** Send the whole run to a file, report the exit code,
+  and open the file only when it is non-zero. Never end the chain in a pipe:
+  `cargo test … | tail` exits 0 on a failing suite.
+
+```bash
+cargo check -q -p <crate> --message-format=short > <scratchpad>/check.log 2>&1
+echo "EXIT=$?"
+```
+
+**`--no-fail-fast` is required and it multiplies output.** Without it cargo
+stops issuing test targets at the first failure, so one red `--lib` test hides
+every integration target behind it and you get an incomplete picture. With it
+you get every target's output, failures included. The answer is to redirect it,
+never to drop the flag — dropping it trades a real gap in coverage for a
+saving you can have for free.
+
+## 9. macOS / Apple Silicon: Never `nice` a Build
+
+Do not `nice` a cargo build to be polite to the rest of the machine. On Apple
+Silicon a niced process is confined to the efficiency cores. Measured on a
+16-core dev host, 2026-09-17: a build run under `nice -n 10` queued its work
+onto 4 efficiency cores while 12 performance cores sat idle, producing a load
+average of 27-37 with the CPU 70% idle. The build was slower and the machine
+looked overloaded at the same time.
+
+To be polite to a shared host, cap the job count instead — `CARGO_BUILD_JOBS`
+bounds concurrency without telling the scheduler to avoid the fast cores.
+`nice` is the wrong knob here even though it is the reflex from other platforms.

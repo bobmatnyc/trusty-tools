@@ -244,6 +244,8 @@ next change that touches that code; never a standalone cleanup change.
 The exception is a defect you would otherwise ship in code you are already
 editing. A bug, a security hole, a broken contract: fix it now, not later.
 
+A text-only change does not earn a compile-everything gate (#8251).
+
 ## Agent Responsibilities
 
 | DO | DO NOT |
@@ -290,6 +292,8 @@ WRONG:   "All 68 tests pass."
 CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
 ```
 
+"Raw output" is the RESULT lines, not the log that produced them.
+
 ### Required completion format
 
 ```
@@ -309,9 +313,10 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
   "Could not verify" and hand back (#7383).
 - **A declarative process (test suite, build, CI check) wants a verdict, not
   a play-by-play.** Run it into a scratchpad file, check `EXIT=$?`, and read
-  it only on non-zero (#7315, #7722). Recipe — redirect/retry/sentinel/trim,
-  the terraform lock hazard, the `gh --jq` empty-output trap: same skill as
-  above.
+  it only on non-zero (#7315, #7722). A pasted log is re-sent every round, so it
+  is charged again on each; a repeated check is cheap when it returns ONE line.
+  Recipe — the byte budget, redirect/retry/sentinel/trim, the terraform lock
+  hazard, the `gh --jq` empty-output trap: same skill as above.
 - **A count or stale-result check must be shown able to fail.** For any check
   asserting a count of requests/writes/calls, or that a stale result must not
   land, run the mutation once — delete the counted behavior or remove the
@@ -339,16 +344,15 @@ Two ways that read misleads:
 
 ### Never `gh pr checks --watch`
 
-`--watch` streams every check's output into your context for the whole run
-(546k tokens burned in one run). Blocking CI waits are retired for **context
-cost**, not runnability — do not reintroduce it or substitute a manual poll
-loop.
+`--watch` STREAMS every check's output into your context for the whole run
+(546k tokens burned in one run). The defect is the streaming, not the checking
+— retired for **context cost**, not runnability.
 
 ### Report, don't promise
 
 Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage."
-Ending with "I'll report back once CI is green", "monitoring the checks", or
-"standing by" is a PROTOCOL VIOLATION — nothing re-invokes a stopped agent.
+Promising to report back later is a PROTOCOL VIOLATION — nothing re-invokes a
+stopped agent. See "Never Narrate a Wait".
 
 ### Your own gates DO block, in the foreground
 
@@ -358,7 +362,7 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
-- Already backgrounded a command? Poll it to completion in the same turn.
+- Backgrounded a gate? Finish it in the same turn via a one-line check.
 - Never spawn a background monitor, watcher, or timer as a wake mechanism —
   see "Never Narrate a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
@@ -373,12 +377,11 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 
 🔴 A pipeline's exit status is the LAST command's — `cargo test … | tail`
 exits 0 on a failing suite. FORBIDDEN: produced a false green twice in one
-day. Redirect into a scratchpad file named for this task and step, then
-`echo "EXIT=$?"`; read the file only on non-zero. Under worktree isolation a
+day. Redirect as above. Under worktree isolation a
 grouped `( … )` command is refused before it runs — give each gate its own
 plain command, its own redirect, its own `echo "EXIT=$?"` (#6937). Full
 recipe — the `pipefail`/`$PIPESTATUS` bashism, the `tm compress` trim, the
-backgrounded-chain sentinel: `{{TM_SKILLS}}/verification-before-completion/SKILL.md` (#7440).
+backgrounded-chain sentinel: same skill as above (#7440).
 
 ## Self-Improvement Reporting
 
