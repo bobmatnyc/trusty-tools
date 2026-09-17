@@ -23,14 +23,18 @@
 /// keeps the deepest directories intact, which is where a repository name
 /// and a worktree name live.
 ///
-/// What it GUARANTEES, and nothing more: when `text` contains `/` and its
-/// last two components fit in `width`, the result keeps the final components
-/// WHOLE — as many as fit, deepest first — behind a leading `…`. Components
-/// nearer the filesystem root are dropped first, so a root-side name can
-/// still be lost; only the tail is promised. Anything else (a path whose own
-/// last two components overflow, or a string with no `/`) falls back to
-/// character elision, which keeps both ends and replaces the middle with
-/// `…`. `text` shorter than `width` is returned unchanged.
+/// What it GUARANTEES, and nothing more: when `text` contains `/` and `…/`
+/// plus its last two components fit in `width`, the result keeps the final
+/// components WHOLE — as many as fit, deepest first — behind that leading
+/// `…/`. The two columns the prefix costs are part of the budget, so a
+/// last-two that fits `width` but not `width - 2` still falls back.
+/// Components nearer the filesystem root are dropped first, so a root-side
+/// name can still be lost; only the tail is promised. Anything else (a path
+/// whose own last two components overflow, or a string with no `/`) falls
+/// back to character elision, which keeps both ends and replaces the middle
+/// with `…`. `text` shorter than `width` is returned unchanged, and a
+/// `width` of 0 still yields the one-character `…` — the ellipsis is never
+/// dropped.
 /// Test: `tests::elide_middle_keeps_whole_trailing_path_components`,
 /// `tests::elide_middle_keeps_a_repo_name_that_is_the_leaf`,
 /// `tests::elide_middle_falls_back_to_character_elision`,
@@ -77,7 +81,9 @@ fn elide_path_components(text: &str, width: usize) -> Option<String> {
 /// [`elide_middle`]'s fallback: keep both ends, replace the middle with `…`.
 ///
 /// What: splits the `width - 1` remaining budget between the two ends, the
-/// odd character going to the head. Counts chars, not bytes.
+/// odd character going to the head. Counts chars, not bytes. A `width` of 0
+/// or 1 returns the bare `…`, so a zero budget is overshot by one column
+/// rather than answered with an empty string.
 /// Test: `tests::elide_middle_falls_back_to_character_elision`,
 /// `tests::elide_middle_handles_degenerate_widths`.
 fn elide_chars(text: &str, width: usize) -> String {
