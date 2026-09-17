@@ -24,6 +24,9 @@ mod assistant_streams;
 mod attachments;
 mod attendance;
 mod cancel;
+// #8036/#8037: the HTTP inbound-event injection seam and the credential-free
+// stub provider that makes send/read verifiable end to end.
+mod channel_inbound;
 // #4278: the durable persona chat log read back for GUI rehydration.
 mod chat_history;
 mod costs;

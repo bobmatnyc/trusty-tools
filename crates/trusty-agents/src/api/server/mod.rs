@@ -62,6 +62,9 @@ mod auth;
 // a configured or minted credential — and leave an audit line.
 mod cancel;
 pub(crate) mod channel_auth;
+// #8036: `POST /api/channels/{id}/inbound` — inject one inbound channel event
+// into the provider-neutral dispatch path, under the channel-write gate.
+mod channel_inbound;
 // #7396: the grant ceiling a turn-originated settings patch may never widen.
 mod grant_ceiling;
 // #7609: `GET`/`PUT /api/channels` — the harness-wide channel list. Visible

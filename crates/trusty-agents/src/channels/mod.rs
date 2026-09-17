@@ -24,6 +24,8 @@
 //! for Gmail (#7427).
 //! Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
 //! `channel_adapter_receive_defaults_to_unsupported`,
+//! `channel_adapter_read_defaults_to_unsupported`,
+//! `a_default_environment_has_no_stub_provider`,
 //! `channel_credential_ref_resolves_through_the_authority`,
 //! `channel_dispatch_failure_is_counted_per_binding`,
 //! `gworkspace_adapter_addresses_sender_and_label_targets`.
@@ -48,6 +50,9 @@ pub mod resolve;
 pub(crate) mod retire;
 mod slack;
 pub(crate) mod status;
+// #8037: the credential-free provider that makes send/read/inbound testable
+// end to end. Admitted only when `stub::ENABLE_ENV` is set; see its module doc.
+pub(crate) mod stub;
 mod telegram;
 
 pub(crate) use credentials::{resolve_credential, validate_credential_ref};
@@ -124,6 +129,15 @@ pub(crate) enum ChannelError {
     /// The provider has no inbound path in this build.
     #[error("provider `{0}` does not deliver inbound events")]
     ReceiveUnsupported(&'static str),
+
+    /// The provider claims readable history and implements none.
+    ///
+    /// Why (#8037): [`ChannelAdapter::read`] has a default, and a default that
+    /// answered with an EMPTY history would render as "this destination has no
+    /// messages" — indistinguishable from a working read. A build defect must
+    /// not look like an empty inbox.
+    #[error("provider `{0}` does not serve message history")]
+    ReadUnsupported(&'static str),
 
     /// The binding's `credential_ref` could not be resolved. Never the value.
     #[error("credential reference could not be resolved: {0}")]
@@ -226,6 +240,24 @@ pub(crate) trait ChannelAdapter: Send + Sync {
     /// acknowledgement.
     async fn send(&self, binding: &Binding, text: &str) -> Result<Value, ChannelError>;
 
+    /// Prior messages on the binding's destination, newest last.
+    ///
+    /// Why (#8037): the history read used to be a Slack client written into
+    /// `agent_channels::messages`, which is the fourth `match provider` site
+    /// #7427 set out to remove — no other provider could serve history however
+    /// its [`Capabilities::can_read`] read. Asking the adapter is what lets the
+    /// stub provider answer a read at all.
+    /// What: the caller checks [`Capabilities::can_read`] first and answers
+    /// `available: false` when it is unset, so this is only reached by a
+    /// provider that CLAIMS history. The default therefore refuses rather than
+    /// returning an empty list — see [`ChannelError::ReadUnsupported`].
+    /// Test: `channel_adapter_read_defaults_to_unsupported`,
+    /// `the_stub_outbox_round_trips_a_send_into_a_read`.
+    async fn read(&self, binding: &Binding) -> Result<Vec<Value>, ChannelError> {
+        let _ = binding;
+        Err(ChannelError::ReadUnsupported(self.provider()))
+    }
+
     /// Turn an inbound event into a wake dispatch, or `Ok(None)` when the event
     /// earns none.
     ///
@@ -310,6 +342,25 @@ mod tests {
         assert!(matches!(
             outcome,
             Err(ChannelError::ReceiveUnsupported("send-only"))
+        ));
+    }
+
+    /// The history default REFUSES; it never answers with an empty inbox.
+    ///
+    /// Why (#8037, fail-open): `Ok(Vec::new())` would have been the convenient
+    /// default, and `agent_channels::messages` renders it as
+    /// `{"available":true,"messages":[]}` — a provider that serves no history
+    /// at all reading exactly like a quiet destination. This is the error arm
+    /// of that decision.
+    #[tokio::test]
+    async fn channel_adapter_read_defaults_to_unsupported() {
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "id":"team","name":"Team","provider":"send-only","target":"X","enabled":true
+        }))
+        .expect("fixture binding");
+        assert!(matches!(
+            SendOnly.read(&binding).await,
+            Err(ChannelError::ReadUnsupported("send-only"))
         ));
     }
 }

@@ -18,17 +18,51 @@ use super::ChannelAdapter;
 use super::ChannelError;
 use super::gworkspace::GworkspaceAdapter;
 use super::slack::SlackAdapter;
+use super::stub::StubAdapter;
 use super::telegram::TelegramAdapter;
 use serde_json::{Value, json};
 
 /// Every channel provider this build supports, in display order.
 static ADAPTERS: &[&dyn ChannelAdapter] = &[&SlackAdapter, &TelegramAdapter, &GworkspaceAdapter];
 
+/// Adapters admitted only when the operator explicitly asked for them.
+///
+/// Why (#8037): the stub provider needs no credential, which is exactly what
+/// makes it useful for a test and unacceptable in production — anyone who could
+/// write a channel could otherwise create a destination that silently swallows
+/// traffic. Keeping it in a SECOND table, consulted only behind
+/// [`super::stub::enabled`], is what makes "not reachable in production config"
+/// a property of the lookup rather than a warning in a doc comment.
+static OPT_IN_ADAPTERS: &[&dyn ChannelAdapter] = &[&StubAdapter];
+
+/// The opt-in table, or nothing at all on a process that did not ask for it.
+///
+/// Test: `a_default_environment_has_no_stub_provider`.
+fn opt_in_adapters() -> &'static [&'static dyn ChannelAdapter] {
+    if super::stub::enabled() {
+        OPT_IN_ADAPTERS
+    } else {
+        &[]
+    }
+}
+
 /// The adapter for `provider`, or `None` when the id is unsupported.
 ///
-/// Test: `channel_registry_resolves_known_providers_and_rejects_notion`.
+/// What: the built-in table answers first, so the opt-in check — and its
+/// environment read — is reached only by an id no shipped provider claims.
+/// Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
+/// `a_default_environment_has_no_stub_provider`.
 pub(crate) fn adapter(provider: &str) -> Option<&'static dyn ChannelAdapter> {
-    ADAPTERS.iter().copied().find(|a| a.provider() == provider)
+    ADAPTERS
+        .iter()
+        .copied()
+        .find(|a| a.provider() == provider)
+        .or_else(|| {
+            opt_in_adapters()
+                .iter()
+                .copied()
+                .find(|a| a.provider() == provider)
+        })
 }
 
 /// The adapter that serves events a channel of `provider` ingests.
@@ -68,6 +102,7 @@ pub(crate) fn providers_json() -> Value {
     Value::Array(
         ADAPTERS
             .iter()
+            .chain(opt_in_adapters())
             .map(|a| {
                 let caps = a.capabilities();
                 json!({
@@ -103,7 +138,10 @@ mod tests {
         assert!(adapter("").is_none());
     }
 
+    /// #8037: serialized against the stub tests, which turn
+    /// `stub::ENABLE_ENV` on and would otherwise add a fourth entry here.
     #[test]
+    #[serial_test::serial(channel_credentials)]
     fn channel_providers_json_reports_registry_capabilities() {
         let providers = providers_json();
         let list = providers.as_array().unwrap();
