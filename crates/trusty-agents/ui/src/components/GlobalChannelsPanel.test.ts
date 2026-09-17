@@ -27,6 +27,7 @@ let revision = 'r1';
 let puts: { body: string; authorization: string | undefined }[] = [];
 let putFailures: { status: number; error: string }[] = [];
 let reads = 0;
+let readFails = false;
 let catalogFails = false;
 // #8187: the create and delete halves. `providers` is what the daemon serves —
 // including the opt-in `stub` adapter, which must never be offered — and
@@ -51,6 +52,7 @@ beforeEach(() => {
   puts = [];
   putFailures = [];
   reads = 0;
+  readFails = false;
   catalogFails = false;
   posts = [];
   deletes = [];
@@ -85,7 +87,10 @@ beforeEach(() => {
       channels = channels.filter(channel => channel.id !== id);
       revision = 'r2';
       return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings }), { status: 200 });
-    } else reads += 1;
+    } else {
+      reads += 1;
+      if (readFails) return new Response(JSON.stringify({ error: 'read refused' }), { status: 503 });
+    }
     return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable }), { status: 200 });
   });
 });
@@ -304,13 +309,17 @@ it('creates a channel through POST at the revision the list was read at', async 
 });
 
 it('offers the providers the daemon serves, and never the test-only stub', async () => {
+  // `discord` is an id this build has never heard of — it is in no type, no
+  // constant and no list here. Offering it is what makes the page's provider
+  // list the DAEMON's: an adapter shipped after this bundle was built is
+  // pickable without a UI release. A list hard-coded here would pass the
+  // `stub` half of this test and fail this line (critic MEDIUM-3).
+  providers = [{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'discord', name: 'Discord' }];
   await render();
   button('Add channel').click();
   await settle();
-  // Served order, served names, `stub` (#8037) withheld. A list written into
-  // the page instead would not match what this daemon answered with.
-  expect([...picker('New channel provider').options].map(option => option.value)).toEqual(['telegram', 'gworkspace']);
-  expect(picker('New channel provider').textContent).toContain('Google Workspace');
+  expect([...picker('New channel provider').options].map(option => option.value)).toEqual(['telegram', 'discord']);
+  expect(picker('New channel provider').textContent).toContain('Discord');
   expect(document.body.textContent).not.toContain('Stub');
 });
 
@@ -425,4 +434,115 @@ it('will not add or delete over an unsaved field edit', async () => {
   expect(button('Add channel').disabled).toBe(true);
   expect(deleteButton('Ops').disabled).toBe(true);
   expect(document.body.textContent).toContain('Save or discard these changes');
+});
+
+// Guarding only the ENTRY buttons left the list editable once an editor was
+// open, and a create or delete that landed then called `apply(result)`, which
+// replaces `channels` wholesale (critic HIGH). Two guards, tested separately:
+// the list goes read-only, AND both writes re-check before going to the wire.
+const listFieldset = () => document.querySelector('fieldset') as HTMLFieldSetElement;
+
+it('makes the stored list read-only while either editor is open', async () => {
+  await render();
+  button('Add channel').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(true);
+  // The click an operator would make is inert, so the list cannot go dirty
+  // underneath the open form and Save has nothing to publish.
+  box('gmail-personal enabled').click();
+  await settle();
+  expect(box('gmail-personal enabled').checked).toBe(true);
+  expect(button('Save channels').disabled).toBe(true);
+  button('Cancel').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(false);
+  deleteButton('Ops').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(true);
+});
+
+/** Drive a checkbox past a disabled fieldset, which blocks clicks but not events. */
+function forceEdit(label: string) {
+  const input = box(label);
+  input.checked = !input.checked;
+  input.dispatchEvent(new Event('change'));
+}
+
+it('refuses a create while the list is dirty instead of overwriting the edit', async () => {
+  await render();
+  await openAdd();
+  // The race the read-only fieldset cannot catch: a change that reaches the
+  // binding anyway. Without the re-check, `apply(result)` replaces `channels`
+  // and the edit disappears under an "added" notice.
+  forceEdit('gmail-personal enabled');
+  await settle();
+  button('Create channel').click();
+  await settle();
+  expect(posts).toHaveLength(0);
+  expect(alerts()).toContain('unsaved changes');
+  expect(box('gmail-personal enabled').checked).toBe(false);
+});
+
+it('refuses a delete while the list is dirty instead of overwriting the edit', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  forceEdit('gmail-personal enabled');
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(deletes).toHaveLength(0);
+  expect(alerts()).toContain('unsaved changes');
+  expect(box('gmail-personal enabled').checked).toBe(false);
+});
+
+// The confirmation claimed `aria-modal` while focus stayed on the Delete
+// button behind it, so Escape reached a handler on the backdrop that nothing
+// was focused inside (critic MEDIUM-2).
+it('closes the delete confirmation on Escape and hands focus back', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  expect(document.activeElement?.textContent).toBe('Cancel');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(deletes).toHaveLength(0);
+  // Focus returns to what opened it, not to the top of the document.
+  expect(document.activeElement).toBe(deleteButton('Ops'));
+});
+
+it('leaves the confirmation open on Escape while the delete is in flight', async () => {
+  await render();
+  let release = () => {};
+  writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie'] } });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'DELETE') await gate;
+    return realFetch(input, init);
+  });
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  // Dismissing mid-flight would leave the operator with no answer to a write
+  // that is still going to land.
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  release();
+  await settle();
+});
+
+it('states why the create failed when the reload after the conflict also fails', async () => {
+  await render();
+  await openAdd();
+  writeFailures.push({ status: 409, body: { error: 'Channel settings changed. Reload before saving.' } });
+  readFails = true;
+  button('Create channel').click();
+  await settle();
+  // The reload is what tells a duplicate id from a lost race. When it fails
+  // too, the create's own refusal is the only thing left to say (critic LOW).
+  expect(alerts()).toContain('Channel settings changed');
 });
