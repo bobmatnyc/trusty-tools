@@ -151,6 +151,31 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          when the mount could not be measured (issue #7497).",
     ),
     (
+        "rust_build_env",
+        "This machine's Rust build settings, for a project whose detected stack includes Rust — \
+         a non-Rust project (or none supplied) reports the row as not applicable, never as a \
+         warning. Reports the shared `CARGO_TARGET_DIR` (`build.cargo_target_dir`, defaulting to \
+         `~/.trusty-tools/cargo-target/<owner>/<repo>` derived from the `origin` remote): whether \
+         it exists, whether it is writable — probed by WRITING a file, since mode bits say only \
+         whether somebody may write — and how much it holds, measured under a 2 s budget that \
+         reports \"at least\" rather than a wrong total. Also the resolved `build.build_jobs` \
+         (default: half the host's cores, minimum 2 — six concurrent cold builds crashed the \
+         reference host on 2026-08-08), whether `sccache` is on PATH, and whether \
+         `build.rustc-wrapper` is wired in `~/.cargo/config.toml`. Every message closes with the \
+         one line a PM pastes into an engineer brief: `CARGO_TARGET_DIR=<dir> \
+         CARGO_BUILD_JOBS=<n> [RUSTC_WRAPPER=sccache] SKIP_UI_BUILD=1`. `Ok` when the directory \
+         exists and is writable; `Warn` when it does not exist yet (naming `tm doctor --fix \
+         --yes`), or when the config asks for sccache and no wrapper is wired; `Fail` ONLY when \
+         the directory exists and cannot be written; UNKNOWN — never `Ok` — when the repo \
+         identity cannot be derived, stack detection was cut short, or the directory could not \
+         be measured. An absent `build:` section is the shipped defaults, never a finding. \
+         Read-only; `tm doctor --fix --yes` creates the directory with its parents and seeds the \
+         `build:` section when and only when no `build` key is present, preserving every \
+         existing key and comment. Neither the check nor the repair ever writes \
+         `~/.cargo/config.toml` — it is machine-global for every Rust project on the host \
+         (issue #6868).",
+    ),
+    (
         "base_clone",
         "The base clone each live worktree resolves through still has its git identity — \
          fails naming the base path and how many worktrees hang off it (issue #3605).",

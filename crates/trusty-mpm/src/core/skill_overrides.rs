@@ -89,7 +89,9 @@ const WEB_STACKS: &[&str] = &[
 pub const SKILL_FAMILY_TABLE: &[SkillFamily] = &[
     SkillFamily {
         name: "rust-build",
-        skills: &["rust-build-performance"],
+        // #8192: `rust-delivery-workflow` joins the same family — a non-Rust
+        // project has no use for either, and both are gated on the same stacks.
+        skills: &["rust-build-performance", "rust-delivery-workflow"],
         // `tauri-engineer` preloads this skill, so a Tauri project keeps it.
         relevant_stacks: &["rust-engineer", "tauri-engineer"],
     },

@@ -299,6 +299,12 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
         name: "code-reviewer",
         md: CODE_REVIEWER_MD,
     },
+    // #8184: `pm` is the default agent of an INTERACTIVE session, which runs
+    // SOLO since #8184 — it edits and runs commands itself, in the user's real
+    // project root, instead of delegating. Its card is therefore the only
+    // bundled one carrying a `permissions:` block: every mutating tool asks
+    // first (#3422), reads stay unprompted. A headless run has nobody to ask,
+    // so an `ask` there denies (#8100) unless TCODE_PERMISSION_MODE=allow-asks.
     EmbeddedAgent::Direct {
         name: "pm",
         md: PM_MD,

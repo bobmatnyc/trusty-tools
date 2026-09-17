@@ -288,6 +288,22 @@ struct TaskRunRequestParams {
 /// the ORIGINAL binding forever while the run actually executed against a
 /// different one — a silent audit/state divergence this validation exists to
 /// prevent (code-critic HIGH finding, PR #3189).
+///
+/// **(#8184) Invariant: a reused session's agent SHAPE is authoritative too.**
+/// A session minted solo (`session.create`'s default — see
+/// `crate::session::protocol::create`) runs solo on every turn; a session
+/// minted delegating rejects a `no_delegate: true` call with
+/// `-32003 invalid_argument` rather than running a shape
+/// `session.status`/`session.list` would keep reporting as the other one.
+/// Same rule, same rationale as the `project` and `workstream_id` guards. The
+/// mint path persists this call's own `no_delegate` onto the session it
+/// creates, so the run and the record always agree.
+///
+/// The guard is ONE-DIRECTIONAL by construction: `no_delegate` is a plain
+/// `bool` with a serde default, so an omitted field and an explicit `false`
+/// are the same value on the wire and a request cannot express "I want
+/// delegation" for the daemon to reject. A solo session therefore runs solo
+/// for a caller that asked for either — which is the shape it reports.
 /// Test: `task::protocol::tests::task_run_rejects_empty_task_description`,
 /// `task::protocol::tests::task_run_creates_session_when_none_given`,
 /// `task::protocol::tests::task_run_sessionful_reuses_existing_session`,
@@ -297,7 +313,11 @@ struct TaskRunRequestParams {
 /// `task::protocol::tests::task_run_with_project_overrides_boot_binding`,
 /// `task::protocol::tests::task_run_rejects_invalid_project`,
 /// `task::protocol::tests::task_run_session_id_with_matching_project_succeeds`,
-/// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`.
+/// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`,
+/// `task::protocol::tests::task_run_on_a_default_session_never_delegates`,
+/// `task::protocol::tests::task_run_on_a_delegating_session_still_delegates`,
+/// `task::protocol::tests::task_run_minted_session_records_its_no_delegate`,
+/// `task::protocol::tests::task_run_no_delegate_against_a_delegating_session_is_rejected`.
 // #7948: production registers through `register_with_permissions`; this
 // headless five-argument form is what the unit tests drive.
 #[cfg(test)]
@@ -349,6 +369,10 @@ async fn task_run_with_permissions(
         .agent_name
         .unwrap_or_else(|| DEFAULT_TASK_RUN_AGENT_NAME.to_string());
 
+    // #8184: the shape this run ACTUALLY executes, which is also the one
+    // persisted on the session — the two can never disagree, see the
+    // immutability guard on the reuse arm below.
+    let mut effective_no_delegate = p.no_delegate;
     let session_id = match &p.session_id {
         Some(id) => {
             let existing = registry.status(id)?; // propagate session_not_found verbatim
@@ -381,6 +405,20 @@ async fn task_run_with_permissions(
                 p.workstream_id.as_deref(),
                 "task.run",
             )?;
+            // (#8184) A session's agent SHAPE is immutable once set, the same
+            // rule as `binding` and `workstream_id` above and for the same
+            // reason: `session.status`/`session.list` keep reporting the
+            // persisted value, so a call that ran a DIFFERENT shape would be
+            // the silent record-vs-run divergence those two guards exist to
+            // prevent (PR #3189). A run may only restate the session's shape.
+            if p.no_delegate && !existing.no_delegate {
+                return Err(RpcError::invalid_argument(format!(
+                    "task.run: no_delegate does not match session `{id}`'s own delegating shape \
+                     — a session's agent shape is persisted at creation and authoritative; \
+                     create a session with `delegate: false` for a single-agent run"
+                )));
+            }
+            effective_no_delegate = existing.no_delegate;
             id.clone()
         }
         None => {
@@ -396,11 +434,14 @@ async fn task_run_with_permissions(
                 p.workstream_id.as_deref(),
                 "task.run",
                 || {
+                    // #8184: record THIS call's shape on the session it mints,
+                    // so a later turn against the same session inherits it.
                     registry
-                        .create(
+                        .create_with_delegation(
                             p.task_description.clone(),
                             Some(agent_name.clone()),
                             binding.clone(),
+                            p.no_delegate,
                         )
                         .id
                 },
@@ -437,10 +478,11 @@ async fn task_run_with_permissions(
         // request, so a caller cannot widen its own permissions.
         permission_broker: permissions,
         permission_mode: crate::permissions::PermissionMode::resolve(None),
-        // #8031: a single-agent run — carried straight through, no resolution
-        // tiers (unlike `mode`/`deadline_secs`, this has no env or settings
-        // source; the request is the only one).
-        no_delegate: p.no_delegate,
+        // #8031: a single-agent run. #8184: on the reuse path this is the
+        // SESSION's persisted shape (the guard above rejects a call that
+        // would differ), on the mint path this call's own param, which the
+        // mint persisted — so the run and the record always agree.
+        no_delegate: effective_no_delegate,
     };
     spawn_task_run(registry, llm, task_params)?;
 

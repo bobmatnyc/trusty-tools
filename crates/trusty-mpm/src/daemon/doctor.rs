@@ -220,6 +220,14 @@ use doctor_disk_usage::check_disk_usage;
 mod doctor_pty_headroom;
 use doctor_pty_headroom::check_pty_headroom;
 
+// See #6868 — the two rows above measure disk this machine HAS SPENT; this one
+// reports the Rust build settings that decide how much a dispatched engineer
+// spends next (shared cargo target dir, job count, sccache posture), and prints
+// the prefix line a PM pastes into a brief.
+#[path = "doctor_rust_build_env.rs"]
+mod doctor_rust_build_env;
+use doctor_rust_build_env::check_rust_build_env;
+
 // #6535: the cloud log drain runs inside the daemon and writes to somebody
 // else's bucket, so nothing else on screen says whether it is on, where it
 // points, or whether the last pass worked.
@@ -406,7 +414,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_five_checks`,
+/// Test: `run_doctor_produces_fifty_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -560,6 +568,13 @@ pub(crate) async fn run_doctor_with_claims(
     // #7497: and this is the mount the store sits ON — the number the
     // `disk.max_usage_pct` gate reads before creating the next worktree.
     checks.push(check_disk_usage(repos_root, &home));
+    // See #6868: the rows above measure what disk has ALREADY gone; this one
+    // reports the Rust build settings that decide the next cold build's cost,
+    // and prints the `CARGO_TARGET_DIR=… CARGO_BUILD_JOBS=…` line a PM pastes
+    // into an engineer brief. Skips silently on a non-Rust project. Read-only:
+    // `tm doctor --fix` creates the directory and seeds the `build:` section,
+    // and neither ever touches `~/.cargo/config.toml`.
+    checks.push(check_rust_build_env(project_dir, &home));
     // #3605: and this is the identity half — a live worktree keeps its files
     // when the base clone behind it loses its git internals, so every git
     // command there fails while both probes above stay green.
@@ -754,7 +769,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_five_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_six_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

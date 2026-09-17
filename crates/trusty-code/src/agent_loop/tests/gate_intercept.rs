@@ -20,6 +20,29 @@
 
 use super::*;
 
+/// A project root the #8206 detection probe recognises, so these #2279
+/// intercept tests still reach the gate's refusal arm.
+///
+/// Why: The gate now refuses only a test suite it can show is there; an
+/// unbound or empty root accepts the finish instead, which would silently
+/// void every assertion below.
+/// What: A tempdir holding a `pytest.ini`, matching these tests' `pytest`
+/// scripts. The caller must keep the returned handle alive for the run.
+/// Test: used by every test in this module.
+fn detectable_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir for a detectable project");
+    std::fs::write(dir.path().join("pytest.ini"), "[pytest]\n").expect("write pytest.ini");
+    dir
+}
+
+/// The #2279 gate bound to `project` with `bash` available (#8206).
+fn detectable_gate(project: &tempfile::TempDir) -> crate::agent_loop::FinishGate {
+    crate::verify_gate::default_finish_gate(crate::verify_gate::VerifyGateContext::new(
+        Some(project.path().to_path_buf()),
+        true,
+    ))
+}
+
 /// An attached [`crate::verify_gate::default_finish_gate`] rejects a
 /// premature `finish_task` with a RECOVERABLE retry (not a terminal error)
 /// when the task names a runnable test command that was never invoked, and
@@ -55,8 +78,9 @@ async fn finish_gate_trips_and_recovers() {
         ),
     ]));
     let registry = registry_with_finish_task_and_bash();
+    let project = detectable_project();
     let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
+        .with_finish_gate(detectable_gate(&project));
 
     let out = agent
         .run(
@@ -125,8 +149,9 @@ async fn finish_gate_trip_logs_warn() {
         ),
     ]));
     let registry = registry_with_finish_task_and_bash();
+    let project = detectable_project();
     let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
+        .with_finish_gate(detectable_gate(&project));
 
     agent
         .run(
@@ -164,8 +189,9 @@ async fn finish_gate_inert_without_named_test_command() {
         r#"{"status": "completed", "summary": "implemented the widget"}"#,
     )]));
     let registry = registry_with_finish_task_and_bash();
+    let project = detectable_project();
     let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
+        .with_finish_gate(detectable_gate(&project));
 
     let out = agent
         .run("system prompt", "implement a widget")
@@ -202,8 +228,9 @@ async fn finish_gate_passes_first_attempt_when_named_tests_already_ran() {
         ),
     ]));
     let registry = registry_with_finish_task_and_bash();
+    let project = detectable_project();
     let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
+        .with_finish_gate(detectable_gate(&project));
 
     let out = agent
         .run(
@@ -231,5 +258,55 @@ async fn finish_gate_passes_first_attempt_when_named_tests_already_ran() {
     assert!(
         !any_nudge,
         "the gate must not inject a nudge when the named tests already ran"
+    );
+}
+
+/// The gate's ACCEPT-WITH-NOTE arm (#8206) leaves the accepted finish's
+/// recorded report saying that no test command ran, and why.
+///
+/// Why: Closure condition 3 — an unverified finish must not read as a
+/// verified one. The note is the only trace the caller sees, so the
+/// `FinishGateOutcome::AcceptWithNote` plumbing through `dispatch_all` and
+/// `append_finish_note` needs an end-to-end guard.
+/// What: One `finish_task` call, a task naming `pytest`, and a gate whose
+/// context reports NO `bash` tool; assert the loop terminates on that first
+/// call and the run's summary/content carry the note.
+/// Test: this test.
+#[tokio::test]
+async fn finish_gate_note_reaches_the_recorded_report() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
+        "call-finish",
+        r#"{"status": "completed", "summary": "implemented the parser"}"#,
+    )]));
+    let registry = registry_with_finish_task_and_bash();
+    let project = detectable_project();
+    let gate = crate::verify_gate::default_finish_gate(crate::verify_gate::VerifyGateContext::new(
+        Some(project.path().to_path_buf()),
+        false,
+    ));
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default()).with_finish_gate(gate);
+
+    let out = agent
+        .run(
+            "system prompt",
+            "implement the parser; run `pytest tests/ -v` before finishing",
+        )
+        .await
+        .expect("an agent with no bash tool must be allowed to finish");
+
+    assert_eq!(llm.calls(), 1, "the gate must not force an extra turn");
+    let summary = out.summary.as_deref().expect("a finish summary");
+    assert!(
+        summary.contains("implemented the parser"),
+        "the model's own summary must survive; got: {summary}"
+    );
+    assert!(
+        summary.contains("no test command was run"),
+        "the report must record that nothing ran; got: {summary}"
+    );
+    assert!(
+        out.content.contains("no test command was run"),
+        "the rendered report must carry the note too; got: {}",
+        out.content
     );
 }

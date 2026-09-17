@@ -330,6 +330,7 @@ mod tests {
             mode: None,
             workstream_id: None,
             result: None,
+            no_delegate: false,
         }
     }
 

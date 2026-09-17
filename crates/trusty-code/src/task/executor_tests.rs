@@ -1317,6 +1317,157 @@ async fn no_delegate_run_respects_the_agents_tools_allowlist() {
     }
 }
 
+// ── #8184: the interactive solo session's registry and permission gate ──────
+
+/// #8184: the SOLO run of the stock `pm` agent advertises the file tools.
+///
+/// Why: `tcode tui`'s default session runs `task.run`'s default agent (`pm`)
+/// with `no_delegate`, so "the agent reads and edits the file itself" is true
+/// only if the SHIPPED `pm` agent card carries those tools. A fixture agent
+/// with a hand-written allowlist would prove nothing about what a user gets.
+/// What: an EMPTY agents dir, so `crate::agents::resolve_agent` falls back to
+/// the embedded roster's real `pm.md`, and asserts the advertised schema set.
+/// Test: this test.
+#[tokio::test]
+async fn solo_run_of_the_stock_pm_advertises_the_file_tools() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = tempfile::tempdir().expect("empty agents tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let advertised = mock.first_tool_names();
+    for tool in ["read_file", "write_file", "edit", "bash"] {
+        assert!(
+            advertised.contains(&tool.to_string()),
+            "the solo session must carry {tool}; got {advertised:?}"
+        );
+    }
+    assert!(
+        !advertised.contains(&"delegate_to_agent".to_string()),
+        "a solo session must not advertise delegate_to_agent; got {advertised:?}"
+    );
+}
+
+/// The `request_id` of the first `permission_requested` this session recorded.
+///
+/// Why (#8184): the ask suspends the run inside the gate, so the answer has to
+/// come from a concurrent task reading the session's own event ring — the same
+/// place a real client reads it from.
+/// Test: `solo_run_of_the_stock_pm_asks_before_write_file`.
+async fn await_permission_request(registry: &SessionRegistry, id: &str) -> (String, String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for e in registry.replay(id).expect("session must exist") {
+            if let crate::events::Event::PermissionRequested {
+                request_id, tool, ..
+            } = &e.event
+            {
+                return (request_id.clone(), tool.clone());
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no permission request arrived within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// #8184 / #3422 SAFETY GATE: the STOCK `pm` agent — the one a default
+/// interactive session runs — asks before writing a file, and a deny keeps it
+/// off disk.
+///
+/// Why: #8184 gives the top-level agent `write_file`/`edit`/`bash` in the
+/// user's real project root. That is only safe if the SHIPPED agent card asks
+/// first; a bespoke fixture card with a hand-written rule would prove nothing
+/// about what a user gets. This drives the daemon path the TUI drives
+/// (`spawn_task_run` with a broker), so the ask, the published event, and the
+/// answer are the real ones.
+/// What: an EMPTY agents dir, so `resolve_agent` falls back to the embedded
+/// `pm.md`; a broker plus a real `session.events` stream — the ONLY thing the
+/// TUI holds, and with no `session.attach` anywhere, so this is the client
+/// shape (#8184, `tui_client::prompter_claim`) rather than a synthetic
+/// `claim_prompter`; a concurrent task answers `deny`. Asserts the request
+/// named `write_file` and that nothing was written. FAILS without `pm.md`'s
+/// `permissions:` block — no request is ever published and the file lands.
+/// Deterministic: the answering task waits for the published event, so there
+/// is no window to lose.
+/// Test: this test.
+#[tokio::test]
+async fn solo_run_of_the_stock_pm_asks_before_write_file() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = tempfile::tempdir().expect("empty agents tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let broker = Arc::new(crate::permissions::PermissionBroker::new());
+    // #8100/#8184: an ask only suspends while someone is watching THIS
+    // session, and what the TUI holds is an events stream — held open for the
+    // whole run, exactly as `prompter_claim` holds it.
+    let mut _watching = crate::session::events_stream::open(
+        Arc::clone(&registry),
+        crate::session::events_stream::SessionEventsParams {
+            session_id: session.id.clone(),
+            after_seq: None,
+        },
+    )
+    .await
+    .expect("the session must be streamable");
+    // One frame proves the daemon-side handler ran, so the claim exists before
+    // anything can be gated — the client's own handshake.
+    let _confirmed = _watching.recv().await;
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[
+        write_file_tool_call_response("call_1", "asked.txt", "nope"),
+        stop_response("pm: the write was refused"),
+    ]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        task: "create asked.txt".to_string(),
+        permission_broker: Some(Arc::clone(&broker)),
+        ..params(&agents, &project, &session.id)
+    };
+
+    let answering = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        let broker = Arc::clone(&broker);
+        let session_id = session.id.clone();
+        async move {
+            let (request_id, tool) = await_permission_request(&registry, &session_id).await;
+            broker
+                .session(&session_id)
+                .respond(&request_id, crate::permissions::PermissionDecision::Deny)
+                .expect("the request must still be waiting");
+            tool
+        }
+    });
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    let tool = answering.await.expect("the answering task must not panic");
+    wait_for_terminal(&registry, &session.id).await;
+
+    assert_eq!(
+        tool, "write_file",
+        "the stock pm must ask before writing a file"
+    );
+    assert!(
+        !project.path().join("asked.txt").exists(),
+        "a denied write_file must not reach the disk"
+    );
+}
+
 // ── #8030 / #8128: top-level model + turn-cap overrides, daemon path ────────
 
 /// A response calling a tool this run's registry does not carry, so the loop

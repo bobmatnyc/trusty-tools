@@ -86,6 +86,8 @@ fn rust_and_svelte_disagree_on_the_rust_and_web_families() {
     let rust = irrelevant_skills(&stacks(&["rust-engineer"]));
     let svelte = irrelevant_skills(&stacks(&["javascript-engineer", "svelte-engineer"]));
     assert!(!rust.contains("rust-build-performance") && svelte.contains("rust-build-performance"));
+    // #8192: the rust-build family's second skill is gated identically.
+    assert!(!rust.contains("rust-delivery-workflow") && svelte.contains("rust-delivery-workflow"));
     assert!(rust.contains("webapp-testing") && !svelte.contains("webapp-testing"));
 }
 

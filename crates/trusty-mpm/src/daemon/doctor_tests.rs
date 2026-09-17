@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_five_checks() {
+async fn run_doctor_produces_fifty_six_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -523,6 +523,10 @@ async fn run_doctor_produces_fifty_five_checks() {
         // `disk.max_usage_pct` — the number that decides whether the next
         // worktree is created at all.
         "disk_usage",
+        // See #6868: this machine's Rust build settings — the shared cargo
+        // target directory, the job count, and the sccache posture — plus the
+        // prefix line a PM pastes into an engineer brief.
+        "rust_build_env",
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
@@ -1004,4 +1008,37 @@ fn live_workspace_paths_drops_only_claims_a_probe_found_gone() {
         WorkspaceClaim::with_liveness("tm-still-here", &still_here, ClaimLiveness::Live),
     ]);
     assert_eq!(live_workspace_paths(&claims), vec![still_here]);
+}
+
+/// See #6868: the report carries the `rust_build_env` row, and the row is
+/// harmless in a project that is not Rust.
+///
+/// Why: the check is registered in `run_doctor_with_claims`, and the
+/// registration is the one part `doctor_rust_build_env_tests.rs` cannot prove —
+/// it drives the module directly. This proves the wiring, and proves the row
+/// never turns a non-Rust project's report red, which is the failure that would
+/// make every operator stop reading `tm doctor` output.
+#[tokio::test]
+async fn doctor_report_includes_rust_build_env_row() {
+    let project = tempfile::tempdir().expect("temp project");
+    std::fs::write(project.path().join("package.json"), "{}").expect("a non-Rust marker");
+
+    let report = run_doctor(Some(project.path()), None, &[], None).await;
+    let row = report
+        .checks
+        .iter()
+        .find(|c| c.name == "rust_build_env")
+        .expect("the rust_build_env row must be registered");
+
+    assert_eq!(
+        row.status,
+        CheckStatus::Ok,
+        "a non-Rust project must not be warned about a cargo target directory: {}",
+        row.message
+    );
+    assert!(
+        row.message.contains("not applicable"),
+        "the row must say why it did nothing: {}",
+        row.message
+    );
 }

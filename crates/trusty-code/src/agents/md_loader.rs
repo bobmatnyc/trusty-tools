@@ -94,7 +94,49 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read agent file {}: {e}", path.display()))?;
     config.permissions = crate::permissions::parse_permissions(&path.display().to_string(), &raw)?;
+    if config.permissions.is_none() {
+        config.permissions = deployed_roster_permissions(name, &raw)?;
+    }
     Ok(config)
+}
+
+/// The EMBEDDED roster card's `permissions:` block, when `raw` is a deployed
+/// copy of that same card and carries none of its own (#8184).
+///
+/// Why: the roster deployer re-emits frontmatter from a fixed key list
+/// (`trusty_agents_common::agents::builder`), which does not include
+/// `permissions:`, so a materialized `<project>/.trusty-code/agents/<name>.md`
+/// silently loses the block its source declared — and an agent with no block is
+/// allowed everything. Since #8184's interactive default runs the stock `pm`
+/// SOLO, with `write_file`/`edit`/`bash` in the user's own project root, that
+/// drop would turn a card that asks into a run that never prompts. Restoring
+/// the source's block here keeps the shipped card authoritative until the
+/// shared emitter carries the key itself.
+/// What: applies ONLY to a file the deployer wrote — read as the PARSED
+/// `provenance:` key, not as a substring, so a quoting or ordering change in
+/// the emitter cannot silently turn this into a no-op — whose stem names a
+/// `Direct` embedded agent, and ONLY when the file declares no block of its
+/// own. A hand-authored card, or a deployed one a user has since given rules,
+/// is never second-guessed. A malformed block in the embedded source is an
+/// `Err`, same fail-closed contract as `parse_permissions` above.
+/// Test: `deployed_roster_copy_recovers_the_cards_permissions`,
+/// `hand_authored_file_gets_no_embedded_permissions`.
+fn deployed_roster_permissions(
+    name: &str,
+    raw: &str,
+) -> anyhow::Result<Option<crate::permissions::PermissionMap>> {
+    if agent_metadata_from_str(raw).provenance
+        != Some(trusty_agents_common::agents::provenance::Provenance::FrameworkOwned)
+    {
+        return Ok(None);
+    }
+    let Some(md) = crate::assets::DEFAULT_AGENTS.iter().find_map(|a| match a {
+        crate::assets::EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    Ok(crate::permissions::parse_permissions(name, md)?)
 }
 
 /// Project an embedded (in-memory, no source directory) `.md` agent document
@@ -646,7 +688,7 @@ mod tests {
     /// body contains marker text unique to each of the three tiers
     /// (BASE-AGENT's "Foundation for all trusty-mpm agents", BASE-ENGINEER's
     /// "Foundation for all engineer agents", and rust-engineer's own
-    /// "toolchains-rust-core").
+    /// `# Rust Engineer` heading).
     /// Test: this test.
     #[test]
     fn project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer() {
@@ -667,8 +709,11 @@ mod tests {
                 .contains("Foundation for all engineer agents"),
             "composed body must include BASE-ENGINEER tier content"
         );
+        // #8215: the leaf marker is rust-engineer's own H1, which tracks the
+        // agent's identity; a skill name pinned here goes stale whenever the
+        // asset's skill wiring changes (as `toolchains-rust-core` did in #8192).
         assert!(
-            cfg.system_prompt.content.contains("toolchains-rust-core"),
+            cfg.system_prompt.content.contains("# Rust Engineer"),
             "composed body must include rust-engineer's own content"
         );
     }
@@ -888,5 +933,72 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("child"), "must name the agent: {text}");
         assert!(text.contains("allowed"), "must quote the value: {text}");
+    }
+
+    /// #8184: the deployer drops `permissions:` when it re-emits frontmatter,
+    /// so a materialized roster card must recover its source's block — the
+    /// difference between the stock `pm` asking before it writes and never
+    /// prompting at all. FAILS before #8184: the deployed copy loaded with no
+    /// permissions, which means everything allowed.
+    /// Test: this test.
+    #[test]
+    fn deployed_roster_copy_recovers_the_cards_permissions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pm.md"),
+            "---\nname: pm\nrole: pm\nprovenance: framework-owned\nmodel: sonnet\n\
+             tcode_tools: [read_file, write_file, bash]\n---\n\nYou are the PM.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("pm.md")).expect("loads");
+        let permissions = cfg
+            .permissions
+            .expect("a deployed roster card must carry its source's block");
+        assert!(
+            !permissions.is_empty(),
+            "the recovered block must carry the card's rules"
+        );
+    }
+
+    /// #8184: the provenance test reads the PARSED key, so a QUOTED value —
+    /// which a frontmatter emitter may legitimately produce — still recovers
+    /// the block. FAILS against the substring form this replaced, which only
+    /// matched the bare spelling and would have silently stopped recovering.
+    /// Test: this test.
+    #[test]
+    fn quoted_provenance_still_recovers_the_cards_permissions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pm.md"),
+            "---\nname: pm\nrole: pm\nprovenance: \"framework-owned\"\nmodel: sonnet\n\
+             tcode_tools: [read_file, write_file, bash]\n---\n\nYou are the PM.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("pm.md")).expect("loads");
+        assert!(
+            cfg.permissions.is_some_and(|p| !p.is_empty()),
+            "a quoted `provenance:` is the same declaration as an unquoted one"
+        );
+    }
+
+    /// The recovery is scoped to the deployer's own output: a hand-authored
+    /// file sharing a roster name keeps its author's silence.
+    /// Test: this test.
+    #[test]
+    fn hand_authored_file_gets_no_embedded_permissions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pm.md"),
+            "---\nname: pm\nmodel: sonnet\ntcode_tools: [read_file]\n---\n\nMy own PM.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("pm.md")).expect("loads");
+        assert!(
+            cfg.permissions.is_none(),
+            "a hand-authored card must not inherit the roster's rules"
+        );
     }
 }

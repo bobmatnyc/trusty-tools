@@ -28,6 +28,9 @@ const CODING_SKILLS: &[&str] = &[
     "requesting-code-review",
     "root-cause-tracing",
     "rust-build-performance",
+    // #8214: engineer-only like its sibling `rust-build-performance` — cargo
+    // gate ordering and toolchain parity for a Rust change under dispatch.
+    "rust-delivery-workflow",
     "security-scanning",
     "software-patterns",
     "systematic-debugging",

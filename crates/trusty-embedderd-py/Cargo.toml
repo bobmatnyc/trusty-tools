@@ -7,7 +7,7 @@ license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Opt-in Python/MPS embedding sidecar launcher for trusty-search: uv-bootstraps a pinned venv and execs the trusty_embed_sidecar stdio JSON-RPC server (epic #3524)."
 readme = "README.md"
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 keywords = ["embeddings", "sidecar", "mps", "torch", "uv"]
 categories = ["command-line-utilities", "artificial-intelligence"]
 

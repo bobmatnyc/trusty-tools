@@ -99,7 +99,7 @@ description = "Shared utilities and provider-agnostic streaming chat (ChatProvid
 readme = "README.md"
 keywords = ["mcp", "utilities", "cli", "openrouter"]
 categories = ["command-line-utilities"]
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 
 # #4474: which feature sets constitute full test coverage of this crate, stated
 # where a machine can read it.
