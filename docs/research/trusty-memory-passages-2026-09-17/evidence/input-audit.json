@@ -1,0 +1,22 @@
+{
+  "counts": {
+    "ambiguous": 8,
+    "negative": 1,
+    "positive": 21,
+    "unavailable": 2
+  },
+  "exact_prompt_overlap": 0,
+  "frozen_before_rankings": true,
+  "gold_sha256": "016e8118d70a90206767f5ed1c444359f4dffaf7a873acb3299afdad912b7491",
+  "mandatory_spans": 29,
+  "parent_review": "PASS",
+  "prepared_sha256": "fd3abfaffb613333295fa573bf641283f769ac855a69327102bfa9494fdacfb8",
+  "prior_artifacts_count": 391,
+  "prior_artifacts_unchanged_before_ranking": true,
+  "sample_sha256": "4a707fa8309f029a763cbb0ea95de73539e8d34b0744e5ce8a6b4beab1e5610b",
+  "source_and_metadata_identity": true,
+  "temporal_strata": {
+    "earlier_support_cases": 2,
+    "later_support_cases": 19
+  }
+}

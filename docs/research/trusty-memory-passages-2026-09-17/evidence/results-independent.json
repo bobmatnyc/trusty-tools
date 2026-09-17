@@ -1,0 +1,398 @@
+{
+  "checks": {
+    "span_checks": 8396,
+    "metric_checks": 3072,
+    "packets": 192,
+    "cross_arm_queries": 32
+  },
+  "labels": {
+    "unavailable": 2,
+    "ambiguous": 8,
+    "positive": 21,
+    "negative": 1
+  },
+  "positive_temporal_cases": {
+    "after": 19,
+    "before_or_equal": 2
+  },
+  "arms": {
+    "raw_bm25-128": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "expanded": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "emitted": {
+        "any_support": 7,
+        "complete_count": 1,
+        "n": 21,
+        "byte_coverage": 0.1005898909739465,
+        "full_span_fraction": 0.047619047619047616,
+        "complete": 0.047619047619047616,
+        "note_recall": 0.30952380952380953
+      },
+      "positive_empty": 0,
+      "negative_empty": 0,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 7,
+          "complete": 1,
+          "mean_byte_coverage": 0.11117830055015139
+        }
+      }
+    },
+    "raw_bm25-256": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "expanded": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "emitted": {
+        "any_support": 12,
+        "complete_count": 1,
+        "n": 21,
+        "byte_coverage": 0.18698792539729442,
+        "full_span_fraction": 0.07142857142857142,
+        "complete": 0.047619047619047616,
+        "note_recall": 0.5476190476190477
+      },
+      "positive_empty": 0,
+      "negative_empty": 0,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 12,
+          "complete": 1,
+          "mean_byte_coverage": 0.2066708649127991
+        }
+      }
+    },
+    "lexical_fixed-128": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "expanded": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "emitted": {
+        "any_support": 7,
+        "complete_count": 1,
+        "n": 21,
+        "byte_coverage": 0.1005898909739465,
+        "full_span_fraction": 0.047619047619047616,
+        "complete": 0.047619047619047616,
+        "note_recall": 0.30952380952380953
+      },
+      "positive_empty": 2,
+      "negative_empty": 1,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 7,
+          "complete": 1,
+          "mean_byte_coverage": 0.11117830055015139
+        }
+      }
+    },
+    "lexical_fixed-256": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "expanded": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "emitted": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "positive_empty": 2,
+      "negative_empty": 1,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 12,
+          "complete": 2,
+          "mean_byte_coverage": 0.2528476275741695
+        }
+      }
+    },
+    "lexical_passages-128": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "expanded": {
+        "any_support": 13,
+        "complete_count": 7,
+        "n": 21,
+        "byte_coverage": 0.5021384399080597,
+        "full_span_fraction": 0.4126984126984127,
+        "complete": 0.3333333333333333,
+        "note_recall": 0.5952380952380952
+      },
+      "emitted": {
+        "any_support": 3,
+        "complete_count": 1,
+        "n": 21,
+        "byte_coverage": 0.09028201133464292,
+        "full_span_fraction": 0.0873015873015873,
+        "complete": 0.047619047619047616,
+        "note_recall": 0.14285714285714285
+      },
+      "positive_empty": 3,
+      "negative_empty": 1,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 3,
+          "complete": 1,
+          "mean_byte_coverage": 0.09978538094881585
+        }
+      }
+    },
+    "lexical_passages-256": {
+      "candidate": {
+        "any_support": 14,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2507773032202088,
+        "full_span_fraction": 0.14285714285714285,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.6666666666666666
+      },
+      "selected": {
+        "any_support": 12,
+        "complete_count": 2,
+        "n": 21,
+        "byte_coverage": 0.2287669011385343,
+        "full_span_fraction": 0.11904761904761904,
+        "complete": 0.09523809523809523,
+        "note_recall": 0.5476190476190477
+      },
+      "expanded": {
+        "any_support": 13,
+        "complete_count": 7,
+        "n": 21,
+        "byte_coverage": 0.5021384399080597,
+        "full_span_fraction": 0.4126984126984127,
+        "complete": 0.3333333333333333,
+        "note_recall": 0.5952380952380952
+      },
+      "emitted": {
+        "any_support": 9,
+        "complete_count": 4,
+        "n": 21,
+        "byte_coverage": 0.3234442818324583,
+        "full_span_fraction": 0.2698412698412698,
+        "complete": 0.19047619047619047,
+        "note_recall": 0.40476190476190477
+      },
+      "positive_empty": 2,
+      "negative_empty": 1,
+      "temporal": {
+        "before_or_equal": {
+          "n": 2,
+          "any_support": 0,
+          "complete": 0,
+          "mean_byte_coverage": 0.0
+        },
+        "after": {
+          "n": 19,
+          "any_support": 9,
+          "complete": 4,
+          "mean_byte_coverage": 0.35749104834113815
+        }
+      }
+    }
+  },
+  "paired": {
+    "128": {
+      "byte_coverage": {
+        "wins": 2,
+        "ties": 14,
+        "losses": 5,
+        "mean_delta": -0.010307879639303578
+      },
+      "full_span_fraction": {
+        "wins": 2,
+        "ties": 19,
+        "losses": 0,
+        "mean_delta": 0.03968253968253968
+      },
+      "complete": {
+        "wins": 0,
+        "ties": 21,
+        "losses": 0,
+        "mean_delta": 0
+      },
+      "note_recall": {
+        "wins": 1,
+        "ties": 15,
+        "losses": 5,
+        "mean_delta": -0.16666666666666666
+      }
+    },
+    "256": {
+      "byte_coverage": {
+        "wins": 7,
+        "ties": 11,
+        "losses": 3,
+        "mean_delta": 0.09467738069392401
+      },
+      "full_span_fraction": {
+        "wins": 6,
+        "ties": 14,
+        "losses": 1,
+        "mean_delta": 0.15079365079365079
+      },
+      "complete": {
+        "wins": 3,
+        "ties": 17,
+        "losses": 1,
+        "mean_delta": 0.09523809523809523
+      },
+      "note_recall": {
+        "wins": 0,
+        "ties": 18,
+        "losses": 3,
+        "mean_delta": -0.14285714285714285
+      }
+    }
+  }
+}

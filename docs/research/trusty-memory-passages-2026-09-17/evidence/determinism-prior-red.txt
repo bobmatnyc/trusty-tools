@@ -1,0 +1,13 @@
+prior_policy_sha256=5da8c643dd61de4317f7a10b0a845635576c35c7905dfaed6e0da730c753bc44
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_exact_quarter_support_across_hash_seeds _________________
+/var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/passage-old-arithmetic-unvbsl44/test_passage.py:132: in test_exact_quarter_support_across_hash_seeds
+    assert outputs == [[[first.id], expected_arguments]]*3
+E   AssertionError: assert [[['toy|dfb6d...dd|1|0'], []]] == [[['toy|dfb6d...34776, ...]]]]
+E     
+E     At index 0 diff: [['toy|dfb6d895a6fdd|1|0'], []] != [['toy|dfb6d895a6fdd|1|0'], [[2.9459101490553135, 3.3513752571634776], [3.3513752571634776, 2.9459101490553135, 2.9459101490553135, 3.3513752571634776, 2.9459101490553135, 3.3513752571634776, 2.9459101490553135, 3.3513752571634776]]]
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/passage-old-arithmetic-unvbsl44/test_passage.py::test_exact_quarter_support_across_hash_seeds
+1 failed, 15 deselected in 0.79s

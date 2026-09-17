@@ -1,0 +1,9 @@
+{
+  "docs/research/trusty-memory-passages-2026-09-17/interface.md": "5a217bd32c1310d3166f5e18e25faa953bb0cdbc4ba59ca67b7b4177447855ee",
+  "docs/research/trusty-memory-passages-2026-09-17/protocol.md": "d2c4722640780309003ee4e8a0f9959d4959dc752378ddb52d4a768ffad7f8bf",
+  "experiments/trusty-memory-passages/README.md": "f3d2c0d0645368175dab2caacece1da93df13fbcc32d3a05d9419c660913a553",
+  "experiments/trusty-memory-passages/passage_evaluate.py": "30cc941090ce2183fb4a2d00c9ee9749753e9821fb15d430a3b33731e909178b",
+  "experiments/trusty-memory-passages/passage_policy.py": "cdd884f24cb377f837731fcb4aeb909ab3f7512c3ad08b2b0ef97c51b8b598e4",
+  "experiments/trusty-memory-passages/test_passage.py": "de85ec8ad4355b1cd0f2d8d236ced0be9da708c4b70792d963ebd4aadefbf54f",
+  "native_helper": "6e30d87ddd012025db474cfa67d6607bfebd1584368f9076ff0812fee204af25"
+}
