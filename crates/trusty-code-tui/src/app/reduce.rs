@@ -96,6 +96,9 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
                 tool_name,
                 args,
                 result,
+                // #4596: `apply_tool_invocation` decides the real default
+                // once it knows whether the call completed and how.
+                collapsed: false,
             };
             apply_tool_invocation(app, card, &agent_id);
         }
@@ -255,10 +258,15 @@ fn push_delegated(app: &mut ReplApp, role: ChatRole, text: String) {
 /// inside an open delegation block (#7940), [`ChatRole::Status`] otherwise.
 /// An empty `id` never correlates. The completion's own `args` are dropped,
 /// since producers send `Null` there.
+/// A completed call also picks its default render state (#4596): collapsed
+/// on success, expanded on failure ([`ToolCard::is_error`]) so the error
+/// text is never hidden behind a keystroke. A still-running card stays
+/// expanded — its body is the single `running…` row.
 /// Test: [`tests::tool_invocation_result_merges_into_its_call_card`],
 /// [`tests::tool_invocation_result_without_a_start_opens_its_own_card`],
-/// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`].
-fn apply_tool_invocation(app: &mut ReplApp, card: ToolCard, agent_id: &str) {
+/// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`],
+/// [`tests::tool_card_is_error_reads_the_producer_failure_prefix`].
+fn apply_tool_invocation(app: &mut ReplApp, mut card: ToolCard, agent_id: &str) {
     app.scroll_offset = 0;
     if !card.id.is_empty()
         && let Some(&idx) = app.tool_cards.get(&card.id)
@@ -267,10 +275,12 @@ fn apply_tool_invocation(app: &mut ReplApp, card: ToolCard, agent_id: &str) {
     {
         if card.result.is_some() {
             open.result = card.result;
+            open.collapsed = !open.is_error();
             app.tool_cards.remove(&card.id);
         }
         return;
     }
+    card.collapsed = card.result.is_some() && !card.is_error();
     if card.id.is_empty() || card.result.is_some() {
         app.tool_cards.remove(&card.id);
     } else {
@@ -554,7 +564,8 @@ fn permission_answer_for_key(key: KeyInput) -> Option<PermissionAnswer> {
 /// what's deferred to Slice 5).
 /// What: printable chars insert; Backspace/Left/Right/Home/End edit/move;
 /// PageUp/PageDown scroll a page; Enter submits; Ctrl-a/u/c/d match the
-/// readline bindings DOC-50 §5 Slice 5 specifies. Up, Down, and Ctrl-E are
+/// readline bindings DOC-50 §5 Slice 5 specifies; Ctrl-O expands/collapses
+/// the newest tool-call card (#4596). Up, Down, and Ctrl-E are
 /// direct ports of tagent's real `keys.rs` bindings rather than a Slice-5
 /// invention — see [`apply_up`] and [`apply_ctrl_e`] for why they're pulled
 /// into their own functions. Any other key (Tab, Esc, Delete,
@@ -584,6 +595,12 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
                 app.cursor_pos = 0;
             }
             'c' => app.pending_cancel = true,
+            // #4596: expand/collapse the newest tool-call card. `o` for
+            // "output"; the free ctrl bindings were o/b/f/k/w/y and this is
+            // the one Claude Code's own TUI uses for the same gesture.
+            'o' => {
+                app.toggle_last_tool_card();
+            }
             // Direct port of tagent's real `KeyCode::Char('d')` arm
             // (`crates/trusty-agents/src/repl/tui/keys.rs`): Ctrl-D only
             // quits on an EMPTY input buffer (the readline EOF convention);

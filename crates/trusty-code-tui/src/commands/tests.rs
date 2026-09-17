@@ -172,6 +172,18 @@ fn render_help_includes_args_hint_when_present() {
     assert!(text.contains("/workstream activate <id> — do workstream"));
 }
 
+/// #4596 requires the expand/collapse binding to be discoverable, and
+/// `/help` is the only place this TUI documents its keys at runtime.
+#[test]
+fn render_help_lists_the_tool_card_toggle_key() {
+    let text = render_help(&[]);
+    assert!(text.contains("Keys:"), "{text}");
+    assert!(
+        text.contains("Ctrl-O — Expand or collapse the newest tool-call card"),
+        "{text}"
+    );
+}
+
 // ── resolve_forward ─────────────────────────────────────────────────────
 
 /// A bare `/model` (no args) whose name matches `engine.picker("model")`

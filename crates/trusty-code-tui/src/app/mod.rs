@@ -160,7 +160,45 @@ pub struct ToolCard {
     pub args: serde_json::Value,
     /// The tool's output; `None` while the call is still running.
     pub result: Option<String>,
+    /// Whether the card draws as a one-line summary rather than its full
+    /// result body (#4596).
+    ///
+    /// Why: a successful `read_file` or `cargo test` buries the conversation
+    /// under dozens of rows nobody asked to re-read. A collapsed card keeps
+    /// the call visible and costs one row.
+    /// What: `false` while the call is in flight (the body is a single
+    /// `running…` row anyway); set by the reducer when the result lands —
+    /// `true` on success, `false` on an error, so a failure is never hidden.
+    /// Ctrl-O toggles it (`reduce::apply_key`).
+    pub collapsed: bool,
 }
+
+impl ToolCard {
+    /// Whether this call failed (#4596).
+    ///
+    /// Why: the seam carries no success flag —
+    /// [`crate::event::ReplEvent::ToolInvocation`] has only a `result`
+    /// string — and adding one would be a breaking change to every producer.
+    /// The producers encode failure in the result's own leading word
+    /// (`crates/trusty-code/src/tui_client/session_events.rs` sends
+    /// `FAILED: …` for an unsuccessful `ToolFinished` and `ERROR: …` for a
+    /// `ToolError`), so that prefix IS the seam's failure convention and
+    /// this reads it.
+    /// What: `false` while the call is still running. Otherwise `true` when
+    /// the result's first non-blank text starts with either marker.
+    /// Test: `widgets::tool_card::tests::errored_card_renders_expanded_by_default`,
+    /// `reduce::tests::tool_card_is_error_reads_the_producer_failure_prefix`.
+    pub fn is_error(&self) -> bool {
+        self.result
+            .as_deref()
+            .is_some_and(|r| ERROR_MARKERS.iter().any(|m| r.trim_start().starts_with(m)))
+    }
+}
+
+/// The leading words a producer uses to mark a failed tool result (#4596) —
+/// see [`ToolCard::is_error`] for why this is a prefix convention and not a
+/// flag on the event.
+const ERROR_MARKERS: [&str; 2] = ["ERROR:", "FAILED:"];
 
 /// Source/role of a chat line — drives the leader glyph and color chosen by
 /// [`crate::widgets::scrollback::build_chat_lines`].
@@ -541,6 +579,30 @@ impl ReplApp {
     /// `build_statusline_appends_active_agent_while_delegating`.
     pub fn active_agent(&self) -> Option<&str> {
         self.delegations.last().map(|d| d.agent.as_str())
+    }
+
+    /// Expand or collapse the newest tool-call card in the scrollback
+    /// (#4596).
+    ///
+    /// Why: this TUI has no card-focus concept — nothing moves a selection
+    /// between scrollback entries — so "the focused card" is the most recent
+    /// one, which is also the one the user just watched arrive and the only
+    /// one still on screen at scroll offset 0. A focus ring would be a
+    /// bigger surface than the toggle it serves.
+    /// What: walks `chat` newest-first for the first entry carrying a
+    /// [`ChatLine::tool`] and flips its [`ToolCard::collapsed`]. No-op when
+    /// no card exists. Returns `true` when a card was toggled, so a caller
+    /// can tell "nothing to toggle" from "toggled".
+    /// Test: `reduce::tests::ctrl_o_toggles_the_newest_tool_card_round_trip`,
+    /// `reduce::tests::ctrl_o_is_a_noop_when_no_tool_card_exists`.
+    pub fn toggle_last_tool_card(&mut self) -> bool {
+        for entry in self.chat.iter_mut().rev() {
+            if let Some(card) = entry.tool.as_mut() {
+                card.collapsed = !card.collapsed;
+                return true;
+            }
+        }
+        false
     }
 
     /// Open an inline picker (DOC-50 §3.2/§6 Q6), staged by

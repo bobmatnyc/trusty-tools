@@ -562,6 +562,8 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: Some("switched to main".into()),
+            // #4596: a successful completion collapses by default.
+            collapsed: true,
         })
     );
     assert!(
@@ -588,6 +590,97 @@ fn tool_invocation_result_without_a_start_opens_its_own_card() {
     let card = app.chat[0].tool.as_ref().expect("a card");
     assert_eq!(card.result.as_deref(), Some("done"));
     assert!(app.tool_cards.is_empty());
+}
+
+/// Push a start event, then its completion, for one tool call (#4596).
+fn tool_call(app: &mut ReplApp, id: &str, name: &str, result: &str) {
+    apply(
+        app,
+        ReplEvent::ToolInvocation {
+            id: id.into(),
+            agent_id: String::new(),
+            tool_name: name.into(),
+            args: serde_json::json!("x"),
+            result: None,
+        },
+    );
+    apply(
+        app,
+        ReplEvent::ToolInvocation {
+            id: id.into(),
+            agent_id: String::new(),
+            tool_name: name.into(),
+            args: serde_json::Value::Null,
+            result: Some(result.into()),
+        },
+    );
+}
+
+/// The seam carries no success flag, so a failed call is recognized by the
+/// leading word its producer writes into the result (#4596).
+#[test]
+fn tool_card_is_error_reads_the_producer_failure_prefix() {
+    let mut app = ReplApp::new("demo", "u");
+    tool_call(&mut app, "ok-1", "bash", "2 passed");
+    tool_call(&mut app, "f-1", "bash", "FAILED: 1 test failed");
+    tool_call(&mut app, "e-1", "read_file", "ERROR: no such file");
+
+    let is_error: Vec<bool> = app
+        .chat
+        .iter()
+        .filter_map(|c| c.tool.as_ref())
+        .map(|c| c.is_error())
+        .collect();
+    assert_eq!(is_error, vec![false, true, true]);
+
+    // A still-running call has no result to classify.
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "run-1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("sleep"),
+            result: None,
+        },
+    );
+    let running = app.chat.last().and_then(|c| c.tool.as_ref()).expect("card");
+    assert!(!running.is_error());
+    assert!(!running.collapsed, "an in-flight card stays expanded");
+}
+
+/// #4596: Ctrl-O flips the newest card and flips it back, leaving older
+/// cards untouched.
+#[test]
+fn ctrl_o_toggles_the_newest_tool_card_round_trip() {
+    let mut app = ReplApp::new("demo", "u");
+    tool_call(&mut app, "c-1", "read_file", "older");
+    tool_call(&mut app, "c-2", "read_file", "newer");
+
+    let collapsed = |app: &ReplApp| -> Vec<bool> {
+        app.chat
+            .iter()
+            .filter_map(|c| c.tool.as_ref())
+            .map(|c| c.collapsed)
+            .collect()
+    };
+    assert_eq!(collapsed(&app), vec![true, true], "both start collapsed");
+
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(collapsed(&app), vec![true, false], "only the newest flips");
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(collapsed(&app), vec![true, true], "and flips back");
+}
+
+/// Ctrl-O with no card in the scrollback must change nothing — in
+/// particular it must not insert a character into the input line.
+#[test]
+fn ctrl_o_is_a_noop_when_no_tool_card_exists() {
+    let mut app = ReplApp::new("demo", "u");
+    app.insert_char('z');
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(app.input_buf, "z");
+    assert!(app.chat.is_empty());
 }
 
 #[test]
