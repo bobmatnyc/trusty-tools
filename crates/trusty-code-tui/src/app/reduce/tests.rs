@@ -117,66 +117,216 @@ fn apply_submit_event_is_noop_while_busy() {
     assert!(app.chat.is_empty(), "must not echo while busy");
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_recalls_last_prompt`
-/// (`crates/trusty-agents/src/repl/tui/tests_input.rs`).
-#[test]
-fn apply_up_recalls_last_prompt_when_idle() {
-    let mut app = ReplApp::new("demo", "u");
-    app.last_prompt = "hello world".to_string();
+/// Submit `line` through the real Enter path, clearing the `busy` flag the
+/// forward sets so the next submission is accepted (#8181).
+fn submit(app: &mut ReplApp, line: &str) {
+    for c in line.chars() {
+        apply(app, key(KeyCode::Char(c)));
+    }
+    apply(app, key(KeyCode::Enter));
+    app.pending_submit.take();
     app.busy = false;
+}
+
+/// #8181, the headline behavior: Up walks back through EVERY submitted
+/// prompt, not just the most recent one. Against the pre-fix `last_prompt`
+/// recall the second press returned "second" again.
+#[test]
+fn apply_up_walks_back_through_submitted_prompts() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "first");
+    submit(&mut app, "second");
+    submit(&mut app, "third");
+
     apply(&mut app, key(KeyCode::Up));
-    assert_eq!(app.input_buf, "hello world");
-    assert_eq!(app.cursor_pos, "hello world".len());
+    assert_eq!(app.input_buf, "third");
+    assert_eq!(app.cursor_pos, "third".len(), "cursor lands at end");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "second");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "first");
     assert!(!app.pending_cancel, "idle Up must NOT signal cancel");
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_when_busy_signals_cancel`.
+/// #8181: Down walks forward and, one step past the newest entry, hands the
+/// user back the draft they were typing. Pre-fix, Down was inert (nothing
+/// ever set `history_idx`) and the draft was simply overwritten by Up.
+#[test]
+fn apply_down_walks_forward_and_restores_the_draft() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "alpha");
+    submit(&mut app, "beta");
+    for c in "draft in progress".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "beta");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "alpha");
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "beta");
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(
+        app.input_buf, "draft in progress",
+        "walking past the newest entry must restore the draft"
+    );
+    assert!(app.history_idx.is_none(), "no longer navigating");
+    assert_eq!(app.cursor_pos, "draft in progress".len());
+}
+
+/// The MEDIUM finding on #8181: Up stashes the draft, so every way of
+/// editing afterwards — typing, Backspace, Ctrl-U — must still leave Down
+/// able to return it. Typing used to clear `history_idx` and strand
+/// `saved_input`; Backspace and Ctrl-U never did, so one gesture behaved
+/// three ways.
+#[test]
+fn editing_a_recalled_entry_still_leaves_down_the_draft() {
+    for edit in ["type", "backspace", "ctrl-u"] {
+        let mut app = ReplApp::new("demo", "u");
+        submit(&mut app, "alpha");
+        for c in "my draft".chars() {
+            apply(&mut app, key(KeyCode::Char(c)));
+        }
+        apply(&mut app, key(KeyCode::Up));
+        assert_eq!(app.input_buf, "alpha", "{edit}");
+
+        match edit {
+            "type" => apply(&mut app, key(KeyCode::Char('!'))),
+            "backspace" => apply(&mut app, key(KeyCode::Backspace)),
+            _ => apply(&mut app, ctrl_key('u')),
+        }
+        apply(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            app.input_buf, "my draft",
+            "Down must return the draft after a {edit} edit"
+        );
+        assert!(app.history_idx.is_none(), "{edit}");
+    }
+}
+
+/// The follow-on to the test above: once editing keeps you IN history, the
+/// oldest-entry clamp must stop calling `set_input` at all. Clamping by
+/// re-recalling `history[0]` silently destroyed an in-place edit of the
+/// oldest entry — an Up that looked like a no-op but wiped the line.
+#[test]
+fn apply_up_at_the_oldest_entry_keeps_an_in_place_edit() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "alpha");
+    for c in "draft".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "alpha", "recalled the only entry");
+
+    apply(&mut app, key(KeyCode::Char('!')));
+    assert_eq!(app.input_buf, "alpha!");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(
+        app.input_buf, "alpha!",
+        "Up at the floor must not re-read history over the edit"
+    );
+
+    // The draft is still reachable — the floor no-op did not disturb it.
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "draft");
+}
+
+/// The oldest entry is a floor, not a wrap point — a fourth Up on a
+/// two-entry history must not jump back to the newest.
+#[test]
+fn apply_up_clamps_at_the_oldest_entry() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "oldest");
+    submit(&mut app, "newest");
+    for _ in 0..4 {
+        apply(&mut app, key(KeyCode::Up));
+    }
+    assert_eq!(app.input_buf, "oldest");
+}
+
+/// Down on a line the user is still typing (never walked history) must
+/// leave it alone rather than blanking it.
+#[test]
+fn apply_down_is_noop_when_not_navigating_history() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "earlier");
+    app.insert_char('x');
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "x", "Down must not clobber input_buf");
+    assert!(app.history_idx.is_none());
+}
+
+/// Direct port of tagent's `repl_app_up_arrow_when_busy_signals_cancel` —
+/// the busy-cancel half of Up survives #8181's change to what Up recalls.
 #[test]
 fn apply_up_signals_cancel_and_recalls_when_busy() {
     let mut app = ReplApp::new("demo", "u");
-    app.last_prompt = "long task".to_string();
+    submit(&mut app, "long task");
     app.busy = true;
     apply(&mut app, key(KeyCode::Up));
     assert!(app.pending_cancel, "busy Up must signal cancel");
-    assert_eq!(app.input_buf, "long task", "must restore last_prompt");
+    assert_eq!(app.input_buf, "long task", "must recall the newest entry");
 }
 
 /// tagent's cancel signal fires unconditionally on `thinking`, ahead of
-/// (and independent of) the `last_prompt` recall — pins that ordering
-/// isn't accidentally coupled to `last_prompt` being non-empty.
+/// (and independent of) the recall — pins that the ordering isn't
+/// accidentally coupled to history being non-empty.
 #[test]
-fn apply_up_signals_cancel_even_with_no_last_prompt() {
+fn apply_up_signals_cancel_even_with_no_history() {
     let mut app = ReplApp::new("demo", "u");
     app.busy = true;
-    assert!(app.last_prompt.is_empty());
+    assert!(app.history.is_empty());
     apply(&mut app, key(KeyCode::Up));
     assert!(app.pending_cancel);
     assert!(app.input_buf.is_empty());
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_noop_when_no_last_prompt`.
+/// Direct port of tagent's `repl_app_up_arrow_noop_when_no_last_prompt`,
+/// restated against history: with nothing submitted yet, Up leaves the
+/// typed line untouched.
 #[test]
-fn apply_up_is_noop_when_idle_and_no_last_prompt() {
+fn apply_up_is_noop_when_idle_and_history_is_empty() {
     let mut app = ReplApp::new("demo", "u");
     app.insert_char('a');
     app.insert_char('b');
-    app.last_prompt.clear();
     app.busy = false;
     apply(&mut app, key(KeyCode::Up));
     assert_eq!(app.input_buf, "ab");
     assert!(!app.pending_cancel);
 }
 
-/// Direct port of tagent's real `KeyCode::Down` arm — a functional
-/// no-op today (nothing sets `history_idx`), kept for fidelity per
-/// `crate::app`'s disclosure list.
+/// Readline's `ignoredups` convention (#8181): submitting the same prompt
+/// twice in a row costs one Up press to recall, not two.
 #[test]
-fn apply_down_calls_history_next_and_is_currently_inert() {
+fn consecutive_duplicate_submissions_are_stored_once() {
     let mut app = ReplApp::new("demo", "u");
-    app.insert_char('x');
-    apply(&mut app, key(KeyCode::Down));
-    assert_eq!(app.input_buf, "x", "Down must not clobber input_buf");
+    submit(&mut app, "same");
+    submit(&mut app, "same");
+    submit(&mut app, "other");
+    assert_eq!(app.history, vec!["same".to_string(), "other".to_string()]);
+
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "other");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "same", "one Up reaches past the duplicate");
+}
+
+/// Submitting appends to history and resets the editor — cursor at 0, no
+/// navigation index, no stale saved draft (#8181).
+#[test]
+fn submitting_appends_to_history_and_resets_the_cursor() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "one");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "one");
+    apply(&mut app, ctrl_key('u')); // clear the recalled line
+
+    submit(&mut app, "two");
+    assert_eq!(app.history, vec!["one".to_string(), "two".to_string()]);
+    assert_eq!(app.cursor_pos, 0);
     assert!(app.history_idx.is_none());
+    assert!(app.saved_input.is_none());
 }
 
 /// Direct port of tagent's `ctrl_e_pastes_last_bash_block_when_input_empty`.
@@ -446,6 +596,7 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: None,
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), 1);
@@ -459,6 +610,7 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::Value::Null,
             result: Some("switched to main".into()),
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), 1, "one card, not two entries");
@@ -469,6 +621,9 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: Some("switched to main".into()),
+            failed: false,
+            // #4596: a successful completion collapses by default.
+            collapsed: true,
         })
     );
     assert!(
@@ -490,11 +645,113 @@ fn tool_invocation_result_without_a_start_opens_its_own_card() {
             tool_name: "bash".into(),
             args: serde_json::Value::Null,
             result: Some("done".into()),
+            failed: false,
         },
     );
     let card = app.chat[0].tool.as_ref().expect("a card");
     assert_eq!(card.result.as_deref(), Some("done"));
     assert!(app.tool_cards.is_empty());
+}
+
+/// Push a start event, then a successful completion, for one tool call
+/// (#4596).
+fn tool_call(app: &mut ReplApp, id: &str, name: &str, result: &str) {
+    tool_call_outcome(app, id, name, result, false);
+}
+
+/// Same as [`tool_call`], with the backend's `failed` verdict spelled out.
+fn tool_call_outcome(app: &mut ReplApp, id: &str, name: &str, result: &str, failed: bool) {
+    apply(
+        app,
+        ReplEvent::ToolInvocation {
+            id: id.into(),
+            agent_id: String::new(),
+            tool_name: name.into(),
+            args: serde_json::json!("x"),
+            result: None,
+            failed: false,
+        },
+    );
+    apply(
+        app,
+        ReplEvent::ToolInvocation {
+            id: id.into(),
+            agent_id: String::new(),
+            tool_name: name.into(),
+            args: serde_json::Value::Null,
+            result: Some(result.into()),
+            failed,
+        },
+    );
+}
+
+/// #4596: failure is the event's `failed` flag, never the result text. The
+/// last two calls here invert the old prefix heuristic — a failure with no
+/// marker, and a success whose output merely mentions one.
+#[test]
+fn tool_card_is_error_reads_the_event_failure_flag() {
+    let mut app = ReplApp::new("demo", "u");
+    tool_call(&mut app, "ok-1", "bash", "2 passed");
+    tool_call_outcome(&mut app, "f-1", "bash", "exit status 1", true);
+    tool_call(&mut app, "n-1", "grep", "ERROR: found in log.txt");
+
+    let is_error: Vec<bool> = app
+        .chat
+        .iter()
+        .filter_map(|c| c.tool.as_ref())
+        .map(|c| c.is_error())
+        .collect();
+    assert_eq!(is_error, vec![false, true, false]);
+
+    // A still-running call has no result to classify.
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "run-1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("sleep"),
+            result: None,
+            failed: false,
+        },
+    );
+    let running = app.chat.last().and_then(|c| c.tool.as_ref()).expect("card");
+    assert!(!running.is_error());
+    assert!(!running.collapsed, "an in-flight card stays expanded");
+}
+
+/// #4596: Ctrl-O flips the newest card and flips it back, leaving older
+/// cards untouched.
+#[test]
+fn ctrl_o_toggles_the_newest_tool_card_round_trip() {
+    let mut app = ReplApp::new("demo", "u");
+    tool_call(&mut app, "c-1", "read_file", "older");
+    tool_call(&mut app, "c-2", "read_file", "newer");
+
+    let collapsed = |app: &ReplApp| -> Vec<bool> {
+        app.chat
+            .iter()
+            .filter_map(|c| c.tool.as_ref())
+            .map(|c| c.collapsed)
+            .collect()
+    };
+    assert_eq!(collapsed(&app), vec![true, true], "both start collapsed");
+
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(collapsed(&app), vec![true, false], "only the newest flips");
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(collapsed(&app), vec![true, true], "and flips back");
+}
+
+/// Ctrl-O with no card in the scrollback must change nothing — in
+/// particular it must not insert a character into the input line.
+#[test]
+fn ctrl_o_is_a_noop_when_no_tool_card_exists() {
+    let mut app = ReplApp::new("demo", "u");
+    app.insert_char('z');
+    apply(&mut app, ctrl_key('o'));
+    assert_eq!(app.input_buf, "z");
+    assert!(app.chat.is_empty());
 }
 
 #[test]
@@ -911,6 +1168,7 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(
@@ -921,6 +1179,7 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
             tool_name: "delegate_to_agent".into(),
             args: serde_json::json!("{}"),
             result: None,
+            failed: false,
         },
     );
     let name = |i: usize| app.chat[i].tool.as_ref().map(|c| c.tool_name.as_str());
@@ -943,6 +1202,7 @@ fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card()
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(
@@ -961,6 +1221,7 @@ fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card()
             tool_name: "bash".into(),
             args: serde_json::Value::Null,
             result: Some("ok".into()),
+            failed: false,
         },
     );
     let cards: Vec<usize> = (0..app.chat.len())
@@ -987,6 +1248,7 @@ fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     let chat_len = app.chat.len();
@@ -1000,6 +1262,7 @@ fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo build"),
             result: None,
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), chat_len);
@@ -1023,6 +1286,7 @@ fn clear_scrollback_drops_delegation_state() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(&mut app, ReplEvent::ClearScrollback);
