@@ -26,6 +26,9 @@ pub mod credentials;
 pub mod daemons;
 pub mod format;
 pub mod registry_counts;
+// #8190: what the Telegram long-poll gateway is doing, for a host that
+// captures no stderr.
+pub mod telegram_gateway;
 
 #[cfg(test)]
 mod bindings_tests;
@@ -100,6 +103,14 @@ pub struct SystemStatusReport {
     /// a dangling search index, listener or MCP override failed soft.
     /// Test: `bindings_tests::reports_every_unresolved_binding_of_every_kind`.
     pub unresolved_bindings: Vec<bindings::UnresolvedBinding>,
+    /// What the Telegram long-poll gateway is doing (#8190).
+    ///
+    /// Why: every gateway degradation used to be a `tracing` line only, and
+    /// izzie's API host captures no stderr — so "Telegram is dead" had no
+    /// surface at all. The rows name the bot by the credential REFERENCE an
+    /// operator wrote, never by a token or a digest.
+    /// Test: `telegram_gateway_status_records_a_skipped_binding`.
+    pub telegram_gateway: telegram_gateway::TelegramGatewayStatus,
     pub agent_registry_count: usize,
     pub skills_count: usize,
 }
@@ -296,6 +307,10 @@ async fn gather_inner(tagent: TagentSelfStatus) -> SystemStatusReport {
         credentials,
         stores,
         unresolved_bindings,
+        // #8190: merges the in-process gateway state with a live probe of this
+        // machine's per-bot locks, so a separate `tagent system status` process
+        // still reports a poller that is running.
+        telegram_gateway: telegram_gateway::snapshot(),
         agent_registry_count,
         skills_count,
     }

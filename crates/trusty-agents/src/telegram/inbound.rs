@@ -78,9 +78,23 @@ fn event_from(msg: &Message, text: &str, included: bool) -> StoredEvent {
 /// failure past this point — an adapter that cannot build a prompt, a dispatch
 /// that fails — is counted on the binding by `crate::channels::status`, so a
 /// claimed-but-failing chat is visible in the channel view rather than silent.
+///
+/// #8190 (owner ruling 2026-09-16): `owners` is the set of assistants that own a
+/// receiving binding on the bot this update arrived on. It is handed straight
+/// to `receive_inbound`'s `allowed_personas` filter, which is what makes "an
+/// inbound message on bot A never wakes an assistant bound only to bot B" a
+/// property of the dispatch rather than of the chat id. `None` is the
+/// pre-#8190 any-assistant behaviour, kept for the standalone `--telegram` and
+/// REPL gateways, which poll one host-wide credential.
 /// Test: `agent_channels_inbound_ignores_an_unbound_telegram_chat` pins the
-/// selection rule this delegates to.
-pub(super) async fn route(msg: &Message, text: &str, project_path: &Path) -> bool {
+/// selection rule this delegates to; `telegram_bot_owners_scope_the_dispatch`
+/// pins the per-bot narrowing.
+pub(super) async fn route(
+    msg: &Message,
+    text: &str,
+    project_path: &Path,
+    owners: Option<&[String]>,
+) -> bool {
     let chat_id = msg.chat.id.0.to_string();
     let event_type = event_type_for(&msg.chat);
     let included = crate::listeners::store::EventStore::is_event_type_included(event_type).await;
@@ -110,7 +124,7 @@ pub(super) async fn route(msg: &Message, text: &str, project_path: &Path) -> boo
         &event,
         project_path,
         &identity,
-        None,
+        owners,
         &mut crate::api::server::agent_channels::inbound::DispatchBudget::PerEvent,
     )
     .await

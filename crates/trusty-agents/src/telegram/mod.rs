@@ -29,6 +29,9 @@
 //! `split_message` and `markdown_to_html_safe` directly. Live verification is
 //! out-of-scope per the issue — this module is wired behind `--telegram`.
 
+// #8190: one bot token, the assistants it may wake, and the key its per-bot
+// state files are named after.
+mod bot;
 mod format;
 mod handlers;
 // #7427: the bridge from a long-poll update into the per-assistant channel
@@ -54,10 +57,7 @@ use tracing::{error, info, warn};
 use crate::ctrl::ConversationTurn;
 
 use handlers::{Command, handle_command, handle_message};
-use pairing::{
-    PairedChats, TelegramPidGuard, load_paired_chats, paired_chats_state_path,
-    telegram_pid_file_path,
-};
+use pairing::{PairedChats, TelegramPidGuard, load_paired_chats, paired_chats_state_path_for};
 
 // Re-export the public REPL-facing API so callers continue to use
 // `crate::telegram::{PendingPairs, new_pending_pairs, issue_repl_pairing_code,
@@ -65,9 +65,24 @@ use pairing::{
 pub use pairing::{
     PendingPairs, SENTINEL_PAIRING_CHAT_ID, issue_repl_pairing_code, new_pending_pairs,
 };
-// #8190: the API host asks whether a poller already owns `getUpdates` on this
-// machine before it spawns one of its own.
-pub use pairing::{gateway_lock_holder, gateway_lock_holder_at};
+// #8190: the API host asks whether a poller already owns `getUpdates` for a
+// given bot before it spawns one of its own.
+pub(crate) use bot::{BotKey, TelegramBot};
+pub use pairing::{LockHolder, gateway_lock_holder_at};
+pub(crate) use pairing::{
+    gateway_state_dir, live_gateway_lock_holders_in, telegram_pid_file_path_for,
+};
+
+/// Take one bot's gateway lock, for a test that needs a live holder.
+///
+/// Why (#8190): the status snapshot's live-lock probe has no other way to be
+/// driven — the real acquirer is inside the poll loop, which needs a network.
+/// `cfg(test)` keeps it out of the shipped surface entirely.
+/// Test: `telegram_gateway_status_snapshot_reports_a_live_lock_holder`.
+#[cfg(test)]
+pub(crate) fn acquire_gateway_lock_for_test(path: PathBuf) -> Result<TelegramPidGuard> {
+    TelegramPidGuard::acquire(path)
+}
 
 /// Maximum characters per Telegram message.
 ///
@@ -186,46 +201,68 @@ pub(super) fn home_persona_exists(name: &str) -> bool {
 
 /// Run the Telegram bot in long-polling mode until SIGINT.
 ///
-/// Why: This is the entry point wired to `--telegram` in `main.rs`. Long
-/// polling avoids webhook setup (no public URL / TLS termination required) so
-/// the bot can run from a developer's laptop or a CI runner identically.
-/// What: resolves the bot token through the credential authority (#7427),
-/// builds a `Bot` with explicit HTTP timeouts (matches the reference
-/// implementation), wires `dptree` routes for commands and plain text, then
-/// dispatches with Ctrl-C handling enabled. A token that will not resolve fails
-/// startup rather than polling without one.
-/// Test: `cargo build` is the primary gate; we never actually contact
-/// Telegram in CI. The two decisions this function makes that are testable
-/// without a live bot are pinned by
-/// `telegram_poll_token_refuses_a_credential_outside_the_family` and
+/// Why: the entry point wired to `--telegram` in `main.rs` and to the REPL's
+/// auto-start. Neither knows which assistant owns which bot, so both poll the
+/// host's default Telegram credential and let any assistant's binding claim a
+/// chat — the pre-#8190 behaviour, preserved.
+/// What: resolves the credential reference the first enabled receiving binding
+/// names (#7427), then delegates to [`run_telegram_bot_for`]. A token that will
+/// not resolve fails startup rather than polling without one.
+/// Test: `telegram_poll_token_refuses_a_credential_outside_the_family`,
 /// `agent_channels_poll_credential_ref_reads_the_first_receiving_binding`.
 pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> Result<()> {
-    // Single-instance guard: refuse to start if another Telegram daemon is
-    // already long-polling, which would otherwise cause Telegram's
-    // `TerminatedByOtherGetUpdates` errors. The guard's `Drop` removes the
-    // PID file on every exit path (normal return, `?`, SIGINT via the
-    // dispatcher's `enable_ctrlc_handler`). Held for the whole function body.
-    let _pid_guard = TelegramPidGuard::acquire(telegram_pid_file_path()).map_err(|e| {
-        error!("{e}");
-        e
-    })?;
-    info!("Telegram daemon starting (PID {})", std::process::id());
-
-    // #7427: the token resolves through the credential authority, under the
-    // reference a receiving Telegram binding names — the same reference
-    // `TelegramAdapter::send` resolves, so the identity that polls and the
-    // identity that replies are one credential. A token that will not resolve
-    // stops startup here: polling with an empty token produces a `getUpdates`
-    // 401 per cycle and looks like a network fault, which is exactly the
-    // failure an operator cannot diagnose.
     let credential_ref = crate::api::server::agent_channels::telegram_poll_credential_ref().await;
     let token = crate::channels::telegram_poll_token(credential_ref.as_deref()).map_err(|e| {
         error!(error = %e, "Telegram bot token could not be resolved; refusing to poll without one");
         anyhow!(
-            "Telegram bot token could not be resolved ({e}). Set TELEGRAM_BOT_TOKEN in .env.local, \
-             or point the binding's credential reference at a stored Telegram credential."
+            "Telegram bot token could not be resolved ({e}). Set TELEGRAM_BOT_TOKEN in the \
+             harness environment, or point the binding's credential reference at a stored \
+             Telegram credential."
         )
     })?;
+    // `None` owners: this path predates per-assistant bots and keeps its
+    // any-assistant-may-claim dispatch (#8190).
+    let bot = TelegramBot::new(token, None, credential_ref.into_iter().collect());
+    run_telegram_bot_for(bot, project_path, pending).await
+}
+
+/// Run ONE bot's long-poll loop until shutdown.
+///
+/// Why (#8190, owner ruling 2026-09-16): each assistant has its own Telegram
+/// bot, so the loop can no longer resolve a machine-wide token and deliver to
+/// whoever matches — a message on izzie's bot must never wake an assistant
+/// bound only to cto-assistant's. The bot is now a PARAMETER: its token
+/// authenticates `getUpdates`, its owners scope the dispatch, and its key names
+/// the lock and pairing files so two bots never share either.
+/// What: takes this bot's own `flock` gateway lock, builds a `Bot` with
+/// explicit HTTP timeouts, wires `dptree` routes for commands and plain text,
+/// then dispatches with Ctrl-C handling enabled.
+/// Test: `telegram_pairing_state_is_per_bot`,
+/// `telegram_bot_owners_scope_the_dispatch`,
+/// `telegram_pid_guard_live_conflict_is_rejected`.
+pub(crate) async fn run_telegram_bot_for(
+    bot_identity: TelegramBot,
+    project_path: PathBuf,
+    pending: PendingPairs,
+) -> Result<()> {
+    // Single-instance guard, per bot: two processes polling `getUpdates` for
+    // the SAME bot trigger `TerminatedByOtherGetUpdates`. The guard holds an
+    // advisory `flock`, which the kernel releases when the descriptor closes on
+    // any exit path — normal return, `?`, panic, SIGINT, process death (#8190).
+    let _pid_guard = TelegramPidGuard::acquire(telegram_pid_file_path_for(bot_identity.key()))
+        .map_err(|e| {
+            error!(bot = %bot_identity.label(), "{e}");
+            e
+        })?;
+    info!(
+        bot = %bot_identity.label(),
+        "Telegram daemon starting (PID {})",
+        std::process::id()
+    );
+    let paired_state_path = paired_chats_state_path_for(bot_identity.key());
+    // #8190: the assistants this bot may wake, carried into every dispatch.
+    let owners: Option<Arc<Vec<String>>> = bot_identity.owners().map(|o| Arc::new(o.to_vec()));
+    let token = bot_identity.into_token();
 
     // Why: Default reqwest client has aggressive idle timeouts that drop
     // long-poll connections. We mirror the reference bot's settings so
@@ -288,7 +325,8 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
     let project_path = Arc::new(project_path);
     let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
     // #467: Load persisted pairings so users don't lose pairing on restart.
-    let paired_state_path = paired_chats_state_path();
+    // #8190: from THIS bot's own file — a chat paired to izzie's bot is not
+    // paired on cto-assistant's.
     let paired: PairedChats = load_paired_chats(&paired_state_path).await;
     let paired_state_path = Arc::new(paired_state_path);
     // #334: `pending` is supplied by the caller (the REPL) so the REPL's
@@ -385,9 +423,18 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     let project = Arc::clone(&project_for_msg);
                     let paired = Arc::clone(&paired_for_msg);
                     let attendance_root = attendance_for_msg.clone();
+                    // #8190: only THIS bot's owners may claim the update.
+                    let owners = owners.clone();
                     async move {
                         let text = msg.text().unwrap_or_default().to_string();
-                        if inbound::route(&msg, &text, project.as_path()).await {
+                        if inbound::route(
+                            &msg,
+                            &text,
+                            project.as_path(),
+                            owners.as_deref().map(Vec::as_slice),
+                        )
+                        .await
+                        {
                             return Ok(());
                         }
                         handle_message(bot, msg, sessions, project, paired, attendance_root).await

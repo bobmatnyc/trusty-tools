@@ -57,6 +57,8 @@ async fn gather_report_serializes_to_json_with_expected_keys() {
         "stores",
         // #7903: every other declared binding that does not resolve.
         "unresolved_bindings",
+        // #8190: the Telegram long-poll gateway's own state.
+        "telegram_gateway",
         "agent_registry_count",
         "skills_count",
     ] {

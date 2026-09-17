@@ -216,20 +216,21 @@ pub(super) async fn dispatch_cli_mode(
         // #8190: the API host is the production host, and it spawned every
         // other channel receiver but never the Telegram gateway — so a
         // telegram binding on `tagent --api` could not receive at all. The
-        // gateway starts here, beside `serve_with_config` rather than inside
-        // it, and stops when the server does. A host with no token, no
-        // enabled receiving Telegram channel, or a lock another poller
-        // already holds logs one reason line and serves exactly as before.
-        let gateway = telegram_gateway::start_for_api_host().await;
+        // gateway supervisor starts here, beside `serve_with_config` rather
+        // than inside it, and stops when the server does. It rescans on a
+        // timer and runs one poller per bound bot, so a host with no enabled
+        // receiving Telegram channel logs one reason line and serves exactly
+        // as before.
+        let gateway = telegram_gateway::start_for_api_host();
         // #3329: default to loopback; `--bind` is the explicit non-loopback
         // opt-in (which serve_with_config gates on a token being present).
         let served = crate::api::server::serve_with_config(
             crate::api::server::ApiConfig::with_bind(cli.bind, port, token),
         )
         .await;
-        // Runs on the graceful-shutdown path AND on a bind failure: the
-        // gateway holds a machine-wide PID lock either way, and a lock left
-        // behind makes the next start refuse.
+        // Runs on the graceful-shutdown path AND on a bind failure: each
+        // poller holds its bot's gateway lock either way, and a lock left
+        // behind makes the next start wait it out.
         gateway.shutdown().await;
         return served;
     }

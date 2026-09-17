@@ -93,6 +93,34 @@ pub fn render_text(report: &SystemStatusReport) -> String {
         ));
     }
 
+    // #8190: the gateway's own state, named by the credential REFERENCE an
+    // operator wrote — never by a bot token or its digest.
+    out.push_str("\nTelegram gateway:\n");
+    let gateway = &report.telegram_gateway;
+    if gateway.bots.is_empty() {
+        out.push_str("  (no Telegram channel bound)\n");
+    }
+    for bot in &gateway.bots {
+        out.push_str(&format!(
+            "  {:<20} {:<16} assistants={} {}\n",
+            bot.credential_refs,
+            bot.state,
+            if bot.assistants.is_empty() {
+                "-".to_string()
+            } else {
+                bot.assistants.join(",")
+            },
+            bot.detail.as_deref().unwrap_or("")
+        ));
+    }
+    for warning in &gateway.warnings {
+        out.push_str(&format!("  WARNING  {warning}\n"));
+    }
+    if !gateway.lock_holders.is_empty() {
+        let pids: Vec<String> = gateway.lock_holders.iter().map(i32::to_string).collect();
+        out.push_str(&format!("  lock held by PID(s) {}\n", pids.join(", ")));
+    }
+
     out.push_str("\nCredentials (names/tiers only — no values):\n");
     for c in &report.credentials {
         out.push_str(&format!("  {:<12} {}\n", c.provider, c.status));
@@ -206,6 +234,9 @@ mod tests {
         assert!(text.contains("openrouter"));
         assert!(text.contains("OKG stores:"));
         assert!(text.contains("(none bound)"));
+        // #8190: the gateway section prints even with nothing bound.
+        assert!(text.contains("Telegram gateway:"));
+        assert!(text.contains("(no Telegram channel bound)"));
         assert!(text.contains("46 agents discovered"));
         assert!(text.contains("12 skills discovered"));
     }
@@ -245,6 +276,8 @@ mod tests {
             }],
             stores: Vec::new(),
             unresolved_bindings: Vec::new(),
+            telegram_gateway:
+                crate::system_status::telegram_gateway::TelegramGatewayStatus::default(),
             agent_registry_count: 46,
             skills_count: 12,
         }
