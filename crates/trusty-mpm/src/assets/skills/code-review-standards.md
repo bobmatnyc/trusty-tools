@@ -160,6 +160,19 @@ Require evidence for both paths, the happy-path assertion failure and the
 error-path read failure, before accepting a check block's coverage claim
 (#8143).
 
+## Lifecycle-Guard Escape-Path Verification
+
+An acceptance record marked a documented `prevent_destroy` recovery path MET
+on the strength of prose, without running it. The documented recovery was
+wrong in two independent ways when tried: re-creating a certificate under the
+same name returned 409, and destroying it while still attached to the target
+proxy returned 400 `resourceInUse`.
+
+For any change adding `prevent_destroy` or another lifecycle guard, require
+the acceptance record to state how the documented escape path was actually
+exercised — the command run and its result. Prose alone marks the criterion
+unverified, never MET (#8132).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
