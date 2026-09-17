@@ -13,6 +13,10 @@
 //! quarantine deadline; `record_success` resets both. `is_quarantined` is the
 //! cheap gate called by `spawn_reindex_with_cleanup` before queuing.
 //!
+//! This module also holds the unrelated-but-adjacent WRITE-quarantine refusal
+//! ([`WriteQuarantined`], #8105) — the gate that stops a reindex being accepted
+//! for an index whose durable corpus never opened.
+//!
 //! Test: unit tests in this module — `cargo test -p trusty-search -- quarantine`.
 
 use std::sync::Arc;
@@ -20,7 +24,97 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::core::registry::IndexId;
+use crate::core::registry::{IndexHandle, IndexId};
+
+/// A reindex refused because the index is WRITE-quarantined (#8105).
+///
+/// Why: a reindex against a corpus-open-failed index was accepted with
+/// `queued: true`, walked 39 files, embedded 496 chunks, and then had every
+/// durable write refused by [`crate::core::indexer::CodeIndexer::refuse_durable_write`]
+/// — leaving `chunk_count` null and the caller polling a completion that can
+/// never arrive. The run was doomed before it started: by the #4122 invariant a
+/// quarantined index has no `CorpusStore` wired, so `staging::should_stage` is
+/// false and `commit_corpus_to_redb` short-circuits, and only a successful
+/// `CorpusStore::open` (a daemon restart, in practice) lifts the quarantine.
+/// Refusing up front is the honest answer and costs nothing that would
+/// otherwise have been persisted.
+/// What: a snapshot of the quarantine state, carrying the #4333 classification
+/// so the refusal names the SAME cause `GET /indexes/{id}/status` reports.
+/// [`Self::check`] is the gate; [`Self::body`] renders the 409 and
+/// [`Self::message`] the terminal-event / log form.
+/// Test: `reindex_of_quarantined_index_is_rejected_with_reason`,
+/// `reindex_never_leaves_chunk_count_null`.
+#[derive(Debug, Clone)]
+pub(crate) struct WriteQuarantined {
+    pub(crate) index_id: String,
+    /// The #4333 label — `contention`, `open_timeout`, `format_incompatible`,
+    /// or `unclassified` when the flag is set without a recorded kind.
+    pub(crate) failure_kind: &'static str,
+    /// The per-kind operator guidance, verbatim from
+    /// [`crate::core::corpus::CorpusOpenFailure::stage_reason`].
+    pub(crate) reason: &'static str,
+}
+
+impl WriteQuarantined {
+    /// Read the live write-quarantine state off `handle` (#8105).
+    ///
+    /// Why: the flag and its kind are set in lockstep under the indexer lock,
+    /// so one short read answers both halves.
+    /// What: `None` when the index accepts writes — the caller proceeds.
+    /// Test: `reindex_of_quarantined_index_is_rejected_with_reason`.
+    pub(crate) async fn check(index_id: &str, handle: &IndexHandle) -> Option<Self> {
+        let indexer = handle.indexer.read().await;
+        if !indexer.corpus_open_failed {
+            return None;
+        }
+        let kind = indexer.corpus_open_failure;
+        drop(indexer);
+        Some(Self {
+            index_id: index_id.to_string(),
+            // Defensive: the kind is written with the flag, so `None` is
+            // unreachable. Report the flag rather than inventing a cause.
+            failure_kind: kind.map_or("unclassified", |k| k.label()),
+            reason: kind.map_or(
+                "durable corpus is unavailable and the cause was not classified",
+                |k| k.stage_reason(),
+            ),
+        })
+    }
+
+    /// One-line refusal text for the log line and the terminal SSE frame.
+    ///
+    /// Test: `reindex_of_quarantined_index_is_rejected_with_reason`.
+    pub(crate) fn message(&self) -> String {
+        format!(
+            "index '{}' is write-quarantined ({}) — a reindex cannot persist anything, so it \
+             is refused rather than queued for a completion that never arrives (issue #8105). \
+             {}",
+            self.index_id, self.failure_kind, self.reason,
+        )
+    }
+
+    /// The `409` body `POST /indexes/{id}/reindex` answers (#8105).
+    ///
+    /// Why: `409 Conflict` is the shape this endpoint already uses for its
+    /// other "the daemon's own state forbids this request" refusals (the #3993
+    /// root collision, the #5357 root-move gate), so a caller branching on the
+    /// status code needs no new case.
+    /// What: carries `retryable: false` and the #4333 classification, matching
+    /// the `index_corpus_unavailable` 503 the query surfaces send for the same
+    /// state (`service::server::degraded`).
+    /// Test: `reindex_of_quarantined_index_is_rejected_with_reason`.
+    pub(crate) fn body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": "index_write_quarantined",
+            "index_id": self.index_id,
+            "failure_kind": self.failure_kind,
+            "retryable": false,
+            "queued": false,
+            "reason": self.reason,
+            "message": self.message(),
+        })
+    }
+}
 
 /// Number of consecutive reindex failures before an index is quarantined.
 ///

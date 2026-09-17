@@ -344,10 +344,15 @@ pub(crate) async fn index_status_report(
     );
     // #4333: name the classified failure so a consumer can tell a transient
     // open timeout (retry) from a genuine format mismatch (rebuild).
+    // #8085: `transient` classifies the CAUSE (the corpus is presumed intact);
+    // `write_quarantined` reports the STATE it left behind, which only a daemon
+    // restart lifts. Health tooling polling this endpoint read `transient: true`
+    // beside "self-heals" and waited for a recovery that never comes.
     let corpus_open_failure = indexer.corpus_open_failure.map(|k| {
         serde_json::json!({
             "kind": k.label(),
             "transient": k.is_transient(),
+            "write_quarantined": true,
             "reason": k.stage_reason(),
         })
     });

@@ -21,7 +21,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{
-    root_gate, spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus,
+    quarantine::WriteQuarantined, root_gate, spawn_reindex_with_cleanup, ReindexProgress,
+    ReindexStatus,
 };
 
 use super::helpers::{find_root_path_collision, validate_root_path};
@@ -63,12 +64,15 @@ pub(super) async fn reindex_handler(
 /// get wrong: the #120 cooldown that stops an infinite memory-abort loop, and
 /// the three guards on a `root_path` override (#3993 collision, #5357 root-move
 /// gate, #767 allowlist) that each stop this index being re-pointed at a tree it
-/// must not claim. The SSE progress stream stays on HTTP until slice 5.
+/// must not claim. #8105 adds the write-quarantine refusal, which precedes all
+/// of them. The SSE progress stream stays on HTTP until slice 5.
 /// What: [`reindex_handler`]'s whole former body, taking the already-decoded
 /// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
 /// Test: `reindex_over_the_socket_matches_the_http_body`,
 /// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport` in
-/// `crate::service::rpc::writes`.
+/// `crate::service::rpc::writes`;
+/// `reindex_of_quarantined_index_is_rejected_with_reason` and
+/// `reindex_never_leaves_chunk_count_null` cover the #8105 refusal.
 pub(crate) async fn reindex_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -81,6 +85,22 @@ pub(crate) async fn reindex_report(
             "error": format!("unknown index: {}", index_id.0),
         }),
     ))?;
+
+    // #8105: refuse before anything else. A write-quarantined index has no
+    // `CorpusStore` wired (the #4122 invariant), so this reindex would walk,
+    // embed, and then have every durable write refused — answering `queued:
+    // true` and leaving `chunk_count` null for a caller polling for a
+    // completion that cannot arrive. Ahead of the #120 cooldown guard because
+    // the quarantine is the more fundamental refusal: it does not expire.
+    if let Some(refusal) = WriteQuarantined::check(&index_id.0, &handle).await {
+        tracing::warn!(
+            index_id = %index_id.0,
+            failure_kind = refusal.failure_kind,
+            "reindex_handler: {}",
+            refusal.message(),
+        );
+        return Err((StatusCode::CONFLICT, refusal.body()));
+    }
 
     // Issue #120: cooldown guard. If the most recent reindex for this index
     // aborted at the memory limit, refuse to queue another one for

@@ -20,6 +20,7 @@
 //! string. Transient kinds explicitly tell the operator NOT to reindex.
 //!
 //! Test: `classify_*` plus `transient_kinds_never_recommend_rebuild`,
+//! `transient_kinds_name_the_write_quarantine_not_a_self_heal`,
 //! `unclassified_kind_does_not_claim_corruption`, and
 //! `format_incompatible_keeps_the_rebuild_instruction` below.
 
@@ -152,18 +153,30 @@ impl CorpusOpenFailure {
     /// `format_incompatible_keeps_the_rebuild_instruction`.
     pub fn stage_reason(self) -> &'static str {
         match self {
+            // #8085: these two used to say "TRANSIENT and self-heals: retry
+            // shortly". Nothing in this process re-attempts `CorpusStore::open`,
+            // so the write quarantine the failure raised stays up for the life
+            // of the daemon — an operator who retried for 10 minutes after every
+            // lock holder went away watched 220 indexes stay failed. The cause is
+            // still transient (see `is_transient`: the corpus is presumed
+            // intact); the STATE it left behind is not.
             Self::OpenTimeout => {
                 "durable corpus open TIMED OUT — an opener is still running (issue #3659). \
-                 This is TRANSIENT and self-heals: the on-disk corpus was never read and is \
-                 presumed INTACT. Retry shortly, or restart the daemon once warm-boot \
-                 contention subsides. DO NOT reindex and DO NOT run `--force`: rebuilding \
-                 here destroys healthy data (issue #4333)"
+                 The on-disk corpus was never read and is presumed INTACT, but this index is \
+                 WRITE-QUARANTINED for the life of this daemon process: only a successful \
+                 CorpusStore::open lifts the quarantine and nothing re-attempts it here, so \
+                 retrying a request will NOT clear it (issue #8085). Restart the daemon once \
+                 warm-boot contention subsides. DO NOT reindex and DO NOT run `--force`: \
+                 rebuilding here destroys healthy data (issue #4333)"
             }
             Self::Contention => {
                 "durable corpus is held by another opener (contention / stale file lock). \
-                 This is TRANSIENT and self-heals: the on-disk corpus was never read and is \
-                 presumed INTACT. Retry shortly, or restart the daemon. DO NOT reindex and \
-                 DO NOT run `--force` (issue #4333)"
+                 The on-disk corpus was never read and is presumed INTACT, but this index is \
+                 WRITE-QUARANTINED for the life of this daemon process: only a successful \
+                 CorpusStore::open lifts the quarantine and nothing re-attempts it here, so \
+                 the index stays failed even after the other holder releases the lock \
+                 (issue #8085). Restart the daemon. DO NOT reindex and DO NOT run `--force` \
+                 (issue #4333)"
             }
             Self::FormatIncompatible => {
                 "redb corpus is in an incompatible on-disk format or is corrupted — redb \
@@ -336,6 +349,39 @@ mod tests {
             assert!(
                 !reason.contains("corrupted format"),
                 "{kind:?} must not claim corruption (issue #4333): {reason}"
+            );
+        }
+    }
+
+    /// Why (#8085): the transient reasons used to promise "TRANSIENT and
+    /// self-heals: retry shortly" for a state only a daemon restart lifts. An
+    /// operator polling a contended index for 10 minutes after every lock
+    /// holder had gone read that sentence and kept waiting.
+    /// What: asserts the two transient reasons name the write quarantine and
+    /// the restart, and make no self-heal or retry-shortly promise.
+    /// Test: this test.
+    #[test]
+    fn transient_kinds_name_the_write_quarantine_not_a_self_heal() {
+        for kind in [
+            CorpusOpenFailure::OpenTimeout,
+            CorpusOpenFailure::Contention,
+        ] {
+            let reason = kind.stage_reason();
+            assert!(
+                !reason.contains("self-heals"),
+                "{kind:?} must not promise a self-heal while write-quarantined: {reason}"
+            );
+            assert!(
+                !reason.contains("Retry shortly"),
+                "{kind:?} must not advise a retry that cannot clear it: {reason}"
+            );
+            assert!(
+                reason.contains("WRITE-QUARANTINED"),
+                "{kind:?} must name the quarantine it left behind: {reason}"
+            );
+            assert!(
+                reason.contains("Restart the daemon"),
+                "{kind:?} must name the operator action that lifts it: {reason}"
             );
         }
     }

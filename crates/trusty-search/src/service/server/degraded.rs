@@ -10,7 +10,7 @@
 //!
 //! | State | Verdict | Retryable |
 //! |---|---|---|
-//! | durable corpus failed to open (#4087) | `503 index_corpus_unavailable` | per #4333 classification |
+//! | durable corpus failed to open (#4087) | `503 index_corpus_unavailable` | no — write-quarantined until restart (#8085) |
 //! | durable corpus failed to read (#6043, #5917) | `503 index_corpus_unavailable` | yes |
 //! | registered but not resident (#5061) | `503 index_not_resident` | yes — `search` reloads it |
 //! | restore permanently failed (#5061) | `503 index_restore_failed` | no — operator action |
@@ -76,7 +76,17 @@ pub(super) async fn is_corpus_failed(handle: &IndexHandle) -> bool {
 /// caller learns whether to retry or to escalate. The body deliberately
 /// repeats the classified reason verbatim rather than paraphrasing it, so a
 /// consumer never sees a rebuild instruction for a transient timeout.
-/// Test: `search_against_corpus_failed_index_returns_503_not_empty_200`.
+///
+/// #8085: `transient` and `retryable` are NOT the same question here, and
+/// sending one value for both is what stranded a caller. `transient` classifies
+/// the CAUSE — a timeout or a lock never read the corpus, so it is presumed
+/// intact and must not be rebuilt. `retryable` describes the STATE the cause
+/// left behind, and that state is a write quarantine only a successful
+/// `CorpusStore::open` lifts; nothing in this process re-attempts one, so no
+/// number of retries clears it. `write_quarantined` is the machine-readable
+/// form of the same fact, for health tooling that must not parse prose.
+/// Test: `search_against_corpus_failed_index_returns_503_not_empty_200`,
+/// `degraded_status_names_quarantine_not_self_heal_while_quarantined`.
 pub(super) async fn corpus_failure_response(
     index_id: &str,
     handle: &IndexHandle,
@@ -112,7 +122,14 @@ pub(super) async fn corpus_failure_response(
             // read-failure producer below sent only it. Two bodies under one
             // error code disagreeing about which field carries the split is
             // what a relay (`mcp::tools::unavailable`) cannot paper over.
-            "retryable": transient,
+            //
+            // #8085: always `false` here. By the #4122 load-bearing invariant a
+            // corpus-open failure ALWAYS leaves the index write-quarantined, and
+            // the quarantine outlives every retry a caller can make.
+            "retryable": false,
+            "write_quarantined": true,
+            "remedy": "restart the daemon; POST /indexes/{id}/reindex is refused while \
+                       the index is write-quarantined (issues #8085, #8105)",
             "message": format!(
                 "index '{index_id}' cannot be searched: its durable corpus failed to open, \
                  so every query would return an empty result set indistinguishable from \
