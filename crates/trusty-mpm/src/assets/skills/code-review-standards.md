@@ -133,6 +133,19 @@ containing the format's own escape or delimiter characters malforms the
 payload, and the system under test then answers the malformed input with a
 permissive default that reads exactly like a real pass (#7550, #7624).
 
+## Check Block Transient-State Coverage
+
+A Terraform `check` block validated only against the final steady-state plan
+misses failures that appear only during resource replacement. Two observed
+failures: `timecmp` raised on the empty `expire_time` a not-yet-issued
+certificate reports, and `timestamp()` deferred an entire plan to "could not
+be evaluated" where `plantimestamp()` was needed. Both passed a green
+steady-state plan and broke mid-replacement.
+
+Require a check block to be reviewed against the transient states a resource
+passes through during creation and replacement, not only the field values
+present once everything has settled (#8144).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
