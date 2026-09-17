@@ -131,19 +131,31 @@ enum Command {
     /// automatically (#4512, reversing DOC-50 §4.1's deferral) and LEFT
     /// RUNNING when the REPL exits, since the daemon owns PM lifecycle and
     /// agent dispatch and this TUI is only one of its attached clients. A
-    /// daemon bound to a DIFFERENT project than `--project` is refused rather
+    /// daemon bound to a DIFFERENT project than this TUI's is refused rather
     /// than attached to, because every session would otherwise run against
-    /// the wrong repository. See `crate::cli::tui` for the wiring and
-    /// `crate::cli::daemon_autospawn` for the policy.
+    /// the wrong repository. Since #8205 that project defaults to the
+    /// repository enclosing the current directory. See `crate::cli::tui` for
+    /// the wiring and `crate::cli::daemon_autospawn` for the policy.
     Tui {
         /// Path to the project root the REPL's session binds to.
         ///
-        /// OPTIONAL: omit it for a PROJECTLESS session — the same
-        /// first-class state `serve` without `--project` and `session.create`
-        /// without a `project` already support. Must name an existing
-        /// directory when given.
+        /// OPTIONAL: omit it and the session homes on the repository
+        /// enclosing the current directory (#8205) — pass `--projectless`
+        /// for the unbound session this used to default to. Must name an
+        /// existing directory when given.
         #[arg(long, short, value_name = "PATH")]
         project: Option<PathBuf>,
+
+        /// Run with NO project bound, ignoring the current directory (#8205).
+        ///
+        /// A projectless session is a first-class state — the same one
+        /// `serve` without `--project` and `session.create` without a
+        /// `project` support — but it is no longer the default: its file
+        /// tools are rooted in a throwaway scratch directory and nothing it
+        /// writes is indexed or kept. Ask for it when you want a
+        /// chat/planning session that touches no repository.
+        #[arg(long, conflicts_with = "project")]
+        projectless: bool,
 
         /// Run the DELEGATING PM instead of the solo agent (#8184).
         ///
@@ -559,9 +571,11 @@ async fn main() -> Result<()> {
         // #4512: that failure is now rare — a missing daemon is started, not
         // reported.
         // #8184: `--delegate` is the ONE opt-in back to the delegating PM.
-        Command::Tui { project, delegate } => {
-            run_thin_client(cli::tui::run(project, delegate), "tui").await
-        }
+        Command::Tui {
+            project,
+            projectless,
+            delegate,
+        } => run_thin_client(cli::tui::run(project, projectless, delegate), "tui").await,
 
         Command::RunTask {
             agent,

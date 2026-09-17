@@ -611,6 +611,30 @@ fn tui_subcommand_is_listed_in_help() {
     );
 }
 
+/// `tcode tui --help` must document `--projectless` (#8205).
+///
+/// Why: the flag is the ONLY way back to the pre-#8205 unbound session, so an
+/// operator who wants one has to be able to find it without reading the
+/// source. Asserting the help text (not just that the flag parses) is what
+/// makes that discoverability a contract.
+/// What: runs the real binary's `tui --help` and looks for the flag and the
+/// homing note on `--project`.
+/// Test: this test.
+#[test]
+fn tui_help_documents_the_projectless_opt_out() {
+    let output = support::tcode_command()
+        .args(["tui", "--help"])
+        .output()
+        .expect("spawn tcode tui --help");
+
+    assert!(output.status.success(), "--help must exit 0: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--projectless"),
+        "`tcode tui --help` must list the opt-out: {stdout}"
+    );
+}
+
 /// `tcode tui` auto-spawns a daemon when none is running (#4512, reversing
 /// DOC-50 §4.1's deferral) — it must NEVER exit telling the operator to go
 /// start one by hand — and that daemon must OUTLIVE the TUI, because it owns
@@ -632,11 +656,18 @@ fn tui_subcommand_is_listed_in_help() {
 /// the exact "our daemon came up" signal — when it is absent the test still
 /// asserts everything that does not depend on a free port. This test kills
 /// the daemon it caused to start; nothing else will.
+///
+/// `--projectless` is passed explicitly since #8205: a bare `tcode tui` now
+/// homes on the repository enclosing its launch directory, which here is the
+/// trusty-tools checkout the test binary runs from. This test is about the
+/// SPAWN, so it asks for the unbound session it always meant, and in doing so
+/// exercises the new flag through the real binary.
 #[tokio::test]
 async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     let data_dir = tempfile::tempdir().expect("data dir tempdir");
     let output = support::tcode_command()
         .arg("tui")
+        .arg("--projectless")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
         .stdin(std::process::Stdio::null())
         .output()
@@ -695,7 +726,7 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     assert_eq!(health["status"], "ok");
     assert_eq!(
         health["binding"]["state"], "projectless",
-        "a projectless TUI must have spawned a projectless daemon: {health}"
+        "a --projectless TUI must have spawned a projectless daemon: {health}"
     );
 
     let pid = health["pid"].as_u64().expect("/health must report a pid") as libc::pid_t;
