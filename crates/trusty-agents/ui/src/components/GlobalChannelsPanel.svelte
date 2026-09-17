@@ -79,6 +79,10 @@
   let addButton: HTMLButtonElement | null = null;
   /** The confirmation's sheet, so Tab can be kept inside it (#8187). */
   let sheet: HTMLElement | null = null;
+  /** The confirmation's Cancel button — where focus goes when the force appears (#8187). */
+  let cancelDelete: HTMLButtonElement | null = null;
+  /** The panel's own root, the focus target of last resort (#8187). */
+  let panelRoot: HTMLElement | null = null;
   /**
    * False while the parent's scope toggle hides this panel (#8187).
    *
@@ -104,9 +108,9 @@
    * create that follows it, under a notice announcing a success.
    */
   $: listLocked = saving || draft !== null || pending !== null;
-  // #8187: hidden and armed is the state the critic named; closing on hide ends
-  // it, and the delete has not been issued so nothing is lost by closing.
-  $: if (!visible && pending) void closeDelete();
+  // #8187 (critic MEDIUM-1): hidden and armed is the state to end, but never
+  // while the DELETE is in flight — see `abandonHidden`.
+  $: if (!visible && pending && !busy) void abandonHidden();
   $: assistantNames = $catalogAgents.map(agent => agent.name);
   // #8187: the daemon's own provider table, minus the test-only adapters, and
   // the dispatch roster the server validates `route_to` against — which is NOT
@@ -248,7 +252,28 @@
     pending = null; referencedBy = []; pendingError = '';
     invoker = null;
     await tick();
-    target?.focus();
+    // #8187 (critic LOW): a disabled target cannot take focus — Add channel is
+    // disabled outright when the daemon offers no provider — so focus falls to
+    // the panel rather than out of it to `<body>`.
+    const usable = target && !(target as HTMLButtonElement).disabled ? target : panelRoot;
+    usable?.focus();
+  }
+  /** What a delete refused for live overlays says once its sheet is gone. */
+  const refusedBy = (names: string[]) =>
+    `${names.join(', ')} ${names.length === 1 ? 'still binds' : 'still bind'} this channel, so it was not deleted. Start the delete again to be offered the force.`;
+  /**
+   * Close a confirmation the scope toggle hid, carrying its outcome up.
+   *
+   * Why: the sheet is the only surface that reports a DELETE's outcome, so this
+   * runs only once `busy` has cleared — an in-flight request is never orphaned
+   * by a visibility change — and whatever the sheet was left showing becomes a
+   * panel-level error rather than disappearing with it.
+   * Test: `GlobalChannelsPanel.test.ts::shows a refusal that landed while the panel was hidden`.
+   */
+  async function abandonHidden() {
+    const refusal = pendingError || (referencedBy.length ? refusedBy(referencedBy) : '');
+    await closeDelete();
+    if (refusal) error = refusal;
   }
   /**
    * The confirmation claims `aria-modal`, so Tab stays inside it (critic LOW).
@@ -307,7 +332,16 @@
     } catch (cause) {
       if (token !== generation) return;
       const named = channelReferences(cause);
-      if (named) { referencedBy = named; return; }
+      if (named) {
+        // #8187 (critic MEDIUM-2): the force button takes the refused one's
+        // place, so focus leaves it — a repeated or held Enter must not force a
+        // delete over a warning that has not been read. `busy` clears first
+        // because a disabled button cannot take the focus.
+        referencedBy = named; busy = false;
+        await tick();
+        cancelDelete?.focus();
+        return;
+      }
       if (isChannelConflict(cause)) {
         busy = false; void closeDelete();
         if (await load()) error = RELOADED;
@@ -330,7 +364,7 @@
   const focusOnMount = (node: HTMLElement) => { node.focus(); };
 </script>
 <svelte:window on:keydown={onWindowKeydown} />
-<div class="global" aria-label="Global channels">
+<div class="global" aria-label="Global channels" tabindex="-1" bind:this={panelRoot}>
   <p class="muted">These channels belong to this host, not to one assistant. Each one fans its incoming updates out to the assistants selected below. An assistant's own channel for the same service and destination takes precedence over the global one.</p>
   {#if loading}<p role="status">Loading global channels…</p>{/if}
   {#if catalogError}<p class="error" role="status">The assistant list could not be read, so the routes below show only the names each channel already carries.</p>{/if}
@@ -430,7 +464,7 @@
       {#if pendingError}<p class="error" role="alert">{pendingError}</p>{/if}
       <div class="row">
         <button class="danger" on:click={() => confirmDelete(referencedBy.length > 0)} disabled={busy}>{busy ? 'Deleting…' : referencedBy.length ? 'Delete anyway' : 'Delete channel'}</button>
-        <button use:focusOnMount on:click={() => closeDelete()} disabled={busy}>Cancel</button>
+        <button bind:this={cancelDelete} use:focusOnMount on:click={() => closeDelete()} disabled={busy}>Cancel</button>
       </div>
     </div>
   </div>

@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
+import { createClassComponent } from 'svelte/legacy';
 import GlobalChannelsPanel from './GlobalChannelsPanel.svelte';
 import { CHANNEL_WRITE_CREDENTIAL_MESSAGE, type GlobalChannel } from '../lib/channels';
 
@@ -22,6 +23,9 @@ const channel = (overrides: Partial<GlobalChannel> = {}): GlobalChannel => ({
 });
 
 let view: ReturnType<typeof mount> | undefined;
+// #8187: the one mount that must change `visible` after the fact — the parent's
+// scope toggle does exactly that, and `mount` props are not writable.
+let toggleable: ReturnType<typeof createClassComponent> | undefined;
 let channels: GlobalChannel[] = [];
 let revision = 'r1';
 let puts: { body: string; authorization: string | undefined }[] = [];
@@ -103,6 +107,8 @@ beforeEach(() => {
 afterEach(async () => {
   if (view) await unmount(view);
   view = undefined;
+  toggleable?.$destroy();
+  toggleable = undefined;
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
 });
@@ -679,3 +685,72 @@ it('claims nothing about when receiving stops before the delete, with receiving 
   expect(dialog).not.toContain('keeps polling');
   expect(dialog).toContain('will say whether a receiver');
 });
+
+// #8187 (critic MEDIUM-1): the scope toggle hides this panel with `display:none`
+// on an ancestor and does not unmount it, and the sheet is the only surface that
+// reports a DELETE's outcome. Closing it mid-flight dropped the refusal with
+// nothing on screen to explain it.
+it('shows a refusal that landed while the panel was hidden', async () => {
+  writeFailures.push({ status: 500, body: { error: 'The channel store could not be written.' } });
+  toggleable = createClassComponent({ component: GlobalChannelsPanel, target: document.body, props: { visible: true } });
+  await settle();
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'DELETE') await gate;
+    return realFetch(input, init);
+  });
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  // The operator switches scope away while the write is still going.
+  toggleable.$set({ visible: false });
+  await settle();
+  release();
+  await settle();
+  toggleable.$set({ visible: true });
+  await settle();
+  expect(deletes).toHaveLength(1);
+  expect(alerts()).toContain('The channel store could not be written.');
+  // And nothing stayed armed behind it: the confirmation itself is gone.
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+// #8187 (critic MEDIUM-2): the force button replaces the refused one in place
+// under retained focus, so a repeated or held Enter forced the delete over a
+// warning the operator had not read.
+it('takes focus off the destructive button when the refusal offers the force', async () => {
+  await render();
+  writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie'] } });
+  deleteButton('Personal mail').click();
+  await settle();
+  const first = button('Delete channel');
+  first.focus();
+  expect(document.activeElement).toBe(first);
+  first.click();
+  await settle();
+  const [danger, cancel] = [...document.querySelectorAll('.sheet button')] as HTMLButtonElement[];
+  expect(danger.textContent).toContain('Delete anyway');
+  expect(document.activeElement).not.toBe(danger);
+  expect(document.activeElement).toBe(cancel);
+  // The repeat keystroke therefore cannot force what has not been read.
+  expect(deletes).toHaveLength(1);
+});
+
+// #8187 (critic LOW): Add channel is disabled when the daemon offers no provider
+// this page may pick, so the post-delete focus call landed on `<body>` — outside
+// the panel entirely.
+it('parks focus on the panel when Add channel cannot take it after a delete', async () => {
+  providers = [{ id: 'stub', name: 'Stub' }];
+  await render();
+  expect(button('Add channel').disabled).toBe(true);
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(document.body.textContent).toContain('Ops deleted.');
+  expect(document.activeElement).toBe(document.querySelector('[aria-label="Global channels"]'));
+});
+
