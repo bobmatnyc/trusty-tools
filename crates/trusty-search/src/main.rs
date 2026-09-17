@@ -438,6 +438,14 @@ enum Commands {
     ///   trusty-search start --port 7878
     ///   trusty-search start --foreground --port 7878   # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
+    ///
+    /// #8176: an isolated instance started against a data directory that did
+    /// not exist (or was empty) before this start does NOT auto-discover — it
+    /// never walks `scan_paths` and never touches a colocated
+    /// `.trusty-search/` store it has not been given. `--no-auto-discover`
+    /// says the same thing explicitly on any data directory, including the
+    /// machine default; `--auto-discover` is the opt-in that grants the scan
+    /// on a fresh isolated one.
     #[command(display_order = 20)]
     Start {
         /// Port to listen on (default: 7878, auto-selects next if busy)
@@ -474,8 +482,11 @@ enum Commands {
         /// indexes.toml, per-index data).
         ///
         /// Equivalent to setting `TRUSTY_DATA_DIR` in the environment.
-        /// `TRUSTY_DATA_DIR` takes precedence over this flag when both are set.
-        /// The directory is created automatically if it does not exist.
+        /// This flag takes precedence over an inherited `TRUSTY_DATA_DIR` when
+        /// both are set (#8149 — the old precedence was the reverse, so a
+        /// second daemon bound the first daemon's RPC socket). The directory is
+        /// created automatically if it does not exist.
+        /// Must be an absolute path.
         ///
         /// Use this to run an isolated daemon (e.g. for cert/benchmark work)
         /// alongside the production daemon without lockfile conflicts:
