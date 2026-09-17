@@ -60,7 +60,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use super::cli_def::Cli;
-use super::{direct_mode, indexer, pm_mode, subagent_mode, workflow_mode};
+use super::{direct_mode, indexer, pm_mode, subagent_mode, telegram_gateway, workflow_mode};
 use crate::{ast, ctrl, identity, plugins, repl, service, session, slack, telegram};
 
 /// Dispatch the parsed CLI into its execution mode.
@@ -213,12 +213,25 @@ pub(super) async fn dispatch_cli_mode(
             .clone()
             .or_else(|| crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").ok())
             .filter(|s| !s.is_empty());
+        // #8190: the API host is the production host, and it spawned every
+        // other channel receiver but never the Telegram gateway — so a
+        // telegram binding on `tagent --api` could not receive at all. The
+        // gateway starts here, beside `serve_with_config` rather than inside
+        // it, and stops when the server does. A host with no token, no
+        // enabled receiving Telegram channel, or a lock another poller
+        // already holds logs one reason line and serves exactly as before.
+        let gateway = telegram_gateway::start_for_api_host().await;
         // #3329: default to loopback; `--bind` is the explicit non-loopback
         // opt-in (which serve_with_config gates on a token being present).
-        return crate::api::server::serve_with_config(crate::api::server::ApiConfig::with_bind(
-            cli.bind, port, token,
-        ))
+        let served = crate::api::server::serve_with_config(
+            crate::api::server::ApiConfig::with_bind(cli.bind, port, token),
+        )
         .await;
+        // Runs on the graceful-shutdown path AND on a bind failure: the
+        // gateway holds a machine-wide PID lock either way, and a lock left
+        // behind makes the next start refuse.
+        gateway.shutdown().await;
+        return served;
     }
 
     if cli.check_orphans {

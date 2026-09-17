@@ -26,6 +26,8 @@ use super::pairing::{
     generate_pairing_code, issue_repl_pairing_code, load_paired_chats, new_pending_pairs,
     save_paired_chats, telegram_pid_alive, verify_pair_attempt,
 };
+// #8190: the read-only probe the API host's start decision runs.
+use super::pairing::gateway_lock_holder_at;
 
 #[test]
 fn split_message_short() {
@@ -461,6 +463,30 @@ fn telegram_pid_guard_live_conflict_is_rejected() {
     assert!(result.is_err(), "live peer must block acquire");
     // The pre-existing file must be left intact for the live peer.
     assert!(path.exists());
+}
+
+/// #8190: the lock probe names a live holder, so the API host can refuse to
+/// start a second poller instead of discovering the conflict mid-`getUpdates`.
+#[test]
+fn telegram_gateway_lock_holder_reports_a_live_pid() {
+    let tmp = tempdir_for_test();
+    let path = tmp.join("telegram.pid");
+    let self_pid = std::process::id() as i32;
+    std::fs::write(&path, self_pid.to_string()).unwrap();
+    assert_eq!(gateway_lock_holder_at(&path), Some(self_pid));
+}
+
+/// #8190: a stale, garbage, or absent PID file is NOT a holder — the API host
+/// must start the gateway after an unclean shutdown, not stay off forever.
+#[test]
+fn telegram_gateway_lock_holder_ignores_a_stale_pid_file() {
+    let tmp = tempdir_for_test();
+    let path = tmp.join("telegram.pid");
+    assert_eq!(gateway_lock_holder_at(&path), None, "absent file");
+    std::fs::write(&path, i32::MAX.to_string()).unwrap();
+    assert_eq!(gateway_lock_holder_at(&path), None, "dead pid");
+    std::fs::write(&path, "not-a-pid").unwrap();
+    assert_eq!(gateway_lock_holder_at(&path), None, "unparseable file");
 }
 
 /// Single-instance guard: unparseable PID file contents are treated as

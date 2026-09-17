@@ -95,6 +95,8 @@ mod subagent_exec;
 mod subagent_mode;
 mod subcommands;
 mod system_cmd;
+// #8190: the Telegram long-poll gateway, supervised inside the `--api` host.
+mod telegram_gateway;
 // Security fix (delegate_to_agent injection-to-RCE path, #4126): `pub(crate)`
 // (not private) so `ctrl::pm_task::dispatch::{persona, history}` — the two
 // OTHER `delegate_to_agent` call sites outside this module — can reuse

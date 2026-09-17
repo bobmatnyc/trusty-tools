@@ -65,6 +65,9 @@ use pairing::{
 pub use pairing::{
     PendingPairs, SENTINEL_PAIRING_CHAT_ID, issue_repl_pairing_code, new_pending_pairs,
 };
+// #8190: the API host asks whether a poller already owns `getUpdates` on this
+// machine before it spawns one of its own.
+pub use pairing::{gateway_lock_holder, gateway_lock_holder_at};
 
 /// Maximum characters per Telegram message.
 ///

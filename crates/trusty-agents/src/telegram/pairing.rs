@@ -194,6 +194,38 @@ pub(super) fn telegram_pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// The PID of a live process already holding the Telegram gateway lock.
+///
+/// Why (#8190): the API host decides BEFORE spawning whether a poller already
+/// owns `getUpdates` on this machine — Telegram terminates the older poller
+/// when a second one starts, so a second poller is a live outage, not a warning.
+/// [`TelegramPidGuard::acquire`] answers the same question but takes the lock
+/// as a side effect, which is exactly what a startup decision must not do.
+/// What: reads the PID file and returns `Some(pid)` only when the recorded
+/// process is still alive. A missing, unreadable, unparseable, or stale file is
+/// `None` — the same three cases `acquire` treats as free. The answer is a
+/// snapshot: `acquire` inside the gateway remains the authoritative gate, and
+/// the supervisor re-probes before every restart.
+/// Test: `telegram_gateway_lock_holder_reports_a_live_pid`,
+/// `telegram_gateway_lock_holder_ignores_a_stale_pid_file`.
+pub fn gateway_lock_holder_at(path: &Path) -> Option<i32> {
+    let pid = std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    telegram_pid_alive(pid).then_some(pid)
+}
+
+/// [`gateway_lock_holder_at`] against the real PID-file path.
+///
+/// Test: `telegram_gateway_refuses_when_another_poller_holds_the_lock` drives
+/// the decision this feeds; the path itself is covered by
+/// `telegram_pid_guard_acquire_writes_and_drops`.
+pub fn gateway_lock_holder() -> Option<i32> {
+    gateway_lock_holder_at(&telegram_pid_file_path())
+}
+
 /// RAII guard that owns the Telegram daemon PID file.
 ///
 /// Why: The PID file must be removed on *every* exit path — normal return,
@@ -216,7 +248,7 @@ impl TelegramPidGuard {
     /// an error (caller should exit). A stale PID file (process dead) is
     /// overwritten. On success, writes the current PID and returns a guard
     /// whose `Drop` cleans up the file.
-    /// Test: `telegram_pid_guard_acquire_writes_file`,
+    /// Test: `telegram_pid_guard_acquire_writes_and_drops`,
     /// `telegram_pid_guard_stale_is_overwritten`.
     pub(super) fn acquire(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {

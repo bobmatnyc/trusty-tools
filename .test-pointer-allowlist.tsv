@@ -132,7 +132,6 @@ crates/trusty-agents/src/skills/registry/meta.rs	save_and_load_index_roundtrip
 crates/trusty-agents/src/skills/registry/mod.rs	save_and_load_index_roundtrip
 crates/trusty-agents/src/skills/registry/scan.rs	looks_like_external_skill_dir_flags_claude_skills_layout
 crates/trusty-agents/src/telegram/format.rs	split_message_hard_split
-crates/trusty-agents/src/telegram/pairing.rs	telegram_pid_guard_acquire_writes_file
 crates/trusty-agents/src/ticketing/actions.rs	gh_actions_cli_client_get_run_calls_run_view
 crates/trusty-agents/src/ticketing/identity.rs	named_identity_lookup
 crates/trusty-agents/src/ticketing/mod.rs	build_client_force_gh_cli_falls_back_to_cli
