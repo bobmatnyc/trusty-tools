@@ -958,6 +958,28 @@ mod tests {
         );
     }
 
+    /// #8184: the provenance test reads the PARSED key, so a QUOTED value —
+    /// which a frontmatter emitter may legitimately produce — still recovers
+    /// the block. FAILS against the substring form this replaced, which only
+    /// matched the bare spelling and would have silently stopped recovering.
+    /// Test: this test.
+    #[test]
+    fn quoted_provenance_still_recovers_the_cards_permissions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pm.md"),
+            "---\nname: pm\nrole: pm\nprovenance: \"framework-owned\"\nmodel: sonnet\n\
+             tcode_tools: [read_file, write_file, bash]\n---\n\nYou are the PM.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("pm.md")).expect("loads");
+        assert!(
+            cfg.permissions.is_some_and(|p| !p.is_empty()),
+            "a quoted `provenance:` is the same declaration as an unquoted one"
+        );
+    }
+
     /// The recovery is scoped to the deployer's own output: a hand-authored
     /// file sharing a roster name keeps its author's silence.
     /// Test: this test.

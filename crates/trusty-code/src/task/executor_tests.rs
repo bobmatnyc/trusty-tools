@@ -1396,11 +1396,14 @@ async fn await_permission_request(registry: &SessionRegistry, id: &str) -> (Stri
 /// (`spawn_task_run` with a broker), so the ask, the published event, and the
 /// answer are the real ones.
 /// What: an EMPTY agents dir, so `resolve_agent` falls back to the embedded
-/// `pm.md`; a broker plus a claimed prompter (#8100, or the ask would resolve
-/// headless without ever publishing); a concurrent task answers `deny`.
-/// Asserts the request named `write_file` and that nothing was written. FAILS
-/// without `pm.md`'s `permissions:` block — no request is ever published and
-/// the file lands.
+/// `pm.md`; a broker plus a real `session.events` stream — the ONLY thing the
+/// TUI holds, and with no `session.attach` anywhere, so this is the client
+/// shape (#8184, `tui_client::prompter_claim`) rather than a synthetic
+/// `claim_prompter`; a concurrent task answers `deny`. Asserts the request
+/// named `write_file` and that nothing was written. FAILS without `pm.md`'s
+/// `permissions:` block — no request is ever published and the file lands.
+/// Deterministic: the answering task waits for the published event, so there
+/// is no window to lose.
 /// Test: this test.
 #[tokio::test]
 async fn solo_run_of_the_stock_pm_asks_before_write_file() {
@@ -1409,10 +1412,21 @@ async fn solo_run_of_the_stock_pm_asks_before_write_file() {
     let agents = tempfile::tempdir().expect("empty agents tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let broker = Arc::new(crate::permissions::PermissionBroker::new());
-    // #8100: an ask only suspends while someone is watching THIS session.
-    let _prompter = registry
-        .claim_prompter(&session.id)
-        .expect("session must exist");
+    // #8100/#8184: an ask only suspends while someone is watching THIS
+    // session, and what the TUI holds is an events stream — held open for the
+    // whole run, exactly as `prompter_claim` holds it.
+    let mut _watching = crate::session::events_stream::open(
+        Arc::clone(&registry),
+        crate::session::events_stream::SessionEventsParams {
+            session_id: session.id.clone(),
+            after_seq: None,
+        },
+    )
+    .await
+    .expect("the session must be streamable");
+    // One frame proves the daemon-side handler ran, so the claim exists before
+    // anything can be gated — the client's own handshake.
+    let _confirmed = _watching.recv().await;
 
     let mock = Arc::new(ScriptedLlm::from_json(&[
         write_file_tool_call_response("call_1", "asked.txt", "nope"),

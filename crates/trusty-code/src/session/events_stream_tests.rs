@@ -116,3 +116,45 @@ async fn session_events_unknown_session_is_refused() {
         i64::from(crate::jsonrpc::RpcError::session_not_found("x").code)
     );
 }
+
+/// #8184: an open `session.events` stream IS a prompter, with no
+/// `session.attach` anywhere.
+///
+/// Why: this is the daemon-side half the TUI's claim rests on
+/// (`tui_client::prompter_claim`) — the client holds a stream, nothing else,
+/// and an `ask` must suspend for it. `registry_tests::
+/// prompter_attached_while_a_session_attachment_lives` pins the same property
+/// for `session.attach`, which is a different code path (#8100).
+/// What: opens the stream and reads the claim off the registry directly, so
+/// nothing about it depends on timing or on an LLM.
+/// Test: this test.
+#[tokio::test]
+async fn session_events_stream_is_a_prompter() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    assert_eq!(
+        registry.prompter_count(&session.id),
+        0,
+        "nobody is watching a session nobody opened a stream on"
+    );
+
+    let mut rx = open(
+        registry.clone(),
+        SessionEventsParams {
+            session_id: session.id.clone(),
+            after_seq: None,
+        },
+    )
+    .await
+    .expect("open must succeed for a live session");
+    // The claim is taken inside `open`, before the first frame — reading one
+    // proves the handler ran, which is exactly what the client waits for.
+    let _first = next_seq(&mut rx).await;
+
+    assert_eq!(
+        registry.prompter_count(&session.id),
+        1,
+        "an events stream alone must count as a prompter, or every gated call \
+         on a TUI session is denied unprompted"
+    );
+}

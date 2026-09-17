@@ -53,7 +53,12 @@ Changed
   that lost was refused with no prompt to answer — and every reconnect gap
   reopened the same hole. `setup` now opens a dedicated claim stream and
   confirms it before returning, held for the TUI's life alongside the per-turn
-  stream, so a gap needs both down at once.
+  stream, so a gap needs both down at once. The claim is confirmed, not
+  assumed: a daemon that refuses or closes the stream fails `setup` rather than
+  starting a session nothing is watching, the wait is bounded by the ordinary
+  15-second call budget, and the background reconnect gives up after the same
+  five attempts the per-turn tail uses instead of re-dialling a dead daemon for
+  the life of the process.
 - **The TUI's connect line states which agent runs and where its file tools are
   rooted (#8184).** It now reads `… (session <id>; solo agent (no delegation),
   file tools rooted at <root>)`, or `… projectless — file tools rooted at a

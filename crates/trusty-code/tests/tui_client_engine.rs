@@ -306,7 +306,27 @@ struct StubDaemon {
 }
 
 impl StubDaemon {
+    /// A stub that serves the TUI's prompter-claim stream (#8184).
+    ///
+    /// Why: `setup` now opens a `session.events` stream and REFUSES to return
+    /// until a frame confirms the daemon took the claim, so every stub test
+    /// needs that one frame — and it must not come out of `stream_frames`,
+    /// which is what the TAIL under test is meant to see (the reconnect
+    /// -exhaustion case, for one, depends on that tail being empty).
+    /// What: a claim request is a `session.events` with NO `after_seq` key —
+    /// `prompter_claim::open` omits it, `pump_session_events` always sends it
+    /// — and gets one synthetic frame; every other stream, `workstream.events`
+    /// included, gets `stream_frames` unchanged.
     fn start(answers: Value, stream_frames: Vec<Value>) -> Self {
+        Self::start_inner(answers, stream_frames, true)
+    }
+
+    /// A stub that serves NOTHING on any stream, so the claim cannot confirm.
+    fn start_refusing_the_claim(answers: Value) -> Self {
+        Self::start_inner(answers, Vec::new(), false)
+    }
+
+    fn start_inner(answers: Value, stream_frames: Vec<Value>, serve_claim: bool) -> Self {
         let dir = tempfile::tempdir().expect("socket tempdir");
         let socket = dir.path().join("stub.sock");
         // `connect_hardened` refuses a socket whose containing directory is
@@ -324,6 +344,7 @@ impl StubDaemon {
             while let Ok((stream, _)) = listener.accept().await {
                 let answers = answers.clone();
                 let frames = stream_frames.clone();
+                let serve_claim = serve_claim;
                 let recorded = recorded.clone();
                 let recorded_requests = recorded_requests.clone();
                 tokio::spawn(async move {
@@ -348,6 +369,19 @@ impl StubDaemon {
                     let id = request["id"].clone();
 
                     if request["stream"] == json!(true) {
+                        // #8184: the prompter claim asks for a bare tail; the
+                        // per-turn pump always carries `after_seq`.
+                        let is_claim = method == "session.events"
+                            && request["params"].get("after_seq").is_none();
+                        let frames = if is_claim {
+                            if serve_claim {
+                                vec![json!({"session_id": "sess-1", "seq": 1})]
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            frames
+                        };
                         for frame in frames {
                             let body = format!(
                                 "{}\n",
@@ -661,6 +695,42 @@ async fn setup_opens_a_prompter_claim_stream() {
     assert!(
         !seen.contains(&"task.run".to_string()),
         "setup must not run anything: {seen:?}"
+    );
+}
+
+/// #8184: a claim stream the daemon does not serve must FAIL `setup`.
+///
+/// Why: `open_stream` returns once the request is written, so a successful
+/// dial proves nothing about the daemon having run the handler that takes the
+/// claim — and a refusal (`session_not_found`) arrives as a terminal frame on
+/// the stream, never as a dial error. A `setup` that ignored the first frame
+/// would report success over a session nothing is watching, and every gated
+/// call in it would then be denied with no prompt: the precise failure the
+/// claim exists to prevent, reintroduced silently.
+/// What: a stub that serves the session but closes the stream with no frame.
+/// Asserts `setup` errors. FAILS while the first frame is discarded: `setup`
+/// returned `Ok`.
+/// Test: this test.
+#[tokio::test]
+async fn setup_fails_when_the_claim_stream_is_refused() {
+    let stub = StubDaemon::start_refusing_the_claim(stub_answers(None));
+    let engine = stub.engine();
+    let (tx, _rx) = unbounded_channel();
+
+    let err = engine
+        .setup(tx)
+        .await
+        .expect_err("an unwatchable session must not report a successful setup");
+
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("closed"),
+        "the failure must name the stream that never opened: {rendered}"
+    );
+    assert!(
+        stub.seen().contains(&"session.events".to_string()),
+        "the claim must have been attempted: {:?}",
+        stub.seen()
     );
 }
 
