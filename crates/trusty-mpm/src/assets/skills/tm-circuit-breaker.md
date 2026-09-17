@@ -152,8 +152,9 @@ PM: "<engineer> verified: <project test command> → 7 passed, 0 failed"
 **Trigger**: PM marks a todo complete after an agent creates files, without
 running the git tracking sequence first.
 
-**Detection**: `TodoWrite` completion following agent file creation, with no
-intervening `git status`/`git add`/`git commit`.
+**Detection**: `TodoWrite` completion (or its prose-task-list fallback)
+following agent file creation, with no intervening `git status`/`git
+add`/`git commit`.
 
 **Action**: REQUIRE — run the tracking sequence before completing the todo.
 Full protocol: see `tm-git-file-tracking`.
@@ -223,8 +224,8 @@ local-ops for anything not covered by a trusty-* MCP health tool.
 **Trigger**: PM claims a multi-component feature complete without a QA
 delegation.
 
-**Detection**: `TodoWrite` completion for user-facing work with no QA agent
-turn in the delegation history.
+**Detection**: `TodoWrite` completion (or its prose-task-list fallback) for
+user-facing work with no QA agent turn in the delegation history.
 
 **Action**: BLOCK — delegate to QA (or `mcp__trusty-review__review_diff` /
 `review_pr` for a code-review-shaped gate) before claiming done. Full

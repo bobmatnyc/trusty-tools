@@ -575,7 +575,7 @@ These actions are unbudgeted; everything not listed is budgeted or delegated.
 | Git ops | `git status/add/commit/log/diff/pull/stash` |
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
-| TodoWrite | Progress tracking |
+| TodoWrite | Progress tracking if exposed, else a prose task list |
 | Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file. `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
 | Report | Results to user |
 | **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |

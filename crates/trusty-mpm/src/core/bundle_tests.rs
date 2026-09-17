@@ -1905,6 +1905,82 @@ fn output_styles_name_the_todowrite_fallback() {
     }
 }
 
+/// Why: #2799 reopened — the first fix (#8097) touched only the three output
+/// styles' own "TodoWrite Framework" section, leaving `core.md`,
+/// `tm-delegation-patterns.md`, `tm-circuit-breaker.md`, and
+/// `tm-session-management.md` naming `TodoWrite` (or the `TaskCreate` task
+/// tool family) as if the harness always exposes it. This sweeps every
+/// bundled asset, not just the three known sites.
+/// What: walks `src/assets/` and, for each blank-line-delimited paragraph
+/// (word-wrap tolerant) naming a gated tool, requires a conditional marker
+/// in the SAME paragraph — a phrase from [`CONDITIONAL_MARKERS`] — so the
+/// asset states what to do when the harness doesn't expose the tool. A bare
+/// markdown heading (e.g. "## TodoWrite Framework") is exempt: it is a
+/// title, not an instruction, and the paragraph right after it carries the
+/// condition. Deliberately loose per marker choice (substring, not full
+/// grammar match) — see #8068 for a broader upstream-drift check.
+/// Test: this test; proven to fail pre-fix by reverting `src/assets/` to
+/// the `origin/main` tip and re-running (see PR body / hand-back for raw
+/// output — not re-asserted here to avoid coupling the suite to git state).
+#[test]
+fn bundled_assets_never_mandate_gated_task_tools_unconditionally() {
+    const GATED_TOOL_NAMES: [&str; 5] = [
+        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskGet",
+        "TaskList",
+    ];
+    const CONDITIONAL_MARKERS: [&str; 8] = [
+        "prose task list",
+        "prose todos",
+        "harness exposes",
+        "harness doesn't expose",
+        "harness does not expose",
+        "if exposed",
+        "where exposed",
+        "fallback",
+    ];
+
+    let assets_dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets"));
+    let mut violations = Vec::new();
+    for entry in walkdir::WalkDir::new(&assets_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+    {
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue; // non-UTF8 asset — none expected under src/assets today
+        };
+        for paragraph in content.split("\n\n") {
+            let trimmed = paragraph.trim_start();
+            if trimmed.starts_with('#') {
+                continue; // bare heading — a title, not an instruction
+            }
+            if !GATED_TOOL_NAMES.iter().any(|name| paragraph.contains(name)) {
+                continue;
+            }
+            let lower = paragraph.to_lowercase();
+            let has_condition = CONDITIONAL_MARKERS.iter().any(|m| lower.contains(m));
+            if !has_condition {
+                violations.push(format!(
+                    "{}: {:?}",
+                    entry.path().display(),
+                    paragraph.chars().take(160).collect::<String>()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "bundled asset names a gated task tool (TodoWrite/TaskCreate family) \
+         as unconditionally available, with no fallback marker in the same \
+         paragraph (#2799):\n{}",
+        violations.join("\n---\n")
+    );
+}
+
 /// The resident budget every deployed agent body is measured against.
 ///
 /// Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +

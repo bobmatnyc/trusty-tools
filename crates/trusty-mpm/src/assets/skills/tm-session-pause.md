@@ -17,8 +17,9 @@ and full format reference live in `/tm-session-management`.
 ## What This Does
 
 When invoked, this skill:
-1. Captures current work state — todos (`TodoWrite`), git status, and a short
-   context summary (plus any message you pass after the command).
+1. Captures current work state — todos (`TodoWrite`, or the prose task list
+   where the harness doesn't expose it), git status, and a short context
+   summary (plus any message you pass after the command).
 2. Writes a project-local snapshot at
    `.trusty-mpm/sessions/session-{timestamp}.md`.
 3. **Appends** a `pause` line to the append-only
@@ -158,10 +159,11 @@ entry. A 2026-09-14 pause snapshot with no recorded id mislabeled agent
 
 ## Procedure
 
-Reconcile the todo list against `git status` first — mark blockers explicitly —
-so the snapshot reflects the *current* state, not a stale one. Then capture
-the tmux window (this ONE step stays PM-side bash — only the PM's own shell
-has tmux client access; the MCP tool never touches tmux):
+Reconcile the todo list — `TodoWrite`'s state, or the prose task list where
+the harness doesn't expose it — against `git status` first — mark blockers
+explicitly — so the snapshot reflects the *current* state, not a stale one.
+Then capture the tmux window (this ONE step stays PM-side bash — only the
+PM's own shell has tmux client access; the MCP tool never touches tmux):
 
 ```bash
 # Capture the current tmux window ONLY when inside tmux; omit the field otherwise.
@@ -346,8 +348,9 @@ long session that spawned managed sessions.
 
 ## Durable Tasks vs. Snapshot Prose
 
-The snapshot captures the PM's own `TodoWrite` state as prose. For work items
-that must survive as durable, queryable tasks visible to *any* future session
+The snapshot captures the PM's own todo state — `TodoWrite` where exposed,
+the prose task list otherwise — as prose. For work items that must survive
+as durable, queryable tasks visible to *any* future session
 (not just a resumed one), promote them via `mcp__trusty-memory__task_add` /
 `task_list` / `task_complete` before pausing.
 

@@ -151,7 +151,7 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
    root-cause analysis *before* re-delegating to the engineer.
 2. Second Failure → Mark "ERROR - Attempt 2/3", widen the investigation: does the
    evidence point at the wrong layer or a stale assumption?
-3. Third Failure → TodoWrite escalation, user decision required. Summarize the
+3. Third Failure → escalate, user decision required. Summarize the
    investigation trail and what has been ruled out.
 
 Always include raw build/test output when re-delegating a failure — never
@@ -164,7 +164,7 @@ paraphrase compiler or test errors.
 2. **Analysis**: Synthesize the research findings (NO TOOLS).
 3. **Planning**: Agent selection, task breakdown, dependencies.
 4. **Delegation**: Task Tool with enhanced format, evidence-enriched context.
-5. **Monitoring**: Track via TodoWrite, handle errors, adjust.
+5. **Monitoring**: Track progress, handle errors, adjust.
 6. **Integration**: Synthesize results (NO TOOLS), validate against the quality
    gate, document the trail, report or re-delegate.
 

@@ -219,13 +219,13 @@ worktree, its branch, and its associated search index atomically.
 
 ## Task-List Integration
 
-Pause/resume snapshots capture the PM's own `TodoWrite` state, but for
-work items that should survive across the pause/resume boundary as durable,
-queryable tasks (not just prose in a snapshot), use
-`mcp__trusty-memory__task_add` / `task_list` / `task_complete` — these
-persist independent of the session snapshot file and are visible to any
-future session, not just a resumed one. Prefer `TodoWrite` for
-in-session-only progress tracking; promote a todo to
+Pause/resume snapshots capture the PM's own todo state — `TodoWrite` where
+exposed, the prose task list otherwise — but for work items that should
+survive across the pause/resume boundary as durable, queryable tasks (not
+just prose in a snapshot), use `mcp__trusty-memory__task_add` / `task_list` /
+`task_complete` — these persist independent of the session snapshot file and
+are visible to any future session, not just a resumed one. Prefer that same
+todo mechanism for in-session-only progress tracking; promote a todo to
 `mcp__trusty-memory__task_add` when it needs to survive past this session's
 resume boundary.
 

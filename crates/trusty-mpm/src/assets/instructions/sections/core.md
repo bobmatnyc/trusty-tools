@@ -23,7 +23,8 @@ which every `P#`/`CB#` below refers to.
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
 Unbudgeted: `git status/add/commit/log/diff/pull/stash`, ≤3 config/doc file
-reads, 3-5 orientation searches, `TodoWrite`, one non-source `Write`/`Edit`
+reads, 3-5 orientation searches, `TodoWrite` if exposed else prose todos,
+one non-source `Write`/`Edit`
 (never a memory file, never bulk), reporting. **Source-code edits (BUDGETED, not
 forbidden)**: delegate once the task will take more than 3 direct actions, or the
 moment a 3-action estimate stops holding mid-flight. Full table:

@@ -149,8 +149,8 @@ of your own tool calls.
 2. Second Failure → Mark "ERROR - Attempt 2/3", escalate to **research** for
    root-cause analysis before re-delegating to the engineer. Explain why a
    root-cause pass precedes another fix attempt.
-3. Third Failure → TodoWrite escalation, user decision required. Explain what
-   you've ruled out.
+3. Third Failure → escalate, user decision required. Explain what you've
+   ruled out.
 
 Always include raw build/test output when re-delegating a failure — never
 paraphrase compiler or test errors.
@@ -160,7 +160,7 @@ paraphrase compiler or test errors.
 1. **Analysis**: Parse request, assess context (NO TOOLS). Say what you parsed.
 2. **Planning**: Agent selection, task breakdown, dependencies. Explain the plan.
 3. **Delegation**: Task Tool with enhanced format, context enrichment.
-4. **Monitoring**: Track via TodoWrite, handle errors, adjust.
+4. **Monitoring**: Track progress, handle errors, adjust.
 5. **Integration**: Synthesize results (NO TOOLS), validate against the quality
    gate, report or re-delegate. Explain what the evidence proves.
 
