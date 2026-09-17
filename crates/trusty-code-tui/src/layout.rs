@@ -23,7 +23,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
 
 use crate::app::ReplApp;
-use crate::widgets::banner::banner_lines;
 use crate::widgets::input_composer::draw_input;
 use crate::widgets::permission_prompt::{draw_permission_prompt, prompt_height};
 use crate::widgets::scrollback::{chat_line_count, draw_chat};
@@ -59,14 +58,21 @@ pub fn draw_separator(f: &mut ratatui::Frame, area: Rect) {
 /// [`crate::widgets::scrollback::chat_line_count`]'s own tests; the full
 /// `Frame` composition is exercised via `ratatui::backend::TestBackend` in
 /// `tests::draw_renders_without_panicking`, which is a smoke test (no
-/// TTY, no assertions on cell contents — see that test's doc comment).
+/// TTY, no assertions on cell contents — see that test's doc comment), and
+/// the banner branch's own sizing in
+/// `wrapped_row_geometry::the_banner_renders_whole_below_its_build_width`.
 pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
     let area = f.area();
 
+    // #8205: one measurement for every branch, and it measures exactly what
+    // `draw_chat` will draw. The banner used to be sized by
+    // `banner_lines(..).len()`, which is wrong twice: `banner_lines` builds at
+    // `width.max(40)`, so below 40 columns every row wraps and the count is
+    // half what the banner needs, and it omits the blank row `build_chat_lines`
+    // appends after the banner, which cost the pane its top rule to a one-row
+    // scroll.
     let content_h = if app.chat.is_empty() && !app.show_banner {
         0
-    } else if app.chat.is_empty() && app.show_banner {
-        banner_lines(app, area.width as usize).len()
     } else {
         chat_line_count(app, area.width as usize).max(1)
     };
@@ -176,7 +182,9 @@ mod tests {
     /// function's 60-column path budget), and projectless with a workstream.
     #[test]
     fn draw_keeps_the_connect_line_home_segment_at_80_columns() {
-        let socket = "/Users/masa/Library/Application Support/tcode/tcode.sock";
+        // A neutral home directory of the same length as the reported one, so
+        // the wrap arithmetic this test exists for is unchanged (#8205).
+        let socket = "/Users/dev0/Library/Application Support/tcode/tcode.sock";
         let worktree = crate::text::elide_middle(
             "/private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef",
             60,

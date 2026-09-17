@@ -36,11 +36,12 @@
 ///
 /// Order of surrender, repository name LAST (owner ruling 2026-09-17): tail
 /// components go one at a time, then the tail entirely (`…/<repo>/…`), and
-/// only a repository name too wide for `width` itself falls through. That
-/// fall-through, a path carrying no repository marker whose last two
-/// components alone overflow, and a string with no `/` all land on character
-/// elision, which keeps both ends and replaces the middle with `…`. Widths
-/// count `char`s, never bytes.
+/// only a repository name too wide for `width` itself is given up — that path
+/// falls back to the gapless `…/<tail>` run, keeping whole components even
+/// though the repository name is no longer among them. Character elision,
+/// which keeps both ends and replaces the middle with `…`, is the last resort:
+/// it takes a string with no `/`, and any path where not even the last two
+/// components fit. Widths count `char`s, never bytes.
 /// Test: `tests::elide_middle_keeps_whole_trailing_path_components`,
 /// `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
 /// `tests::elide_middle_keeps_a_repo_name_that_is_the_leaf`,
@@ -149,7 +150,9 @@ fn deepest_contiguous(components: &[&str], width: usize) -> Option<(usize, Strin
 /// longest that fits. When no tail fits, the bare `…/<repo>/…` keeps the name
 /// on its own — the repository name is the last thing surrendered (owner
 /// ruling 2026-09-17). `None` only when even that bare form overflows, which
-/// hands a repository name wider than `width` to character elision.
+/// sends a repository name wider than `width` back to the caller's gapless
+/// [`deepest_contiguous`] run — and on to character elision only when there is
+/// no such run either.
 /// Test: `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
 /// `tests::elide_middle_drops_the_tail_before_the_repo_name`.
 fn anchored_on_repo(components: &[&str], anchor: usize, width: usize) -> Option<String> {
