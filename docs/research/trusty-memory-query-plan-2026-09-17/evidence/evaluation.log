@@ -1,0 +1,4 @@
+Command: /Users/masa/trusty-search-experiment/venv/bin/python experiments/trusty-memory-query-plan/plan_evaluate.py --helper /Users/masa/trusty-search-experiment/target/debug/examples/memory_prompt_probe --output experiments/trusty-memory-query-plan/results/run-01
+tune: three arms complete
+heldout: three arms complete
+Exit code: 0

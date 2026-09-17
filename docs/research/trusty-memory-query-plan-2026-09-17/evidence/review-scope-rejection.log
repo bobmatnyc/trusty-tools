@@ -1,0 +1,16 @@
+'owner and location of Alpha; omit owner' => [('ready', ['owned_by'], ('owned_by',)), ('ready', ['located_at'], ('owned_by',))] [('Alpha', 'located_at')]
+'owner and location of Alpha; owner would not answer this' => [('ready', ['owned_by'], ('owned_by',)), ('ready', ['located_at'], ('owned_by',))] [('Alpha', 'located_at')]
+"Alpha's owner and Beta's location" => [('unsupported', [], ())] []
+'location of Alpha; list both' => [('ready', ['located_at'], ()), ('unsupported', [], ())] [('Alpha', 'located_at')]
+'Owner Of Alpha' => [('unsupported', [], ())] []
+'owner of Alpha' => [('ready', ['owned_by'], ())] [('Alpha', 'owned_by')]
+Traceback (most recent call last):
+  File "/tmp/queryplan-critic-probes.py", line 16, in <module>
+    print('WRONG_SCOPE =>',[(e.source.scope,e.id) for e in run_arm(replace(task(),scope='foreign'),'structured_plan',idx,h).selection.evidence])
+                                                           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/masa/trusty-search-experiment/worktree/experiments/trusty-memory-query-plan/plan_experiment.py", line 63, in run_arm
+    validate_context(task, index)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/Users/masa/trusty-search-experiment/worktree/experiments/trusty-memory-query-plan/plan_index.py", line 34, in validate_context
+    raise IntegrityError('task/index context mismatch or unknown construction context')
+records.IntegrityError: task/index context mismatch or unknown construction context

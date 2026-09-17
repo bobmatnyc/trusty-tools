@@ -1,0 +1,484 @@
+{
+  "gold": [
+    {
+      "query_id": "bracken-owner",
+      "required": [
+        [
+          "realm/bracken|bracken-owner|1|v",
+          "realm/bracken|bracken-copy|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-copy|1|v",
+        "realm/bracken|bracken-owner|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-maintenance",
+      "required": [
+        [
+          "realm/bracken|bracken-maintainer|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-maintainer|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-location",
+      "required": [
+        [
+          "realm/bracken|bracken-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-b-location|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-release",
+      "required": [
+        [
+          "realm/bracken|bracken-release|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-release|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-reason",
+      "required": [
+        [
+          "realm/bracken|bracken-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-reason|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-alias",
+      "required": [
+        [
+          "realm/bracken|bracken-aliases|1|pair-a"
+        ],
+        [
+          "realm/bracken|bracken-aliases|1|pair-b"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-aliases|1|pair-a",
+        "realm/bracken|bracken-aliases|1|pair-b",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-dedup",
+      "required": [
+        [
+          "realm/bracken|bracken-owner|1|v",
+          "realm/bracken|bracken-copy|1|v"
+        ],
+        [
+          "realm/bracken|bracken-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-copy|1|v",
+        "realm/bracken|bracken-location|1|v",
+        "realm/bracken|bracken-owner|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-revision",
+      "required": [
+        [
+          "realm/bracken|bracken-release|2|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-release|2|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-release|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-unfamiliar",
+      "required": [
+        [
+          "realm/bracken|bracken-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/bracken|bracken-reason|1|v",
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "bracken-unknown",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-missing",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-future",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-future|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-expired",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-expired|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-deleted",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-deleted|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-weather",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "bracken-qualifier",
+      "required": [],
+      "acceptable": [
+        "realm/bracken|bracken-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/bracken-external|bracken-shadow|1|v",
+        "realm/bracken|bracken-prohibition|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-owner",
+      "required": [
+        [
+          "realm/riverstone|riverstone-owner|1|v",
+          "realm/riverstone|riverstone-copy|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-copy|1|v",
+        "realm/riverstone|riverstone-owner|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-maintenance",
+      "required": [
+        [
+          "realm/riverstone|riverstone-maintainer|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-maintainer|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-location",
+      "required": [
+        [
+          "realm/riverstone|riverstone-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-b-location|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-release",
+      "required": [
+        [
+          "realm/riverstone|riverstone-release|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-release|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-reason",
+      "required": [
+        [
+          "realm/riverstone|riverstone-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-reason|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-alias",
+      "required": [
+        [
+          "realm/riverstone|riverstone-aliases|1|pair-a"
+        ],
+        [
+          "realm/riverstone|riverstone-aliases|1|pair-b"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-aliases|1|pair-a",
+        "realm/riverstone|riverstone-aliases|1|pair-b",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-dedup",
+      "required": [
+        [
+          "realm/riverstone|riverstone-owner|1|v",
+          "realm/riverstone|riverstone-copy|1|v"
+        ],
+        [
+          "realm/riverstone|riverstone-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-copy|1|v",
+        "realm/riverstone|riverstone-location|1|v",
+        "realm/riverstone|riverstone-owner|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-revision",
+      "required": [
+        [
+          "realm/riverstone|riverstone-release|2|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-release|2|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-release|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-unfamiliar",
+      "required": [
+        [
+          "realm/riverstone|riverstone-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/riverstone|riverstone-reason|1|v",
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "riverstone-unknown",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-missing",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-future",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-future|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-expired",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-expired|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-deleted",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-deleted|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-weather",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "riverstone-qualifier",
+      "required": [],
+      "acceptable": [
+        "realm/riverstone|riverstone-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/riverstone-external|riverstone-shadow|1|v",
+        "realm/riverstone|riverstone-prohibition|1|v"
+      ],
+      "expected_empty": true
+    }
+  ]
+}

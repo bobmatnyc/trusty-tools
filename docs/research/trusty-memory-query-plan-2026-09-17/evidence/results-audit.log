@@ -1,0 +1,42 @@
+tune old_combined {"positive_coverage": 0.8333333333333334, "positive_precision": 0.7037037037037037, "negative_abstention": 0.42857142857142855, "mean_tokens": 43.65625, "all_required": 0.7777777777777778}
+tune defect_fixes {"positive_coverage": 0.8888888888888888, "positive_precision": 0.8888888888888888, "negative_abstention": 1, "mean_tokens": 33.0625, "all_required": 0.8888888888888888}
+tune structured_plan {"positive_coverage": 0.8888888888888888, "positive_precision": 0.8888888888888888, "negative_abstention": 1, "mean_tokens": 33.0625, "all_required": 0.8888888888888888}
+heldout old_combined {"positive_coverage": 0.6, "positive_precision": 0.475, "negative_abstention": 0.3333333333333333, "mean_tokens": 49.53125, "all_required": 0.4}
+ execution {}
+ FAIL cinder-inverse-property coverage 0.0 precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Jade Circle located at Room 41.']
+ FAIL cinder-excluded-branch coverage 0.5 precision 0.25 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon Reserve located at Room 15.', 'Cinder Beacon depends on Cinder Beacon Reserve.', 'Cinder Beacon uses Cinder Valve.', 'Cinder Valve located at Bay 3.']
+ FAIL cinder-alias-properties coverage 0.5 precision 1.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Swift Pair is alias for Cinder Beacon.', 'Swift Pair is alias for Cinder Valve.']
+ FAIL cinder-partial coverage 0.5 precision 0.5 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon release rule Two signed reviews.', 'Cinder Beacon depends on Cinder Valve.', 'Cinder Beacon uses Cinder Valve.', 'Cinder Beacon depends on Cinder Beacon Reserve.']
+ FAIL cinder-dedup-cap coverage 0.5 precision 0.5 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon owned by Lena Cinder.', 'Cinder Beacon release rule Two signed reviews.', 'Cinder Beacon uses Cinder Valve.', 'Cinder Valve located at Bay 3.']
+ FAIL cinder-unfamiliar coverage 0.0 precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.']
+ FAIL cinder-unknown coverage None precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon owned by Lena Cinder.', 'Cinder Beacon uses Cinder Valve.', 'Cinder Valve located at Bay 3.']
+ FAIL cinder-deleted coverage None precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon uses Cinder Valve.', 'Cinder Beacon located at Room 12.', 'Cinder Valve located at Bay 3.']
+ FAIL cinder-qualifier coverage None precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon release prohibition No releases after 19:00 UTC.']
+ FAIL cinder-unknown-polarity coverage None precision 0.0 plan [] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon release rule Two signed reviews.']
+ FAIL fathom-inverse-property coverage 0.0 precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Pearl Circle located at Room 41.']
+ FAIL fathom-excluded-branch coverage 0.5 precision 0.25 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle Reserve located at Room 15.', 'Fathom Spindle depends on Fathom Spindle Reserve.', 'Fathom Spindle uses Fathom Valve.', 'Fathom Valve located at Bay 3.']
+ FAIL fathom-alias-properties coverage 0.5 precision 1.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Kite Pair is alias for Fathom Spindle.', 'Kite Pair is alias for Fathom Valve.']
+ FAIL fathom-partial coverage 0.5 precision 0.5 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle release rule Two signed reviews.', 'Fathom Spindle depends on Fathom Valve.', 'Fathom Spindle uses Fathom Valve.', 'Fathom Spindle depends on Fathom Spindle Reserve.']
+ FAIL fathom-dedup-cap coverage 0.5 precision 0.5 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle owned by Lena Fathom.', 'Fathom Spindle release rule Two signed reviews.', 'Fathom Spindle uses Fathom Valve.', 'Fathom Valve located at Bay 3.']
+ FAIL fathom-unfamiliar coverage 0.0 precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.']
+ FAIL fathom-unknown coverage None precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle owned by Lena Fathom.', 'Fathom Spindle uses Fathom Valve.', 'Fathom Valve located at Bay 3.']
+ FAIL fathom-deleted coverage None precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle uses Fathom Valve.', 'Fathom Spindle located at Room 12.', 'Fathom Valve located at Bay 3.']
+ FAIL fathom-qualifier coverage None precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle release prohibition No releases after 19:00 UTC.']
+ FAIL fathom-unknown-polarity coverage None precision 0.0 plan [] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle release rule Two signed reviews.']
+heldout defect_fixes {"positive_coverage": 0.65, "positive_precision": 0.7166666666666667, "negative_abstention": 1, "mean_tokens": 37.78125, "all_required": 0.5}
+ execution {'complete': 30, 'no_evidence': 6, 'not_run': 14}
+ FAIL cinder-inverse-property coverage 0.0 precision 0.0 plan ['ready', 'ready'] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Jade Circle located at Room 41.']
+ FAIL cinder-excluded-branch coverage 0.5 precision 0.5 plan ['ready', 'ready'] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon depends on Cinder Valve.', 'Cinder Beacon located at Room 12.']
+ FAIL cinder-alias-properties coverage 0.5 precision 1.0 plan ['ready', 'ready'] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Swift Pair is alias for Cinder Beacon.', 'Swift Pair is alias for Cinder Valve.']
+ FAIL cinder-partial coverage 0.5 precision 0.6666666666666666 plan ['ready', 'ready'] evidence ['Mina Birch has convention Identify assumptions explicitly.', 'Cinder Beacon depends on Cinder Valve.', 'Cinder Beacon release rule Two signed reviews.', 'Cinder Beacon depends on Cinder Beacon Reserve.']
+ FAIL cinder-unfamiliar coverage 0.0 precision 0.0 plan ['unsupported'] evidence ['Mina Birch has convention Identify assumptions explicitly.']
+ FAIL fathom-inverse-property coverage 0.0 precision 0.0 plan ['ready', 'ready'] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Pearl Circle located at Room 41.']
+ FAIL fathom-excluded-branch coverage 0.5 precision 0.5 plan ['ready', 'ready'] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle depends on Fathom Valve.', 'Fathom Spindle located at Room 12.']
+ FAIL fathom-alias-properties coverage 0.5 precision 1.0 plan ['ready', 'ready'] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Kite Pair is alias for Fathom Spindle.', 'Kite Pair is alias for Fathom Valve.']
+ FAIL fathom-partial coverage 0.5 precision 0.6666666666666666 plan ['ready', 'ready'] evidence ['Otto Pine has convention Identify assumptions explicitly.', 'Fathom Spindle depends on Fathom Valve.', 'Fathom Spindle release rule Two signed reviews.', 'Fathom Spindle depends on Fathom Spindle Reserve.']
+ FAIL fathom-unfamiliar coverage 0.0 precision 0.0 plan ['unsupported'] evidence ['Otto Pine has convention Identify assumptions explicitly.']
+heldout structured_plan {"positive_coverage": 0.9, "positive_precision": 0.9, "negative_abstention": 1, "mean_tokens": 38.875, "all_required": 0.9}
+ execution {'complete': 24, 'partial': 2, 'not_run': 14, 'no_evidence': 2}
+ FAIL cinder-unfamiliar coverage 0.0 precision 0.0 plan ['unsupported'] evidence ['Mina Birch has convention Identify assumptions explicitly.']
+ FAIL fathom-unfamiliar coverage 0.0 precision 0.0 plan ['unsupported'] evidence ['Otto Pine has convention Identify assumptions explicitly.']
+PASS independent numerical aggregates, candidate equality, counts, budgets, temporal/scope emissions

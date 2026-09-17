@@ -1,0 +1,3 @@
+candidate-lost branch => ('partial',) {'index_probes': 2, 'examined_assertions': 2, 'candidate_membership_misses': 1, 'visited_bindings': 2, 'emitted_semantic_facts': 2, 'seeds': 1} [(('Alpha', 'First'), 'test|c|1|f')]
+'owner of dependencies of Alpha and location of Second' => [('unsupported', [], [('Alpha',), ('Second',)])]
+'location of Alpha and owner of dependencies of Second' => [('unsupported', [], [('Alpha',), ('Second',)])]

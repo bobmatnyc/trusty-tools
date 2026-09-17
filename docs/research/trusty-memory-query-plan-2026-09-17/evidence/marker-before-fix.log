@@ -1,0 +1,59 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__________ test_literal_internal_markers_are_unsupported[owner of @0] __________
+
+prompt = 'owner of @0', helper = <adapters.RustHelper object at 0x10a300590>
+indexes = [ScopedIndex(evidence={'test|a|1|f': Evidence(source=Source(source_id='a', scope='test', revision=1, title='Note', bod... 'input_triples': 0, '_helper_ns': 41213917}}, _task_context=('test', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'))]
+
+    @pytest.mark.parametrize('prompt', ['owner of @0', 'owner of Alpha excluding @99'])
+    def test_literal_internal_markers_are_unsupported(prompt: str, helper: RustHelper,
+                                                      indexes: list[RelevanceIndex]) -> None:
+        index = index_for((source('a'),), helper, indexes)
+>       plan = parse_plan(task(prompt), index)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+experiments/trusty-memory-query-plan/test_query_plan.py:215:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+experiments/trusty-memory-query-plan/plan_policy.py:184: in parse_plan
+    selected = tuple(refs[i] for i in roots)
+               ^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+.0 = <tuple_iterator object at 0x106c3a320>
+
+>   selected = tuple(refs[i] for i in roots)
+                     ^^^^^^^
+E   IndexError: tuple index out of range
+
+experiments/trusty-memory-query-plan/plan_policy.py:184: IndexError
+_ test_literal_internal_markers_are_unsupported[owner of Alpha excluding @99] __
+
+prompt = 'owner of Alpha excluding @99'
+helper = <adapters.RustHelper object at 0x107cd2990>
+indexes = [ScopedIndex(evidence={'test|a|1|f': Evidence(source=Source(source_id='a', scope='test', revision=1, title='Note', bod... 'input_triples': 0, '_helper_ns': 42202875}}, _task_context=('test', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'))]
+
+    @pytest.mark.parametrize('prompt', ['owner of @0', 'owner of Alpha excluding @99'])
+    def test_literal_internal_markers_are_unsupported(prompt: str, helper: RustHelper,
+                                                      indexes: list[RelevanceIndex]) -> None:
+        index = index_for((source('a'),), helper, indexes)
+>       plan = parse_plan(task(prompt), index)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+experiments/trusty-memory-query-plan/test_query_plan.py:215:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+experiments/trusty-memory-query-plan/plan_policy.py:166: in parse_plan
+    target_refs = tuple(refs[int(v)] for v in re.findall(r'@(\d+)', m[1]))
+                  ^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+.0 = <list_iterator object at 0x100c28550>
+
+>   target_refs = tuple(refs[int(v)] for v in re.findall(r'@(\d+)', m[1]))
+                        ^^^^^^^^^^^^
+E   IndexError: tuple index out of range
+
+experiments/trusty-memory-query-plan/plan_policy.py:166: IndexError
+=========================== short test summary info ============================
+FAILED experiments/trusty-memory-query-plan/test_query_plan.py::test_literal_internal_markers_are_unsupported[owner of @0]
+FAILED experiments/trusty-memory-query-plan/test_query_plan.py::test_literal_internal_markers_are_unsupported[owner of Alpha excluding @99]
+2 failed, 17 deselected in 0.54s

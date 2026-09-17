@@ -1,0 +1,13 @@
+{
+  "queries": 64,
+  "split_counts": {
+    "tune": 32,
+    "heldout": 32
+  },
+  "positives": 38,
+  "negatives": 26,
+  "sources": 92,
+  "events": 8,
+  "all_revision_facts": 104,
+  "checks": "exact UTF8 spans; independent revision/tombstone/TTL/cutoff/slot eligibility; gold groups and IDs; split vocabulary; no entity hints"
+}

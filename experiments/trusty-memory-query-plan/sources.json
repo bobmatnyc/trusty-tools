@@ -1,0 +1,2783 @@
+{
+  "version": "graph-prompt-v1",
+  "sources": [
+    {
+      "source_id": "bracken-standing",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Tessa Brook has convention Identify assumptions explicitly.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Tessa Brook",
+          "predicate": "has_convention",
+          "object": "Identify assumptions explicitly",
+          "object_entity": null,
+          "claim": "Tessa Brook has convention Identify assumptions explicitly.",
+          "start_byte": 0,
+          "end_byte": 59,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": true
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-owner",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine owned by Lena Bracken.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "owned_by",
+          "object": "Lena Bracken",
+          "object_entity": null,
+          "claim": "Bracken Engine owned by Lena Bracken.",
+          "start_byte": 0,
+          "end_byte": 37,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Bracken Engine owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-copy",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine owned by Lena Bracken.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "owned_by",
+          "object": "Lena Bracken",
+          "object_entity": null,
+          "claim": "Bracken Engine owned by Lena Bracken.",
+          "start_byte": 0,
+          "end_byte": 37,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Bracken Engine owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-old-owner",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine owned by Former Custodian Bracken.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "owned_by",
+          "object": "Former Custodian Bracken",
+          "object_entity": null,
+          "claim": "Bracken Engine owned by Former Custodian Bracken.",
+          "start_byte": 0,
+          "end_byte": 49,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": "2026-07-01T00:00:00Z",
+          "single_value_slot": "Bracken Engine owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-maintainer",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine maintained by Ochre Crew.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "maintained_by",
+          "object": "Ochre Crew",
+          "object_entity": "Ochre Crew",
+          "claim": "Bracken Engine maintained by Ochre Crew.",
+          "start_byte": 0,
+          "end_byte": 40,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-location",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine located at Room 12.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "located_at",
+          "object": "Room 12",
+          "object_entity": null,
+          "claim": "Bracken Engine located at Room 12.",
+          "start_byte": 0,
+          "end_byte": 34,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-team-location",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Ochre Crew located at Room 41.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Ochre Crew",
+          "predicate": "located_at",
+          "object": "Room 41",
+          "object_entity": null,
+          "claim": "Ochre Crew located at Room 41.",
+          "start_byte": 0,
+          "end_byte": 30,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-release",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine release rule Two signed reviews.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "release_rule",
+          "object": "Two signed reviews",
+          "object_entity": null,
+          "claim": "Bracken Engine release rule Two signed reviews.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-prohibition",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine release prohibition No releases after 19:00 UTC.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "release_prohibition",
+          "object": "No releases after 19:00 UTC",
+          "object_entity": null,
+          "claim": "Bracken Engine release prohibition No releases after 19:00 UTC.",
+          "start_byte": 0,
+          "end_byte": 63,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-reason",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine rationale Preserve a fragile calibration sample.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "rationale",
+          "object": "Preserve a fragile calibration sample",
+          "object_entity": null,
+          "claim": "Bracken Engine rationale Preserve a fragile calibration sample.",
+          "start_byte": 0,
+          "end_byte": 63,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-uses",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine uses Bracken Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "uses",
+          "object": "Bracken Valve",
+          "object_entity": "Bracken Valve",
+          "claim": "Bracken Engine uses Bracken Valve.",
+          "start_byte": 0,
+          "end_byte": 34,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-b-location",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Valve located at Bay 3.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Valve",
+          "predicate": "located_at",
+          "object": "Bay 3",
+          "object_entity": null,
+          "claim": "Bracken Valve located at Bay 3.",
+          "start_byte": 0,
+          "end_byte": 31,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-b-owner",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Valve owned by Greta Bracken.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Valve",
+          "predicate": "owned_by",
+          "object": "Greta Bracken",
+          "object_entity": null,
+          "claim": "Bracken Valve owned by Greta Bracken.",
+          "start_byte": 0,
+          "end_byte": 37,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-dep",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine depends on Bracken Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "depends_on",
+          "object": "Bracken Valve",
+          "object_entity": "Bracken Valve",
+          "claim": "Bracken Engine depends on Bracken Valve.",
+          "start_byte": 0,
+          "end_byte": 40,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-second-dep",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine depends on Bracken Engine Reserve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "depends_on",
+          "object": "Bracken Engine Reserve",
+          "object_entity": "Bracken Engine Reserve",
+          "claim": "Bracken Engine depends on Bracken Engine Reserve.",
+          "start_byte": 0,
+          "end_byte": 49,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-b-release",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Valve release rule A seal inspection.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Valve",
+          "predicate": "release_rule",
+          "object": "A seal inspection",
+          "object_entity": null,
+          "claim": "Bracken Valve release rule A seal inspection.",
+          "start_byte": 0,
+          "end_byte": 45,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-second-location",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine Reserve located at Room 15.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine Reserve",
+          "predicate": "located_at",
+          "object": "Room 15",
+          "object_entity": null,
+          "claim": "Bracken Engine Reserve located at Room 15.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-long-location",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine Reserve East located at Room 16.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine Reserve East",
+          "predicate": "located_at",
+          "object": "Room 16",
+          "object_entity": null,
+          "claim": "Bracken Engine Reserve East located at Room 16.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-aliases",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Sable is alias for Bracken Engine.\nSable Pair is alias for Bracken Engine.\nSable Pair is alias for Bracken Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "one",
+          "subject": "Sable",
+          "predicate": "is_alias_for",
+          "object": "Bracken Engine",
+          "object_entity": "Bracken Engine",
+          "claim": "Sable is alias for Bracken Engine.",
+          "start_byte": 0,
+          "end_byte": 34,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-a",
+          "subject": "Sable Pair",
+          "predicate": "is_alias_for",
+          "object": "Bracken Engine",
+          "object_entity": "Bracken Engine",
+          "claim": "Sable Pair is alias for Bracken Engine.",
+          "start_byte": 35,
+          "end_byte": 74,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-b",
+          "subject": "Sable Pair",
+          "predicate": "is_alias_for",
+          "object": "Bracken Valve",
+          "object_entity": "Bracken Valve",
+          "claim": "Sable Pair is alias for Bracken Valve.",
+          "start_byte": 75,
+          "end_byte": 113,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-future",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine Locker located at Room 63.",
+      "observed_at": "2026-09-10T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine Locker",
+          "predicate": "located_at",
+          "object": "Room 63",
+          "object_entity": null,
+          "claim": "Bracken Engine Locker located at Room 63.",
+          "start_byte": 0,
+          "end_byte": 41,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-expired",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine Gate access code 8306.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-01T00:00:00Z",
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine Gate",
+          "predicate": "access_code",
+          "object": "8306",
+          "object_entity": null,
+          "claim": "Bracken Engine Gate access code 8306.",
+          "start_byte": 0,
+          "end_byte": 37,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-deleted",
+      "scope": "realm/bracken",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine Archive located at Shelf 2.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine Archive",
+          "predicate": "located_at",
+          "object": "Shelf 2",
+          "object_entity": null,
+          "claim": "Bracken Engine Archive located at Shelf 2.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "bracken-shadow",
+      "scope": "realm/bracken-external",
+      "revision": 1,
+      "title": "Bracken Engine reference record",
+      "body": "Bracken Engine owned by External Custodian.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Bracken Engine",
+          "predicate": "owned_by",
+          "object": "External Custodian",
+          "object_entity": null,
+          "claim": "Bracken Engine owned by External Custodian.",
+          "start_byte": 0,
+          "end_byte": 43,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-standing",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Hugo Field has convention Identify assumptions explicitly.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Hugo Field",
+          "predicate": "has_convention",
+          "object": "Identify assumptions explicitly",
+          "object_entity": null,
+          "claim": "Hugo Field has convention Identify assumptions explicitly.",
+          "start_byte": 0,
+          "end_byte": 58,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": true
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-owner",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array owned by Lena Riverstone.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "owned_by",
+          "object": "Lena Riverstone",
+          "object_entity": null,
+          "claim": "Riverstone Array owned by Lena Riverstone.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Riverstone Array owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-copy",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array owned by Lena Riverstone.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "owned_by",
+          "object": "Lena Riverstone",
+          "object_entity": null,
+          "claim": "Riverstone Array owned by Lena Riverstone.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Riverstone Array owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-old-owner",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array owned by Former Custodian Riverstone.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "owned_by",
+          "object": "Former Custodian Riverstone",
+          "object_entity": null,
+          "claim": "Riverstone Array owned by Former Custodian Riverstone.",
+          "start_byte": 0,
+          "end_byte": 54,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": "2026-07-01T00:00:00Z",
+          "single_value_slot": "Riverstone Array owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-maintainer",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array maintained by Coral Crew.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "maintained_by",
+          "object": "Coral Crew",
+          "object_entity": "Coral Crew",
+          "claim": "Riverstone Array maintained by Coral Crew.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-location",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array located at Room 12.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "located_at",
+          "object": "Room 12",
+          "object_entity": null,
+          "claim": "Riverstone Array located at Room 12.",
+          "start_byte": 0,
+          "end_byte": 36,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-team-location",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Coral Crew located at Room 41.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Coral Crew",
+          "predicate": "located_at",
+          "object": "Room 41",
+          "object_entity": null,
+          "claim": "Coral Crew located at Room 41.",
+          "start_byte": 0,
+          "end_byte": 30,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-release",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array release rule Two signed reviews.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "release_rule",
+          "object": "Two signed reviews",
+          "object_entity": null,
+          "claim": "Riverstone Array release rule Two signed reviews.",
+          "start_byte": 0,
+          "end_byte": 49,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-prohibition",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array release prohibition No releases after 19:00 UTC.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "release_prohibition",
+          "object": "No releases after 19:00 UTC",
+          "object_entity": null,
+          "claim": "Riverstone Array release prohibition No releases after 19:00 UTC.",
+          "start_byte": 0,
+          "end_byte": 65,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-reason",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array rationale Preserve a fragile calibration sample.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "rationale",
+          "object": "Preserve a fragile calibration sample",
+          "object_entity": null,
+          "claim": "Riverstone Array rationale Preserve a fragile calibration sample.",
+          "start_byte": 0,
+          "end_byte": 65,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-uses",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array uses Riverstone Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "uses",
+          "object": "Riverstone Valve",
+          "object_entity": "Riverstone Valve",
+          "claim": "Riverstone Array uses Riverstone Valve.",
+          "start_byte": 0,
+          "end_byte": 39,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-b-location",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Valve located at Bay 3.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Valve",
+          "predicate": "located_at",
+          "object": "Bay 3",
+          "object_entity": null,
+          "claim": "Riverstone Valve located at Bay 3.",
+          "start_byte": 0,
+          "end_byte": 34,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-b-owner",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Valve owned by Greta Riverstone.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Valve",
+          "predicate": "owned_by",
+          "object": "Greta Riverstone",
+          "object_entity": null,
+          "claim": "Riverstone Valve owned by Greta Riverstone.",
+          "start_byte": 0,
+          "end_byte": 43,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-dep",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array depends on Riverstone Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "depends_on",
+          "object": "Riverstone Valve",
+          "object_entity": "Riverstone Valve",
+          "claim": "Riverstone Array depends on Riverstone Valve.",
+          "start_byte": 0,
+          "end_byte": 45,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-second-dep",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array depends on Riverstone Array Reserve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "depends_on",
+          "object": "Riverstone Array Reserve",
+          "object_entity": "Riverstone Array Reserve",
+          "claim": "Riverstone Array depends on Riverstone Array Reserve.",
+          "start_byte": 0,
+          "end_byte": 53,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-b-release",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Valve release rule A seal inspection.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Valve",
+          "predicate": "release_rule",
+          "object": "A seal inspection",
+          "object_entity": null,
+          "claim": "Riverstone Valve release rule A seal inspection.",
+          "start_byte": 0,
+          "end_byte": 48,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-second-location",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array Reserve located at Room 15.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array Reserve",
+          "predicate": "located_at",
+          "object": "Room 15",
+          "object_entity": null,
+          "claim": "Riverstone Array Reserve located at Room 15.",
+          "start_byte": 0,
+          "end_byte": 44,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-long-location",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array Reserve East located at Room 16.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array Reserve East",
+          "predicate": "located_at",
+          "object": "Room 16",
+          "object_entity": null,
+          "claim": "Riverstone Array Reserve East located at Room 16.",
+          "start_byte": 0,
+          "end_byte": 49,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-aliases",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Heron is alias for Riverstone Array.\nHeron Pair is alias for Riverstone Array.\nHeron Pair is alias for Riverstone Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "one",
+          "subject": "Heron",
+          "predicate": "is_alias_for",
+          "object": "Riverstone Array",
+          "object_entity": "Riverstone Array",
+          "claim": "Heron is alias for Riverstone Array.",
+          "start_byte": 0,
+          "end_byte": 36,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-a",
+          "subject": "Heron Pair",
+          "predicate": "is_alias_for",
+          "object": "Riverstone Array",
+          "object_entity": "Riverstone Array",
+          "claim": "Heron Pair is alias for Riverstone Array.",
+          "start_byte": 37,
+          "end_byte": 78,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-b",
+          "subject": "Heron Pair",
+          "predicate": "is_alias_for",
+          "object": "Riverstone Valve",
+          "object_entity": "Riverstone Valve",
+          "claim": "Heron Pair is alias for Riverstone Valve.",
+          "start_byte": 79,
+          "end_byte": 120,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-future",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array Locker located at Room 63.",
+      "observed_at": "2026-09-10T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array Locker",
+          "predicate": "located_at",
+          "object": "Room 63",
+          "object_entity": null,
+          "claim": "Riverstone Array Locker located at Room 63.",
+          "start_byte": 0,
+          "end_byte": 43,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-expired",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array Gate access code 8306.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-01T00:00:00Z",
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array Gate",
+          "predicate": "access_code",
+          "object": "8306",
+          "object_entity": null,
+          "claim": "Riverstone Array Gate access code 8306.",
+          "start_byte": 0,
+          "end_byte": 39,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-deleted",
+      "scope": "realm/riverstone",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array Archive located at Shelf 2.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array Archive",
+          "predicate": "located_at",
+          "object": "Shelf 2",
+          "object_entity": null,
+          "claim": "Riverstone Array Archive located at Shelf 2.",
+          "start_byte": 0,
+          "end_byte": 44,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "riverstone-shadow",
+      "scope": "realm/riverstone-external",
+      "revision": 1,
+      "title": "Riverstone Array reference record",
+      "body": "Riverstone Array owned by External Custodian.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Riverstone Array",
+          "predicate": "owned_by",
+          "object": "External Custodian",
+          "object_entity": null,
+          "claim": "Riverstone Array owned by External Custodian.",
+          "start_byte": 0,
+          "end_byte": 45,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-standing",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Mina Birch has convention Identify assumptions explicitly.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Mina Birch",
+          "predicate": "has_convention",
+          "object": "Identify assumptions explicitly",
+          "object_entity": null,
+          "claim": "Mina Birch has convention Identify assumptions explicitly.",
+          "start_byte": 0,
+          "end_byte": 58,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": true
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-owner",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon owned by Lena Cinder.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "owned_by",
+          "object": "Lena Cinder",
+          "object_entity": null,
+          "claim": "Cinder Beacon owned by Lena Cinder.",
+          "start_byte": 0,
+          "end_byte": 35,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Cinder Beacon owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-copy",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon owned by Lena Cinder.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "owned_by",
+          "object": "Lena Cinder",
+          "object_entity": null,
+          "claim": "Cinder Beacon owned by Lena Cinder.",
+          "start_byte": 0,
+          "end_byte": 35,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Cinder Beacon owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-old-owner",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon owned by Former Custodian Cinder.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "owned_by",
+          "object": "Former Custodian Cinder",
+          "object_entity": null,
+          "claim": "Cinder Beacon owned by Former Custodian Cinder.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": "2026-07-01T00:00:00Z",
+          "single_value_slot": "Cinder Beacon owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-maintainer",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon maintained by Jade Circle.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "maintained_by",
+          "object": "Jade Circle",
+          "object_entity": "Jade Circle",
+          "claim": "Cinder Beacon maintained by Jade Circle.",
+          "start_byte": 0,
+          "end_byte": 40,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-location",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon located at Room 12.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "located_at",
+          "object": "Room 12",
+          "object_entity": null,
+          "claim": "Cinder Beacon located at Room 12.",
+          "start_byte": 0,
+          "end_byte": 33,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-team-location",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Jade Circle located at Room 41.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Jade Circle",
+          "predicate": "located_at",
+          "object": "Room 41",
+          "object_entity": null,
+          "claim": "Jade Circle located at Room 41.",
+          "start_byte": 0,
+          "end_byte": 31,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-release",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon release rule Two signed reviews.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "release_rule",
+          "object": "Two signed reviews",
+          "object_entity": null,
+          "claim": "Cinder Beacon release rule Two signed reviews.",
+          "start_byte": 0,
+          "end_byte": 46,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-prohibition",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon release prohibition No releases after 19:00 UTC.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "release_prohibition",
+          "object": "No releases after 19:00 UTC",
+          "object_entity": null,
+          "claim": "Cinder Beacon release prohibition No releases after 19:00 UTC.",
+          "start_byte": 0,
+          "end_byte": 62,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-reason",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon rationale Preserve a fragile calibration sample.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "rationale",
+          "object": "Preserve a fragile calibration sample",
+          "object_entity": null,
+          "claim": "Cinder Beacon rationale Preserve a fragile calibration sample.",
+          "start_byte": 0,
+          "end_byte": 62,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-uses",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon uses Cinder Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "uses",
+          "object": "Cinder Valve",
+          "object_entity": "Cinder Valve",
+          "claim": "Cinder Beacon uses Cinder Valve.",
+          "start_byte": 0,
+          "end_byte": 32,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-b-location",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Valve located at Bay 3.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Valve",
+          "predicate": "located_at",
+          "object": "Bay 3",
+          "object_entity": null,
+          "claim": "Cinder Valve located at Bay 3.",
+          "start_byte": 0,
+          "end_byte": 30,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-b-owner",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Valve owned by Greta Cinder.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Valve",
+          "predicate": "owned_by",
+          "object": "Greta Cinder",
+          "object_entity": null,
+          "claim": "Cinder Valve owned by Greta Cinder.",
+          "start_byte": 0,
+          "end_byte": 35,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-dep",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon depends on Cinder Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "depends_on",
+          "object": "Cinder Valve",
+          "object_entity": "Cinder Valve",
+          "claim": "Cinder Beacon depends on Cinder Valve.",
+          "start_byte": 0,
+          "end_byte": 38,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-second-dep",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon depends on Cinder Beacon Reserve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "depends_on",
+          "object": "Cinder Beacon Reserve",
+          "object_entity": "Cinder Beacon Reserve",
+          "claim": "Cinder Beacon depends on Cinder Beacon Reserve.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-b-release",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Valve release rule A seal inspection.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Valve",
+          "predicate": "release_rule",
+          "object": "A seal inspection",
+          "object_entity": null,
+          "claim": "Cinder Valve release rule A seal inspection.",
+          "start_byte": 0,
+          "end_byte": 44,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-second-location",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon Reserve located at Room 15.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon Reserve",
+          "predicate": "located_at",
+          "object": "Room 15",
+          "object_entity": null,
+          "claim": "Cinder Beacon Reserve located at Room 15.",
+          "start_byte": 0,
+          "end_byte": 41,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-long-location",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon Reserve East located at Room 16.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon Reserve East",
+          "predicate": "located_at",
+          "object": "Room 16",
+          "object_entity": null,
+          "claim": "Cinder Beacon Reserve East located at Room 16.",
+          "start_byte": 0,
+          "end_byte": 46,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-aliases",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Swift is alias for Cinder Beacon.\nSwift Pair is alias for Cinder Beacon.\nSwift Pair is alias for Cinder Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "one",
+          "subject": "Swift",
+          "predicate": "is_alias_for",
+          "object": "Cinder Beacon",
+          "object_entity": "Cinder Beacon",
+          "claim": "Swift is alias for Cinder Beacon.",
+          "start_byte": 0,
+          "end_byte": 33,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-a",
+          "subject": "Swift Pair",
+          "predicate": "is_alias_for",
+          "object": "Cinder Beacon",
+          "object_entity": "Cinder Beacon",
+          "claim": "Swift Pair is alias for Cinder Beacon.",
+          "start_byte": 34,
+          "end_byte": 72,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-b",
+          "subject": "Swift Pair",
+          "predicate": "is_alias_for",
+          "object": "Cinder Valve",
+          "object_entity": "Cinder Valve",
+          "claim": "Swift Pair is alias for Cinder Valve.",
+          "start_byte": 73,
+          "end_byte": 110,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-future",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon Locker located at Room 63.",
+      "observed_at": "2026-09-10T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon Locker",
+          "predicate": "located_at",
+          "object": "Room 63",
+          "object_entity": null,
+          "claim": "Cinder Beacon Locker located at Room 63.",
+          "start_byte": 0,
+          "end_byte": 40,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-expired",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon Gate access code 8306.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-01T00:00:00Z",
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon Gate",
+          "predicate": "access_code",
+          "object": "8306",
+          "object_entity": null,
+          "claim": "Cinder Beacon Gate access code 8306.",
+          "start_byte": 0,
+          "end_byte": 36,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-deleted",
+      "scope": "realm/cinder",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon Archive located at Shelf 2.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon Archive",
+          "predicate": "located_at",
+          "object": "Shelf 2",
+          "object_entity": null,
+          "claim": "Cinder Beacon Archive located at Shelf 2.",
+          "start_byte": 0,
+          "end_byte": 41,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "cinder-shadow",
+      "scope": "realm/cinder-external",
+      "revision": 1,
+      "title": "Cinder Beacon reference record",
+      "body": "Cinder Beacon owned by External Custodian.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Cinder Beacon",
+          "predicate": "owned_by",
+          "object": "External Custodian",
+          "object_entity": null,
+          "claim": "Cinder Beacon owned by External Custodian.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-standing",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Otto Pine has convention Identify assumptions explicitly.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Otto Pine",
+          "predicate": "has_convention",
+          "object": "Identify assumptions explicitly",
+          "object_entity": null,
+          "claim": "Otto Pine has convention Identify assumptions explicitly.",
+          "start_byte": 0,
+          "end_byte": 57,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": true
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-owner",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle owned by Lena Fathom.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "owned_by",
+          "object": "Lena Fathom",
+          "object_entity": null,
+          "claim": "Fathom Spindle owned by Lena Fathom.",
+          "start_byte": 0,
+          "end_byte": 36,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Fathom Spindle owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-copy",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle owned by Lena Fathom.",
+      "observed_at": "2026-07-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "owned_by",
+          "object": "Lena Fathom",
+          "object_entity": null,
+          "claim": "Fathom Spindle owned by Lena Fathom.",
+          "start_byte": 0,
+          "end_byte": 36,
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": "Fathom Spindle owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-old-owner",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle owned by Former Custodian Fathom.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "owned_by",
+          "object": "Former Custodian Fathom",
+          "object_entity": null,
+          "claim": "Fathom Spindle owned by Former Custodian Fathom.",
+          "start_byte": 0,
+          "end_byte": 48,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": "2026-07-01T00:00:00Z",
+          "single_value_slot": "Fathom Spindle owner",
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-maintainer",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle maintained by Pearl Circle.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "maintained_by",
+          "object": "Pearl Circle",
+          "object_entity": "Pearl Circle",
+          "claim": "Fathom Spindle maintained by Pearl Circle.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-location",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle located at Room 12.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "located_at",
+          "object": "Room 12",
+          "object_entity": null,
+          "claim": "Fathom Spindle located at Room 12.",
+          "start_byte": 0,
+          "end_byte": 34,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-team-location",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Pearl Circle located at Room 41.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Pearl Circle",
+          "predicate": "located_at",
+          "object": "Room 41",
+          "object_entity": null,
+          "claim": "Pearl Circle located at Room 41.",
+          "start_byte": 0,
+          "end_byte": 32,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-release",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle release rule Two signed reviews.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "release_rule",
+          "object": "Two signed reviews",
+          "object_entity": null,
+          "claim": "Fathom Spindle release rule Two signed reviews.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-prohibition",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle release prohibition No releases after 19:00 UTC.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "release_prohibition",
+          "object": "No releases after 19:00 UTC",
+          "object_entity": null,
+          "claim": "Fathom Spindle release prohibition No releases after 19:00 UTC.",
+          "start_byte": 0,
+          "end_byte": 63,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-reason",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle rationale Preserve a fragile calibration sample.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "rationale",
+          "object": "Preserve a fragile calibration sample",
+          "object_entity": null,
+          "claim": "Fathom Spindle rationale Preserve a fragile calibration sample.",
+          "start_byte": 0,
+          "end_byte": 63,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-uses",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle uses Fathom Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "uses",
+          "object": "Fathom Valve",
+          "object_entity": "Fathom Valve",
+          "claim": "Fathom Spindle uses Fathom Valve.",
+          "start_byte": 0,
+          "end_byte": 33,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-b-location",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Valve located at Bay 3.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Valve",
+          "predicate": "located_at",
+          "object": "Bay 3",
+          "object_entity": null,
+          "claim": "Fathom Valve located at Bay 3.",
+          "start_byte": 0,
+          "end_byte": 30,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-b-owner",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Valve owned by Greta Fathom.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Valve",
+          "predicate": "owned_by",
+          "object": "Greta Fathom",
+          "object_entity": null,
+          "claim": "Fathom Valve owned by Greta Fathom.",
+          "start_byte": 0,
+          "end_byte": 35,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-dep",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle depends on Fathom Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "depends_on",
+          "object": "Fathom Valve",
+          "object_entity": "Fathom Valve",
+          "claim": "Fathom Spindle depends on Fathom Valve.",
+          "start_byte": 0,
+          "end_byte": 39,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-second-dep",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle depends on Fathom Spindle Reserve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "depends_on",
+          "object": "Fathom Spindle Reserve",
+          "object_entity": "Fathom Spindle Reserve",
+          "claim": "Fathom Spindle depends on Fathom Spindle Reserve.",
+          "start_byte": 0,
+          "end_byte": 49,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-b-release",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Valve release rule A seal inspection.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Valve",
+          "predicate": "release_rule",
+          "object": "A seal inspection",
+          "object_entity": null,
+          "claim": "Fathom Valve release rule A seal inspection.",
+          "start_byte": 0,
+          "end_byte": 44,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-second-location",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle Reserve located at Room 15.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle Reserve",
+          "predicate": "located_at",
+          "object": "Room 15",
+          "object_entity": null,
+          "claim": "Fathom Spindle Reserve located at Room 15.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-long-location",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle Reserve East located at Room 16.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle Reserve East",
+          "predicate": "located_at",
+          "object": "Room 16",
+          "object_entity": null,
+          "claim": "Fathom Spindle Reserve East located at Room 16.",
+          "start_byte": 0,
+          "end_byte": 47,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-aliases",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Kite is alias for Fathom Spindle.\nKite Pair is alias for Fathom Spindle.\nKite Pair is alias for Fathom Valve.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "one",
+          "subject": "Kite",
+          "predicate": "is_alias_for",
+          "object": "Fathom Spindle",
+          "object_entity": "Fathom Spindle",
+          "claim": "Kite is alias for Fathom Spindle.",
+          "start_byte": 0,
+          "end_byte": 33,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-a",
+          "subject": "Kite Pair",
+          "predicate": "is_alias_for",
+          "object": "Fathom Spindle",
+          "object_entity": "Fathom Spindle",
+          "claim": "Kite Pair is alias for Fathom Spindle.",
+          "start_byte": 34,
+          "end_byte": 72,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        },
+        {
+          "fact_id": "pair-b",
+          "subject": "Kite Pair",
+          "predicate": "is_alias_for",
+          "object": "Fathom Valve",
+          "object_entity": "Fathom Valve",
+          "claim": "Kite Pair is alias for Fathom Valve.",
+          "start_byte": 73,
+          "end_byte": 109,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-future",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle Locker located at Room 63.",
+      "observed_at": "2026-09-10T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle Locker",
+          "predicate": "located_at",
+          "object": "Room 63",
+          "object_entity": null,
+          "claim": "Fathom Spindle Locker located at Room 63.",
+          "start_byte": 0,
+          "end_byte": 41,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-expired",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle Gate access code 8306.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-01T00:00:00Z",
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle Gate",
+          "predicate": "access_code",
+          "object": "8306",
+          "object_entity": null,
+          "claim": "Fathom Spindle Gate access code 8306.",
+          "start_byte": 0,
+          "end_byte": 37,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-deleted",
+      "scope": "realm/fathom",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle Archive located at Shelf 2.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle Archive",
+          "predicate": "located_at",
+          "object": "Shelf 2",
+          "object_entity": null,
+          "claim": "Fathom Spindle Archive located at Shelf 2.",
+          "start_byte": 0,
+          "end_byte": 42,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    },
+    {
+      "source_id": "fathom-shadow",
+      "scope": "realm/fathom-external",
+      "revision": 1,
+      "title": "Fathom Spindle reference record",
+      "body": "Fathom Spindle owned by External Custodian.",
+      "observed_at": "2026-05-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "deleted": false,
+      "facts": [
+        {
+          "fact_id": "v",
+          "subject": "Fathom Spindle",
+          "predicate": "owned_by",
+          "object": "External Custodian",
+          "object_entity": null,
+          "claim": "Fathom Spindle owned by External Custodian.",
+          "start_byte": 0,
+          "end_byte": 43,
+          "valid_from": "2026-05-01T00:00:00Z",
+          "valid_to": null,
+          "single_value_slot": null,
+          "standing": false
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "sequence": 1,
+      "source": {
+        "source_id": "bracken-release",
+        "scope": "realm/bracken",
+        "revision": 2,
+        "title": "Bracken Engine reference record",
+        "body": "Bracken Engine release rule One signed review and a recorded rehearsal.",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": false,
+        "facts": [
+          {
+            "fact_id": "v",
+            "subject": "Bracken Engine",
+            "predicate": "release_rule",
+            "object": "One signed review and a recorded rehearsal",
+            "object_entity": null,
+            "claim": "Bracken Engine release rule One signed review and a recorded rehearsal.",
+            "start_byte": 0,
+            "end_byte": 71,
+            "valid_from": "2026-08-20T00:00:00Z",
+            "valid_to": null,
+            "single_value_slot": null,
+            "standing": false
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 2,
+      "source": {
+        "source_id": "bracken-deleted",
+        "scope": "realm/bracken",
+        "revision": 2,
+        "title": "Bracken Engine reference record",
+        "body": "",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": true,
+        "facts": []
+      }
+    },
+    {
+      "sequence": 3,
+      "source": {
+        "source_id": "riverstone-release",
+        "scope": "realm/riverstone",
+        "revision": 2,
+        "title": "Riverstone Array reference record",
+        "body": "Riverstone Array release rule One signed review and a recorded rehearsal.",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": false,
+        "facts": [
+          {
+            "fact_id": "v",
+            "subject": "Riverstone Array",
+            "predicate": "release_rule",
+            "object": "One signed review and a recorded rehearsal",
+            "object_entity": null,
+            "claim": "Riverstone Array release rule One signed review and a recorded rehearsal.",
+            "start_byte": 0,
+            "end_byte": 73,
+            "valid_from": "2026-08-20T00:00:00Z",
+            "valid_to": null,
+            "single_value_slot": null,
+            "standing": false
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 4,
+      "source": {
+        "source_id": "riverstone-deleted",
+        "scope": "realm/riverstone",
+        "revision": 2,
+        "title": "Riverstone Array reference record",
+        "body": "",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": true,
+        "facts": []
+      }
+    },
+    {
+      "sequence": 5,
+      "source": {
+        "source_id": "cinder-release",
+        "scope": "realm/cinder",
+        "revision": 2,
+        "title": "Cinder Beacon reference record",
+        "body": "Cinder Beacon release rule One signed review and a recorded rehearsal.",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": false,
+        "facts": [
+          {
+            "fact_id": "v",
+            "subject": "Cinder Beacon",
+            "predicate": "release_rule",
+            "object": "One signed review and a recorded rehearsal",
+            "object_entity": null,
+            "claim": "Cinder Beacon release rule One signed review and a recorded rehearsal.",
+            "start_byte": 0,
+            "end_byte": 70,
+            "valid_from": "2026-08-20T00:00:00Z",
+            "valid_to": null,
+            "single_value_slot": null,
+            "standing": false
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 6,
+      "source": {
+        "source_id": "cinder-deleted",
+        "scope": "realm/cinder",
+        "revision": 2,
+        "title": "Cinder Beacon reference record",
+        "body": "",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": true,
+        "facts": []
+      }
+    },
+    {
+      "sequence": 7,
+      "source": {
+        "source_id": "fathom-release",
+        "scope": "realm/fathom",
+        "revision": 2,
+        "title": "Fathom Spindle reference record",
+        "body": "Fathom Spindle release rule One signed review and a recorded rehearsal.",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": false,
+        "facts": [
+          {
+            "fact_id": "v",
+            "subject": "Fathom Spindle",
+            "predicate": "release_rule",
+            "object": "One signed review and a recorded rehearsal",
+            "object_entity": null,
+            "claim": "Fathom Spindle release rule One signed review and a recorded rehearsal.",
+            "start_byte": 0,
+            "end_byte": 71,
+            "valid_from": "2026-08-20T00:00:00Z",
+            "valid_to": null,
+            "single_value_slot": null,
+            "standing": false
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 8,
+      "source": {
+        "source_id": "fathom-deleted",
+        "scope": "realm/fathom",
+        "revision": 2,
+        "title": "Fathom Spindle reference record",
+        "body": "",
+        "observed_at": "2026-08-20T00:00:00Z",
+        "verified_at": null,
+        "expires_at": null,
+        "deleted": true,
+        "facts": []
+      }
+    }
+  ]
+}

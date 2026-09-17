@@ -1,0 +1,570 @@
+{
+  "gold": [
+    {
+      "query_id": "cinder-bound-pair",
+      "required": [
+        [
+          "realm/cinder|cinder-owner|1|v",
+          "realm/cinder|cinder-copy|1|v"
+        ],
+        [
+          "realm/cinder|cinder-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-b-location|1|v",
+        "realm/cinder|cinder-copy|1|v",
+        "realm/cinder|cinder-owner|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-inverse-property",
+      "required": [
+        [
+          "realm/cinder|cinder-maintainer|1|v"
+        ],
+        [
+          "realm/cinder|cinder-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-location|1|v",
+        "realm/cinder|cinder-maintainer|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-excluded-branch",
+      "required": [
+        [
+          "realm/cinder|cinder-dep|1|v"
+        ],
+        [
+          "realm/cinder|cinder-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-b-location|1|v",
+        "realm/cinder|cinder-dep|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-alias-properties",
+      "required": [
+        [
+          "realm/cinder|cinder-aliases|1|pair-a"
+        ],
+        [
+          "realm/cinder|cinder-aliases|1|pair-b"
+        ],
+        [
+          "realm/cinder|cinder-location|1|v"
+        ],
+        [
+          "realm/cinder|cinder-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-aliases|1|pair-a",
+        "realm/cinder|cinder-aliases|1|pair-b",
+        "realm/cinder|cinder-b-location|1|v",
+        "realm/cinder|cinder-location|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-partial",
+      "required": [
+        [
+          "realm/cinder|cinder-dep|1|v"
+        ],
+        [
+          "realm/cinder|cinder-b-release|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-b-release|1|v",
+        "realm/cinder|cinder-dep|1|v",
+        "realm/cinder|cinder-second-dep|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-polarity",
+      "required": [
+        [
+          "realm/cinder|cinder-prohibition|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-prohibition|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-dedup-cap",
+      "required": [
+        [
+          "realm/cinder|cinder-owner|1|v",
+          "realm/cinder|cinder-copy|1|v"
+        ],
+        [
+          "realm/cinder|cinder-location|1|v"
+        ],
+        [
+          "realm/cinder|cinder-release|1|v"
+        ],
+        [
+          "realm/cinder|cinder-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-copy|1|v",
+        "realm/cinder|cinder-location|1|v",
+        "realm/cinder|cinder-owner|1|v",
+        "realm/cinder|cinder-reason|1|v",
+        "realm/cinder|cinder-release|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-history-exclusion",
+      "required": [
+        [
+          "realm/cinder|cinder-old-owner|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-old-owner|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-copy|1|v",
+        "realm/cinder|cinder-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-prefix",
+      "required": [
+        [
+          "realm/cinder|cinder-long-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-long-location|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-unfamiliar",
+      "required": [
+        [
+          "realm/cinder|cinder-owner|1|v",
+          "realm/cinder|cinder-copy|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/cinder|cinder-copy|1|v",
+        "realm/cinder|cinder-owner|1|v",
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "cinder-unknown",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "cinder-future",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-future|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "cinder-expired",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-expired|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "cinder-deleted",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-deleted|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "cinder-qualifier",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-prohibition|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "cinder-unknown-polarity",
+      "required": [],
+      "acceptable": [
+        "realm/cinder|cinder-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/cinder-external|cinder-shadow|1|v",
+        "realm/cinder|cinder-prohibition|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-bound-pair",
+      "required": [
+        [
+          "realm/fathom|fathom-owner|1|v",
+          "realm/fathom|fathom-copy|1|v"
+        ],
+        [
+          "realm/fathom|fathom-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-b-location|1|v",
+        "realm/fathom|fathom-copy|1|v",
+        "realm/fathom|fathom-owner|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-inverse-property",
+      "required": [
+        [
+          "realm/fathom|fathom-maintainer|1|v"
+        ],
+        [
+          "realm/fathom|fathom-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-location|1|v",
+        "realm/fathom|fathom-maintainer|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-excluded-branch",
+      "required": [
+        [
+          "realm/fathom|fathom-dep|1|v"
+        ],
+        [
+          "realm/fathom|fathom-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-b-location|1|v",
+        "realm/fathom|fathom-dep|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-alias-properties",
+      "required": [
+        [
+          "realm/fathom|fathom-aliases|1|pair-a"
+        ],
+        [
+          "realm/fathom|fathom-aliases|1|pair-b"
+        ],
+        [
+          "realm/fathom|fathom-location|1|v"
+        ],
+        [
+          "realm/fathom|fathom-b-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-aliases|1|pair-a",
+        "realm/fathom|fathom-aliases|1|pair-b",
+        "realm/fathom|fathom-b-location|1|v",
+        "realm/fathom|fathom-location|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-partial",
+      "required": [
+        [
+          "realm/fathom|fathom-dep|1|v"
+        ],
+        [
+          "realm/fathom|fathom-b-release|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-b-release|1|v",
+        "realm/fathom|fathom-dep|1|v",
+        "realm/fathom|fathom-second-dep|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-polarity",
+      "required": [
+        [
+          "realm/fathom|fathom-prohibition|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-prohibition|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-dedup-cap",
+      "required": [
+        [
+          "realm/fathom|fathom-owner|1|v",
+          "realm/fathom|fathom-copy|1|v"
+        ],
+        [
+          "realm/fathom|fathom-location|1|v"
+        ],
+        [
+          "realm/fathom|fathom-release|1|v"
+        ],
+        [
+          "realm/fathom|fathom-reason|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-copy|1|v",
+        "realm/fathom|fathom-location|1|v",
+        "realm/fathom|fathom-owner|1|v",
+        "realm/fathom|fathom-reason|1|v",
+        "realm/fathom|fathom-release|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-history-exclusion",
+      "required": [
+        [
+          "realm/fathom|fathom-old-owner|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-old-owner|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-copy|1|v",
+        "realm/fathom|fathom-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-prefix",
+      "required": [
+        [
+          "realm/fathom|fathom-long-location|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-long-location|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-unfamiliar",
+      "required": [
+        [
+          "realm/fathom|fathom-owner|1|v",
+          "realm/fathom|fathom-copy|1|v"
+        ]
+      ],
+      "acceptable": [
+        "realm/fathom|fathom-copy|1|v",
+        "realm/fathom|fathom-owner|1|v",
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-old-owner|1|v"
+      ],
+      "expected_empty": false
+    },
+    {
+      "query_id": "fathom-unknown",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-future",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-future|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-expired",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-expired|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-deleted",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-deleted|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-qualifier",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-prohibition|1|v"
+      ],
+      "expected_empty": true
+    },
+    {
+      "query_id": "fathom-unknown-polarity",
+      "required": [],
+      "acceptable": [
+        "realm/fathom|fathom-standing|1|v"
+      ],
+      "forbidden": [
+        "realm/fathom-external|fathom-shadow|1|v",
+        "realm/fathom|fathom-prohibition|1|v"
+      ],
+      "expected_empty": true
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+699bc17f23a571785876e76741493393247183a44e128c36e4fffc89fe89d957  experiments/trusty-memory-query-plan/sources.json
+5b0788a80c4528917a366058841ed63dd02267967d8fae9e35f1e878b8f47727  experiments/trusty-memory-query-plan/queries.json
+9206c40ceaa6c471848547d72af026c98300a57a4d5a00f7b3f4e6e4524de271  experiments/trusty-memory-query-plan/gold.json
+47b7c36c9963b7c6749e4dec335bb6594b2f0aae5cc05b69df98c182d56df7c2  experiments/trusty-memory-query-plan/gold-tune.json
+cd6138664d3be96774ab4e63bc7059872ad85d4f38a34b65b9e037b59468ef64  experiments/trusty-memory-query-plan/gold-heldout.json
+633e6deaf4769212a153704aaf979435c96fdc7f37850de08fa028a19c5e5f17  docs/research/trusty-memory-query-plan-2026-09-17/interface.md
+32c777e397298ee0ed8aaa9a2930b9f64f66140dfbf37d1c3b7c5ebe7d6f4425  docs/research/trusty-memory-query-plan-2026-09-17/protocol.md
