@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Deterministic personal-knowledge-base markdown-tree maintainer, exposed as a native MCP stdio server. Organizes a per-assistant KB tree with READMEs + YAML frontmatter and converts arbitrary doc trees into the collection model in place."
 keywords = ["mcp", "knowledge-base", "markdown", "frontmatter", "deterministic"]
 categories = ["command-line-utilities", "development-tools"]
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 # NOT PUBLISHED, and deliberately so. This crate has never been uploaded to
 # crates.io and is still in-progress, so claiming the permanent `trusty-kb`
 # name for a store whose schema is still moving buys nothing and cannot be

@@ -21,6 +21,7 @@ description = "Trusty Agents: Rust-native agentic harness with multi-model routi
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage = "https://trustytools.dev"
 
 include = [
     "src/**/*",

@@ -1908,6 +1908,18 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # ── Point release notes at the public site (owner ruling) ────────────────
+      # Why: every crate's Homepage now points at https://trustytools.dev, and
+      #   the release notes should carry the same link. cliff.toml's body
+      #   template (see cliff.toml) has no `crates.io:` line to append after, so
+      #   this is unconditionally prepended as the first line instead.
+      # What: prepends "Site: https://trustytools.dev" to the RELEASE_NOTES.md
+      #   file the git-cliff step above wrote, before softprops reads it below.
+      - name: Prepend site link to release notes
+        run: |
+          { printf 'Site: https://trustytools.dev\n'; cat RELEASE_NOTES.md; } > RELEASE_NOTES.md.tmp
+          mv RELEASE_NOTES.md.tmp RELEASE_NOTES.md
+
       # ── Detect (never repair-by-deletion) a stuck immutable asset-less
       # release (issue #5455, revised in PR #5591 after this exact strategy
       # was proven destructive) ──────────────────────────────────────────────

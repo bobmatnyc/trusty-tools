@@ -213,6 +213,11 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     }
 
     if let Some(home) = dirs::home_dir() {
+        // See #6868: create the shared cargo target directory and seed the
+        // `build:` defaults the `rust_build_env` row reports. Both halves are
+        // skipped when already done, which is what makes a second `--fix` run
+        // silent, and neither ever touches `~/.cargo/config.toml`.
+        steps.extend(rust_build_env_steps(&home, project_dir.as_deref(), mode));
         // #5866: `output_style_staleness` named `tm install` as its remedy and
         // `tm install` has no output-style step, so the finding had no repair at
         // all. This is it.
@@ -239,6 +244,58 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     }
 
     print_steps(&steps, apply, FIX_APPLY_HINT);
+}
+
+/// The `rust_build_env` repair, resolved against the operator's real paths.
+///
+/// Why (#6868): [`trusty_mpm::core::build_env_repair::repair_rust_build_env`]
+/// is hermetic by design — it takes the config path and the already-resolved
+/// settings so its tests never reach a real `$HOME`. This is the one place that
+/// turns the operator's home directory and cwd into those arguments, and it is
+/// where the two refusals live: a project that is not a Rust checkout, and a
+/// machine whose repo identity cannot be derived, both produce NO steps rather
+/// than a guessed target directory.
+/// What: resolves the `build:` section from `<home>/.trusty-tools/trusty-mpm/
+/// config.yaml`, derives `<owner>/<repo>` from the project's `origin` remote,
+/// and delegates. The `rust_build_env` doctor row reports the same values
+/// through the same resolver, so `--fix` can never act on a different reading
+/// than the one the operator saw.
+/// Test: `core::build_env_repair`'s tests cover every step and every refusal;
+/// this function is path resolution.
+fn rust_build_env_steps(
+    home: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
+    // The same gate the row uses. `None` is a cut-short scan, which has not
+    // shown the project is free of Rust — and equally has not shown it is one,
+    // so `--fix` declines rather than creating a directory on a guess.
+    if project_dir.and_then(trusty_mpm::core::build_env::project_is_rust) != Some(true) {
+        return Vec::new();
+    }
+    let config_path = trusty_common::crate_config::crate_config_path_at(
+        home,
+        trusty_mpm::core::trusty_tools_config::CRATE_NAME,
+    );
+    let config = trusty_common::crate_config::load_at::<
+        trusty_mpm::core::trusty_tools_config::TrustyToolsConfig,
+    >(&config_path)
+    .ok()
+    .flatten();
+    let identity = project_dir.and_then(trusty_common::github_path::derive_github_path);
+    match trusty_mpm::core::build_env::resolve_build_env(
+        config.as_ref().and_then(|c| c.build.as_ref()),
+        home,
+        identity.as_ref(),
+        trusty_mpm::core::build_env::host_cores(),
+    ) {
+        Ok(env) => {
+            trusty_mpm::core::build_env_repair::repair_rust_build_env(&config_path, &env, mode)
+        }
+        // The `rust_build_env` row already reports this as UNDETERMINED with the
+        // key to set; `--fix` has nothing safe to do about it.
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Every `.claude/settings*.json` the build-tree repoint should reach (#7262).

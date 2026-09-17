@@ -71,6 +71,7 @@ use crate::llm::{
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
+use crate::verify_gate::FinishGateOutcome;
 
 pub use cadence::{CadenceConfig, resolve_cadence_config};
 pub use compaction::CompactionConfig;
@@ -99,12 +100,12 @@ pub use transcript::Transcript;
 /// `Self::stop_signal` (#2265 fix #5) already established for "some external
 /// condition the loop must consult at a turn boundary" — reused here rather
 /// than adding a bespoke third turn-boundary check.
-/// What: Returns `None` when the gate is satisfied (or inert — nothing
-/// requires verification for this run); `Some(reason)` when it trips,
-/// carrying the message fed back to the model as the rejected `finish_task`
-/// call's recoverable tool result.
+/// What: Returns a [`crate::verify_gate::FinishGateOutcome`] — accept, accept with a note folded
+/// into the recorded completion report (#8206), or reject with the message
+/// fed back to the model as the rejected `finish_task` call's recoverable
+/// tool result.
 /// Test: `agent_loop::tests::finish_gate_*`.
-pub type FinishGate = Arc<dyn Fn(&Transcript) -> Option<String> + Send + Sync>;
+pub type FinishGate = Arc<dyn Fn(&Transcript) -> FinishGateOutcome + Send + Sync>;
 
 /// Phase name used when accruing token usage into the `PerfCollector`.
 const PERF_PHASE: &str = "agent_loop";
@@ -774,7 +775,9 @@ impl AgentLoop {
         for call in tool_calls {
             let tool = call.function.name.as_str();
 
-            let args = match extractor.parse_and_validate(tool, &call.function.arguments) {
+            // #8206: `mut` so the gate's AcceptWithNote arm can fold its note
+            // into the `finish_task` report before it becomes the run's output.
+            let mut args = match extractor.parse_and_validate(tool, &call.function.arguments) {
                 Ok(args) => args,
                 Err(error) => {
                     self.report_invalid_arguments(&call.id, tool, &error, transcript)
@@ -854,13 +857,28 @@ impl AgentLoop {
             // than the loop silently declining to terminate.
             if tool == FINISH_TASK_TOOL_NAME
                 && !result.is_error()
-                && let Some(reason) = self.finish_gate.as_ref().and_then(|gate| gate(transcript))
+                && let Some(gate) = self.finish_gate.as_ref()
             {
-                tracing::warn!(
-                    reason = %reason,
-                    "agent_loop: verify-before-finish gate intercepted finish_task (#2279)"
-                );
-                result = ToolResult::err(reason);
+                match gate(transcript) {
+                    FinishGateOutcome::Accept => {}
+                    // #8206: triggered but unsatisfiable here — accept the
+                    // finish, and record in the report why nothing ran.
+                    FinishGateOutcome::AcceptWithNote(note) => {
+                        tracing::info!(
+                            note = %note,
+                            "agent_loop: verify-before-finish gate accepted an unverified \
+                             finish_task (#8206)"
+                        );
+                        append_finish_note(&mut args, &note);
+                    }
+                    FinishGateOutcome::Reject(reason) => {
+                        tracing::warn!(
+                            reason = %reason,
+                            "agent_loop: verify-before-finish gate intercepted finish_task (#2279)"
+                        );
+                        result = ToolResult::err(reason);
+                    }
+                }
             }
 
             if let Some(sink) = &self.sink {
@@ -1243,6 +1261,25 @@ fn build_output(transcript: &Transcript, perf: &PerfCollector) -> AgentOutput {
         totals.cache_creation_tokens,
     );
     output
+}
+
+/// Fold a [`FinishGateOutcome::AcceptWithNote`] note into a `finish_task`
+/// call's validated arguments (#8206).
+///
+/// Why: The accepted-but-unverified arm must leave a trace in what the caller
+/// reads back, not only in the log. Appending to the model's own `summary` is
+/// the one edit that reaches BOTH halves of the recorded report —
+/// `AgentOutput::summary` and the `content` `render_finish_summary` builds
+/// from the same field — without a second plumbing path.
+/// What: Appends `note` to `args["summary"]`, separated by a blank line. A
+/// non-string or absent `summary` (unreachable past schema validation, which
+/// marks it required) is left untouched rather than replaced.
+/// Test: `agent_loop::tests::finish_gate_note_reaches_the_recorded_report`.
+fn append_finish_note(args: &mut Value, note: &str) {
+    if let Some(summary) = args.get("summary").and_then(Value::as_str) {
+        let merged = format!("{summary}\n\n{note}");
+        args["summary"] = Value::String(merged);
+    }
 }
 
 /// Assemble the final `AgentOutput` from an explicit `finish_task` call (#2072).

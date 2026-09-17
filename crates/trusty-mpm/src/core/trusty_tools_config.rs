@@ -259,6 +259,25 @@ pub struct TrustyToolsConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<SecretsConfig>,
+
+    /// Machine-level Rust build settings (the `build:` YAML section, #6868).
+    ///
+    /// `None` → the shipped defaults: a shared cargo target directory at
+    /// `~/.trusty-tools/cargo-target/<owner>/<repo>` derived from the project's
+    /// `origin` remote, half the host's cores (minimum 2) of build jobs, and no
+    /// sccache. The `rust_build_env` doctor row never fails on an absent
+    /// section. The section type and its resolver live in
+    /// [`crate::core::build_env`] beside the policy they configure, the same
+    /// arrangement `log_drain`, `agents` and `startup_context` use.
+    ///
+    /// ```yaml
+    /// build:
+    ///   cargo_target_dir: ~/.trusty-tools/cargo-target/bobmatnyc/trusty-tools
+    ///   build_jobs: 8
+    ///   sccache: false
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<crate::core::build_env::BuildConfig>,
 }
 
 /// The `disk:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#6927).

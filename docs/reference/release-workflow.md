@@ -122,6 +122,11 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
    binary on PATH is always the version that was just released.
 
+> **Site link (owner ruling):** every crate's `Cargo.toml` `homepage` field
+> points at `https://trustytools.dev`, and the `release` job in
+> `.github/workflows/release.yml` prepends `Site: https://trustytools.dev` to
+> the GitHub Release notes it generates from `cliff.toml`.
+
 ## Publish-Only-From-Merged-Main Guard (issue #2227)
 
 🔴 **Publish only from merged main / the pushed release tag — never an

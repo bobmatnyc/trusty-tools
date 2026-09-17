@@ -810,8 +810,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = resolve_agent(tmp.path(), "rust-engineer").expect("resolve embedded");
         assert_eq!(cfg.agent.name, "rust-engineer");
+        // #8215: match rust-engineer's own H1, not a skill name the asset can
+        // retire (`toolchains-rust-core` went away in #8192).
         assert!(
-            cfg.system_prompt.content.contains("toolchains-rust-core"),
+            cfg.system_prompt.content.contains("# Rust Engineer"),
             "expected rust-engineer's composed body, got: {:?}",
             cfg.system_prompt.content
         );

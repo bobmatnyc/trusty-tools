@@ -235,6 +235,44 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
 
+###### Off-box per-index delivery (issue #8135)
+
+`POST /indexes` also restores an index that was built on a different host and
+copied over — there is no separate import/attach endpoint, and none is
+needed. The colocated storage layout (issue #403) makes the corpus a plain
+directory the daemon reads on registration.
+
+Recipe:
+
+1. On the source host, copy `<root_path>/.trusty-search/` in full — at least
+   `index.redb`, `hnsw.usearch`, `hnsw.keys.json`, and `schema_version.json`.
+   All four live under that one directory; none of them is optional.
+2. Place the copied `.trusty-search/` directory under the same relative
+   position at `<root_path>` on the destination host.
+3. Allowlist `root_path` on the destination daemon (`trusty-search index add
+   <root_path>` or an `allowlist.toml` entry — see "Opt-in index allowlist"
+   above).
+4. `POST /indexes` with the same `id` and `root_path`. The daemon finds the
+   colocated corpus, registers it, and serves it with no walk, no re-embed,
+   and no restart.
+
+**Constraint:** the artifact must be produced by the same `CURRENT_SCHEMA_VERSION`
+major version as the receiving daemon (see "Schema Versioning and Migrations"
+below) — this recipe moves bytes, it runs no migration on the way over. A
+corpus from an older schema version still opens; a corpus from a newer major
+version does not.
+
+**Replacing an already-registered id:** `DELETE /indexes/:id` (default, no
+`delete_data`) followed by `POST /indexes` with the same `id`/`root_path` is
+the supported way to swap a registration's data while the daemon keeps
+running. `DELETE` (via `unregister_index`) always stops that index's
+filesystem watcher and drops its in-memory handle — and with it the redb
+file lock — before returning, so the following `POST` reopens the corpus
+cleanly. Skipping the `DELETE` and dropping a handle out-of-process (or
+racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
+some other handle (e.g. a detached watcher task) still holds the corpus open;
+see `tests_2984.rs` for the concrete failure mode this ordering avoids.
+
 ##### `DELETE /indexes/:id[?delete_data=true]`
 
 Drop an index from the in-memory registry and from `indexes.toml` / `roots.toml`.

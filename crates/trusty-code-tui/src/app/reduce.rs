@@ -90,12 +90,17 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
             tool_name,
             args,
             result,
+            failed,
         } => {
             let card = ToolCard {
                 id,
                 tool_name,
                 args,
                 result,
+                failed,
+                // #4596: `apply_tool_invocation` decides the real default
+                // once it knows whether the call completed and how.
+                collapsed: false,
             };
             apply_tool_invocation(app, card, &agent_id);
         }
@@ -255,10 +260,15 @@ fn push_delegated(app: &mut ReplApp, role: ChatRole, text: String) {
 /// inside an open delegation block (#7940), [`ChatRole::Status`] otherwise.
 /// An empty `id` never correlates. The completion's own `args` are dropped,
 /// since producers send `Null` there.
+/// A completed call also picks its default render state (#4596): collapsed
+/// on success, expanded on failure ([`ToolCard::is_error`]) so the error
+/// text is never hidden behind a keystroke. A still-running card stays
+/// expanded — its body is the single `running…` row.
 /// Test: [`tests::tool_invocation_result_merges_into_its_call_card`],
 /// [`tests::tool_invocation_result_without_a_start_opens_its_own_card`],
-/// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`].
-fn apply_tool_invocation(app: &mut ReplApp, card: ToolCard, agent_id: &str) {
+/// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`],
+/// [`tests::tool_card_is_error_reads_the_event_failure_flag`].
+fn apply_tool_invocation(app: &mut ReplApp, mut card: ToolCard, agent_id: &str) {
     app.scroll_offset = 0;
     if !card.id.is_empty()
         && let Some(&idx) = app.tool_cards.get(&card.id)
@@ -267,10 +277,15 @@ fn apply_tool_invocation(app: &mut ReplApp, card: ToolCard, agent_id: &str) {
     {
         if card.result.is_some() {
             open.result = card.result;
+            // #4596: the completion carries the verdict; the start event
+            // never could.
+            open.failed = card.failed;
+            open.collapsed = !open.is_error();
             app.tool_cards.remove(&card.id);
         }
         return;
     }
+    card.collapsed = card.result.is_some() && !card.is_error();
     if card.id.is_empty() || card.result.is_some() {
         app.tool_cards.remove(&card.id);
     } else {
@@ -554,7 +569,8 @@ fn permission_answer_for_key(key: KeyInput) -> Option<PermissionAnswer> {
 /// what's deferred to Slice 5).
 /// What: printable chars insert; Backspace/Left/Right/Home/End edit/move;
 /// PageUp/PageDown scroll a page; Enter submits; Ctrl-a/u/c/d match the
-/// readline bindings DOC-50 §5 Slice 5 specifies. Up, Down, and Ctrl-E are
+/// readline bindings DOC-50 §5 Slice 5 specifies; Ctrl-O expands/collapses
+/// the newest tool-call card (#4596). Up, Down, and Ctrl-E are
 /// direct ports of tagent's real `keys.rs` bindings rather than a Slice-5
 /// invention — see [`apply_up`] and [`apply_ctrl_e`] for why they're pulled
 /// into their own functions. Any other key (Tab, Esc, Delete,
@@ -584,6 +600,12 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
                 app.cursor_pos = 0;
             }
             'c' => app.pending_cancel = true,
+            // #4596: expand/collapse the newest tool-call card. `o` for
+            // "output"; the free ctrl bindings were o/b/f/k/w/y and this is
+            // the one Claude Code's own TUI uses for the same gesture.
+            'o' => {
+                app.toggle_last_tool_card();
+            }
             // Direct port of tagent's real `KeyCode::Char('d')` arm
             // (`crates/trusty-agents/src/repl/tui/keys.rs`): Ctrl-D only
             // quits on an EMPTY input buffer (the readline EOF convention);
@@ -600,12 +622,9 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Home => app.cursor_pos = 0,
         KeyCode::End => app.cursor_pos = app.input_buf.len(),
         KeyCode::Up => apply_up(app),
-        // Direct port of tagent's real `KeyCode::Down` arm
-        // (`crates/trusty-agents/src/repl/tui/keys.rs`), which calls
-        // `history_next()` even though nothing (including `apply_up` below)
-        // ever sets `history_idx` — a functional no-op today in tagent too.
-        // Kept for fidelity per `crate::app`'s disclosure list, not because
-        // it currently does anything observable.
+        // #8181: live since `apply_up` walks `history` rather than recalling
+        // the single-level `last_prompt`. Down steps forward through the
+        // same list and restores the in-progress draft at the newest end.
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
@@ -628,31 +647,39 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
     }
 }
 
-/// Up-arrow: recall [`ReplApp::last_prompt`], and — while
+/// Up-arrow: walk one step back through [`ReplApp::history`], and — while
 /// [`ReplApp::busy`] — ALSO signal [`ReplApp::pending_cancel`].
 ///
-/// Why: direct port of tagent's real `KeyCode::Up` arm
-/// (`crates/trusty-agents/src/repl/tui/keys.rs`): a busy in-flight request
-/// gets cancelled so the user can edit and resubmit, and the cancel signal
-/// fires independent of whether `last_prompt` happens to be set (matching
-/// tagent's unconditional `if app.thinking { app.pending_cancel = true; }`
-/// ahead of the recall). This is NOT the multi-level `history_prev` browser
-/// — see `crate::app`'s module doc comment for why that helper stays
-/// unwired, exactly as it is in tagent.
-/// What: no-ops the recall half when `last_prompt` is empty (nothing to
-/// recall); the cancel signal is unconditional on `busy`.
-/// Test: [`tests::apply_up_recalls_last_prompt_when_idle`],
+/// Why: #8181. This used to recall [`ReplApp::last_prompt`], a single
+/// snapshot overwritten on every submit, so a second press repeated the
+/// first and `KeyCode::Down` (which calls [`ReplApp::history_next`]) never
+/// had an index to walk forward from. Walking [`ReplApp::history`] is the
+/// readline behavior the owner asked for and is what makes the already-wired
+/// Down arm live. The busy-cancel half is unchanged tagent parity
+/// (`crates/trusty-agents/src/repl/tui/keys.rs`): it fires independent of
+/// whether anything is recallable, and the composer's `↑ to cancel` hint
+/// depends on it.
+/// What: the input is a single line — [`crate::widgets::input_composer`]
+/// renders `input_buf` on one row and no binding inserts a newline — so
+/// readline's "history only when the cursor is on the first/last line" rule
+/// is satisfied unconditionally here and Up is always history.
+/// [`ReplApp::history_prev`] saves the in-progress draft on the first step
+/// (so Down can restore it), clamps at the oldest entry, and no-ops on an
+/// empty history.
+/// Test: [`tests::apply_up_walks_back_through_submitted_prompts`],
+/// [`tests::apply_down_walks_forward_and_restores_the_draft`],
+/// [`tests::apply_up_clamps_at_the_oldest_entry`],
+/// [`tests::apply_down_is_noop_when_not_navigating_history`],
 /// [`tests::apply_up_signals_cancel_and_recalls_when_busy`],
-/// [`tests::apply_up_signals_cancel_even_with_no_last_prompt`],
-/// [`tests::apply_up_is_noop_when_idle_and_no_last_prompt`].
+/// [`tests::apply_up_signals_cancel_even_with_no_history`],
+/// [`tests::apply_up_is_noop_when_idle_and_history_is_empty`].
 fn apply_up(app: &mut ReplApp) {
     if app.busy {
         app.pending_cancel = true;
     }
-    if !app.last_prompt.is_empty() {
-        let lp = app.last_prompt.clone();
-        app.set_input(lp);
-    }
+    // #8181: was a single-level `last_prompt` recall; `history_prev` walks
+    // the whole session's submissions and is what gives Down an index.
+    app.history_prev();
 }
 
 /// Ctrl-E: with an empty input buffer and a cached

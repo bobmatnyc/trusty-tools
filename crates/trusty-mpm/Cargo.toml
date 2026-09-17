@@ -74,14 +74,21 @@ name = "trusty-mpm"
 # 1.5.38 (owner-authorized reinstall, 2026-09-15): patch, version-only — 1.5.37
 # is the in-tree tip (crates.io is still at 1.5.36) and this bump exists solely
 # so `tm --version` identifies the locally reinstalled build. Not published.
-version = "1.6.0"
+# 1.6.1 (#8192): patch — 1.6.0 is already published on crates.io and this PR
+# bundles the rust-delivery-workflow skill and wires it to rust-engineer,
+# touching src/**, so the "PR version bump vs crates.io" check (#4421)
+# requires the bump. Patch: additive skill bundling, no breaking change.
+# Also #8135/#8156 (this PR): same 1.6.1 patch bump applies here too, since
+# this PR also edits src/** (tm-delegation-patterns.md skill asset) after
+# 1.6.0's crates.io publish.
+version = "1.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "trusty-mpm: unified multi-agent orchestration platform (core, daemon, CLI, TUI, Telegram)"
 readme = "README.md"
-homepage = "https://github.com/bobmatnyc/trusty-tools"
+homepage = "https://trustytools.dev"
 keywords = ["orchestration", "multi-agent", "cli", "daemon", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.claude/", "/.trusty-mpm/", "/CLAUDE.md"]
