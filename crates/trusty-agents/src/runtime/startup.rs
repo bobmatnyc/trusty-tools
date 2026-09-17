@@ -567,6 +567,32 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             tracing::warn!(error = %e, "project registry update failed (continuing)");
         }
 
+        // #4289: a registry written before the containment guard can already
+        // hold overlapping roots. Report them so the operator can clean them
+        // up; never reject the load, and never block startup on the report.
+        match async {
+            let reg = registry::ProjectRegistry::new()?;
+            anyhow::Ok(reg.overlap_report().await?)
+        }
+        .await
+        {
+            Ok(overlaps) => {
+                for overlap in overlaps {
+                    tracing::warn!(
+                        project = %overlap.name,
+                        path = %overlap.path.display(),
+                        relation = ?overlap.overlap,
+                        other_project = %overlap.against_name,
+                        other_path = %overlap.against_path.display(),
+                        "registered project roots overlap (#4289)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "project overlap report failed (continuing)");
+            }
+        }
+
         // #130: Clean up stale sub-agent PIDs from `.trusty-agents/state/processes.json`
         // left over by any prior crashed run. Best-effort; failures are logged
         // and never block startup.

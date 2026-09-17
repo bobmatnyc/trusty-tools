@@ -1,8 +1,13 @@
 //! Registered-project indexing and additive import into an assistant's bound OKG.
 //! Uses the search socket and existing docstore tool; clients cannot override
 //! destination trees/indexes. Tests inject registries, agent dirs and sockets.
+//! #4289: index creation refuses a root that overlaps an already-registered
+//! index root — see `overlapping_index`.
 use super::{agent_patch::resolve_agent_paths, agent_stores::is_valid_agent_name};
-use crate::{registry::ProjectRegistry, stores::StoresConfig};
+use crate::{
+    registry::{ProjectRegistry, RootOverlap, classify_root_overlap},
+    stores::StoresConfig,
+};
 use axum::{Json, extract::Query, http::StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -130,23 +135,72 @@ fn destination(dirs: &[PathBuf], knowledge: &Path, name: &str) -> Result<Destina
         index: binding.resolved_index().to_owned(),
     })
 }
-fn matching_index(list: &Value, root: &Path) -> Option<String> {
-    list.get("indexes")
+/// `(id, root)` for every index in an `indexes.list` reply, path-sorted.
+///
+/// Why: The reuse lookup and the #4289 containment guard read the same reply
+/// and must agree on what each index covers; two walks of the same JSON would
+/// drift. Sorting makes the guard's answer independent of daemon map order.
+/// What: Canonicalizes each `root_path`, keeping the registered spelling when
+/// the directory is gone so a stale entry still participates in the guard.
+/// Test: `index_refuses_a_root_inside_an_existing_index`.
+fn indexed_roots(list: &Value) -> Vec<(String, PathBuf)> {
+    let items = list
+        .get("indexes")
         .and_then(Value::as_array)
-        .or_else(|| list.as_array())?
+        .or_else(|| list.as_array());
+    let mut roots: Vec<(String, PathBuf)> = items
+        .map(Vec::as_slice)
+        .unwrap_or_default()
         .iter()
-        .find_map(|item| {
+        .filter_map(|item| {
             let registered = item.get("root_path")?.as_str()?;
-            let canonical = std::fs::canonicalize(registered).ok()?;
-            (canonical == root)
-                .then(|| {
-                    item.get("id")
-                        .or_else(|| item.get("index_id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .flatten()
+            let id = item
+                .get("id")
+                .or_else(|| item.get("index_id"))
+                .and_then(Value::as_str)?;
+            let path =
+                std::fs::canonicalize(registered).unwrap_or_else(|_| PathBuf::from(registered));
+            Some((id.to_owned(), path))
         })
+        .collect();
+    roots.sort_by(|a, b| a.1.cmp(&b.1));
+    roots
+}
+fn matching_index(list: &Value, root: &Path) -> Option<String> {
+    indexed_roots(list)
+        .into_iter()
+        // #2519: one tree spelled two ways (symlink alias, macOS case variant)
+        // is one index, so reuse it instead of registering a duplicate.
+        .find(|(_, path)| trusty_common::index_id::identifies_same_path(path, root))
+        .map(|(id, _)| id)
+}
+/// The registered index whose root contains, or is contained by, `root` (#4289).
+///
+/// Why: `create_index` refuses only an EXACT root collision, so the create
+/// path accepted a subdirectory of an indexed tree, or an ancestor that
+/// swallows one. #402 / P0 #2178 recorded the consequence: a reindex hijacked
+/// a live index and pruned its corpus. From a tool card this is one click.
+/// What: Classifies `root` against each registered root with the shared
+/// containment primitive. `matching_index` has already consumed the same-tree
+/// case, so a hit here is always a genuine overlap.
+/// Test: `index_refuses_a_root_inside_an_existing_index`,
+/// `index_refuses_a_root_that_encloses_an_existing_index`.
+fn overlapping_index(list: &Value, root: &Path) -> Option<(String, PathBuf, RootOverlap)> {
+    indexed_roots(list)
+        .into_iter()
+        .find_map(|(id, path)| classify_root_overlap(root, &path).map(|kind| (id, path, kind)))
+}
+/// Operator-facing refusal naming the index that already covers the tree.
+fn index_overlap_refusal(id: &str, path: &Path, overlap: RootOverlap) -> String {
+    let relation = match overlap {
+        RootOverlap::SameTree => "is already covered by",
+        RootOverlap::InsideKnownRoot => "is inside the tree covered by",
+        RootOverlap::EnclosesKnownRoot => "encloses the tree covered by",
+    };
+    format!(
+        "This folder {relation} search index \"{id}\" ({}); overlapping index roots reindex each other's corpus",
+        path.display()
+    )
 }
 async fn search(socket: &Path, method: &str, params: Value) -> Result<Value, ApiError> {
     search_rpc::call_at(socket, method, params, Duration::from_secs(15))
@@ -219,6 +273,14 @@ async fn start_index(socket: &Path, root: &Path) -> Result<Value, ApiError> {
     let id = match matching_index(&list, root) {
         Some(id) => id,
         None => {
+            // #4289: nothing covers this tree exactly — refuse before creating
+            // when an existing index root contains it or sits inside it.
+            if let Some((existing, path, overlap)) = overlapping_index(&list, root) {
+                return Err(failure(
+                    StatusCode::CONFLICT,
+                    index_overlap_refusal(&existing, &path, overlap),
+                ));
+            }
             let id = trusty_common::derive_checkout_index_id(root).ok_or_else(|| {
                 failure(
                     StatusCode::BAD_REQUEST,
