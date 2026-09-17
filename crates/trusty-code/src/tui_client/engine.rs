@@ -44,7 +44,7 @@ use crate::permissions::{PERMISSION_RESPOND_METHOD, PermissionDecision};
 
 use super::engine_state::EngineState;
 use super::error::EngineError;
-use super::splash::{SplashFacts, splash_lines};
+use super::splash::{SplashFacts, connect_line, splash_lines};
 use super::uds_rpc::UdsRpcClient;
 use super::workstream_subscription::run_workstream_subscription;
 
@@ -88,6 +88,26 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
     None
 }
 
+/// The words for whether this session runs the solo agent or the delegating
+/// PM (#8184), shared by [`session_shape_summary`] and the connect line so
+/// the two can never disagree.
+///
+/// A missing or `false` `no_delegate` reads as the delegating PM, matching
+/// `Session::no_delegate`'s own `#[serde(default)]`.
+/// Test: `engine_tests::session_shape_summary_names_the_solo_agent_and_root`,
+/// `engine_tests::session_shape_summary_names_the_delegating_pm`.
+fn agent_label(session: &Value) -> &'static str {
+    if session
+        .get("no_delegate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "solo agent (no delegation)"
+    } else {
+        "delegating PM"
+    }
+}
+
 /// One line naming the agent shape and the working root of the session
 /// `session.create` just returned (#8184).
 ///
@@ -104,15 +124,7 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
 /// `engine_tests::session_shape_summary_names_the_projectless_scratch_root`,
 /// `engine_tests::session_shape_summary_names_the_delegating_pm`.
 fn session_shape_summary(session: &Value) -> String {
-    let agent = if session
-        .get("no_delegate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        "solo agent (no delegation)"
-    } else {
-        "delegating PM"
-    };
+    let agent = agent_label(session);
     match session
         .get("binding")
         .and_then(|b| b.get("root"))
@@ -295,17 +307,22 @@ impl TuiEngine for CodeEngine {
             daemon_version: daemon.as_ref().and_then(|d| d["version"].as_str()),
             daemon_build: daemon.as_ref().and_then(|d| d["build"].as_str()),
             socket: self.state.rpc.socket(),
-            session_id: &session_id,
             project: project.as_deref(),
             workstream: workstream.as_deref(),
             shape: &shape,
         })));
 
-        // #8184: name the agent shape and working root — see
-        // `session_shape_summary`.
-        let _ = tx.send(ReplEvent::StatusMessage(format!(
-            "connected to tcode daemon at {} (session {session_id}; {shape})",
-            self.state.rpc.socket().display(),
+        // #8164: one scrollback line naming the home directory the session
+        // actually got (the DAEMON's binding, not this client's request), the
+        // workstream, and the agent shape — and no session id (owner rule).
+        let _ = tx.send(ReplEvent::StatusMessage(connect_line(
+            self.state.rpc.socket(),
+            result
+                .get("binding")
+                .and_then(|b| b.get("root"))
+                .and_then(Value::as_str),
+            workstream.as_deref(),
+            agent_label(&result),
         )));
         Ok(())
     }

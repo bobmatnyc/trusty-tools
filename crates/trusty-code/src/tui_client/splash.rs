@@ -26,7 +26,7 @@ const ROBOT: &str = "🤖🤖🤖";
 
 /// Everything the splash names, already resolved by `engine::setup`.
 ///
-/// Why: a struct rather than nine positional parameters because six of them
+/// Why: a struct rather than eight positional parameters because six of them
 /// are strings and a transposed pair would compile silently. Borrowed, not
 /// owned, so `setup` hands over what it already has.
 /// What: `client_*` come from [`crate::build_info`] (the same constants
@@ -36,13 +36,16 @@ const ROBOT: &str = "🤖🤖🤖";
 /// display root, `None` for a projectless session. `shape` is
 /// `engine::session_shape_summary`'s sentence (#8184), passed in rather
 /// than recomputed here so there is one definition of it.
+///
+/// There is deliberately NO session id here (owner rule, #8164): the id is
+/// internal, kept for recovery in the daemon log and the session record, and
+/// never shown on launch.
 pub(super) struct SplashFacts<'a> {
     pub(super) client_version: &'a str,
     pub(super) client_build: &'a str,
     pub(super) daemon_version: Option<&'a str>,
     pub(super) daemon_build: Option<&'a str>,
     pub(super) socket: &'a Path,
-    pub(super) session_id: &'a str,
     pub(super) project: Option<&'a str>,
     pub(super) workstream: Option<&'a str>,
     pub(super) shape: &'a str,
@@ -52,7 +55,7 @@ pub(super) struct SplashFacts<'a> {
 ///
 /// Why: the header line is first because the banner widget styles line 0 as
 /// the identity row it replaces — see `ReplEvent::SplashUpdated`.
-/// What: header, daemon, session, project, optional workstream, agent shape,
+/// What: header, daemon, project, optional workstream, agent shape,
 /// and — only when both builds are known AND differ — one plain warning
 /// naming both. The `agent` line repeats the root on purpose: `project` is
 /// what THIS client asked to bind, while the shape sentence reports where
@@ -72,7 +75,6 @@ pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
             describe_daemon_build(facts.daemon_version, facts.daemon_build),
             facts.socket.display()
         ),
-        format!("session {}", facts.session_id),
         match facts.project {
             Some(root) => format!("project {root}"),
             None => "project projectless".to_string(),
@@ -86,7 +88,11 @@ pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
         // #8164: detection only — restarting the daemon is #8203's job. Kept
         // short: the banner's right column is ~57 columns on an 80-column
         // terminal, and this is the line that must stay readable there.
-        (_, Some(build)) if build != facts.client_build => lines.push(format!(
+        // Both halves must be known before a comparison means anything: a
+        // reply carrying a build but no version is an unreachable-looking
+        // daemon, and warning about its build would contradict the line
+        // above saying it did not answer.
+        (Some(_), Some(build)) if build != facts.client_build => lines.push(format!(
             "warning: daemon build {build} ≠ client {} — restart the daemon",
             facts.client_build
         )),
@@ -100,6 +106,50 @@ pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
         _ => {}
     }
     lines
+}
+
+/// Columns a path may occupy inside the one-line connect message.
+///
+/// Why: the message is one scrollback line, and a worktree path can be most
+/// of a terminal row on its own — long enough to push the workstream and the
+/// agent shape out of sight on a narrow window.
+const CONNECT_PATH_WIDTH: usize = 60;
+
+/// The single scrollback line published when a session connects (#8164).
+///
+/// Why (owner rule, #8164): the launch line has to answer "where am I
+/// working, on what, as what" without the operator scrolling or opening the
+/// banner. It carries NO session id — that is internal, kept in the daemon
+/// log and the session record for recovery, and never displayed.
+/// What: one line naming the socket, the home directory (`home <root>`, or
+/// `home projectless`), the active workstream when one is bound, and the
+/// agent shape. The home path is middle-elided by
+/// [`trusty_code_tui::text::elide_middle`] so its deepest components survive
+/// on a narrow terminal. Pure, so it is testable without a daemon.
+/// Test: `tests::connect_line_names_home_and_workstream`,
+/// `tests::connect_line_omits_an_unbound_workstream`,
+/// `tests::connect_line_says_projectless_when_unbound`,
+/// `tests::connect_line_elides_a_long_home_path`.
+pub(super) fn connect_line(
+    socket: &Path,
+    home: Option<&str>,
+    workstream: Option<&str>,
+    agent: &str,
+) -> String {
+    let home = match home {
+        Some(root) => format!(
+            "home {}",
+            trusty_code_tui::text::elide_middle(root, CONNECT_PATH_WIDTH)
+        ),
+        None => "home projectless".to_string(),
+    };
+    let workstream = workstream
+        .map(|ws| format!(", workstream {ws}"))
+        .unwrap_or_default();
+    format!(
+        "connected to tcode daemon at {} — {home}{workstream}, {agent}",
+        socket.display()
+    )
 }
 
 /// How the daemon's identity reads on the splash's `daemon` line.
@@ -134,7 +184,6 @@ mod tests {
             daemon_version: Some("0.7.0"),
             daemon_build,
             socket: Path::new("/tmp/tcode.sock"),
-            session_id: "8ff7f92d",
             project,
             workstream: Some("bobmatnyc/bakeoff-l1 (548f2143)"),
             shape: "solo agent (no delegation), file tools rooted at /repo",
@@ -145,8 +194,9 @@ mod tests {
         lines.join("\n")
     }
 
-    /// A bound session names the repository, the session, the daemon and the
-    /// agent shape — the whole #8164 acceptance list, in one block.
+    /// A bound session names the repository, the daemon and the agent shape
+    /// — the whole #8164 acceptance list, in one block, and NO session id
+    /// (owner rule: the id is internal).
     #[test]
     fn splash_names_a_bound_project() {
         let lines = splash_lines(&facts(Some("/repo"), Some("ea6a1a9e")));
@@ -160,7 +210,10 @@ mod tests {
             text.contains("daemon v0.7.0 (ea6a1a9e) at /tmp/tcode.sock"),
             "{text}"
         );
-        assert!(text.contains("session 8ff7f92d"), "{text}");
+        assert!(
+            !text.contains("session"),
+            "the session id is internal and must never be displayed: {text}"
+        );
         assert!(text.contains("project /repo"), "{text}");
         assert!(text.contains("workstream bobmatnyc/bakeoff-l1"), "{text}");
         assert!(text.contains("agent solo agent (no delegation)"), "{text}");
@@ -238,6 +291,69 @@ mod tests {
         f.workstream = None;
         let text = rendered(&splash_lines(&f));
         assert!(!text.contains("workstream"), "{text}");
+    }
+
+    /// The connect line answers "where am I working, on what, as what" in
+    /// one line — and never names the session (owner rule, #8164).
+    #[test]
+    fn connect_line_names_home_and_workstream() {
+        let line = connect_line(
+            Path::new("/tmp/tcode.sock"),
+            Some("/repo/bakeoff-l1"),
+            Some("Feature X"),
+            "solo agent (no delegation)",
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("/tmp/tcode.sock"), "{line}");
+        assert!(line.contains("home /repo/bakeoff-l1"), "{line}");
+        assert!(line.contains("workstream Feature X"), "{line}");
+        assert!(line.contains("solo agent (no delegation)"), "{line}");
+        assert!(
+            !line.contains("session"),
+            "the session id is internal: {line}"
+        );
+    }
+
+    /// With no active workstream the clause is absent, not empty — a
+    /// dangling `workstream ,` would read as a bug.
+    #[test]
+    fn connect_line_omits_an_unbound_workstream() {
+        let line = connect_line(
+            Path::new("/tmp/tcode.sock"),
+            Some("/repo/bakeoff-l1"),
+            None,
+            "delegating PM",
+        );
+        assert!(!line.contains("workstream"), "{line}");
+        assert!(
+            line.contains("home /repo/bakeoff-l1, delegating PM"),
+            "{line}"
+        );
+    }
+
+    /// An unbound session says so in the same slot a path would occupy.
+    #[test]
+    fn connect_line_says_projectless_when_unbound() {
+        let line = connect_line(
+            Path::new("/tmp/tcode.sock"),
+            None,
+            None,
+            "solo agent (no delegation)",
+        );
+        assert!(line.contains("home projectless"), "{line}");
+    }
+
+    /// A worktree path is elided rather than allowed to push the workstream
+    /// and the agent shape off a narrow row; its deepest components survive.
+    #[test]
+    fn connect_line_elides_a_long_home_path() {
+        let long = "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-af14d84dd34577cee";
+        let line = connect_line(Path::new("/tmp/tcode.sock"), Some(long), None, "solo agent");
+        assert!(!line.contains(long), "the raw path must not appear: {line}");
+        assert!(
+            line.contains("worktrees/agent-af14d84dd34577cee"),
+            "the deepest components must survive: {line}"
+        );
     }
 
     /// Each daemon field degrades on its own, so "answered but old" never

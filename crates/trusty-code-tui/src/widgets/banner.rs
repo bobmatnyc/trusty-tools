@@ -26,6 +26,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::ReplApp;
+use crate::text::elide_middle;
 
 /// Maximum number of [`ReplApp::recent_activity`] entries shown.
 const MAX_RECENT_ACTIVITY: usize = 3;
@@ -38,6 +39,14 @@ const MAX_COMMANDS: usize = 4;
 /// part of the line above it rather than as a new fact.
 const SPLASH_CONTINUATION_INDENT: &str = "   ";
 
+/// Floor on the wrap width a splash row is given.
+///
+/// Why: the right column is derived from the terminal width, and a narrow
+/// enough terminal drives it to zero — at which point every splash row would
+/// render as an empty string and the launch facts would vanish rather than
+/// merely overflow. Overflowing a tiny frame is the better failure.
+const MIN_SPLASH_WIDTH: usize = 12;
+
 /// Break one splash line into rows that each fit `width` columns.
 ///
 /// Why (#8164): the right column is `width - width/4 - 3` columns wide, so an
@@ -46,8 +55,9 @@ const SPLASH_CONTINUATION_INDENT: &str = "   ";
 /// which is the half of those two lines carrying the daemon's sha, the remedy,
 /// and a path's final components. Wrapping keeps every character.
 /// What: greedy word wrap on whitespace; a single token too long to fit on a
-/// row of its own is middle-elided by [`elide_middle`] rather than clipped, so
-/// both ends of a path survive. Always returns at least one row.
+/// row of its own is middle-elided by [`crate::text::elide_middle`] rather
+/// than clipped, so a path keeps its deepest components whole. Always returns
+/// at least one row.
 /// Test: `tests::fit_splash_line_wraps_rather_than_clipping`,
 /// `tests::fit_splash_line_elides_the_middle_of_an_unbreakable_token`,
 /// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
@@ -72,32 +82,6 @@ fn fit_splash_line(line: &str, width: usize) -> Vec<String> {
         rows.push(current);
     }
     rows
-}
-
-/// Shorten `text` to `width` columns by replacing its middle with `…`.
-///
-/// Why: clipping a path's tail hides the repository name, which is the one
-/// component a reader is checking. Keeping both ends answers "which repo,
-/// under which root" even when the middle is gone.
-/// What: returns `text` unchanged when it already fits; otherwise
-/// `head…tail`, splitting the remaining budget with the extra character going
-/// to the head. Counts chars, not bytes.
-/// Test: `tests::fit_splash_line_elides_the_middle_of_an_unbreakable_token`.
-fn elide_middle(text: &str, width: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= width {
-        return text.to_string();
-    }
-    if width <= 1 {
-        return "…".to_string();
-    }
-    let keep = width - 1;
-    let head = keep.div_ceil(2);
-    let tail = keep - head;
-    let mut out: String = chars[..head].iter().collect();
-    out.push('…');
-    out.extend(&chars[chars.len() - tail..]);
-    out
 }
 
 /// Produce the welcome banner as a `Vec<Line<'static>>` so it can be
@@ -154,7 +138,9 @@ pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
         // ~57 columns on an 80-column terminal, and the tail of a build
         // mismatch warning (the daemon's sha and what to do about it) is the
         // part that matters most.
-        let wrap_w = right_w.saturating_sub(SPLASH_CONTINUATION_INDENT.len());
+        let wrap_w = right_w
+            .saturating_sub(SPLASH_CONTINUATION_INDENT.len())
+            .max(MIN_SPLASH_WIDTH);
         for (idx, line) in app.splash.iter().enumerate() {
             let style = if idx == 0 { header } else { Style::default() };
             for (row, text) in fit_splash_line(line, wrap_w).into_iter().enumerate() {
@@ -335,7 +321,7 @@ mod tests {
         let mut app = ReplApp::new("tcode", "masa");
         app.splash = vec![
             "🤖🤖🤖 tcode v0.7.0 (ea6a1a9e 2026-09-16)".to_string(),
-            "project /Users/masa/trusty-mpm-projects/bobmatnyc/bakeoff-l1".to_string(),
+            "project /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-af14d84dd34577cee".to_string(),
             "warning: daemon build deadbeef ≠ client ea6a1a9e — restart the daemon".to_string(),
         ];
         let lines = banner_lines(&app, 80);
@@ -353,9 +339,12 @@ mod tests {
             text.contains("restart the daemon"),
             "the remedy must survive: {text}"
         );
+        // The deepest components arrive WHOLE — the worktree's own name and
+        // the directory holding it. Components nearer the root are dropped
+        // first, which is the guarantee `text::elide_middle` documents.
         assert!(
-            text.contains("/Users/masa/") && text.contains("bakeoff-l1"),
-            "both ends of the project path must survive: {text}"
+            text.contains("worktrees/agent-af14d84dd34577cee"),
+            "the worktree's own name must survive whole: {text}"
         );
         // Wrapping must not widen the frame: every row still fits 80 columns.
         for line in &lines {
@@ -378,15 +367,14 @@ mod tests {
         }
     }
 
-    /// A path has no spaces to wrap on, so it is elided in the MIDDLE — the
-    /// repository name at the end is the component a reader is checking.
+    /// A path has no spaces to wrap on, so it is elided on `/` boundaries —
+    /// the repository name at the end is the component a reader is checking.
     #[test]
     fn fit_splash_line_elides_the_middle_of_an_unbreakable_token() {
         let rows = fit_splash_line("/Users/masa/trusty-mpm-projects/bobmatnyc/bakeoff-l1", 24);
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].chars().count(), 24, "{rows:?}");
-        assert!(rows[0].starts_with("/Users/masa"), "{rows:?}");
-        assert!(rows[0].ends_with("bakeoff-l1"), "{rows:?}");
+        assert!(rows[0].chars().count() <= 24, "{rows:?}");
+        assert!(rows[0].ends_with("bobmatnyc/bakeoff-l1"), "{rows:?}");
         assert!(rows[0].contains('…'), "{rows:?}");
     }
 

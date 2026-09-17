@@ -296,6 +296,22 @@ async fn setup_creates_session_and_reports_active_workstream() {
         engine.picker("workstream").is_some(),
         "setup must populate the workstream picker cache"
     );
+    // #8164: the connect line names the bound workstream, not just the
+    // statusline — this is the wiring the pure `connect_line` tests cannot see.
+    // Read from the already-drained `events`; `rx` is empty by now.
+    let line = events
+        .iter()
+        .find_map(|event| match event {
+            ReplEvent::StatusMessage(text) if text.contains("connected to tcode daemon") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("setup must report the daemon it connected to");
+    assert!(
+        line.contains(&format!("workstream {WS_NAME}")),
+        "the connect line must name the active workstream: {line}"
+    );
 }
 
 // ── Stub-socket fixtures, for failures a real daemon never produces ──
@@ -780,9 +796,22 @@ async fn tui_default_session_runs_the_solo_agent() {
         line.contains("solo agent (no delegation)"),
         "the connect line must state the agent shape: {line}"
     );
+    // #8164: the line names the HOME directory. A tempdir root is long
+    // enough to be middle-elided, so the leaf is what must survive.
+    let leaf = daemon
+        .project
+        .file_name()
+        .expect("a tempdir has a final component")
+        .to_string_lossy()
+        .to_string();
+    assert!(line.contains("home "), "{line}");
     assert!(
-        line.contains(&daemon.project.display().to_string()),
+        line.contains(&leaf),
         "the connect line must name the working root: {line}"
+    );
+    assert!(
+        !line.contains("session "),
+        "the session id is internal and must never be displayed: {line}"
     );
 }
 
@@ -841,24 +870,26 @@ async fn tui_projectless_default_session_runs_solo_in_a_scratch_root() {
     );
     let line = connect_line(&mut rx);
     assert!(
-        line.contains("projectless — file tools rooted at a scratch workspace"),
-        "the connect line must say where a projectless session edits: {line}"
+        line.contains("home projectless"),
+        "the connect line must say the session is unbound: {line}"
     );
 }
 
 // ── #8164: the startup splash ───────────────────────────────────────────────
 
 /// #8164: `setup` publishes a splash naming the client build, the DAEMON's
-/// build, the session, the project and the agent shape.
+/// build, the project and the agent shape — and NOT the session id.
 ///
 /// Why: the splash's text assembly is unit-tested, but nothing there proves
 /// the facts are actually fetched — in particular that the daemon's `build`
 /// field crosses the socket. This daemon runs in THIS process, so its build
 /// is by construction the client's, which is also what makes the
-/// "no mismatch warning" assertion meaningful rather than incidental.
+/// "no mismatch warning" assertion meaningful rather than incidental. The
+/// session id is asserted ABSENT here, against the real id the daemon minted,
+/// because an owner rule keeps it internal (logged for recovery, never shown).
 /// What: `setup` against a project-bound daemon; asserts the splash's header,
-/// the daemon build line, the session id, the bound root, and the absence of
-/// the mismatch warning.
+/// the daemon build line, the bound root, the absent session id, and the
+/// absence of the mismatch warning.
 /// Test: this test.
 #[tokio::test]
 async fn setup_publishes_a_splash_naming_the_project() {
@@ -880,8 +911,8 @@ async fn setup_publishes_a_splash_naming_the_project() {
         "the daemon must report its build sha over `health`: {splash}"
     );
     assert!(
-        splash.contains(&format!("session {session_id}")),
-        "the splash must name the session: {splash}"
+        !splash.contains(session_id),
+        "the session id is internal and must never be displayed: {splash}"
     );
     assert!(
         splash.contains(&format!("project {}", daemon.project.display())),

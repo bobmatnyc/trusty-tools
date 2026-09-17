@@ -146,14 +146,16 @@ pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) ->
 ///    trusty-search derives an index id from, so the bound root and the
 ///    index `search_code` queries cannot disagree. No enclosing repository
 ///    means no implicit bind: projectless.
-/// 4. `home` is refused even when it IS a repository, and stays projectless:
-///    binding it would ask trusty-search to index an entire home directory.
-///    An explicit `--project ~` still works — rule 1 outranks this.
+/// 4. A root that CONTAINS `home` — `home` itself, or any ancestor of it —
+///    is refused and stays projectless: binding one would ask trusty-search
+///    to index an entire home directory or more. An explicit `--project ~`
+///    still works — rule 1 outranks this.
 ///
 /// Test: `tui_tests::resolve_project_defaults_to_the_enclosing_git_repo`,
 /// `tui_tests::resolve_project_without_a_repo_stays_projectless`,
 /// `tui_tests::resolve_project_projectless_opts_out_of_homing`,
 /// `tui_tests::resolve_project_refuses_to_home_on_the_home_directory`,
+/// `tui_tests::resolve_project_refuses_a_repo_above_the_home_directory`,
 /// `tui_tests::resolve_project_canonicalizes_a_real_directory`,
 /// `tui_tests::resolve_project_rejects_a_missing_path`.
 fn resolve_project(
@@ -178,7 +180,10 @@ fn resolve_project(
     let Some(root) = trusty_common::find_git_root(&cwd) else {
         return Ok(None);
     };
-    if root.parent().is_none() || home.is_some_and(|h| h == root) {
+    // #8205: `starts_with` is component-wise and subsumes equality, so a
+    // repository that ENCLOSES the home directory (a stray `/Users/.git`) is
+    // refused too — that root would index every user's files, not just one's.
+    if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
         return Ok(None);
     }
     Ok(Some(root))
@@ -280,6 +285,28 @@ mod tui_tests {
                 .expect("resolve")
                 .is_none(),
             "a subdirectory of a $HOME repo resolves to $HOME, and is refused too"
+        );
+    }
+
+    /// A repository that is an ANCESTOR of `$HOME` — a stray `/Users/.git`
+    /// — must be refused too. Exact-match alone would bind it and hand
+    /// trusty-search every user's files on the machine.
+    #[test]
+    fn resolve_project_refuses_a_repo_above_the_home_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let above = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(above.join(".git")).expect("create .git");
+        let home = above.join("masa");
+        let cwd = home.join("projects");
+        std::fs::create_dir_all(&cwd).expect("create home and cwd");
+
+        // `cwd` has no `.git` of its own, so the walk resolves to `above` —
+        // which contains `$HOME`.
+        assert!(
+            resolve_project(None, false, &cwd, Some(&home))
+                .expect("resolve")
+                .is_none(),
+            "a repository enclosing $HOME must not become the default project"
         );
     }
 
