@@ -259,7 +259,7 @@ impl CodeIndexer {
         let skip_kg = lexical_only || semantic_lane;
 
         // 1) Embed (cache-first).
-        let embedding = if lexical_only {
+        let embedding = if lexical_only || self.skip_vector {
             None
         } else {
             self.embed_query(&query.text).await?
@@ -353,7 +353,7 @@ impl CodeIndexer {
 
         // 4) KG expand (conditional). Issue #147: embed `refine_query` for
         // KG-neighbourhood reranking.
-        let refine_embedding: Option<Vec<f32>> = if skip_kg {
+        let refine_embedding: Option<Vec<f32>> = if skip_kg || self.skip_vector {
             None
         } else {
             match &query.refine_query {

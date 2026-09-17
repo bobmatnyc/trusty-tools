@@ -336,6 +336,11 @@ impl CodeIndexer {
         let (mut chunks, entities) = chunk_ast(file_path, content);
 
         populate_virtual_terms(&mut chunks, &entities);
+        crate::core::experiment::enrich_chunk_context(
+            &mut chunks,
+            content,
+            crate::core::experiment::experiment_config(),
+        );
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
@@ -577,7 +582,7 @@ impl CodeIndexer {
         }
         let parse_ms = parse_start.elapsed().as_millis() as u64;
 
-        let (embeddings, embed_ms, vector_count) = if embed {
+        let (embeddings, embed_ms, vector_count) = if embed && !self.skip_vector {
             let embed_start = std::time::Instant::now();
             let embeddings = self
                 .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None)
@@ -623,6 +628,11 @@ impl CodeIndexer {
                             chunk_ast(path, content)
                         };
                     populate_virtual_terms(&mut chunks, &entities);
+                    crate::core::experiment::enrich_chunk_context(
+                        &mut chunks,
+                        content,
+                        crate::core::experiment::experiment_config(),
+                    );
                     (path.clone(), chunks, entities)
                 })
                 .collect()
@@ -641,6 +651,9 @@ impl CodeIndexer {
     /// trigger the lazy spawn and ONNX session init. The result is discarded.
     /// Test: `warm_embedder_noop_without_embedder`.
     pub async fn warm_embedder(&self) {
+        if self.skip_vector {
+            return;
+        }
         let Some(embedder) = &self.embedder else {
             return;
         };

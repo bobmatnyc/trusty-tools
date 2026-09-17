@@ -25,12 +25,12 @@ use super::classify::{
 use super::inherits::collect_inherits;
 use super::{ChunkType, RawChunk};
 
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod window_tests;
+
 /// Maximum lines for a single AST chunk before we split into sub-chunks.
 const MAX_CHUNK_LINES: usize = 200;
-/// Sub-chunk window (used when splitting oversized AST chunks).
-const SUB_CHUNK_WINDOW: usize = 100;
-/// Sub-chunk stride.
-const SUB_CHUNK_STRIDE: usize = 50;
 
 /// Compute byte ranges → 1-based line numbers from the source bytes.
 pub(super) fn line_for_byte(line_offsets: &[usize], byte: usize) -> usize {
@@ -438,6 +438,17 @@ pub(super) fn walk_for_chunks(
 /// If a chunk exceeds `MAX_CHUNK_LINES`, replace it with sliding sub-chunks
 /// that keep `parent_chunk_id` pointing back at the AST chunk.
 pub(super) fn split_oversized(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
+    split_oversized_with_config(chunks, crate::core::experiment::experiment_config())
+}
+
+pub(super) fn split_oversized_with_config(
+    chunks: Vec<RawChunk>,
+    config: &crate::core::experiment::ExperimentConfig,
+) -> Vec<RawChunk> {
+    assert!(
+        matches!(config.subchunk_window, 64 | 100),
+        "unsupported experiment window"
+    );
     let mut out: Vec<RawChunk> = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         let line_count = chunk.end_line.saturating_sub(chunk.start_line) + 1;
@@ -453,7 +464,7 @@ pub(super) fn split_oversized(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
         let mut start = 0usize;
         let mut sub_idx = 0usize;
         while start < lines.len() {
-            let end = (start + SUB_CHUNK_WINDOW).min(lines.len());
+            let end = (start + config.subchunk_window).min(lines.len());
             let text = lines[start..end].join("\n");
             // #6581: the sub tail is part of the id grammar, so it is built
             // where the rest of the grammar lives.
@@ -480,7 +491,7 @@ pub(super) fn split_oversized(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
             if end == lines.len() {
                 break;
             }
-            start += SUB_CHUNK_STRIDE;
+            start += config.subchunk_window / 2;
             sub_idx += 1;
         }
 

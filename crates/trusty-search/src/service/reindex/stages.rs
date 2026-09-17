@@ -398,6 +398,10 @@ pub(super) async fn refresh_context_embedding(handle: &Arc<IndexHandle>) {
 }
 
 #[cfg(test)]
+#[path = "stages_experiment_tests.rs"]
+mod experiment_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::chunker::{ChunkType, RawChunk};

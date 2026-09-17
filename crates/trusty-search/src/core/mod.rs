@@ -11,6 +11,7 @@ pub mod embed;
 // #6524: the embedding pause gate and the per-index file-change feed.
 pub mod embed_pause;
 pub mod entity;
+pub mod experiment;
 pub mod extract;
 pub mod file_events;
 pub mod git;

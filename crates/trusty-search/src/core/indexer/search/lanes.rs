@@ -211,6 +211,9 @@ impl CodeIndexer {
     /// pool routing covered by `embed_pool_routing` (see
     /// [`Self::embed_interactive`]).
     pub async fn embed_text(&self, text: &str) -> Result<Option<Vec<f32>>> {
+        if self.skip_vector {
+            return Ok(None);
+        }
         let Some(embedder) = self.embedder.clone() else {
             return Ok(None);
         };

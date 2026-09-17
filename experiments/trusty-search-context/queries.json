@@ -1,0 +1,734 @@
+[
+  {
+    "id": "exact_symbol-01",
+    "split": "held_out",
+    "type": "exact_symbol",
+    "query": "Where is hash_query defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "hash_query",
+        "start_line": 296,
+        "end_line": 296
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-02",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is resolve_chunk_file defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "resolve_chunk_file",
+        "start_line": 329,
+        "end_line": 329
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-03",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is compute_match_reason defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "compute_match_reason",
+        "start_line": 571,
+        "end_line": 571
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-04",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is populate_virtual_terms defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "populate_virtual_terms",
+        "start_line": 389,
+        "end_line": 389
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-05",
+    "split": "held_out",
+    "type": "exact_symbol",
+    "query": "Where is fixed_port_for defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/probe_http.rs",
+        "symbol": "fixed_port_for",
+        "start_line": 112,
+        "end_line": 112
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-06",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is classify_response defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/probe_http.rs",
+        "symbol": "classify_response",
+        "start_line": 671,
+        "end_line": 671
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-07",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is reconcile defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/probe_http.rs",
+        "symbol": "reconcile",
+        "start_line": 717,
+        "end_line": 717
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-08",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is resolve_probe_bases defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/probe_http.rs",
+        "symbol": "resolve_probe_bases",
+        "start_line": 906,
+        "end_line": 906
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-09",
+    "split": "held_out",
+    "type": "exact_symbol",
+    "query": "Where is repair_interval defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/src/bm25_repair.rs",
+        "symbol": "repair_interval",
+        "start_line": 72,
+        "end_line": 72
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-10",
+    "split": "held_out",
+    "type": "exact_symbol",
+    "query": "Where is dirty_palaces defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/src/bm25_repair.rs",
+        "symbol": "dirty_palaces",
+        "start_line": 109,
+        "end_line": 109
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-11",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is extract_published_src defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-publish-guard/src/lib.rs",
+        "symbol": "extract_published_src",
+        "start_line": 117,
+        "end_line": 117
+      }
+    ]
+  },
+  {
+    "id": "exact_symbol-12",
+    "split": "tuning",
+    "type": "exact_symbol",
+    "query": "Where is find_workspace_env_local defined?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/credentials/dotenv.rs",
+        "symbol": "find_workspace_env_local",
+        "start_line": 89,
+        "end_line": 89
+      }
+    ]
+  },
+  {
+    "id": "behavior-01",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "How does review calculate coverage only for newly added lines and handle lines absent from the coverage report?",
+    "expected": [
+      {
+        "path": "crates/trusty-review/src/coverage/lcov.rs",
+        "symbol": "new_code_coverage",
+        "start_line": 192,
+        "end_line": 192
+      }
+    ]
+  },
+  {
+    "id": "behavior-02",
+    "split": "held_out",
+    "type": "behavior",
+    "query": "Where do we collect all local source files as bytes to compare against a published crate?",
+    "expected": [
+      {
+        "path": "crates/trusty-publish-guard/src/lib.rs",
+        "symbol": "local_src",
+        "start_line": 152,
+        "end_line": 152
+      }
+    ]
+  },
+  {
+    "id": "behavior-03",
+    "split": "held_out",
+    "type": "behavior",
+    "query": "How are UUID scratch worktree names rejected when choosing a memory workstream tag?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/src/attribution.rs",
+        "symbol": "is_valid_workstream_name",
+        "start_line": 488,
+        "end_line": 488
+      }
+    ]
+  },
+  {
+    "id": "behavior-04",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "Where are known credentials removed from text with longer secrets replaced first?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/credentials/redact.rs",
+        "symbol": "scrub_secrets",
+        "start_line": 155,
+        "end_line": 155
+      }
+    ]
+  },
+  {
+    "id": "behavior-05",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "How is a secret shortened for display while preserving its length?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/credentials/redact.rs",
+        "symbol": "redact_secret",
+        "start_line": 92,
+        "end_line": 92
+      }
+    ]
+  },
+  {
+    "id": "behavior-06",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "Where does the shutdown budget subtract reserved cleanup time without underflow?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/shutdown.rs",
+        "symbol": "plannable_grace_from",
+        "start_line": 94,
+        "end_line": 94
+      }
+    ]
+  },
+  {
+    "id": "behavior-07",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "What prevents an unattended installation from proceeding without an explicit yes flag?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/install_gate.rs",
+        "symbol": "decide_install_gate",
+        "start_line": 77,
+        "end_line": 77
+      }
+    ]
+  },
+  {
+    "id": "behavior-08",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "How does the installer extract listening process IDs from lsof output?",
+    "expected": [
+      {
+        "path": "crates/trusty-installer/src/commands/port_guard.rs",
+        "symbol": "parse_lsof_listen_pids",
+        "start_line": 259,
+        "end_line": 259
+      }
+    ]
+  },
+  {
+    "id": "behavior-09",
+    "split": "held_out",
+    "type": "behavior",
+    "query": "Where are documentation and configuration files downweighted for definition searches?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "file_type_score_multiplier",
+        "start_line": 414,
+        "end_line": 414
+      }
+    ]
+  },
+  {
+    "id": "behavior-10",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "How are long search result snippets shortened for compact output?",
+    "expected": [
+      {
+        "path": "crates/trusty-search/src/core/indexer/helpers.rs",
+        "symbol": "build_compact_snippet",
+        "start_line": 312,
+        "end_line": 312
+      }
+    ]
+  },
+  {
+    "id": "behavior-11",
+    "split": "tuning",
+    "type": "behavior",
+    "query": "Where does Slack canvas conversion append numbered footnotes in the order they were referenced?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/footnotes.rs",
+        "symbol": "render_footnotes_section",
+        "start_line": 62,
+        "end_line": 62
+      }
+    ]
+  },
+  {
+    "id": "behavior-12",
+    "split": "held_out",
+    "type": "behavior",
+    "query": "What recognizes Slack user and channel mention image targets in canvas markdown?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/inline.rs",
+        "symbol": "is_slack_mention",
+        "start_line": 158,
+        "end_line": 158
+      }
+    ]
+  },
+  {
+    "id": "kg-01",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which function does plannable_grace call to obtain the configured termination window?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/shutdown.rs",
+        "symbol": "termination_grace",
+        "start_line": 118,
+        "end_line": 118
+      }
+    ],
+    "kg_seed": {
+      "symbol": "plannable_grace",
+      "path": "crates/trusty-common/src/shutdown.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-common/src/shutdown.rs:86; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-02",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which parser does termination_grace call to interpret its environment override?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/shutdown.rs",
+        "symbol": "termination_grace_from",
+        "start_line": 131,
+        "end_line": 131
+      }
+    ],
+    "kg_seed": {
+      "symbol": "termination_grace",
+      "path": "crates/trusty-common/src/shutdown.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-common/src/shutdown.rs:119; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-03",
+    "split": "tuning",
+    "type": "kg",
+    "query": "What builder does loopback_client call before applying timeout defaults?",
+    "expected": [
+      {
+        "path": "crates/trusty-common/src/http_client.rs",
+        "symbol": "loopback_client_builder",
+        "start_line": 71,
+        "end_line": 71
+      }
+    ],
+    "kg_seed": {
+      "symbol": "loopback_client",
+      "path": "crates/trusty-common/src/http_client.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-common/src/http_client.rs:84; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-04",
+    "split": "held_out",
+    "type": "kg",
+    "query": "Which parser is called after parse_lcov_file reads the coverage file?",
+    "expected": [
+      {
+        "path": "crates/trusty-review/src/coverage/lcov.rs",
+        "symbol": "parse_lcov",
+        "start_line": 102,
+        "end_line": 102
+      }
+    ],
+    "kg_seed": {
+      "symbol": "parse_lcov_file",
+      "path": "crates/trusty-review/src/coverage/lcov.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-review/src/coverage/lcov.rs:174; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-05",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which helper does to_canvas_markdown call to configure markdown parsing?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/mod.rs",
+        "symbol": "parse_options",
+        "start_line": 128,
+        "end_line": 128
+      }
+    ],
+    "kg_seed": {
+      "symbol": "to_canvas_markdown",
+      "path": "crates/trusty-channels/src/slack/canvas_markdown/mod.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-channels/src/slack/canvas_markdown/mod.rs:107; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-06",
+    "split": "held_out",
+    "type": "kg",
+    "query": "Which escaping helper is invoked by render_table for rendered cell text?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/table.rs",
+        "symbol": "escape_cell",
+        "start_line": 102,
+        "end_line": 102
+      }
+    ],
+    "kg_seed": {
+      "symbol": "render_table",
+      "path": "crates/trusty-channels/src/slack/canvas_markdown/table.rs",
+      "direction": "callees",
+      "note": "callees: direct source call at crates/trusty-channels/src/slack/canvas_markdown/table.rs:51; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-07",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which inline code formatter calls longest_backtick_run to choose a safe fence?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/inline.rs",
+        "symbol": "code_span",
+        "start_line": 141,
+        "end_line": 141
+      }
+    ],
+    "kg_seed": {
+      "symbol": "longest_backtick_run",
+      "path": "crates/trusty-channels/src/slack/canvas_markdown/mod.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-channels/src/slack/canvas_markdown/inline.rs:142; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-08",
+    "split": "held_out",
+    "type": "kg",
+    "query": "Which table renderer calls render_inlines for each cell?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/table.rs",
+        "symbol": "render_table",
+        "start_line": 42,
+        "end_line": 42
+      }
+    ],
+    "kg_seed": {
+      "symbol": "render_inlines",
+      "path": "crates/trusty-channels/src/slack/canvas_markdown/inline.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-channels/src/slack/canvas_markdown/table.rs:51; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-09",
+    "split": "held_out",
+    "type": "kg",
+    "query": "Which session attribution helper calls is_creator_tag before looking for UUID tags?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/src/attribution.rs",
+        "symbol": "session_tag_from_tags",
+        "start_line": 521,
+        "end_line": 521
+      }
+    ],
+    "kg_seed": {
+      "symbol": "is_creator_tag",
+      "path": "crates/trusty-memory/src/attribution.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-memory/src/attribution.rs:526; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-10",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which analyze webhook listener constructor calls socket_path?",
+    "expected": [
+      {
+        "path": "crates/trusty-analyze/src/webhook_listener.rs",
+        "symbol": "listener",
+        "start_line": 77,
+        "end_line": 77
+      }
+    ],
+    "kg_seed": {
+      "symbol": "socket_path",
+      "path": "crates/trusty-analyze/src/webhook_listener.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-analyze/src/webhook_listener.rs:78; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-11",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which analyze webhook serving function calls inbox_root before constructing the delivery processor?",
+    "expected": [
+      {
+        "path": "crates/trusty-analyze/src/webhook_listener.rs",
+        "symbol": "run",
+        "start_line": 96,
+        "end_line": 96
+      }
+    ],
+    "kg_seed": {
+      "symbol": "inbox_root",
+      "path": "crates/trusty-analyze/src/webhook_listener.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-analyze/src/webhook_listener.rs:98; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "kg-12",
+    "split": "tuning",
+    "type": "kg",
+    "query": "Which image renderer calls is_slack_mention before preserving a canvas image target?",
+    "expected": [
+      {
+        "path": "crates/trusty-channels/src/slack/canvas_markdown/inline.rs",
+        "symbol": "render_image",
+        "start_line": 108,
+        "end_line": 108
+      }
+    ],
+    "kg_seed": {
+      "symbol": "is_slack_mention",
+      "path": "crates/trusty-channels/src/slack/canvas_markdown/inline.rs",
+      "direction": "callers",
+      "note": "callers: direct source call at crates/trusty-channels/src/slack/canvas_markdown/inline.rs:109; expected is a verified relevant endpoint, not an exhaustive adjacency list."
+    }
+  },
+  {
+    "id": "documentation-01",
+    "split": "held_out",
+    "type": "documentation",
+    "query": "What does the repository exclude when counting source lines for the file size cap?",
+    "expected": [
+      {
+        "path": "docs/reference/sloc-cap.md",
+        "start_line": 78,
+        "end_line": 96
+      }
+    ]
+  },
+  {
+    "id": "documentation-02",
+    "split": "held_out",
+    "type": "documentation",
+    "query": "Can one changelog fragment contain both Changed and Removed categories?",
+    "expected": [
+      {
+        "path": "docs/reference/changelog-fragments.md",
+        "start_line": 41,
+        "end_line": 50
+      }
+    ]
+  },
+  {
+    "id": "documentation-03",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "How can I validate a changelog fragment before committing it?",
+    "expected": [
+      {
+        "path": "docs/reference/changelog-fragments.md",
+        "start_line": 52,
+        "end_line": 66
+      }
+    ]
+  },
+  {
+    "id": "documentation-04",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Why must cargo test use no-fail-fast in this workspace?",
+    "expected": [
+      {
+        "path": "docs/reference/test-ladder-baseline.md",
+        "start_line": 67,
+        "end_line": 94
+      }
+    ]
+  },
+  {
+    "id": "documentation-05",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Why can pull request CI fail while the same branch passes locally?",
+    "expected": [
+      {
+        "path": "docs/reference/ci-gates.md",
+        "start_line": 68,
+        "end_line": 80
+      }
+    ]
+  },
+  {
+    "id": "documentation-06",
+    "split": "held_out",
+    "type": "documentation",
+    "query": "Why should I install a rebuilt binary with cargo install instead of copying it on macOS?",
+    "expected": [
+      {
+        "path": "docs/reference/worktree-discipline.md",
+        "start_line": 132,
+        "end_line": 150
+      }
+    ]
+  },
+  {
+    "id": "documentation-07",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Which Rust minimum version and default edition does the workspace require?",
+    "expected": [
+      {
+        "path": "docs/adr/0029-msrv-1-94-and-edition-policy.md",
+        "start_line": 74,
+        "end_line": 91
+      }
+    ]
+  },
+  {
+    "id": "documentation-08",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Are prereleases allowed as a baseline for checking published API compatibility?",
+    "expected": [
+      {
+        "path": "docs/reference/semver-gate.md",
+        "start_line": 225,
+        "end_line": 237
+      }
+    ]
+  },
+  {
+    "id": "documentation-09",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Which search keys should I use to find an existing issue before filing a bug?",
+    "expected": [
+      {
+        "path": "docs/reference/issue-search-keys.md",
+        "start_line": 9,
+        "end_line": 23
+      }
+    ]
+  },
+  {
+    "id": "documentation-10",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "How does trusty-memory derive the required project palace name?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/README.md",
+        "start_line": 477,
+        "end_line": 491
+      }
+    ]
+  },
+  {
+    "id": "documentation-11",
+    "split": "tuning",
+    "type": "documentation",
+    "query": "Can the memory dream cycle evict completed task drawers?",
+    "expected": [
+      {
+        "path": "crates/trusty-memory/README.md",
+        "start_line": 322,
+        "end_line": 331
+      }
+    ]
+  },
+  {
+    "id": "documentation-12",
+    "split": "held_out",
+    "type": "documentation",
+    "query": "Where did the former trusty-symgraph and trusty-rpc packages move?",
+    "expected": [
+      {
+        "path": "docs/reference/crate-map.md",
+        "start_line": 62,
+        "end_line": 71
+      }
+    ]
+  }
+]
