@@ -146,6 +146,20 @@ Require a check block to be reviewed against the transient states a resource
 passes through during creation and replacement, not only the field values
 present once everything has settled (#8144).
 
+## Check Block Red-Path Coverage
+
+A check block on a scoped data source has two independent failure paths: an
+assertion failure (the read succeeds, the value is wrong) and a read failure
+(the host is unreachable). Terraform converts a read failure to a warning
+automatically, but that behavior is only proven by testing it. An
+`https_listener` check validated on a 404 response only left the
+unreachable-host path — the one carrying load during certificate
+provisioning — untested until a late review caught it.
+
+Require evidence for both paths, the happy-path assertion failure and the
+error-path read failure, before accepting a check block's coverage claim
+(#8143).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
