@@ -160,6 +160,10 @@ pub struct ToolCard {
     pub args: serde_json::Value,
     /// The tool's output; `None` while the call is still running.
     pub result: Option<String>,
+    /// The backend's own verdict that this call failed (#4596), copied from
+    /// [`crate::event::ReplEvent::ToolInvocation`]'s `failed`. `false` while
+    /// the call is still running.
+    pub failed: bool,
     /// Whether the card draws as a one-line summary rather than its full
     /// result body (#4596).
     ///
@@ -176,29 +180,20 @@ pub struct ToolCard {
 impl ToolCard {
     /// Whether this call failed (#4596).
     ///
-    /// Why: the seam carries no success flag —
-    /// [`crate::event::ReplEvent::ToolInvocation`] has only a `result`
-    /// string — and adding one would be a breaking change to every producer.
-    /// The producers encode failure in the result's own leading word
-    /// (`crates/trusty-code/src/tui_client/session_events.rs` sends
-    /// `FAILED: …` for an unsuccessful `ToolFinished` and `ERROR: …` for a
-    /// `ToolError`), so that prefix IS the seam's failure convention and
-    /// this reads it.
-    /// What: `false` while the call is still running. Otherwise `true` when
-    /// the result's first non-blank text starts with either marker.
+    /// Why: an error must be impossible to hide. An earlier revision read
+    /// the `FAILED:` / `ERROR:` prefix trusty-code writes into the result
+    /// text, which made a producer reword silently render a failed call as
+    /// a collapsed green `· ok` card. The verdict now travels as data —
+    /// [`crate::event::ReplEvent::ToolInvocation`]'s `failed` — and the
+    /// prefix is display text only.
+    /// What: [`Self::failed`], which a producer sets only on a completion.
     /// Test: `widgets::tool_card::tests::errored_card_renders_expanded_by_default`,
-    /// `reduce::tests::tool_card_is_error_reads_the_producer_failure_prefix`.
+    /// `widgets::tool_card::tests::failure_flag_alone_drives_the_error_render`,
+    /// `reduce::tests::tool_card_is_error_reads_the_event_failure_flag`.
     pub fn is_error(&self) -> bool {
-        self.result
-            .as_deref()
-            .is_some_and(|r| ERROR_MARKERS.iter().any(|m| r.trim_start().starts_with(m)))
+        self.failed
     }
 }
-
-/// The leading words a producer uses to mark a failed tool result (#4596) —
-/// see [`ToolCard::is_error`] for why this is a prefix convention and not a
-/// flag on the event.
-const ERROR_MARKERS: [&str; 2] = ["ERROR:", "FAILED:"];
 
 /// Source/role of a chat line — drives the leader glyph and color chosen by
 /// [`crate::widgets::scrollback::build_chat_lines`].
@@ -770,10 +765,18 @@ impl ReplApp {
     }
 
     /// Insert a single character at the cursor.
+    ///
+    /// Why: editing does NOT end history navigation (#8181). It used to
+    /// clear [`Self::history_idx`] while leaving [`Self::saved_input`] set,
+    /// so Up-then-type stranded the draft with no way back — and Backspace
+    /// and Ctrl-U never cleared it at all, making the same gesture behave
+    /// three ways. Readline's rule is the consistent one: the draft is
+    /// yours until you submit, and Down always walks back to it. Editing a
+    /// RECALLED entry still discards that edit when you navigate away;
+    /// per-entry edit buffers are not worth the state.
     pub fn insert_char(&mut self, c: char) {
         self.input_buf.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
-        self.history_idx = None;
     }
 
     /// Backspace: delete the char before the cursor.
@@ -853,9 +856,12 @@ impl ReplApp {
     /// What: no-op when not navigating (`history_idx == None`), so Down on a
     /// freshly typed line never clobbers it. Stepping past the newest entry
     /// clears `history_idx` and restores [`Self::saved_input`] (empty string
-    /// when the draft was empty).
+    /// when the draft was empty). Editing while navigating does not end
+    /// navigation — see [`Self::insert_char`] — so the draft survives
+    /// typing, Backspace and Ctrl-U alike.
     /// Test: `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
-    /// `reduce::tests::apply_down_is_noop_when_not_navigating_history`.
+    /// `reduce::tests::apply_down_is_noop_when_not_navigating_history`,
+    /// `reduce::tests::editing_a_recalled_entry_still_leaves_down_the_draft`.
     pub fn history_next(&mut self) {
         let Some(i) = self.history_idx else { return };
         if i + 1 >= self.history.len() {

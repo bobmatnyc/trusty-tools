@@ -21,8 +21,15 @@ use crate::widgets::scrollback::delegated_gutter_span;
 const RESULT_ELBOW: &str = "  ⎿  ";
 /// Prefix of every later result line, aligned under the first.
 const RESULT_INDENT: &str = "     ";
-/// Longest argument preview a collapsed header shows before eliding (#4596)
-/// — the summary must stay one row on a narrow terminal.
+/// Longest argument preview a collapsed header shows before eliding
+/// (#4596), in `char`s.
+///
+/// This bounds the ARGUMENT text only, not the rendered row: the tool name
+/// and status suffix are unbounded, and a `char` is not a display cell (a
+/// CJK or emoji argument occupies more columns than it counts). So it is a
+/// cap on how much of a long path or command line the summary spends, not a
+/// guarantee the row fits the terminal — an over-wide row wraps like any
+/// other scrollback line.
 const COLLAPSED_ARGS_MAX: usize = 32;
 
 /// Render one tool card: a header naming the tool and its arguments, then
@@ -31,8 +38,9 @@ const COLLAPSED_ARGS_MAX: usize = 32;
 /// Why: the header and body are separate rows so a multi-line result reads
 /// as the output it is, not as one wrapped string.
 /// What: the header is `⏺ <tool>(<args>)`, the glyph yellow while the call
-/// runs, green once a result arrives, and red when that result is an error
-/// ([`ToolCard::is_error`]). The body is `running…` while pending,
+/// runs, green once a result arrives, and red when the backend reported a
+/// failure ([`ToolCard::is_error`] — the flag, never the result text). The
+/// body is `running…` while pending,
 /// `(no output)` for an empty result, and otherwise one row per result line.
 /// A [`ToolCard::collapsed`] card drops the body entirely and appends a
 /// status word plus a result-line count to the header, so it occupies one
@@ -41,6 +49,7 @@ const COLLAPSED_ARGS_MAX: usize = 32;
 /// Test: `tests::tool_call_and_result_render_as_one_card`,
 /// `tests::completed_card_collapses_to_a_one_line_summary`,
 /// `tests::errored_card_renders_expanded_by_default`,
+/// `tests::failure_flag_alone_drives_the_error_render`,
 /// `tests::multi_line_result_keeps_its_line_breaks`,
 /// `tests::delegated_card_is_guttered_and_top_level_card_is_not`.
 pub fn tool_card_lines(card: &ToolCard, delegated: bool) -> Vec<Line<'static>> {
@@ -126,8 +135,10 @@ fn collapsed_status(card: &ToolCard) -> String {
     }
 }
 
-/// Truncate `text` to at most `max` chars, marking the cut with `…`.
-/// Char-based, so a multi-byte argument can never be split mid-character.
+/// Truncate `text` to at most `max` `char`s, marking the cut with `…`.
+/// Counts characters, not display cells — see [`COLLAPSED_ARGS_MAX`] for
+/// what that does and does not guarantee. Char-based rather than byte-based
+/// so a multi-byte argument can never be split mid-character.
 fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();

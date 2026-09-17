@@ -10,7 +10,11 @@
 //! JSON-RPC stream has no status code to classify, and every failure it can
 //! report is worth the same bounded reconnect.
 //! Test: `engine_tests::*` (in the sibling `engine_tests.rs`, included from
-//! `engine.rs`).
+//! `engine.rs`), plus `session_events_forward_tests::*` (#4596 — the
+//! tool-failure flag) in the sibling `session_events_forward_tests.rs`
+//! included at the foot of this file. The similarly named
+//! `session_events_tests.rs` is NOT this module's: it holds
+//! `engine_state.rs`'s reconnect suite (#6637).
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -54,9 +58,12 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// What: `Message`/`AgentMessage`/`PmThinking` -> `AssistantOutput` chunks
 /// (`done: false`); `AgentMessageDelta` -> `AgentOutput`, keyed by
 /// `(agent_id, turn_id)` (#7940); `ToolStarted` -> `ToolInvocation{result:
-/// None}`; `ToolFinished`/`ToolError` -> `ToolInvocation{result: Some(..)}`,
-/// keyed by the SAME `call_id` so the (future) tool-card renderer can pair
-/// them; `PmDelegating`/`AgentSpawned` -> `DelegationStarted` and
+/// None, failed: false}`; `ToolFinished`/`ToolError` ->
+/// `ToolInvocation{result: Some(..)}` carrying the backend's verdict in
+/// `failed` (#4596 — `!success`, and always `true` for a `ToolError`; the
+/// `FAILED: `/`ERROR: ` prefixes in the result text are for the reader, not
+/// for the renderer), keyed by the SAME `call_id` so the tool-card renderer
+/// can pair them; `PmDelegating`/`AgentSpawned` -> `DelegationStarted` and
 /// `AgentDone`/`AgentFailed` -> `DelegationFinished` (#7940);
 /// `PermissionRequested`/`PermissionResolved` -> the matching `ReplEvent`
 /// halves of the TUI's permission prompt (#3422), field for field;
@@ -193,6 +200,8 @@ pub(super) fn forward_session_event(
                 tool_name: tool,
                 args: json!(args_preview),
                 result: None,
+                // #4596: a call that has not finished has not failed.
+                failed: false,
             });
             false
         }
@@ -215,6 +224,10 @@ pub(super) fn forward_session_event(
                 tool_name: tool,
                 args: Value::Null,
                 result: Some(result),
+                // #4596: the `FAILED: ` prefix above is what the operator
+                // reads; THIS is what the TUI renders from. Rewording the
+                // prefix must not change whether the card shows as an error.
+                failed: !success,
             });
             false
         }
@@ -231,6 +244,8 @@ pub(super) fn forward_session_event(
                 tool_name: tool,
                 args: Value::Null,
                 result: Some(format!("ERROR: {error}")),
+                // #4596: a `ToolError` is unconditionally a failure.
+                failed: true,
             });
             false
         }
@@ -289,3 +304,7 @@ pub(super) fn forward_session_event(
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "session_events_forward_tests.rs"]
+mod session_events_forward_tests;

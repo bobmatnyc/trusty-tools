@@ -90,12 +90,14 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
             tool_name,
             args,
             result,
+            failed,
         } => {
             let card = ToolCard {
                 id,
                 tool_name,
                 args,
                 result,
+                failed,
                 // #4596: `apply_tool_invocation` decides the real default
                 // once it knows whether the call completed and how.
                 collapsed: false,
@@ -265,7 +267,7 @@ fn push_delegated(app: &mut ReplApp, role: ChatRole, text: String) {
 /// Test: [`tests::tool_invocation_result_merges_into_its_call_card`],
 /// [`tests::tool_invocation_result_without_a_start_opens_its_own_card`],
 /// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`],
-/// [`tests::tool_card_is_error_reads_the_producer_failure_prefix`].
+/// [`tests::tool_card_is_error_reads_the_event_failure_flag`].
 fn apply_tool_invocation(app: &mut ReplApp, mut card: ToolCard, agent_id: &str) {
     app.scroll_offset = 0;
     if !card.id.is_empty()
@@ -275,6 +277,9 @@ fn apply_tool_invocation(app: &mut ReplApp, mut card: ToolCard, agent_id: &str) 
     {
         if card.result.is_some() {
             open.result = card.result;
+            // #4596: the completion carries the verdict; the start event
+            // never could.
+            open.failed = card.failed;
             open.collapsed = !open.is_error();
             app.tool_cards.remove(&card.id);
         }

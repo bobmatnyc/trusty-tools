@@ -32,6 +32,19 @@ fn rows(app: &ReplApp) -> Vec<String> {
 }
 
 fn tool(id: &str, agent_id: &str, name: &str, args: &str, result: Option<&str>) -> ReplEvent {
+    tool_outcome(id, agent_id, name, args, result, false)
+}
+
+/// Same as [`tool`], with the backend's `failed` verdict spelled out
+/// (#4596).
+fn tool_outcome(
+    id: &str,
+    agent_id: &str,
+    name: &str,
+    args: &str,
+    result: Option<&str>,
+    failed: bool,
+) -> ReplEvent {
     ReplEvent::ToolInvocation {
         id: id.into(),
         agent_id: agent_id.into(),
@@ -43,6 +56,7 @@ fn tool(id: &str, agent_id: &str, name: &str, args: &str, result: Option<&str>) 
             serde_json::json!(args)
         },
         result: result.map(str::to_string),
+        failed,
     }
 }
 
@@ -151,7 +165,7 @@ fn errored_card_renders_expanded_by_default() {
     apply(&mut app, tool("e1", "", "read_file", "missing.rs", None));
     apply(
         &mut app,
-        tool("e1", "", "read_file", "", Some("ERROR: no such file")),
+        tool_outcome("e1", "", "read_file", "", Some("ERROR: no such file"), true),
     );
     let out = rows(&app);
     assert!(
@@ -161,6 +175,49 @@ fn errored_card_renders_expanded_by_default() {
     assert!(
         !out.iter().any(|r| r.contains("· ok")),
         "an errored card is not summarized as ok: {out:#?}"
+    );
+}
+
+/// The HIGH finding #4596 closed: the render keys on the `failed` flag, not
+/// on the result text. A producer that rewords its marker (or never writes
+/// one) still gets an expanded, red card; a successful call whose output
+/// merely CONTAINS `ERROR:` still collapses as `ok`.
+#[test]
+fn failure_flag_alone_drives_the_error_render() {
+    let mut flagged = app();
+    let mut noisy = app();
+
+    apply(&mut flagged, tool("f1", "", "bash", "cargo test", None));
+    apply(
+        &mut flagged,
+        tool_outcome("f1", "", "bash", "", Some("exit status 1"), true),
+    );
+    let out = rows(&flagged);
+    assert!(
+        out.contains(&"  ⎿  exit status 1".to_string()),
+        "a flagged failure expands with no marker in the body: {out:#?}"
+    );
+    let card = flagged
+        .chat
+        .last()
+        .and_then(|c| c.tool.as_ref())
+        .expect("a card");
+    assert!(card.is_error());
+    assert_eq!(
+        super::tool_card_lines(card, false)[0].spans[0].style.fg,
+        Some(ratatui::style::Color::Red),
+        "a flagged failure paints its glyph red"
+    );
+
+    apply(&mut noisy, tool("s1", "", "grep", "ERROR", None));
+    apply(
+        &mut noisy,
+        tool("s1", "", "grep", "", Some("ERROR: found in log.txt")),
+    );
+    let out = rows(&noisy);
+    assert!(
+        out.iter().any(|r| r.contains("· ok")),
+        "an unflagged result is output, however it reads: {out:#?}"
     );
 }
 

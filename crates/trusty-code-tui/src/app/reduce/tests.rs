@@ -175,6 +175,36 @@ fn apply_down_walks_forward_and_restores_the_draft() {
     assert_eq!(app.cursor_pos, "draft in progress".len());
 }
 
+/// The MEDIUM finding on #8181: Up stashes the draft, so every way of
+/// editing afterwards — typing, Backspace, Ctrl-U — must still leave Down
+/// able to return it. Typing used to clear `history_idx` and strand
+/// `saved_input`; Backspace and Ctrl-U never did, so one gesture behaved
+/// three ways.
+#[test]
+fn editing_a_recalled_entry_still_leaves_down_the_draft() {
+    for edit in ["type", "backspace", "ctrl-u"] {
+        let mut app = ReplApp::new("demo", "u");
+        submit(&mut app, "alpha");
+        for c in "my draft".chars() {
+            apply(&mut app, key(KeyCode::Char(c)));
+        }
+        apply(&mut app, key(KeyCode::Up));
+        assert_eq!(app.input_buf, "alpha", "{edit}");
+
+        match edit {
+            "type" => apply(&mut app, key(KeyCode::Char('!'))),
+            "backspace" => apply(&mut app, key(KeyCode::Backspace)),
+            _ => apply(&mut app, ctrl_key('u')),
+        }
+        apply(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            app.input_buf, "my draft",
+            "Down must return the draft after a {edit} edit"
+        );
+        assert!(app.history_idx.is_none(), "{edit}");
+    }
+}
+
 /// The oldest entry is a floor, not a wrap point — a fourth Up on a
 /// two-entry history must not jump back to the newest.
 #[test]
@@ -539,6 +569,7 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: None,
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), 1);
@@ -552,6 +583,7 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::Value::Null,
             result: Some("switched to main".into()),
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), 1, "one card, not two entries");
@@ -562,6 +594,7 @@ fn tool_invocation_result_merges_into_its_call_card() {
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: Some("switched to main".into()),
+            failed: false,
             // #4596: a successful completion collapses by default.
             collapsed: true,
         })
@@ -585,6 +618,7 @@ fn tool_invocation_result_without_a_start_opens_its_own_card() {
             tool_name: "bash".into(),
             args: serde_json::Value::Null,
             result: Some("done".into()),
+            failed: false,
         },
     );
     let card = app.chat[0].tool.as_ref().expect("a card");
@@ -592,8 +626,14 @@ fn tool_invocation_result_without_a_start_opens_its_own_card() {
     assert!(app.tool_cards.is_empty());
 }
 
-/// Push a start event, then its completion, for one tool call (#4596).
+/// Push a start event, then a successful completion, for one tool call
+/// (#4596).
 fn tool_call(app: &mut ReplApp, id: &str, name: &str, result: &str) {
+    tool_call_outcome(app, id, name, result, false);
+}
+
+/// Same as [`tool_call`], with the backend's `failed` verdict spelled out.
+fn tool_call_outcome(app: &mut ReplApp, id: &str, name: &str, result: &str, failed: bool) {
     apply(
         app,
         ReplEvent::ToolInvocation {
@@ -602,6 +642,7 @@ fn tool_call(app: &mut ReplApp, id: &str, name: &str, result: &str) {
             tool_name: name.into(),
             args: serde_json::json!("x"),
             result: None,
+            failed: false,
         },
     );
     apply(
@@ -612,18 +653,20 @@ fn tool_call(app: &mut ReplApp, id: &str, name: &str, result: &str) {
             tool_name: name.into(),
             args: serde_json::Value::Null,
             result: Some(result.into()),
+            failed,
         },
     );
 }
 
-/// The seam carries no success flag, so a failed call is recognized by the
-/// leading word its producer writes into the result (#4596).
+/// #4596: failure is the event's `failed` flag, never the result text. The
+/// last two calls here invert the old prefix heuristic — a failure with no
+/// marker, and a success whose output merely mentions one.
 #[test]
-fn tool_card_is_error_reads_the_producer_failure_prefix() {
+fn tool_card_is_error_reads_the_event_failure_flag() {
     let mut app = ReplApp::new("demo", "u");
     tool_call(&mut app, "ok-1", "bash", "2 passed");
-    tool_call(&mut app, "f-1", "bash", "FAILED: 1 test failed");
-    tool_call(&mut app, "e-1", "read_file", "ERROR: no such file");
+    tool_call_outcome(&mut app, "f-1", "bash", "exit status 1", true);
+    tool_call(&mut app, "n-1", "grep", "ERROR: found in log.txt");
 
     let is_error: Vec<bool> = app
         .chat
@@ -631,7 +674,7 @@ fn tool_card_is_error_reads_the_producer_failure_prefix() {
         .filter_map(|c| c.tool.as_ref())
         .map(|c| c.is_error())
         .collect();
-    assert_eq!(is_error, vec![false, true, true]);
+    assert_eq!(is_error, vec![false, true, false]);
 
     // A still-running call has no result to classify.
     apply(
@@ -642,6 +685,7 @@ fn tool_card_is_error_reads_the_producer_failure_prefix() {
             tool_name: "bash".into(),
             args: serde_json::json!("sleep"),
             result: None,
+            failed: false,
         },
     );
     let running = app.chat.last().and_then(|c| c.tool.as_ref()).expect("card");
@@ -1097,6 +1141,7 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(
@@ -1107,6 +1152,7 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
             tool_name: "delegate_to_agent".into(),
             args: serde_json::json!("{}"),
             result: None,
+            failed: false,
         },
     );
     let name = |i: usize| app.chat[i].tool.as_ref().map(|c| c.tool_name.as_str());
@@ -1129,6 +1175,7 @@ fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card()
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(
@@ -1147,6 +1194,7 @@ fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card()
             tool_name: "bash".into(),
             args: serde_json::Value::Null,
             result: Some("ok".into()),
+            failed: false,
         },
     );
     let cards: Vec<usize> = (0..app.chat.len())
@@ -1173,6 +1221,7 @@ fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     let chat_len = app.chat.len();
@@ -1186,6 +1235,7 @@ fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo build"),
             result: None,
+            failed: false,
         },
     );
     assert_eq!(app.chat.len(), chat_len);
@@ -1209,6 +1259,7 @@ fn clear_scrollback_drops_delegation_state() {
             tool_name: "bash".into(),
             args: serde_json::json!("cargo test"),
             result: None,
+            failed: false,
         },
     );
     apply(&mut app, ReplEvent::ClearScrollback);

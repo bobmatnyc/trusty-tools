@@ -145,12 +145,22 @@ pub enum ReplEvent {
     /// attribution to offer. It is what lets the reducer render a delegated
     /// agent's tool calls INSIDE that agent's block rather than at the top
     /// level beside the primary agent's own.
+    ///
+    /// `failed` (#4596) is the backend's own verdict on the call, carried as
+    /// data. Producers also write a human marker into `result` (trusty-code
+    /// sends `FAILED: …` / `ERROR: …`), but that text is for the reader —
+    /// rewording it must never change how the TUI renders the card, which is
+    /// why the fact travels in its own field. Meaningless while `result` is
+    /// `None`: a call that has not finished has not failed, so a start event
+    /// sets `false`. Set `true` ONLY on a completion the backend reported as
+    /// unsuccessful.
     ToolInvocation {
         id: String,
         agent_id: String,
         tool_name: String,
         args: serde_json::Value,
         result: Option<String>,
+        failed: bool,
     },
     /// A chunk of streamed output attributed to a specific agent turn
     /// (#7940).
@@ -422,6 +432,7 @@ mod tests {
             tool_name: "fs.read".to_string(),
             args: serde_json::json!({"path": "a.txt"}),
             result: None,
+            failed: false,
         };
         let complete = ReplEvent::ToolInvocation {
             id: "call-1".to_string(),
@@ -429,6 +440,7 @@ mod tests {
             tool_name: "fs.read".to_string(),
             args: serde_json::json!({"path": "a.txt"}),
             result: Some("contents".to_string()),
+            failed: false,
         };
         assert_ne!(start, complete);
         let ReplEvent::ToolInvocation { id: start_id, .. } = &start else {
