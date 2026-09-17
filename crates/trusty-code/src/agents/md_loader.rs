@@ -688,7 +688,7 @@ mod tests {
     /// body contains marker text unique to each of the three tiers
     /// (BASE-AGENT's "Foundation for all trusty-mpm agents", BASE-ENGINEER's
     /// "Foundation for all engineer agents", and rust-engineer's own
-    /// "toolchains-rust-core").
+    /// `# Rust Engineer` heading).
     /// Test: this test.
     #[test]
     fn project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer() {
@@ -709,8 +709,11 @@ mod tests {
                 .contains("Foundation for all engineer agents"),
             "composed body must include BASE-ENGINEER tier content"
         );
+        // #8215: the leaf marker is rust-engineer's own H1, which tracks the
+        // agent's identity; a skill name pinned here goes stale whenever the
+        // asset's skill wiring changes (as `toolchains-rust-core` did in #8192).
         assert!(
-            cfg.system_prompt.content.contains("toolchains-rust-core"),
+            cfg.system_prompt.content.contains("# Rust Engineer"),
             "composed body must include rust-engineer's own content"
         );
     }
