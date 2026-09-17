@@ -909,7 +909,10 @@ async fn a_referenced_global_channel_is_not_deleted_without_force() {
     );
     assert_eq!(deleted["channels"].as_array().map(Vec::len), Some(0));
     let raw = std::fs::read_to_string(&config_path).expect("read back");
-    assert!(!raw.contains("gmail-personal"), "the channel is gone:\n{raw}");
+    assert!(
+        !raw.contains("gmail-personal"),
+        "the channel is gone:\n{raw}"
+    );
     assert_eq!(
         std::fs::read_to_string(&bindings_path).expect("bindings"),
         overlay.to_string(),

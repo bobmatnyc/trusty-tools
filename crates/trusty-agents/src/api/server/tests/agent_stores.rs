@@ -264,10 +264,7 @@ impl Drop for AssistantsRoot {
 
 /// Provision protected knowledge for `izzie` under `root`, recording `legacy`
 /// as the legacy binding. Returns the protected extraction index id.
-fn provision_izzie(
-    root: &std::path::Path,
-    legacy: crate::stores::AgentStoreBinding,
-) -> String {
+fn provision_izzie(root: &std::path::Path, legacy: crate::stores::AgentStoreBinding) -> String {
     let home = crate::assistants::AssistantHome::under(
         root.to_path_buf(),
         crate::assistants::AssistantInstanceId::new("izzie").expect("instance id"),
@@ -362,7 +359,10 @@ async fn stores_route_reports_no_difference_when_the_declared_index_answers() {
     let slot = &body["search_slot"];
 
     assert_eq!(slot["declared_index"], "bob-kb");
-    assert_eq!(slot["default_index"], "bob-kb", "the declared index answers");
+    assert_eq!(
+        slot["default_index"], "bob-kb",
+        "the declared index answers"
+    );
     assert_eq!(slot["differs_from_declared"], false, "{slot}");
     assert!(slot["error"].is_null(), "nothing to report: {slot}");
     assert_eq!(
