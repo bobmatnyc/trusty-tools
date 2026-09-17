@@ -582,6 +582,42 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 
 ---
 
+## 9a. SPEC-AGENTS-09 — Channel Binding Identity: Per-Assistant Bot Tokens {#SPEC-AGENTS-09~draft}
+
+Elaborates §1a item 2 (two-way channel connectors, epic #7427) for Telegram.
+The replacement for DOC-57 §6's withdrawn Listeners section — the
+`[[channels]]` model in `crates/trusty-agents/src/channels/model.rs` — is
+where this requirement's mechanics land; [DOC-57](./agent-config-five-sections.md)
+§6 carries a one-line pointer back here.
+
+- **T-1** Each assistant (`izzie`, `cto-assistant`, `writing-assistant`, and
+  any assistant added later) that binds a Telegram channel owns its own
+  Telegram bot. There is no platform-wide bot shared across assistants.
+- **T-2** A Telegram channel binding on an assistant carries its own bot
+  token through the binding's credential reference (`Channel.credential_ref`)
+  — the same pattern Slack bindings use
+  (`crates/trusty-agents/src/channels/slack.rs`,
+  `crates/trusty-agents/src/channels/telegram.rs`).
+- **T-3** The API host runs one long-poll gateway per distinct bound token,
+  not one gateway per assistant and not one gateway platform-wide. Two
+  bindings that resolve to the same token share one gateway; two bindings
+  with different tokens run two.
+- **T-4** Each gateway dispatches inbound messages only to the assistant that
+  owns the binding carrying the token the message arrived on.
+- **T-5** The poller lock and the pairing state are keyed per bot token, not
+  per machine and not per chat ID alone.
+
+**Non-goal.** A single machine-wide `TELEGRAM_BOT_TOKEN` routed to assistants
+by chat-id pairing is explicitly not the model — pairing state narrows
+traffic within one token, it does not substitute for per-assistant token
+identity.
+
+**Decided:** 2026-09-16, owner ruling.
+
+Refs #8190 #8188 #8183
+
+---
+
 ## 10. Design Decisions Log
 
 | Decision | Date | Tracking Issue |
@@ -601,6 +637,7 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 | Demo three agents: Izzie (personal), CTO Assistant (work), Concierge (fixed/ctrl) | 2026-07-24 | #3818, #3816 |
 | Declarative-only agents (no coded agents) | 2026-07-16 | #2791, reaffirmed 2026-07-24 |
 | 1.0 assistant-platform scope: 2 crates; two-way channels; one memory palace per Assistant with opt-in fan-out; one search index per Assistant with multiple roots; projects per Assistant/thread; chat attachments as objects; OKG-only exposed graph | 2026-09-11 | #7425 (epic), #7359/#7427/#7428/#7429/#4358/#7370/#7430 |
+| Telegram bot identity is per assistant: each Telegram channel binding carries its own bot token via the binding's credential reference; one long-poll gateway per distinct token; dispatch, poller lock, and pairing state keyed per token; no machine-wide `TELEGRAM_BOT_TOKEN` routed by pairing | 2026-09-16 | #8190, #8188, #8183 |
 
 ---
 
@@ -640,6 +677,9 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 - #7370 — (e) chat attachments as objects
 - #7430 — (f) knowledge-graph cleanup, OKG-only exposed graph
 - #7451 — (g) MCP connectors, global and per-assistant tiers (epic for #7452, #7453, #5428, #7454)
+- #8190 — Telegram bot identity is per assistant, per-binding credential reference (§9a)
+- #8188 — Live verification of per-assistant Telegram bot identity
+- #8183 — Acceptance umbrella, trusty-agents channels
 
 **Related Specs:**
 - DOC-41 (SPEC-AGENTFW-01~draft …) — Eve-Style Agent Framework (agent definition format, runtime)
@@ -668,3 +708,8 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
   (epic #7425 item (g), #7451). Evidence:
   `docs/research/trusty-agents-mcp-connectors-gap-analysis-2026-09-11.md`.
   Authority: [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md).
+- **2026-09-16** — Added §9a (`SPEC-AGENTS-09~draft`): Telegram bot identity
+  is per assistant, per-binding credential reference, one long-poll gateway
+  per distinct token, dispatch/lock/pairing keyed per token, and the explicit
+  non-goal of a machine-wide token routed by chat-id pairing. Owner ruling,
+  2026-09-16. Refs #8190, #8188, #8183.
