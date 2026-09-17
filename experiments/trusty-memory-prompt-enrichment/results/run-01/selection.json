@@ -1,0 +1,11 @@
+{
+  "policy": {
+    "max_emitted_edges": 32,
+    "max_hops": 1,
+    "max_scanned_edges": 128,
+    "max_seeds": 1,
+    "minimum_cosine": 0.4,
+    "version": "graph-prompt-v1"
+  },
+  "selected_before_heldout_gold": true
+}

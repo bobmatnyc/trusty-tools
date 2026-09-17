@@ -1,0 +1,5 @@
+Final artifact audit: 61 files; each below 1,000,000 bytes.
+Input manifest: 8 matching hashes.
+Runner source hashes: 10 match actual evaluated files.
+Run complete=true; gzip JSON parsed; result hashes recorded.
+Targeted credential-pattern scan passed, including decompressed packets. Not a comprehensive secret audit.

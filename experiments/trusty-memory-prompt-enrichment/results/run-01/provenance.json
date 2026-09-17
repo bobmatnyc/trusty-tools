@@ -1,0 +1,419 @@
+{
+  "corpus_encoding_ns": 1451384167,
+  "helper_hash": "6e30d87ddd012025db474cfa67d6607bfebd1584368f9076ff0812fee204af25",
+  "helper_startup_ns": 8193916,
+  "incremental_rebuild_equal_atol": 1e-06,
+  "limitations": [
+    "Finite clock projections rebuilt outside queries; not incremental native publication.",
+    "Scope/time filtering belongs to adapter; native active APIs have no as-of/TTL contract.",
+    "Native formatted controls verify exact bullets; matched treatments verify full claims.",
+    "Source body presentation removes ineligible fact spans.",
+    "Graph entity hops exclude literal-property edges, but all examined facts consume scan budget."
+  ],
+  "maintenance": [
+    {
+      "changed": 2,
+      "derived_hash": "f0b09ac3341a6f73cfc4fa8b5ffec12758d1e07af67ce6ccb1816252b576056d",
+      "elapsed_ns": 4201459,
+      "pending_sequence": 4,
+      "removed": 1,
+      "sequence": 3,
+      "source_hash": "1c712c4c5f38c12fc1b957dc6aeaad88f3c2c52b65a2f1c763f3c3a3607493fa"
+    },
+    {
+      "changed": 1,
+      "derived_hash": "1c2e1928613eab24d064e87284f7c7e6a72fcad74790c92806df8b3551bf1d62",
+      "elapsed_ns": 1986709,
+      "pending_sequence": 7,
+      "removed": 2,
+      "sequence": 6,
+      "source_hash": "896400834ad8862b21c9979203d6704239f869c22ab23d480227bd3e9a291d3c"
+    },
+    {
+      "changed": 2,
+      "derived_hash": "25b3084453b556f592ee448595c3dab0876b4f75f84e05ef10abffd0c8961131",
+      "elapsed_ns": 3730542,
+      "pending_sequence": 10,
+      "removed": 1,
+      "sequence": 9,
+      "source_hash": "4564834beaf3e3e445f1150707097e82bdab4d34aa8d8744581fed02b00e7373"
+    },
+    {
+      "changed": 1,
+      "derived_hash": "2c7b430d2ef9b7b041a6e89f0fa1fa6127dff43201e9b38d2cdc7af42a6b8907",
+      "elapsed_ns": 2137583,
+      "pending_sequence": null,
+      "removed": 2,
+      "sequence": 12,
+      "source_hash": "85b7d66bb370fed366dc6f758094fa9deae95642d109ef5426e1ccdcbfbd2649"
+    }
+  ],
+  "manifest": {
+    "docs/research/trusty-memory-prompt-enrichment-2026-09-17/interface.md": "3bc988b9b549393ae8ecd0077c44df003ee6795d643b5b9cc902fb787b6ab70b",
+    "docs/research/trusty-memory-prompt-enrichment-2026-09-17/pre-run-clarifications.md": "af17f5ee7fea9781689c72774009a293393f27c3eba434e96561b36a0d70c9ed",
+    "docs/research/trusty-memory-prompt-enrichment-2026-09-17/protocol.md": "9b0697296abfefded24a911a304c4e9c75786a66f20d2e26231375dab3330d44",
+    "experiments/trusty-memory-prompt-enrichment/gold-heldout.json": "ecd4e9d0b33054be05adca780d18809a345dffaec8a60d65ef61b36070f23ecd",
+    "experiments/trusty-memory-prompt-enrichment/gold-tune.json": "439abbf3b5b0adc5c0e2b42bce2362e311b2369c66c83a139d03c7fef9a79c20",
+    "experiments/trusty-memory-prompt-enrichment/gold.json": "bb3babac5e65e3c9642ed8d16d0c4f5794f17398ec15c0fa271714e8c1d5f57b",
+    "experiments/trusty-memory-prompt-enrichment/queries.json": "9440e61f87348716d474ddd8456d0297e510f2f97ef8efd4dbd630b5c4797099",
+    "experiments/trusty-memory-prompt-enrichment/sources.json": "e61e69f1ecb265fd5034f6901222de6d8cb1a2840c4517a7e20b40e2b444fabd"
+  },
+  "model_hash": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+  "model_load_ns": 86652083,
+  "model_tokenizer_hash": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+  "numpy": "2.4.6",
+  "onnxruntime": "1.30.0",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "projections": {
+    "008f364cfd228eaf4e1f": {
+      "build_ns": 45749667,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 45256792,
+        "active_store_rows": 16,
+        "bm25_build_ns": 695667,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 43733583,
+        "hydration_ns": 252041,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "226bc9e7fb7f8304fab8": {
+      "build_ns": 70241625,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 65616458,
+        "active_store_rows": 234,
+        "bm25_build_ns": 6445209,
+        "disk_bytes": 598016,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 52836292,
+        "hydration_ns": 2349791,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "26b672c90617f02fcfcf": {
+      "build_ns": 75743000,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 72272458,
+        "active_store_rows": 234,
+        "bm25_build_ns": 6243584,
+        "disk_bytes": 593920,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 59805333,
+        "hydration_ns": 2422667,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "2ed65c0305bee926e7cd": {
+      "build_ns": 44399042,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 43925417,
+        "active_store_rows": 16,
+        "bm25_build_ns": 526166,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 42566584,
+        "hydration_ns": 266083,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "3081ebae28b5d06a3bb8": {
+      "build_ns": 66757416,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 62799584,
+        "active_store_rows": 235,
+        "bm25_build_ns": 5789000,
+        "disk_bytes": 593920,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 51297834,
+        "hydration_ns": 2230625,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    },
+    "4ab074fc0b4176dd8c6f": {
+      "build_ns": 69851209,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 65751291,
+        "active_store_rows": 234,
+        "bm25_build_ns": 6375417,
+        "disk_bytes": 598016,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 52934875,
+        "hydration_ns": 2868583,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "52aada93c40c5152377e": {
+      "build_ns": 77154042,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 72995791,
+        "active_store_rows": 234,
+        "bm25_build_ns": 6583167,
+        "disk_bytes": 593920,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 59775833,
+        "hydration_ns": 2897875,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "549b7f162f2767c50bf2": {
+      "build_ns": 74054375,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 69484667,
+        "active_store_rows": 235,
+        "bm25_build_ns": 6190750,
+        "disk_bytes": 593920,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 56804416,
+        "hydration_ns": 2633625,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    },
+    "5a5a1bc8617bd0c9699b": {
+      "build_ns": 43280708,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 42780417,
+        "active_store_rows": 16,
+        "bm25_build_ns": 596084,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 41262000,
+        "hydration_ns": 304834,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "6c61f2b00cf568668cce": {
+      "build_ns": 71030500,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 67445333,
+        "active_store_rows": 234,
+        "bm25_build_ns": 5716750,
+        "disk_bytes": 593920,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 55409042,
+        "hydration_ns": 2646542,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "79b957125427d50b71f3": {
+      "build_ns": 71008625,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 67538959,
+        "active_store_rows": 235,
+        "bm25_build_ns": 6013250,
+        "disk_bytes": 593920,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 54942625,
+        "hydration_ns": 2689291,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    },
+    "875ba25a7dc2b011a682": {
+      "build_ns": 44933042,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 44303875,
+        "active_store_rows": 16,
+        "bm25_build_ns": 650208,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 42543166,
+        "hydration_ns": 371208,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "896f5bf1a5f22ace79e3": {
+      "build_ns": 73200708,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 69134500,
+        "active_store_rows": 235,
+        "bm25_build_ns": 6264375,
+        "disk_bytes": 598016,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 56401250,
+        "hydration_ns": 2482250,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    },
+    "8eaf44759655e3fe962a": {
+      "build_ns": 74155958,
+      "eligible_facts": 234,
+      "graph_facts": 14,
+      "native": {
+        "_helper_ns": 69295875,
+        "active_store_rows": 234,
+        "bm25_build_ns": 6947625,
+        "disk_bytes": 593920,
+        "documents": 232,
+        "edges": 233,
+        "graph_build_ns": 55679375,
+        "hydration_ns": 2404667,
+        "input_triples": 234
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 356352
+    },
+    "9f799281f93c12889690": {
+      "build_ns": 54186292,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 53582584,
+        "active_store_rows": 16,
+        "bm25_build_ns": 667083,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 52068000,
+        "hydration_ns": 264334,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "d21f41e8dfea36444b8d": {
+      "build_ns": 45945500,
+      "eligible_facts": 16,
+      "graph_facts": 16,
+      "native": {
+        "_helper_ns": 45405250,
+        "active_store_rows": 16,
+        "bm25_build_ns": 567041,
+        "disk_bytes": 552960,
+        "documents": 14,
+        "edges": 15,
+        "graph_build_ns": 43892959,
+        "hydration_ns": 317167,
+        "input_triples": 16
+      },
+      "structural_omitted": 0,
+      "vector_bytes": 21504
+    },
+    "dc29624703e8ca321471": {
+      "build_ns": 70272958,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 66251458,
+        "active_store_rows": 235,
+        "bm25_build_ns": 6140250,
+        "disk_bytes": 598016,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 54020083,
+        "hydration_ns": 2320667,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    },
+    "fdbc1d5d81a5f4ac0ac8": {
+      "build_ns": 99639000,
+      "eligible_facts": 235,
+      "graph_facts": 15,
+      "native": {
+        "_helper_ns": 95747375,
+        "active_store_rows": 235,
+        "bm25_build_ns": 5858958,
+        "disk_bytes": 593920,
+        "documents": 233,
+        "edges": 234,
+        "graph_build_ns": 83740167,
+        "hydration_ns": 2430083,
+        "input_triples": 235
+      },
+      "structural_omitted": 220,
+      "vector_bytes": 357888
+    }
+  },
+  "prompt_tokenizer_hash": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+  "python": "3.14.7",
+  "source_hashes": {
+    "adapters.py": "b05f9ac0b18cb9785bb452b219c1e3d0df4799a8526ab30501efb2948e12e800",
+    "evaluate.py": "5bdc10720fc0ef80ab8ff42932af38f6a780035e176d145a8b41ee0f58f6da69",
+    "offline_encoding.py": "81f07dfef4413719b60020a2915ed4591e8115a6e94c74ccb542182609230697",
+    "packet_integrity.py": "7bd1f675c18c098933a37ec2945b6671a56322f874495725557c7e9a87cb54a7",
+    "projection.py": "b387ca3a5209aae2679afb62a8fb46ea2d5eae4355c322b20511bf60099d8b24",
+    "records.py": "a9a5de698a15a61d9b8defcd3fbf88262b230db7ea2bbba4e8a0fbdd873fc468",
+    "retrieval.py": "3855e3167b162a67697ad1d885be90c68c9cec9d2693936911de6b83930efad5",
+    "scaling.py": "ad658e30a3a6d9855cc29507d2fcfdb8fbb7cc72e14a937eeaf82197040a942f",
+    "scoring.py": "93c81dbe2a763b9295c5a13827ec0618729d9548bba015f5e4d364ea46da3d0d",
+    "test_experiment.py": "285d580c62696d22d77735ae14b6c71e1665cbdefb66b6c6b07f63519a66cfc8"
+  },
+  "tiktoken": "0.14.0",
+  "tokenizers": "0.23.2",
+  "truncation_events": 0,
+  "unchanged": {
+    "changed": 0,
+    "derived_hash": "2c7b430d2ef9b7b041a6e89f0fa1fa6127dff43201e9b38d2cdc7af42a6b8907",
+    "elapsed_ns": 60500,
+    "pending_sequence": null,
+    "removed": 0,
+    "sequence": 12,
+    "source_hash": "85b7d66bb370fed366dc6f758094fa9deae95642d109ef5426e1ccdcbfbd2649"
+  }
+}

@@ -1,0 +1,76 @@
+import sys
+import tempfile
+from dataclasses import replace
+sys.path.insert(0, '/Users/masa/trusty-search-experiment/worktree/experiments/trusty-memory-prompt-enrichment')
+from adapters import LocalEncoder, RustHelper
+from test_experiment import source, query, HELPER, MODEL
+from projection import SourceIndex, build_source_index, build_projection, update_projection, backfill_vectors
+from records import Event, Gold, Evidence, ModelArtifactError, IntegrityError, Policy
+from retrieval import Retrieval, pack, retrieve, TREATMENTS
+from scoring import evaluate
+from offline_encoding import load_encoding
+from evaluate import verify_manifest, ROOT
+
+encoder = LocalEncoder(MODEL)
+helper = RustHelper(HELPER)
+encoding = load_encoding()
+try:
+    with tempfile.TemporaryDirectory(prefix='graph-prompt-critic-final-') as scratch:
+        a, b = source('a'), source('b', subject='Beta', claim='Beta prefers short explanations.')
+        b = replace(b, facts=(replace(b.facts[0], standing=True),))
+        state = SourceIndex({a.key:a, b.key:b}, {})
+        index = build_projection(state, query(), helper, scratch)
+        assert any(e.source.key == a.key for e in retrieve(query(), 'bm25', index, encoder, helper, Policy()).evidence)
+        before = dict(state.sources)
+        while backfill_vectors(state, encoder, 1)['pending']:
+            pass
+        assert state.sources == before and len(state.vectors) == 2
+        print('missing vectors: lexical retrieval succeeds; bounded backfill preserves sources')
+        fingerprint = state.semantic_hash()
+        real_encode = encoder.encode
+        def fail_encode(*args, **kwargs):
+            raise ModelArtifactError('injected model failure')
+        encoder.encode = fail_encode
+        event = Event(1, replace(a, revision=2, title='changed title'))
+        try:
+            update_projection(state, (event,), 1, encoder)
+            raise AssertionError('expected failure')
+        except ModelArtifactError:
+            assert state.semantic_hash() == fingerprint and state.sequence == 0
+        encoder.encode = real_encode
+        assert update_projection(state, (event,), 1, encoder)['changed'] == 1
+        print('failed maintenance: state preserved; same event retry succeeds')
+        # All representations use synthetic assertions; no frozen gold is parsed.
+        original = build_source_index((a,b), encoder)
+        index = build_projection(original, replace(query(), scenario='updated'), helper, scratch)
+        e = Evidence(a,a.facts[0])
+        se = Evidence(b,b.facts[0])
+        gold = Gold('q',((e.id,),),(e.id,se.id),(),False)
+        for treatment in TREATMENTS:
+            evidence = list(index.standing) if treatment == 'standing_cache' else [e]
+            packet = pack(query(),Retrieval(evidence,{},{}),index,128,helper,encoding,treatment,prelude=treatment!='standing_cache')
+            evaluate(packet,gold,(a,b),query(),treatment=treatment,budget=128,helper=helper,encoding=encoding)
+        print('packet reconstruction: all 8 treatment representations accepted')
+        for kind in ('extra','replaced','tokens'):
+            packet = pack(query(),Retrieval([e],{},{}),index,128,helper,encoding,'bm25')
+            if kind == 'extra':
+                packet.text += 'Alpha owns the moon.\n'
+                packet.tokens = len(encoding.encode(packet.text))
+            elif kind == 'replaced':
+                packet.text = 'No factual content.'
+                packet.renderings[e.id] = packet.text
+                packet.tokens = len(encoding.encode(packet.text))
+            else:
+                packet.tokens += 1
+            try:
+                evaluate(packet,gold,(a,b),query(),treatment='bm25',budget=128,helper=helper,encoding=encoding)
+                raise AssertionError('corruption accepted')
+            except IntegrityError:
+                print(f'packet corruption {kind}: rejected')
+        packet=pack(query(),Retrieval(list(index.standing),{},{}),index,128,helper,encoding,'standing_cache',prelude=False)
+        metrics=evaluate(packet,Gold('q',(),(se.id,),(),True),(a,b),query(),treatment='standing_cache',budget=128,helper=helper,encoding=encoding)
+        assert metrics['unsupported_tokens']==0 and metrics['standing_coverage']==1
+        print('standing-only negative task: unsupported_tokens=0; standing_coverage=1.0')
+        print('manifest entries verified:',len(verify_manifest(ROOT)))
+finally:
+    helper.close()

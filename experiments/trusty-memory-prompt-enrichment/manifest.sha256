@@ -1,0 +1,8 @@
+e61e69f1ecb265fd5034f6901222de6d8cb1a2840c4517a7e20b40e2b444fabd  experiments/trusty-memory-prompt-enrichment/sources.json
+9440e61f87348716d474ddd8456d0297e510f2f97ef8efd4dbd630b5c4797099  experiments/trusty-memory-prompt-enrichment/queries.json
+bb3babac5e65e3c9642ed8d16d0c4f5794f17398ec15c0fa271714e8c1d5f57b  experiments/trusty-memory-prompt-enrichment/gold.json
+439abbf3b5b0adc5c0e2b42bce2362e311b2369c66c83a139d03c7fef9a79c20  experiments/trusty-memory-prompt-enrichment/gold-tune.json
+ecd4e9d0b33054be05adca780d18809a345dffaec8a60d65ef61b36070f23ecd  experiments/trusty-memory-prompt-enrichment/gold-heldout.json
+9b0697296abfefded24a911a304c4e9c75786a66f20d2e26231375dab3330d44  docs/research/trusty-memory-prompt-enrichment-2026-09-17/protocol.md
+3bc988b9b549393ae8ecd0077c44df003ee6795d643b5b9cc902fb787b6ab70b  docs/research/trusty-memory-prompt-enrichment-2026-09-17/interface.md
+af17f5ee7fea9781689c72774009a293393f27c3eba434e96561b36a0d70c9ed  docs/research/trusty-memory-prompt-enrichment-2026-09-17/pre-run-clarifications.md
