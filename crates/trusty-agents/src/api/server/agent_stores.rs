@@ -13,7 +13,7 @@
 //! explicitly (same injected-dependency convention as `agent_patch::*_at` and
 //! `workstreams::list_workstreams_at`). Response shape:
 //! `{"stores": [StoreStatus, …], "issues": […], "search_indexes": […],
-//! "enforce_search_indexes": bool}` — empty arrays for an agent that binds
+//! "enforce_search_indexes": bool, "search_slot": {…}}` — empty arrays for an agent that binds
 //! nothing, which is a valid state, not an error. `search_indexes` /
 //! `enforce_search_indexes` (#3232/#4009, epic #4007) are the second,
 //! UNCURATED knowledge tier: arbitrary trusty-search indexes attached to the
@@ -158,11 +158,67 @@ pub(super) async fn stores_at(
         // than in each client.
         "search_indexes": attached_indexes_deduped(&stores, &tools),
         "enforce_search_indexes": tools.search_indexes_enforced(),
+        // #7902: what an unqualified `vector_search` ACTUALLY answers from,
+        // beside what `[[stores]]` declares. See `search_slot`.
+        "search_slot": search_slot(name, &stores),
     });
     if let Some(err) = config_error {
         body["config_error"] = serde_json::Value::String(err);
     }
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Which index the DEFAULT `vector_search` slot resolves to for `name` (#7902).
+///
+/// Why: this route reported the declared `[[stores]]` binding as
+/// `connected: true` against its own index while `vector_search` answered from
+/// somewhere else, and nothing in the payload let a reader tell the two apart
+/// — the whole of #7902. [`crate::knowledge::search_binding::search_slots`] is
+/// the runtime's own resolver, so this reports what the tool is actually built
+/// with rather than a second opinion about it.
+/// What: `declared_index` is the primary binding's index,
+/// `default_index` the slot an unqualified `vector_search` uses,
+/// `protected_index` the provisioned extraction index (`null` before
+/// provisioning, and reachable by id rather than by default whenever it is not
+/// the default itself), and `differs_from_declared` whether the first two
+/// disagree.
+///
+/// FAIL-VISIBLE, not fail-open: a resolution failure is reported as `error`
+/// with `default_index: null`, which a declared store makes
+/// `differs_from_declared: true` — the slot resolves to NOTHING while the
+/// store beside it still reads as connected, and that is exactly the state an
+/// operator has to be told about. It is not an
+/// HTTP error, because this route's contract is `200` whenever the agent
+/// resolves at all; the same failure reaches the CLI as
+/// `search_binding_error` (#7903).
+/// Test: `super::tests::agent_stores::stores_route_reports_a_default_slot_that_differs_from_the_declared_index`,
+/// `super::tests::agent_stores::stores_route_reports_no_difference_when_the_declared_index_answers`.
+fn search_slot(name: &str, stores: &StoresConfig) -> serde_json::Value {
+    let declared = stores.default_search_index();
+    let (slots, error) = match crate::knowledge::search_binding::search_slots(name, stores) {
+        Ok(slots) => (slots, None),
+        Err(e) => {
+            tracing::warn!(
+                agent = name,
+                error = %e,
+                "stores_at: the default vector_search slot could not be resolved (#7902)"
+            );
+            (
+                crate::knowledge::search_binding::SearchSlots::default(),
+                Some(e.to_string()),
+            )
+        }
+    };
+    let mut slot = serde_json::json!({
+        "declared_index": declared,
+        "default_index": slots.default_index,
+        "protected_index": slots.protected_index,
+        "differs_from_declared": slots.default_index.as_deref() != declared,
+    });
+    if let Some(error) = error {
+        slot["error"] = serde_json::Value::String(error);
+    }
+    slot
 }
 
 /// The attached tier-2 indexes MINUS any id already bound as an OKG store
