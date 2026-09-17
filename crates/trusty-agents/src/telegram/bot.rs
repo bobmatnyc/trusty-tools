@@ -81,7 +81,9 @@ impl std::fmt::Debug for BotKey {
 /// the pre-#8190 behaviour (any assistant may claim), which only the standalone
 /// `--telegram` and REPL paths use. `credential_refs` is display text: a
 /// credential REFERENCE is a config name, never a secret.
-/// Test: `telegram_bot_owners_scope_the_dispatch`.
+/// Test: `telegram_bot_carries_its_owners_and_never_renders_its_key` for the
+/// value; `a_telegram_bots_owners_are_the_only_assistants_it_wakes` for the
+/// dispatch narrowing it produces.
 ///
 /// `Debug` is hand-written, not derived: a derive would render the [`BotKey`]
 /// field, and keeping the whole type free of any key-shaped output is the

@@ -97,12 +97,27 @@ pub(super) fn paired_chats_state_path_for(bot: &BotKey) -> PathBuf {
 /// Parse errors -> log a warning and return empty map (never panic). The
 /// stored `DateTime<Utc>` is discarded; we use `Instant::now()` as a stand-in
 /// since the value is only consumed by diagnostic logging.
+///
+/// #8190: a first run on a host that still has the pre-#8190 shared
+/// `telegram-paired.json` says so once, because "every chat is suddenly
+/// unpaired" is otherwise indistinguishable from a lost state file. The old
+/// file is never read: its pairings were machine-wide, which is the grant leak
+/// the per-bot split closes.
 /// Test: `paired_state_round_trip` covers happy-path; missing-file and
 /// malformed-JSON branches are intentionally fail-open (no panic).
 pub(super) async fn load_paired_chats(state_path: &Path) -> PairedChats {
     let bytes = match tokio::fs::read(state_path).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let legacy = gateway_state_dir().join("telegram-paired.json");
+            if tokio::fs::metadata(&legacy).await.is_ok() {
+                info!(
+                    legacy = %legacy.display(),
+                    "telegram: this bot has no pairing file yet, but the pre-#8190 shared one \
+                     exists; its pairings were machine-wide and are not migrated — pair this bot \
+                     once with /start"
+                );
+            }
             return Arc::new(RwLock::new(HashMap::new()));
         }
         Err(e) => {

@@ -632,6 +632,97 @@ async fn telegram_gateway_stops_a_poller_whose_binding_went_away() {
     );
 }
 
+/// A bot whose owners the test controls, sharing one token across rounds.
+fn fake_bot_owned_by(
+    reference: &str,
+    token: &str,
+    owners: &[&str],
+) -> crate::telegram::TelegramBot {
+    crate::telegram::TelegramBot::new(
+        Secret::new(token.to_string()),
+        Some(owners.iter().map(|o| (*o).to_string()).collect()),
+        vec![reference.to_string()],
+    )
+}
+
+/// #8190 round-2 finding 1 (HIGH): the rescan reconciled the token SET, so a
+/// bot already running was skipped whatever its owners now were. The live
+/// poller froze `allowed_personas` at spawn, so revoking assistant B's binding
+/// on a bot assistant A still binds left B dispatchable until the host
+/// restarted — SPEC-AGENTS-09 T-4 revocation never took effect.
+///
+/// Pre-change this fails: `running.contains_key(bot.key())` short-circuits, the
+/// one original poller survives every rescan, and the label is recorded ONCE.
+#[tokio::test(start_paused = true)]
+async fn telegram_gateway_restarts_a_poller_whose_owners_changed() {
+    // Recorded synchronously inside `start`, not from the spawned poller task,
+    // so the count cannot depend on when that task is polled.
+    let started: Arc<std::sync::Mutex<Vec<Vec<String>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tick_tx, mut tick_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let round = Arc::new(AtomicUsize::new(0));
+    let task = {
+        let started = Arc::clone(&started);
+        tokio::spawn(async move {
+            supervise(
+                move || {
+                    let round = round.fetch_add(1, Ordering::SeqCst);
+                    let tick = tick_tx.clone();
+                    async move {
+                        let _ = tick.send(());
+                        // The operator revoked cto-assistant's binding on the
+                        // bot izzie also binds. Same token, so the same key.
+                        let owners: &[&str] = if round == 0 {
+                            &["cto-assistant", "izzie"]
+                        } else {
+                            &["izzie"]
+                        };
+                        GatewayDecision::Poll(vec![fake_bot_owned_by(
+                            "telegram/shared",
+                            "111:shared",
+                            owners,
+                        )])
+                    }
+                },
+                move |bot| {
+                    started
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(bot.owners().unwrap_or_default().to_vec());
+                    let (tx, rx) = oneshot::channel();
+                    RunningBot::new(
+                        tx,
+                        tokio::spawn(async move {
+                            let _ = rx.await;
+                        }),
+                    )
+                },
+                shutdown_rx,
+            )
+            .await;
+        })
+    };
+    for _ in 0..3 {
+        tick_rx.recv().await.expect("three scans");
+    }
+    let _ = shutdown_tx.send(());
+    task.await.expect("supervisor joins");
+
+    let seen = started
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        seen,
+        vec![
+            vec!["cto-assistant".to_string(), "izzie".to_string()],
+            vec!["izzie".to_string()],
+        ],
+        "the poller must be restarted with the NEW owner set, exactly once: {seen:?}"
+    );
+}
+
 /// #8190 finding 1 (HIGH), outer half: a `Skip` is a pause, not an exit. A host
 /// that had nothing bound at boot must start polling when a binding appears.
 #[tokio::test(start_paused = true)]

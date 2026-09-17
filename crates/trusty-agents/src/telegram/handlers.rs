@@ -318,7 +318,98 @@ pub(super) fn note_turn_and_is_switch(
     text.starts_with("/switch")
 }
 
+/// The assistants a supervised per-assistant bot may drive; `None` is an
+/// unsupervised host-wide gateway.
+///
+/// Why (#8190): the owner list is cloned once per bot at spawn and read by
+/// every handler branch, so it travels as a shared `Arc` rather than being
+/// re-derived per update.
+pub(super) type BotOwners = Option<Arc<Vec<String>>>;
+
+/// Whether this bot may drive `persona` at all.
+///
+/// Why (#8190 round-2 finding 2, HIGH): `owners` scoped only the BINDING lane.
+/// An update no binding claimed fell through to [`handle_message`], which is
+/// unscoped — so a chat paired on the per-bot pairing file could
+/// `/switch cto-assistant` and drive an assistant that owns no binding on this
+/// bot, which is exactly the cross-assistant reach SPEC-AGENTS-09 T-2/T-4
+/// forbid. Deciding it in one pure function is what lets the `/switch` gate be
+/// stated by a test rather than inferred from the dptree wiring.
+/// What: `None` owners means the pre-#8190 standalone `--telegram`/REPL
+/// gateway, which polls one host-wide credential and may drive anything. A
+/// supervised bot admits exactly the assistants that own a receiving binding on
+/// it — `ctrl` included only when it is one of them.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
+pub(super) fn bot_may_drive(owners: Option<&[String]>, persona: &str) -> bool {
+    owners.is_none_or(|owners| owners.iter().any(|o| o == persona))
+}
+
+/// Whether an update no binding claimed may fall through to the gateway's own
+/// `ChatSession`.
+///
+/// Why (#8190 round-2 finding 2, HIGH): the `ChatSession` path exists for the
+/// standalone `--telegram` gateway and the REPL, which issue pairing codes and
+/// own a conversation of their own. A supervised per-assistant bot has neither:
+/// it is started by the API host, its grant IS the binding, and every update it
+/// should act on is claimed by [`super::inbound::route`]. Falling through gave
+/// an unbound chat a session the binding never authorized, so a supervised bot
+/// refuses it outright.
+/// What: `true` only for an unsupervised bot.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
+pub(super) fn fallback_session_allowed(owners: Option<&[String]>) -> bool {
+    owners.is_none()
+}
+
+/// Route one plain-text update: bindings first, then the gateway session.
+///
+/// Why (#8190 round-2 finding 2): this was an inline dptree closure, so the
+/// decision it makes — what happens to an update NO binding claimed — could
+/// only be exercised through a live dispatcher. Naming it puts both arms
+/// (`claimed`, and the refused fallback on a supervised bot) under test.
+/// What: asks [`super::inbound::route`] whether a saved binding claims this
+/// chat for one of `owners`; a claimed update is done. An unclaimed one reaches
+/// the gateway's own `ChatSession` only when [`fallback_session_allowed`]
+/// permits it — on a supervised per-assistant bot it is dropped, with a debug
+/// line naming the chat.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
+pub(super) async fn handle_plain_text(
+    bot: Bot,
+    msg: Message,
+    sessions: SessionMap,
+    project_path: Arc<PathBuf>,
+    paired: PairedChats,
+    attendance_root: crate::attendance::AttendanceRoot,
+    owners: BotOwners,
+) -> ResponseResult<()> {
+    let text = msg.text().unwrap_or_default().to_string();
+    let scope = owners.as_deref().map(Vec::as_slice);
+    if super::inbound::route(&msg, &text, project_path.as_path(), scope).await {
+        return Ok(());
+    }
+    if !fallback_session_allowed(scope) {
+        tracing::debug!(
+            chat_id = %msg.chat.id.0,
+            "telegram: no binding on this assistant's bot claims this chat; a supervised \
+             per-assistant bot has no gateway session to fall back to (#8190)"
+        );
+        return Ok(());
+    }
+    handle_message(
+        bot,
+        msg,
+        sessions,
+        project_path,
+        paired,
+        attendance_root,
+        owners,
+    )
+    .await
+}
+
 /// Forward a plain-text message to ctrl and reply with the result.
+// Why: teloxide's dptree dispatch passes injected state as positional
+// arguments; see `handle_command` above.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -327,6 +418,8 @@ pub(super) async fn handle_message(
     paired: PairedChats,
     // #4703: injected by `run_telegram_bot`; see `handle_command` above.
     attendance_root: crate::attendance::AttendanceRoot,
+    // #8190: the assistants this bot may drive, or `None` for a host-wide one.
+    owners: BotOwners,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
     let user_msg_id = msg.id;
@@ -363,7 +456,15 @@ pub(super) async fn handle_message(
     // store the choice on the session so subsequent turns route through
     // `run_pm_task_with_persona`.
     if is_switch {
-        return handle_switch(&bot, chat_id, &sessions, &project_path, &text).await;
+        return handle_switch(
+            &bot,
+            chat_id,
+            &sessions,
+            &project_path,
+            &text,
+            owners.as_deref().map(Vec::as_slice),
+        )
+        .await;
     }
 
     // Show "typing…" indicator while we wait on the LLM. Best-effort: if it
@@ -448,13 +549,18 @@ pub(super) async fn handle_message(
 /// What: Reports the current persona when no arg is given, validates the
 /// requested persona resolves (project-local then `~/.trusty-agents/agents/`), and
 /// stores it on the session (or clears it for `ctrl`/`default`).
-/// Test: Exercised indirectly via the `/switch` flow.
-async fn handle_switch(
+///
+/// #8190: `owners` narrows the whole command on a supervised per-assistant bot
+/// — see [`bot_may_drive`]. The check runs on the CANONICALIZED stem, so the
+/// `cto`/`cto assistant` aliases cannot slip past it.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
+pub(super) async fn handle_switch(
     bot: &Bot,
     chat_id: teloxide::types::ChatId,
     sessions: &SessionMap,
     project_path: &Arc<PathBuf>,
     text: &str,
+    owners: Option<&[String]>,
 ) -> ResponseResult<()> {
     let arg = text.trim_start_matches("/switch").trim().to_string();
     if arg.is_empty() {
@@ -485,6 +591,19 @@ async fn handle_switch(
         "cto" | "cto-assistant" | "cto assistant" => "cto-assistant".to_string(),
         _ => arg.clone(),
     };
+    // #8190: a supervised per-assistant bot drives only its own assistants.
+    if !bot_may_drive(owners, &stem) {
+        let admitted = owners.unwrap_or_default().join(", ");
+        bot.send_message(
+            chat_id,
+            format!(
+                "This bot drives only: {admitted}. `{arg}` owns no channel binding on it, so it \
+                 cannot be switched to here."
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
     // `/switch ctrl` / `/switch default` clears the persona, restoring
     // the default ctrl/PM runner used before any switch.
     if stem == "ctrl" {

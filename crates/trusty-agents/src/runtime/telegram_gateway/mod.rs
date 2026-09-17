@@ -90,8 +90,13 @@ impl ApiGateway {
 /// skip, and its own read failures — all belong in the status surface, and
 /// publishing them is the same step as deciding. Keeping that in one function
 /// is what stops a future rescan from updating one and not the other.
-/// What: records the scan, then returns the decision.
-/// Test: `telegram_gateway_status_records_a_skipped_binding`.
+/// What: records the scan, then returns the decision. Each scanned bot's row
+/// carries the [`status::STARTING`] placeholder, which
+/// [`status::record_scan`] replaces with the live state the previous scan's row
+/// held — a rescan must not report a healthy poller as perpetually starting
+/// (#8190).
+/// Test: `telegram_gateway_status_records_a_skipped_binding`,
+/// `telegram_gateway_status_a_rescan_preserves_a_polling_row`.
 async fn decide_and_publish() -> GatewayDecision {
     let found = scan::scan().await;
     let mut rows: Vec<status::TelegramBotStatus> = found
@@ -100,7 +105,7 @@ async fn decide_and_publish() -> GatewayDecision {
         .map(|bot| status::TelegramBotStatus {
             credential_refs: bot.label(),
             assistants: bot.owners().unwrap_or_default().to_vec(),
-            state: "starting".into(),
+            state: status::STARTING.into(),
             detail: None,
         })
         .collect();

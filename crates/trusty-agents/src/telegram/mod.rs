@@ -56,7 +56,7 @@ use tracing::{error, info, warn};
 
 use crate::ctrl::ConversationTurn;
 
-use handlers::{Command, handle_command, handle_message};
+use handlers::{BotOwners, Command, handle_command, handle_message, handle_plain_text};
 use pairing::{PairedChats, TelegramPidGuard, load_paired_chats, paired_chats_state_path_for};
 
 // Re-export the public REPL-facing API so callers continue to use
@@ -238,7 +238,7 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
 /// explicit HTTP timeouts, wires `dptree` routes for commands and plain text,
 /// then dispatches with Ctrl-C handling enabled.
 /// Test: `telegram_pairing_state_is_per_bot`,
-/// `telegram_bot_owners_scope_the_dispatch`,
+/// `telegram_bot_carries_its_owners_and_never_renders_its_key`,
 /// `telegram_pid_guard_live_conflict_is_rejected`.
 pub(crate) async fn run_telegram_bot_for(
     bot_identity: TelegramBot,
@@ -261,7 +261,7 @@ pub(crate) async fn run_telegram_bot_for(
     );
     let paired_state_path = paired_chats_state_path_for(bot_identity.key());
     // #8190: the assistants this bot may wake, carried into every dispatch.
-    let owners: Option<Arc<Vec<String>>> = bot_identity.owners().map(|o| Arc::new(o.to_vec()));
+    let owners: BotOwners = bot_identity.owners().map(|o| Arc::new(o.to_vec()));
     let token = bot_identity.into_token();
 
     // Why: Default reqwest client has aggressive idle timeouts that drop
@@ -354,6 +354,7 @@ pub(crate) async fn run_telegram_bot_for(
     let sessions_for_slash = Arc::clone(&sessions);
     let project_for_slash = Arc::clone(&project_path);
     let paired_for_slash = Arc::clone(&paired);
+    let owners_for_slash = owners.clone();
     let attendance_for_cmd = attendance_root.clone();
     let attendance_for_slash = attendance_root.clone();
     let attendance_for_msg = attendance_root.clone();
@@ -404,8 +405,13 @@ pub(crate) async fn run_telegram_bot_for(
                     let project = Arc::clone(&project_for_slash);
                     let paired = Arc::clone(&paired_for_slash);
                     let attendance_root = attendance_for_slash.clone();
+                    // #8190: `/switch` is gateway control, and on a supervised
+                    // bot it may not reach an assistant that owns no binding
+                    // here.
+                    let owners = owners_for_slash.clone();
                     async move {
-                        handle_message(bot, msg, sessions, project, paired, attendance_root).await
+                        handle_message(bot, msg, sessions, project, paired, attendance_root, owners)
+                            .await
                     }
                 }),
         )
@@ -413,8 +419,10 @@ pub(crate) async fn run_telegram_bot_for(
         // saved binding names dispatches through `receive_inbound` — the same
         // path, prompt and failure counter Slack uses. Everything else falls
         // through to the pre-#7427 gateway session, so a host with no bindings
-        // behaves exactly as it did. Slash commands never route here: they are
-        // gateway control (`/pair`, `/connect`, `/switch`), not assistant work.
+        // behaves exactly as it did — but a SUPERVISED per-assistant bot has no
+        // such session and drops the update instead (#8190). Slash commands
+        // never route here: they are gateway control (`/pair`, `/connect`,
+        // `/switch`), not assistant work.
         .branch(
             Update::filter_message()
                 .filter(|msg: Message| msg.text().map(|t| !t.starts_with('/')).unwrap_or(false))
@@ -426,18 +434,16 @@ pub(crate) async fn run_telegram_bot_for(
                     // #8190: only THIS bot's owners may claim the update.
                     let owners = owners.clone();
                     async move {
-                        let text = msg.text().unwrap_or_default().to_string();
-                        if inbound::route(
-                            &msg,
-                            &text,
-                            project.as_path(),
-                            owners.as_deref().map(Vec::as_slice),
+                        handle_plain_text(
+                            bot,
+                            msg,
+                            sessions,
+                            project,
+                            paired,
+                            attendance_root,
+                            owners,
                         )
                         .await
-                        {
-                            return Ok(());
-                        }
-                        handle_message(bot, msg, sessions, project, paired, attendance_root).await
                     }
                 }),
         );

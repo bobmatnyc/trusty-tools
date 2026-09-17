@@ -94,6 +94,58 @@ fn telegram_gateway_status_records_a_live_state_change() {
     clear();
 }
 
+/// #8190 round-2 finding 4: every rescan rewrote each bot's row with the
+/// `starting` placeholder, while `supervise_bot` records `polling` only at a
+/// TRANSITION — so a healthy poller read `starting` forever after the first
+/// rescan, and the one surface an operator can consult said the gateway was
+/// permanently coming up.
+///
+/// Pre-change this fails: the second `record_scan` overwrites the live row and
+/// the state reads `starting`.
+#[test]
+#[serial_test::serial(telegram_gateway_status)]
+fn telegram_gateway_status_a_rescan_preserves_a_polling_row() {
+    clear();
+    // Scan 1 publishes the placeholder; the poller then reports it is polling.
+    record_scan(vec![row("telegram/izzie", STARTING)], Vec::new());
+    record_state("telegram/izzie", "polling", None);
+    // Scan 2 finds the same bot and publishes the placeholder again.
+    record_scan(vec![row("telegram/izzie", STARTING)], Vec::new());
+    let snapshot = snapshot_at(std::path::Path::new("/nonexistent-telegram-state-dir"));
+    assert_eq!(
+        snapshot.bots[0].state, "polling",
+        "a rescan must not demote a live poller to `starting`: {:?}",
+        snapshot.bots[0]
+    );
+
+    // A live detail survives with its state, and a bot the scan no longer finds
+    // takes nothing forward.
+    record_state(
+        "telegram/izzie",
+        "waiting-for-lock",
+        Some("PID 4242 holds this bot's gateway lock".into()),
+    );
+    record_scan(vec![row("telegram/izzie", STARTING)], Vec::new());
+    let snapshot = snapshot_at(std::path::Path::new("/nonexistent-telegram-state-dir"));
+    assert_eq!(snapshot.bots[0].state, "waiting-for-lock");
+    assert!(
+        snapshot.bots[0]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("4242")),
+        "the live reason must travel with the state it explains: {:?}",
+        snapshot.bots[0]
+    );
+    record_scan(vec![row("telegram/cto", STARTING)], Vec::new());
+    let snapshot = snapshot_at(std::path::Path::new("/nonexistent-telegram-state-dir"));
+    assert_eq!(
+        snapshot.bots[0].state, STARTING,
+        "a bot the previous scan never saw inherits nothing: {:?}",
+        snapshot.bots[0]
+    );
+    clear();
+}
+
 /// The separate `tagent system status` process holds no gateway state, so the
 /// live lock probe is the only thing that can report a running poller.
 #[test]

@@ -87,8 +87,9 @@ fn event_from(msg: &Message, text: &str, included: bool) -> StoredEvent {
 /// pre-#8190 any-assistant behaviour, kept for the standalone `--telegram` and
 /// REPL gateways, which poll one host-wide credential.
 /// Test: `agent_channels_inbound_ignores_an_unbound_telegram_chat` pins the
-/// selection rule this delegates to; `telegram_bot_owners_scope_the_dispatch`
-/// pins the per-bot narrowing.
+/// selection rule this delegates to;
+/// `a_telegram_bots_owners_are_the_only_assistants_it_wakes` pins the per-bot
+/// narrowing end to end.
 pub(super) async fn route(
     msg: &Message,
     text: &str,

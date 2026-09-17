@@ -611,24 +611,27 @@ fn telegram_state_file_names_never_contain_the_token() {
     }
 }
 
-/// Owner ruling 2026-09-16: a bot delivers ONLY to the assistants that own a
-/// binding on it, and that set is the `allowed_personas` filter
-/// `receive_inbound` applies — so an update on bot A cannot wake an assistant
-/// bound only to bot B.
+/// The VALUE half of the owner ruling: a scanned bot carries exactly the
+/// assistants that own a binding on it, the legacy host-wide gateway carries
+/// `None`, and neither renders anything key-shaped.
+///
+/// #8190 round-2 finding 3: this used to be named for the dispatch and assert
+/// only the accessor, which states nothing about who wakes. The dispatch
+/// narrowing itself is
+/// `a_telegram_bots_owners_are_the_only_assistants_it_wakes`, which drives the
+/// live loader and an injected dispatcher against two assistants.
 #[test]
-fn telegram_bot_owners_scope_the_dispatch() {
+fn telegram_bot_carries_its_owners_and_never_renders_its_key() {
     let izzie = TelegramBot::new(
         trusty_common::credentials::Secret::new("111:izzie".to_string()),
         Some(vec!["izzie".into()]),
         vec!["telegram/izzie".into()],
     );
     assert_eq!(izzie.owners(), Some(["izzie".to_string()].as_slice()));
-    assert!(
-        !izzie
-            .owners()
-            .unwrap_or_default()
-            .contains(&"cto-assistant".to_string()),
-        "izzie's bot must not list an assistant bound to another bot"
+    assert_eq!(
+        format!("{izzie:?}"),
+        "TelegramBot { credential_refs: [\"telegram/izzie\"], owners: Some([\"izzie\"]), .. }",
+        "the label is the whole rendered surface"
     );
     // The pre-#8190 standalone gateway keeps its any-assistant dispatch.
     let legacy = TelegramBot::new(
@@ -994,6 +997,8 @@ async fn telegram_handle_message_records_attendance_under_the_injected_root() {
         Arc::new(dir.path().to_path_buf()),
         paired,
         Some(Arc::clone(&root)),
+        // #8190: an unsupervised host-wide gateway, the pre-#8190 shape.
+        None,
     )
     .await;
 
@@ -1001,5 +1006,241 @@ async fn telegram_handle_message_records_attendance_under_the_injected_root() {
         recorded_turn(&root, PROBE_PERSONA).is_some(),
         "handle_message must record the human turn under the INJECTED root; \
          finding nothing here means the hook resolved $HOME again (#4703)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #8190 round-2 finding 2 (HIGH): `owners` used to scope the BINDING lane only.
+// Everything below drives the two unscoped paths it left open — the `/switch`
+// intercept and the `ChatSession` fallback — against a stand-in Telegram, so a
+// reply is an assertion rather than a connection refusal.
+// ---------------------------------------------------------------------------
+
+/// A stand-in Telegram recording every `sendMessage` body, and a `Bot` aimed
+/// at it.
+///
+/// Why: `probe_bot` points at a closed port, which proves only that a handler
+/// TRIED to reply. The refusal these tests pin is a specific sentence, and the
+/// fallback refusal is the ABSENCE of any request at all — both need a server
+/// that answers.
+async fn recording_telegram() -> (teloxide::Bot, Arc<std::sync::Mutex<Vec<String>>>) {
+    let sent: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&sent);
+    // A catch-all rather than `/bot<token>/sendMessage`: a handler that called
+    // an unexpected Bot API method would otherwise show up as a 404 with an
+    // empty body, which reads as a JSON-parse bug rather than as the extra call
+    // it is. Recording `<path> <body>` keeps both assertable.
+    let app = axum::Router::new().route(
+        "/{*method}",
+        axum::routing::post(move |uri: axum::http::Uri, body: String| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                recorder
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("{} {body}", uri.path()));
+                axum::Json(serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 7427, "date": 0,
+                        "chat": {"id": 8190, "type": "private"}
+                    }
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let bot = teloxide::Bot::new("8190:owners")
+        .set_api_url(reqwest::Url::parse(&format!("http://{addr}/")).expect("stand-in url parses"));
+    (bot, sent)
+}
+
+/// Everything recorded by a stand-in Telegram so far.
+fn recorded(sent: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+    sent.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Write `<project>/.trusty-agents/agents/<name>/` as a complete package, so
+/// `/switch <name>` resolves without touching the developer's real `$HOME`.
+fn seed_project_persona(project: &std::path::Path, name: &str) {
+    let dir = project.join(".trusty-agents").join("agents").join(name);
+    std::fs::create_dir_all(&dir).expect("persona dir");
+    std::fs::write(
+        dir.join("agent.toml"),
+        format!("[agent]\nname = \"{name}\"\n"),
+    )
+    .expect("agent.toml");
+    std::fs::write(dir.join("persona.md"), "# persona\n").expect("persona.md");
+}
+
+/// #8190 round-2 finding 2 (HIGH): a supervised per-assistant bot must not let
+/// an update reach an assistant that owns no binding on it.
+///
+/// Why: `owners` narrowed `inbound::route` alone. An update that route declined
+/// fell through to `handle_message`, which is unscoped — so a chat paired on
+/// THIS bot's own pairing file could `/switch cto-assistant` and drive an
+/// assistant bound only to another bot, and any plain-text message afterwards
+/// ran as that persona in a gateway session the binding never authorized. Both
+/// are the cross-assistant reach SPEC-AGENTS-09 T-2/T-4 forbid.
+/// What: five real handler runs against a stand-in Telegram — a refused
+/// `/switch`, an admitted one, and the fallback a supervised bot no longer
+/// takes. The unsupervised (`owners: None`) bot is exercised beside each, so
+/// the assertions are a narrowing and not a blanket refusal.
+///
+/// Pre-change this fails twice: `handle_switch` takes no owners and stores
+/// `cto-assistant` on the session, and `handle_plain_text` does not exist — the
+/// closure it replaces always reaches `handle_message`, which answers the
+/// "Not paired" line the last assertion requires to be absent.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the crate's own $HOME-sandboxing convention; see test_env::lock_home"
+)]
+#[tokio::test]
+async fn telegram_gateway_fallback_session_cannot_switch_outside_the_owners() {
+    let _home_guard = crate::test_env::lock_home();
+    let home = tempfile::TempDir::new().expect("temp home");
+    // SAFETY: `lock_home` is held for the whole body, the crate's convention.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+    // An EMPTY roster: `inbound::route` must find no binding for this chat, so
+    // what happens next is the fallback decision under test and not a claim.
+    // Without the pin, `agents_dir_candidates` reads the repo's own bundled
+    // assistants from the CWD-relative tier.
+    let _agents_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        home.path()
+            .join(".trusty-agents/agents")
+            .to_str()
+            .expect("utf-8 tempdir"),
+    );
+    let project = tempfile::TempDir::new().expect("temp project");
+    for name in ["izzie", "cto-assistant"] {
+        seed_project_persona(project.path(), name);
+    }
+    let project_path = Arc::new(project.path().to_path_buf());
+    let owners: super::handlers::BotOwners = Some(Arc::new(vec!["izzie".to_string()]));
+    let scope = owners.as_deref().map(Vec::as_slice);
+    let chat_id = ChatId(8190);
+
+    // 1. A `/switch` to an assistant that owns no binding on this bot is
+    //    refused, and the session keeps whatever it had.
+    let (bot, sent) = recording_telegram().await;
+    let sessions: super::SessionMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    super::handlers::handle_switch(
+        &bot,
+        chat_id,
+        &sessions,
+        &project_path,
+        "/switch cto",
+        scope,
+    )
+    .await
+    .expect("the refusal is delivered");
+    let refusal = recorded(&sent);
+    assert_eq!(refusal.len(), 1, "one reply: {refusal:?}");
+    assert!(
+        refusal[0].contains("owns no channel binding"),
+        "the alias `cto` must be canonicalized and then refused: {refusal:?}"
+    );
+    assert!(
+        sessions.lock().await.get(&chat_id).is_none(),
+        "a refused switch must store nothing on the session"
+    );
+
+    // 2. An assistant that DOES own a binding on this bot still switches.
+    let (bot, sent) = recording_telegram().await;
+    super::handlers::handle_switch(
+        &bot,
+        chat_id,
+        &sessions,
+        &project_path,
+        "/switch izzie",
+        scope,
+    )
+    .await
+    .expect("the confirmation is delivered");
+    assert!(
+        recorded(&sent)[0].contains("Switched to izzie"),
+        "an owner must still be switchable: {:?}",
+        recorded(&sent)
+    );
+    assert_eq!(
+        sessions
+            .lock()
+            .await
+            .get(&chat_id)
+            .and_then(|s| s.active_persona.clone()),
+        Some("izzie".to_string())
+    );
+
+    // 3. The same refused switch on an UNSUPERVISED bot is not refused: the
+    //    gate belongs to per-assistant bots, not to `/switch` in general.
+    let (bot, sent) = recording_telegram().await;
+    let host_wide: super::SessionMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    super::handlers::handle_switch(
+        &bot,
+        chat_id,
+        &host_wide,
+        &project_path,
+        "/switch cto",
+        None,
+    )
+    .await
+    .expect("the confirmation is delivered");
+    assert!(
+        recorded(&sent)[0].contains("Switched to cto"),
+        "the pre-#8190 host-wide gateway keeps its any-persona `/switch`: {:?}",
+        recorded(&sent)
+    );
+
+    // 4. A plain-text update no binding claims reaches NO gateway session on a
+    //    supervised bot — not even the pairing refusal, which is the cheapest
+    //    observable proof the fallback was never entered.
+    let (bot, sent) = recording_telegram().await;
+    super::handlers::handle_plain_text(
+        bot,
+        probe_message(chat_id.0, "move the 3pm"),
+        Arc::clone(&sessions),
+        Arc::clone(&project_path),
+        Arc::new(RwLock::new(HashMap::new())),
+        None,
+        owners.clone(),
+    )
+    .await
+    .expect("a dropped update is not an error");
+    assert!(
+        recorded(&sent).is_empty(),
+        "a supervised bot has no gateway session to fall back to: {:?}",
+        recorded(&sent)
+    );
+
+    // 5. The same update on an unsupervised bot DOES reach the gateway session,
+    //    which answers with its pairing gate — so assertion 4 is the owners
+    //    rule and not a broken handler.
+    let (bot, sent) = recording_telegram().await;
+    super::handlers::handle_plain_text(
+        bot,
+        probe_message(chat_id.0, "move the 3pm"),
+        Arc::clone(&host_wide),
+        Arc::clone(&project_path),
+        Arc::new(RwLock::new(HashMap::new())),
+        None,
+        None,
+    )
+    .await
+    .expect("the pairing refusal is delivered");
+    let replies = recorded(&sent);
+    assert!(
+        replies.len() == 1 && replies[0].contains("Not paired"),
+        "the pre-#8190 fallback still runs for a host-wide bot: {replies:?}"
     );
 }

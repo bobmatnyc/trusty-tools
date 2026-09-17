@@ -506,7 +506,9 @@ fn absorb_overlays(bindings: &mut Vec<Binding>, channels: &[crate::channels::Cha
 /// assistant can be woken twice for one event.
 /// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`,
 /// `a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding`,
-/// `a_routed_global_and_its_legacy_binding_wake_once`.
+/// `a_routed_global_and_its_legacy_binding_wake_once`,
+/// `an_unallowed_binding_leaves_the_event_unclaimed`,
+/// `a_telegram_bots_owners_are_the_only_assistants_it_wakes`.
 #[allow(clippy::too_many_arguments)]
 async fn receive_inbound_at(
     loaded: &[(String, Vec<Binding>)],
@@ -545,7 +547,15 @@ async fn receive_inbound_at(
         // source (1) — otherwise `poll_once` falls through to the
         // `[[listeners]]` wake, which reads the still-enabled `agent.toml`
         // binding and wakes anyway.
-        outcome.claimed |= bound || sources.claimed;
+        //
+        // #8190 round-2 finding 5: `bound` is `allowed`-blind — it only asks
+        // whether this assistant's binding ADDRESSES the destination. Claiming
+        // on it alone let an assistant that `allowed_personas` excludes suppress
+        // the caller's fallback for an event nobody here may dispatch, so a
+        // Telegram update on another assistant's bot was dropped with no
+        // dispatch and no log. Only an assistant this call may actually wake
+        // claims for it.
+        outcome.claimed |= (allowed && bound) || sources.claimed;
         let selected = match source {
             crate::channels::dispatch::WakeSource::AssistantChannel => own.cloned(),
             crate::channels::dispatch::WakeSource::GlobalRouteTo => sources.routed,
@@ -891,6 +901,83 @@ mod receive_tests {
             1
         );
         assert!(budget.is_spent());
+    }
+
+    /// #8190 round-2 finding 5: an assistant `allowed_personas` EXCLUDES may not
+    /// claim the event.
+    ///
+    /// Why: `claimed` is what every caller's own fallback stands down for — the
+    /// Telegram gateway's chat session, `poll_once`'s `[[listeners]]` wake. A
+    /// binding owned by a non-owner assistant addresses the destination just as
+    /// well as the owner's, so claiming on `bound` alone made a message on
+    /// another assistant's bot suppress the fallback for a chat this call may
+    /// not dispatch: dropped with no dispatch and no log.
+    ///
+    /// Pre-change this fails at the first assertion: `outcome.claimed |= bound`
+    /// is `allowed`-blind and answers `true`.
+    #[tokio::test]
+    async fn an_unallowed_binding_leaves_the_event_unclaimed() {
+        let binding: Binding = serde_json::from_value(json!({
+            "id":"tg-cto","name":"Masa DM","provider":"telegram","target":"123456",
+            "enabled":true,"send_enabled":true,"receive_enabled":true
+        }))
+        .unwrap();
+        let loaded = vec![("cto-assistant".to_string(), vec![binding])];
+        let event = crate::listeners::store::StoredEvent {
+            id: "telegram:123456:42".into(),
+            listener_id: "telegram".into(),
+            provider: "telegram".into(),
+            event_type: "message.private".into(),
+            ts: "2026-09-16T00:00:00Z".into(),
+            from: Some("Masa".into()),
+            subject: None,
+            snippet: Some("Move the 3pm".into()),
+            included: true,
+            labels: vec![],
+        };
+        let user = crate::rbac::UserIdentity::new(
+            "telegram:123456".to_string(),
+            "Masa".to_string(),
+            crate::rbac::ServiceTier::default(),
+        );
+        let dispatcher = RecordingDispatch::default();
+        let claim = async |allowed: &[String]| {
+            receive_inbound_at(
+                &loaded,
+                "telegram",
+                "123456",
+                &event,
+                std::path::Path::new("/nonexistent"),
+                &user,
+                Some(allowed),
+                &mut DispatchBudget::PerEvent,
+                &[],
+                &dispatcher,
+            )
+            .await
+        };
+
+        let excluded = claim(&["izzie".to_string()]).await;
+        assert!(
+            !excluded.claimed,
+            "a binding this call may not dispatch must leave the caller's fallback \
+             free to handle the update: {excluded:?}"
+        );
+        assert!(excluded.woken.is_empty(), "{excluded:?}");
+
+        // The same binding, for an assistant that IS allowed: claimed and woken,
+        // so the assertion above is a narrowing and not a blanket refusal.
+        let owner = claim(&["cto-assistant".to_string()]).await;
+        assert!(owner.claimed, "{owner:?}");
+        assert_eq!(owner.woken, vec!["cto-assistant".to_string()], "{owner:?}");
+        assert_eq!(
+            dispatcher
+                .dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            vec![("cto-assistant".to_string(), "tg-cto".to_string())]
+        );
     }
 
     /// A binding whose wake prompt fails to build does not spend the cycle's

@@ -153,6 +153,24 @@ impl RunningBot {
 /// How long a stop waits for one poller to unwind.
 pub(super) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// One running poller and the owners it was spawned with.
+///
+/// Why (#8190 round-2 finding 1, HIGH): a poller's `allowed_personas` are
+/// FROZEN at spawn — `run_telegram_bot_for` clones them once and every dispatch
+/// reads that clone. Reconciling the token SET alone therefore kept an old
+/// poller alive across an owner change, so removing or disabling assistant B's
+/// binding on a bot assistant A still binds left B in the live poller's filter
+/// until the host restarted, and T-4 revocation never took effect. Remembering
+/// what each running poller was started with is what makes the change
+/// detectable.
+/// What: `owners` is the scanned owner list the poller carries, already sorted
+/// by [`super::scan::group_by_token`], so equality is a plain comparison.
+/// Test: `telegram_gateway_restarts_a_poller_whose_owners_changed`.
+struct RunningEntry {
+    owners: Option<Vec<String>>,
+    bot: RunningBot,
+}
+
 /// Run ONE bot's poller, restarting it until shutdown.
 ///
 /// Why (#8190 finding 1): a live lock holder used to end this loop for good, so
@@ -266,8 +284,14 @@ pub(super) async fn supervise_bot<A, AFut, L>(
 /// DISTINCT reason, so a permanently-unconfigured host prints one line, not one
 /// per minute. On shutdown every poller is stopped and awaited, which releases
 /// every lock.
+///
+/// #8190 round-2 finding 1: reconciliation is per BOT, not per token set. A bot
+/// whose scanned owners differ from the running poller's is restarted, because
+/// the poller's `allowed_personas` cannot be changed in place — see
+/// [`RunningEntry`].
 /// Test: `telegram_gateway_starts_a_poller_for_each_new_bot`,
 /// `telegram_gateway_stops_a_poller_whose_binding_went_away`,
+/// `telegram_gateway_restarts_a_poller_whose_owners_changed`,
 /// `telegram_gateway_skip_is_not_terminal`.
 pub(super) async fn supervise<D, DFut, S>(
     mut decide_now: D,
@@ -278,7 +302,7 @@ pub(super) async fn supervise<D, DFut, S>(
     DFut: Future<Output = GatewayDecision>,
     S: FnMut(&TelegramBot) -> RunningBot,
 {
-    let mut running: BTreeMap<BotKey, RunningBot> = BTreeMap::new();
+    let mut running: BTreeMap<BotKey, RunningEntry> = BTreeMap::new();
     let mut reported_skip: Option<String> = None;
     loop {
         let decision = tokio::select! {
@@ -303,17 +327,38 @@ pub(super) async fn supervise<D, DFut, S>(
                     .cloned()
                     .collect();
                 for key in departed {
-                    if let Some(bot) = running.remove(&key) {
+                    if let Some(entry) = running.remove(&key) {
                         info!("telegram gateway: a bot is no longer bound; stopping its poller");
-                        bot.stop().await;
+                        entry.bot.stop().await;
                     }
                 }
                 for bot in &bots {
-                    if running.contains_key(bot.key()) {
-                        continue;
+                    let owners = bot.owners().map(<[String]>::to_vec);
+                    match running.get(bot.key()) {
+                        Some(entry) if entry.owners == owners => continue,
+                        Some(_) => {
+                            // #8190: the live poller froze the OLD owner list at
+                            // spawn, so a revoked binding stays in its filter
+                            // until it is replaced.
+                            if let Some(entry) = running.remove(bot.key()) {
+                                info!(
+                                    bot = %bot.label(),
+                                    "telegram gateway: this bot's owning assistants changed; \
+                                     restarting its poller so the new set takes effect (#8190)"
+                                );
+                                entry.bot.stop().await;
+                            }
+                        }
+                        None => {}
                     }
                     info!(bot = %bot.label(), "telegram gateway: starting a poller (#8190)");
-                    running.insert(bot.key().clone(), start(bot));
+                    running.insert(
+                        bot.key().clone(),
+                        RunningEntry {
+                            owners,
+                            bot: start(bot),
+                        },
+                    );
                 }
             }
         }
@@ -327,8 +372,8 @@ pub(super) async fn supervise<D, DFut, S>(
 }
 
 /// Stop and await every running poller, releasing every lock.
-async fn stop_all(running: &mut BTreeMap<BotKey, RunningBot>) {
-    for (_, bot) in std::mem::take(running) {
-        bot.stop().await;
+async fn stop_all(running: &mut BTreeMap<BotKey, RunningEntry>) {
+    for (_, entry) in std::mem::take(running) {
+        entry.bot.stop().await;
     }
 }

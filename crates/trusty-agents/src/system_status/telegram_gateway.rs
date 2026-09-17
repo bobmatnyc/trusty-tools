@@ -70,18 +70,51 @@ pub struct TelegramGatewayStatus {
 static STATE: LazyLock<Mutex<TelegramGatewayStatus>> =
     LazyLock::new(|| Mutex::new(TelegramGatewayStatus::default()));
 
+/// The state a scan row carries before any poller has reported on it.
+///
+/// Why (#8190 round-2 finding 4): the scan cannot know what a poller is doing,
+/// so its row is a PLACEHOLDER. Naming the placeholder is what lets
+/// [`record_scan`] tell "the scan has nothing to say" apart from "the scan
+/// decided this bot is starting".
+pub(crate) const STARTING: &str = "starting";
+
 /// Replace the bot roster and the scan warnings with this scan's answer.
 ///
 /// Why (#8190 finding 4): the scan re-runs on a timer, so a binding an operator
 /// enables or fixes must be able to REMOVE its own warning. Appending would
 /// grow an unbounded log of stale complaints.
-/// What: overwrites `bots` and `warnings`; `lock_holders` is never stored,
+///
+/// #8190 round-2 finding 4: a rescan used to rewrite every row as
+/// [`STARTING`], while [`crate::runtime::telegram_gateway`]'s
+/// `supervise_bot` records `polling` only at a TRANSITION — so a healthy poller
+/// read `starting` forever after the first rescan, and the status surface said
+/// the gateway was perpetually coming up. A placeholder row now inherits the
+/// live state the previous scan's row had.
+/// What: overwrites `bots` and `warnings`, carrying `state`/`detail` forward
+/// for any row whose `credential_refs` the previous roster also carried AND
+/// whose incoming state is the [`STARTING`] placeholder. A `skipped` row, which
+/// the scan decides itself, always wins. `lock_holders` is never stored,
 /// because it is probed at read time.
 /// Test: `telegram_gateway_status_records_a_skipped_binding`,
-/// `telegram_gateway_status_scan_replaces_the_previous_warnings`.
+/// `telegram_gateway_status_scan_replaces_the_previous_warnings`,
+/// `telegram_gateway_status_a_rescan_preserves_a_polling_row`.
 pub(crate) fn record_scan(bots: Vec<TelegramBotStatus>, warnings: Vec<String>) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.bots = bots;
+    let previous = std::mem::take(&mut state.bots);
+    state.bots = bots
+        .into_iter()
+        .map(|mut row| {
+            if row.state == STARTING
+                && let Some(prior) = previous
+                    .iter()
+                    .find(|p| p.credential_refs == row.credential_refs)
+            {
+                row.state.clone_from(&prior.state);
+                row.detail.clone_from(&prior.detail);
+            }
+            row
+        })
+        .collect();
     state.warnings = warnings;
 }
 

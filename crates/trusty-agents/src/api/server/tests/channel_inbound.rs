@@ -50,11 +50,20 @@ route_to = [\"alpha-assistant\"]
 
 /// Point `$HOME` at a tempdir holding `config` and two assistants.
 fn seed_home(config: &str) -> tempfile::TempDir {
+    seed_home_with(config, &["alpha-assistant", "beta-assistant"])
+}
+
+/// [`seed_home`] with the roster named by the caller (#8190).
+///
+/// Why: the per-assistant Telegram bot rule is stated about two NAMED
+/// assistants, and a test that says `alpha`/`beta` cannot be read against the
+/// spec. Everything else about the fixture is identical.
+fn seed_home_with(config: &str, names: &[&str]) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("tempdir");
     let dir = home.path().join(".trusty-agents");
     std::fs::create_dir_all(&dir).expect("config dir");
     std::fs::write(dir.join("config.toml"), config).expect("seed config");
-    for name in ["alpha-assistant", "beta-assistant"] {
+    for name in names {
         let agent = dir.join("agents").join(name);
         std::fs::create_dir_all(&agent).expect("assistant dir");
         std::fs::write(
@@ -166,6 +175,105 @@ async fn an_injected_event_wakes_only_the_routed_assistant() {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone(),
         vec![("alpha-assistant".to_string(), "stub-desk".to_string())]
+    );
+}
+
+/// #8190 round-2 finding 3: the `allowed_personas` narrowing a per-assistant
+/// Telegram bot applies is DISPATCH behaviour, and the only test for it asserted
+/// that `TelegramBot::owners()` returns what it was constructed with — which
+/// states nothing about who wakes.
+///
+/// Why this shape: both assistants bind the SAME chat id, which is the case the
+/// owner ruling is about — izzie's bot and cto-assistant's bot are different
+/// bots, so an update arriving on izzie's must reach izzie alone even though
+/// cto-assistant's binding addresses that chat id just as well. The roster, the
+/// per-assistant channel files and the global config are all read live through
+/// `receive_inbound_with` into `receive_inbound_at`; only the model turn is
+/// substituted.
+///
+/// Pre-change the narrowing is untested, and reverting
+/// `receive_inbound_at`'s `allowed` gate fails this: cto-assistant wakes too.
+#[tokio::test]
+#[serial_test::serial(channel_credentials)]
+async fn a_telegram_bots_owners_are_the_only_assistants_it_wakes() {
+    let _home_guard = crate::test_env::lock_home();
+    let home = seed_home_with("", &["izzie", "cto-assistant"]);
+    // The repo this suite runs in ships its own `izzie` under the CWD-relative
+    // agents dir, which `agents_dir_candidates` puts FIRST — so the roster has
+    // to be pinned to the fixture or `load_at` reads the bundled izzie's
+    // (bindingless) channels instead.
+    let _agents_dir = EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        home.path()
+            .join(".trusty-agents/agents")
+            .to_str()
+            .expect("utf-8 tempdir"),
+    );
+    for name in ["izzie", "cto-assistant"] {
+        std::fs::write(
+            home.path()
+                .join(".trusty-agents/agents")
+                .join(name)
+                .join("agent.channels.json"),
+            json!([{
+                "id": format!("tg-{name}"), "name": "Masa DM", "provider": "telegram",
+                "target": "123456", "enabled": true, "send_enabled": true,
+                "receive_enabled": true
+            }])
+            .to_string(),
+        )
+        .expect("seed bindings");
+    }
+
+    let event = crate::listeners::store::StoredEvent {
+        id: "telegram:123456:42".into(),
+        listener_id: "telegram".into(),
+        provider: "telegram".into(),
+        event_type: "message.private".into(),
+        ts: "2026-09-16T00:00:00Z".into(),
+        from: Some("Masa".into()),
+        subject: None,
+        snippet: Some("Move the 3pm".into()),
+        included: true,
+        labels: vec![],
+    };
+    let user = crate::rbac::UserIdentity::from_remote(
+        "telegram:123456".to_string(),
+        event.from.as_deref(),
+        "telegram",
+    );
+    let dispatcher = RecordingDispatch::default();
+    let outcome = super::super::agent_channels::inbound::receive_inbound_with(
+        "telegram",
+        "123456",
+        &event,
+        std::path::Path::new("/nonexistent"),
+        &user,
+        // The bot this update arrived on is bound by izzie alone.
+        Some(&["izzie".to_string()]),
+        &mut super::super::agent_channels::inbound::DispatchBudget::PerEvent,
+        &dispatcher,
+    )
+    .await;
+
+    assert!(
+        outcome.claimed,
+        "izzie's own binding claims it: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.woken,
+        vec!["izzie".to_string()],
+        "exactly the bot's owner, and nobody else: {outcome:?}"
+    );
+    assert_eq!(
+        dispatcher
+            .woken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+        vec![("izzie".to_string(), "tg-izzie".to_string())],
+        "one turn, on izzie's own binding — cto-assistant binds the same chat id \
+         on ITS bot and must not be woken by this one"
     );
 }
 
