@@ -1,0 +1,264 @@
+{
+  "cases": 192,
+  "timing_samples": 576,
+  "matched_ordered_candidates": 64,
+  "candidate_comparisons": 64,
+  "labels": {
+    "ambiguous": 14,
+    "unavailable": 2,
+    "positive": 13,
+    "negative": 3
+  },
+  "source_creation_strata": {
+    "created_before_prompt": 6,
+    "created_after_prompt": 7
+  },
+  "arms": {
+    "old_combined-128": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 32,
+      "negative_abstention": 1.0,
+      "mean_tokens": 0,
+      "p50_ns": 251361249.5,
+      "p95_ns": 1236976125,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.0,
+      "selected_complete": 0,
+      "selected_note_recall": 0.0,
+      "selected_span_coverage": 0.0,
+      "selected_byte_coverage": 0.0,
+      "evidence_group_coverage": 0.0,
+      "evidence_complete": 0,
+      "evidence_note_recall": 0.0,
+      "evidence_span_coverage": 0.0,
+      "evidence_byte_coverage": 0.0,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        }
+      }
+    },
+    "old_combined-256": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 32,
+      "negative_abstention": 1.0,
+      "mean_tokens": 0,
+      "p50_ns": 249989750.0,
+      "p95_ns": 1226646458,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.0,
+      "selected_complete": 0,
+      "selected_note_recall": 0.0,
+      "selected_span_coverage": 0.0,
+      "selected_byte_coverage": 0.0,
+      "evidence_group_coverage": 0.0,
+      "evidence_complete": 0,
+      "evidence_note_recall": 0.0,
+      "evidence_span_coverage": 0.0,
+      "evidence_byte_coverage": 0.0,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        }
+      }
+    },
+    "raw_bm25-128": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 0,
+      "negative_abstention": 0.0,
+      "mean_tokens": 104.875,
+      "p50_ns": 37746520.5,
+      "p95_ns": 110546917,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.47435897435897434,
+      "selected_complete": 0.23076923076923078,
+      "selected_note_recall": 0.7692307692307693,
+      "selected_span_coverage": 0.23076923076923078,
+      "selected_byte_coverage": 0.4545900301569481,
+      "evidence_group_coverage": 0.21794871794871795,
+      "evidence_complete": 0.07692307692307693,
+      "evidence_note_recall": 0.38461538461538464,
+      "evidence_span_coverage": 0.07692307692307693,
+      "evidence_byte_coverage": 0.18051160758328463,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.5714285714285714,
+          "evidence_group_coverage": 0.2619047619047619
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.16666666666666666,
+          "evidence_group_coverage": 0.16666666666666666
+        }
+      }
+    },
+    "raw_bm25-256": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 0,
+      "negative_abstention": 0.0,
+      "mean_tokens": 238.09375,
+      "p50_ns": 38766645.5,
+      "p95_ns": 111333583,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.47435897435897434,
+      "selected_complete": 0.23076923076923078,
+      "selected_note_recall": 0.7692307692307693,
+      "selected_span_coverage": 0.23076923076923078,
+      "selected_byte_coverage": 0.4545900301569481,
+      "evidence_group_coverage": 0.28205128205128205,
+      "evidence_complete": 0.07692307692307693,
+      "evidence_note_recall": 0.5384615384615384,
+      "evidence_span_coverage": 0.07692307692307693,
+      "evidence_byte_coverage": 0.19811168371744298,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.8571428571428571,
+          "evidence_group_coverage": 0.38095238095238093
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.16666666666666666,
+          "evidence_group_coverage": 0.16666666666666666
+        }
+      }
+    },
+    "structured_plan-128": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 32,
+      "negative_abstention": 1.0,
+      "mean_tokens": 0,
+      "p50_ns": 37452854.5,
+      "p95_ns": 111211750,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.0,
+      "selected_complete": 0,
+      "selected_note_recall": 0.0,
+      "selected_span_coverage": 0.0,
+      "selected_byte_coverage": 0.0,
+      "evidence_group_coverage": 0.0,
+      "evidence_complete": 0,
+      "evidence_note_recall": 0.0,
+      "evidence_span_coverage": 0.0,
+      "evidence_byte_coverage": 0.0,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        }
+      },
+      "request_status": {
+        "unsupported": 62
+      },
+      "queries_with_ready_request": 0,
+      "max_graph_counters": {
+        "seeds": 0,
+        "index_probes": 0,
+        "visited_bindings": 0,
+        "examined_assertions": 0,
+        "emitted_semantic_facts": 0
+      }
+    },
+    "structured_plan-256": {
+      "cases": 32,
+      "positive": 13,
+      "negative": 3,
+      "empty_all": 32,
+      "negative_abstention": 1.0,
+      "mean_tokens": 0,
+      "p50_ns": 37713479.0,
+      "p95_ns": 113349583,
+      "candidate_group_coverage": 0.47435897435897434,
+      "candidate_complete": 0.23076923076923078,
+      "candidate_note_recall": 0.7692307692307693,
+      "candidate_span_coverage": 0.23076923076923078,
+      "candidate_byte_coverage": 0.4545900301569481,
+      "selected_group_coverage": 0.0,
+      "selected_complete": 0,
+      "selected_note_recall": 0.0,
+      "selected_span_coverage": 0.0,
+      "selected_byte_coverage": 0.0,
+      "evidence_group_coverage": 0.0,
+      "evidence_complete": 0,
+      "evidence_note_recall": 0.0,
+      "evidence_span_coverage": 0.0,
+      "evidence_byte_coverage": 0.0,
+      "strata": {
+        "created_after_prompt": {
+          "n": 7,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        },
+        "created_before_prompt": {
+          "n": 6,
+          "evidence_note_recall": 0.0,
+          "evidence_group_coverage": 0.0
+        }
+      },
+      "request_status": {
+        "unsupported": 62
+      },
+      "queries_with_ready_request": 0,
+      "max_graph_counters": {
+        "seeds": 0,
+        "index_probes": 0,
+        "visited_bindings": 0,
+        "examined_assertions": 0,
+        "emitted_semantic_facts": 0
+      }
+    }
+  },
+  "mandatory_groups_per_budget": 27,
+  "errors": []
+}

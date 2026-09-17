@@ -1,0 +1,26 @@
+{
+  "counts": {
+    "content_tokens": 3848151,
+    "drawer_chunks": 24854,
+    "empty_drawers": 0,
+    "expired_drawers": 258,
+    "graph_facts": 63167,
+    "graph_with_provenance": 63167,
+    "ineligible_triples": 23491,
+    "object_entities": 191,
+    "object_literals": 62976,
+    "supported_graph_facts": 157,
+    "unsupported_graph_facts": 63010
+  },
+  "drawer_decode_versions": {
+    "current": 3544,
+    "legacy": 0,
+    "pre_fact_key": 1165,
+    "pre_task": 112
+  },
+  "embeddings": false,
+  "gold_sha256": "bfb4f196a7853986084f981689ffc66ec81b4bd861eb81ea1791721c16e10024",
+  "helper_sha256": "6e30d87ddd012025db474cfa67d6607bfebd1584368f9076ff0812fee204af25",
+  "index_build_ns": 13219932709,
+  "prepared_sha256": "20e6d0465dc2f998d0a2164dd8cd9b9895f235a3f79b7b7cab48a3f9a0b115d6"
+}

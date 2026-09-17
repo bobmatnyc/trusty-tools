@@ -1,0 +1,57 @@
+{
+  "audit": "PASS",
+  "counts": {
+    "content_tokens": 3848151,
+    "drawer_chunks": 24854,
+    "empty_drawers": 0,
+    "expired_drawers": 258,
+    "graph_facts": 63167,
+    "graph_with_provenance": 63167,
+    "ineligible_triples": 23491,
+    "object_entities": 191,
+    "object_literals": 62976,
+    "supported_graph_facts": 157,
+    "unsupported_graph_facts": 63010
+  },
+  "counts_equal": true,
+  "database_or_index_residue": 0,
+  "drawer_decode_versions": {
+    "current": 3544,
+    "legacy": 0,
+    "pre_fact_key": 1165,
+    "pre_task": 112
+  },
+  "freeze_before_rankings": true,
+  "gold_sha256": "bfb4f196a7853986084f981689ffc66ec81b4bd861eb81ea1791721c16e10024",
+  "graph_predicate_counts": {
+    "contains": 4353,
+    "depends-on": 116,
+    "is-a": 563,
+    "is_alias_for": 11,
+    "mentioned-in": 16641,
+    "tags": 41300,
+    "uses": 146,
+    "works-at": 1
+  },
+  "metadata_equal": true,
+  "other_predicates": 36,
+  "parent_gold_audit": "PASS",
+  "prepared_sha256": "20e6d0465dc2f998d0a2164dd8cd9b9895f235a3f79b7b7cab48a3f9a0b115d6",
+  "raw_counts": {
+    "drawers": {
+      "decoded": 4821,
+      "errors": 0,
+      "read": 4821
+    },
+    "triples": {
+      "decoded": 86658,
+      "errors": 0,
+      "read": 86658
+    }
+  },
+  "recovered_copy": false,
+  "source_text_equal": true,
+  "strict_snapshot_sha256": "3d000743f7de080efb0b5c22ffc7231448f48e5fcd43918acea72a93a53d5166",
+  "temporary_residue_note": "No database or retrieval-index residue; five tool-hook files retained inside private root.",
+  "tmp_mode": "0o700"
+}
