@@ -52,6 +52,11 @@ no direct dependency reaches on its own, so dropping one reopens an alert.
 
 ## Vercel project settings
 
+The production domain is `trustytools.dev`, assigned in the Vercel project's
+Domains setting — not in `vercel.json`, which adapter-vercel does not require
+for a domain — and `SITE_URL` in `src/lib/site.ts` is the single in-repo
+source of the canonical origin every page's canonical link and `og:url` use.
+
 Three settings must be configured on the Vercel project. Only the first is
 obvious; the other two produce confusing failures when missing.
 
