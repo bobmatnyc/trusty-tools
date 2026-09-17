@@ -47,9 +47,9 @@
 //! switch re-execs with these variables dropped.
 //!
 //! Test: this module's `tests`, plus one per launch path for each variable —
-//! `spawn_command_defaults_the_alternate_screen_off` /
-//! `spawn_command_defaults_the_mouse_capture_off`,
-//! `resume_command_defaults_the_alternate_screen_off` /
+//! the daemon's spawn/resume/attach paths by
+//! `spec_command_yields_the_alt_screen_default_to_the_pane` (#8233 turned the
+//! `${NAME-1}` shell operand into `apply_default_to_command`), and
 //! `resume_command_defaults_the_mouse_capture_off`,
 //! `claude_command_defaults_the_alternate_screen_off` /
 //! `claude_command_defaults_the_mouse_capture_off`,

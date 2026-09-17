@@ -7,6 +7,54 @@
 
 use super::*;
 
+// ── #8233: the pane COMMAND-line length guard ──
+
+#[test]
+fn pane_command_limit_sits_below_max_canon() {
+    // The tty's canonical-mode buffer is MAX_CANON = 1024 bytes on macOS
+    // (`sys/syslimits.h:89`; `fpathconf(pty, _PC_MAX_CANON)` agrees). The guard
+    // must sit below it with room for the terminating newline, and must not be
+    // so low that the fixed-shape launch line (< 512 bytes) cannot pass.
+    const {
+        assert!(MAX_PANE_COMMAND_BYTES < 1024);
+        assert!(MAX_PANE_COMMAND_BYTES >= 512);
+    }
+}
+
+#[test]
+fn oversized_pane_command_is_refused() {
+    // The failure this exists for: 1054 bytes typed, ~1020 delivered, the rest
+    // dropped by the kernel with nothing able to notice.
+    let line = "x".repeat(MAX_PANE_COMMAND_BYTES + 1);
+    let msg = refuse_oversized_pane_command(&line).expect("an over-length line must be refused");
+    assert!(msg.contains("MAX_CANON"), "{msg}");
+    assert!(
+        msg.contains(&(MAX_PANE_COMMAND_BYTES + 1).to_string()),
+        "{msg}"
+    );
+}
+
+#[test]
+fn pane_command_at_the_limit_is_allowed() {
+    let line = "x".repeat(MAX_PANE_COMMAND_BYTES);
+    assert!(refuse_oversized_pane_command(&line).is_none());
+}
+
+#[test]
+fn send_command_line_refuses_an_oversized_line() {
+    // Nothing is typed and nothing is spawned: the refusal happens before any
+    // tmux process starts, so a bogus binary path proves no exec occurred.
+    let line = "x".repeat(MAX_PANE_COMMAND_BYTES + 1);
+    let err = send_command_line(
+        Some("/nonexistent/definitely-not-tmux"),
+        &TmuxTarget::session("tm-sess"),
+        &line,
+    )
+    .expect_err("an over-length command must be refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    assert!(err.to_string().contains("#8233"), "{err}");
+}
+
 // ── #2414: untyped-argv builders for display-message / show-environment ──
 
 #[test]

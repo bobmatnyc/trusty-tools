@@ -8,15 +8,39 @@
 //! Every builder that relocates `CLAUDE_CONFIG_DIR` therefore gets its own pin
 //! for each, so a future edit to one path cannot regress it while the others
 //! keep passing.
-//! What: `spawn_command`, `resume_command` and `compose_inplace_args` asserted
-//! both ways on the flags; then `ClaudeCodeAdapter::spawn`, `spawn_resume` and
-//! `build_inplace_resume_command` asserted to return `Err` — and to send no
-//! command to the pane — when the composed file cannot be written.
+//! What: `managed_launch::{spawn_spec, resume_spec}` and `compose_inplace_args`
+//! asserted both ways on the flags; then `ClaudeCodeAdapter::spawn`,
+//! `spawn_resume` and `build_inplace_resume_command` asserted to return `Err` —
+//! and to send no command to the pane — when the composed file cannot be
+//! written.
+//!
+//! #8233: the two shell-string builders became spec builders, so the flag
+//! assertions read the resolved argv. The `--mcp-config` path is now an argv
+//! TOKEN rather than a single-quoted shell word — which is the point: an argv
+//! token reaches `execv` unquoted, so a path with a space no longer depends on
+//! the pane shell re-splitting it correctly.
 //! Test: this file IS the test suite.
 
 use super::*;
 
+use super::super::managed_launch::{ManagedLaunch, resume_spec, spawn_spec};
 use crate::runtime::test_helpers::FakeTmux;
+
+/// The launch these flag tests share, with `config_dir` chosen per test.
+fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
+    ManagedLaunch {
+        cwd: Path::new(SCOPE_CWD),
+        claude_bin: "claude",
+        config_dir,
+        session_id: SCOPE_SESSION_ID,
+        prompt_file: None,
+        oauth_token: None,
+        gh_env: &[],
+        mcp_env: &[],
+        // #7685: the reachable posture — MCP scoping is orthogonal to it.
+        memory_reachable: true,
+    }
+}
 
 /// Representative managed-session UUID; not a real session.
 const SCOPE_SESSION_ID: &str = "99999999-8888-7777-6666-555555555555";
@@ -51,18 +75,8 @@ fn expected_path() -> String {
 #[test]
 #[serial_test::serial]
 fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
-    let cmd = spawn_command(
-        Path::new(SCOPE_CWD),
-        "claude",
-        Some(Path::new(SCOPE_CONFIG_DIR)),
-        SCOPE_SESSION_ID,
-        None,
-        None,
-        None,
-        &[],
-        // #7685: the reachable posture — MCP scoping is orthogonal to it.
-        true,
-    );
+    let args = spawn_spec(&scope_launch(Some(Path::new(SCOPE_CONFIG_DIR)))).args;
+    let cmd = args.join(" ");
     // #7892: additive, never strict — the operator's user-scope servers load
     // beside tm's builtins.
     assert!(
@@ -70,25 +84,15 @@ fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
         "a relocated spawn must not narrow the operator's user scope: {cmd}"
     );
     assert!(
-        cmd.contains(&format!("--mcp-config '{}'", expected_path())),
-        "the flag must name this session's own composed file, single-quoted: {cmd}"
+        cmd.contains(&format!("--mcp-config {}", expected_path())),
+        "the flag must name this session's own composed file as an argv token: {cmd}"
     );
 }
 
 #[test]
 #[serial_test::serial]
 fn spawn_command_omits_the_mcp_config_flag_without_a_config_dir() {
-    let cmd = spawn_command(
-        Path::new(SCOPE_CWD),
-        "claude",
-        None,
-        SCOPE_SESSION_ID,
-        None,
-        None,
-        None,
-        &[],
-        true,
-    );
+    let cmd = spawn_spec(&scope_launch(None)).args.join(" ");
     assert!(
         !cmd.contains("--mcp-config"),
         "a spawn reading the operator's own ~/.claude.json is not tm's to scope: {cmd}"
@@ -98,24 +102,18 @@ fn spawn_command_omits_the_mcp_config_flag_without_a_config_dir() {
 #[test]
 #[serial_test::serial]
 fn resume_command_carries_the_mcp_config_flag_and_not_strict() {
-    let cmd = resume_command(
-        Path::new(SCOPE_CWD),
-        "claude",
-        Some(Path::new(SCOPE_CONFIG_DIR)),
+    let args = resume_spec(
+        &scope_launch(Some(Path::new(SCOPE_CONFIG_DIR))),
         Some("abc-123"),
-        SCOPE_SESSION_ID,
-        None,
-        None,
-        None,
-        &[],
-        true,
-    );
+    )
+    .args;
+    let cmd = args.join(" ");
     assert!(
         !cmd.contains("--strict-mcp-config"),
         "a resumed pane must be scoped exactly like a fresh one: {cmd}"
     );
     assert!(
-        cmd.contains(&format!("--mcp-config '{}'", expected_path())),
+        cmd.contains(&format!("--mcp-config {}", expected_path())),
         "{cmd}"
     );
 }
@@ -123,18 +121,9 @@ fn resume_command_carries_the_mcp_config_flag_and_not_strict() {
 #[test]
 #[serial_test::serial]
 fn resume_command_omits_the_mcp_config_flag_without_a_config_dir() {
-    let cmd = resume_command(
-        Path::new(SCOPE_CWD),
-        "claude",
-        None,
-        Some("abc-123"),
-        SCOPE_SESSION_ID,
-        None,
-        None,
-        None,
-        &[],
-        true,
-    );
+    let cmd = resume_spec(&scope_launch(None), Some("abc-123"))
+        .args
+        .join(" ");
     assert!(!cmd.contains("--mcp-config"), "{cmd}");
 }
 

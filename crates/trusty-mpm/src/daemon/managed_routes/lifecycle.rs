@@ -878,6 +878,9 @@ async fn spawn_managed_inproject(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
+    // #8233: the post-send launch check below needs the driver after the adapter
+    // has taken ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
     let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, reachable);
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
@@ -896,12 +899,9 @@ async fn spawn_managed_inproject(
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
             .await;
     } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            worktree = %worktree.display(),
-            "managed session spawned successfully (in-project worktree)"
-        );
+        // #8233: `spawn` returning Ok means tmux took the keystrokes, not that
+        // `claude` started — the launch-spec shim can still fail after this.
+        super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), &record).await;
     }
 
     emit(ProvisioningStage::Complete);
@@ -995,6 +995,9 @@ pub async fn spawn_runtime_for(
     }
 
     let tmux_arc = mgr.tmux_driver();
+    // #8233: the post-send launch check needs the driver after the adapter takes
+    // ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
     let adapter = build_adapter(record.runtime, tmux_arc, None);
     let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
@@ -1014,11 +1017,9 @@ pub async fn spawn_runtime_for(
             .await;
         return Err(e.to_string());
     }
-    info!(
-        id = %record.id,
-        name = %record.tmux_name,
-        "FRONT-gate-escalated session spawned after human approval"
-    );
+    // #8233: same post-send check as the in-project path — an accepted
+    // keystroke is not a started runtime.
+    super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), record).await;
     Ok(())
 }
 

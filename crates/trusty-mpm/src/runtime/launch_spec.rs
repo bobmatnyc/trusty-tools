@@ -1,0 +1,315 @@
+//! The parameter carrier a managed pane launch is driven by (#8233).
+//!
+//! Why: every managed launch used to be TYPED into the pane as one shell script
+//! — `cd … && { export …; __tm_t0=…; . gh-env; rm -f gh-env; env -u … A=… B=…
+//! <tm> internal-spawn-disclaimed <claude> --flags…; <exit dispatch> }`. Its
+//! length grew with the cwd, `TMPDIR`, every env assignment and every flag, and
+//! at 1054 bytes it crossed the tty's canonical-mode input limit
+//! (`MAX_CANON`, 1024 on macOS — `sys/syslimits.h:89`, and `fpathconf(pty,
+//! _PC_MAX_CANON)` agrees). tmux typed it before the pane shell's line editor
+//! was up, the line discipline dropped everything past ~1020 bytes, and the
+//! session died with a truncated command on screen. Shortening the line only
+//! moves the cliff; the fix is to stop putting parameters in it at all.
+//!
+//! What: [`LaunchSpec`] is the whole launch — cwd, program, argv, env unsets and
+//! env assignments — written to a mode-0600 JSON file inside a mode-0700
+//! directory. The pane receives a FIXED-SHAPE invocation naming only that file,
+//! and `tm internal-spawn-disclaimed --launch-spec <file>` resolves the rest
+//! itself. Nothing on the typed line grows with the launch.
+//!
+//! Secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`) ride in `env_set`, so they
+//! reach `claude`'s environment without ever being typed into the pane or
+//! appearing in any process's argv. The file is created WITH mode 0600 (never
+//! chmod'd after, so it is not world-readable for an instant) and
+//! [`LaunchSpec::consume`] deletes it as it reads it.
+//!
+//! Test: `crates/trusty-mpm/src/runtime/launch_spec_tests.rs`.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Directory under the tm config home that holds pending launch specs.
+///
+/// Why: a fixed, short, tm-owned root rather than `std::env::temp_dir()` — the
+/// typed line carries this path, and `TMPDIR` on macOS is a ~50-character
+/// per-user sandbox path that would put the launch's length back at the mercy
+/// of the environment.
+/// What: joined onto `~/.trusty-tools/trusty-mpm/`.
+const SPEC_SUBDIR: &str = "launch-specs";
+
+/// Owner-only mode for the spec directory (#8233 requirement: 0700).
+#[cfg(unix)]
+const DIR_MODE: u32 = 0o700;
+
+/// Owner-only mode for the spec file itself, applied AT CREATION.
+#[cfg(unix)]
+const FILE_MODE: u32 = 0o600;
+
+/// What can go wrong carrying a launch's parameters to the pane.
+///
+/// Why: the spawn path must fail CLOSED — a spec that cannot be written or read
+/// back must abort the launch and error the session record, never fall back to
+/// typing an unbounded shell line. Structured variants let the caller say which
+/// half failed in the message it puts in front of the operator.
+/// What: one variant per step, each naming the path it was working on.
+/// Test: `write_reports_an_unwritable_directory`, `consume_reports_a_missing_spec`,
+/// `consume_reports_a_corrupt_spec`.
+#[derive(Debug, Error)]
+pub enum LaunchSpecError {
+    /// The home directory could not be resolved, so there is no spec root.
+    #[error("launch-spec directory unavailable: home directory could not be resolved")]
+    NoRoot,
+
+    /// The spec directory could not be created with owner-only permissions.
+    #[error("launch-spec directory {path} could not be prepared: {source}")]
+    Dir {
+        /// The directory that could not be prepared.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
+
+    /// The spec file could not be created or written.
+    #[error("launch-spec {path} could not be written: {source}")]
+    Write {
+        /// The spec file that could not be written.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
+
+    /// The spec file could not be read back (missing, unreadable, deleted).
+    #[error("launch-spec {path} could not be read: {source}")]
+    Read {
+        /// The spec file that could not be read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
+
+    /// The spec file existed but did not hold a decodable [`LaunchSpec`].
+    #[error("launch-spec {path} is corrupt: {source}")]
+    Parse {
+        /// The spec file that could not be decoded.
+        path: PathBuf,
+        /// The decode failure.
+        source: serde_json::Error,
+    },
+}
+
+/// Everything a managed `claude` launch needs, in structured form (#8233).
+///
+/// Why: the pane can only run a command; it must not have to CARRY the launch.
+/// Moving cwd/argv/env off the typed line is what makes the line's length
+/// independent of the launch — the whole point of the fix. It is also what lets
+/// `claude` be `posix_spawn`ed directly by the disclaim shim (#2997) instead of
+/// through an `env` process, so the resolved parameters are asserted against
+/// this struct rather than re-parsed out of a shell string.
+/// What: `session_id` is the managed session UUID (#2023 component B, exported
+/// into the child so hooks and the in-place relaunch can identify the session);
+/// `cwd` is the directory the child is rooted at (#2250); `program` is the
+/// resolved absolute `claude` (#1298); `args` is its argv after the program;
+/// `env_unset` names variables removed from the inherited pane environment
+/// (`ANTHROPIC_API_KEY` plus `core::claude_env_scrub::INHERITED_SESSION_MARKERS`
+/// and any inherited `gh` identity, #4467/#6668); `env_set` is every assignment,
+/// applied after the unsets.
+///
+/// Field ORDER within `env_unset`/`env_set` is preserved on the wire so a test
+/// can pin the composition against the shell line this replaced.
+/// Test: `spec_round_trips_through_the_file`,
+/// `spec_command_carries_cwd_program_argv_and_env`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchSpec {
+    /// The managed session's UUID (`TM_MANAGED_SESSION_ID`).
+    pub session_id: String,
+    /// Working directory for the spawned process.
+    pub cwd: PathBuf,
+    /// Absolute path to the program to launch (the resolved `claude`).
+    pub program: String,
+    /// The program's arguments, excluding the program itself.
+    pub args: Vec<String>,
+    /// Variables removed from the inherited environment, applied first.
+    pub env_unset: Vec<String>,
+    /// Variables assigned into the child environment, applied after the unsets.
+    pub env_set: Vec<(String, String)>,
+}
+
+impl LaunchSpec {
+    /// Resolve the tm-owned directory pending specs are written to.
+    ///
+    /// Why: one answer for both the writer (the daemon) and the reader (the
+    /// shim), so neither can look in a directory the other does not use.
+    /// What: `~/.trusty-tools/trusty-mpm/launch-specs`. `None` when the home
+    /// directory cannot be resolved.
+    /// Test: `spec_root_nests_under_the_tm_config_home`.
+    pub fn root() -> Option<PathBuf> {
+        trusty_common::crate_config::crate_config_dir(crate::core::trusty_tools_config::CRATE_NAME)
+            .map(|dir| dir.join(SPEC_SUBDIR))
+    }
+
+    /// Write this spec to a fresh mode-0600 file under [`LaunchSpec::root`].
+    ///
+    /// Why: the launch's parameters have to reach the pane somehow, and a file
+    /// the pane merely NAMES is the only carrier whose typed size is fixed.
+    /// What: delegates to [`LaunchSpec::write_in`] with the production root.
+    /// Test: `write_creates_an_owner_only_file_in_an_owner_only_dir`.
+    pub fn write(&self) -> Result<PathBuf, LaunchSpecError> {
+        let dir = Self::root().ok_or(LaunchSpecError::NoRoot)?;
+        self.write_in(&dir)
+    }
+
+    /// [`LaunchSpec::write`] against an explicit directory (the hermetic seam).
+    ///
+    /// Why: tests must not write into the operator's real config home, and the
+    /// permission assertions need a directory they control.
+    /// What: creates `dir` with mode 0700 when absent, then writes
+    /// `<dir>/<uuid>.json` through [`create_owner_only`] — created WITH mode
+    /// 0600, never chmod'd afterwards, so the JSON (which carries
+    /// `CLAUDE_CODE_OAUTH_TOKEN`/`GH_TOKEN`) is never group- or world-readable
+    /// for even an instant.
+    /// Test: `write_creates_an_owner_only_file_in_an_owner_only_dir`,
+    /// `write_reports_an_unwritable_directory`.
+    pub fn write_in(&self, dir: &Path) -> Result<PathBuf, LaunchSpecError> {
+        ensure_owner_only_dir(dir).map_err(|source| LaunchSpecError::Dir {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let json = serde_json::to_vec(self).map_err(|e| LaunchSpecError::Write {
+            path: path.clone(),
+            source: std::io::Error::other(e),
+        })?;
+        create_owner_only(&path, &json).map_err(|source| LaunchSpecError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
+    /// Read a spec and DELETE it in the same step.
+    ///
+    /// Why: the spec is single-use and holds credentials. Removing it as part of
+    /// reading it means a launch that proceeds leaves nothing on disk, and a
+    /// stale file can never be replayed into a second `claude`.
+    /// What: reads the bytes, removes the file (a removal failure is logged by
+    /// the caller, never fatal — the launch itself already has the parameters),
+    /// then decodes. A missing file, an unreadable one, or one that is not
+    /// decodable JSON each returns the matching [`LaunchSpecError`], which is
+    /// what makes the shim fail loudly instead of launching a partial `claude`.
+    /// Test: `spec_round_trips_through_the_file`, `consume_removes_the_file`,
+    /// `consume_reports_a_missing_spec`, `consume_reports_a_corrupt_spec`.
+    pub fn consume(path: &Path) -> Result<Self, LaunchSpecError> {
+        let bytes = std::fs::read(path).map_err(|source| LaunchSpecError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        // Best-effort: the parameters are already in hand, so a removal failure
+        // must not abort a launch that can otherwise succeed.
+        let _ = std::fs::remove_file(path);
+        serde_json::from_slice(&bytes).map_err(|source| LaunchSpecError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Read a spec back WITHOUT consuming it, to prove it is usable.
+    ///
+    /// Why: the daemon writes the spec and then types a line naming it, and by
+    /// then the launch is out of its hands. Reading it back first turns "the
+    /// carrier is missing, unreadable or corrupt" into a spawn error the caller
+    /// can mark the session record errored on, instead of a pane that quietly
+    /// sits at a bare shell (#8233 fail-closed requirement).
+    /// What: the same read-and-decode [`LaunchSpec::consume`] performs, minus the
+    /// removal. Returns the decoded spec so a caller can also assert on it.
+    /// Test: `verify_accepts_a_spec_just_written`, `verify_reports_a_corrupt_spec`.
+    pub fn verify(path: &Path) -> Result<Self, LaunchSpecError> {
+        let bytes = std::fs::read(path).map_err(|source| LaunchSpecError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        serde_json::from_slice(&bytes).map_err(|source| LaunchSpecError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Build the [`std::process::Command`] this spec describes.
+    ///
+    /// Why: this is where "the claude the OS sees" is decided — cwd, env and
+    /// argv all come from the spec rather than from a shell that re-splits a
+    /// string, so nothing about the launch depends on pane-shell quoting.
+    /// What: `program` + `args`, `current_dir(cwd)`, one `env_remove` per
+    /// `env_unset` entry FIRST (mirroring POSIX `env -u` preceding every
+    /// assignment), then one `env` per `env_set` pair, then
+    /// `TM_MANAGED_SESSION_ID` (#2023 component B) and the
+    /// `core::alt_screen` managed defaults, which yield per-variable to a value
+    /// the pane already exports exactly as the `${NAME-1}` shell form did
+    /// (#6495/#7160).
+    /// Test: `spec_command_carries_cwd_program_argv_and_env`,
+    /// `spec_command_yields_the_alt_screen_default_to_the_pane`.
+    pub fn to_command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(&self.args).current_dir(&self.cwd);
+        for name in &self.env_unset {
+            cmd.env_remove(name);
+        }
+        for (name, value) in &self.env_set {
+            cmd.env(name, value);
+        }
+        cmd.env(
+            crate::core::harness_root::MANAGED_SESSION_ID_ENV,
+            &self.session_id,
+        );
+        // #6495/#7160: the `${NAME-1}` shell operands became this call — same
+        // table, same per-variable operator precedence, no shell needed.
+        crate::core::alt_screen::apply_default_to_command(&mut cmd);
+        cmd
+    }
+}
+
+/// Create `dir` (and its parents) with owner-only permissions.
+///
+/// Why: the spec files inside carry credentials, so the directory must not be
+/// traversable by another local user. Setting the mode on the directory as well
+/// as the file is defence in depth against an umask that would otherwise leave
+/// it 0755.
+/// What: `create_dir_all`, then `set_permissions(0700)` on unix. The mode is set
+/// on the DIRECTORY (not a file), so there is no window in which a secret is
+/// readable — the files inside are created 0600 from the start.
+/// Test: `write_creates_an_owner_only_file_in_an_owner_only_dir`.
+fn ensure_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE))?;
+    }
+    Ok(())
+}
+
+/// Write `data` to a NEW file created with mode 0600.
+///
+/// Why: `std::fs::write` honours the umask, so a spec carrying `GH_TOKEN` could
+/// land group-readable; and a `chmod` after the write leaves a window in which
+/// it was. Opening with the mode closes both.
+/// What: `OpenOptions::create_new(true).mode(0600)` on unix — `create_new` also
+/// means a uuid collision errors instead of clobbering another live launch.
+/// Test: `write_creates_an_owner_only_file_in_an_owner_only_dir`.
+fn create_owner_only(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(FILE_MODE);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(data)
+}
+
+#[cfg(test)]
+#[path = "launch_spec_tests.rs"]
+mod tests;

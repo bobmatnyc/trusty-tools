@@ -536,6 +536,27 @@ impl TmuxDriver {
         Ok(())
     }
 
+    /// [`send_line`](Self::send_line) for a SHELL COMMAND, refusing a line the
+    /// pane's tty would truncate (#8233).
+    ///
+    /// Why: every launch path types a composed `claude` invocation at a pane's
+    /// shell prompt, where the tty is in canonical mode and drops everything past
+    /// `MAX_CANON` (1024 bytes on macOS) with no error. A 1054-byte launch line
+    /// killed session `dd0e2fb8-…` that way. Refusing is the only place the
+    /// failure can be made visible, and it is scoped to COMMAND lines so task
+    /// injection into Claude Code's raw-mode TUI — legitimately multi-kilobyte —
+    /// is untouched.
+    /// What: [`crate::core::tmux::refuse_oversized_pane_command`] first; on
+    /// refusal NOTHING is typed and the message is returned as a
+    /// `Error::Protocol`. Otherwise delegates to [`send_line`](Self::send_line).
+    /// Test: `driver_send_command_line_refuses_an_oversized_line`.
+    pub fn send_command_line(&self, target: &TmuxTarget, text: &str) -> Result<()> {
+        if let Some(msg) = crate::core::tmux::refuse_oversized_pane_command(text) {
+            return Err(Error::Protocol(msg));
+        }
+        self.send_line(target, text)
+    }
+
     /// Send literal text to a session/pane WITHOUT a trailing Enter.
     ///
     /// Why: the harness-agnostic no-submit inject intent (#1461) types into the

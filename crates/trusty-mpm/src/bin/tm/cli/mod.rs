@@ -245,17 +245,28 @@ pub(crate) enum Command {
     /// tmux server. Hidden because it is an internal launch shim
     /// (`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`), never a
     /// user-facing verb.
-    /// What: spawns `argv[0]` with `argv[1..]` via
-    /// [`trusty_mpm::core::spawn_disclaim::disclaimed_status`] (inherited stdio),
-    /// waits, and exits with the child's status code. On non-macOS the disclaim
-    /// is a no-op pass-through to a plain `Command::status()`.
+    /// What: with `--launch-spec <path>` (#8233, the managed form) it reads a
+    /// [`trusty_mpm::runtime::launch_spec::LaunchSpec`] — cwd, program, argv,
+    /// env unsets and assignments — deletes it, and spawns from that; with a
+    /// trailing argv it spawns `argv[0]` with `argv[1..]`. Either way the spawn
+    /// goes through [`trusty_mpm::core::spawn_disclaim::disclaimed_status`]
+    /// (inherited stdio), waits, and exits with the child's status code. On
+    /// non-macOS the disclaim is a no-op pass-through to a plain
+    /// `Command::status()`.
     /// Test: `cli_parses_internal_spawn_disclaimed` (in `tests.rs`) covers the
-    /// trailing-argv parse; the spawn behaviour is covered by
+    /// trailing-argv parse and `cli_parses_internal_spawn_disclaimed_launch_spec`
+    /// the spec form; the spawn behaviour is covered by
     /// `crate::core::spawn_disclaim`'s `disclaimed_status_*` tests.
     #[command(name = "internal-spawn-disclaimed", hide = true)]
     InternalSpawnDisclaimed {
-        /// The program to launch, followed by its arguments.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        /// Read cwd, argv and environment from a launch spec instead of argv
+        /// (#8233) — the managed-session form, which keeps the pane's typed
+        /// line a fixed size no matter how large the launch is.
+        #[arg(long = "launch-spec", value_name = "PATH")]
+        launch_spec: Option<std::path::PathBuf>,
+        /// The program to launch, followed by its arguments. Empty when
+        /// `--launch-spec` is given.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
     },
     /// Manage the project registry (registry B) and its Deliverable/Milestone

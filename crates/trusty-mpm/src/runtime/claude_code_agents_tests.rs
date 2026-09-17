@@ -1,6 +1,10 @@
 //! Tests for the #6863 live-background-session probe and the `attach` relaunch
-//! shape: `claude_code_agents::{attach_id_in_registry, attach_command,
-//! relaunch_command}`.
+//! shape: `claude_code_agents::{attach_id_in_registry, relaunch_spec}`.
+//!
+//! #8233: the builders return a `LaunchSpec` rather than a shell string, so the
+//! assertions read the resolved argv (space-joined for legibility — every token
+//! here is space-free) instead of a quoted command line. Same tokens, same
+//! decisions; one layer of quoting removed.
 //!
 //! Why: the defect is a WRONG COMMAND, not a wrong exit code — `tm session
 //! resume` typed `claude --resume <uuid>` at a session Claude Code was already
@@ -17,7 +21,9 @@
 
 use std::path::Path;
 
-use super::{RelaunchInputs, attach_command, attach_id_in_registry, relaunch_command};
+use super::super::super::launch_spec::LaunchSpec;
+use super::super::super::managed_launch::{ManagedLaunch, attach_spec};
+use super::{attach_id_in_registry, relaunch_spec};
 
 /// The live background session every "attaches" test targets.
 const LIVE_UUID: &str = "74ede5c9-c66d-471e-8dbe-9370d29f6f2e";
@@ -97,21 +103,45 @@ const REGISTRY_SAMPLE: &str = r#"[
   }
 ]"#;
 
-/// The command inputs every builder test shares.
-fn inputs(cwd: &Path) -> RelaunchInputs<'_> {
-    RelaunchInputs {
+/// The launch inputs every builder test shares.
+fn inputs(cwd: &Path) -> ManagedLaunch<'_> {
+    ManagedLaunch {
         cwd,
         claude_bin: "/usr/local/bin/claude",
         config_dir: None,
         session_id: TEST_SESSION_ID,
         prompt_file: None,
         oauth_token: None,
-        gh_env_file: None,
+        gh_env: &[],
         // #7685: the reachable posture — the one every pre-#7685 assertion in
         // this file was written against.
         memory_reachable: true,
         mcp_env: &[],
     }
+}
+
+/// The resolved argv, space-joined, for the token-presence assertions below.
+///
+/// Why (#8233): these tests are about WHICH subcommand and flags the choice
+/// produces, and every token involved is space-free, so joining is a faithful
+/// rendering — not a re-introduction of the shell line the fix removed.
+fn argv(spec: &LaunchSpec) -> String {
+    spec.args.join(" ")
+}
+
+/// [`relaunch_spec`] rendered through [`argv`] — the shape the assertions read.
+fn relaunch_command(
+    launch: &ManagedLaunch<'_>,
+    claude_session_id: Option<&str>,
+    effective_id: Option<&str>,
+    probe: impl FnOnce() -> Result<String, String>,
+) -> String {
+    argv(&relaunch_spec(
+        launch,
+        claude_session_id,
+        effective_id,
+        probe,
+    ))
 }
 
 /// Why (#6863): this is the whole defect. A `claude_session_id` Claude Code is
@@ -415,64 +445,31 @@ fn query_registry_kills_and_reaps_a_wedged_probe() {
     );
 }
 
-/// Why (#6766, #3025, #2023, #2250): attaching must keep every wrapper the
-/// resume path carries, or the attached pane loses the `cd`, the managed
-/// session id, the launch clock, or the on-exit report.
+/// Why (#6766, #3025, #2023, #2250): attaching must keep everything the resume
+/// path carries — the cwd, the managed session id, the env scrub — or the
+/// attached pane loses whatever the differing piece carried. #8233 made that
+/// mechanical: both builders share one `base()`, so this asserts the shared
+/// values directly rather than comparing a string prefix.
 #[test]
 fn attach_command_carries_the_resume_prefixes() {
     let cwd = Path::new(TEST_CWD);
-    let cmd = attach_command(&inputs(cwd), LIVE_SHORT);
-    assert!(cmd.starts_with("cd '/tmp/ws' && {"), "rooted at cwd: {cmd}");
-    assert!(
-        cmd.contains(&format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'")),
-        "exports the managed session id: {cmd}"
-    );
-    assert!(
-        cmd.contains("env -u ANTHROPIC_API_KEY"),
-        "keeps the env scrub: {cmd}"
-    );
-    assert!(
-        cmd.contains("__tm_t0"),
-        "keeps the #6766 launch clock: {cmd}"
-    );
-    assert!(
-        cmd.contains(&format!("/usr/local/bin/claude attach {LIVE_SHORT}")),
-        "attaches by short id: {cmd}"
-    );
-}
+    let launch = inputs(cwd);
+    let attach = attach_spec(&launch, LIVE_SHORT);
+    let resume = super::super::super::managed_launch::resume_spec(&launch, Some(LIVE_UUID));
 
-/// Why (#6863): `attach` and `--resume` are two endings on ONE preamble — the
-/// `cd`, the managed-session-id export, the launch clock, the `gh` identity
-/// source, the env scrub and `CLAUDE_CONFIG_DIR`. Asserting each piece
-/// individually lets the two drift apart one piece at a time; comparing the
-/// byte-identical prefix pins that they diverge only at the subcommand.
-#[test]
-fn attach_and_resume_share_a_byte_identical_prefix() {
-    let cwd = Path::new(TEST_CWD);
-    let shared = inputs(cwd);
-    let attach = attach_command(&shared, LIVE_SHORT);
-    let resume = super::super::resume_command(
-        shared.cwd,
-        shared.claude_bin,
-        shared.config_dir,
-        Some(LIVE_UUID),
-        shared.session_id,
-        shared.prompt_file,
-        shared.oauth_token,
-        shared.gh_env_file,
-        shared.mcp_env,
-        shared.memory_reachable,
-    );
-    let prefix: String = attach
-        .chars()
-        .zip(resume.chars())
-        .take_while(|(a, r)| a == r)
-        .map(|(a, _)| a)
-        .collect();
+    assert_eq!(attach.cwd, cwd, "rooted at the workspace");
+    assert_eq!(attach.session_id, TEST_SESSION_ID);
+    assert_eq!(attach.program, "/usr/local/bin/claude");
     assert!(
-        prefix.ends_with(&format!("{} ", shared.claude_bin)),
-        "the two commands must be identical up to the claude binary, then \
-         diverge at the subcommand; shared prefix was: {prefix}"
+        attach.env_unset.contains(&"ANTHROPIC_API_KEY".to_owned()),
+        "keeps the env scrub: {:?}",
+        attach.env_unset
+    );
+    assert_eq!(argv(&attach), format!("attach {LIVE_SHORT}"));
+    assert_eq!(
+        (attach.env_unset, attach.env_set, attach.cwd, attach.program),
+        (resume.env_unset, resume.env_set, resume.cwd, resume.program),
+        "attach and resume must diverge only in argv"
     );
 }
 
@@ -484,7 +481,7 @@ fn attach_command_omits_flags_attach_cannot_take() {
     let prompt = Path::new("/tmp/prompt.md");
     let mut with_prompt = inputs(cwd);
     with_prompt.prompt_file = Some(prompt);
-    let cmd = attach_command(&with_prompt, LIVE_SHORT);
+    let cmd = argv(&attach_spec(&with_prompt, LIVE_SHORT));
     for flag in [
         "--append-system-prompt-file",
         "--setting-sources",

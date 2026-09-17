@@ -170,6 +170,57 @@ pub(crate) async fn record_resume_outcome(
     );
 }
 
+/// Verify a just-sent SPAWN and record what it found (#8233, mirroring #6766's
+/// resume half).
+///
+/// Why: `spawn` returning `Ok` means tmux accepted the keystrokes, not that
+/// `claude` started. Since #8233 the pane runs `tm internal-spawn-disclaimed
+/// --launch-spec <file>`, and that shim can still fail AFTER the daemon is out
+/// of the loop — a spec deleted or clobbered between write and read, a `claude`
+/// that vanished from disk. The shim prints why, but only this check turns an
+/// absent runtime into an errored RECORD; without it the session sat `Active`
+/// with no runtime behind it until the ~60 s reaper noticed, which is exactly
+/// how `dd0e2fb8-…` stayed ACTIVE with last activity `None`.
+/// What: [`verify_launch`] with the production budget; on
+/// [`LaunchOutcome::NotStarted`] it warns and drives the same
+/// `SessionManager::mark_errored` transition the adapter-failure arm uses.
+/// [`LaunchOutcome::Unverifiable`] — every hermetic test's driver, and the
+/// documented tmux-absent fallback — changes nothing, exactly as on the resume
+/// path.
+/// Test: `verify_launch_reports_not_started_when_the_pane_stays_bare` covers the
+/// verdict; `spawn_outcome_errors_a_record_whose_runtime_never_came_up` covers
+/// this wrapper's transition.
+pub(crate) async fn record_spawn_outcome(
+    mgr: &crate::session_manager::SessionManager,
+    tmux: &dyn ManagedTmuxDriver,
+    record: &crate::session_manager::SessionRecord,
+) {
+    let outcome = verify_launch(
+        tmux,
+        &record.tmux_name,
+        RESUME_VERIFY_ATTEMPTS,
+        RESUME_VERIFY_INTERVAL,
+    )
+    .await;
+    if outcome == LaunchOutcome::NotStarted {
+        let msg = format!(
+            "launch did not take: no runtime came up in pane '{}' — the pane printed why \
+             on its own last line (a launch spec that could not be read prints there); \
+             start again once that is addressed (#8233)",
+            record.tmux_name
+        );
+        tracing::warn!(id = %record.id, name = %record.tmux_name, "{msg}");
+        let _ = mgr.mark_errored(&record.id, &msg).await;
+        return;
+    }
+    tracing::info!(
+        id = %record.id,
+        name = %record.tmux_name,
+        ?outcome,
+        "managed session spawned successfully"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,6 +23,12 @@
 //! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
 mod claude_code;
+// #8233: the managed launch is carried to the pane as PARAMETERS, not as a
+// typed shell script. `launch_spec` is the carrier, `managed_launch` composes
+// it, `launch_report` is the on-exit hint the shim now prints.
+pub mod launch_report;
+pub mod launch_spec;
+mod managed_launch;
 // #7568: the PM system-prompt file and its named-root compiled-prompt refresh.
 mod prompt_file;
 mod tcode;
@@ -37,10 +43,12 @@ pub(crate) use claude_code::session_id_exists;
 // auto-memory directory with it in production, not only in tests.
 pub(crate) use claude_code::encode_project_dir;
 // #4467: re-exported so the `transcript_saving` doctor check can read the scrub
-// set out of the REAL managed-spawn env prefix rather than restating the marker
+// set out of the REAL managed-spawn environment rather than restating the marker
 // constant — a check that compared the constant against itself could not fail.
-pub(crate) use claude_code::env_bin_prefix;
+// #8233: the daemon's launch is no longer a shell string, so the check reads the
+// STRUCTURED unset list the spec carries instead of parsing `-u` operands.
 pub use claude_code::{ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command};
+pub(crate) use managed_launch::managed_env_unset;
 pub use tcode::TcodeAdapter;
 
 use std::path::Path;
@@ -131,7 +139,6 @@ pub trait RuntimeAdapter: Send + Sync {
     /// [`Self::spawn`] for the `TM_MANAGED_SESSION_ID` pane-shell export.
     /// Called by `resume_managed` instead of `spawn`.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
-    /// `spawn_resume_without_id_uses_continue_flag`,
     /// `spawn_resume_targets_stored_pane_id_when_known`,
     /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown` in
     /// `claude_code` tests.

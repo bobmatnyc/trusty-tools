@@ -17,489 +17,30 @@ use tracing::debug;
 // #7685: imported rather than path-qualified at each use — this file sits at
 // its SLOC cap and the qualified form wraps over three lines per call site.
 use crate::core::memory_reachable::{resolve_memory_reachable, resolve_spawn_memory_reachable};
-use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::session_manager::ManagedTmuxDriver;
 
 use super::RuntimeAdapter;
 use super::RuntimeError;
 
-/// History-safe `GH_TOKEN`/`GH_USER` delivery (#3025 review follow-up) — a
-/// sibling submodule so this file (grandfathered at a frozen SLOC budget,
-/// #2398) does not have to carry the temp-file plumbing inline.
-#[path = "claude_code_gh_env.rs"]
-mod claude_code_gh_env;
-
-/// Single-quote a string for safe interpolation into the pane shell command.
-///
-/// Why: [`env_bin_prefix`] interpolates the resolved `CLAUDE_CONFIG_DIR` path into
-/// a command string that `send_line` types into the tmux pane's live shell. An
-/// UNQUOTED path containing a space — e.g. a macOS home `/Users/John Doe/…` —
-/// word-splits, so `env` sees `CLAUDE_CONFIG_DIR=/Users/John` plus a stray
-/// `Doe/…` argv entry; `claude` never execs and the pane silently dies with no
-/// error surfaced anywhere. POSIX single-quoting disables ALL word-splitting,
-/// globbing, and expansion, so any path survives intact.
-/// What: wraps `s` in single quotes, escaping any embedded single quote with the
-/// canonical close-reopen sequence `'\''` (a macOS home never contains a `'`, but
-/// the escape keeps the quoting correct for arbitrary paths and is cheap).
-/// Test: `env_bin_prefix_quotes_config_dir_with_space`,
-/// `shell_single_quote_escapes_embedded_quote`.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Build the `export TM_MANAGED_SESSION_ID=…;` prefix injected into the pane
-/// shell ahead of every managed launch/resume command (#2023 component B).
-///
-/// Why: `tmux set-environment` only updates the tmux *session* environment —
-/// the pane's login shell was already forked (and its environment snapshotted)
-/// at session creation, BEFORE this command is ever sent, so it never picks up
-/// a `set-environment` change. Exporting the variable as part of the literal
-/// shell line sent via `send_line` is the only way the assignment lands in
-/// THAT shell's live environment, which is what makes it survive `claude`
-/// exiting and dropping back to the pane's shell — the exact case the
-/// in-place-relaunch feature (#2023 component C) depends on: a command run in
-/// the pane after Claude exits needs to identify which managed session it is.
-/// What: `export TM_MANAGED_SESSION_ID='<session_id>'; ` (single-quoted via
-/// [`shell_single_quote`], trailing space so it concatenates cleanly with the
-/// `env …` prefix that follows). `session_id` is a UUID and never contains a
-/// single quote, but the same escaping used for `CLAUDE_CONFIG_DIR` is applied
-/// for defense in depth.
-/// Test: `spawn_command_exports_managed_session_id`,
-/// `resume_command_exports_managed_session_id`.
-fn session_id_export_prefix(session_id: &str) -> String {
-    format!(
-        "export TM_MANAGED_SESSION_ID={}; ",
-        shell_single_quote(session_id)
-    )
-}
-
-// #6766: the on-exit report used to be an unconditional `; echo '<hint>'`, so
-// a `claude` that refused the launch and quit printed the same "run `tm` to
-// relaunch" line as a session the operator worked in and exited. The hint, the
-// two failure lines, and the status/elapsed branch that chooses between them
-// now live in `claude_code_exit_hint` — a sibling submodule for the same reason
-// `claude_code_gh_env` is one (this file carries a frozen SLOC budget, #2398).
-use claude_code_exit_hint::{exit_dispatch_suffix, launch_clock_prefix};
-
-/// Status-branched on-exit reporting for the pane (#6766) — see its module doc
-/// for why the refusal is detected by elapsed time rather than by matching
-/// Claude Code's own wording.
-#[path = "claude_code_exit_hint.rs"]
-mod claude_code_exit_hint;
+/// #8233: the managed launch is no longer a shell script typed into the pane.
+/// `session_id_export_prefix`, `launch_clock_prefix`, `gh_env_source_prefix`,
+/// `env_bin_prefix`, `prompt_file_flag`, `cd_and_group`, `exit_dispatch_suffix`,
+/// `spawn_command` and `resume_command` all composed pieces of one line whose
+/// length grew with the launch and crossed the tty's canonical-mode `MAX_CANON`
+/// limit at 1054 bytes. Their behaviour now lives in
+/// [`super::managed_launch`] (cwd/env/argv as a [`super::launch_spec::LaunchSpec`])
+/// and [`super::launch_report`] (the on-exit hint), both evaluated by the
+/// `internal-spawn-disclaimed --launch-spec` shim rather than by the pane shell.
+use super::managed_launch::{self, ManagedLaunch};
 
 /// Live-background-session probe and the `attach` relaunch shape (#6863) — a
-/// sibling submodule for the same reason `claude_code_exit_hint` is one.
+/// sibling submodule because this file carries a frozen SLOC budget (#2398).
 #[path = "claude_code_agents.rs"]
 mod claude_code_agents;
-
-/// Wrap a managed launch/resume command so it is rooted at `cwd` regardless
-/// of the tmux pane shell's actual starting directory (#2250).
-///
-/// Why: `create_session -c <workdir>` is supposed to root the pane at the
-/// workspace, and `session_manager::resume_workdir::verify_pane_cwd` now
-/// fails loudly when tmux silently falls back to `$HOME` on the fresh-create
-/// resume path — but a RESUMED session that reuses an already-alive pane
-/// (created by a build that predates that verification, or whose cwd drifted
-/// after creation for any other reason) has no such guard. Prepending an
-/// explicit `cd` to the command line itself means the pane ends up in the
-/// right place independent of whatever directory the shell actually started
-/// in, closing that gap for every caller — not just the ones a point-in-time
-/// verification could catch.
-/// What: `cd '<cwd>' && { <body>; }`. `cwd` is single-quoted via
-/// [`shell_single_quote`] for the same reason [`env_bin_prefix`] quotes
-/// `CLAUDE_CONFIG_DIR` — a path with a space would otherwise word-split and
-/// break the pane. The brace GROUP (not a `( … )` subshell) is load-bearing:
-/// `body`'s `export TM_MANAGED_SESSION_ID=…` must land in the SAME shell
-/// process so it survives `claude` exiting and dropping back to the pane's
-/// shell (#2023 component B) — a subshell would discard that export the
-/// instant the group exits, breaking the in-place-relaunch fallback.
-/// Test: `spawn_command_prefixes_cd_to_workdir`,
-/// `resume_command_prefixes_cd_to_workdir`,
-/// `cd_and_group_quotes_workdir_with_space`.
-fn cd_and_group(cwd: &Path, body: &str) -> String {
-    format!(
-        "cd {} && {{ {body}; }}",
-        shell_single_quote(&cwd.display().to_string())
-    )
-}
-
-/// Compose the `env …` prefix + resolved binary that starts every managed
-/// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` and, when available,
-/// a `CLAUDE_CODE_OAUTH_TOKEN` (DOC-34; issue #2246).
-///
-/// Why: three invariants must hold on the pane command. (1) `-u ANTHROPIC_API_KEY`
-/// strips the API key so Claude Code falls back to OAuth, preventing key leakage
-/// through pane history. (2) When a managed `CLAUDE_CONFIG_DIR` is resolved,
-/// `env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='<dir>'` points the session at the tm-owned config home
-/// (`~/.trusty-tools/trusty-mpm/claude-config/`). #4873: this config home DOES
-/// supply the agent roster and skills. Every command builder resolves its flag
-/// through [`crate::core::model_inject::setting_sources_flag`], which returns
-/// `--setting-sources user,project,local` whenever a config dir is present —
-/// and `user` is the tier this directory relocates (see [`spawn_command`]'s
-/// #4451 note). The older text here claimed `project,local` and "loads from the
-/// project layer"; that predates the relocation. It also isolates the session's
-/// auth, which was always true: with the API key
-/// scrubbed, `claude` authenticates via the keychain/`.credentials.json` keyed to
-/// this config-dir path (the tm-managed login), never touching the operator's
-/// `~/.claude`. (3) On macOS the Keychain entry Claude Code reads is keyed by a
-/// hash of `CLAUDE_CONFIG_DIR` — so a `/login` run inside a managed session
-/// diverges from the login stored under the operator's default config dir,
-/// producing a "login successful then immediately not-logged-in" loop
-/// (#2246). `CLAUDE_CODE_OAUTH_TOKEN`, when [`crate::core::oauth_token::resolve_oauth_token`]
-/// resolves one, bypasses the Keychain entirely and sidesteps that divergence.
-/// Every value is SINGLE-QUOTED via [`shell_single_quote`] so a home dir (or a
-/// token, though tokens do not contain shell metacharacters in practice) with a
-/// space does not word-split and break the pane. All settings are applied via a
-/// single `env` prefix, consistent with the scrub-only prefix.
-/// (4) Issue #4467: Claude Code's own process-local session markers — chiefly
-/// `CLAUDE_CODE_CHILD_SESSION` — are unset via
-/// [`crate::core::claude_env_scrub::env_unset_flags`]. When `tm` is invoked from
-/// inside a Claude Code session it inherits them and passed them straight
-/// through, and an inherited `CLAUDE_CODE_CHILD_SESSION` makes the spawned
-/// `claude` turn session persistence OFF ("Transcript saving is off — inherited
-/// CLAUDE_CODE_CHILD_SESSION marker"), costing the managed session its native
-/// `--resume` / `--continue` / `/rewind` recovery. The scrub list deliberately
-/// EXCLUDES `CLAUDE_CONFIG_DIR` — see that module's `DELIBERATE_SPAWN_ENV`, and
-/// #4455/#4451 for why removing it would re-break the bundled agent roster.
-/// (5) Issues #6495/#7160: the line always assigns
-/// [`crate::core::alt_screen::managed_shell_assignments`], which starts the
-/// pane on Claude Code's classic renderer with its own mouse capture off. The
-/// fullscreen renderer captures the mouse wheel, and Claude Code sets tmux's
-/// per-pane `mouse_any_flag` via escape sequence even under the classic
-/// renderer, so either half alone still costs a managed pane native and tmux
-/// scrollback. Each operand's `${NAME-1}` expansion means a value the pane
-/// already exports wins, decided independently per variable.
-/// (6) Issue #7685: the line assigns `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` when
-/// and only when `memory_reachable` — the documented env-var half of turning
-/// Claude Code's own auto memory off. The project-tier `autoMemoryEnabled:
-/// false` key ([`crate::core::session_launch`]) is the other half, and each
-/// covers what the other cannot — the env var reaches only this spawned child,
-/// the settings key reaches a bare `claude` launched in the same project. Both
-/// are conditional for one reason (owner ruling 2026-09-12): auto memory is the
-/// FALLBACK, so with trusty-memory down a session that also lost auto memory
-/// would have no memory at all. The caller resolves the flag, exactly as it
-/// resolves `gh_env` — this builder stays a pure function of its arguments.
-/// (7) Issue #8066: the line always assigns `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`.
-/// Claude Code 2.1.260 gates `TodoWrite` and the `TaskCreate` family to a fixed
-/// model list, so a managed session on any model outside it gets neither tool
-/// family and the PM loses progress tracking. Unlike auto memory this one is
-/// unconditional: nothing about the host decides it, and the instruction-asset
-/// fallback (#2799) covers only the case where the binary ignores the variable.
-/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" CLAUDE_CODE_ENABLE_TODO_TOOLS=1 [CLAUDE_CODE_DISABLE_AUTO_MEMORY=1] [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
-/// — each bracketed assignment appears only when its value is `Some`; the two
-/// managed-default operands and the todo-tools switch are unconditional. The
-/// `-u NAME` option MUST precede any
-/// `NAME=VALUE` assignment per POSIX `env` grammar (`env [OPTION]...
-/// [NAME=VALUE]... [COMMAND]...`); putting an assignment before `-u` makes
-/// `env` stop parsing options at the first `NAME=VALUE` and try to exec `-u`
-/// as a command (`env: -u: No such file or directory`), which fatally kills
-/// every managed session spawn.
-/// Test: `spawn_command_contains_env_scrub`, `spawn_command_sets_claude_config_dir`,
-/// `spawn_command_without_config_dir_omits_it`,
-/// `env_bin_prefix_quotes_config_dir_with_space`,
-/// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`,
-/// `env_bin_prefix_carries_a_non_empty_mcp_env`,
-/// `spawn_command_sets_oauth_token_when_available`,
-/// `spawn_command_omits_oauth_token_when_absent`,
-/// `spawn_command_without_token_pins_the_exact_command`,
-/// `spawn_command_scrubs_inherited_session_markers`,
-/// `spawn_command_keeps_config_dir_out_of_the_scrub`,
-/// `env_bin_prefix_orders_scrub_flags_before_assignments`,
-/// `spawn_command_defaults_the_alternate_screen_off`,
-/// `resume_command_defaults_the_alternate_screen_off`,
-/// `spawn_command_defaults_the_mouse_capture_off`,
-/// `resume_command_defaults_the_mouse_capture_off`,
-/// `spawn_command_disables_auto_memory`, `resume_command_disables_auto_memory`,
-/// `env_bin_prefix_orders_auto_memory_before_the_config_dir`,
-/// `env_bin_prefix_keeps_auto_memory_when_trusty_memory_is_unreachable`,
-/// `spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable`,
-/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`,
-/// `env_bin_prefix_enables_todo_tools_unconditionally`,
-/// `spawn_command_enables_todo_tools`, `resume_command_enables_todo_tools`.
-///
-/// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
-/// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
-/// BEFORE this prefix in [`spawn_command`]/[`resume_command`]'s body, for why
-/// (review follow-up: embedding a token literally in this `env` command line
-/// would land it in the pane shell's history file and be transiently visible
-/// in `ps` output for the `env` process itself).
-pub(crate) fn env_bin_prefix(
-    claude_bin: &str,
-    config_dir: Option<&Path>,
-    oauth_token: Option<&str>,
-    mcp_env: &[(String, String)],
-    memory_reachable: bool,
-) -> String {
-    let mut assignments = String::new();
-    // #6495/#7160: default the pane to Claude Code's classic renderer with
-    // mouse capture off, so native and tmux scrollback keep working; each
-    // `${NAME-1}` form yields independently to a value the pane already
-    // exports.
-    assignments.push(' ');
-    assignments.push_str(&crate::core::alt_screen::managed_shell_assignments());
-    // #8066: Claude Code 2.1.260+ gates TodoWrite and the TaskCreate family to a
-    // fixed model list, so a managed session on any other model (Fable 5.1, say)
-    // has no progress-tracking tool at all unless this variable is set.
-    // Unconditional — no caller input decides it, and the instruction-asset
-    // fallback (#2799) covers only a binary that ignores the variable.
-    assignments.push_str(" CLAUDE_CODE_ENABLE_TODO_TOOLS=1");
-    // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
-    // is the memory, so the switch goes in only when trusty-memory answered
-    // (owner ruling 2026-09-12). Per Claude Code's docs the env var also wins
-    // over a subagent's own `memory:` frontmatter field, so when it IS present it
-    // forecloses a future agent asset opting back in.
-    if memory_reachable {
-        assignments.push_str(" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
-    }
-    if let Some(dir) = config_dir {
-        let quoted = shell_single_quote(&dir.display().to_string());
-        assignments.push_str(&format!(" CLAUDE_CONFIG_DIR={quoted}"));
-    }
-    // #4181: the per-project MCP pins. Claude Code hands its own environment to
-    // every stdio MCP server it spawns, so these reach `trusty-memory` and
-    // `trusty-search` in place of the arguments the deleted injectors wrote into
-    // a workspace `.mcp.json`. See `core::mcp_session_env`.
-    for (name, value) in mcp_env {
-        let quoted = shell_single_quote(value);
-        assignments.push_str(&format!(" {name}={quoted}"));
-    }
-    if let Some(token) = oauth_token {
-        let quoted = shell_single_quote(token);
-        assignments.push_str(&format!(" {OAUTH_TOKEN_ENV_VAR}={quoted}"));
-    }
-    // #4467: strip Claude Code's inherited process-local session markers. An
-    // inherited `CLAUDE_CODE_CHILD_SESSION` makes the spawned `claude` disable
-    // transcript saving, so the managed session gets no native `--resume` /
-    // `--continue` / `/rewind` recovery and never appears in `--resume`. These
-    // flags MUST precede `assignments` — POSIX `env` stops parsing options at
-    // the first `NAME=VALUE`, so a `-u` after one is exec'd as a command.
-    let scrub = crate::core::claude_env_scrub::env_unset_flags();
-    format!("env -u ANTHROPIC_API_KEY{scrub}{assignments} {claude_bin}")
-}
-
-/// Build the `--append-system-prompt-file <path>` flag fragment for a spawn
-/// command, when a prompt file was written (issue #2125 item 3).
-///
-/// Why: the flag must be single-quoted for the same reason
-/// [`env_bin_prefix`] quotes `CLAUDE_CONFIG_DIR` — the prompt file lives under
-/// `std::env::temp_dir()`, which is not attacker-controlled, but quoting
-/// defensively costs nothing and matches this file's established convention.
-/// What: `" --append-system-prompt-file '<path>'"` when `prompt_file` is
-/// `Some`; an empty string when `None` (no prompt was built — e.g. the write
-/// failed — so the flag is simply omitted rather than passing a bad path).
-/// Test: `spawn_command_with_prompt_file_contains_flag`,
-/// `spawn_command_without_prompt_file_omits_flag`.
-fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
-    match prompt_file {
-        Some(p) => format!(
-            " --append-system-prompt-file {}",
-            shell_single_quote(&p.display().to_string())
-        ),
-        None => String::new(),
-    }
-}
-
-/// The shell command sent to the tmux pane to start Claude Code.
-///
-/// Why: the env prefix (see [`env_bin_prefix`]) strips `ANTHROPIC_API_KEY` and,
-/// when available, injects the tm-owned `CLAUDE_CONFIG_DIR` for AUTH isolation.
-/// `--setting-sources project,local` is RETAINED and is LOAD-BEARING for where
-/// the roster comes from: it restricts every setting source Claude Code loads —
-/// settings.json, subagents (`agents/*.md`), and skills (`skills/`) — to the
-/// tiers it names. This spawn ALWAYS injects `CLAUDE_CONFIG_DIR`, so it carries
-/// [`crate::core::model_inject::SETTING_SOURCES_FLAG_RELOCATED`]
-/// (`--setting-sources user,project,local`), selected by
-/// [`crate::core::model_inject::setting_sources_flag`].
-///
-/// Issue #4451 — why `user` is in that list, and why it MUST stay: the earlier
-/// `project,local` value (correct for #1269 when the roster lived in the
-/// project tier) became wrong the moment #4437 moved bundled agents into
-/// `$CLAUDE_CONFIG_DIR/agents`, which IS the `user` tier. A managed session then
-/// resolved zero bundled specialists (`Agent type 'rust-engineer' not found`)
-/// with all 42 files correctly on disk. Re-admitting `user` does NOT re-admit
-/// the operator's global `~/.claude/settings.json` hooks the #1269 exclusion was
-/// protecting against: `CLAUDE_CONFIG_DIR` relocates the whole `user` tier to
-/// the tm-owned config home, so the isolation now comes from the relocation.
-/// Verified live against `claude` 2.1.220 — see the constant's own doc.
-/// Project hooks (trusty-memory + PM-guard), workspace skills and MCP servers
-/// continue to come from the PROJECT layer — `<workspace>/.claude/
-/// {skills,settings.json,.mcp.json}` — which `session_launch::prepare_session`
-/// (run on every daemon spawn path) deploys and which `project,local` loads.
-/// `--dangerously-skip-permissions` keeps the
-/// unattended orchestration session from blocking on per-tool prompts (#1269).
-/// Both flags reuse the shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`]
-/// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
-/// path and the CLI launch path can never drift. `prompt_file` (issue #2125
-/// item 3) carries the PM system prompt via `--append-system-prompt-file` — the
-/// same mechanism the CLI `tm launch` / client `/connect` paths already use —
-/// so this, previously the one driver missing it, can no longer silently spawn
-/// vanilla Claude Code.
-/// What: [`launch_clock_prefix`] (#6766) and [`session_id_export_prefix`]
-/// followed by [`env_bin_prefix`], the optional [`prompt_file_flag`], the two
-/// shared flag constants, followed by [`exit_dispatch_suffix`] (#2023 component
-/// D, status-branched by #6766 — it runs once `claude` exits and control
-/// returns to the pane, and reports WHICH way it exited); piped to
-/// `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an absolute
-/// path under launchd so the pane (which inherits the daemon's minimal `PATH`)
-/// does not need `claude` on its own `PATH` (#1298). `session_id` is the
-/// managed session's UUID (#2023 component B), exported so in-pane commands
-/// can identify the session after `claude` exits.
-/// `cwd` (#2250) is where the tmux pane is supposed to be rooted; the
-/// entire command is wrapped via [`cd_and_group`] so it is correct
-/// independent of the pane shell's actual starting directory.
-/// Test: `spawn_command_contains_env_scrub`,
-/// `spawn_command_contains_isolation_flags`,
-/// `spawn_command_uses_resolved_binary`,
-/// `spawn_command_sets_claude_config_dir`,
-/// `spawn_command_exports_managed_session_id`,
-/// `spawn_command_dispatches_on_the_claude_exit_status`,
-/// `spawn_command_with_prompt_file_contains_flag`,
-/// `spawn_command_without_prompt_file_omits_flag`,
-/// `spawn_command_prefixes_cd_to_workdir`,
-/// `spawn_command_sets_oauth_token_when_available`,
-/// `spawn_command_omits_oauth_token_when_absent`. `gh_env_file` (#3025):
-/// `claude_code_gh_env_tests.rs`.
-#[allow(clippy::too_many_arguments)]
-fn spawn_command(
-    cwd: &Path,
-    claude_bin: &str,
-    config_dir: Option<&Path>,
-    session_id: &str,
-    prompt_file: Option<&Path>,
-    oauth_token: Option<&str>,
-    gh_env_file: Option<&Path>,
-    mcp_env: &[(String, String)],
-    memory_reachable: bool,
-) -> String {
-    let body = format!(
-        "{}{}{}{}{} {}{} {}{}",
-        session_id_export_prefix(session_id),
-        // #6766: stamp the launch second here, between the two prefixes whose
-        // positions are already pinned — the `export` stays the group's first
-        // statement (#2023 B), and the gh-env source-and-delete stays
-        // immediately before `env` (#3025).
-        launch_clock_prefix(),
-        claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(
-            claude_bin,
-            config_dir,
-            oauth_token,
-            mcp_env,
-            memory_reachable
-        ),
-        prompt_file_flag(prompt_file),
-        // #4451: the relocated spawn must load the `user` tier — that is where
-        // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
-        crate::core::model_inject::setting_sources_flag(config_dir),
-        // #7892: the ADDITIVE `--mcp-config`, rendered from the same spawn
-        // posture as the flag above so the two can never drift. No
-        // `--strict-mcp-config`: the operator's user-scope servers load beside
-        // tm's builtins. `spawn` wrote the file before this builder ran; an
-        // empty string here means the spawn does not relocate its config dir
-        // and reads the operator's own `~/.claude.json`.
-        crate::core::session_mcp_scope::mcp_config_flag_string(
-            crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
-        ),
-        crate::core::model_inject::PERMISSION_MODE_FLAG,
-        exit_dispatch_suffix(),
-    );
-    cd_and_group(cwd, &body)
-}
 
 // #7568: the prompt-file writer and its named-root seam live in
 // `super::prompt_file`; `claude_code.rs` was at the 500-SLOC production cap.
 use super::prompt_file::build_prompt_file;
-
-/// Build a resume-aware Claude Code command (#1744, #1840, #6765).
-///
-/// Why: `resume_managed` must restore the prior conversation when one is known.
-/// `--resume <id>` restores the exact Claude Code conversation identified by
-/// `claude_session_id`. There is no `--continue` fallback (#6765): the command
-/// exports the MANAGED `CLAUDE_CONFIG_DIR`, so a bare `--continue` resolves
-/// "most recent conversation" against `<config_dir>/projects` — a store this
-/// process cannot reason about, and which may hold a still-live conversation
-/// Claude Code refuses to double-attach to (it prints "Your most recent
-/// conversation is running in the background" and exits 0, dropping the pane to
-/// a bare shell). Resolving the target EXPLICITLY, or launching fresh, keeps
-/// the decision independent of Claude Code's undocumented background-job layout.
-/// What: `Some(id)` → `--resume <id>`; `None` → plain spawn (no resume flag), so
-/// the session starts a fresh conversation. Both share the same env prefix
-/// (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as [`spawn_command`], and
-/// both get [`launch_clock_prefix`] prepended and [`exit_dispatch_suffix`]
-/// appended (#2023 component D, status-branched by #6766) so the pane reports
-/// how `claude` exited — the relaunch hint for a session that ran, a named
-/// failure for a launch that was refused — whichever branch fired. `prompt_file` (#2230) carries the
-/// PM system prompt via `--append-system-prompt-file` the same way
-/// [`spawn_command`] does, so resumed/guided-resume/crash-recovery sessions
-/// get the identical carrier a fresh spawn gets instead of falling back to a
-/// vanilla `claude` invocation.
-/// Test: `resume_command_with_id_uses_resume_flag`,
-/// `resume_command_without_id_never_uses_continue`,
-/// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
-/// `resume_command_sets_claude_config_dir`,
-/// `resume_command_exports_managed_session_id`,
-/// `resume_command_dispatches_on_the_claude_exit_status`,
-/// `resume_command_with_prompt_file_contains_flag`,
-/// `resume_command_prefixes_cd_to_workdir`,
-/// `resume_command_sets_oauth_token_when_available`,
-/// `resume_command_omits_oauth_token_when_absent`.
-///
-/// `cwd` (#2250) is where the tmux pane is supposed to be rooted; the entire
-/// command is wrapped via [`cd_and_group`] — see its doc for why this must be
-/// a brace GROUP, not a subshell (the exported `TM_MANAGED_SESSION_ID` has to
-/// survive `claude` exiting).
-///
-/// `#[allow(too_many_arguments)]`: each parameter is an independently-tested,
-/// orthogonal command-builder input (cwd/#2250, config_dir/DOC-34, resume
-/// selection/#1744+#1840, session_id/#2023, prompt_file/#2230, oauth_token/
-/// #2246, gh_env_file/#3025) — bundling them into a struct would only move
-/// the field list, not reduce it, and this is a private, single-call-site
-/// builder (mirrors the established pattern in `session_manager/create.rs`).
-#[allow(clippy::too_many_arguments)]
-fn resume_command(
-    cwd: &Path,
-    claude_bin: &str,
-    config_dir: Option<&Path>,
-    claude_session_id: Option<&str>,
-    session_id: &str,
-    prompt_file: Option<&Path>,
-    oauth_token: Option<&str>,
-    gh_env_file: Option<&Path>,
-    mcp_env: &[(String, String)],
-    memory_reachable: bool,
-) -> String {
-    let base = format!(
-        "{}{}{}{}{} {}{} {}",
-        session_id_export_prefix(session_id),
-        // #6766: same launch stamp, same position as `spawn_command` — the
-        // resume path is the one the refused relaunch was observed on.
-        launch_clock_prefix(),
-        claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(
-            claude_bin,
-            config_dir,
-            oauth_token,
-            mcp_env,
-            memory_reachable
-        ),
-        prompt_file_flag(prompt_file),
-        // #4451: same relocated-tier contract as `spawn_command`.
-        crate::core::model_inject::setting_sources_flag(config_dir),
-        // #7892: same additive `--mcp-config` as `spawn_command`.
-        crate::core::session_mcp_scope::mcp_config_flag_string(
-            crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
-        ),
-        crate::core::model_inject::PERMISSION_MODE_FLAG,
-    );
-    let cmd = match claude_session_id {
-        Some(id) => format!("{base} --resume {id}"),
-        // #6765: never a bare `--continue` — it would resolve against the
-        // managed store this process did not choose. No usable id → start fresh.
-        None => base,
-    };
-    let body = format!("{cmd}{}", exit_dispatch_suffix());
-    cd_and_group(cwd, &body)
-}
 
 /// Length at which Claude Code truncates a project key and appends a path hash
 /// (its `MAX_SANITIZED_LENGTH`). Verified live: a 370-character cwd produced a
@@ -735,7 +276,7 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// and no name to pre-approve. `preseed_managed_trust` now seeds the trust dialog
 /// only, and strips any approval an older tm left in the file.
 /// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
-/// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
+/// `env_set_relocates_the_config_dir` spec-composition test;
 /// the provisioning itself is covered in `core::managed_config`;
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
@@ -1091,19 +632,18 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// [`build_prompt_file`] (issue #2125 item 3), resolves an optional
     /// `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (issue #2246), then
-    /// sends [`spawn_command`] (`env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir>
-    /// [CLAUDE_CODE_OAUTH_TOKEN=<token>] <abs-claude> --append-system-prompt-file
-    /// <prompt>` plus the isolation/permission flags) to the pane; the task is
+    /// sends a FIXED-SHAPE launch line naming a [`super::launch_spec::LaunchSpec`] the shim reads
+    /// ([`managed_launch::deliver`]); the task is
     /// logged for observability but not passed to the command. `gh_env`
     /// (#3025) is caller-RESOLVED (the daemon's spawn handler consults the
     /// `ProjectRegistry` — the actual write target for a pinned `gh_account`
     /// — off the async executor via `tokio::task::spawn_blocking`, since this
-    /// trait method itself is synchronous); `spawn` only writes it to a
-    /// mode-0600 temp file the pane sources-and-deletes
-    /// ([`claude_code_gh_env::write_gh_env_file`]) rather than embedding the
-    /// token literally in the command line sent via `send-keys` (history/`ps`
-    /// exposure, review follow-up).
-    /// Test: `spawn_sends_env_scrub_when_binary_available`.
+    /// trait method itself is synchronous); #8233: it rides in the spec's
+    /// `env_set` (a mode-0600 file inside a mode-0700 directory, consumed and
+    /// deleted by the shim) rather than in any typed text, so the token still
+    /// never reaches the pane's shell history or any process's argv.
+    /// Test: `spawn_sends_the_parameterized_launch_line`,
+    /// `spawn_errors_when_the_line_is_refused`.
     fn spawn(
         &self,
         tmux_name: &str,
@@ -1152,44 +692,41 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // token — the command is then byte-identical to pre-#2246.
         let oauth_token = crate::core::oauth_token::resolve_oauth_token();
         // Issue #3025: `gh_env` was already resolved by the caller (registry
-        // lookup + `gh auth token` both happen off the async executor). Here
-        // we only write it to a mode-0600 temp file the pane sources-and-
-        // deletes — the token value itself never appears in the command
-        // line sent via `send-keys` (history/`ps` exposure, review follow-up).
+        // lookup + `gh auth token` both happen off the async executor).
+        // #8233: it now rides in the launch spec's `env_set`/`env_unset`, which
+        // is the same mode-0600 carrier the OAuth token uses — one secret file
+        // per launch instead of two, still never typed into the pane.
         // #4181: the per-project MCP pins the shared user-scope declarations
         // cannot carry as arguments. Resolved once per spawn (it touches the
-        // trusty-search daemon), never inside the command-string builder.
+        // trusty-search daemon), never inside the spec builder.
         let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
-        let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
-        // #7685: auto memory is the FALLBACK, so the kill switch goes on the
-        // command line only when trusty-memory answered. The launch resolved
-        // this already where it could; this only probes when nothing did, so the
-        // string builders below stay pure functions of their arguments.
+        // #7685: auto memory is the FALLBACK, so the kill switch goes into the
+        // spec only when trusty-memory answered. The launch resolved this
+        // already where it could; this only probes when nothing did, so the
+        // spec builders below stay pure functions of their arguments.
         let memory_reachable = resolve_spawn_memory_reachable(self.memory_reachable);
-        self.tmux
-            .send_line(
-                tmux_name,
-                &spawn_command(
-                    cwd,
-                    // #2997: route the pane's `claude` through the disclaim-exec
-                    // wrapper so tccd attributes its RemovableVolumes/App-Data
-                    // access to Claude Code itself, not the shared tmux server
-                    // that forks this pane's shell. No-op off macOS / under
-                    // TM_DISABLE_SPAWN_DISCLAIM (`claude_bin` stays unwrapped for
-                    // the debug log above).
-                    &crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin),
-                    config_dir.as_deref(),
-                    session_id,
-                    prompt_file.as_deref(),
-                    oauth_token.as_deref(),
-                    gh_env_file.as_deref(),
-                    &mcp_env,
-                    memory_reachable,
-                ),
-            )
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        // #2997: `claude_bin` is passed UNWRAPPED — the shim is now the process
+        // that reads the spec, so it `posix_spawn`s `claude` itself, disclaimed,
+        // with one hop less than the old `env`-as-program shape.
+        let launch = ManagedLaunch {
+            cwd,
+            claude_bin: &claude_bin,
+            config_dir: config_dir.as_deref(),
+            session_id,
+            prompt_file: prompt_file.as_deref(),
+            oauth_token: oauth_token.as_deref(),
+            gh_env,
+            mcp_env: &mcp_env,
+            memory_reachable,
+        };
+        managed_launch::deliver(
+            self.tmux.as_ref(),
+            tmux_name,
+            None,
+            &managed_launch::spawn_spec(&launch),
+        )?;
         // #2157 item 1: durable publish, belt-and-suspenders alongside the
-        // pane-shell export baked into spawn_command above.
+        // pane-shell export the launch line still carries.
         self.publish_session_env(
             tmux_name,
             session_id,
@@ -1271,14 +808,14 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // here, so omitting it would leave exactly those sessions exposed to
         // the login loop spawn() itself was fixed against.
         let oauth_token = crate::core::oauth_token::resolve_oauth_token();
-        // Issue #3025: same caller-resolved `gh_env` → temp-file delivery as
-        // `spawn` — every resumed/guided-resume/crash-recovery session must
-        // get the same deterministic `gh` identity.
+        // Issue #3025: same caller-resolved `gh_env` as `spawn` — every resumed /
+        // guided-resume / crash-recovery session must get the same deterministic
+        // `gh` identity, and #8233 carries it in the launch spec, not a second
+        // temp file the pane sources.
         // #4181: the per-project MCP pins the shared user-scope declarations
         // cannot carry as arguments. Resolved once per spawn (it touches the
-        // trusty-search daemon), never inside the command-string builder.
+        // trusty-search daemon), never inside the spec builder.
         let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
-        let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
 
         // #2013: a stored id can go stale — existence-check it before trusting
         // `--resume <id>` so a missing session falls back gracefully instead
@@ -1315,18 +852,17 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             resume = effective_id.is_some(),
             "resuming claude-code in tmux pane"
         );
-        // #2997: same disclaim-exec wrapper as `spawn` — every resumed /
-        // guided-resume / crash-recovery pane must disclaim `claude` off the
-        // shared tmux server too, else exactly those sessions keep re-prompting.
-        let disclaimed_bin = crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin);
-        let inputs = claude_code_agents::RelaunchInputs {
+        // #2997: `claude_bin` stays UNWRAPPED — the shim reads the spec and
+        // `posix_spawn`s `claude` disclaimed itself, so every resumed /
+        // guided-resume / crash-recovery pane keeps the same TCC contract.
+        let launch = ManagedLaunch {
             cwd,
-            claude_bin: &disclaimed_bin,
+            claude_bin: &claude_bin,
             config_dir: config_dir.as_deref(),
             session_id,
             prompt_file: prompt_file.as_deref(),
             oauth_token: oauth_token.as_deref(),
-            gh_env_file: gh_env_file.as_deref(),
+            gh_env,
             mcp_env: &mcp_env,
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
@@ -1338,22 +874,18 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // registry falls back to the pre-#6863 `--resume`/fresh-launch choice.
         // The probe is passed unevaluated: a launch with no stored id has
         // nothing to look up and must not spawn `claude` at all.
-        let cmd =
-            claude_code_agents::relaunch_command(&inputs, claude_session_id, effective_id, || {
+        let spec =
+            claude_code_agents::relaunch_spec(&launch, claude_session_id, effective_id, || {
                 claude_code_agents::query_registry(&claude_bin, config_dir.as_deref())
             });
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
-        // session-scoped `send_line` resolves to whichever pane/window is
-        // currently ACTIVE, which is not necessarily (and after this bug,
-        // often was not) the pane this resume is actually about. `None`
-        // (a legacy record predating pane-id capture) preserves the prior
-        // session-scoped behavior — there is no stronger signal available.
-        let send_result = match pane_id {
-            Some(pane_id) => self.tmux.send_line_to_pane(tmux_name, pane_id, &cmd),
-            None => self.tmux.send_line(tmux_name, &cmd),
-        };
-        send_result.map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        // session-scoped send resolves to whichever pane/window is currently
+        // ACTIVE, which is not necessarily (and after this bug, often was not)
+        // the pane this resume is actually about. `None` (a legacy record
+        // predating pane-id capture) preserves the prior session-scoped
+        // behavior — there is no stronger signal available.
+        managed_launch::deliver(self.tmux.as_ref(), tmux_name, pane_id, &spec)?;
         // #2157 item 1: durable publish for the RESUME path too — a fresh tmux
         // session is created on resume, so it needs the same belt-and-suspenders
         // set-environment call as spawn().
@@ -1375,14 +907,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 }
-
-// #3025 GH_TOKEN/GH_USER spawn-env injection tests live in a companion
-// `_tests.rs` file purely to keep this file — a production file capped at
-// 500 SLOC (grandfathered, #2398) — clear of further growth; see that
-// file's module doc.
-#[cfg(test)]
-#[path = "claude_code_gh_env_tests.rs"]
-mod gh_env_tests;
 
 // The command-builder and `RuntimeAdapter` impl tests (#3070) live in a
 // sibling `_tests.rs` file for the same reason — see that file's module doc.
