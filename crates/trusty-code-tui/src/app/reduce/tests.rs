@@ -205,6 +205,33 @@ fn editing_a_recalled_entry_still_leaves_down_the_draft() {
     }
 }
 
+/// The follow-on to the test above: once editing keeps you IN history, the
+/// oldest-entry clamp must stop calling `set_input` at all. Clamping by
+/// re-recalling `history[0]` silently destroyed an in-place edit of the
+/// oldest entry — an Up that looked like a no-op but wiped the line.
+#[test]
+fn apply_up_at_the_oldest_entry_keeps_an_in_place_edit() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "alpha");
+    for c in "draft".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "alpha", "recalled the only entry");
+
+    apply(&mut app, key(KeyCode::Char('!')));
+    assert_eq!(app.input_buf, "alpha!");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(
+        app.input_buf, "alpha!",
+        "Up at the floor must not re-read history over the edit"
+    );
+
+    // The draft is still reachable — the floor no-op did not disturb it.
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "draft");
+}
+
 /// The oldest entry is a floor, not a wrap point — a fourth Up on a
 /// two-entry history must not jump back to the newest.
 #[test]

@@ -186,12 +186,14 @@ impl ToolCard {
     /// a collapsed green `· ok` card. The verdict now travels as data —
     /// [`crate::event::ReplEvent::ToolInvocation`]'s `failed` — and the
     /// prefix is display text only.
-    /// What: [`Self::failed`], which a producer sets only on a completion.
+    /// What: [`Self::failed`], AND a result having arrived. A producer is
+    /// contracted to leave `failed` false on a start event; requiring the
+    /// result too means a slip there cannot paint an in-flight card red.
     /// Test: `widgets::tool_card::tests::errored_card_renders_expanded_by_default`,
     /// `widgets::tool_card::tests::failure_flag_alone_drives_the_error_render`,
     /// `reduce::tests::tool_card_is_error_reads_the_event_failure_flag`.
     pub fn is_error(&self) -> bool {
-        self.failed
+        self.failed && self.result.is_some()
     }
 }
 
@@ -825,12 +827,16 @@ impl ReplApp {
     /// prevent.
     /// What: no-op on an empty history. The first step (`history_idx ==
     /// None`) stashes `input_buf` into [`Self::saved_input`] and lands on the
-    /// newest entry; later steps move one older and clamp at index 0 rather
-    /// than wrapping. The cursor moves to the end of the recalled line
+    /// newest entry; later steps move one older. At the oldest entry the key
+    /// does NOTHING rather than re-reading `history[0]` into the buffer —
+    /// since #8181 made editing keep you in history, a clamp that still
+    /// called `set_input` silently destroyed an in-place edit of the oldest
+    /// entry. The cursor moves to the end of a recalled line
     /// ([`Self::set_input`]).
     /// Test: `reduce::tests::apply_up_walks_back_through_submitted_prompts`,
     /// `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
-    /// `reduce::tests::apply_up_clamps_at_the_oldest_entry`.
+    /// `reduce::tests::apply_up_clamps_at_the_oldest_entry`,
+    /// `reduce::tests::apply_up_at_the_oldest_entry_keeps_an_in_place_edit`.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
@@ -840,7 +846,9 @@ impl ReplApp {
                 self.saved_input = Some(self.input_buf.clone());
                 self.history.len() - 1
             }
-            Some(i) => i.saturating_sub(1),
+            // #8181: the floor is a true no-op, not a re-recall.
+            Some(0) => return,
+            Some(i) => i - 1,
         };
         self.history_idx = Some(new_idx);
         let entry = self.history[new_idx].clone();
