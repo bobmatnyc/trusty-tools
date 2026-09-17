@@ -160,8 +160,10 @@ fn sanitize_toml_error(e: &toml::de::Error) -> String {
 /// module docs).
 /// Test: `tests::tmp_write_path_is_0600_from_birth`,
 /// `tests::preexisting_loose_tmp_file_is_tightened`.
+// #7521: `pub(super)` so `keychain_backend`'s names-only index reuses this one
+// 0600-from-birth writer rather than hand-rolling a second one.
 #[cfg(unix)]
-fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
+pub(super) fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let io_err = |e: std::io::Error| KeyStoreError::Io {
@@ -187,7 +189,7 @@ fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
 
 /// Non-unix best-effort variant — see [`write_owner_only`] docs.
 #[cfg(not(unix))]
-fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
+pub(super) fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
     std::fs::write(path, content).map_err(|e| KeyStoreError::Io {
         path: path.to_path_buf(),
         source: e,

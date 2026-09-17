@@ -49,10 +49,13 @@ backends, not vault-to-vault between two different projects.
 
 ## Command Grammar
 
-`tm secrets` does not exist in this checkout yet — every verb below lands
-with **#7521**, except `exec`, which lands with **#7525**. Nothing here is
-runnable today; this table is what the shipped CLI will expose, so the skill
-is ready the day the CLI lands.
+Slice 1 of **#7521** ships five verbs against the `keychain` backend:
+`configure`, `add`, `list`, `remove`, `doctor`. They are runnable today. The
+rest of this table is not: `import` and `copy` are still #7521 work, `exec`
+lands with **#7525**, and the `onepassword`/`keeper` backends with **#7519** —
+slice 1's `--provider` accepts `keychain` only and errors on the others. Until
+those land, use `tm secrets add`/`list` for a project's keys and fall back to
+`tm config keys` for inference-provider credentials.
 
 | Command | Purpose |
 |---|---|

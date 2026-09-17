@@ -848,6 +848,26 @@ pub(crate) enum Command {
         action: AuthAction,
     },
 
+    /// Store a project's API keys in the OS keychain (#7521, DOC-74).
+    ///
+    /// Why: a project's keys otherwise live in a `.env` file the agent guard
+    /// (#7266) refuses to read, or in shell history. `tm secrets` puts them in
+    /// the machine's own encrypted store, namespaced per project, with the
+    /// value never passing through argv.
+    /// What: `configure` records the backend and group; `add` stores one key's
+    /// value from stdin or a masked prompt; `list` prints NAMES only; `remove`
+    /// deletes one; `doctor` reports reachability and the indexed-name count.
+    /// Slice 1 implements the `keychain` backend only — 1Password and Keeper
+    /// land with #7519, `exec` with #7525.
+    /// Test: `cli_parses_secrets_configure`, `cli_parses_secrets_add`,
+    /// `cli_parses_secrets_add_stdin`, `cli_parses_secrets_list`,
+    /// `cli_parses_secrets_remove`, `cli_parses_secrets_doctor`.
+    Secrets {
+        /// Secrets action to perform.
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+
     /// Sync and inspect the claude-mpm agent/skill catalog.
     ///
     /// Why: the session-manager MVP deploys agents and skills sourced from the

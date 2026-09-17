@@ -49,6 +49,12 @@ pub use agents::{
     resolve_ticketing,
 };
 
+/// The `secrets:` group — `tm secrets`' backend and vault group (#7521,
+/// DOC-74 §6.1), split out for the same SLOC reason as `untracked_sync`. It
+/// holds a backend name and a group; never a secret value.
+pub mod secrets;
+pub use secrets::{KEYCHAIN_BACKEND, SecretsConfig, SecretsConfigError};
+
 /// Cloud log-drain config shape + resolution (#6535), split out for the same
 /// SLOC reason as `untracked_sync`. See that module's doc for why a malformed
 /// section is an error rather than a silent fall-back to defaults.
@@ -238,6 +244,21 @@ pub struct TrustyToolsConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_context: Option<crate::core::startup_context::StartupContextConfig>,
+
+    /// `tm secrets` backend and vault group (the `secrets:` YAML section,
+    /// #7521). See #7521.
+    ///
+    /// `None` → the shipped default backend (`keychain`) with the group
+    /// derived from the working directory's git remote. Holds a backend name
+    /// and a group only — never a secret value (DOC-74 §4 T-2).
+    ///
+    /// ```yaml
+    /// secrets:
+    ///   backend: keychain
+    ///   group: bobmatnyc/trusty-tools
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsConfig>,
 }
 
 /// The `disk:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#6927).

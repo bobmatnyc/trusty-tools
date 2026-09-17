@@ -12,7 +12,9 @@
 
 use clap::Parser;
 
-use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, SessctlAction};
+use crate::cli::{
+    AuthAction, Cli, Command, RepairAction, SecretsAction, ServicesAction, SessctlAction,
+};
 use crate::commands::session::{
     instructions::compose_session_instructions,
     instructions::compose_session_instructions_with_roster,
@@ -591,6 +593,105 @@ fn cli_parses_auth_status() {
         cli.command.unwrap(),
         Command::Auth {
             action: AuthAction::Status
+        }
+    ));
+}
+
+// ── issue #7521: `tm secrets` CLI parse tests ───────────────────────────────
+
+#[test]
+fn cli_parses_secrets_configure() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "secrets",
+        "configure",
+        "--provider",
+        "keychain",
+        "--group",
+        "bobmatnyc/trusty-tools",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Secrets {
+            action: SecretsAction::Configure { provider, group },
+        } => {
+            assert_eq!(provider, "keychain");
+            assert_eq!(group.as_deref(), Some("bobmatnyc/trusty-tools"));
+        }
+        other => panic!("expected Secrets {{ Configure }}, got {other:?}"),
+    }
+
+    // --provider defaults to the only backend slice 1 implements.
+    let defaulted = Cli::try_parse_from(["trusty-mpm", "secrets", "configure"]).unwrap();
+    match defaulted.command.unwrap() {
+        Command::Secrets {
+            action: SecretsAction::Configure { provider, group },
+        } => {
+            assert_eq!(provider, "keychain");
+            assert_eq!(group, None);
+        }
+        other => panic!("expected Secrets {{ Configure }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_secrets_add() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "secrets", "add", "API_KEY"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Secrets {
+            action: SecretsAction::Add { key, value },
+        } => {
+            assert_eq!(key, "API_KEY");
+            assert_eq!(value, None, "no --value means the masked prompt");
+        }
+        other => panic!("expected Secrets {{ Add }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_secrets_add_stdin() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "secrets", "add", "API_KEY", "--value", "-"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Secrets {
+            action: SecretsAction::Add { key, value },
+        } => {
+            assert_eq!(key, "API_KEY");
+            assert_eq!(value.as_deref(), Some("-"));
+        }
+        other => panic!("expected Secrets {{ Add }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_secrets_list() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "secrets", "list"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Secrets {
+            action: SecretsAction::List
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_secrets_remove() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "secrets", "remove", "API_KEY"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Secrets {
+            action: SecretsAction::Remove { key },
+        } => assert_eq!(key, "API_KEY"),
+        other => panic!("expected Secrets {{ Remove }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_secrets_doctor() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "secrets", "doctor"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Secrets {
+            action: SecretsAction::Doctor
         }
     ));
 }

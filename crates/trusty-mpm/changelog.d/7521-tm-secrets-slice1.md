@@ -1,0 +1,4 @@
+Added
+- `tm secrets` (slice 1, #7521): `configure --provider keychain [--group <g>]`, `add KEY [--value -]`, `list`, `remove KEY`, and `doctor`, storing a project's keys in the macOS Keychain under the DOC-74 §6.3 naming (service `trusty/<owner>/<repo>`, account the KEY). A value is read from stdin or a masked prompt only — never from argv — and is never printed, logged, or quoted in an error. `list` reads a `0600` names-only index at `~/.trusty-tools/trusty-mpm/secrets-index/<group>.json`. `import`, `copy`, and `exec` are not in this slice; 1Password and Keeper land with #7519.
+- `secrets:` config section (`backend`, `group`) in `~/.trusty-tools/trusty-mpm/config.yaml`, written by `tm secrets configure` and merged into the existing config rather than overwriting it.
+- `trusty-common`'s `keyring-store` feature is now enabled for the `tm` binary (#4570): until this change no consumer turned it on, so the OS-keychain backends compiled nowhere.

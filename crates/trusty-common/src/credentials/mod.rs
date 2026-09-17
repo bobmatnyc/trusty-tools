@@ -71,6 +71,9 @@ pub(crate) mod env_guard;
 mod error;
 mod file_store;
 mod handle;
+// #7521: the group-namespaced `tm secrets` vault over the same keychain.
+#[cfg(feature = "keyring-store")]
+mod keychain_backend;
 #[cfg(feature = "keyring-store")]
 mod keyring_store;
 mod memory_store;
@@ -88,6 +91,11 @@ pub use dotenv::{
 pub use error::CredentialError;
 pub use file_store::FileKeyStore;
 pub use handle::{CredentialRef, CredentialRefError};
+#[cfg(feature = "keyring-store")]
+pub use keychain_backend::{
+    KeychainBackend, SERVICE_PREFIX, default_index_path, index_path_at, keychain_service_name,
+    validate_group, validate_key,
+};
 #[cfg(feature = "keyring-store")]
 pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryKeyStore;

@@ -267,6 +267,12 @@ trusty-common = { workspace = true, features = [
     "update-check",
     # #2405: the universal `tm config keys …` inference-provider credential CLI.
     "config-cli",
+    # #7521 (closes the #4570 gap): the OS-keychain credential backends. Until
+    # now NO consumer turned `keyring-store` on, so `KeyringStore` compiled
+    # nowhere; `tm secrets` is the first, and it also brings in
+    # `credentials::KeychainBackend`, the group-namespaced vault DOC-74 §6.3
+    # specifies. Adds the `keyring` crate to this binary's graph.
+    "keyring-store",
     # #2580/#2581 (DOC-36 §3.3): the Layer-3 `tm manager` digest/chat handlers
     # resolve providers and issue chat calls through the unified
     # `trusty_common::inference` adapter/Configurator. `config-cli` already implies
@@ -337,6 +343,10 @@ globset.workspace = true
 # #2734: quote-aware shell word-splitting for the PM Bash guard's git-argv
 # parsing (`src/bin/tm/commands/pm_guard_bash/shell_lex.rs`).
 shlex.workspace = true
+# #7521: the masked terminal prompt `tm secrets add` uses when no value is
+# piped. Already a workspace dependency (trusty-audit, and trusty-common's
+# `config-cli`), so it adds nothing new to the lockfile.
+rpassword.workspace = true
 jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }

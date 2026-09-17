@@ -553,6 +553,8 @@ async fn main() -> anyhow::Result<()> {
                 AuthAction::Status => commands::auth::status(),
             }
         }
+        // See #7521 — `tm secrets`, the keychain-backed project vault.
+        Some(Command::Secrets { action }) => commands::secrets::dispatch(action),
         Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
         Some(Command::Ticket {
             issue,

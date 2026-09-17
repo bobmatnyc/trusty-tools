@@ -35,6 +35,8 @@ mod pr;
 mod project;
 mod projects;
 mod repair;
+// #7521: `tm secrets` — the keychain-backed project vault (DOC-74).
+mod secrets;
 mod services;
 mod sessctl;
 mod session;
@@ -68,6 +70,7 @@ pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
 };
 pub(crate) use repair::RepairAction;
+pub(crate) use secrets::SecretsAction;
 pub(crate) use services::ServicesAction;
 pub(crate) use sessctl::SessctlAction;
 pub(crate) use session::SessionAction;
