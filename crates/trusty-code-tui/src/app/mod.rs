@@ -305,6 +305,13 @@ pub struct ReplApp {
     /// Version string shown in the banner (defaults to this crate's own
     /// version — a product should override with its own).
     pub version: String,
+    /// Engine-supplied startup splash lines (#8164). Empty by default; when
+    /// non-empty they REPLACE the banner's generic `{banner_title}
+    /// v{version}` identity row rather than stacking above or below it, so a
+    /// product that knows its own launch facts states them once. Set from
+    /// [`crate::event::ReplEvent::SplashUpdated`], which is also where the
+    /// content contract lives.
+    pub splash: Vec<String>,
     /// Recent-activity lines shown in the banner's right column. Generic
     /// replacement for tagent's `git_commits` — a product decides what
     /// "recent activity" means for it (or supplies none).
@@ -449,6 +456,7 @@ impl ReplApp {
             status_prefix,
             banner_title,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            splash: Vec::new(),
             recent_activity: Vec::new(),
             banner_art: Vec::new(),
             commands: Vec::new(),

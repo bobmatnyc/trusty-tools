@@ -26,6 +26,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::ReplApp;
+use crate::text::elide_middle;
 
 /// Maximum number of [`ReplApp::recent_activity`] entries shown.
 const MAX_RECENT_ACTIVITY: usize = 3;
@@ -33,6 +34,55 @@ const MAX_RECENT_ACTIVITY: usize = 3;
 /// Maximum number of [`ReplApp::commands`] entries shown (the banner is a
 /// glance-able splash, not a full `/help` listing).
 const MAX_COMMANDS: usize = 4;
+
+/// Leading whitespace on a wrapped splash row, so a continuation reads as
+/// part of the line above it rather than as a new fact.
+const SPLASH_CONTINUATION_INDENT: &str = "   ";
+
+/// Floor on the wrap width a splash row is given.
+///
+/// Why: the right column is derived from the terminal width, and a narrow
+/// enough terminal drives it to zero — at which point every splash row would
+/// render as an empty string and the launch facts would vanish rather than
+/// merely overflow. Overflowing a tiny frame is the better failure.
+const MIN_SPLASH_WIDTH: usize = 12;
+
+/// Break one splash line into rows that each fit `width` columns.
+///
+/// Why (#8164): the right column is `width - width/4 - 3` columns wide, so an
+/// 80-column terminal gives it ~57 — less than a build-mismatch warning or an
+/// absolute project path needs. The surrounding renderer CLIPS a row's tail,
+/// which is the half of those two lines carrying the daemon's sha, the remedy,
+/// and a path's final components. Wrapping keeps every character.
+/// What: greedy word wrap on whitespace; a single token too long to fit on a
+/// row of its own is middle-elided by [`crate::text::elide_middle`] rather
+/// than clipped, so a path keeps its deepest components whole. Always returns
+/// at least one row.
+/// Test: `tests::fit_splash_line_wraps_rather_than_clipping`,
+/// `tests::fit_splash_line_elides_the_middle_of_an_unbreakable_token`,
+/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
+fn fit_splash_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let word = elide_middle(word, width);
+        let current_len = current.chars().count();
+        if current_len > 0 && current_len + 1 + word.chars().count() > width {
+            rows.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&word);
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
 
 /// Produce the welcome banner as a `Vec<Line<'static>>` so it can be
 /// prepended to the chat scroll buffer instead of occupying its own layout
@@ -43,13 +93,16 @@ const MAX_COMMANDS: usize = 4;
 /// terminal command history — avoiding an abrupt "banner disappears on
 /// first message" UX.
 /// What: left column is `app.banner_art` (if any) plus the
-/// `{user_label} · {label}` identity line; right column is the title,
-/// recent activity, and commands. Column widths are computed from `width`,
-/// widened enough to fit the art (if present) unclipped.
+/// `{user_label} · {label}` identity line; right column is the title (or
+/// `app.splash` in its place, #8164), recent activity, and commands. Column
+/// widths are computed from `width`, widened enough to fit the art (if
+/// present) unclipped.
 /// Test: `tests::banner_lines_top_and_bottom_rules_present`,
 /// `tests::banner_lines_includes_identity_and_title`,
 /// `tests::banner_lines_lists_recent_activity_and_commands`,
-/// `tests::banner_lines_renders_with_no_art_or_commands`.
+/// `tests::banner_lines_renders_with_no_art_or_commands`,
+/// `tests::banner_lines_splash_replaces_the_identity_row`,
+/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
 pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let art_width = app
         .banner_art
@@ -71,13 +124,35 @@ pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
         app.user_label, app.label
     ))]);
 
+    let header = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let mut right_rows: Vec<(String, Style)> = Vec::new();
-    right_rows.push((
-        format!(" {} v{}", app.banner_title, app.version),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
+    // #8164: an engine-supplied splash REPLACES the generic identity row —
+    // its own first line is the header, so keeping both would print the
+    // product's name and version twice.
+    if app.splash.is_empty() {
+        right_rows.push((format!(" {} v{}", app.banner_title, app.version), header));
+    } else {
+        // #8164: splash rows WRAP rather than clip — the right column is only
+        // ~57 columns on an 80-column terminal, and the tail of a build
+        // mismatch warning (the daemon's sha and what to do about it) is the
+        // part that matters most.
+        let wrap_w = right_w
+            .saturating_sub(SPLASH_CONTINUATION_INDENT.len())
+            .max(MIN_SPLASH_WIDTH);
+        for (idx, line) in app.splash.iter().enumerate() {
+            let style = if idx == 0 { header } else { Style::default() };
+            for (row, text) in fit_splash_line(line, wrap_w).into_iter().enumerate() {
+                let indent = if row == 0 {
+                    " "
+                } else {
+                    SPLASH_CONTINUATION_INDENT
+                };
+                right_rows.push((format!("{indent}{text}"), style));
+            }
+        }
+    }
     right_rows.push((String::new(), Style::default()));
     right_rows.push((
         " Recent activity".to_string(),
@@ -208,6 +283,99 @@ mod tests {
         assert!(text.contains("fixed the bug"));
         assert!(text.contains("/workstream"));
         assert!(text.contains("List or activate a workstream"));
+    }
+
+    /// A splash must REPLACE the `{banner_title} v{version}` row, not stack
+    /// with it (#8164): the product states its identity once, in its own
+    /// words.
+    #[test]
+    fn banner_lines_splash_replaces_the_identity_row() {
+        let mut app = ReplApp::new("tcode", "bob");
+        app.version = "9.9.9".to_string();
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0 (ea6a1a9e 2026-09-16)".to_string(),
+            "project /repo/x".to_string(),
+        ];
+        let text: String = banner_lines(&app, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("🤖🤖🤖 tcode v0.7.0"), "{text}");
+        assert!(text.contains("project /repo/x"), "{text}");
+        // The top RULE still carries the title (that is the frame, not the
+        // content column); only the right column's identity row is replaced.
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert!(
+            !rows.iter().any(|r| r.contains("tcode v9.9.9")),
+            "the generic identity row must be gone: {text}"
+        );
+    }
+
+    /// #8164: on an 80-column terminal the right column is ~57 wide, so a
+    /// build-mismatch warning and a real project path BOTH overflow it. The
+    /// facts that must survive are the daemon's sha, the remedy, and the
+    /// path's final components — exactly what a tail clip destroys.
+    #[test]
+    fn banner_lines_keep_the_mismatch_warning_readable_at_80_columns() {
+        let mut app = ReplApp::new("tcode", "masa");
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0 (ea6a1a9e 2026-09-16)".to_string(),
+            "project /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-af14d84dd34577cee".to_string(),
+            "warning: daemon build deadbeef ≠ client ea6a1a9e — restart the daemon".to_string(),
+        ];
+        let lines = banner_lines(&app, 80);
+        let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(
+            text.contains("deadbeef"),
+            "the daemon sha must survive: {text}"
+        );
+        assert!(
+            text.contains("ea6a1a9e"),
+            "the client sha must survive: {text}"
+        );
+        assert!(
+            text.contains("restart the daemon"),
+            "the remedy must survive: {text}"
+        );
+        // The deepest components arrive WHOLE — the worktree's own name and
+        // the directory holding it. Components nearer the root are dropped
+        // first, which is the guarantee `text::elide_middle` documents.
+        assert!(
+            text.contains("worktrees/agent-af14d84dd34577cee"),
+            "the worktree's own name must survive whole: {text}"
+        );
+        // Wrapping must not widen the frame: every row still fits 80 columns.
+        for line in &lines {
+            assert!(
+                line_text(line).chars().count() <= 80,
+                "a wrapped row must not overflow the frame: {}",
+                line_text(line)
+            );
+        }
+    }
+
+    /// A line longer than the column becomes more rows, never a clipped one.
+    #[test]
+    fn fit_splash_line_wraps_rather_than_clipping() {
+        let rows = fit_splash_line("alpha bravo charlie delta", 12);
+        assert!(rows.len() > 1, "{rows:?}");
+        assert_eq!(rows.join(" "), "alpha bravo charlie delta");
+        for row in &rows {
+            assert!(row.chars().count() <= 12, "{row:?}");
+        }
+    }
+
+    /// A path has no spaces to wrap on, so it is elided on `/` boundaries —
+    /// the repository name at the end is the component a reader is checking.
+    #[test]
+    fn fit_splash_line_elides_the_middle_of_an_unbreakable_token() {
+        let rows = fit_splash_line("/Users/masa/trusty-mpm-projects/bobmatnyc/bakeoff-l1", 24);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].chars().count() <= 24, "{rows:?}");
+        assert!(rows[0].ends_with("bobmatnyc/bakeoff-l1"), "{rows:?}");
+        assert!(rows[0].contains('…'), "{rows:?}");
     }
 
     #[test]

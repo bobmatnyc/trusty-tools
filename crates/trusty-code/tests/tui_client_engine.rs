@@ -121,6 +121,17 @@ async fn only_session(daemon: &RealDaemon) -> Value {
     sessions[0].clone()
 }
 
+/// The startup splash `setup` published (#8164), joined into one string.
+fn splash_text(rx: &mut UnboundedReceiver<ReplEvent>) -> String {
+    drain(rx)
+        .iter()
+        .find_map(|event| match event {
+            ReplEvent::SplashUpdated(lines) => Some(lines.join("\n")),
+            _ => None,
+        })
+        .expect("setup must publish a startup splash")
+}
+
 /// The `connected to tcode daemon` line `setup` published.
 fn connect_line(rx: &mut UnboundedReceiver<ReplEvent>) -> String {
     drain(rx)
@@ -284,6 +295,22 @@ async fn setup_creates_session_and_reports_active_workstream() {
     assert!(
         engine.picker("workstream").is_some(),
         "setup must populate the workstream picker cache"
+    );
+    // #8164: the connect line names the bound workstream, not just the
+    // statusline — this is the wiring the pure `connect_line` tests cannot see.
+    // Read from the already-drained `events`; `rx` is empty by now.
+    let line = events
+        .iter()
+        .find_map(|event| match event {
+            ReplEvent::StatusMessage(text) if text.contains("connected to tcode daemon") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("setup must report the daemon it connected to");
+    assert!(
+        line.contains(&format!("workstream {WS_NAME}")),
+        "the connect line must name the active workstream: {line}"
     );
 }
 
@@ -769,9 +796,22 @@ async fn tui_default_session_runs_the_solo_agent() {
         line.contains("solo agent (no delegation)"),
         "the connect line must state the agent shape: {line}"
     );
+    // #8164: the line names the HOME directory. A tempdir root is long
+    // enough to be middle-elided, so the leaf is what must survive.
+    let leaf = daemon
+        .project
+        .file_name()
+        .expect("a tempdir has a final component")
+        .to_string_lossy()
+        .to_string();
+    assert!(line.contains("home "), "{line}");
     assert!(
-        line.contains(&daemon.project.display().to_string()),
+        line.contains(&leaf),
         "the connect line must name the working root: {line}"
+    );
+    assert!(
+        !line.contains("session "),
+        "the session id is internal and must never be displayed: {line}"
     );
 }
 
@@ -830,7 +870,80 @@ async fn tui_projectless_default_session_runs_solo_in_a_scratch_root() {
     );
     let line = connect_line(&mut rx);
     assert!(
-        line.contains("projectless — file tools rooted at a scratch workspace"),
-        "the connect line must say where a projectless session edits: {line}"
+        line.contains("home projectless"),
+        "the connect line must say the session is unbound: {line}"
+    );
+}
+
+// ── #8164: the startup splash ───────────────────────────────────────────────
+
+/// #8164: `setup` publishes a splash naming the client build, the DAEMON's
+/// build, the project and the agent shape — and NOT the session id.
+///
+/// Why: the splash's text assembly is unit-tested, but nothing there proves
+/// the facts are actually fetched — in particular that the daemon's `build`
+/// field crosses the socket. This daemon runs in THIS process, so its build
+/// is by construction the client's, which is also what makes the
+/// "no mismatch warning" assertion meaningful rather than incidental. The
+/// session id is asserted ABSENT here, against the real id the daemon minted,
+/// because an owner rule keeps it internal (logged for recovery, never shown).
+/// What: `setup` against a project-bound daemon; asserts the splash's header,
+/// the daemon build line, the bound root, the absent session id, and the
+/// absence of the mismatch warning.
+/// Test: this test.
+#[tokio::test]
+async fn setup_publishes_a_splash_naming_the_project() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let session = only_session(&daemon).await;
+    let session_id = session["id"].as_str().expect("a session carries an id");
+    let splash = splash_text(&mut rx);
+
+    assert!(
+        splash.starts_with("🤖🤖🤖 tcode v"),
+        "the splash must lead with the robot header and the BINARY version: {splash}"
+    );
+    assert!(
+        splash.contains(&format!("({})", trusty_code::build_info::GIT_HASH)),
+        "the daemon must report its build sha over `health`: {splash}"
+    );
+    assert!(
+        !splash.contains(session_id),
+        "the session id is internal and must never be displayed: {splash}"
+    );
+    assert!(
+        splash.contains(&format!("project {}", daemon.project.display())),
+        "the splash must name the bound project: {splash}"
+    );
+    assert!(
+        splash.contains("agent solo agent (no delegation)"),
+        "the splash must name the delegation shape: {splash}"
+    );
+    assert!(
+        !splash.contains("warning:"),
+        "client and daemon are the same build here, so nothing must warn: {splash}"
+    );
+}
+
+/// #8164: an unbound session says "projectless" on the splash.
+///
+/// Why: #8205's transcript failed precisely because an unbound session looked
+/// identical to a bound one at launch. The word has to be on screen.
+/// What: `setup` with `project_path: None`.
+/// Test: this test.
+#[tokio::test]
+async fn setup_splash_says_projectless_when_unbound() {
+    let daemon = RealDaemon::start().await;
+    let engine = daemon.projectless_engine();
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx).await.expect("setup over the socket");
+
+    let splash = splash_text(&mut rx);
+    assert!(
+        splash.contains("project projectless"),
+        "an unbound session must say so: {splash}"
     );
 }

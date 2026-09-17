@@ -9,7 +9,9 @@
 //! point and nothing more: it owns no REPL behaviour, no rendering, and no
 //! daemon logic, matching `crate::cli`'s "translate CLI args into a call,
 //! decisions belong elsewhere" contract.
-//! What: [`run`] resolves the optional project path, obtains the daemon
+//! What: [`run`] resolves the project the session homes in — since #8205
+//! that defaults to the repository enclosing the launch directory, see
+//! [`resolve_project`] — obtains the daemon
 //! socket to drive from `super::daemon_autospawn`, and hands a `CodeEngine`
 //! pointed at it to `trusty_code_tui::run::run` together with the shared
 //! `ReplApp` model,
@@ -46,7 +48,7 @@
 //! running `tcode tui` by hand; the engine half is already covered
 //! end-to-end by `tests/tui_client_engine.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -68,12 +70,18 @@ const PRODUCT_LABEL: &str = "tcode";
 /// forwarded to a spawned daemon so the daemon's binding matches the TUI's,
 /// and checked against a pre-existing daemon's reported binding.
 ///
+/// (#8205) `projectless` is the opt-out from the cwd homing
+/// [`resolve_project`] now performs by default.
 /// (#8184) `delegate` is the `--delegate` opt-in back to the PM: `false` (the
 /// default) mints the SOLO session `session.create` now defaults to, where the
 /// agent reads and edits files itself through the permission prompt rather
 /// than handing the work to a sub-agent.
-pub async fn run(project: Option<PathBuf>, delegate: bool) -> Result<()> {
-    let project = resolve_project(project)?;
+pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("resolve the current directory")?;
+    // Canonicalized so the `$HOME` guard in `resolve_project` compares like
+    // with like; an unresolvable home simply disables that one guard.
+    let home = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let project = resolve_project(project, projectless, &cwd, home.as_deref())?;
     // #4512: attach to a running daemon serving this project, or start one —
     // replaces #4424's "exit and tell the user to start one". Nothing is
     // torn down afterwards: the daemon outlives every client (module docs).
@@ -86,7 +94,11 @@ pub async fn run(project: Option<PathBuf>, delegate: bool) -> Result<()> {
     } else {
         CodeEngine::with_socket(socket, project)
     };
-    let app = ReplApp::new(PRODUCT_LABEL, user_label());
+    let mut app = ReplApp::new(PRODUCT_LABEL, user_label());
+    // #8164: the banner's frame title must name the BINARY's version and SHA.
+    // `ReplApp::new` defaults it to `trusty-code-tui`'s own crate version, so
+    // a 0.7.0 tcode advertised itself as `tcode v0.2.0`.
+    app.version = trusty_code::build_info::LONG_VERSION.to_string();
 
     trusty_code_tui::run::run(
         Arc::new(engine),
@@ -97,17 +109,84 @@ pub async fn run(project: Option<PathBuf>, delegate: bool) -> Result<()> {
     .await
 }
 
-/// Canonicalize `--project` when given, so the daemon receives an absolute
-/// path and an unusable one fails HERE (with the flag's name in the
-/// message) rather than as a confusing `-32003 invalid_argument` from
-/// `session.create` after the TUI has already started.
-fn resolve_project(project: Option<PathBuf>) -> Result<Option<PathBuf>> {
-    project
-        .map(|p| {
-            p.canonicalize()
-                .with_context(|| format!("invalid --project path '{}'", p.display()))
-        })
-        .transpose()
+/// Decide which project a `tcode tui` session binds to.
+///
+/// Why (#8205): omitting `--project` used to mean "projectless", so a TUI
+/// launched inside a repository ran against the executor's throwaway scratch
+/// root — on 2026-09-16 an agent's `list_dir(".")` answered `(empty
+/// directory)` inside a repository full of files and `search_code` found no
+/// index, while the footer named the repo's workstream. DOC-75's MVP is
+/// "sit in a repo, launch `tcode tui`", so the launch directory is now the
+/// default binding and projectlessness is something you ask for.
+///
+/// This homing lives HERE, at the CLI layer, and not in
+/// `ProjectBinding::resolve`: a launch directory is a choice the operator
+/// made by typing the command there, whereas the daemon/protocol layer is
+/// still forbidden from implicitly binding a CWD it was never told about
+/// (see `ProjectBinding::agents_dir`).
+///
+/// An IMPLICIT bind requires an enclosing git root (PM ruling, 2026-09-16).
+/// A bound binding passes `task::executor`'s `should_index` and reaches
+/// `run_task`'s `ensure_project_indexed_in_background` with
+/// `allow_sensitive_path: true`, so homing on any directory at all would
+/// make `cd ~/Downloads && tcode tui` index Downloads. DOC-75's MVP is
+/// "sits in a repo", and a repository is the one thing that says "this
+/// directory is a project" without the operator saying it. An EXPLICIT
+/// `--project <dir>` still binds a non-repo directory — git stays a
+/// nice-to-have there (owner directive, `run_task::tests` ~1996).
+///
+/// What, in precedence order:
+/// 1. `--project <path>` wins, canonicalized here so an unusable path fails
+///    with the flag's name rather than as a confusing `-32003
+///    invalid_argument` from `session.create` after the TUI has started.
+///    Binds whether or not the path is a repository.
+/// 2. `--projectless` yields `None` — today's behaviour, opted into.
+/// 3. Otherwise the session homes on `cwd`'s enclosing git toplevel
+///    ([`trusty_common::find_git_root`]). That walk is the SAME one
+///    trusty-search derives an index id from, so the bound root and the
+///    index `search_code` queries cannot disagree. No enclosing repository
+///    means no implicit bind: projectless.
+/// 4. A root that CONTAINS `home` — `home` itself, or any ancestor of it —
+///    is refused and stays projectless: binding one would ask trusty-search
+///    to index an entire home directory or more. An explicit `--project ~`
+///    still works — rule 1 outranks this.
+///
+/// Test: `tui_tests::resolve_project_defaults_to_the_enclosing_git_repo`,
+/// `tui_tests::resolve_project_without_a_repo_stays_projectless`,
+/// `tui_tests::resolve_project_projectless_opts_out_of_homing`,
+/// `tui_tests::resolve_project_refuses_to_home_on_the_home_directory`,
+/// `tui_tests::resolve_project_refuses_a_repo_above_the_home_directory`,
+/// `tui_tests::resolve_project_canonicalizes_a_real_directory`,
+/// `tui_tests::resolve_project_rejects_a_missing_path`.
+fn resolve_project(
+    project: Option<PathBuf>,
+    projectless: bool,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    if let Some(p) = project {
+        return p
+            .canonicalize()
+            .with_context(|| format!("invalid --project path '{}'", p.display()))
+            .map(Some);
+    }
+    if projectless {
+        return Ok(None);
+    }
+    let cwd = cwd
+        .canonicalize()
+        .with_context(|| format!("resolve the launch directory '{}'", cwd.display()))?;
+    // #8205: no enclosing repository, no implicit bind — see the ruling above.
+    let Some(root) = trusty_common::find_git_root(&cwd) else {
+        return Ok(None);
+    };
+    // #8205: `starts_with` is component-wise and subsumes equality, so a
+    // repository that ENCLOSES the home directory (a stray `/Users/.git`) is
+    // refused too — that root would index every user's files, not just one's.
+    if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
+        return Ok(None);
+    }
+    Ok(Some(root))
 }
 
 /// Name shown on the banner's `{user} · tcode` identity line — `$USER`, or a
@@ -128,19 +207,116 @@ fn label_or_default(raw: Option<String>) -> String {
 mod tui_tests {
     use super::*;
 
-    /// Omitting `--project` stays projectless — never silently defaults to
-    /// the current directory (which would bind a session to whatever
-    /// directory the operator happened to launch from).
-    #[test]
-    fn resolve_project_none_stays_projectless() {
-        assert!(resolve_project(None).expect("resolve").is_none());
+    /// A temp directory that IS a git repository (a bare `.git` directory is
+    /// all `find_git_root` looks for), plus a nested subdirectory.
+    fn repo_with_subdir() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(root.join(".git")).expect("create .git");
+        let nested = root.join("crates").join("x");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        (dir, root, nested)
     }
 
-    /// A real directory is canonicalized to an absolute path.
+    /// #8205: launched anywhere inside a repository with no flags, the
+    /// session binds that repository's TOPLEVEL — not the subdirectory the
+    /// operator happened to stand in, and not the scratch root. This is the
+    /// inverse of the pre-#8205 `resolve_project_none_stays_projectless`.
+    #[test]
+    fn resolve_project_defaults_to_the_enclosing_git_repo() {
+        let (_guard, root, nested) = repo_with_subdir();
+        let resolved = resolve_project(None, false, &nested, None)
+            .expect("resolve")
+            .expect("a repo must bind");
+        assert_eq!(resolved, root);
+    }
+
+    /// Outside any repository there is no implicit bind: a bound binding is
+    /// indexed with `allow_sensitive_path: true`, so homing on any directory
+    /// would make `cd ~/Downloads && tcode tui` index Downloads. `--project`
+    /// is how a non-repo directory becomes a project.
+    #[test]
+    fn resolve_project_without_a_repo_stays_projectless() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().canonicalize().expect("canonicalize");
+        assert!(
+            resolve_project(None, false, &cwd, None)
+                .expect("resolve")
+                .is_none(),
+            "a directory with no enclosing repository must not bind implicitly"
+        );
+        // …but naming it explicitly still binds it (git is a nice-to-have for
+        // an explicit `--project`, never a requirement).
+        assert_eq!(
+            resolve_project(Some(cwd.clone()), false, &cwd, None)
+                .expect("resolve")
+                .expect("--project must bind a non-repo directory"),
+            cwd
+        );
+    }
+
+    /// The opt-out keeps the pre-#8205 behaviour — a projectless session is
+    /// still first-class, it just has to be asked for.
+    #[test]
+    fn resolve_project_projectless_opts_out_of_homing() {
+        let (_guard, _root, nested) = repo_with_subdir();
+        assert!(
+            resolve_project(None, true, &nested, None)
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    /// `$HOME` is not a project even when it IS a repository — some operators
+    /// keep a dotfiles repo there, and homing on it would hand trusty-search
+    /// an entire home directory to index. The home here is a real repo, so
+    /// the git-root rule alone cannot account for the `None`.
+    #[test]
+    fn resolve_project_refuses_to_home_on_the_home_directory() {
+        let (_guard, home, nested) = repo_with_subdir();
+        assert!(
+            resolve_project(None, false, &home, Some(&home))
+                .expect("resolve")
+                .is_none(),
+            "$HOME must not become the default project"
+        );
+        assert!(
+            resolve_project(None, false, &nested, Some(&home))
+                .expect("resolve")
+                .is_none(),
+            "a subdirectory of a $HOME repo resolves to $HOME, and is refused too"
+        );
+    }
+
+    /// A repository that is an ANCESTOR of `$HOME` — a stray `/Users/.git`
+    /// — must be refused too. Exact-match alone would bind it and hand
+    /// trusty-search every user's files on the machine.
+    #[test]
+    fn resolve_project_refuses_a_repo_above_the_home_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let above = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(above.join(".git")).expect("create .git");
+        let home = above.join("masa");
+        let cwd = home.join("projects");
+        std::fs::create_dir_all(&cwd).expect("create home and cwd");
+
+        // `cwd` has no `.git` of its own, so the walk resolves to `above` —
+        // which contains `$HOME`.
+        assert!(
+            resolve_project(None, false, &cwd, Some(&home))
+                .expect("resolve")
+                .is_none(),
+            "a repository enclosing $HOME must not become the default project"
+        );
+    }
+
+    /// `--project` outranks both the homing and the opt-out, and is
+    /// canonicalized to an absolute path.
     #[test]
     fn resolve_project_canonicalizes_a_real_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let resolved = resolve_project(Some(dir.path().to_path_buf()))
+        let cwd = std::env::temp_dir();
+        let resolved = resolve_project(Some(dir.path().to_path_buf()), true, &cwd, None)
             .expect("resolve")
             .expect("some");
         assert!(resolved.is_absolute());
@@ -152,7 +328,9 @@ mod tui_tests {
     #[test]
     fn resolve_project_rejects_a_missing_path() {
         let missing = std::env::temp_dir().join("tcode-tui-4424-does-not-exist");
-        let err = resolve_project(Some(missing.clone())).expect_err("must reject");
+        let cwd = std::env::temp_dir();
+        let err =
+            resolve_project(Some(missing.clone()), false, &cwd, None).expect_err("must reject");
         let rendered = format!("{err:#}");
         assert!(rendered.contains("invalid --project path"), "{rendered}");
         assert!(

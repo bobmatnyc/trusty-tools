@@ -269,6 +269,20 @@ pub enum ReplEvent {
     },
     /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
     StatusMessage(String),
+    /// Engine-supplied startup splash lines, replacing the banner's generic
+    /// `{banner_title} v{version}` identity row (#8164).
+    ///
+    /// Why: the only launch facts this crate can name on its own are the ones
+    /// a product set on [`crate::app::ReplApp`] at construction. Everything an
+    /// operator actually needs at a glance — the daemon's build, the session
+    /// id, the project the session is homed in — is learned from the backend
+    /// during `TuiEngine::setup`, after the app was built. This is how those
+    /// reach the banner.
+    /// What: a pre-rendered, pre-ordered block of plain lines. This crate
+    /// composes none of it and parses none of it; the first line is rendered
+    /// as the header and the rest as body. An empty vector restores the
+    /// generic identity row.
+    SplashUpdated(Vec<String>),
     /// Clear the scrollback buffer. Emitted by the shared `/clear` built-in
     /// slash command (DOC-50 §5 Slice 7) rather than handled ad hoc by each
     /// engine, so `TuiEngine` implementations never touch scrollback state

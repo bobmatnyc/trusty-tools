@@ -109,8 +109,12 @@ async fn health(
 /// the 30s per-batch budget then cut it short partway, abandoning the files it
 /// had not reached. Reporting only drops would read `0` throughout an episode
 /// in which every batch is accepted and then truncated.
+/// `build` is additive too (#8164) — the short git SHA `build.rs` embeds,
+/// which is what `tcode tui`'s startup splash compares against its own to
+/// warn that the daemon it attached to is a different build.
 /// Test: `health_payload_has_expected_shape`,
 /// `health_payload_reports_a_bound_project_root`,
+/// `health_payload_reports_the_daemon_build_sha`,
 /// `health_payload_reports_incremental_index_drops`,
 /// `health_payload_reports_incremental_index_truncations`.
 /// The whole of what an UNAUTHENTICATED `GET /health` caller may learn
@@ -138,6 +142,12 @@ pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
     json!({
         "server": "tcode",
         "version": crate::VERSION,
+        // #8164: the SHA, not just the semver. A daemon started before a
+        // reinstall reports the same `version` as the fresh binary that
+        // replaced it, so a client had no way to see it was talking to a
+        // stale process — that gap reproduced #4602 after its fix shipped.
+        // Same constant `tcode --version` prints.
+        "build": crate::build_info::GIT_HASH,
         "status": "ok",
         "pid": std::process::id(),
         "binding": binding.to_json(),
@@ -209,6 +219,30 @@ mod tests {
         assert_eq!(v["pid"], std::process::id());
         assert_eq!(v["binding"]["state"], crate::binding::STATE_PROJECTLESS);
         assert!(v["binding"]["root"].is_null());
+    }
+
+    /// The daemon's own build SHA must be on the wire (#8164), and it must be
+    /// the SAME constant `tcode --version` prints.
+    ///
+    /// Why: a client can already read `version`, but two builds of the same
+    /// semver are indistinguishable by it — which is exactly the stale-daemon
+    /// case the splash's mismatch warning exists to catch. Asserting against
+    /// `build_info::GIT_HASH` (rather than merely "a non-empty string") is
+    /// what pins the two surfaces to one source; a second, independently
+    /// derived SHA here would satisfy a looser assertion while reporting a
+    /// different build.
+    /// What: the field is present and equals `build_info::GIT_HASH`, which is
+    /// the literal `"unknown"` outside a git checkout — a real, reportable
+    /// value, so no case is excluded.
+    /// Test: this test.
+    #[test]
+    fn health_payload_reports_the_daemon_build_sha() {
+        let v = health_payload(&ProjectBinding::None);
+        assert_eq!(v["build"], crate::build_info::GIT_HASH);
+        assert!(
+            v["build"].as_str().is_some_and(|s| !s.is_empty()),
+            "the build field must always carry a value, got {v}"
+        );
     }
 
     /// The background-index drop counters must be on the wire, and a process

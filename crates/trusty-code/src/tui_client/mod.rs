@@ -29,6 +29,7 @@ mod engine_state;
 pub mod error;
 mod prompter_claim;
 mod session_events;
+mod splash;
 pub mod uds_rpc;
 mod workstream_subscription;
 

@@ -1,0 +1,2 @@
+Changed
+- `tcode tui` with no `--project` now binds the git repository enclosing the current directory (its toplevel) instead of running projectless against a throwaway scratch root. With no enclosing repository the session stays projectless — an implicit bind indexes what it binds, so only a repository homes implicitly; `--project <dir>` still binds any directory. `--projectless` opts out; `$HOME` and the filesystem root are never homed on. (#8205)
