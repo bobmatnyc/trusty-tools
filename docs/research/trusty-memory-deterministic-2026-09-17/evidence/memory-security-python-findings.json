@@ -1,0 +1,22 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 10,
+  "EndLine": 10,
+  "StartColumn": 2,
+  "EndColumn": 55,
+  "Match": "CACHE_KEY = 'REDACTED'",
+  "Secret": "REDACTED",
+  "File": "experiments/trusty-memory-deterministic/offline_encoding.py",
+  "SymlinkFile": "",
+  "Commit": "",
+  "Entropy": 3.7398229,
+  "Author": "",
+  "Email": "",
+  "Date": "",
+  "Message": "",
+  "Tags": [],
+  "Fingerprint": "experiments/trusty-memory-deterministic/offline_encoding.py:generic-api-key:10"
+ }
+]

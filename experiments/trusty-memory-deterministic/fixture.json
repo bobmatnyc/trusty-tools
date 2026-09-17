@@ -1,0 +1,2300 @@
+{
+  "schema_version": 1,
+  "provenance": "Entirely synthetic, authored for this experiment; no personal memory, external corpus, model output, or external factual assertions.",
+  "memories": [
+    {
+      "id": "cedar-owner-old",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Ivo is responsible for the Cedar Observatory maintenance rota. Route repair approvals to Ivo.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-owner-new",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Mira takes responsibility for the Cedar Observatory maintenance rota from July. Route repair approvals to Mira.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-preference",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "The Cedar Observatory coordinator wants all routine reports in plain text. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-task",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Unfinished work at Cedar Observatory: inspect the wind sensor before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-manual",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory service manual. When the wind sensor stops responding, isolate its supply and inspect the copper latch. Turn the copper latch counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-alias",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Solstice"
+      ],
+      "links": []
+    },
+    {
+      "id": "cedar-foreign",
+      "scope": "other/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Solstice replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Solstice"
+      ],
+      "links": []
+    },
+    {
+      "id": "cedar-expired",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "The Cedar Observatory temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-late",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "The Cedar Observatory emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-revision",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-metadata",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-noise-weather",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-noise-rota",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-noise-format",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-noise-device",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "The Cedar Observatory wind sensor appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-noise-travel",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Cedar Observatory staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-owner-old",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Nell is responsible for the Harbor Theatre maintenance rota. Route repair approvals to Nell.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-owner-new",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Otto takes responsibility for the Harbor Theatre maintenance rota from July. Route repair approvals to Otto.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-preference",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "The Harbor Theatre coordinator wants all routine reports in large print. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-task",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Unfinished work at Harbor Theatre: inspect the stage curtain before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-manual",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre service manual. When the stage curtain stops responding, isolate its supply and inspect the amber pulley. Turn the amber pulley counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-alias",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Lantern"
+      ],
+      "links": []
+    },
+    {
+      "id": "harbor-foreign",
+      "scope": "other/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Lantern replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Lantern"
+      ],
+      "links": []
+    },
+    {
+      "id": "harbor-expired",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "The Harbor Theatre temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-late",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "The Harbor Theatre emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-revision",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-metadata",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-noise-weather",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-noise-rota",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-noise-format",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-noise-device",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "The Harbor Theatre stage curtain appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "harbor-noise-travel",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Harbor Theatre staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-owner-old",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Ari is responsible for the Quartz Greenhouse maintenance rota. Route repair approvals to Ari.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-owner-new",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Una takes responsibility for the Quartz Greenhouse maintenance rota from July. Route repair approvals to Una.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-preference",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "The Quartz Greenhouse coordinator wants all routine reports in metric units. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-task",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Unfinished work at Quartz Greenhouse: inspect the mist valve before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-manual",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse service manual. When the mist valve stops responding, isolate its supply and inspect the ceramic wheel. Turn the ceramic wheel counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-alias",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Sprout"
+      ],
+      "links": []
+    },
+    {
+      "id": "quartz-foreign",
+      "scope": "other/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Sprout replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Sprout"
+      ],
+      "links": []
+    },
+    {
+      "id": "quartz-expired",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "The Quartz Greenhouse temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-late",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "The Quartz Greenhouse emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-revision",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-metadata",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-noise-weather",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-noise-rota",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-noise-format",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-noise-device",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "The Quartz Greenhouse mist valve appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "quartz-noise-travel",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Quartz Greenhouse staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-owner-old",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Pia is responsible for the Velvet Archive maintenance rota. Route repair approvals to Pia.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-owner-new",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Eli takes responsibility for the Velvet Archive maintenance rota from July. Route repair approvals to Eli.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-preference",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "The Velvet Archive coordinator wants all routine reports in dark background. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-task",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Unfinished work at Velvet Archive: inspect the humidity alarm before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-manual",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive service manual. When the humidity alarm stops responding, isolate its supply and inspect the silver clasp. Turn the silver clasp counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-alias",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Beacon"
+      ],
+      "links": []
+    },
+    {
+      "id": "velvet-foreign",
+      "scope": "other/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Beacon replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Beacon"
+      ],
+      "links": []
+    },
+    {
+      "id": "velvet-expired",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "The Velvet Archive temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-late",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "The Velvet Archive emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-revision",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-metadata",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-noise-weather",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-noise-rota",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-noise-format",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-noise-device",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "The Velvet Archive humidity alarm appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "velvet-noise-travel",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Velvet Archive staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-owner-old",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Ren is responsible for the Meadow Workshop maintenance rota. Route repair approvals to Ren.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-owner-new",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Ada takes responsibility for the Meadow Workshop maintenance rota from July. Route repair approvals to Ada.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-preference",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "The Meadow Workshop coordinator wants all routine reports in short bullet lists. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-task",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Unfinished work at Meadow Workshop: inspect the lathe guard before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-manual",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop service manual. When the lathe guard stops responding, isolate its supply and inspect the violet lever. Turn the violet lever counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-alias",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Comet"
+      ],
+      "links": []
+    },
+    {
+      "id": "meadow-foreign",
+      "scope": "other/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Comet replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Comet"
+      ],
+      "links": []
+    },
+    {
+      "id": "meadow-expired",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "The Meadow Workshop temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-late",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "The Meadow Workshop emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-revision",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-metadata",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-noise-weather",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-noise-rota",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-noise-format",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-noise-device",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "The Meadow Workshop lathe guard appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "meadow-noise-travel",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Meadow Workshop staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-owner-old",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Leo is responsible for the Tundra Aquarium maintenance rota. Route repair approvals to Leo.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": "2025-01-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": "2026-07-01T00:00:00Z",
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-owner-new",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Bea takes responsibility for the Tundra Aquarium maintenance rota from July. Route repair approvals to Bea.",
+      "tags": [],
+      "fact_key": "maintenance-owner",
+      "created_at": "2026-07-01T00:00:00Z",
+      "effective_at": "2026-07-01T00:00:00Z",
+      "verified_at": "2026-07-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-preference",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "The Tundra Aquarium coordinator wants all routine reports in twenty four hour time. This standing preference has no review deadline.",
+      "tags": [],
+      "fact_key": "report-format",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": "2025-01-01T00:00:00Z",
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "UserFact",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-task",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Unfinished work at Tundra Aquarium: inspect the water filter before the next public opening. Keep this task until an operator explicitly closes it.",
+      "tags": [
+        "protected",
+        "open"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "Task",
+      "importance": 0.9,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-manual",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium service manual. When the water filter stops responding, isolate its supply and inspect the brass collar. Turn the brass collar counterclockwise exactly one quarter turn. Restore the supply only after the inspection is complete.\n\nStorage inventory. Spare notebooks, empty cartons and protective covers are kept beside the east entrance. Staff count these materials on the first working day of each month. Damaged packaging is recorded separately from usable material. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. The inventory ledger describes ordinary supplies and shelf positions; it does not establish equipment repair instructions. \n\nVisitor arrangements. Group tours gather at the reception desk. The coordinator checks attendance and explains the route before opening the interior door. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. Visitors leave coats in the numbered lockers and collect them before departure; tour timing depends on the published opening schedule. ",
+      "tags": [
+        "maintenance",
+        "manual"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-alias",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Calibration station seven stores its replacement probes in the locked west cupboard. Access is arranged through the duty technician.",
+      "tags": [
+        "station"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Ripple"
+      ],
+      "links": []
+    },
+    {
+      "id": "tundra-foreign",
+      "scope": "other/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Ripple replacement probes are in the unlocked south cabinet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Ripple"
+      ],
+      "links": []
+    },
+    {
+      "id": "tundra-expired",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "The Tundra Aquarium temporary admission code is MARIGOLD. This visitor pass is valid only during August.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-08-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": "2026-08-31T23:59:59Z",
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-late",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "The Tundra Aquarium emergency assembly location is the stone courtyard.",
+      "tags": [],
+      "fact_key": "assembly-point",
+      "created_at": "2026-08-01T00:00:00Z",
+      "effective_at": "2026-06-01T00:00:00Z",
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-revision",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium delivery parcels go to gate north. The gate north sign marks the unloading entrance.",
+      "tags": [],
+      "fact_key": "delivery-gate",
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-metadata",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Ledger folio nine contains the equipment service receipts.",
+      "tags": [
+        "unclassified"
+      ],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-noise-weather",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium recorded rain on the roof during the afternoon. Staff placed a bucket under a minor ceiling drip.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "SessionEvent",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-noise-rota",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium maintenance rota stationery uses blue ink. This note describes paper supplies, not the person responsible for approvals.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-noise-format",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium reports from the annual festival use decorative covers. A guest suggested colour photographs for the festival booklet.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2026-08-31T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-noise-device",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "The Tundra Aquarium water filter appeared in a training photograph. The picture caption identifies its exterior colour but contains no repair procedure.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "tundra-noise-travel",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Tundra Aquarium staff meeting participants walked from the railway station. The lunch order included lentil soup and bread.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [],
+      "links": []
+    },
+    {
+      "id": "cedar-kg-seed",
+      "scope": "lab/cedar",
+      "room": "Cedar Observatory operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Solstice-link"
+      ],
+      "links": [
+        {
+          "target_id": "cedar-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    },
+    {
+      "id": "harbor-kg-seed",
+      "scope": "lab/harbor",
+      "room": "Harbor Theatre operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Lantern-link"
+      ],
+      "links": [
+        {
+          "target_id": "harbor-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    },
+    {
+      "id": "quartz-kg-seed",
+      "scope": "lab/quartz",
+      "room": "Quartz Greenhouse operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Sprout-link"
+      ],
+      "links": [
+        {
+          "target_id": "quartz-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    },
+    {
+      "id": "velvet-kg-seed",
+      "scope": "lab/velvet",
+      "room": "Velvet Archive operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Beacon-link"
+      ],
+      "links": [
+        {
+          "target_id": "velvet-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    },
+    {
+      "id": "meadow-kg-seed",
+      "scope": "lab/meadow",
+      "room": "Meadow Workshop operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Comet-link"
+      ],
+      "links": [
+        {
+          "target_id": "meadow-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    },
+    {
+      "id": "tundra-kg-seed",
+      "scope": "lab/tundra",
+      "room": "Tundra Aquarium operations",
+      "body": "Station registry pointer. The linked station record contains the storage location.",
+      "tags": [],
+      "fact_key": null,
+      "created_at": "2025-01-01T00:00:00Z",
+      "effective_at": null,
+      "verified_at": null,
+      "expires_at": null,
+      "valid_to": null,
+      "kind": "AgentNote",
+      "importance": 0.5,
+      "aliases": [
+        "Ripple-link"
+      ],
+      "links": [
+        {
+          "target_id": "tundra-alias",
+          "predicate": "storage_record",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "cedar-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "cedar-revision",
+            "scope": "lab/cedar",
+            "room": "Cedar Observatory operations",
+            "body": "Cedar Observatory delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "cedar-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "cedar-metadata",
+            "scope": "lab/cedar",
+            "room": "Cedar Observatory accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Solstice invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "cedar-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/cedar",
+          "id": "cedar-noise-travel",
+          "revision": 2
+        }
+      ]
+    },
+    {
+      "id": "harbor-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "harbor-revision",
+            "scope": "lab/harbor",
+            "room": "Harbor Theatre operations",
+            "body": "Harbor Theatre delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "harbor-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "harbor-metadata",
+            "scope": "lab/harbor",
+            "room": "Harbor Theatre accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Lantern invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "harbor-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/harbor",
+          "id": "harbor-noise-travel",
+          "revision": 2
+        }
+      ]
+    },
+    {
+      "id": "quartz-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "quartz-revision",
+            "scope": "lab/quartz",
+            "room": "Quartz Greenhouse operations",
+            "body": "Quartz Greenhouse delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "quartz-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "quartz-metadata",
+            "scope": "lab/quartz",
+            "room": "Quartz Greenhouse accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Sprout invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "quartz-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/quartz",
+          "id": "quartz-noise-travel",
+          "revision": 2
+        }
+      ]
+    },
+    {
+      "id": "velvet-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "velvet-revision",
+            "scope": "lab/velvet",
+            "room": "Velvet Archive operations",
+            "body": "Velvet Archive delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "velvet-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "velvet-metadata",
+            "scope": "lab/velvet",
+            "room": "Velvet Archive accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Beacon invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "velvet-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/velvet",
+          "id": "velvet-noise-travel",
+          "revision": 2
+        }
+      ]
+    },
+    {
+      "id": "meadow-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "meadow-revision",
+            "scope": "lab/meadow",
+            "room": "Meadow Workshop operations",
+            "body": "Meadow Workshop delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "meadow-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "meadow-metadata",
+            "scope": "lab/meadow",
+            "room": "Meadow Workshop accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Comet invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "meadow-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/meadow",
+          "id": "meadow-noise-travel",
+          "revision": 2
+        }
+      ]
+    },
+    {
+      "id": "tundra-content-update",
+      "as_of": "2026-09-02T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "tundra-revision",
+            "scope": "lab/tundra",
+            "room": "Tundra Aquarium operations",
+            "body": "Tundra Aquarium delivery parcels now go to gate east. The gate north entrance is closed.",
+            "tags": [],
+            "fact_key": "delivery-gate",
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "tundra-metadata-update",
+      "as_of": "2026-09-03T00:00:00Z",
+      "mutations": [
+        {
+          "op": "upsert",
+          "revision": 2,
+          "drawer": {
+            "id": "tundra-metadata",
+            "scope": "lab/tundra",
+            "room": "Tundra Aquarium accounting",
+            "body": "Ledger folio nine contains the equipment service receipts.",
+            "tags": [
+              "service-receipts"
+            ],
+            "fact_key": null,
+            "created_at": "2025-01-01T00:00:00Z",
+            "effective_at": null,
+            "verified_at": null,
+            "expires_at": null,
+            "valid_to": null,
+            "kind": "AgentNote",
+            "importance": 0.5,
+            "aliases": [
+              "Ripple invoices"
+            ],
+            "links": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "tundra-delete",
+      "as_of": "2026-09-04T00:00:00Z",
+      "mutations": [
+        {
+          "op": "remove",
+          "scope": "lab/tundra",
+          "id": "tundra-noise-travel",
+          "revision": 2
+        }
+      ]
+    }
+  ]
+}

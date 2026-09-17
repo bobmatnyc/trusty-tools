@@ -1,0 +1,1668 @@
+{
+  "schema_version": 1,
+  "provenance": "Human-rule synthetic labels frozen before running retrieval. Relevance is source-level binary evidence, not answer generation quality.",
+  "queries": [
+    {
+      "id": "cedar-owner-current",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Who should approve repairs for Cedar Observatory today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-owner-new"
+      ],
+      "invalid_ids": [
+        "cedar-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "cedar-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-owner-history",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Who handled repair approvals at Cedar Observatory in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-owner-old"
+      ],
+      "invalid_ids": [
+        "cedar-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "cedar-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-preference",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "How does the coordinator at Cedar Observatory want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "cedar-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-task",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Which safety inspection still needs doing before Cedar Observatory admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "cedar-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-manual",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "What part should I turn, and by how much, when the wind sensor fails at Cedar Observatory?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "cedar-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-alias",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Where are spare probes kept for Solstice?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "cedar-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "cedar-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-cutoff",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Where was the emergency gathering point for Cedar Observatory as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "cedar-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-expiry",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "What admission code can a visitor use at Cedar Observatory now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "cedar-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-unsupported",
+      "split": "tuning",
+      "family": "cedar",
+      "text": "Why did the founder of Cedar Observatory choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-owner-current",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Who should approve repairs for Harbor Theatre today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-owner-new"
+      ],
+      "invalid_ids": [
+        "harbor-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "harbor-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-owner-history",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Who handled repair approvals at Harbor Theatre in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-owner-old"
+      ],
+      "invalid_ids": [
+        "harbor-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "harbor-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-preference",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "How does the coordinator at Harbor Theatre want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "harbor-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-task",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Which safety inspection still needs doing before Harbor Theatre admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "harbor-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-manual",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "What part should I turn, and by how much, when the stage curtain fails at Harbor Theatre?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "harbor-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-alias",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Where are spare probes kept for Lantern?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "harbor-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "harbor-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-cutoff",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Where was the emergency gathering point for Harbor Theatre as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "harbor-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-expiry",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "What admission code can a visitor use at Harbor Theatre now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "harbor-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-unsupported",
+      "split": "tuning",
+      "family": "harbor",
+      "text": "Why did the founder of Harbor Theatre choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-owner-current",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Who should approve repairs for Quartz Greenhouse today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-owner-new"
+      ],
+      "invalid_ids": [
+        "quartz-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "quartz-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-owner-history",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Who handled repair approvals at Quartz Greenhouse in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-owner-old"
+      ],
+      "invalid_ids": [
+        "quartz-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "quartz-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-preference",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "How does the coordinator at Quartz Greenhouse want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "quartz-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-task",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Which safety inspection still needs doing before Quartz Greenhouse admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "quartz-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-manual",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "What part should I turn, and by how much, when the mist valve fails at Quartz Greenhouse?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "quartz-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-alias",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Where are spare probes kept for Sprout?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "quartz-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "quartz-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-cutoff",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Where was the emergency gathering point for Quartz Greenhouse as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "quartz-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-expiry",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "What admission code can a visitor use at Quartz Greenhouse now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "quartz-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-unsupported",
+      "split": "tuning",
+      "family": "quartz",
+      "text": "Why did the founder of Quartz Greenhouse choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-owner-current",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Who should approve repairs for Velvet Archive today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-owner-new"
+      ],
+      "invalid_ids": [
+        "velvet-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "velvet-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-owner-history",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Who handled repair approvals at Velvet Archive in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-owner-old"
+      ],
+      "invalid_ids": [
+        "velvet-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "velvet-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-preference",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "How does the coordinator at Velvet Archive want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "velvet-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-task",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Which safety inspection still needs doing before Velvet Archive admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "velvet-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-manual",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "What part should I turn, and by how much, when the humidity alarm fails at Velvet Archive?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "velvet-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-alias",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Where are spare probes kept for Beacon?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "velvet-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "velvet-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-cutoff",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Where was the emergency gathering point for Velvet Archive as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "velvet-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-expiry",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "What admission code can a visitor use at Velvet Archive now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "velvet-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-unsupported",
+      "split": "heldout",
+      "family": "velvet",
+      "text": "Why did the founder of Velvet Archive choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-owner-current",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Who should approve repairs for Meadow Workshop today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-owner-new"
+      ],
+      "invalid_ids": [
+        "meadow-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "meadow-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-owner-history",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Who handled repair approvals at Meadow Workshop in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-owner-old"
+      ],
+      "invalid_ids": [
+        "meadow-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "meadow-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-preference",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "How does the coordinator at Meadow Workshop want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "meadow-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-task",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Which safety inspection still needs doing before Meadow Workshop admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "meadow-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-manual",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "What part should I turn, and by how much, when the lathe guard fails at Meadow Workshop?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "meadow-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-alias",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Where are spare probes kept for Comet?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "meadow-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "meadow-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-cutoff",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Where was the emergency gathering point for Meadow Workshop as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "meadow-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-expiry",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "What admission code can a visitor use at Meadow Workshop now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "meadow-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-unsupported",
+      "split": "heldout",
+      "family": "meadow",
+      "text": "Why did the founder of Meadow Workshop choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-owner-current",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Who should approve repairs for Tundra Aquarium today?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-owner-new"
+      ],
+      "invalid_ids": [
+        "tundra-owner-old"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Explicit single-valued owner slot changes July 1; previous interval has ended.",
+      "expected_ids": [
+        "tundra-owner-new"
+      ],
+      "category": "owner-current",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-owner-history",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Who handled repair approvals at Tundra Aquarium in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-owner-old"
+      ],
+      "invalid_ids": [
+        "tundra-owner-new"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Historical effective interval and recorded cutoff both apply.",
+      "expected_ids": [
+        "tundra-owner-old"
+      ],
+      "category": "owner-history",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-preference",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "How does the coordinator at Tundra Aquarium want routine written updates presented?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-preference"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old durable preference remains relevant despite recent unrelated format suggestions.",
+      "expected_ids": [
+        "tundra-preference"
+      ],
+      "category": "preference",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-task",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Which safety inspection still needs doing before Tundra Aquarium admits visitors?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-task"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Old explicit open protected task persists; age alone cannot delete it.",
+      "expected_ids": [
+        "tundra-task"
+      ],
+      "category": "task",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-manual",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "What part should I turn, and by how much, when the water filter fails at Tundra Aquarium?",
+      "mode": "general",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-manual"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Answer exists only in first paragraph of a long heterogeneous source; count source once.",
+      "expected_ids": [
+        "tundra-manual"
+      ],
+      "category": "manual",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-alias",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Where are spare probes kept for Ripple?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "tundra-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Alias exists only in structured same-scope metadata; other-scope homonym is forbidden.",
+      "expected_ids": [
+        "tundra-alias"
+      ],
+      "category": "alias",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-cutoff",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Where was the emergency gathering point for Tundra Aquarium as known in mid June?",
+      "mode": "asof",
+      "as_of": "2026-06-15T00:00:00Z",
+      "knowledge_cutoff": "2026-06-15T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "tundra-late"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Assertion is effective June 1 but not recorded until August; unavailable at knowledge cutoff.",
+      "expected_ids": [],
+      "category": "cutoff",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-expiry",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "What admission code can a visitor use at Tundra Aquarium now?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [
+        "tundra-expired"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Admission code expiry precedes the query as_of; source cannot answer current admission access.",
+      "expected_ids": [],
+      "category": "expiry",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-unsupported",
+      "split": "heldout",
+      "family": "tundra",
+      "text": "Why did the founder of Tundra Aquarium choose its architectural style?",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "No source contains founder motivation; empty relevance set, not inferred semantic answer.",
+      "expected_ids": [],
+      "category": "unsupported",
+      "scenario": "initial",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-after-content-update",
+      "split": "tuning",
+      "family": "cedar",
+      "category": "content-update",
+      "scenario": "postevents",
+      "text": "Which entrance now accepts Cedar Observatory deliveries?",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-revision"
+      ],
+      "expected_ids": [
+        "cedar-revision"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {
+        "cedar-revision": [
+          "gate east"
+        ]
+      },
+      "forbidden_evidence": {
+        "cedar-revision": [
+          "parcels go to gate north"
+        ]
+      }
+    },
+    {
+      "id": "velvet-after-content-update",
+      "split": "heldout",
+      "family": "velvet",
+      "category": "content-update",
+      "scenario": "postevents",
+      "text": "Which entrance now accepts Velvet Archive deliveries?",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-revision"
+      ],
+      "expected_ids": [
+        "velvet-revision"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {
+        "velvet-revision": [
+          "gate east"
+        ]
+      },
+      "forbidden_evidence": {
+        "velvet-revision": [
+          "parcels go to gate north"
+        ]
+      }
+    },
+    {
+      "id": "harbor-after-metadata-update",
+      "split": "tuning",
+      "family": "harbor",
+      "category": "metadata-update",
+      "scenario": "postevents",
+      "text": "Lantern invoices service receipts",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-metadata"
+      ],
+      "expected_ids": [
+        "harbor-metadata"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-after-metadata-update",
+      "split": "heldout",
+      "family": "meadow",
+      "category": "metadata-update",
+      "scenario": "postevents",
+      "text": "Comet invoices service receipts",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-metadata"
+      ],
+      "expected_ids": [
+        "meadow-metadata"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [],
+      "expected_empty": false,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-after-deletion",
+      "split": "tuning",
+      "family": "quartz",
+      "category": "deletion",
+      "scenario": "postevents",
+      "text": "Quartz Greenhouse railway walk lunch order",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [],
+      "expected_ids": [],
+      "invalid_ids": [
+        "quartz-noise-travel"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-after-deletion",
+      "split": "heldout",
+      "family": "tundra",
+      "category": "deletion",
+      "scenario": "postevents",
+      "text": "Tundra Aquarium railway walk lunch order",
+      "mode": "current",
+      "as_of": "2026-09-05T00:00:00Z",
+      "knowledge_cutoff": "2026-09-05T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [],
+      "expected_ids": [],
+      "invalid_ids": [
+        "tundra-noise-travel"
+      ],
+      "forbidden_ids": [],
+      "expected_empty": true,
+      "label_reason": "Evaluate after all dated events in order; source ID relevance alone cannot establish revision freshness.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "cedar-kg-hop",
+      "split": "tuning",
+      "family": "cedar",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Solstice-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/cedar",
+      "top_k": 5,
+      "relevant_ids": [
+        "cedar-alias"
+      ],
+      "expected_ids": [
+        "cedar-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "cedar-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "harbor-kg-hop",
+      "split": "tuning",
+      "family": "harbor",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Lantern-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/harbor",
+      "top_k": 5,
+      "relevant_ids": [
+        "harbor-alias"
+      ],
+      "expected_ids": [
+        "harbor-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "harbor-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "quartz-kg-hop",
+      "split": "tuning",
+      "family": "quartz",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Sprout-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/quartz",
+      "top_k": 5,
+      "relevant_ids": [
+        "quartz-alias"
+      ],
+      "expected_ids": [
+        "quartz-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "quartz-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "velvet-kg-hop",
+      "split": "heldout",
+      "family": "velvet",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Beacon-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/velvet",
+      "top_k": 5,
+      "relevant_ids": [
+        "velvet-alias"
+      ],
+      "expected_ids": [
+        "velvet-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "velvet-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "meadow-kg-hop",
+      "split": "heldout",
+      "family": "meadow",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Comet-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/meadow",
+      "top_k": 5,
+      "relevant_ids": [
+        "meadow-alias"
+      ],
+      "expected_ids": [
+        "meadow-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "meadow-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    },
+    {
+      "id": "tundra-kg-hop",
+      "split": "heldout",
+      "family": "tundra",
+      "category": "kg-hop",
+      "scenario": "initial",
+      "text": "Ripple-link",
+      "mode": "current",
+      "as_of": "2026-09-01T00:00:00Z",
+      "knowledge_cutoff": "2026-09-01T00:00:00Z",
+      "scope": "lab/tundra",
+      "top_k": 5,
+      "relevant_ids": [
+        "tundra-alias"
+      ],
+      "expected_ids": [
+        "tundra-alias"
+      ],
+      "invalid_ids": [],
+      "forbidden_ids": [
+        "tundra-foreign"
+      ],
+      "expected_empty": false,
+      "label_reason": "Exact alias denotes registry seed; explicit storage_record link points to the source containing the requested station information. Seed has no storage answer.",
+      "required_evidence": {},
+      "forbidden_evidence": {}
+    }
+  ]
+}

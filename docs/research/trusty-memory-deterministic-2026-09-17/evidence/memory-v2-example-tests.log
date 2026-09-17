@@ -1,0 +1,31 @@
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `tctl`
+  * `bin` target `trusty-installer`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/src/bin/tm/main.rs` found to be present in multiple build targets:
+  * `bin` target `tm`
+  * `bin` target `trusty-mpm`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `taudit`
+  * `bin` target `trusty-audit`
+   Compiling trusty-memory v0.26.1 (/Users/masa/trusty-search-experiment/worktree/crates/trusty-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.07s
+     Running unittests examples/memory_deterministic_eval.rs (/Users/masa/trusty-search-experiment/target/debug/examples/memory_deterministic_eval-7c03f69a076aefa3)
+
+running 14 tests
+test support::tests::policy_bounds_match_the_frozen_interface ... ok
+test support::tests::validation_errors_and_budget_retry ... ok
+test support::tests::extra_legacy_children_cannot_claim_a_fresh_generation ... ok
+test support::tests::canonical_metadata_and_dates_are_idempotent_retries ... ok
+test support::tests::alias_candidates_survive_context_cap_without_links ... ok
+test support::tests::tombstones_revisions_and_atomic_conflicts ... ok
+test support::tests::aliases_do_not_cross_scope_and_corrupt_ranges_are_rejected ... ok
+test support::tests::production_backfill_skips_changed_text_when_id_is_present ... ok
+test support::tests::body_metadata_repair_noop_and_source_preservation ... ok
+test support::tests::temporal_scope_and_boundary_rules ... ok
+test support::tests::capacity_refusal_never_publishes_success ... ok
+test support::tests::bounded_resume_legacy_import_and_snapshot_compatibility ... ok
+test support::tests::deterministic_ties_chunks_alias_links_and_stale_locators ... ok
+test support::tests::repeated_occurrences_and_oversized_utf8_runs_are_bounded ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+

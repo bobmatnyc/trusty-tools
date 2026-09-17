@@ -1,6 +1,6 @@
 # Deterministic memory retrieval and dream-cycle indexing
 
-Status: source-backed research and experiment proposal, not implemented or benchmarked. Inspected source revision: `90b6aeb944e1d010f3690281ec24efe7b89435c3`. Scope: chunking, BM25, temporal metadata, and KG; no embeddings or inference in the experimental path. This follows the [search experiment](../trusty-search-context-2026-09-17/README.md).
+Status: the isolated deterministic prototype is implemented; see the [experiment report](report.md), [verification](verification.md), and [reproduction instructions](../../../experiments/trusty-memory-deterministic/README.md). Production integration remains tracked in [#8246](https://github.com/bobmatnyc/trusty-tools/issues/8246). No installed daemon or live memory was changed. Inspected base revision: `90b6aeb944e1d010f3690281ec24efe7b89435c3`. Scope: chunking, BM25, temporal metadata, and KG; no embeddings or inference in the experimental path. This follows the [search experiment](../trusty-search-context-2026-09-17/README.md).
 
 ## Recommendation
 
@@ -92,4 +92,4 @@ No full reindex is required to start or serve existing memories. New writes get 
 
 [Generative Agents (Park et al., 2023)](https://arxiv.org/abs/2304.03442) combines memory retrieval with reflection and temporal behavior, but its architecture uses language models; it is not evidence that deterministic consolidation alone achieves the same outcome. [Anthropic Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval) adds context to BM25 and embedding inputs; its reported combined gains cannot be attributed to this proposed no-embedding treatment.
 
-The deterministic contribution here is derived-index maintenance, structural context, explicit temporal eligibility, and reproducible ranking. Semantic truth verification and open-ended conflict resolution remain outside what these rules can establish. No memory benchmark or live dream cycle was run for this assessment.
+The deterministic contribution here is derived-index maintenance, structural context, explicit temporal eligibility, and reproducible ranking. Semantic truth verification and open-ended conflict resolution remain outside what these rules can establish. The subsequent [experiment](report.md) tests synthetic memories through an isolated engine; no live dream cycle was run.

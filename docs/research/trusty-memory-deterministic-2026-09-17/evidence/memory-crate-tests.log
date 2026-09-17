@@ -1,0 +1,1423 @@
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `taudit`
+  * `bin` target `trusty-audit`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/src/bin/tm/main.rs` found to be present in multiple build targets:
+  * `bin` target `tm`
+  * `bin` target `trusty-mpm`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `tctl`
+  * `bin` target `trusty-installer`
+   Compiling trusty-memory v0.26.1 (/Users/masa/trusty-search-experiment/worktree/crates/trusty-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.10s
+     Running unittests src/lib.rs (/Users/masa/trusty-search-experiment/target/debug/deps/trusty_memory-3ea7a28d446a5556)
+
+running 940 tests
+test attribution::tests::creator_info_omits_workstream_tags_when_absent_or_invalid ... ok
+test activity::tests::activity_source_parse_and_back ... ok
+test attribution::tests::creator_info_renders_all_fields ... ok
+test attribution::tests::creator_info_omits_cwd_when_absent ... ok
+test attribution::tests::creator_source_from_activity_source ... ok
+test attribution::tests::is_creator_tag_detects_namespace ... ok
+test activity::tests::discard_variant_drops_writes_and_returns_empty_reads ... ok
+test attribution::tests::merge_into_appends_creator_tags ... ok
+test attribution::tests::creator_info_renders_workstream_tags_when_resolvable ... ok
+test attribution::tests::is_valid_workstream_name_rejects_uuid_and_unsafe_names ... ok
+test activity::tests::activity_source_round_trips_via_serde ... ok
+test attribution::tests::new_for_caller_omits_workstream_when_neither_resolvable ... ok
+test attribution::tests::is_valid_workstream_name_accepts_slugs ... ok
+test attribution::tests::merge_into_deduped_appends_when_no_overlap ... ok
+test attribution::tests::new_for_caller_prefers_explicit_workstream_over_cwd ... ok
+test attribution::tests::new_for_caller_invalid_explicit_workstream_returns_none_not_cwd_fallback ... ok
+test attribution::tests::merge_into_deduped_skips_tags_already_present ... ok
+test attribution::tests::resolve_workstream_name_invalid_env_var_returns_none ... ok
+test attribution::tests::resolve_workstream_name_prefers_env_var ... ok
+test activity::tests::entry_serde_round_trip ... ok
+test attribution::tests::resolve_workstream_name_none_when_unresolvable ... ok
+test attribution::tests::resolve_workstream_name_rejects_uuid_shaped_cwd_segment ... ok
+test attribution::tests::resolve_workstream_name_falls_back_to_worktrees_cwd_segment ... ok
+test attribution::tests::new_for_caller_falls_back_to_cwd_when_workstream_absent ... ok
+test attribution::tests::creator_info_self_populates_version_and_cwd ... ok
+test attribution::tests::session_tag_from_tags_returns_first_uuid_short ... ok
+test attribution::tests::session_tag_from_tags_skips_non_uuid_entries ... ok
+test attribution::tests::session_tag_from_tags_skips_reserved_namespace ... ok
+test bm25_backfill::tests::a_palace_of_only_blank_drawers_is_covered_and_counted ... ok
+test activity::tests::activity_log_open_creates_db_file ... ok
+test bm25_backfill::tests::backfill_reports_index_unavailable_when_the_snapshot_cannot_be_opened ... ok
+test activity::tests::appends_assign_monotonic_ids ... ok
+test bm25_backfill::tests::docs_from_drawers_splits_blank_from_indexable ... ok
+test activity::tests::list_filters_by_source_palace_and_time ... ok
+test bm25_backfill::tests::empty_palace_is_already_indexed ... ok
+test bm25_backfill::tests::fully_indexed_requires_a_verified_empty_missing_set ... ok
+test activity::tests::list_returns_newest_first ... ok
+test activity::tests::next_id_resumes_from_max_after_reopen ... ok
+test bm25_backfill::tests::short_circuit_reports_are_never_covered ... ok
+test bm25_backfill::tests::stale_doc_estimate_is_reported_not_acted_on ... ok
+test bm25_backfill::tests::startup_backfill_respects_the_opt_out ... ok
+test authz::tests::authorize_force_palace_create_allows_single_tenant_default ... ok
+test bm25_backfill::tests::coverage_probe_classifies_an_unreadable_index_as_unreachable ... ok
+test authz::tests::authorize_force_palace_create_denies_multi_tenant_without_capability ... ok
+test activity::tests::appends_evict_oldest_when_capped ... ok
+test activity::tests::list_paginates_via_limit_and_offset ... ok
+test bm25_backfill::tests::a_sweep_that_cannot_enumerate_verifies_nothing ... ok
+test bm25_index::tests::an_unquarantinable_corrupt_snapshot_fails_the_load ... ok
+test bm25_index::tests::a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it ... ok
+test bm25_index::tests::a_failed_flush_leaves_the_index_dirty ... ok
+test bm25_index::tests::index_doc_marks_dirty ... ok
+test bm25_index::tests::load_propagates_an_unreadable_snapshot ... ok
+test bm25_index::tests::missing_docs_answers_by_identity_not_count ... ok
+test bm25_index::tests::flush_round_trips ... ok
+test bm25_index::tests::load_recovers_from_a_corrupt_snapshot ... ok
+test bm25_index::tests::search_clamps_a_zero_top_k ... ok
+test bm25_index::tests::stats_track_docs_and_bytes ... ok
+test bm25_index::tests::search_returns_hits ... ok
+test bm25_index::tests::delete_doc_removes_and_marks_dirty ... ok
+test bm25_lane::tests::bm25_hit_round_trips ... ok
+test bm25_lane::tests::default_cap_is_three ... ok
+test bm25_lane::tests::data_dir_matches_the_daemon_era_layout ... ok
+test bm25_index::tests::snapshot_written_by_the_daemon_is_read_in_place ... ok
+test bm25_lane::tests::a_cold_load_failure_propagates ... ok
+test bm25_lane::tests::max_resident_honours_env_override ... ok
+test bm25_lane::tests::cap_is_clamped_to_at_least_one ... ok
+test bm25_lane::tests::a_cold_load_refuses_to_evict_an_unflushable_victim ... ok
+test bm25_lane::tests::concurrent_callers_for_one_palace_share_one_index ... ok
+test bm25_lane::tests::flush_persists_a_pending_write ... ok
+test bm25_lane::tests::a_disabled_budget_never_evicts ... ok
+test bm25_lane::tests::a_write_reaches_disk_without_an_explicit_flush ... ok
+test bm25_lane::tests::delete_removes_the_document ... ok
+test bm25_lane::tests::text_budget_honours_env_override ... ok
+test bm25_lane::tests::eviction_flushes_before_dropping_the_index ... ok
+test bm25_lane::tests::index_then_search_finds_the_document ... ok
+test bm25_lane::tests::missing_docs_answers_by_identity ... ok
+test bm25_backfill::tests::palace_docs_reads_the_drawer_table ... ok
+test bm25_lane::tests::shutdown_flushes_and_is_idempotent ... ok
+test bm25_lane::tests::stats_report_docs_and_bytes ... ok
+test bm25_repair::tests::repair_interval_honours_env_override ... ok
+test bm25_lane::tests::over_budget_evicts_the_coldest ... ok
+test bm25_lane::tests::palaces_do_not_share_a_corpus ... ok
+test bm25_backfill::tests::backfill_state_palace_is_disabled_without_a_lane ... ok
+test bm25_lane::tests::the_budget_keeps_a_palace_whose_snapshot_cannot_be_flushed ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_cargo_facts ... ok
+test bm25_repair::tests::a_palace_absent_from_disk_is_dropped_from_the_queue ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_claude_md_h1 ... ok
+test bm25_lane::tests::the_budget_evicts_past_a_palace_it_cannot_flush ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_go_mod ... ok
+test bm25_repair::tests::mark_dirty_is_idempotent ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_package_json ... ok
+test chat::tools_tests::all_tools_returns_expected_set ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_git_origin ... ok
+test bootstrap::scan::scan_tests::scan_project_falls_back_to_palace_id_when_no_manifest ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_pyproject ... ok
+test bootstrap::scan::scan_tests::scan_project_extracts_workspace_members ... ok
+test client::tests::client_reports_a_dead_socket_rather_than_hanging ... ok
+test bm25_repair::tests::repair_sweep_is_a_noop_without_the_lane ... ok
+test commands::backfill_report::tests::bullets_are_counted_once_per_entry ... ok
+test commands::backfill_report::tests::empty_census_says_why ... ok
+test commands::backfill_report::tests::date_stamp_only_scans_the_opening ... ok
+test commands::backfill_report::tests::counts_are_scoped_per_palace ... ok
+test chat::tools_tests::execute_tool_dispatches_known_tools ... ok
+test commands::backfill_report::tests::kg_facts_section_is_ignored ... ok
+test bm25_backfill::tests::startup_sweep_counts_an_undecodable_palace_instead_of_skipping_it ... ok
+test commands::backfill_report::tests::max_importance_and_expiry_are_reported ... ok
+test bm25_lane::tests::a_concurrent_fanout_never_exceeds_the_cap ... ok
+test commands::backfill_report::tests::no_signal_implies_empty_list ... ok
+test commands::backfill_report::tests::non_prompt_context_entries_are_not_counted ... ok
+test commands::backfill_report::tests::collision_json_field_is_always_present ... ok
+test commands::backfill_report::tests::colliding_excerpts_are_marked_on_every_affected_row ... ok
+test commands::backfill_report::tests::predates_log_window_fires_only_outside_coverage ... ok
+test bm25_backfill::tests::startup_sweep_marks_unopenable_palaces_instead_of_skipping_them ... ok
+test commands::backfill_report::tests::predates_log_window_is_silent_when_no_log_was_scanned ... ok
+test commands::backfill_report::tests::json_round_trips ... ok
+test commands::backfill_report::tests::preview_matches_injection_bullet ... ok
+test bm25_repair::tests::an_unrepairable_palace_stays_queued ... ok
+test commands::backfill_report::tests::scan_dir_on_missing_directory_is_empty_not_error ... ok
+test commands::backfill_report::tests::short_partial_is_not_matched ... ok
+test commands::backfill_report::tests::scan_dir_counts_across_files ... ok
+test commands::backfill_report::tests::tags_are_reported_verbatim ... ok
+test commands::backfill_report::tests::text_output_leads_with_the_read_only_contract ... ok
+test commands::backfill_report::tests::truncated_tail_bullet_matches_by_prefix ... ok
+test chat::tools_tests::chat_kg_assert_refreshes_prompt_cache ... ok
+test commands::backfill_report::tests::limit_caps_the_output_without_hiding_the_total ... ok
+test chat::tools_tests::chat_kg_assert_reports_tier_s_refusal_without_writing ... ok
+test commands::backfill_report::tests::palace_without_a_kg_store_is_empty_not_an_error ... ok
+test commands::backfill_report::tests::min_injections_filters ... ok
+test commands::backfill_report::tests::weight_retained_needs_both_age_and_weight ... ok
+test commands::backfill_report::tests::untagged_bullet_counts_exactly ... ok
+test commands::backfill_report::tests::untagged_bullet_mid_block_is_not_treated_as_a_tail ... ok
+test commands::backfill_report::tests::incompatible_store_is_reported_not_recreated ... ok
+test commands::daemon_guard::tests::probe_returns_false_for_an_absent_socket ... ok
+test commands::daemon_guard::tests::ensure_daemon_running_returns_early_when_something_is_serving ... ok
+test bm25_repair::tests::an_evicted_palace_is_rehydrated_not_dropped ... ok
+test commands::backfill_report::tests::identical_excerpts_in_different_palaces_do_not_collide ... ok
+test bm25_repair::tests::repair_pass_hands_back_the_palace_it_opened ... ok
+test commands::daemon_lock::tests::pid_alive_returns_false_for_overflow_pid ... ok
+test commands::daemon_lock::tests::pid_alive_returns_false_for_pid_zero ... ok
+test commands::daemon_lock::tests::pid_alive_returns_true_for_current_pid ... ok
+test commands::daemon_lock::tests::lock_file_path_uses_data_dir ... ok
+test bm25_repair::tests::repair_pass_keeps_a_recently_used_palace ... ok
+test commands::daemon_lock::tests::acquire_lock_refuses_live_pid ... ok
+test commands::doctor::checks::checks_tests::a_daemon_with_no_stall_detector_is_undetermined_not_a_pass ... ok
+test commands::doctor::checks::checks_tests::a_non_health_undetermined_check_also_ends_the_run_unhealthy ... ok
+test commands::doctor::checks::checks_tests::a_pool_wedge_beside_a_benign_stamp_names_the_pool ... ok
+test commands::daemon_lock::tests::daemon_lock_drops_removes_file ... ok
+test commands::daemon_lock::tests::read_lock_pid_returns_none_for_missing_file ... ok
+test commands::daemon_lock::tests::read_lock_pid_returns_none_for_empty_file ... ok
+test commands::daemon_lock::tests::acquire_lock_writes_own_pid ... ok
+test commands::doctor::checks::checks_tests::an_undetermined_check_is_not_a_healthy_run ... ok
+test commands::daemon_lock::tests::read_lock_pid_returns_pid_for_valid_file ... ok
+test commands::doctor::checks::checks_tests::stopped_stall_tracking_is_undetermined_not_a_warning ... ok
+test commands::doctor::checks::checks_tests::warnings_alone_are_a_healthy_run ... ok
+test commands::daemon_lock::tests::acquire_lock_reclaims_stale_pid ... ok
+test commands::doctor::mcp_registration::tests::absent_registration_warns ... ok
+test commands::doctor::mcp_registration::tests::canonical_vector_passes_and_reports_the_four_facts ... ok
+test commands::doctor::mcp_registration::tests::equals_form_of_the_palace_flag_is_recognised ... ok
+test commands::doctor::mcp_registration::tests::codex_missing_file_is_none ... ok
+test commands::doctor::mcp_registration::tests::absent_global_claude_files_still_emit_a_scope_warning ... ok
+test commands::doctor::mcp_registration::tests::joined_string_vector_fails ... ok
+test commands::doctor::mcp_registration::tests::legacy_stdio_vector_warns ... ok
+test commands::doctor::mcp_registration::tests::nested_json_string_vector_fails ... ok
+test commands::doctor::checks::checks_tests::a_wedge_from_a_held_handle_lock_fails_and_names_the_lock ... ok
+test commands::doctor::mcp_registration::tests::registration_without_serve_fails ... ok
+test commands::doctor::mcp_registration::tests::reads_a_claude_registration ... ok
+test commands::doctor::mcp_registration::tests::unpinned_registration_reports_the_working_directory_rule ... ok
+test commands::doctor::mcp_registration::tests::existing_global_claude_file_is_checked ... ok
+test commands::doctor::mcp_registration::tests::reads_a_codex_registration ... ok
+test commands::doctor::tests::body_without_worker_block_is_unknown ... ok
+test commands::doctor::tests::degraded_body_is_warn ... ok
+test commands::doctor::tests::fastembed_cache_check_reports_missing_dir ... ok
+test commands::doctor::tests::check_daemon_health_fails_cleanly_with_no_listener ... ok
+test commands::doctor::tests::fastembed_cache_has_models_detects_entries ... ok
+test commands::backfill_report::tests::stanza_carries_every_decision_field ... ok
+test commands::doctor::checks::checks_tests::an_answer_without_a_health_body_is_never_a_healthy_run ... ok
+test commands::doctor::tests::healthy_body_is_pass ... ok
+test commands::doctor::tests::indeterminate_probe_renders_as_unknown_not_pass ... ok
+test commands::doctor::tests::kg_redb_size_verdict_matches_the_thresholds ... ok
+test commands::doctor::tests::find_lock_files_returns_paths ... ok
+test commands::backfill_report::tests::ranks_by_injection_count ... ok
+test commands::doctor::tests::warming_body_is_warn ... ok
+test commands::doctor::tests::wedged_body_is_fail ... ok
+test commands::doctor::tier_s::tests::no_facts_is_pass ... ok
+test commands::doctor::tier_s::tests::fresh_facts_are_pass ... ok
+test commands::doctor::tier_s::tests::stale_facts_warn_and_name_the_retirement_path ... ok
+test commands::doctor::tier_s::tests::stale_facts_never_fail ... ok
+test commands::inbox_check::tests::palace_slug_from_stdin_cwd_returns_none_on_bad_input ... ok
+test commands::doctor::tests::audit_palaces_ok_when_pin_file_claims_it ... ok
+test commands::kg_rebuild::tests::count_purge_failures_never_double_counts_a_palace ... ok
+test commands::backfill_report::tests::unique_excerpts_are_not_marked ... ok
+test commands::backfill_report::tests::palace_filter_narrows_the_census ... ok
+test commands::doctor::tests::plist_check_detects_missing_env_var ... ok
+test commands::inbox_check::tests::inbox_check_logs_attempt_without_daemon ... ok
+test commands::doctor::tests::scan_project_dirs_returns_false_for_mismatch ... ok
+test commands::kg_rebuild::tests::purge_is_off_by_default ... ok
+test commands::inbox_check::tests::inbox_check_returns_ok_without_daemon ... ok
+test commands::kg_rebuild::tests::purge_reports_a_failed_delete_as_failed_not_deleted ... ok
+test commands::doctor::checks::checks_tests::a_socket_that_accepts_and_never_answers_is_unknown_within_the_budget ... ok
+test commands::backfill_report::tests::report_writes_nothing_to_the_palace ... ok
+test commands::kg_rebuild::tests::purge_selects_a_legacy_subject_with_welded_punctuation ... ok
+test commands::doctor::tests::find_orphaned_palaces_lists_non_matching_and_empty ... ok
+test commands::kg_rebuild::tests::purge_selects_only_stopword_subjects ... ok
+test commands::kg_rebuild::tests::purge_skips_namespaced_subjects ... ok
+test commands::kg_rebuild::tests::purge_spares_a_subject_with_a_manual_triple ... ok
+test commands::inbox_check::tests::palace_slug_from_stdin_cwd_uses_stdin_path ... ok
+test commands::backfill_report::tests::zero_injection_drawers_rank_last ... ok
+test commands::kg_rebuild::tests::purge_palaces_propagates_an_unreadable_data_root ... ok
+test commands::kg_twin_merge::tests::merge_palaces_propagates_an_unreadable_data_root ... ok
+test commands::kg_twin_merge::tests::merge_summary_counts_each_failure_once ... ok
+test commands::doctor::checks::checks_tests::a_responsive_daemon_passes ... ok
+test commands::kg_rebuild::tests::rebuild_palaces_propagates_an_unreadable_data_root ... ok
+test commands::kg_twin_merge::tests::twin_repoints_leaves_the_purge_its_stopwords ... ok
+test commands::kg_twin_merge::tests::twin_repoints_moves_both_positions ... ok
+test commands::daemon_guard::tests::ensure_daemon_running_spawns_when_no_launchd_unit_owns_the_socket ... ok
+test commands::kg_twin_merge::tests::twin_repoints_skips_namespaces ... ok
+test commands::kg_twin_merge::tests::twin_repoints_spares_a_manual_triple ... ok
+test commands::kuzu_migrate::tests::entity_to_drawer_empty_observations ... ok
+test commands::kuzu_migrate::tests::entity_to_drawer_maps_name_and_observations ... ok
+test commands::kuzu_migrate::tests::entity_uuid_is_deterministic ... ok
+test commands::kuzu_migrate::tests::discover_schema_on_empty_db_returns_empty ... ok
+test commands::daemon_guard::tests::ensure_daemon_running_defers_to_a_launchd_unit_instead_of_spawning ... ok
+test commands::kuzu_migrate::tests::relation_to_triple_maps_fields ... ok
+test commands::kuzu_migrate::tests::dry_run_returns_ok_without_writing ... ok
+test commands::kuzu_migrate::tests::read_entities_on_empty_db_returns_empty ... ok
+test commands::kuzu_migrate::tests::read_fixture_store_returns_entities_and_relations ... ok
+test commands::kuzu_migrate::tests::read_relations_on_empty_db_returns_empty ... ok
+test commands::link::tests::link_creates_pin_file ... ok
+test commands::link::tests::link_is_idempotent ... ok
+test commands::link::tests::link_refuses_overwrite_without_force ... ok
+test commands::migrate::tests::test_migrate_config_dry_run_does_not_write ... ok
+test commands::migrate::tests::test_migrate_config_idempotent ... ok
+test commands::link::tests::link_updates_slug_with_force ... ok
+test commands::migrate::tests::test_migrate_config_skips_when_no_legacy_key ... ok
+test commands::migrate::tests::test_migrate_config_replaces_dashed_key ... ok
+test commands::migrate::tests::test_migrate_config_replaces_underscored_key ... ok
+test commands::migrations::tests::missing_palace_is_noop ... ok
+test commands::migrations::tests::leaves_custom_name_untouched ... ok
+test commands::migrations::tests::idempotent_when_already_renamed ... ok
+test commands::migrations::tests::pre_renamed_user_memories_is_untouched ... ok
+test commands::migrations::tests::migrates_when_legacy_name ... ok
+test commands::monitor::tests::fmt_count_groups_thousands ... ok
+test commands::monitor::tests::fmt_opt_count_marks_unknown ... ok
+test commands::monitor::tests::print_palace_detail_renders_unknown_vectors ... ok
+test commands::note::tests::note_builds_expected_body ... ok
+test commands::migrations::tests::unrelated_palaces_are_not_touched ... ok
+test commands::port::tests::format_socket_output_escapes_an_awkward_path ... ok
+test commands::migrations::tests::unstattable_palace_json_is_an_error_not_a_noop ... ok
+test commands::note::tests::note_reports_a_dropped_write_as_a_failure ... ok
+test commands::port::tests::format_socket_output_renders_each_format ... ok
+test commands::kg_rebuild::tests::purge_dry_run_does_not_prune_expired_drawers ... ok
+test commands::prompt_context::query::tests::cjk_is_one_token_per_char ... ok
+test commands::kg_rebuild::tests::purge_deletes_stale_subjects_only_when_applied ... ok
+test commands::kg_rebuild::tests::purge_counts_an_unopenable_palace_as_exactly_one_failure ... ok
+test commands::prompt_context::query::tests::configured_query_budget_clamps_to_bounds ... ok
+test commands::prompt_context::query::tests::envelope_strip_keeps_text_after_the_envelope ... ok
+test commands::prompt_context::query::tests::envelope_strip_recovers_the_payload ... ok
+test commands::prompt_context::query::tests::envelope_strip_tolerates_a_cut_envelope ... ok
+test commands::prompt_context::query::tests::envelope_trailing_instruction_outranks_the_payload ... ok
+test commands::prompt_context::query::tests::envelope_with_no_payload_passes_through_whole ... ok
+test commands::kg_twin_merge::tests::merge_dry_run_writes_nothing ... ok
+test commands::prompt_context::query::tests::latin_compounds_are_not_underestimated ... ok
+test commands::kg_twin_merge::tests::merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples ... ok
+test commands::prompt_context::query::tests::max_tokens_bounds_the_real_tokenizer ... ok
+test commands::prompt_context::query::tests::pack_chars_matches_the_estimator ... ok
+test commands::prompt_context::query::tests::short_query_passes_through_untouched ... ok
+test commands::prompt_context::query::tests::shape_flags_a_send_it_cannot_prove_fits ... ok
+test commands::prompt_context::query::tests::token_estimate_never_splits_a_unit ... ok
+test commands::prompt_context::query::tests::token_estimate_covers_the_measured_scripts ... ok
+test commands::prompt_context::tests::bounded_blocking_returns_value_when_fast_enough ... ok
+test commands::prompt_context::query::tests::over_window_query_is_reduced_to_whole_units ... ok
+test commands::prompt_context::query::tests::single_oversized_line_falls_back_to_whole_words ... ok
+test commands::prompt_context::query::tests::unbreakable_oversized_token_still_yields_a_query ... ok
+test bm25_backfill::tests::startup_sweep_enumerates_every_palace_on_disk ... ok
+test commands::prompt_context::tests::compose_injection_announces_withheld_drawers ... ok
+test commands::prompt_context::tests::compose_injection_caps_kg_section_bytes ... ok
+test commands::prompt_context::tests::compose_injection_drops_a_kg_fact_tier_s_already_rendered ... ok
+test commands::prompt_context::tests::compose_injection_empty_inputs_yields_empty ... ok
+test commands::prompt_context::tests::compose_injection_is_silent_when_everything_was_withheld ... ok
+test commands::prompt_context::tests::configured_relevance_floor_clamps_to_bounds ... ok
+test commands::prompt_context::tests::compose_injection_keeps_a_kg_fact_tier_s_did_not_render ... ok
+test commands::prompt_context::tests::filter_drawers_by_deny_tags_handles_edge_cases ... ok
+test commands::prompt_context::tests::configured_top_k_clamps_to_bounds ... ok
+test commands::prompt_context::tests::injection_byte_cap_is_eight_kib ... ok
+test commands::prompt_context::tests::injection_caps_rendered_tag_bytes ... ok
+test commands::prompt_context::tests::injection_caps_rendered_tag_count ... ok
+test commands::prompt_context::tests::compose_injection_truncates_at_cap ... ok
+test commands::prompt_context::tests::injection_drops_provenance_tags ... ok
+test commands::prompt_context::tests::parse_user_prompt_prefers_prompt_field ... ok
+test commands::prompt_context::tests::project_scope_counts_what_it_drops ... ok
+test commands::prompt_context::tests::project_scope_drops_foreign_cwd_drawer ... ok
+test commands::prompt_context::tests::project_scope_keeps_in_tree_writers_and_drops_prefix_siblings ... ok
+test commands::palace::tests::palace_stats_reports_a_hand_built_palace ... ok
+test commands::kg_rebuild::tests::rebuild_does_not_supersede_a_good_object_from_a_later_line ... ok
+test commands::kg_twin_merge::tests::merge_reports_a_failed_repoint_and_leaves_the_fact_readable ... ok
+test commands::prompt_context::tests::bounded_blocking_times_out_on_slow_closure ... ok
+test commands::palace::tests::palace_compact_dry_run_writes_nothing ... ok
+test commands::prompt_context::tests::project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate ... ok
+test commands::prompt_context::tests::recall_query_is_the_whole_prompt ... ok
+test commands::prompt_context::tests::relevance_floor_drops_all_noise_drawers ... ok
+test commands::prompt_context::tests::relevance_floor_keeps_drawer_without_score ... ok
+test commands::prompt_context::tests::relevance_floor_keeps_high_scoring_drawer ... ok
+test commands::prompt_context::tests::resolve_palace_for_log_falls_back_to_process_cwd ... ok
+test commands::kg_rebuild::tests::rebuild_reports_failed_asserts_instead_of_a_clean_summary ... ok
+test commands::prompt_context::tests::select_relevant_triples_drops_creator_provenance_triples ... ok
+test commands::prompt_context::tests::select_relevant_triples_drops_structural_predicates ... ok
+test commands::prompt_context::tests::select_relevant_triples_filters_by_prompt_overlap ... ok
+test commands::prompt_context::tests::resolve_palace_for_log_prefers_stdin_cwd ... ok
+test commands::kg_rebuild::tests::kg_rebuild_processes_named_palace_only ... ok
+test commands::kg_rebuild::tests::kg_rebuild_processes_all_drawers ... ok
+test commands::prompt_context::tests::session_project_root_resolves_a_worktree_to_its_main_checkout ... ok
+test commands::prompt_context::tests::session_project_root_is_none_inside_a_separate_git_dir_child ... ok
+test commands::serve_stdio_bridge::tests::a_notification_is_suppressed_without_dialling ... ok
+test commands::serve_stdio_bridge::tests::a_transport_failure_answers_the_request_that_caused_it ... ok
+test commands::serve_stdio_bridge::tests::a_transport_failure_names_the_endpoint_and_does_not_hang ... ok
+test commands::serve_stdio_bridge::tests::inject_caller_context_direct_dispatch_shape ... ok
+test commands::serve_stdio_bridge::tests::inject_caller_context_noop_when_nothing_resolved ... ok
+test commands::serve_stdio_bridge::tests::inject_caller_context_preserves_existing_caller_values ... ok
+test commands::serve_stdio_bridge::tests::inject_caller_context_tools_call_shape ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_adds_when_absent ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_legacy_direct_shape_still_injects_top_level ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_noop_when_none ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_null_params_becomes_object ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_preserves_existing ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_tools_call_adds_when_absent ... ok
+test commands::serve_stdio_bridge::tests::inject_default_palace_tools_call_preserves_existing ... ok
+test commands::serve_stdio_bridge::tests::streaming_method_is_refused_rather_than_half_answered ... ok
+test commands::serve_stdio_bridge::tests::the_rewriter_reaches_the_forwarded_envelope ... ok
+test commands::service::tests::build_launchd_config_plist_includes_fd_limits_and_throttle ... ok
+test commands::service::tests::build_launchd_config_sets_fastembed_cache_dir ... ok
+test commands::service::tests::build_launchd_config_uses_canonical_shape ... ok
+test commands::setup::tests::gui_entry_is_absolute_where_the_claude_entry_is_bare ... ok
+test commands::setup::tests::handle_setup_gui_client_rejects_an_unknown_client ... ok
+test commands::setup::tests::patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_shape ... ok
+test commands::setup::tests::patch_one_creates_missing_file ... ok
+test commands::setup::tests::patch_one_installs_hook_when_mcp_already_present ... ok
+test commands::setup::tests::patch_one_installs_hook_with_absolute_path ... ok
+test commands::setup::tests::patch_one_installs_session_start_hook_when_upgrading ... ok
+test commands::setup::tests::patch_one_is_idempotent ... ok
+test commands::rooms::tests::apply_writes_the_planned_rooms ... ok
+test commands::setup::tests::patch_one_preserves_unrelated_keys ... ok
+test commands::setup::tests::setup_codex_is_idempotent ... ok
+test commands::setup::tests::patch_one_repairs_a_legacy_serve_stdio_entry ... ok
+test commands::prompt_context::tests::handle_prompt_context_fails_open_on_slow_daemon ... ok
+test commands::single_instance::tests::bind_permitted_for_the_launchd_unit_itself ... ok
+test commands::single_instance::tests::bind_permitted_on_a_socket_launchd_does_not_own ... ok
+test commands::single_instance::tests::bind_permitted_when_launchd_cannot_be_asked ... ok
+test commands::setup::tests::setup_codex_writes_the_serve_entrypoint ... ok
+test commands::single_instance::tests::bind_permitted_when_no_unit_is_registered ... ok
+test commands::single_instance::tests::bind_refused_for_an_unsupervised_process_on_a_registered_socket ... ok
+test commands::single_instance::tests::production_socket_is_the_resolved_path ... ok
+test commands::single_instance::tests::production_socket_is_false_under_a_data_dir_override ... ok
+test commands::single_instance::tests::single_instance_check_proceeds_when_nothing_is_serving ... ok
+test commands::single_instance::tests::startup_action_from_probe_result_when_alive ... ok
+test commands::single_instance::tests::startup_action_from_probe_result_when_dead ... ok
+test commands::single_instance::tests::single_instance_check_exits_when_something_is_serving ... ok
+test commands::start::tests::start_lock_lives_beside_the_socket ... ok
+test commands::setup::tests::setup_codex_repairs_a_legacy_stdio_registration ... ok
+test console_metrics::disk_stats::tests::disk_stats_reports_a_missing_palace_directory ... ok
+test console_metrics::tests::an_unavailable_ram_breakdown_omits_its_keys_rather_than_nulling_them ... ok
+test console_metrics::tests::cached_field_passes_a_successful_read_through ... ok
+test console_metrics::tests::cached_field_turns_a_read_error_into_unavailable_not_zero ... ok
+test commands::rooms::tests::dry_run_reports_without_writing ... ok
+test commands::rooms::tests::audit_can_be_scoped_to_one_palace ... ok
+test console_metrics::tests::console_metrics_reports_ram_and_disk_usage ... ok
+test console_metrics::disk_stats::tests::disk_stats_refuses_a_palace_held_open_for_writing ... ok
+test console_metrics::disk_stats::tests::disk_stats_counts_a_palace_that_was_never_opened ... ok
+test console_metrics::tests::handle_console_metrics_returns_valid_report ... ok
+test console_metrics::usage::tests::palace_disk_bytes_counts_a_palace_directory ... ok
+test commands::prompt_context::tests::prompt_context_empty_palace_falls_back_to_global ... ok
+test console_metrics::tests::console_metrics_marks_an_unreadable_palace_unavailable ... ok
+test console_metrics::usage::tests::palace_disk_bytes_is_zero_for_a_missing_directory ... ok
+test discovery::tests::extract_origin_url_handles_typical_config ... ok
+test console_metrics::usage::tests::usage_sample_reports_a_footprint_and_a_disk_figure ... ok
+test discovery::tests::first_letter_abbrev_skips_ambiguous ... ok
+test discovery::tests::first_letter_abbrev_tm_unique_when_only_trusty_memory ... ok
+test discovery::tests::discovers_trusty_git_analytics_alias ... ok
+test discovery::tests::first_letter_abbrev_emits_unique_workspace_initials ... ok
+test discovery::tests::scan_member_emits_package_and_binary_aliases ... ok
+test discovery::tests::short_repo_name_strips_git_suffix_and_path ... ok
+test discovery::tests::no_duplicate_short_names_in_results ... ok
+test console_metrics::tests::console_metrics_reports_real_counts_for_an_uncached_palace ... ok
+test dream_scheduler::tests::dream_scheduler_no_panic_with_empty_registry ... ok
+Initialized empty Git repository in /private/var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmpEXpf7U/local-checkout/.git/
+test dream_scheduler::tests::dream_scheduler_honors_disable_flag ... ok
+test dream_scheduler::tests::dream_scheduler_loops_actually_run_cycles ... ok
+test dream_scheduler::tests::make_shutdown_watch_pair_works ... ok
+test fd_metrics::tests::fd_metrics_returns_sane_values ... ok
+test hook_emit::tests::hook_emit_failure_isolated ... ok
+test console_metrics::tests::console_metrics_reports_room_counts_for_every_palace ... ok
+test dream_scheduler::tests::dream_scheduler_shutdown_stops_loop ... ok
+[main (root-commit) 9bc1ee2] init
+ 1 file changed, 1 insertion(+)
+ create mode 100644 README.md
+Preparing worktree (new branch 'feature')
+test hook_emit::tests::hook_fired_activity_emit_smoke ... ok
+test commands::prompt_context::tests::prompt_context_header_names_the_alias_target ... ok
+HEAD is now at 9bc1ee2 init
+test console_metrics::tests::console_metrics_uses_cache_only_and_does_not_evict ... ok
+test kg_extract::tests::canonical_entity_names_the_cleaned_twin ... ok
+test kg_extract::tests::extract_triples_deny_list_is_case_insensitive ... ok
+test kg_extract::tests::extract_triples_emits_hashtag_mentions ... ok
+test kg_extract::tests::extract_triples_emits_tag_triples ... ok
+test kg_extract::tests::extract_triples_empty_deny_list_passes_through ... ok
+test kg_extract::tests::extract_triples_extracts_is_a_pattern ... ok
+test kg_extract::tests::extract_triples_keeps_allowlisted_c ... ok
+test kg_extract::tests::extract_triples_keeps_allowlisted_go ... ok
+test kg_extract::tests::extract_triples_keeps_real_entities_across_all_predicates ... ok
+test kg_extract::tests::extract_triples_never_panics_on_empty_input ... ok
+test kg_extract::tests::extract_triples_rejects_pronoun_subject ... ok
+test kg_extract::tests::extract_triples_rejects_short_token_off_allowlist ... ok
+test kg_extract::tests::extract_triples_rejects_stopword_object ... ok
+test kg_extract::tests::extract_triples_skips_denied_tags ... ok
+test kg_extract::tests::extract_triples_stamps_provenance ... ok
+test kg_extract::tests::extract_triples_strips_punctuation_from_both_token_edges ... ok
+test kg_extract::tests::extract_triples_tags_only_path ... ok
+test kg_extract::tests::extract_triples_uses_reduced_confidence ... ok
+test kg_extract::tests::is_stop_token_accepts_ordinary_entities ... ok
+test kg_extract::tests::is_stop_token_normalises_surrounding_punctuation ... ok
+test kg_extract::tests::is_stop_token_rejects_every_stopword ... ok
+test discovery::tests::git_remote_works_inside_worktree ... ok
+test kg_extract::tests::lexical_filter_still_cannot_reach_the_two_content_word_regressions_but_wordnet_does ... ok
+test kg_extract::tests::short_entity_allowlist_entries_survive_the_length_floor ... ok
+test kg_extract::wordnet_eval::a_caller_supplied_pos_table_is_the_one_consulted ... ok
+test kg_extract::tests::stopwords_are_unique ... ok
+test kg_extract::wordnet_eval::a_participle_does_not_head_the_phrase ... ok
+test kg_extract::wordnet_eval::a_plural_subject_whose_singular_ends_in_e_still_heads_its_phrase ... ok
+test kg_extract::wordnet_eval::a_terminated_line_is_unaffected_by_the_newline_rule ... ok
+test kg_extract::wordnet_eval::adjective_only_modifiers_re_walk_instead_of_destroying_the_triple ... ok
+test kg_extract::wordnet_eval::an_all_adjective_subject_yields_no_triple ... ok
+test kg_extract::wordnet_eval::an_unknown_token_does_not_displace_an_established_head ... ok
+test kg_extract::wordnet_eval::caps_the_noun_phrase_run ... ok
+test kg_extract::wordnet_eval::an_unknown_token_heads_its_phrase_over_an_adjective_capable_modifier ... ok
+test kg_extract::wordnet_eval::inflected_forms_resolve_through_their_base_form ... ok
+test kg_extract::wordnet_eval::common_english_words_that_are_real_entity_names_survive ... ok
+test kg_extract::wordnet_eval::interior_punctuation_does_not_terminate_the_run ... ok
+test kg_extract::wordnet_eval::row1_rewalks_past_an_adjective_only_modifier ... ok
+test kg_extract::wordnet_eval::row2_rejects_ancestor_truncated_before_of ... ok
+test kg_extract::wordnet_eval::row3_keeps_rustc_is_a_compiler ... ok
+test kg_extract::wordnet_eval::measures_the_adjective_only_population ... ok
+test kg_extract::wordnet_eval::row4_rewalks_past_the_adjective_to_the_head_noun ... ok
+test kg_extract::wordnet_eval::row5_keeps_uses_object_before_a_non_genitive_preposition ... ok
+test kg_extract::wordnet_eval::row6_rejects_member_of_the_process_group ... ok
+test kg_extract::wordnet_eval::row7_takes_the_head_of_a_noun_noun_compound ... ok
+test kg_extract::wordnet_eval::stops_the_noun_phrase_run_at_a_comma ... ok
+test kg_extract::wordnet_eval::subject_side_rewalks_past_an_adjective_only_token ... ok
+test kg_extract::wordnet_eval::stops_the_run_at_a_terminator_behind_markdown_emphasis ... ok
+test kg_extract::wordnet_eval::subject_walk_stops_before_a_previous_sentence ... ok
+test kg_extract::wordnet_eval::surprising_a_gerund_noun_still_takes_the_head ... ok
+test kg_extract::wordnet_eval::surprising_non_genitive_relational_phrase_still_truncates ... ok
+test kg_extract::wordnet_eval::surprising_run_stops_at_the_first_unknown_token ... ok
+test kg_extract::wordnet_eval::surprising_single_token_head_truncates_a_compound ... ok
+test kg_extract::wordnet_eval::the_subject_walk_stops_at_a_line_break ... ok
+test kg_extract::wordnet_eval::the_object_walk_stops_at_a_line_break ... ok
+test kg_extract::wordnet_eval::unknown_subject_and_object_both_fail_open ... ok
+test dream_scheduler::tests::dream_scheduler_spawns_per_palace_loop ... ok
+test idle_evict::tests::idle_evict_secs_from_env_defaults_and_parses ... ok
+test idle_evict::tests::spawn_disabled_returns_none ... ok
+test kg_write::tests::kg_write_admission_refusal_leaves_storage_and_cache_untouched ... ok
+test kg_write::tests::kg_write_batch_policy_defers_refresh ... ok
+test kg_write::tests::kg_write_refreshes_cache_for_hot_predicate ... ok
+test kg_write::tests::kg_write_batch_refresh_is_a_noop_when_nothing_was_hot ... ok
+test kg_write::tests::kg_write_skips_refresh_for_cold_predicate ... ok
+test lib_tests::daemon_event_palace_id_and_source_extraction ... ok
+test lib_tests::daemon_event_type_str_matches_sse_tag ... ok
+test lib_tests::daemon_readiness_from_u8 ... ok
+test lib_tests::app_state_default_constructs ... ok
+test lib_tests::app_state_starts_with_empty_bound_addr ... ok
+test lib_tests::daemon_readiness_transitions_warming_to_ready ... ok
+test lib_tests::hook_excerpt_collapses_whitespace ... ok
+test lib_tests::hook_excerpt_truncates_long_prompts ... ok
+test lib_tests::hook_type_serde_round_trips ... ok
+test lib_tests::emit_persists_mutations_but_skips_status_changed ... ok
+test idle_evict::tests::ticker_evicts_idle_palace ... ok
+test commands::prompt_context::tests::prompt_context_logs_attempt_without_daemon ... ok
+test lib_tests::initialize_does_not_advertise_prompts_capability ... ok
+test commands::prompt_context::tests::prompt_context_injection_has_no_provenance_tags ... ok
+test lib_tests::injection_kind_serde_round_trips ... ok
+test lib_tests::initialize_returns_protocol_version_and_capabilities ... ok
+test lib_tests::initialize_without_default_palace_omits_field ... ok
+test lib_tests::initialized_notification_returns_null ... ok
+test lib_tests::load_palaces_from_disk_empty_root_returns_zero ... ok
+test lib_tests::machine_budget_is_detected_and_self_consistent ... ok
+test lib_tests::missing_palace_without_default_errors_for_a_write ... ok
+test lib_tests::default_palace_used_when_arg_omitted ... ok
+test lib_tests::missing_palace_without_default_returns_an_index ... ok
+test lib_tests::load_palaces_from_disk_records_an_unopenable_palace ... ok
+test lib_tests::open_activity_log_with_fallback_returns_discard_when_unwritable ... ok
+test lib_tests::load_palaces_from_disk_honours_registry_open_intent ... ok
+test commands::prompt_context::tests::prompt_context_off_topic_prompt_injects_nothing ... ok
+test lib_tests::load_palaces_from_disk_handles_palaces_subdir ... ok
+test lib_tests::open_palace_lazy_reopens_hydration_skipped_palace ... ok
+test lib_tests::resolve_palace_registry_dir_falls_back_to_data_dir ... ok
+test lib_tests::resolve_palace_registry_dir_prefers_palaces_subdir ... ok
+test lib_tests::resolve_palace_registry_dir_relative_input_is_not_absolute ... ok
+test lib_tests::resolve_palace_registry_dir_root_input_stays_root ... ok
+test lib_tests::load_palaces_from_disk_rehydrates_registry ... ok
+test lib_tests::ping_returns_empty_result ... ok
+test lib_tests::tools_list_returns_all_tools ... ok
+test lib_tests::unknown_method_returns_error ... ok
+test lib_tests::with_writer_intent_marks_registry_writer ... ok
+test lock_stall::tests::a_free_sighting_never_clears_a_live_probe_stamp ... ok
+test lock_stall::tests::a_holder_that_panics_releases_and_clears_the_stall ... ok
+test lock_stall::tests::a_lock_held_past_the_threshold_ages_past_it_and_clears_on_release ... ok
+test lock_stall::tests::a_poisoned_tracker_keeps_its_stamps_and_reports_degraded ... ok
+test lock_stall::tests::a_reopened_palace_clears_a_stamp_left_by_a_superseded_handle ... ok
+test lock_stall::tests::a_reopened_palace_restamps_instead_of_inheriting_the_old_age ... ok
+test lib_tests::palace_name_cache_updates_on_create ... ok
+test lib_tests::palace_name_cache_populated_after_hydration ... ok
+test commands::prompt_context::tests::prompt_context_logs_recall_query_shape ... ok
+test lock_stall::tests::a_ticker_that_stops_beating_reports_degraded ... ok
+test lock_stall::tests::an_abandoned_probe_keeps_the_stamp_until_the_lock_is_seen_free ... ok
+test lock_stall::tests::degraded_at_sees_poison_without_a_prior_stamp_read ... ok
+test lock_stall::tests::probe_interval_is_a_quarter_of_the_threshold_within_bounds ... ok
+test lib_tests::with_writer_intent_panics_on_hydrated_registry - should panic ... ok
+test mcp_service::tests::dispatches_through_trait_object ... ok
+test mcp_service::tests::name_returns_trusty_memory ... ok
+test mcp_service::tests::scopes_for_read_tool ... ok
+test mcp_service::tests::scopes_for_write_tool ... ok
+test mcp_service::tests::tools_returns_expected_count ... ok
+test mcp_service::tests::version_matches_cargo_pkg_version ... ok
+test messaging::tests::build_message_tags_includes_all_fields ... ok
+test lock_stall::tests::a_sweep_stamps_both_handle_locks_of_an_open_palace ... ok
+test lock_stall::tests::a_ticker_sweep_records_itself_against_the_health_rate_limit ... ok
+test lock_stall::tests::health_sweeps_are_rate_limited_to_the_interval ... ok
+test lock_stall::tests::the_ticker_stamps_a_held_lock_on_an_open_palace ... ok
+test commands::prompt_context::tests::prompt_context_recall_all_filtered_falls_back_to_global ... ok
+test lib_tests::restart_burst_hydration_is_immediately_idle_evictable ... ok
+test commands::prompt_context::tests::prompt_context_recall_env_override_extends_deny_list ... ok
+test messaging::tests::decode_message_from_drawer_round_trips ... ok
+test messaging::tests::decode_skips_non_message_drawer ... ok
+test messaging::tests::formatted_message_includes_from_purpose_and_body ... ok
+test messaging::tests::inbox_returns_only_unread_after_mark ... ok
+test messaging::tests::mark_read_is_atomic_under_concurrency ... ok
+test commands::prompt_context::tests::prompt_context_recall_filters_deny_tags ... ok
+test messaging::tests::mark_read_is_idempotent ... ok
+test messaging::tests::slug_derivation_cases ... ok
+test openrpc::tests::discover_response_lists_all_tools ... ok
+test openrpc::tests::discover_response_x_scopes_present ... ok
+test openrpc::tests::every_tool_has_scopes ... ok
+test openrpc::tests::read_write_classification ... ok
+test messaging::tests::round_trip_send_and_inbox ... ok
+test commands::prompt_context::tests::prompt_context_returns_ok_without_daemon ... ok
+test hook_emit::tests::post_hook_event_no_daemon_is_noop ... ok
+test palace_last_used::tests::read_garbage_is_none ... ok
+test palace_last_used::tests::read_missing_is_none ... ok
+test palace_last_used::tests::stamp_round_trips ... ok
+test palace_last_used::tests::stamp_survives_a_fresh_cache ... ok
+test commands::prompt_context::tests::prompt_context_recalls_palace_drawers ... ok
+test palace_last_used::tests::stamp_throttles_within_the_window ... ok
+test palace_last_used::tests::stamp_throttles_per_palace_not_globally ... ok
+test palace_last_used::tests::stamp_writes_again_after_the_window ... ok
+test project_root::tests::absent_pin_still_falls_back_to_basename ... ok
+test project_root::tests::lazy_write_non_fatal_on_readonly_dir ... ok
+test project_root::tests::absent_pin_writes_computed_slug ... ok
+test project_root::tests::malformed_pin_does_not_fall_back_to_basename ... ok
+test project_root::tests::pinned_slug_at_returns_none_without_pin ... ok
+test project_root::tests::pin_file_read_when_present ... ok
+test project_root::tests::project_slug_at_readonly_falls_back_to_basename ... ok
+test project_root::tests::pinned_slug_at_returns_pin_when_present ... ok
+test project_root::tests::project_slug_at_normalises_case_and_underscores ... ok
+test project_root::tests::project_slug_at_readonly_no_write_when_absent ... ok
+test project_root::tests::project_slug_at_returns_none_without_markers ... ok
+test project_root::tests::project_slug_finds_git_root ... ok
+test project_root::tests::project_slug_at_readonly_reads_existing_pin ... ok
+test project_root::tests::project_slug_returns_none_without_markers ... ok
+test project_root::tests::read_project_pin_returns_none_when_absent ... ok
+test project_root::tests::project_slug_at_returns_root_basename_slug ... ok
+test project_root::tests::project_slug_uses_first_ancestor_marker ... ok
+test project_root::tests::trusty_tools_dir_is_project_marker ... ok
+test project_root::tests::validate_palace_name_accepts_personal ... ok
+test project_root::tests::renamed_dir_with_pin_resolves_to_original_slug ... ok
+test project_root::tests::validate_palace_name_accepts_matching_slug ... ok
+test project_root::tests::validate_palace_name_rejects_non_personal_without_project ... ok
+test project_root::tests::validate_palace_name_accepts_pinned_slug_via_cwd ... ok
+test project_root::tests::write_and_read_pin_round_trips ... ok
+test prompt_facts::tests::build_prompt_context_empty_when_no_hot_triples ... ok
+test prompt_facts::tests::build_prompt_context_groups_and_formats ... ok
+test prompt_facts::tests::is_hot_predicate_matches_listed ... ok
+test prompt_facts::tests::render_stale_tier_s_report_names_pair_and_age ... ok
+test prompt_facts::tests::stale_tier_s_facts_partitions_at_the_threshold ... ok
+test project_root::tests::write_pin_omits_null_note ... ok
+test project_root::tests::validate_palace_name_rejects_mismatch ... ok
+test prompt_log::writer::tests::disabled_mode_writes_nothing ... ok
+test prompt_log::writer::tests::is_off_matches_documented_values ... ok
+test prompt_log::writer::tests::is_on_matches_documented_values ... ok
+test prompt_log::writer::tests::parse_filename_date_parses_canonical_and_rotated ... ok
+test prompt_log::writer::tests::hash_mode_hashes_trigger_prompt ... ok
+test prompt_log::writer::tests::retention_prunes_old_files ... ok
+test prompt_log::writer::tests::single_event_roundtrip ... ok
+test prompt_log::writer::tests::rotation_at_size_cap ... ok
+test lib_tests::bm25_lane_disabled_by_default ... ok
+test service::core_kg_tests::activity_endpoint_lists_recent_emits ... ok
+test lib_tests::bm25_lane_enabled_when_env_set ... ok
+test lib_tests::multi_tenant_mode_disabled_by_default ... ok
+test lib_tests::multi_tenant_mode_enabled_when_env_set ... ok
+test messaging::tests::cwd_palace_slug_at_env_override_wins ... ok
+test palace_id_derive::tests::follow_palace_alias_leaves_a_real_palace_alone ... ok
+test palace_id_derive::tests::follow_palace_alias_names_the_target ... ok
+test prompt_log::writer::tests::config_from_env_defaults ... ok
+test messaging::tests::cwd_palace_slug_at_pin_read_does_not_create_pin_file ... ok
+test service::core_kg_tests::dream_run_aggregates_stats ... ok
+test service::core_kg_tests::http_kg_assert_endpoint_rejects_over_long_tier_s_object ... ok
+test service::core_kg_tests::http_kg_assert_endpoint_refreshes_prompt_cache ... ok
+test service::core_kg_tests::kg_delete_triple_closes_one_object_and_keeps_siblings ... ok
+test service::core_kg_tests::dream_status_aggregates_across_palaces ... ok
+test service::core_kg_tests::kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate ... ok
+test service::core_kg_tests::kg_delete_triple_rejects_a_legacy_pair_id ... ok
+test service::core_kg_tests::kg_delete_triple_returns_404_for_missing ... ok
+test service::core_kg_tests::kg_graph_returns_active_triples ... ok
+test service::core_tests::absent_palace_is_still_404_at_both_open_handles ... ok
+test service::core_kg_tests::kg_graph_seed_clamps_limit ... ok
+test service::core_kg_tests::kg_graph_signals_truncation ... ok
+test service::core_kg_tests::kg_neighbors_rejects_bad_direction ... ok
+test service::core_kg_tests::kg_neighbors_clamps_max_hops ... ok
+test service::core_kg_tests::kg_graph_seed_ranks_by_degree ... ok
+test messaging::tests::cwd_palace_slug_uses_git_toplevel ... ok
+test service::core_kg_tests::list_prompt_facts_endpoint_returns_hot_triples ... ok
+test service::core_kg_tests::kg_neighbors_returns_incoming_edges ... ok
+test service::core_kg_tests::roster_polls_partition_each_palace_at_most_once_per_write ... ok
+test service::core_kg_tests::palace_info_blocking_matches_the_inline_row ... ok
+test service::core_tests::delete_palace_returns_not_found_for_missing_id ... ok
+test messaging::tests::cwd_palace_slug_at_prefers_pin_file ... ok
+test service::core_tests::dream_status_empty_returns_nulls ... ok
+test messaging::tests::cwd_palace_slug_at_reads_pin_from_subdir ... ok
+test service::core_tests::create_drawer_rejects_json_content_without_force ... ok
+test messaging::tests::cwd_palace_slug_falls_back_to_parent_dir ... ok
+test service::core_tests::create_then_list_palace ... ok
+test service::core_tests::status_endpoint_returns_payload ... ok
+test service::core_tests::status_includes_total_counters ... ok
+test service::core_tests::delete_drawer_404s_for_an_unknown_drawer_id ... ok
+test service::core_tests::create_drawer_force_bypasses_quality_gate_for_json_content ... ok
+test service::helpers::tests::drawer_snippet_handles_empty_content ... ok
+test service::helpers::tests::drawer_snippet_truncates_long_content ... ok
+test service::core_tests::delete_palace_removes_dir_when_empty ... ok
+test service::core_tests::update_palace_name_returns_not_found_for_missing_id ... ok
+test service::core_tests::delete_palace_force_removes_populated_palace ... ok
+test service::helpers::tests::triple_count_or_zero_degrades_a_failed_read_to_zero ... ok
+test service::core_tests::delete_palace_refuses_when_drawers_present ... ok
+test service::helpers_tests::drawer_preview_collapses_whitespace_and_truncates ... ok
+test service::helpers_tests::recall_entry_json_hoists_drawer_fields ... ok
+test service::core_tests::drawers_list_reads_through_the_folded_method ... ok
+test service::user_config::tests::absent_local_model_table_parses_as_disabled ... ok
+test service::user_config::tests::an_absent_dream_table_leaves_every_default ... ok
+test service::core_tests::palace_list_includes_graph_counts ... ok
+test service::user_config::tests::dream_config_forwards_an_explicit_ollama_model ... ok
+test service::user_config::tests::dream_config_from_user_config_prefers_openrouter_model_with_key ... ok
+test service::user_config::tests::dream_config_is_off_and_names_no_local_model_by_default ... ok
+test service::user_config::tests::dream_table_overrides_the_compaction_defaults ... ok
+test service::user_config::tests::empty_semantic_model_inherits_the_openrouter_model_not_the_local_one ... ok
+test service::user_config::tests::loaded_user_config_default_disables_the_local_model ... ok
+test service::user_config::tests::semantic_consolidation_is_off_without_a_config_file ... ok
+test service::user_config::tests::semantic_consolidation_table_is_read_from_the_file ... ok
+test service::user_config::tests::semantic_table_alias_is_accepted ... ok
+test service::core_tests::unstattable_palace_is_500_not_404_at_the_service_open_handle ... ok
+test service::core_tests::unreadable_palace_is_500_not_404_at_the_service_open_handle ... ok
+test session_store_cache::tests::env_override_is_honoured ... ok
+test service::core_tests::update_palace_name_renames_palace ... ok
+test service::core_tests::http_create_drawer_runs_auto_kg_extraction ... ok
+test service::core_tests::update_palace_name_rejects_empty_name ... ok
+test startup_budget::tests::parse_open_limit_warns_and_keeps_the_default_on_garbage ... ok
+test service::core_tests::update_palace_name_reports_an_unstattable_palace_as_internal ... ok
+test startup_budget::tests::gate_never_exceeds_its_limit_under_contention ... ok
+test session_store_cache::tests::concurrent_callers_share_one_store ... ok
+test service::helpers::tests::list_drawers_creates_desc_paginates ... ok
+test startup_scan::tests::scan_pin_map_empty_search_dirs ... ok
+test startup_scan::tests::scan_pin_map_missing_root_dir_contributes_nothing ... ok
+test session_store_cache::tests::remove_drops_cached_handle ... ok
+test startup_scan::tests::scan_pin_map_one_level_only ... ok
+test startup_scan::tests::scan_pin_map_skips_corrupt_yaml ... ok
+test startup_scan::tests::scan_pin_map_accumulates_across_roots ... ok
+test tools::byte_cap_tests::a_max_bytes_over_the_hard_cap_is_clamped_and_reported ... ok
+test tools::byte_cap_tests::a_measurement_failure_returns_an_error_not_an_unmeasured_body ... ok
+test tools::byte_cap_tests::a_non_boolean_full_is_rejected ... ok
+test tools::byte_cap_tests::a_non_integer_or_out_of_range_max_bytes_is_rejected ... ok
+test tools::byte_cap_tests::a_palace_index_fallback_is_left_untouched ... ok
+test messaging::tests::cwd_palace_slug_at_uses_git_owner_repo ... ok
+test tools::byte_cap_tests::an_oversized_first_entry_ships_alone_under_an_honest_notice ... ok
+test startup_scan::tests::scan_pin_map_two_pins_found ... ok
+test tools::byte_cap_tests::an_uncapped_tool_is_returned_untouched ... ok
+test tools::byte_cap_tests::an_under_cap_call_is_unchanged_except_for_the_truncated_flag ... ok
+test tools::byte_cap_tests::every_capped_tool_advertises_max_bytes_and_full ... ok
+test tools::byte_cap_tests::full_returns_every_entry_with_no_ceiling ... ok
+test tools::byte_cap_tests::identity_and_essential_hits_survive_a_cap_that_drops_l2 ... ok
+test tools::byte_cap_tests::over_cap_recall_keeps_whole_hits_and_reports_the_withheld_count ... ok
+test tools::byte_cap_tests::protected_hits_ship_over_the_ceiling_when_they_alone_exceed_it ... ok
+test tools::tests::a_failed_index_call_queues_the_palace_for_repair ... ok
+test startup_budget::tests::release_after_sweep_keeps_an_already_resident_palace ... ok
+test tools::byte_cap_tests::every_capped_tool_is_routed_by_the_dispatcher ... ok
+test startup_budget::tests::release_after_sweep_keeps_a_recently_used_palace ... ok
+test tools::tests::attach_mcp_attribution_dedupes_hand_written_ws_claim_tag ... ok
+test tools::tests::blocklist_gate_blocks_session_ended ... ok
+test startup_budget::tests::release_after_sweep_refuses_while_a_reference_is_held ... ok
+test tools::tests::blocklist_gate_blocks_tool_use ... ok
+test tools::tests::a_closed_index_queue_queues_the_palace_for_repair ... ok
+test tools::tests::blocklist_gate_names_matched_pattern ... ok
+test tools::tests::blocklist_gate_passes_normal_content ... ok
+test tools::tests::bm25_index_queue_drops_when_full ... ok
+test tools::tests::bm25_hits_hydrate_from_handle_during_warmup ... ok
+test service::helpers::tests::list_palaces_does_not_open_uncached_palaces ... ok
+test tools::tests::content_gate_blank_context_treated_as_none ... ok
+test tools::tests::content_gate_blocks_short_no_context ... ok
+test tools::tests::content_gate_force_bypasses_short_content ... ok
+test tools::tests::content_gate_keeps_long ... ok
+test tools::tests::content_gate_wraps_short_with_context ... ok
+test service::helpers::tests::status_does_not_open_uncached_palaces ... ok
+test tools::tests::add_alias_round_trip_through_prompt_cache ... ok
+test tools::tests::add_alias_palace_arg_required_without_server_default ... ok
+test service::helpers::tests::open_palaces_blocking_opens_every_palace ... ok
+test tools::tests::auto_kg_extraction_no_op_does_not_fail_remember ... ok
+test tools::tests::auto_kg_extraction_hooks_into_memory_remember ... ok
+test tools::tests::chat_kg_assert_tool_enforces_form_constraint ... ok
+test tools::tests::chat_kg_assert_tool_allows_cold_predicates_at_cap ... ok
+test tools::tests::dedup_allows_different_content ... ok
+test tools::tests::dispatch_add_alias_enforces_form_constraint_on_composed_object ... ok
+test tools::tests::chat_kg_assert_tool_enforces_tier_s_cap ... ok
+test tools::tests::dedup_gate_blocks_concurrent_duplicate_writes ... ok
+test tools::tests::dedup_skips_near_duplicate ... ok
+test tools::tests::dispatch_kg_assert_accepts_object_at_char_limit ... ok
+test tools::tests::dispatch_add_alias_enforces_tier_s_cap ... ok
+test tools::tests::dispatch_discover_aliases_inserts_new_and_dedupes ... ok
+test tools::tests::dispatch_discover_aliases_stops_at_tier_s_cap ... ok
+test tools::tests::dispatch_kg_assert_rejects_object_over_char_limit ... ok
+test tools::tests::dispatch_kg_assert_accepts_twenty_facts ... ok
+test tools::tests::dispatch_kg_assert_then_query ... ok
+test tools::tests::dispatch_kg_assert_allows_replacing_existing_fact_at_cap ... ok
+test tools::tests::dispatch_kg_gaps_returns_cached ... ok
+test tools::tests::dispatch_kg_assert_cap_does_not_apply_to_cold_predicates ... ok
+test tools::tests::dispatch_kg_assert_rejection_names_existing_facts ... ok
+test tools::tests::dispatch_kg_assert_rejects_twenty_first_fact ... ok
+test tools::tests::dispatch_kg_assert_retracted_fact_frees_a_slot ... ok
+test tools::tests::dispatch_kg_list_subjects_exact_limit_is_not_truncated ... ok
+test tools::tests::dispatch_palace_create_force_denied_in_multi_tenant_mode ... ok
+test tools::tests::dispatch_kg_list_subjects_returns_distinct_subjects ... ok
+test tools::tests::dispatch_kg_list_subjects_with_counts_returns_pairs ... ok
+test tools::tests::dispatch_palace_create_force_allowed_in_single_tenant_default ... ok
+test tools::tests::dispatch_note_skips_short_no_context ... ok
+test tools::tests::dispatch_palace_create_persists ... ok
+test tools::tests::dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing ... ok
+test tools::tests::dispatch_palace_reembed_dry_run_reports_counts ... ok
+test tools::tests::dispatch_note_admits_a_tier_c_slot ... ok
+test tools::tests::dispatch_note_accepts_an_explicit_room ... ok
+test tools::tests::dispatch_palace_info_reports_room_count ... ok
+test tools::tests::dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent ... ok
+test tools::tests::dispatch_recall_room_filter_scopes_results ... ok
+test tools::tests::dispatch_remember_blocks_blocklist_pattern ... ok
+test tools::tests::dispatch_remember_blocks_real_secret ... ok
+test tools::tests::dispatch_remember_accepts_live_false_positive_tokens ... ok
+test tools::tests::dispatch_remember_allow_secret_like_bypasses_secret_gate ... ok
+test tools::tests::dispatch_remember_admits_a_tier_c_slot ... ok
+test tools::tests::dispatch_remember_force_bypasses_short_content_gate ... ok
+test tools::tests::dispatch_remember_force_still_blocks_secret ... ok
+test tools::tests::dispatch_remember_force_bypasses_blocklist_gate ... ok
+test tools::tests::dispatch_remember_rejects_an_unparseable_expires_at ... ok
+test session_store_cache::tests::in_use_store_is_never_evicted ... ok
+test tools::tests::dispatch_unknown_tool_errors ... ok
+test session_store_cache::tests::evicted_store_reopens_with_data_intact ... ok
+test tools::tests::dispatch_remember_skips_short_no_context ... ok
+test tools::tests::dispatch_room_create_is_idempotent ... ok
+test tools::tests::dispatch_remember_reports_a_refused_slot_as_tier_e ... ok
+test tools::tests::dispatch_remember_with_context_writes_combined ... ok
+test tools::tests::dispatch_remember_stores_git_sha_prose ... ok
+test tools::tests::dispatch_remember_then_recall ... ok
+test tools::tests::dispatch_room_list_rejects_an_unknown_wing ... ok
+test tools::tests::dispatch_room_rename_leaves_drawers_in_place ... ok
+test tools::tests::dispatch_room_list_reports_rooms_with_drawer_counts ... ok
+test tools::tests::dispatch_room_rename_rejects_a_taken_name ... ok
+test tools::tests::kg_miss_classify_distinguishes_empty_graph_from_missing_subject ... ok
+test tools::tests::get_prompt_context_serves_cache_and_filters ... ok
+test tools::tests::embed_audit_tests::embed_sweep_reports_a_palace_with_an_unembedded_drawer ... ok
+test tools::tests::embed_audit_tests::embed_sweep_reports_a_palace_it_could_not_open ... ok
+test tools::tests::embed_audit_tests::verify_embedded_separates_an_unknown_id_from_an_unembedded_one ... ok
+test tools::tests::embed_audit_tests::verify_embedded_refuses_a_malformed_id ... ok
+test tools::tests::embed_audit_tests::verify_embedded_names_the_unembedded_id ... ok
+test tools::tests::kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones ... ok
+test tools::tests::forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete ... ok
+test tools::tests::embed_audit_tests::embed_sweep_sees_a_palace_the_cache_never_opened ... ok
+test tools::tests::kg_query_reports_graph_empty_when_graph_has_no_triples ... ok
+test tools::tests::forget_succeeds_when_the_lexical_lane_is_disabled ... ok
+test tools::tests::kg_bootstrap_seeds_workspace_facts ... ok
+test tools::tests::kg_retract_tests::dispatch_kg_retract_triple_closes_one_object_and_keeps_siblings ... ok
+test tools::tests::kg_query_reports_subject_not_found_when_graph_has_other_subjects ... ok
+test tools::tests::palace_compact_description_says_vector_index_only ... ok
+test tools::tests::kg_retract_tests::dispatch_kg_retract_triple_missing_triple_is_a_legible_noop ... ok
+test service::core_tests::list_palaces_with_counts_opens_palaces_off_the_executor ... ok
+test tools::tests::kg_retract_tests::dispatch_kg_retract_triple_rebuilds_prompt_cache_for_hot_predicate ... ok
+test tools::tests::kg_retract_tests::dispatch_kg_retract_triple_requires_object ... ok
+test tools::tests::palace_index_tests::a_named_palace_that_does_not_exist_still_errors ... ok
+test tools::tests::last_used_tests::an_alias_addressed_recall_stamps_the_canonical_palace ... ok
+test tools::tests::palace_index_tests::palace_index_on_an_empty_estate_is_still_a_success ... ok
+test tools::tests::palace_index_tests::read_tool_schemas_never_require_palace ... ok
+test tools::tests::last_used_tests::dispatch_palace_info_does_not_stamp_last_used ... ok
+test tools::tests::recall_projection_tests::a_widened_window_fills_top_k_after_the_floor ... ok
+test tools::tests::recall_projection_tests::candidate_window_is_top_k_without_a_floor ... ok
+test tools::tests::recall_projection_tests::candidate_window_widens_and_caps_with_a_floor ... ok
+test tools::tests::recall_projection_tests::creator_tags_are_hidden_by_default ... ok
+test tools::tests::recall_projection_tests::creator_tags_come_back_when_the_flag_is_set ... ok
+test tools::tests::recall_projection_tests::eight_hit_recall_response_shrinks_without_creator_tags ... ok
+test tools::tests::recall_projection_tests::min_score_arg_is_absent_by_default ... ok
+test tools::tests::recall_projection_tests::min_score_arg_rejects_a_non_numeric_value ... ok
+test tools::tests::recall_projection_tests::min_score_arg_rejects_a_numeric_string ... ok
+test tools::tests::recall_projection_tests::recall_response_reports_the_dropped_count ... ok
+test tools::tests::recall_projection_tests::score_floor_applies_before_top_k ... ok
+test tools::tests::recall_projection_tests::score_floor_drops_below_and_keeps_above ... ok
+test tools::tests::recall_projection_tests::score_floor_keeps_identity_and_essential_layers ... ok
+test tools::tests::last_used_tests::last_used_is_reported_by_palace_info_and_console_metrics ... ok
+test tools::tests::last_used_tests::dispatch_remember_and_recall_stamp_last_used ... ok
+test tools::tests::tool_definitions_drops_palace_required_when_default_set ... ok
+test tools::tests::tool_definitions_expose_the_tier_c_arguments ... ok
+test tools::tests::palace_create_auto_seeds_temporal_metadata ... ok
+test tools::tests::tool_definitions_lists_all_tools ... ok
+test tools::tests::palace_index_tests::a_default_palace_still_wins_over_the_index ... ok
+test tools::tests::write_budget_tests::an_exhausted_write_budget_gives_the_open_queue_leg_nothing ... ok
+test tools::tests::note_succeeds_while_state_is_warming ... ok
+test tools::tests::palace_index_tests::every_write_tool_still_errors_with_no_palace ... ok
+test tools::tests::mcp_room_parse_matches_http ... ok
+test tools::tests::palace_index_tests::every_read_tool_returns_an_index_with_no_palace ... ok
+test tools::tests::palace_index_tests::palace_index_reports_counts_and_rooms ... ok
+test tools::tests::reasserting_an_identical_fact_refreshes_affirmed_at ... ok
+test tools::tests::write_budget_tests::a_refused_write_leaves_the_palace_write_mutex_free ... ok
+test tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling ... ok
+test transport::api_error::tests::api_error_kind_maps_to_its_rpc_code ... ok
+test transport::api_error::tests::api_error_message_survives_the_conversion ... ok
+test tools::tests::remember_succeeds_and_defers_embedding_while_state_is_warming ... ok
+test tools::tests::write_budget_tests::a_short_budget_does_not_disturb_an_uncontended_write ... ok
+test tools::tests::write_budget_tests::memory_note_gives_up_within_one_budget_not_the_leg_sum ... ok
+test tools::tests::write_budget_tests::task_add_gives_up_within_one_budget_not_the_leg_sum ... ok
+test tools::tests::write_budget_tests::memory_remember_gives_up_within_one_budget_not_the_leg_sum ... ok
+test transport::methods::health_tests::health_endpoint_includes_resource_fields ... ignored, loads the default ONNX embedder; run with --include-ignored
+test transport::methods::health_tests::health_endpoint_returns_ok ... ignored, loads the default ONNX embedder; run with --include-ignored
+test tools::tests::tier_s_cap_holds_under_concurrent_writes ... ok
+test transport::api_error::tests::unreadable_palace_is_internal_not_not_found_at_open_handle ... ok
+test transport::methods::health_tests::health_endpoint_round_trip_on_fresh_install_is_ok ... ignored, loads the default ONNX embedder; run with --include-ignored
+test session_store_cache::tests::open_handles_are_bounded_by_cap ... ok
+test transport::methods::health_tests::health_endpoint_round_trip_with_palace_is_ok ... ignored, loads the default ONNX embedder; run with --include-ignored
+test transport::methods::health_tests::health_endpoint_cheap_by_default ... ok
+test transport::methods::health_tests::health_endpoint_includes_fd_gauge ... ok
+test transport::methods::health_tests::health_omits_unopenable_palaces_when_none ... ok
+test transport::methods::health_tests::health_names_the_lock_as_the_wedge_reason ... ok
+test tools::tests::write_liveness_tests::a_handle_lock_held_inside_the_threshold_is_visible_but_not_wedged ... ok
+test tools::tests::write_liveness_tests::a_dream_cycle_holding_the_handle_write_mutex_reads_as_wedged ... ok
+test tools::tests::write_liveness_tests::a_write_queued_inside_its_bound_is_in_flight_but_not_wedged ... ok
+test transport::methods::health_tests::health_omits_drawer_degraded_when_all_healthy ... ok
+test transport::methods::health_tests::health_reports_idle_worker_pool ... ok
+test transport::methods::health_tests::health_reports_stall_tracking_that_stopped ... ok
+test transport::methods::health_tests::health_reports_unopenable_palaces ... ok
+test transport::methods::kg::tests::decode_triple_id_rejects_the_legacy_pair_form ... ok
+test transport::methods::health_tests::health_reports_drawer_degraded_palace ... ok
+test transport::methods::kg::tests::decode_triple_id_returns_none_for_invalid_input ... ok
+test transport::methods::kg::tests::decode_triple_id_round_trips ... ok
+test transport::methods::kg::tests::encode_triple_id_rejects_null_byte ... ok
+test transport::methods::health_tests::health_reports_wedged_worker_pool ... ok
+test transport::methods::health_tests::health_wedge_signal_clears_when_work_completes ... ok
+test transport::rpc::tests::dispatch_forwards_the_embed_audit_tools_by_raw_name ... ok
+test transport::rpc::tests::dispatch_forwards_the_reclassified_tools_by_raw_name ... ok
+test transport::methods::health_tests::health_probe_palace_is_invisible ... ok
+test transport::methods::health_tests::health_drawer_degraded_names_only_the_degraded_palace ... ok
+test transport::rpc::tests::dispatch_hook_fired_emits_activity ... ok
+test transport::rpc::tests::dispatch_hook_fired_invalid_params_errors ... ok
+test transport::methods::health_tests::health_probe_self_heals_after_migration_wipe ... ok
+test transport::methods::health_tests::health_probe_cleans_up_on_recall_error ... ok
+test tools::tests::write_liveness_tests::a_write_stalled_holding_the_palace_lock_reads_as_wedged ... ok
+test transport::methods::health_tests::health_probe_cleans_up_on_recall_miss ... ok
+test transport::methods::health_tests::health_drawer_degraded_check_opens_no_palace ... ok
+test transport::rpc::tests::every_registered_tool_is_forwarded_or_listed_unforwarded ... ok
+test transport::methods::health_tests::health_probe_cleans_up_on_success ... ok
+test transport::rpc::tests::jsonrpc_request_round_trip ... ok
+test transport::rpc::tests::dispatch_palace_list_returns_empty_array_initially ... ok
+test transport::uds::tests::a_prompt_exit_flush_is_not_cut_short ... ok
+test transport::rpc::tests::dispatch_initialize_returns_capabilities ... ok
+test transport::rpc::tests::dispatch_ping_returns_empty_object ... ok
+test transport::rpc::tests::dispatch_refuses_the_deliberately_unforwarded_tools_by_raw_name ... ok
+test transport::uds::tests::remove_if_present_deletes_a_stale_file_and_tolerates_an_absent_one ... ok
+test transport::rpc::tests::dispatch_unknown_method_returns_method_not_found ... ok
+test transport::rpc::tests::dispatch_tools_list_returns_tool_array ... ok
+2026-09-17T16:02:42.534917Z  WARN BM25 exit flush exceeded the shutdown cleanup reserve and was abandoned so the socket is still unlinked; palaces not yet flushed keep the snapshot their last ticker published budget_secs=0
+test transport::uds::tests::an_exit_flush_that_overruns_the_reserve_is_abandoned ... ok
+test transport::rpc::tests::method_names_covers_every_dispatched_arm ... ok
+test service::recall_stream_tests::recall_all_releases_every_batch_when_the_search_fails ... ok
+test transport::uds::tests::rpc_activity_refuses_an_unparseable_since ... ok
+test transport::uds::tests::rpc_chat_providers_answers_both_upstreams ... ok
+test transport::uds::tests::rpc_chat_reports_a_midstream_provider_failure_as_the_terminal_error_frame ... ok
+test transport::uds::tests::rpc_chat_refuses_a_unary_call_naming_the_stream_requirement ... ok
+test transport::uds::tests::rpc_folded_names_do_not_collide_with_dispatcher_names ... ok
+test transport::uds::tests::rpc_dispatcher_method_answers_through_the_fallback ... ok
+test transport::uds::tests::rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame ... ok
+test transport::uds::tests::rpc_config_reports_whether_a_key_is_set_without_echoing_it ... ok
+test transport::uds::tests::rpc_accepts_a_request_larger_than_the_shared_default ... ok
+test transport::uds::tests::rpc_dream_status_answers_an_aggregate ... ok
+test transport::uds::tests::rpc_health_answers_over_a_real_socket ... ok
+test transport::uds::tests::rpc_logs_tail_answers_a_bounded_page ... ok
+test transport::uds::tests::rpc_palace_get_reports_not_found_for_an_unknown_id ... ok
+test transport::uds::tests::rpc_drawer_delete_reports_not_found_for_an_unknown_id ... ok
+test transport::uds::tests::rpc_drawer_create_attributes_the_caller_it_was_given ... ok
+test transport::uds::tests::rpc_drawer_create_list_and_delete_round_trip ... ok
+test transport::uds::tests::rpc_kg_all_clamps_an_absurd_limit ... ok
+test transport::uds::tests::rpc_kg_graph_neighbors_refuses_a_bad_direction ... ok
+test transport::uds::tests::rpc_reports_the_dispatcher_surface_size ... ok
+test transport::uds::tests::rpc_messages_send_list_and_mark_read_round_trip ... ok
+test transport::uds::tests::rpc_reports_method_not_found_for_an_unknown_method ... ok
+test transport::uds::tests::rpc_remember_async_rejects_short_content ... ok
+test transport::uds::tests::mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc ... ok
+test transport::uds::tests::rpc_palaces_list_without_counts_does_not_open_a_cold_palace ... ok
+test transport::uds::tests::socket_path_is_named_for_this_daemon ... ok
+test transport::uds::tests::rpc_router_registers_every_documented_method ... ok
+test wordnet_pos::tests::adjective_only_catches_hard_and_spares_fast ... ok
+test wordnet_pos::tests::base_forms_cover_the_regular_inflections ... ok
+test wordnet_pos::tests::base_forms_skip_non_words ... ok
+test wordnet_pos::tests::data_start_handles_no_header ... ok
+test wordnet_pos::tests::data_start_skips_the_whole_header ... ok
+test transport::uds::tests::rpc_serves_concurrent_connections ... ok
+test wordnet_pos::tests::es_and_s_are_ordered_by_the_sibilant_rule ... ok
+test wordnet_pos::tests::independent_handles_agree ... ok
+test transport::uds::tests::rpc_palaces_list_defaults_to_counting ... ok
+test wordnet_pos::tests::lookup_finds_the_first_and_last_records ... ok
+test wordnet_pos::tests::lookup_misses_outside_the_table_range ... ok
+test wordnet_pos::tests::lookup_retries_an_inflected_form ... ok
+test wordnet_pos::tests::lookup_tolerates_a_bad_line ... ok
+test transport::uds::tests::rpc_status_answers_with_no_params ... ok
+test transport::uds::tests::rpc_unlinks_its_socket_on_shutdown ... ok
+test wordnet_pos::tests::mask_is_case_insensitive ... ok
+test wordnet_pos::tests::mask_leaves_non_words_and_names_unknown ... ok
+test wordnet_pos::tests::mask_reports_every_pos_for_a_four_way_lemma ... ok
+test wordnet_pos::tests::mask_resolves_regular_inflections_to_their_base_form ... ok
+test wordnet_pos::tests::mask_returns_zero_for_unknown_words ... ok
+test wordnet_pos::tests::multiword_lemmas_are_absent ... ok
+test worker_liveness::tests::guard_releases_slot_on_drop ... ok
+test worker_liveness::tests::idle_tracker_reports_no_work ... ok
+test worker_liveness::tests::in_flight_counts_active_operations ... ok
+test wordnet_pos::tests::shipped_table_answers_the_four_pos_classes ... ok
+test worker_liveness::tests::wedge_threshold_doubles_the_larger_wait_bound ... ok
+test worker_liveness::tests::wedge_threshold_exceeds_the_open_queue_bound ... ok
+test worker_liveness::tests::overflow_is_counted_when_slots_exhausted ... ok
+test wordnet_pos::tests::the_shipped_table_is_sorted_and_parseable ... ok
+2026-09-17T16:02:45.306669Z  WARN uds rpc connection failed; nothing was answered error=request frame exceeded 33554432 bytes without a newline
+test worker_liveness::tests::oldest_age_tracks_the_earliest_operation ... ok
+test worker_liveness::tests::oldest_age_recovers_when_the_slow_operation_finishes ... ok
+2026-09-17T16:02:45.271504Z ERROR PANIC in thread 'worker_liveness::tests::guard_releases_slot_on_panic' at crates/trusty-memory/src/worker_liveness_tests.rs:57:9: simulated failure inside a tracked operation
+backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2: std::backtrace::Backtrace::create
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/backtrace.rs:331:13
+   3: trusty_common::panic_hook::wrap_hook::{{closure}}
+             at /Users/masa/trusty-search-experiment/worktree/crates/trusty-common/src/panic_hook.rs:73:25
+   4: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2220:9
+   5: std::panicking::panic_with_hook
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:833:13
+   6: std::panicking::panic_handler::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:691:13
+   7: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:182:18
+   8: __rustc::rust_begin_unwind
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:689:5
+   9: core::panicking::panic_fmt
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panicking.rs:80:14
+  10: trusty_memory::worker_liveness::tests::guard_releases_slot_on_panic::{{closure}}
+             at ./src/worker_liveness_tests.rs:57:9
+  11: core::ops::function::FnOnce::call_once
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  12: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:274:9
+  13: std::panicking::catch_unwind::do_call
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  14: ___rust_try
+  15: std::panicking::catch_unwind
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  16: std::panic::catch_unwind
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  17: trusty_memory::worker_liveness::tests::guard_releases_slot_on_panic
+             at ./src/worker_liveness_tests.rs:54:15
+  18: trusty_memory::worker_liveness::tests::guard_releases_slot_on_panic::{{closure}}
+             at ./src/worker_liveness_tests.rs:52:34
+  19: core::ops::function::FnOnce::call_once
+             at /Users/masa/.rustup/toolchains/1.94.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  20: core::ops::function::FnOnce::call_once
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+  21: test::__rust_begin_short_backtrace
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:663:18
+  22: test::run_test_in_process::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:686:74
+  23: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panic/unwind_safe.rs:274:9
+  24: std::panicking::catch_unwind::do_call
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:581:40
+  25: std::panicking::catch_unwind
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:544:19
+  26: std::panic::catch_unwind
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panic.rs:359:14
+  27: test::run_test_in_process
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:686:27
+  28: test::run_test::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:607:43
+  29: test::run_test::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:637:41
+  30: std::sys::backtrace::__rust_begin_short_backtrace
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:166:18
+  31: std::thread::lifecycle::spawn_unchecked::{{closure}}::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/thread/lifecycle.rs:91:13
+  32: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panic/unwind_safe.rs:274:9
+  33: std::panicking::catch_unwind::do_call
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:581:40
+  34: std::panicking::catch_unwind
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:544:19
+  35: std::panic::catch_unwind
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panic.rs:359:14
+  36: std::thread::lifecycle::spawn_unchecked::{{closure}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/thread/lifecycle.rs:89:26
+  37: core::ops::function::FnOnce::call_once{{vtable.shim}}
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+  38: <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2206:9
+  39: std::sys::thread::unix::Thread::new::thread_start
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/thread/unix.rs:130:17
+  40: __pthread_cond_wait
+ panic_payload="simulated failure inside a tracked operation" panic_location=crates/trusty-memory/src/worker_liveness_tests.rs:57:9 panic_thread=worker_liveness::tests::guard_releases_slot_on_panic
+test worker_liveness::tests::wedged_when_oldest_exceeds_threshold ... ok
+test worker_liveness::tests::guard_releases_slot_on_panic ... ok
+test transport::uds::tests::rpc_refuses_a_request_past_its_own_budget ... ok
+test service::recall_stream_tests::recall_streamed_visits_every_palace_in_bounded_batches ... ok
+test transport::uds::tests::rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it ... ok
+test transport::uds::tests::rpc_remember_async_queues_and_persists ... ok
+test transport::uds::tests::rpc_palaces_list_reports_counts_per_palace ... ok
+test tools::tests::embed_audit_tests::embed_sweep_opens_palaces_off_the_executor ... ok
+test tools::tests::palace_index_tests::palace_index_details_are_capped_and_the_rest_are_still_listed ... ok
+test transport::uds::tests::rpc_activity_stream_delivers_an_event_without_polling ... ok
+test transport::uds::tests::rpc_activity_stream_does_not_replay_history ... ok
+
+test result: ok. 936 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 55.30s
+
+     Running unittests src/main.rs (/Users/masa/trusty-search-experiment/target/debug/deps/trusty_memory-c1924a9215f10512)
+
+running 14 tests
+test cli_tests::serve_foreground_conflicts_with_stdio ... ok
+test cli_tests::serve_rejects_unknown_flag ... ok
+test cli_tests::serve_http_and_stdio_together_is_error ... ok
+test cli_tests::serve_mode_foreground_is_daemon ... ok
+test cli_tests::serve_mode_daemon_addr ... ok
+test cli_tests::serve_bare_sets_no_transport_flag ... ok
+test cli_tests::serve_http_bare_parses_as_some_none ... ok
+test cli_tests::serve_mode_explicit_stdio ... ok
+test cli_tests::serve_mode_daemon_bare ... ok
+test cli_tests::serve_mode_bare_is_stdio ... ok
+test cli_tests::serve_http_with_addr_parses_as_some_some ... ok
+test cli_tests::serve_mode_palace_only_is_stdio ... ok
+test startup_task_tests::spawn_startup_tasks_populates_pin_map ... ok
+test startup_task_tests::hydration_never_exceeds_the_startup_open_limit ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s
+
+     Running unittests src/bin/mcp_bridge.rs (/Users/masa/trusty-search-experiment/target/debug/deps/trusty_memory_mcp_bridge-19dd21ea4b58dbf1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bm25_alias_recall.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_alias_recall-ff99e7ef4093a69a)
+
+running 1 test
+test an_aliased_recall_reads_the_corpus_the_backfill_wrote ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/bm25_alias_write.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_alias_write-e6f04ee951659a58)
+
+running 1 test
+test an_aliased_write_indexes_into_the_resolved_palaces_corpus ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/bm25_backfill_e2e.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_backfill_e2e-ce760ef098819a6c)
+
+running 4 tests
+test an_evicted_palace_reloads_on_next_use ... ok
+test partial_index_is_detected_and_repaired ... ok
+test palace_residency_stays_within_the_cap ... ok
+test backfill_indexes_every_drawer_without_drops ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/bm25_forget_delete.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_forget_delete-f08ab20475582c86)
+
+running 1 test
+test a_forgotten_drawer_leaves_the_lexical_corpus ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/bm25_lane_concurrency.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_lane_concurrency-35e58da2a4eafbe1)
+
+running 3 tests
+test concurrent_writers_for_one_palace_converge_on_one_index ... ok
+test a_fanout_holds_the_cap_and_loses_no_write ... ok
+test writes_through_the_tool_surface_survive_eviction ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.74s
+
+     Running tests/bm25_lane_e2e.rs (/Users/masa/trusty-search-experiment/target/debug/deps/bm25_lane_e2e-75cc3a9fca7d4d51)
+
+running 2 tests
+test a_daemon_era_snapshot_is_served_without_migration ... ok
+test a_corpus_survives_a_full_lane_restart ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/chat_mcp.rs (/Users/masa/trusty-search-experiment/target/debug/deps/chat_mcp-f1166929457ecb41)
+
+running 11 tests
+test chat_session_add_turn_rejects_bad_role ... ok
+test chat_session_create_returns_id ... ok
+test chat_session_create_with_explicit_id ... ok
+test chat_session_recall_returns_history ... ok
+test chat_session_add_turn_appends ... ok
+test chat_session_get_round_trips ... ok
+test chat_turn_append_stores_pair ... ok
+test chat_session_list_paginates ... ok
+test chat_session_delete_removes_session ... ok
+test turns_persist_across_restart ... ok
+test chat_session_add_turn_concurrent_calls_all_land ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests/codex_stdio_e2e_5265.rs (/Users/masa/trusty-search-experiment/target/debug/deps/codex_stdio_e2e_5265-eca38c17c2460b1a)
+
+running 1 test
+[trusty-memory] parent-death watchdog armed for pid 10320 as a direct child
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmpllud7w/trusty-memory/trusty-memory.sock
+2026-09-17T16:03:06.961892Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+startup pin scan complete: 0 pin(s) discovered in 0ms
+test bare_serve_completes_a_clean_mcp_session ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.00s
+
+     Running tests/concurrent_perf.rs (/Users/masa/trusty-search-experiment/target/debug/deps/concurrent_perf-16ee51ce56dd7fe2)
+
+running 4 tests
+test test_burst ... ignored
+test test_concurrent_reads ... ignored
+test test_concurrent_rw ... ignored
+test test_sustained_load ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_mount.rs (/Users/masa/trusty-search-experiment/target/debug/deps/config_mount-99a00294ebcf6def)
+
+running 2 tests
+test config_help_advertises_keys_feature ... ok
+test config_keys_list_runs_offline ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/dream_room_mcp.rs (/Users/masa/trusty-search-experiment/target/debug/deps/dream_room_mcp-e30619e7d4d15c6f)
+
+running 3 tests
+test palace_dream_response_includes_fading ... ok
+test palace_dream_no_inference_returns_gracefully ... ok
+test dream_consolidate_room_returns_shape ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/generated_docs.rs (/Users/masa/trusty-search-experiment/target/debug/deps/generated_docs-462dc1a530acf255)
+
+running 2 tests
+test readme_mcp_tool_section_is_generated ... ok
+test default_palace_variant_does_not_change_the_documented_roster ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/http_recall_bm25_fusion.rs (/Users/masa/trusty-search-experiment/target/debug/deps/http_recall_bm25_fusion-d8653beded971f35)
+
+running 1 test
+test the_service_recall_path_runs_the_lexical_lane ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/isolation_override.rs (/Users/masa/trusty-search-experiment/target/debug/deps/isolation_override-23079d4aeb75709e)
+
+running 5 tests
+test is_data_dir_override_active_when_set ... ok
+test is_data_dir_override_inactive_when_unset ... ok
+test is_data_dir_override_inactive_when_blank ... ok
+test isolated_instance_does_not_import_real_env_palaces ... ok
+test isolated_instance_does_not_overwrite_dotfile ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+     Running tests/kg_rebuild_cli.rs (/Users/masa/trusty-search-experiment/target/debug/deps/kg_rebuild_cli-c80f70e2ff52c5f4)
+
+running 6 tests
+test kg_rebuild_help_is_accepted ... ok
+test kg_rebuild_help_advertises_purge_flags ... ok
+test kg_rebuild_dry_run_requires_the_purge_flag ... ok
+test kg_rebuild_purge_dry_run_runs_clean ... ok
+test kg_rebuild_palace_arg_is_accepted_by_clap ... ok
+test kg_rebuild_merge_dry_run_runs_clean ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/mcp_stdio_tools.rs (/Users/masa/trusty-search-experiment/target/debug/deps/mcp_stdio_tools-5b6aaa57ef4ab095)
+
+running 22 tests
+test perf_kg_assert_within_budget ... ignored, perf budget — run with --include-ignored
+test perf_kg_query_1000_triples_within_budget ... ignored, perf budget — 1000-triple seed is slow; run with --include-ignored
+test perf_memory_recall_100_drawers_within_budget ... ignored, perf budget — 100-drawer seed is slow; run with --include-ignored
+test perf_memory_remember_within_budget ... ignored, perf budget — requires warm embedder; run with --include-ignored
+test perf_palace_cold_open_within_budget ... ignored, perf budget — run with --include-ignored
+test perf_ten_concurrent_read_only_opens_within_budget ... ignored, perf budget — run with --include-ignored
+test palace_create_appears_in_list_with_empty_counts ... ok
+test kg_query_filters_by_subject ... ok
+test memory_forget_still_rejects_a_malformed_drawer_id ... ok
+test kg_assert_then_query_round_trips ... ok
+test memory_forget_removes_drawer ... ok
+test memory_forget_reports_not_found_for_unknown_drawer_id ... ok
+test remember_then_recall_returns_drawer ... ok
+test round_trip_remember_recall_forget_recall_empty ... ok
+test two_states_can_read_same_palace_simultaneously ... ok
+test read_only_kg_assert_returns_clear_error ... ok
+test read_only_kg_query_succeeds ... ok
+test read_only_memory_remember_returns_clear_error ... ok
+test recall_ranks_best_match_first ... ok
+test read_only_memory_recall_succeeds ... ok
+test read_only_open_while_writer_holds_lock_succeeds ... ok
+test recall_deep_returns_at_least_as_many_as_shallow ... ok
+
+test result: ok. 16 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+     Running tests/migration_boot.rs (/Users/masa/trusty-search-experiment/target/debug/deps/migration_boot-4cb513523f22cc24)
+
+running 1 test
+test boot_migrates_default_palace_name_and_is_idempotent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.03s
+
+     Running tests/orphan_reap_7085.rs (/Users/masa/trusty-search-experiment/target/debug/deps/orphan_reap_7085-03026f5f22c57367)
+
+running 5 tests
+test bridge_child_mode ... ignored, re-entry helper, run as a child by detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled
+test spawner_child_mode ... ignored, re-entry helper, run as a child by the two orphan-reap tests
+test guard_spawned_daemon_exits_when_its_spawner_is_sigkilled ... ok
+test detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled ... ok
+test foreground_daemon_exits_when_its_spawner_is_sigkilled ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/palace_force.rs (/Users/masa/trusty-search-experiment/target/debug/deps/palace_force-054ddeda64cef19f)
+
+running 4 tests
+test force_flag_rejects_unsafe_slugs ... ok
+test force_false_still_enforces_validation ... ok
+test force_true_creates_custom_slug_palace_with_isolated_dirs ... ok
+test a_derived_palace_id_is_accepted ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/palaces_list_poll_residency.rs (/Users/masa/trusty-search-experiment/target/debug/deps/palaces_list_poll_residency-85a2d33cfe2b9391)
+
+running 2 tests
+test palaces_list_without_counts_opens_nothing_on_the_daemon ... ok
+test monitor_client_poll_leaves_closed_palaces_closed ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+
+     Running tests/recall_all_residency.rs (/Users/masa/trusty-search-experiment/target/debug/deps/recall_all_residency-68c2e363bb33a456)
+
+running 2 tests
+test recall_all_returns_open_palaces_to_baseline ... ok
+test recall_all_keeps_palaces_that_were_already_open ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.68s
+
+     Running tests/recall_degraded_lane.rs (/Users/masa/trusty-search-experiment/target/debug/deps/recall_degraded_lane-1bfc40e299b1c183)
+
+running 3 tests
+test recall_all_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold ... ok
+test recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold ... ok
+test recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/recall_query_discrimination.rs (/Users/masa/trusty-search-experiment/target/debug/deps/recall_query_discrimination-e13ce47a72c35919)
+
+running 4 tests
+test resolving_the_embedder_marks_a_warming_daemon_ready ... ok
+test deep_recall_also_discriminates_by_query ... ok
+test a_query_matching_a_drawer_returns_that_drawer ... ok
+test different_queries_return_different_drawers ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+     Running tests/redb_cache_bounds.rs (/Users/masa/trusty-search-experiment/target/debug/deps/redb_cache_bounds-01487370d706b8e8)
+
+running 1 test
+test every_palace_redb_open_in_trusty_memory_is_bounded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/serve_cli_surface.rs (/Users/masa/trusty-search-experiment/target/debug/deps/serve_cli_surface-f8aecf3002057784)
+
+running 7 tests
+test help_documents_the_new_serve_semantics ... ok
+test unknown_flag_is_still_rejected ... ok
+test conflicting_transport_flags_still_rejected ... ok
+test bare_serve_notice_absent_when_stdin_is_piped ... ok
+test bare_serve_notice_present_when_stdin_is_a_tty ... ok
+test bare_serve_keeps_stdout_clean ... ok
+test bare_serve_and_explicit_stdio_behave_alike ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.14s
+
+     Running tests/serve_stdio_concurrent_e2e.rs (/Users/masa/trusty-search-experiment/target/debug/deps/serve_stdio_concurrent_e2e-e44c68a3203549b5)
+
+running 2 tests
+[trusty-memory] parent-death watchdog armed for pid 14504 as a direct child
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmpqIBNSZ/trusty-memory/trusty-memory.sock
+2026-09-17T16:03:42.787092Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+startup pin scan complete: 0 pin(s) discovered in 0ms
+test stdio_serve_concurrent_two_bridges_both_work ... ok
+test stdio_bridge_exits_when_no_daemon ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running tests/serve_stdio_e2e.rs (/Users/masa/trusty-search-experiment/target/debug/deps/serve_stdio_e2e-81deb0b30072a103)
+
+running 4 tests
+[trusty-memory] parent-death watchdog armed for pid 14668 as a direct child
+[trusty-memory[trusty-memory] parent-death watchdog armed for pid 14668 as a direct child
+] parent-death watchdog armed for pid 14668 as a direct child
+[trusty-memory] parent-death watchdog armed for pid 14668 as a direct child
+2026-09-17T16:03:44.082717Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmp64bAuD/trusty-memory/trusty-memory.sock
+startup pin scan complete: 0 pin(s) discovered in 0ms
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmpbFRsfD/trusty-memory/trusty-memory.sock
+2026-09-17T16:03:44.084174Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+startup pin scan complete: 0 pin(s) discovered in 0ms
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmpVB1Zo1/trusty-memory/trusty-memory.sock
+2026-09-17T16:03:44.085263Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+startup pin scan complete: 0 pin(s) discovered in 0ms
+trusty-memory: serving on /var/folders/7s/g9twvy8j0wl58ffgzsmrccv40000gp/T/.tmput8x0F/trusty-memory/trusty-memory.sock
+2026-09-17T16:03:44.099090Z  INFO dream_scheduler: all per-palace loops running loops_spawned=0 max_concurrent=2
+startup pin scan complete: 0 pin(s) discovered in 0ms
+test stdio_serve_recall_all_bounded ... ok
+test stdio_serve_stdout_is_only_json ... ok
+test stdio_serve_tools_list_bounded ... ok
+test stdio_serve_remember_and_recall_bounded ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/session_store_fd_bound.rs (/Users/masa/trusty-search-experiment/target/debug/deps/session_store_fd_bound-def7675fbeb12d37)
+
+running 1 test
+test session_store_fd_count_is_bounded_by_cap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.29s
+
+     Running tests/task_mcp.rs (/Users/masa/trusty-search-experiment/target/debug/deps/task_mcp-9103d64505a14254)
+
+running 5 tests
+test task_complete_errors_on_missing_drawer ... ok
+test task_complete_sets_completed_at ... ok
+test task_add_and_list_via_mcp ... ok
+test task_complete_rejects_non_task_drawer ... ok
+test task_drawer_survives_dream_cycle ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+     Running tests/uds_consumer_contract.rs (/Users/masa/trusty-search-experiment/target/debug/deps/uds_consumer_contract-78ba18e8188b9964)
+
+running 8 tests
+test memory_rpc_frame_budget_matches_the_daemon ... ok
+test bridge_streaming_methods_match_the_daemon ... ok
+test shared_client_reaches_the_health_method_consumers_dial_by_literal ... ok
+test tctl_probe_sees_a_live_uds_daemon_as_serving ... ok
+test memory_rpc_not_found_code_matches_the_daemon ... ok
+test shared_client_reaches_a_dispatcher_method_through_the_fallback ... ok
+test shared_client_reaches_a_chat_tool_through_the_tools_call_envelope ... ok
+test shared_client_round_trips_a_tagged_drawer_through_the_folded_methods ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/wing_mcp.rs (/Users/masa/trusty-search-experiment/target/debug/deps/wing_mcp-c053cc9203f9d23b)
+
+running 15 tests
+test wing_tools_are_listed ... ok
+test wing_create_rejects_blank ... ok
+test recall_rejects_an_unknown_wing ... ok
+test memory_list_rejects_wing_and_room_together ... ok
+test palace_info_reports_real_wings ... ok
+test wing_rename_rejects_taken_label_over_mcp ... ok
+test recall_rejects_wing_and_room_together ... ok
+test wing_rename_rejects_blank_new_label ... ok
+test wing_create_is_idempotent_over_mcp ... ok
+test wing_create_then_list ... ok
+test wing_rename_over_mcp ... ok
+test wing_list_shows_the_default_wing ... ok
+test a_caller_that_never_names_a_wing_is_unaffected ... ok
+test deep_recall_honours_a_wing_scope ... ok
+test wing_scoped_write_then_recall_over_mcp ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+   Doc-tests trusty_memory
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

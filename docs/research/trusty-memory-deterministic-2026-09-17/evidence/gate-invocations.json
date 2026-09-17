@@ -1,0 +1,46 @@
+[
+  {
+    "name": "python-tests",
+    "command": [
+      "/Users/masa/trusty-search-experiment/venv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "test_evaluate.py",
+      "test_metrics.py",
+      "test_oracle.py",
+      "test_offline_encoding.py"
+    ],
+    "cwd": "/Users/masa/trusty-search-experiment/worktree/experiments/trusty-memory-deterministic",
+    "exit_code": 0
+  },
+  {
+    "name": "python-mypy",
+    "command": [
+      "/Users/masa/trusty-search-experiment/venv/bin/python",
+      "-m",
+      "mypy",
+      "--strict",
+      "--no-incremental",
+      "--cache-dir=/dev/null",
+      "evaluate.py",
+      "metrics.py",
+      "oracle.py",
+      "offline_encoding.py"
+    ],
+    "cwd": "/Users/masa/trusty-search-experiment/worktree/experiments/trusty-memory-deterministic",
+    "exit_code": 0
+  },
+  {
+    "name": "sld",
+    "command": [
+      "/Users/masa/trusty-search-experiment/target/debug/sld-lint",
+      "--root",
+      "/Users/masa/trusty-search-experiment/worktree"
+    ],
+    "cwd": "/Users/masa/trusty-search-experiment/worktree",
+    "exit_code": 0
+  }
+]

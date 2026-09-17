@@ -1,0 +1,11 @@
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-installer/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `tctl`
+  * `bin` target `trusty-installer`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-audit/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `taudit`
+  * `bin` target `trusty-audit`
+warning: /Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/Cargo.toml: file `/Users/masa/trusty-search-experiment/worktree/crates/trusty-mpm/src/bin/tm/main.rs` found to be present in multiple build targets:
+  * `bin` target `tm`
+  * `bin` target `trusty-mpm`
+    Checking trusty-memory v0.26.1 (/Users/masa/trusty-search-experiment/worktree/crates/trusty-memory)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.14s
