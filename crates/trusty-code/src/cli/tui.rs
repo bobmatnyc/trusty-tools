@@ -94,7 +94,11 @@ pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) ->
     } else {
         CodeEngine::with_socket(socket, project)
     };
-    let app = ReplApp::new(PRODUCT_LABEL, user_label());
+    let mut app = ReplApp::new(PRODUCT_LABEL, user_label());
+    // #8164: the banner's frame title must name the BINARY's version and SHA.
+    // `ReplApp::new` defaults it to `trusty-code-tui`'s own crate version, so
+    // a 0.7.0 tcode advertised itself as `tcode v0.2.0`.
+    app.version = trusty_code::build_info::LONG_VERSION.to_string();
 
     trusty_code_tui::run::run(
         Arc::new(engine),

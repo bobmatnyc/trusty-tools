@@ -150,6 +150,9 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         }
         ReplEvent::StatusMessage(msg) => app.push_status(msg),
         ReplEvent::ClearScrollback => app.clear_scrollback(),
+        // #8164: the splash replaces the banner's identity row — see
+        // `ReplEvent::SplashUpdated`. Stored verbatim; nothing is parsed.
+        ReplEvent::SplashUpdated(lines) => app.splash = lines,
         ReplEvent::StatuslineUpdate(segments) => app.statusline = segments,
         ReplEvent::WorkstreamUpdated(ws) => app.active_workstream = Some(ws),
         ReplEvent::WorkstreamActivationChanged { new_active_id, .. } => {

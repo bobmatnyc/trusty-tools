@@ -785,6 +785,19 @@ fn apply_statusline_update_replaces_segments() {
     assert_eq!(app.statusline.len(), 1);
 }
 
+/// #8164: the splash lands on `ReplApp::splash` verbatim and pushes nothing
+/// into the scrollback — it is banner content, not a chat message.
+#[test]
+fn apply_splash_updated_sets_the_banner_splash() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::SplashUpdated(vec!["🤖🤖🤖 demo v1".into(), "project /repo".into()]),
+    );
+    assert_eq!(app.splash, vec!["🤖🤖🤖 demo v1", "project /repo"]);
+    assert!(app.chat.is_empty());
+}
+
 #[test]
 fn apply_workstream_updated_sets_active_workstream() {
     let mut app = ReplApp::new("demo", "u");

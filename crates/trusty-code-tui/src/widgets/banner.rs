@@ -43,13 +43,15 @@ const MAX_COMMANDS: usize = 4;
 /// terminal command history — avoiding an abrupt "banner disappears on
 /// first message" UX.
 /// What: left column is `app.banner_art` (if any) plus the
-/// `{user_label} · {label}` identity line; right column is the title,
-/// recent activity, and commands. Column widths are computed from `width`,
-/// widened enough to fit the art (if present) unclipped.
+/// `{user_label} · {label}` identity line; right column is the title (or
+/// `app.splash` in its place, #8164), recent activity, and commands. Column
+/// widths are computed from `width`, widened enough to fit the art (if
+/// present) unclipped.
 /// Test: `tests::banner_lines_top_and_bottom_rules_present`,
 /// `tests::banner_lines_includes_identity_and_title`,
 /// `tests::banner_lines_lists_recent_activity_and_commands`,
-/// `tests::banner_lines_renders_with_no_art_or_commands`.
+/// `tests::banner_lines_renders_with_no_art_or_commands`,
+/// `tests::banner_lines_splash_replaces_the_identity_row`.
 pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let art_width = app
         .banner_art
@@ -71,13 +73,21 @@ pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
         app.user_label, app.label
     ))]);
 
+    let header = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let mut right_rows: Vec<(String, Style)> = Vec::new();
-    right_rows.push((
-        format!(" {} v{}", app.banner_title, app.version),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
+    // #8164: an engine-supplied splash REPLACES the generic identity row —
+    // its own first line is the header, so keeping both would print the
+    // product's name and version twice.
+    if app.splash.is_empty() {
+        right_rows.push((format!(" {} v{}", app.banner_title, app.version), header));
+    } else {
+        for (idx, line) in app.splash.iter().enumerate() {
+            let style = if idx == 0 { header } else { Style::default() };
+            right_rows.push((format!(" {line}"), style));
+        }
+    }
     right_rows.push((String::new(), Style::default()));
     right_rows.push((
         " Recent activity".to_string(),
@@ -208,6 +218,33 @@ mod tests {
         assert!(text.contains("fixed the bug"));
         assert!(text.contains("/workstream"));
         assert!(text.contains("List or activate a workstream"));
+    }
+
+    /// A splash must REPLACE the `{banner_title} v{version}` row, not stack
+    /// with it (#8164): the product states its identity once, in its own
+    /// words.
+    #[test]
+    fn banner_lines_splash_replaces_the_identity_row() {
+        let mut app = ReplApp::new("tcode", "bob");
+        app.version = "9.9.9".to_string();
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0 (ea6a1a9e 2026-09-16)".to_string(),
+            "project /repo/x".to_string(),
+        ];
+        let text: String = banner_lines(&app, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("🤖🤖🤖 tcode v0.7.0"), "{text}");
+        assert!(text.contains("project /repo/x"), "{text}");
+        // The top RULE still carries the title (that is the frame, not the
+        // content column); only the right column's identity row is replaced.
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert!(
+            !rows.iter().any(|r| r.contains("tcode v9.9.9")),
+            "the generic identity row must be gone: {text}"
+        );
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! production-file cap): `engine_state.rs` holds [`super::engine_state::EngineState`]
 //! (the actual session/cache/streaming logic), `session_events.rs` holds
 //! the pure `Event` -> `ReplEvent` mapping, `workstream_subscription.rs`
-//! holds the background workstream-activation SSE loop. This file keeps
+//! holds the background workstream-activation SSE loop, `splash.rs` holds
+//! the startup splash's pure text assembly (#8164). This file keeps
 //! only the public `CodeEngine` wrapper and the `TuiEngine` impl that
 //! delegates into `EngineState`.
 //! What: [`CodeEngine`] is a thin `Arc<EngineState>` wrapper so the
@@ -43,6 +44,7 @@ use crate::permissions::{PERMISSION_RESPOND_METHOD, PermissionDecision};
 
 use super::engine_state::EngineState;
 use super::error::EngineError;
+use super::splash::{SplashFacts, splash_lines};
 use super::uds_rpc::UdsRpcClient;
 use super::workstream_subscription::run_workstream_subscription;
 
@@ -268,12 +270,42 @@ impl TuiEngine for CodeEngine {
             ));
         }
 
+        let shape = session_shape_summary(&result);
+
+        // #8164: the launch facts, as a splash that REPLACES the banner's
+        // generic identity row. `health` is best-effort — a daemon that
+        // cannot answer it still ran `session.create`, so a splash missing
+        // the daemon's build beats no splash at all.
+        let daemon = self.state.rpc.call("health", json!({})).await.ok();
+        let workstream = self
+            .state
+            .active_workstream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|ws| format!("{} ({})", ws.name, ws.id));
+        let project = self
+            .state
+            .project_path
+            .as_ref()
+            .map(|p| p.display().to_string());
+        let _ = tx.send(ReplEvent::SplashUpdated(splash_lines(&SplashFacts {
+            client_version: crate::build_info::LONG_VERSION,
+            client_build: crate::build_info::GIT_HASH,
+            daemon_version: daemon.as_ref().and_then(|d| d["version"].as_str()),
+            daemon_build: daemon.as_ref().and_then(|d| d["build"].as_str()),
+            socket: self.state.rpc.socket(),
+            session_id: &session_id,
+            project: project.as_deref(),
+            workstream: workstream.as_deref(),
+            shape: &shape,
+        })));
+
         // #8184: name the agent shape and working root — see
         // `session_shape_summary`.
         let _ = tx.send(ReplEvent::StatusMessage(format!(
-            "connected to tcode daemon at {} (session {session_id}; {})",
+            "connected to tcode daemon at {} (session {session_id}; {shape})",
             self.state.rpc.socket().display(),
-            session_shape_summary(&result),
         )));
         Ok(())
     }

@@ -728,6 +728,13 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
         health["binding"]["state"], "projectless",
         "a --projectless TUI must have spawned a projectless daemon: {health}"
     );
+    // #8164: the daemon publishes its own build sha, which is what the TUI
+    // splash compares against its own to spot a stale daemon.
+    assert_eq!(
+        health["build"],
+        trusty_code::build_info::GIT_HASH,
+        "/health must report the daemon's build sha: {health}"
+    );
 
     let pid = health["pid"].as_u64().expect("/health must report a pid") as libc::pid_t;
     // SAFETY: `pid` was just reported by a live daemon this test caused to
