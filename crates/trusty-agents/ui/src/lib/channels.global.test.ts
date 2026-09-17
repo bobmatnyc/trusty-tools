@@ -12,8 +12,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
-  CHANNEL_WRITE_CREDENTIAL_MESSAGE, channelErrorMessage, fetchGlobalChannels,
-  isChannelConflict, saveGlobalChannels, type GlobalChannel,
+  CHANNEL_WRITE_CREDENTIAL_MESSAGE, channelErrorMessage, channelReferences,
+  createGlobalChannel, deleteGlobalChannel, fetchGlobalChannels, isChannelConflict,
+  offerableProviders, saveGlobalChannels, updateGlobalChannel,
+  type ChannelProvider, type GlobalChannel,
 } from './channels';
 import { resetChannelWriteToken } from './channel-auth';
 
@@ -31,12 +33,17 @@ const channelFixture = (overrides: Partial<GlobalChannel> = {}): GlobalChannel =
 
 interface Recorded { url: string; method: string; authorization: string | undefined; body: string | undefined }
 
+/** A refusal the stub should answer with: a plain sentence, or a whole body. */
+type Refusal = { status: number; error?: string; body?: Record<string, unknown> };
+
 let recorded: Recorded[] = [];
-let putFailures: { status: number; error: string }[] = [];
+let putFailures: Refusal[] = [];
+let writeFailures: Refusal[] = [];
 
 beforeEach(() => {
   recorded = [];
   putFailures = [];
+  writeFailures = [];
   resetChannelWriteToken();
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -45,8 +52,11 @@ beforeEach(() => {
     if (url.endsWith('/api/config')) {
       return new Response(JSON.stringify({ auth_required: false, channel_write_token: MINTED }), { status: 200 });
     }
-    const failure = init?.method === 'PUT' ? putFailures.shift() : undefined;
-    if (failure) return new Response(JSON.stringify({ error: failure.error }), { status: failure.status });
+    // #8187: the per-channel writes have their own queue, so a test that
+    // refuses a DELETE cannot accidentally refuse the whole-list PUT.
+    const failure = init?.method === 'PUT' ? putFailures.shift()
+      : init?.method === 'POST' || init?.method === 'DELETE' ? writeFailures.shift() : undefined;
+    if (failure) return new Response(JSON.stringify(failure.body ?? { error: failure.error }), { status: failure.status });
     return new Response(JSON.stringify({ scope: 'global', revision: 'r2', channels: [channelFixture()], providers: [] }), { status: 200 });
   });
 });
@@ -122,5 +132,69 @@ describe('global channel writes', () => {
     const cause = await saveGlobalChannels('r1', []).catch(e => e);
     expect(isChannelConflict(cause)).toBe(false);
     expect(channelErrorMessage(cause)).toBe('route_to conflicts with an assistant binding');
+  });
+});
+
+// The three per-channel writes (#8038 create/update, #8187 delete). Same
+// credential, same compare-and-swap; what is asserted here is the wire shape
+// the daemon's `deny_unknown_fields` structs and query extractor parse.
+describe('per-channel global writes', () => {
+  const sent = (method: string) => recorded.find(r => r.method === method);
+
+  test('a create posts the revision and one channel, with the write credential', async () => {
+    const { transport: _t, poll_interval_secs: _p, ...fresh } = channelFixture({ id: 'ops-slack', provider: 'slack' });
+    await createGlobalChannel('r1', fresh);
+    const post = sent('POST');
+    expect(post?.url).toMatch(/\/api\/channels$/);
+    expect(post?.authorization).toBe(`Bearer ${MINTED}`);
+    const body = JSON.parse(post?.body ?? '{}');
+    expect(Object.keys(body)).toEqual(['revision', 'channel']);
+    expect(body.revision).toBe('r1');
+    expect(body.channel.id).toBe('ops-slack');
+    // Connector plumbing is the daemon's default to choose, not a constant
+    // copied into the page: omitted here, filled by `Channel`'s serde defaults.
+    expect(body.channel).not.toHaveProperty('transport');
+    expect(body.channel).not.toHaveProperty('poll_interval_secs');
+  });
+
+  test('an update puts to the channel-s own path, id taken from the record', async () => {
+    await updateGlobalChannel('r1', channelFixture({ id: 'mail/personal' }));
+    // The id is percent-encoded, and the body repeats it — the server answers
+    // 400 when the two disagree, so they cannot be passed separately.
+    expect(sent('PUT')?.url).toMatch(/\/api\/channels\/mail%2Fpersonal$/);
+    expect(JSON.parse(sent('PUT')?.body ?? '{}').channel.id).toBe('mail/personal');
+  });
+
+  test('a delete carries the revision in the query and omits force unless asked', async () => {
+    await deleteGlobalChannel('r1', 'gmail-personal');
+    expect(sent('DELETE')?.url).toMatch(/\/api\/channels\/gmail-personal\?revision=r1$/);
+    expect(sent('DELETE')?.authorization).toBe(`Bearer ${MINTED}`);
+    expect(sent('DELETE')?.url).not.toContain('force');
+  });
+
+  test('a forced delete says so in the query string', async () => {
+    await deleteGlobalChannel('r1', 'gmail-personal', true);
+    expect(sent('DELETE')?.url).toMatch(/\?revision=r1&force=true$/);
+  });
+
+  test('a refused delete yields the assistants it named, and nothing else does', async () => {
+    writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie', 'cto-assistant'] } });
+    const refused = await deleteGlobalChannel('r1', 'gmail-personal').catch(e => e);
+    expect(channelReferences(refused)).toEqual(['izzie', 'cto-assistant']);
+    // A lost compare-and-swap is a 409 too, and forcing would not fix it.
+    writeFailures.push({ status: 409, error: 'Channel settings changed. Reload before saving.' });
+    const stale = await deleteGlobalChannel('stale', 'gmail-personal').catch(e => e);
+    expect(channelReferences(stale)).toBeNull();
+    expect(isChannelConflict(stale)).toBe(true);
+    // And a non-409 carrying the key is not a force case either.
+    expect(channelReferences(Object.assign(new Error('no'), { status: 400, body: { referenced_by: ['izzie'] } }))).toBeNull();
+  });
+
+  test('only the providers the daemon serves are offered, never the test-only stub', async () => {
+    const provider = (id: string): ChannelProvider =>
+      ({ id, name: id, configured: true, can_send: true, can_read: false } as unknown as ChannelProvider);
+    const served = [provider('telegram'), provider('stub'), provider('gworkspace')];
+    expect(offerableProviders(served).map(p => p.id)).toEqual(['telegram', 'gworkspace']);
+    expect(offerableProviders(undefined)).toEqual([]);
   });
 });
