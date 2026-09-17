@@ -163,8 +163,10 @@ pub(super) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// until the host restarted, and T-4 revocation never took effect. Remembering
 /// what each running poller was started with is what makes the change
 /// detectable.
-/// What: `owners` is the scanned owner list the poller carries, already sorted
-/// by [`super::scan::group_by_token`], so equality is a plain comparison.
+/// What: `owners` is the scanned owner list the poller carries. Every list
+/// reaching here was sorted where the scan builds it (`scan.rs`, `a.owners
+/// .sort()` in the `group_by_token` fold) — nothing in that function's
+/// signature promises it — so equality is a plain comparison.
 /// Test: `telegram_gateway_restarts_a_poller_whose_owners_changed`.
 struct RunningEntry {
     owners: Option<Vec<String>>,

@@ -407,7 +407,8 @@ pub(crate) async fn run_telegram_bot_for(
                     let attendance_root = attendance_for_slash.clone();
                     // #8190: `/switch` is gateway control, and on a supervised
                     // bot it may not reach an assistant that owns no binding
-                    // here.
+                    // here. Round-4: every OTHER slash text is dropped there
+                    // too — see `handlers::gateway_dispatch_allowed`.
                     let owners = owners_for_slash.clone();
                     async move {
                         handle_message(bot, msg, sessions, project, paired, attendance_root, owners)

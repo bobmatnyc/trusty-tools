@@ -1090,10 +1090,15 @@ fn seed_project_persona(project: &std::path::Path, name: &str) {
 /// assistant bound only to another bot, and any plain-text message afterwards
 /// ran as that persona in a gateway session the binding never authorized. Both
 /// are the cross-assistant reach SPEC-AGENTS-09 T-2/T-4 forbid.
-/// What: five real handler runs against a stand-in Telegram — a refused
-/// `/switch`, an admitted one, and the fallback a supervised bot no longer
-/// takes. The unsupervised (`owners: None`) bot is exercised beside each, so
-/// the assertions are a narrowing and not a blanket refusal.
+/// What: real handler runs against a stand-in Telegram — a refused `/switch`,
+/// an admitted one, and the fallback a supervised bot no longer takes. The
+/// unsupervised (`owners: None`) bot is exercised beside each, so the
+/// assertions are a narrowing and not a blanket refusal.
+///
+/// #8190 round-4 (HIGH): assertions 6 and 7 cover the SLASH branch, which the
+/// plain-text gate never saw. `/cost` and `/x move the 3pm` reached
+/// `handle_message` and drove `ctrl` on a supervised bot; `/switch` must still
+/// get through.
 ///
 /// Pre-change this fails twice: `handle_switch` takes no owners and stores
 /// `cto-assistant` on the session, and `handle_plain_text` does not exist — the
@@ -1242,5 +1247,72 @@ async fn telegram_gateway_fallback_session_cannot_switch_outside_the_owners() {
     assert!(
         replies.len() == 1 && replies[0].contains("Not paired"),
         "the pre-#8190 fallback still runs for a host-wide bot: {replies:?}"
+    );
+
+    // 6. #8190 round-4: a SLASH update takes its own dptree branch straight to
+    //    `handle_message`, which assertion 4 never covered. On a supervised bot
+    //    both a REPL-command shape (`/cost`) and free text behind an unknown
+    //    slash (`/x move the 3pm`) are dropped exactly as plain text is —
+    //    neither may drive `ctrl`, which owns no binding on this bot.
+    for slash in ["/cost", "/x move the 3pm"] {
+        let (bot, sent) = recording_telegram().await;
+        super::handlers::handle_message(
+            bot,
+            probe_message(chat_id.0, slash),
+            Arc::clone(&sessions),
+            Arc::clone(&project_path),
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            owners.clone(),
+        )
+        .await
+        .expect("a dropped update is not an error");
+        assert!(
+            recorded(&sent).is_empty(),
+            "`{slash}` must not reach the gateway session on a supervised bot: {:?}",
+            recorded(&sent)
+        );
+
+        // The same slash on an UNSUPERVISED bot still reaches the session,
+        // which answers with its pairing gate — so the drop above is the owners
+        // rule and not a broken handler.
+        let (bot, sent) = recording_telegram().await;
+        super::handlers::handle_message(
+            bot,
+            probe_message(chat_id.0, slash),
+            Arc::clone(&host_wide),
+            Arc::clone(&project_path),
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            None,
+        )
+        .await
+        .expect("the pairing refusal is delivered");
+        let replies = recorded(&sent);
+        assert!(
+            replies.len() == 1 && replies[0].contains("Not paired"),
+            "`{slash}` still reaches the host-wide gateway: {replies:?}"
+        );
+    }
+
+    // 7. `/switch` is the ONE slash a supervised bot still admits — it is
+    //    gateway control, and `handle_switch` scopes the name it carries. The
+    //    pairing refusal is the cheapest proof the gate let it through.
+    let (bot, sent) = recording_telegram().await;
+    super::handlers::handle_message(
+        bot,
+        probe_message(chat_id.0, "/switch izzie"),
+        Arc::clone(&sessions),
+        Arc::clone(&project_path),
+        Arc::new(RwLock::new(HashMap::new())),
+        None,
+        owners.clone(),
+    )
+    .await
+    .expect("the pairing refusal is delivered");
+    let replies = recorded(&sent);
+    assert!(
+        replies.len() == 1 && replies[0].contains("Not paired"),
+        "the owners gate must not swallow `/switch` on a supervised bot: {replies:?}"
     );
 }

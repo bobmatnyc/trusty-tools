@@ -360,6 +360,24 @@ pub(super) fn fallback_session_allowed(owners: Option<&[String]>) -> bool {
     owners.is_none()
 }
 
+/// Whether one update may reach the gateway's own dispatch at all.
+///
+/// Why (#8190 round-4 finding, HIGH): [`fallback_session_allowed`] scoped the
+/// PLAIN-TEXT lane only. A slash command outside the `Command` enum takes its
+/// own dptree branch (see [`super::run_telegram_bot_for`]) straight into
+/// [`handle_message`], so on a supervised bot a chat paired on that bot's own
+/// pairing file could send `/x move the 3pm` and drive `ctrl` — an assistant
+/// that owns no binding there. `/switch` is the one exception: it is gateway
+/// control, and [`handle_switch`] applies [`bot_may_drive`] to the name it
+/// carries, so refusing it here would break the owner's own persona switch.
+/// What: an unsupervised bot admits everything, as before. A supervised one
+/// admits `/switch` and nothing else; every other text is dropped exactly as
+/// unclaimed plain text is.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
+pub(super) fn gateway_dispatch_allowed(owners: Option<&[String]>, text: &str) -> bool {
+    fallback_session_allowed(owners) || text.starts_with("/switch")
+}
+
 /// Route one plain-text update: bindings first, then the gateway session.
 ///
 /// Why (#8190 round-2 finding 2): this was an inline dptree closure, so the
@@ -406,7 +424,12 @@ pub(super) async fn handle_plain_text(
     .await
 }
 
-/// Forward a plain-text message to ctrl and reply with the result.
+/// Forward a message to ctrl and reply with the result.
+///
+/// #8190 round-4: this is the gateway's own dispatch, and BOTH the plain-text
+/// branch and the catch-all slash branch land on it — so it applies
+/// [`gateway_dispatch_allowed`] itself rather than trusting its callers.
+/// Test: `telegram_gateway_fallback_session_cannot_switch_outside_the_owners`.
 // Why: teloxide's dptree dispatch passes injected state as positional
 // arguments; see `handle_command` above.
 #[allow(clippy::too_many_arguments)]
@@ -427,6 +450,19 @@ pub(super) async fn handle_message(
         Some(t) => t.to_string(),
         None => return Ok(()),
     };
+
+    // #8190 round-4: the slash branch reaches here directly, so the owners gate
+    // lives HERE and not only in `handle_plain_text` — see
+    // `gateway_dispatch_allowed`.
+    let scope = owners.as_deref().map(Vec::as_slice);
+    if !gateway_dispatch_allowed(scope, &text) {
+        tracing::debug!(
+            chat_id = %chat_id.0,
+            "telegram: a supervised per-assistant bot has no gateway session, so only \
+             /switch reaches it (#8190)"
+        );
+        return Ok(());
+    }
 
     // #334: Gate the LLM dispatch behind the pairing check. We do this before
     // showing the typing indicator so the user gets immediate feedback.
@@ -456,15 +492,7 @@ pub(super) async fn handle_message(
     // store the choice on the session so subsequent turns route through
     // `run_pm_task_with_persona`.
     if is_switch {
-        return handle_switch(
-            &bot,
-            chat_id,
-            &sessions,
-            &project_path,
-            &text,
-            owners.as_deref().map(Vec::as_slice),
-        )
-        .await;
+        return handle_switch(&bot, chat_id, &sessions, &project_path, &text, scope).await;
     }
 
     // Show "typing…" indicator while we wait on the LLM. Best-effort: if it
