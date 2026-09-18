@@ -1,29 +1,23 @@
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { RELEASED_FLAGSHIPS } from '../site';
 import { findRepoRoot } from '../docs/repo';
 import { ChangelogBuildError } from './errors';
-import {
-	buildChangelogSite,
-	DETAILED_RELEASES,
-	stripItems,
-	whatsNewSections,
-	type ChangelogSite
-} from './site';
+import { buildChangelogSite, stripItems } from './site';
 
 /**
  * Why: the four gates are the whole point of this module — a "What's New" that
  * renders empty is indistinguishable from one that says nothing shipped, so
- * each gate is provoked here rather than assumed. The real corpus is exercised
- * too, because the grammar deviations that would break it are in the files and
- * not in any fixture.
- * What: one pass over the released crates' real changelogs, then a temp-repo
- * fixture per gate. Each fixture starts from a WORKING repo and breaks exactly one thing,
- * so a green assertion means that one change caused the failure.
- * Test: this file.
+ * each gate is provoked here rather than assumed.
+ * What: a temp-repo fixture per gate. Each fixture starts from a WORKING repo
+ * and breaks exactly one thing, so a green assertion means that one change
+ * caused the failure. No case here reads the real corpus — those moved to
+ * `site.corpus.test.ts`, which runs under its own vitest project and its own
+ * CI check, so a changelog fragment no longer pays for this suite.
+ * Test: this file; the real-corpus cases are `site.corpus.test.ts`.
  */
 
 const REPO_ROOT = findRepoRoot();
@@ -68,82 +62,6 @@ const failuresOf = (run: () => unknown) => {
 	}
 	throw new Error('expected the build to fail, but it succeeded');
 };
-
-describe('the real flagship-crate corpus', () => {
-	let site: ChangelogSite;
-
-	beforeAll(() => {
-		site = buildChangelogSite(REPO_ROOT);
-	});
-
-	it('covers exactly the released flagships, in RELEASED_FLAGSHIPS order', () => {
-		expect(site.crates.map((crate) => crate.name)).toEqual(RELEASED_FLAGSHIPS.map((f) => f.name));
-	});
-
-	it('gives every flagship at least one release with at least one item', () => {
-		for (const crate of site.crates) {
-			expect(crate.releases.length, crate.name).toBeGreaterThan(0);
-			expect(crate.latest.itemCount, `${crate.name} ${crate.latest.version}`).toBeGreaterThan(0);
-			expect(crate.latest).toBe(crate.releases[0]);
-		}
-	});
-
-	it('parses the grammar deviations the corpus actually contains', () => {
-		const byName = new Map(site.crates.map((crate) => [crate.name, crate]));
-		const versions = (name: string) => byName.get(name)!.releases.map((r) => r.version);
-
-		// A title where the date should be, and a heading with no separator.
-		expect(versions('trusty-search')).toContain('0.1.46');
-		expect(versions('trusty-mpm')).toContain('0.4.0');
-		// A non-semver label, and a date sitting in the version slot.
-		expect(versions('trusty-mpm')).toContain('consolidation');
-		expect(versions('trusty-git-analytics')).toContain('2026-05-11');
-	});
-
-	it('links each crate at its LIVING changelog on main, not a pinned SHA', () => {
-		for (const crate of site.crates) {
-			expect(crate.sourceUrl).toBe(
-				`https://github.com/bobmatnyc/trusty-tools/blob/main/crates/${crate.name}/CHANGELOG.md`
-			);
-		}
-		expect(site.cratesDirUrl).toBe('https://github.com/bobmatnyc/trusty-tools/tree/main/crates');
-	});
-
-	/**
-	 * `beforeAll` already throws if any link in the corpus fails to resolve, so
-	 * this states what a green build means rather than adding new coverage: no
-	 * relative link in the corpus escapes the repository or points at a
-	 * missing path, and every one that survived is a `blob/main` link.
-	 */
-	it('resolves every relative link in the corpus, none escaping the repository', () => {
-		const hrefs = site.crates.flatMap((crate) =>
-			crate.releases.flatMap((release) =>
-				[
-					release.preambleHtml ?? '',
-					...release.categories.flatMap((category) => [
-						...category.items.map((entry) => entry.html),
-						...category.blocks.map((block) => (block.kind === 'html' ? block.html : ''))
-					])
-				].flatMap((html) => [...html.matchAll(/href="([^"]*)"/g)].map((match) => match[1]))
-			)
-		);
-		expect(hrefs.length).toBeGreaterThan(500);
-		for (const href of hrefs) expect(href, href).toMatch(/^https?:\/\//);
-		expect(hrefs.some((href) => href.includes('/blob/main/docs/specs/'))).toBe(true);
-	});
-
-	/**
-	 * trusty-audit's CHANGELOG.md carries a real `## [0.6.0]` release, so it
-	 * joined RELEASED_FLAGSHIPS (`Tool.released`) alongside the others. Only
-	 * non-flagship crates such as `trusty-common` — never carded or paged —
-	 * stay out of this surface.
-	 */
-	it('includes every released flagship, and only non-flagship crates stay out', () => {
-		expect(site.crates.map((c) => c.name)).not.toContain('trusty-common');
-		expect(site.crates.map((c) => c.name)).toContain('trusty-audit');
-		expect(site.crates).toHaveLength(RELEASED_FLAGSHIPS.length);
-	});
-});
 
 describe('the build gates', () => {
 	it('passes on a repository where every flagship is populated', () => {
@@ -250,35 +168,6 @@ describe('the build gates', () => {
 	});
 });
 
-describe('the /whats-new projection', () => {
-	it('splits every release into exactly one of detailed or earlier', () => {
-		for (const crate of whatsNewSections(REPO_ROOT).crates) {
-			expect(crate.detailed.length, crate.name).toBeGreaterThan(0);
-			expect(crate.detailed.length).toBeLessThanOrEqual(DETAILED_RELEASES);
-			expect(crate.detailed.length + crate.earlier.length).toBe(crate.releaseCount);
-
-			const detailed = new Set(crate.detailed.map((release) => release.version));
-			for (const summary of crate.earlier) expect(detailed.has(summary.version)).toBe(false);
-		}
-	});
-
-	it('ships no item prose for a summarised release', () => {
-		const crate = whatsNewSections(REPO_ROOT).crates.find((c) => c.name === 'trusty-search')!;
-		expect(crate.earlier.length).toBeGreaterThan(100);
-		for (const summary of crate.earlier) {
-			expect(Object.keys(summary).sort()).toEqual(['date', 'title', 'version']);
-		}
-	});
-
-	it('keeps the newest release detailed, so the page opens on what just shipped', () => {
-		const projected = whatsNewSections(REPO_ROOT);
-		const built = buildChangelogSite(REPO_ROOT);
-		for (const [index, crate] of projected.crates.entries()) {
-			expect(crate.detailed[0].version).toBe(built.crates[index].latest.version);
-		}
-	});
-});
-
 describe('the landing-page strip', () => {
 	const release = (categories: [string, string[]][]) => ({
 		version: '1.0.0',
@@ -312,12 +201,6 @@ describe('the landing-page strip', () => {
 		]);
 	});
 
-	it('produces a non-empty strip for every real flagship crate', () => {
-		for (const crate of buildChangelogSite(REPO_ROOT).crates) {
-			const lines = stripItems(crate.latest);
-			expect(lines.length, crate.name).toBeGreaterThan(0);
-			expect(lines.length).toBeLessThanOrEqual(3);
-			for (const line of lines) expect(line.text.trim(), crate.name).not.toBe('');
-		}
-	});
+	// The same strip over the REAL corpus is `site.corpus.test.ts`'s
+	// "produces a non-empty strip for every real flagship crate".
 });
