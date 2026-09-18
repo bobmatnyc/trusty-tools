@@ -584,7 +584,6 @@ crates/trusty-mpm/src/runtime/claude_code.rs	session_id_exists_falls_back_to_hom
 crates/trusty-mpm/src/runtime/claude_code.rs	session_id_exists_prefers_config_dir_projects_when_present
 crates/trusty-mpm/src/runtime/claude_code.rs	spawn_resume_publishes_session_id_via_set_environment
 crates/trusty-mpm/src/runtime/mod.rs	claude_code_adapter_spawn_sends_env_scrub_command
-crates/trusty-mpm/src/runtime/mod.rs	spawn_resume_without_id_uses_continue_flag
 crates/trusty-mpm/src/services/discoverer/mod.rs	health_state_serialises_correctly
 crates/trusty-mpm/src/services/discoverer/mod.rs	probe_uptime_returns_none_for_unknown_pid
 crates/trusty-mpm/src/services/discoverer/mod.rs	probe_version_returns_first_line

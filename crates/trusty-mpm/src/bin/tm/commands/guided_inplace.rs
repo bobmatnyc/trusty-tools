@@ -624,8 +624,18 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::FallThrough;
     }
 
+    // #8233 review (HIGH): resolve the session workspace's pinned `gh` identity
+    // — the pane shell stopped carrying it when the launch moved into a spec.
+    // A refusal here (the `account`-only strategy) is logged, not fatal: losing
+    // the relaunch entirely is worse than relaunching on the ambient identity,
+    // which is what every pre-#3025 session had.
+    let gh_env = crate::gh_identity::load_gh_env_for(&cwd).unwrap_or_else(|e| {
+        eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
+        trusty_mpm::core::gh_identity::GhEnv::default()
+    });
+
     InPlaceOutcome::Result(exec_claude_in_place(build_inplace_exec_command(
-        &resume, &cwd,
+        &resume, &cwd, &gh_env,
     )))
 }
 
@@ -665,7 +675,20 @@ pub(crate) async fn run_inplace_relaunch(
 /// [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets both here.
 /// It runs last and, for each variable independently, sets nothing when this
 /// pane already exports a value.
+///
+/// #8233 review (HIGH): `gh_env` is the pinned `gh` identity
+/// (`GH_TOKEN`/`GH_CONFIG_DIR`/`GH_HOST`, #3025/#6668), and it is applied FIRST
+/// so a later deliberate assignment always wins. Before #8233 the spawn wrote
+/// those exports into the PANE's shell by sourcing a temp file, so a bare-`tm`
+/// relaunch inherited them for free. The launch spec now delivers the
+/// environment to `claude` alone and the pane shell never sees it, so this path
+/// has to resolve the binding again — otherwise every in-place relaunch silently
+/// fell back to the ambient account, reintroducing #6668 for exactly this path.
+/// [`trusty_mpm::core::gh_identity::GhEnv::apply_to`] also REMOVES the inherited
+/// identity vars the binding outranks, which is the half a plain set would miss.
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
+/// `inplace_exec_command_carries_the_pinned_gh_identity`,
+/// `inplace_exec_command_clears_an_inherited_gh_token`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
@@ -675,11 +698,14 @@ pub(crate) async fn run_inplace_relaunch(
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(&resume.claude_bin);
     cmd.args(&resume.args)
         .current_dir(cwd)
         .env_remove("ANTHROPIC_API_KEY");
+    // #8233 review: the pinned `gh` identity the pane shell no longer carries.
+    gh_env.apply_to(&mut cmd);
     // #4467: strip Claude Code's inherited process-local session markers so the
     // relaunched session keeps native --resume/--continue/rewind recovery.
     trusty_mpm::core::claude_env_scrub::scrub_command(&mut cmd);

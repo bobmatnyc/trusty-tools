@@ -86,23 +86,37 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
 /// reads it — the SAME process the #2997 disclaim contract already put between
 /// the pane shell and `claude`, so the parameterisation costs no extra hop and
 /// `claude` is still `posix_spawn`ed disclaimed.
-/// What: consumes (reads AND deletes) the spec, builds its
-/// [`std::process::Command`], spawns it disclaimed, and on exit prints the
-/// three-way launch report [`trusty_mpm::runtime::launch_report::report_exit`]
-/// produces — the behaviour #6766 used to express as an `if`/`elif` shell
-/// fragment appended to the typed line. Exits with the child's code.
+/// What: consumes (reads AND deletes) the spec, writes the
+/// `<session>.started` sentinel that tells the daemon the pane's SHELL really
+/// ran the typed line (#8233 review — tmux accepting keystrokes never proved
+/// that), builds the spec's [`std::process::Command`], spawns it disclaimed, and
+/// on exit prints the three-way launch report
+/// [`trusty_mpm::runtime::launch_report::report_exit`] produces — the behaviour
+/// #6766 used to express as an `if`/`elif` shell fragment appended to the typed
+/// line. Exits with the child's code.
+///
+/// The sentinel is written BEFORE the spawn deliberately: it answers "did the
+/// shell consume the command", which is true whether or not `claude` then
+/// starts, and the two failures need different remedies.
 ///
 /// # Errors
 ///
 /// A spec that is missing, unreadable or corrupt returns an error rather than
-/// launching anything. `main` prints it to the pane and exits non-zero, so the
-/// pane says what happened and no `claude` starts with half a configuration;
-/// the daemon's post-send launch check then marks the record errored.
+/// launching anything, and so does a `program` the OS refuses to spawn. `main`
+/// prints it to the pane and exits non-zero, so the pane says what happened and
+/// no `claude` starts with half a configuration; the daemon's post-send launch
+/// check then marks the record errored.
 /// Test: `run_launch_spec_rejects_a_missing_spec`,
-/// `run_launch_spec_rejects_a_corrupt_spec`.
+/// `run_launch_spec_rejects_a_corrupt_spec`,
+/// `run_launch_spec_reports_a_program_that_cannot_be_spawned`,
+/// `run_launch_spec_marks_started_before_it_spawns`.
 pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
     let spec = trusty_mpm::runtime::launch_spec::LaunchSpec::consume(path)
         .with_context(|| "managed launch aborted: its launch spec could not be used")?;
+    // #8233: the pane's shell parsed and ran the launch line — record that before
+    // anything else can fail, so a stuck parser is distinguishable from a launch
+    // that started and then broke.
+    trusty_mpm::runtime::launch_spec::LaunchSpec::mark_started(path, &spec.session_id);
     let mut cmd = spec.to_command();
     let started = std::time::Instant::now();
     let (status, code) = spawn_and_wait(&mut cmd, &spec.program)?;
@@ -153,6 +167,69 @@ fn spawn_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a spec naming `program` into `dir`, and return its path.
+    ///
+    /// Why: both cases below need a spec that decodes cleanly, so the only
+    /// thing under test is what happens AFTER it is consumed.
+    /// Test: `run_launch_spec_reports_a_program_that_cannot_be_spawned`,
+    /// `run_launch_spec_marks_started_before_it_spawns`.
+    fn spec_naming(dir: &std::path::Path, program: &str) -> std::path::PathBuf {
+        let spec = trusty_mpm::runtime::launch_spec::LaunchSpec {
+            session_id: "11111111-2222-3333-4444-555555555555".to_owned(),
+            cwd: dir.to_path_buf(),
+            program: program.to_owned(),
+            args: Vec::new(),
+            env_unset: Vec::new(),
+            env_set: Vec::new(),
+        };
+        spec.write_in(dir).expect("write the spec")
+    }
+
+    /// #8233 review (MEDIUM): the "program cannot be spawned" arm had no test.
+    /// It is the arm a `claude` deleted between resolution and launch takes, and
+    /// it must ERROR — `main` prints that into the pane and exits non-zero —
+    /// rather than exiting 0 and leaving the daemon to believe a runtime started.
+    #[test]
+    fn run_launch_spec_reports_a_program_that_cannot_be_spawned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = spec_naming(
+            dir.path(),
+            &dir.path().join("no-such-claude").to_string_lossy(),
+        );
+
+        let err = run_launch_spec(&path).expect_err("an unspawnable program must error");
+
+        assert!(
+            err.to_string().contains("failed to spawn"),
+            "the pane must be told the program could not start: {err:#}"
+        );
+    }
+
+    /// #8233 review: the sentinel answers "did the pane's SHELL run the line",
+    /// which is true even when the launch then fails. Writing it only on the
+    /// success path would make every real launch failure look like a stuck
+    /// parser — so it must already be there when the spawn arm errors.
+    #[test]
+    fn run_launch_spec_marks_started_before_it_spawns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = spec_naming(
+            dir.path(),
+            &dir.path().join("no-such-claude").to_string_lossy(),
+        );
+
+        let _ = run_launch_spec(&path);
+
+        let marker = trusty_mpm::runtime::launch_spec::LaunchSpec::started_marker_in(
+            dir.path(),
+            "11111111-2222-3333-4444-555555555555",
+        );
+        assert!(
+            marker.exists(),
+            "the sentinel must record that the shell reached the shim: {}",
+            marker.display()
+        );
+    }
 
     #[test]
     fn run_rejects_empty_argv() {

@@ -421,6 +421,9 @@ fn abort_notice_is_short_enough_to_always_type() {
 struct Recorder {
     sends: Mutex<Vec<String>>,
     fail_first: usize,
+    /// #8233: every pane reset, as `(session, pane_id)` — the pre-send `C-c`
+    /// that returns a wedged shell to a primary prompt.
+    interrupts: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl Recorder {
@@ -428,10 +431,14 @@ impl Recorder {
         Self {
             sends: Mutex::new(Vec::new()),
             fail_first,
+            interrupts: Mutex::new(Vec::new()),
         }
     }
     fn lines(&self) -> Vec<String> {
         self.sends.lock().expect("recorder mutex").clone()
+    }
+    fn resets(&self) -> Vec<(String, Option<String>)> {
+        self.interrupts.lock().expect("recorder mutex").clone()
     }
 }
 
@@ -448,6 +455,28 @@ impl ManagedTmuxDriver for Recorder {
         if log.len() <= self.fail_first {
             return Err(ManagedError::TmuxUnavailable("pane is gone".into()));
         }
+        Ok(())
+    }
+    fn send_line_to_pane(&self, _name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        let mut log = self.sends.lock().expect("recorder mutex");
+        log.push(text.to_owned());
+        if log.len() <= self.fail_first {
+            return Err(ManagedError::TmuxUnavailable("pane is gone".into()));
+        }
+        Ok(())
+    }
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.interrupts
+            .lock()
+            .expect("recorder mutex")
+            .push((name.to_owned(), None));
+        Ok(())
+    }
+    fn send_interrupt_to_pane(&self, name: &str, pane: &str) -> Result<(), ManagedError> {
+        self.interrupts
+            .lock()
+            .expect("recorder mutex")
+            .push((name.to_owned(), Some(pane.to_owned())));
         Ok(())
     }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
@@ -484,6 +513,68 @@ fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
         .collect();
     assert_eq!(written.len(), 1, "one spec per launch: {written:?}");
     assert_eq!(LaunchSpec::verify(&written[0]).expect("verify"), spec);
+}
+
+/// #8233 review (defence in depth, independent of line length): the length
+/// guard makes THIS line un-truncatable, but it cannot undo a pane an earlier
+/// launch already wedged. A shell at a PS2 continuation prompt swallows whatever
+/// is typed next as more of the open construct, so a short line would vanish
+/// into it just as the long one did. The reset must happen BEFORE the
+/// keystrokes, or it protects nothing.
+#[test]
+fn deliver_resets_the_pane_before_typing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = PathBuf::from("/w");
+    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let tmux = Recorder::new(0);
+
+    deliver_in(&tmux, "tm-sess", None, &spec, dir.path()).expect("deliver");
+
+    assert_eq!(
+        tmux.resets(),
+        vec![("tm-sess".to_owned(), None)],
+        "the pane must be interrupted exactly once, session-scoped with no pane id"
+    );
+    assert_eq!(tmux.lines().len(), 1, "and then the launch line is typed");
+}
+
+/// #2456: the reset must land on the RECORD's pane, not on whichever pane tmux
+/// currently considers active — a session-scoped `C-c` would interrupt a
+/// sibling window's work.
+#[test]
+fn deliver_resets_the_named_pane_when_one_is_known() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = PathBuf::from("/w");
+    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let tmux = Recorder::new(0);
+
+    deliver_in(&tmux, "tm-sess", Some("%9"), &spec, dir.path()).expect("deliver");
+
+    assert_eq!(
+        tmux.resets(),
+        vec![("tm-sess".to_owned(), Some("%9".to_owned()))]
+    );
+}
+
+/// #8233 review: the post-send handshake reads a `<session>.started` sentinel.
+/// One left by an EARLIER launch of the same session would make a stuck pane
+/// look healthy, so delivery must clear it before the pane can write a new one.
+#[test]
+fn deliver_clears_a_stale_started_sentinel() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = PathBuf::from("/w");
+    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let stale = LaunchSpec::started_marker_in(dir.path(), &spec.session_id);
+    std::fs::create_dir_all(dir.path()).expect("mkdir");
+    std::fs::write(&stale, b"").expect("plant a stale sentinel");
+
+    deliver_in(&Recorder::new(0), "tm-sess", None, &spec, dir.path()).expect("deliver");
+
+    assert!(
+        !stale.exists(),
+        "a previous launch's sentinel must not survive into this one: {}",
+        stale.display()
+    );
 }
 
 #[test]

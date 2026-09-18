@@ -1627,6 +1627,35 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
     );
 }
 
+/// #2013, restored by the #8233 review (MEDIUM): a stored `claude_session_id`
+/// goes stale when its conversation is pruned or the workspace moves, and
+/// `claude --resume <missing>` fails hard with no recovery. The daemon resume
+/// path must therefore existence-check the id and launch FRESH when it does not
+/// resolve. The deleted `spawn_resume_with_missing_id_falls_back_gracefully`
+/// asserted this against the old shell string; this asserts it against the spec
+/// the pane will actually consume, which is strictly sharper.
+#[test]
+#[serial_test::serial]
+fn spawn_resume_drops_a_stale_stored_id() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let cwd = home.home().to_path_buf();
+    // No transcript is seeded for this id anywhere under the redirected home.
+    drive_resume(&fake, &home, &cwd, None, Some("pruned-conversation"));
+
+    let spec = sent_spec(&only_line(&fake));
+    assert!(
+        !spec.args.iter().any(|a| a == "--resume"),
+        "a stale id must not reach `claude --resume`, which fails hard: {:?}",
+        spec.args
+    );
+    assert!(
+        !spec.args.iter().any(|a| a == "pruned-conversation"),
+        "and the id itself must appear nowhere in the argv: {:?}",
+        spec.args
+    );
+}
+
 /// #2246: every resumed / guided-resume / crash-recovery session must carry the
 /// OAuth token too, or exactly those sessions keep the login loop `spawn` was
 /// fixed against. #8233: it reaches `claude` through the spec, and must appear

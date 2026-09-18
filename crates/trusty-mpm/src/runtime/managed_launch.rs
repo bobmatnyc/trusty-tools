@@ -341,10 +341,15 @@ fn abort_notice(session_id: &str) -> String {
 /// four steps in one function is what stops a future caller performing three of
 /// them.
 /// What: resolves the tm binary ([`crate::core::spawn_disclaim::launch_wrapper_bin`]);
-/// writes the spec to its mode-0600 file; reads it back
-/// ([`LaunchSpec::verify`]); types [`pane_line`] through
+/// clears any stale `.started` sentinel for this session; writes the spec to its
+/// mode-0600 file; reads it back ([`LaunchSpec::verify`]); returns the pane to a
+/// primary prompt ([`reset_pane_input`]); types [`pane_line`] through
 /// [`crate::session_manager::ManagedTmuxDriver::send_command_line`], which
-/// refuses an over-length line rather than letting the tty truncate it. On any
+/// refuses an over-length line rather than letting the tty truncate it. The
+/// pane's shim then writes the sentinel, which
+/// `daemon::managed_routes::launch_verify::detect_unconsumed_launch` waits on —
+/// that is the half of the handshake that proves the SHELL, not just tmux, took
+/// the line. On any
 /// failure it types [`abort_notice`] (best-effort — a pane that cannot be typed
 /// into cannot be told either), removes the spec it wrote so no credential is
 /// left on disk, and returns the error.
@@ -394,7 +399,43 @@ pub(super) fn deliver_in(
     }
 }
 
-/// The four steps [`deliver`] wraps; see its doc.
+/// Return the pane's shell to a PRIMARY prompt before anything is typed at it
+/// (#8233 review, defence in depth).
+///
+/// Why: the length guard makes THIS launch un-truncatable, but it cannot undo a
+/// pane the PREVIOUS one already wedged. A shell holding an unterminated `{`
+/// group sits at PS2 and silently swallows whatever is typed next as more of
+/// that command, so a perfectly short launch line would vanish into it — the
+/// exact "bare `tm` in the pane relaunched the session" recovery an operator had
+/// to perform by hand on this issue. `C-c` abandons a PS2 continuation and
+/// discards any half-typed line at PS1, which covers both states without
+/// needing to recognise either.
+/// What: pane-scoped when a `pane_id` is known (sibling-window hijack, #2456),
+/// else session-scoped. BEST-EFFORT by design: the trait default for both
+/// methods is an error, so every hermetic driver and the tmux-absent fallback
+/// simply skip this, and a pane that cannot be interrupted is reported by the
+/// send that follows rather than here.
+/// Test: `deliver_resets_the_pane_before_typing`,
+/// `deliver_resets_the_named_pane_when_one_is_known`.
+fn reset_pane_input(
+    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
+    tmux_name: &str,
+    pane_id: Option<&str>,
+) {
+    let sent = match pane_id {
+        Some(pane) => tmux.send_interrupt_to_pane(tmux_name, pane),
+        None => tmux.send_interrupt(tmux_name),
+    };
+    if let Err(e) = sent {
+        tracing::debug!(
+            session = %tmux_name,
+            "could not interrupt the pane before typing the launch line (non-fatal, \
+             expected for drivers with no interrupt support, #8233): {e}"
+        );
+    }
+}
+
+/// The steps [`deliver`] wraps; see its doc.
 fn deliver_inner(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
     tmux_name: &str,
@@ -409,6 +450,10 @@ fn deliver_inner(
                 .to_owned(),
         )
     })?;
+    // #8233: a sentinel left by an EARLIER launch of this same session would make
+    // the post-send check pass without the pane having run anything. Clear it
+    // before the pane can write a new one.
+    let _ = std::fs::remove_file(LaunchSpec::started_marker_in(spec_dir, &spec.session_id));
     let path = spec
         .write_in(spec_dir)
         .map_err(|e| super::RuntimeError::Spawn(e.to_string()))?;
@@ -417,6 +462,9 @@ fn deliver_inner(
         return Err(super::RuntimeError::Spawn(e.to_string()));
     }
     let line = pane_line(&spec.session_id, &wrapper, &path);
+    // #8233: last thing before the keystrokes — a pane left at a continuation
+    // prompt by an earlier launch would otherwise swallow this one too.
+    reset_pane_input(tmux, tmux_name, pane_id);
     if let Err(e) = tmux.send_command_line(tmux_name, pane_id, &line) {
         // The spec carries credentials and nothing will consume it now.
         let _ = std::fs::remove_file(&path);

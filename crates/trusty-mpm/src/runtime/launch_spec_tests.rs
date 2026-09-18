@@ -226,3 +226,96 @@ fn spec_command_yields_the_alt_screen_default_to_the_pane() {
         );
     }
 }
+
+// ── #8233 review: orphan reaping and the launch-started sentinel ──────────
+
+/// Backdate `path`'s mtime by `age`, so a TTL sweep sees it as an orphan.
+///
+/// Why: a reaper keyed on age can only be tested by producing something old,
+/// and sleeping ten minutes is not a test. `File::set_modified` does it with no
+/// new dependency.
+fn backdate(path: &Path, age: std::time::Duration) {
+    let when = std::time::SystemTime::now() - age;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("reopen the orphan")
+        .set_modified(when)
+        .expect("backdate the orphan");
+}
+
+/// #8233 review (HIGH): a spec the pane never consumed holds `GH_TOKEN` and
+/// `CLAUDE_CODE_OAUTH_TOKEN` in cleartext, and nothing else on the machine ever
+/// deletes it. Writing a new spec must collect it.
+#[test]
+fn write_reaps_an_orphaned_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let orphan = sample().write_in(dir.path()).expect("write the orphan");
+    backdate(&orphan, std::time::Duration::from_secs(3600));
+
+    let fresh = sample().write_in(dir.path()).expect("write a second spec");
+
+    assert!(
+        !orphan.exists(),
+        "an hour-old spec must be reaped by the next launch: {}",
+        orphan.display()
+    );
+    assert!(
+        fresh.exists(),
+        "the launch's own spec must survive its sweep"
+    );
+}
+
+/// The sweep must not eat a spec a CONCURRENT launch is about to consume — a
+/// reaper that took live files would turn one bug into a worse one.
+#[test]
+fn write_keeps_a_fresh_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let concurrent = sample().write_in(dir.path()).expect("write the sibling");
+
+    let mine = sample().write_in(dir.path()).expect("write my spec");
+
+    assert!(
+        concurrent.exists(),
+        "a seconds-old sibling spec must be left alone: {}",
+        concurrent.display()
+    );
+    assert!(mine.exists());
+}
+
+/// The reaper runs on the launch path, so it must never be the thing that fails
+/// one: a directory that is not there yet is the normal first-launch state.
+#[test]
+fn reap_survives_a_missing_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let absent = dir.path().join("never-created");
+    super::reap_orphans_in(&absent, std::time::Duration::from_secs(1));
+    // Reaching here without a panic is the assertion; the write below proves the
+    // path is still usable afterwards.
+    assert!(sample().write_in(&absent).is_ok());
+}
+
+/// Both halves of the handshake derive the sentinel path from the SESSION id —
+/// the shim from the spec it consumed, the daemon from the record — so a
+/// mismatch here would make every launch read as stuck.
+#[test]
+fn started_marker_is_named_for_the_session() {
+    let marker = LaunchSpec::started_marker_in(Path::new("/specs"), "sess-1");
+    assert_eq!(marker, PathBuf::from("/specs/sess-1.started"));
+}
+
+/// #8233 review: the sentinel is what proves the pane's SHELL ran the line. It
+/// must land beside the spec, where the daemon looks for it.
+#[test]
+fn mark_started_writes_the_sentinel_beside_the_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = sample();
+    let path = spec.write_in(dir.path()).expect("write");
+
+    LaunchSpec::mark_started(&path, &spec.session_id);
+
+    assert!(
+        LaunchSpec::started_marker_in(dir.path(), &spec.session_id).exists(),
+        "the shim must leave a sentinel the daemon can see"
+    );
+}

@@ -110,23 +110,37 @@ pub(crate) fn resolve_project_aware(
 /// detect project → resolve `github:` section → GhEnv" sequence; centralising
 /// it keeps the call sites to one line and the behaviour identical across
 /// `ticket`/`watch`/`issue`.
-/// What: loads [`TrustyToolsConfig`], detects the current directory's git
-/// origin remote (best-effort — a non-repo cwd or a read failure simply yields
-/// no project match, never an error), and resolves via
-/// [`resolve_project_aware`], surfacing the `account`-strategy refusal as an
-/// `anyhow` error.
+/// What: [`load_gh_env_for`] against the process's current directory.
 /// Test: `resolve_project_aware_*` cover the resolution logic; this function
-/// is thin wiring over real cwd/git detection.
+/// is thin wiring over real cwd detection.
 pub(crate) fn load_gh_env() -> anyhow::Result<GhEnv> {
+    match std::env::current_dir() {
+        Ok(cwd) => load_gh_env_for(&cwd),
+        Err(_) => load_gh_env_for(std::path::Path::new(".")),
+    }
+}
+
+/// [`load_gh_env`] against an EXPLICIT directory (#8233 review, HIGH).
+///
+/// Why: the bare-`tm` in-place relaunch runs inside a managed pane whose session
+/// has its own workspace, and that workspace — not the shell's current
+/// directory — is the project whose `github:` binding the relaunched `claude`
+/// must inherit. Before #8233 it inherited the identity from the pane's shell
+/// environment, which the spawn had exported there by sourcing a temp file; the
+/// launch spec now delivers the environment to `claude` alone, so the pane shell
+/// no longer holds it and this path has to resolve it again from config.
+/// What: [`load_gh_env`]'s body, with `dir` in place of the process cwd.
+/// Test: `resolve_project_aware_*` cover the resolution; the in-place
+/// application is covered by
+/// `inplace_exec_command_carries_the_pinned_gh_identity`.
+pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
     let config = TrustyToolsConfig::load();
-    let origin_url = std::env::current_dir().ok().and_then(|cwd| {
-        // #4734: still best-effort, but a git failure is logged instead of
-        // passing silently as "this directory has no origin remote".
-        trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&cwd)
-            .inspect_err(|e| tracing::warn!("cannot read git origin remote for gh identity: {e}"))
-            .ok()
-            .flatten()
-    });
+    // #4734: still best-effort, but a git failure is logged instead of passing
+    // silently as "this directory has no origin remote".
+    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)
+        .inspect_err(|e| tracing::warn!("cannot read git origin remote for gh identity: {e}"))
+        .ok()
+        .flatten();
     let env = resolve_project_aware(&config, origin_url.as_deref())?;
     if !env.is_empty() {
         // Names only — never the resolved token VALUE (which `vars()` may hold).

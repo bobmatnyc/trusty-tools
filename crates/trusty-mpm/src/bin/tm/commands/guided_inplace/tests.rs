@@ -727,6 +727,88 @@ fn synthetic_resume(args: &[&str]) -> trusty_mpm::runtime::InPlaceResumeCommand 
     }
 }
 
+/// The unbound `gh` identity — an operator with no `github:` binding.
+///
+/// Why: most `inplace_exec_command_*` cases are about argv and auth env, not
+/// about `gh`, and an empty [`GhEnv`] is exactly what they saw before #8233
+/// gave this seam a `gh_env` parameter.
+/// Test: used by every `inplace_exec_command_*` case that is not about `gh`.
+fn no_gh() -> trusty_mpm::core::gh_identity::GhEnv {
+    trusty_mpm::core::gh_identity::GhEnv::default()
+}
+
+/// A `gh` identity bound by `config_dir`, resolved through the production
+/// precedence engine rather than hand-built.
+///
+/// Why: asserting against a hand-assembled `GhEnv` would prove only that this
+/// function copies a struct. Resolving a real [`GithubConfig`] means the test
+/// breaks if the precedence or the #6668 removal set changes.
+/// Test: `inplace_exec_command_carries_the_pinned_gh_identity`,
+/// `inplace_exec_command_clears_an_inherited_gh_token`.
+fn bound_gh(config_dir: &str) -> trusty_mpm::core::gh_identity::GhEnv {
+    let cfg = trusty_mpm::core::trusty_tools_config::GithubConfig {
+        config_dir: Some(config_dir.into()),
+        token_env: None,
+        account: None,
+        host: None,
+    };
+    trusty_mpm::core::gh_identity::resolve_gh_env(Some(&cfg))
+        .expect("a config_dir binding resolves")
+}
+
+/// Every `(name, value)` the built command will apply, with `None` for a removal.
+fn env_of(cmd: &std::process::Command) -> Vec<(String, Option<String>)> {
+    cmd.get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+/// #8233 review (HIGH): the bare-`tm` in-place relaunch used to inherit
+/// `GH_CONFIG_DIR`/`GH_TOKEN` from the pane shell, which the pre-#8233 spawn had
+/// exported there by sourcing a temp file. The launch spec delivers the
+/// environment to `claude` alone now, so this seam must resolve and apply the
+/// binding itself or every in-place relaunch silently runs as the ambient
+/// account.
+#[test]
+fn inplace_exec_command_carries_the_pinned_gh_identity() {
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(
+        &resume,
+        std::path::Path::new("/fake/cwd"),
+        &bound_gh("/cfg/pinned"),
+    );
+
+    let envs = env_of(&cmd);
+    assert!(
+        envs.contains(&("GH_CONFIG_DIR".to_owned(), Some("/cfg/pinned".to_owned()))),
+        "the relaunched claude must see the project's gh config home: {envs:?}"
+    );
+}
+
+/// #6668, for the path #8233 reintroduced it on: `gh` reads an env token BEFORE
+/// a config dir, so applying the binding without also removing an inherited
+/// `GH_TOKEN` leaves the wrong account in force for the session's whole life.
+#[test]
+fn inplace_exec_command_clears_an_inherited_gh_token() {
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(
+        &resume,
+        std::path::Path::new("/fake/cwd"),
+        &bound_gh("/cfg/pinned"),
+    );
+
+    let envs = env_of(&cmd);
+    assert!(
+        envs.contains(&("GH_TOKEN".to_owned(), None)),
+        "an inherited GH_TOKEN must be REMOVED, not merely outranked: {envs:?}"
+    );
+}
+
 #[test]
 fn inplace_exec_command_forwards_every_arg_in_order() {
     // #4336 core regression: the Command handed to `exec` must carry the
@@ -741,7 +823,7 @@ fn inplace_exec_command_forwards_every_arg_in_order() {
         "--resume",
         "abc-123",
     ]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let args: Vec<String> = cmd
         .get_args()
@@ -788,7 +870,7 @@ fn inplace_exec_command_carries_a_non_empty_mcp_env() {
         ),
         ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
     ];
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -828,7 +910,7 @@ fn inplace_exec_command_scrubs_api_key_and_sets_auth_env() {
     // The env invariants `env_bin_prefix` encodes for the shell-string paths
     // must hold identically on the exec path (DOC-34 + #2246).
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -868,7 +950,7 @@ fn inplace_exec_command_scrubs_inherited_session_markers() {
     // name is hard-coded so this cannot pass vacuously if the shared marker list
     // is emptied.
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -915,7 +997,7 @@ fn inplace_exec_command_defaults_the_alternate_screen_off() {
     use trusty_mpm::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
 
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
     let provisioned = cmd.get_envs().any(|(k, v)| {
@@ -935,7 +1017,7 @@ fn inplace_exec_command_defaults_the_mouse_capture_off() {
     use trusty_mpm::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
 
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
 
     let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();
     let provisioned = cmd.get_envs().any(|(k, v)| {
@@ -961,7 +1043,7 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
     let Ok(resume) = trusty_mpm::runtime::build_inplace_resume_command(tmp.path(), None) else {
         return;
     };
-    let cmd = build_inplace_exec_command(&resume, tmp.path());
+    let cmd = build_inplace_exec_command(&resume, tmp.path(), &no_gh());
     let args: Vec<String> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())

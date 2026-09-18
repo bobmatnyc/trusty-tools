@@ -47,6 +47,32 @@ const DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
 const FILE_MODE: u32 = 0o600;
 
+/// Extension of the "the pane ran the launch line" sentinel (#8233 review).
+///
+/// Why: `tmux send-keys` succeeding proves tmux accepted the keystrokes, not
+/// that the pane's SHELL parsed and ran them. The whole defect this issue tracks
+/// is a shell left at a continuation prompt with the line unexecuted, so the
+/// launcher needs a signal that only exists once the shim actually started.
+/// What: `<session-uuid>.started`, written by
+/// [`LaunchSpec::mark_started`] beside the spec it was read from and observed by
+/// `daemon::managed_routes::launch_verify`.
+const STARTED_SUFFIX: &str = ".started";
+
+/// How long an unconsumed spec or sentinel may sit before it is reaped (#8233
+/// review, HIGH).
+///
+/// Why: a spec carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in cleartext and
+/// is normally deleted within a second, as the shim reads it. But the pane can
+/// be killed before the line runs, the daemon can restart, or the launch can be
+/// abandoned — and nothing then deletes it. Unlike the `TMPDIR` file this
+/// replaced, `~/.trusty-tools/…/launch-specs` is never swept by the OS, so an
+/// orphan would keep a live token readable indefinitely.
+/// What: ten minutes. A spec is consumed within seconds of being written, so
+/// anything older is certainly an orphan; the margin covers a pane that is slow
+/// to start its shell.
+/// Test: `write_reaps_an_orphaned_spec`, `write_keeps_a_fresh_spec`.
+const ORPHAN_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// What can go wrong carrying a launch's parameters to the pane.
 ///
 /// Why: the spawn path must fail CLOSED — a spec that cannot be written or read
@@ -176,6 +202,10 @@ impl LaunchSpec {
             path: dir.to_path_buf(),
             source,
         })?;
+        // #8233 review (HIGH): collect whatever earlier launches abandoned here
+        // before adding one more. Every launch passes through this function, so
+        // it is the one place a sweep is guaranteed to run.
+        reap_orphans_in(dir, ORPHAN_TTL);
         let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
         let json = serde_json::to_vec(self).map_err(|e| LaunchSpecError::Write {
             path: path.clone(),
@@ -193,11 +223,17 @@ impl LaunchSpec {
     /// Why: the spec is single-use and holds credentials. Removing it as part of
     /// reading it means a launch that proceeds leaves nothing on disk, and a
     /// stale file can never be replayed into a second `claude`.
-    /// What: reads the bytes, removes the file (a removal failure is logged by
-    /// the caller, never fatal — the launch itself already has the parameters),
-    /// then decodes. A missing file, an unreadable one, or one that is not
-    /// decodable JSON each returns the matching [`LaunchSpecError`], which is
-    /// what makes the shim fail loudly instead of launching a partial `claude`.
+    /// What: reads the bytes, removes the file, then decodes. A missing file, an
+    /// unreadable one, or one that is not decodable JSON each returns the
+    /// matching [`LaunchSpecError`], which is what makes the shim fail loudly
+    /// instead of launching a partial `claude`.
+    ///
+    /// #8233 review (MEDIUM): the removal is best-effort — the parameters are
+    /// already in hand, so failing the launch over it would trade a working
+    /// session for a tidy directory — but it is WARNED here rather than left to
+    /// "the caller", which no caller did. A file that cannot be removed still
+    /// holds a live token, so the log line is the only thing that can bring an
+    /// operator to it before [`reap_orphans_in`] does.
     /// Test: `spec_round_trips_through_the_file`, `consume_removes_the_file`,
     /// `consume_reports_a_missing_spec`, `consume_reports_a_corrupt_spec`.
     pub fn consume(path: &Path) -> Result<Self, LaunchSpecError> {
@@ -205,13 +241,62 @@ impl LaunchSpec {
             path: path.to_path_buf(),
             source,
         })?;
-        // Best-effort: the parameters are already in hand, so a removal failure
-        // must not abort a launch that can otherwise succeed.
-        let _ = std::fs::remove_file(path);
+        if let Err(err) = std::fs::remove_file(path) {
+            tracing::warn!(
+                spec = %path.display(),
+                "launch spec could not be deleted after reading it — it still holds this \
+                 session's credentials and will only go away when a later launch reaps it \
+                 (#8233): {err}"
+            );
+        }
         serde_json::from_slice(&bytes).map_err(|source| LaunchSpecError::Parse {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// The sentinel path proving the pane's shell RAN this session's launch.
+    ///
+    /// Why: see [`STARTED_SUFFIX`]. Both sides have to compute the same path
+    /// from what they each know — the shim from the spec it just consumed, the
+    /// daemon from the session record — so the derivation lives in one function
+    /// keyed on the session id.
+    /// What: `<dir>/<session_id>.started`.
+    /// Test: `started_marker_is_named_for_the_session`.
+    pub fn started_marker_in(dir: &Path, session_id: &str) -> PathBuf {
+        dir.join(format!("{session_id}{STARTED_SUFFIX}"))
+    }
+
+    /// [`LaunchSpec::started_marker_in`] against the production root.
+    ///
+    /// Why: the daemon's post-send check knows only the session record, not the
+    /// spec file the adapter wrote.
+    /// What: `None` when the home directory cannot be resolved.
+    /// Test: `started_marker_is_named_for_the_session`.
+    pub fn started_marker(session_id: &str) -> Option<PathBuf> {
+        Self::root().map(|dir| Self::started_marker_in(&dir, session_id))
+    }
+
+    /// Record that the pane's shell reached this shim (#8233 review).
+    ///
+    /// Why: this is the sentinel the launcher waits on. It is written BEFORE
+    /// `claude` is spawned, so it separates "the shell never ran the line" — the
+    /// stuck-parser failure this issue is about — from "the line ran and the
+    /// launch then failed", which the pane's own output already explains.
+    /// What: creates `<spec dir>/<session_id>.started`, empty. Best-effort: a
+    /// launch must not be abandoned because a marker could not be written, but
+    /// the failure is warned because it will read downstream as a stuck pane.
+    /// Test: `mark_started_writes_the_sentinel_beside_the_spec`.
+    pub fn mark_started(spec_path: &Path, session_id: &str) {
+        let dir = spec_path.parent().unwrap_or(Path::new("."));
+        let marker = Self::started_marker_in(dir, session_id);
+        if let Err(err) = std::fs::write(&marker, b"") {
+            tracing::warn!(
+                marker = %marker.display(),
+                "could not write the launch-started sentinel; the daemon will read this \
+                 launch as one the pane never ran (#8233): {err}"
+            );
+        }
     }
 
     /// Read a spec back WITHOUT consuming it, to prove it is usable.
@@ -266,6 +351,50 @@ impl LaunchSpec {
         // table, same per-variable operator precedence, no shell needed.
         crate::core::alt_screen::apply_default_to_command(&mut cmd);
         cmd
+    }
+}
+
+/// Delete every entry in `dir` older than `ttl` (#8233 review, HIGH).
+///
+/// Why: a spec is consumed-and-deleted by the shim within about a second, and
+/// [`super::managed_launch::deliver`] removes the one it wrote on every abort
+/// path. Neither covers the cases where the daemon is no longer in the loop — a
+/// pane killed between the write and the keystroke, a daemon restart, a launch
+/// the shell never ran. The file left behind holds `GH_TOKEN` and
+/// `CLAUDE_CODE_OAUTH_TOKEN` in cleartext, and this directory (unlike the
+/// `TMPDIR` file it replaced) is never swept by the OS.
+/// What: best-effort, non-fatal, and deliberately dumb — anything in the spec
+/// directory whose mtime is older than `ttl` goes, specs and `.started`
+/// sentinels alike. An entry whose metadata or mtime cannot be read is LEFT
+/// alone rather than guessed at. Errors are logged, never propagated: reaping is
+/// hygiene, and a launch must not fail because an old file would not delete.
+/// Test: `write_reaps_an_orphaned_spec`, `write_keeps_a_fresh_spec`,
+/// `reap_survives_a_missing_directory`.
+fn reap_orphans_in(dir: &Path, ttl: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|age| age > ttl).unwrap_or(false))
+            .unwrap_or(false);
+        if !stale {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::warn!(
+                orphan = %path.display(),
+                "reaped an abandoned launch spec — its pane never consumed it, so a \
+                 launch was lost and its credentials sat on disk until now (#8233)"
+            ),
+            Err(err) => tracing::warn!(
+                orphan = %path.display(),
+                "abandoned launch spec could not be reaped (#8233): {err}"
+            ),
+        }
     }
 }
 
