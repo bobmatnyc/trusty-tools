@@ -15,7 +15,7 @@ spec_refs:
 
 **Status:** Draft
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
-**Subsystem:** `trusty-common` — the `secrets` module (backend trait, project vault, session cache, subprocess-env resolution); `trusty-mpm` — the `tm secrets` CLI group, the `secrets_get_ref` / `secrets_list` MCP tools, the `SessionStart` preload hook, `!tm secrets add` slash entry; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference the same way `trusty-common::credentials` consumers do today.
+**Subsystem:** `trusty-common` — the `secrets` module (backend trait, project vault, session cache, subprocess-env resolution); `trusty-mpm` — the `tm secrets` CLI group, the `secrets_get_ref` / `secrets_list` MCP tools, the `SessionStart` preload hook, `!tm secrets set` slash entry; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference the same way `trusty-common::credentials` consumers do today.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
 **Last-updated:** 2026-09-11
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
@@ -89,7 +89,7 @@ the one hand-rolled case in `trusty-agents`' task runner.
    never printed in the process.
 4. **G-4** A project's variables live in one **namespaced vault** per backend
    (`trusty/<owner>/<repo>` — §6.3), importable in bulk from `.env`/`.env.local`,
-   addable one at a time (`tm secrets add KEY`, and `!tm secrets add` from a
+   addable one at a time (`tm secrets set KEY [group]`, and `!tm secrets set` from a
    session prompt).
 5. **G-5** A session unlocks its backend **at most once** — biometric/password
    prompts do not repeat mid-session.
@@ -329,12 +329,14 @@ third and fourth hand-rolled `Command::new`.
 
 **Delivery of the value out of the subprocess never touches argv.** `op read`
 takes a reference in argv (not a secret), and returns the secret on stdout —
-safe. Writing a *new* value (`tm secrets add`) pipes the value to the CLI's
-stdin (`op item create … password=- ` / Keeper Commander's `--from-file -`)
-rather than composing it into the argv this document's own `ExternalCliCommand`
-would otherwise render into a log line (see `GhCommand::argv_display`,
-`gh.rs:289`, which exists precisely so a command can be logged — the new
-commands must never call the equivalent for a value-carrying argument).
+safe. Writing a *new* value (`tm secrets set`) reads the value from the
+clipboard by default (or stdin via `--value -` for scripts), and pipes it to
+the CLI's subprocess (`op item create … password=- ` / Keeper Commander's
+`--from-file -`) rather than composing it into the argv this document's own
+`ExternalCliCommand` would otherwise render into a log line (see
+`GhCommand::argv_display`, `gh.rs:289`, which exists precisely so a command
+can be logged — the new commands must never call the equivalent for a
+value-carrying argument).
 
 ### 8.3 `ProjectVault`
 
@@ -397,7 +399,7 @@ surface T-3 already scrubs before it becomes visible anywhere).
 tm secrets configure                          # detect backends (§7), prompt for machine or project-level choice, write §6 config
 tm secrets import [--from .env.local] [--project|--machine]
                                                # bulk-load KEY=VALUE pairs into the active vault; never deletes the source file (open question, §13)
-tm secrets add KEY [--value -]                 # add/update one key; value via stdin (`-`) or an interactive masked prompt, never argv
+tm secrets set KEY [group] [--value -]         # set/update one key (upsert); value from clipboard by default; --value - reads stdin for scripts; never argv
 tm secrets list                                # key NAMES only, per project vault — never values (mirrors KeyStore::list, mod.rs:171)
 tm secrets remove KEY
 tm secrets copy --from <backend> --to <backend> [KEY...]
@@ -412,11 +414,45 @@ tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
                                                # Example: `tm secrets exec --env GH_TOKEN=GH_TOKEN -- gh pr list`
 ```
 
-`!tm secrets add` from a session prompt is the same `add` verb, routed
+`!tm secrets set` from a session prompt is the same `set` verb, routed
 through the daemon's existing bang-command dispatch (the same seam
 `misc.rs`'s hook handler and the CLI share a `clap` definition for — no new
-parsing path); the interactive value prompt is masked in the terminal and
+parsing path); the interactive value prompt (from clipboard or a masked
+terminal input if clipboard is empty) is masked in the terminal and
 never appears in the turn's transcript, matching T-2/T-3.
+
+### 9.1 Group Parameter
+
+`group` is an optional positional label that namespaces keys within a vault.
+The same KEY in different groups resolves to different values.
+No group names defaults to the project's default group.
+Reference resolution (§9.5, `secret://<project>/<KEY>`) uses this same
+default-group binding — a reference does not need to name a group.
+
+### 9.2 Clipboard and Value Source
+
+`tm secrets set KEY [group]` reads the value from the clipboard by default.
+If the clipboard is empty, the command exits with a non-zero code and no value is stored.
+The optional `--value -` flag overrides the default: it reads a single line from stdin instead.
+This form exists for scripts that pipe values in; the interactive CLI never uses it.
+
+### 9.3 Confirmation Response
+
+After successfully storing a value, `tm secrets set` prints a single line naming the outcome:
+
+```
+(new) secret added KEY:key-034f3... [48 chars]
+(updated) secret updated KEY:key-034f3... [48 chars]
+```
+
+The response names whether the entry is new or an update, the KEY, the first
+8 characters of the value, and the total value length in brackets.
+
+**Open question:** A value of 8 characters or fewer would be echoed whole in
+place of the truncated form. Should this be allowed, or should the response
+always truncate after 8 characters regardless of length?
+
+### 9.4 Bang Command Entry Point
 
 **`tm secrets exec` is the "integrate with `gh` without exposing the
 password" seam the owner asked for.** It is the CLI-level sibling of §9.5's
