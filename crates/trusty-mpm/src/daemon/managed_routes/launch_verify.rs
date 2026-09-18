@@ -632,24 +632,111 @@ mod tests {
     }
 
     /// #8233 review round 2, finding 2: a launch whose runtime DID come up must
-    /// never be interrupted just because its sentinel is missing. Before the
-    /// fix an absent marker alone errored the record and sent a C-c, on a 2 s
-    /// budget — which killed a launch whose `direnv` hook was merely slow.
+    /// never be interrupted just because its sentinel is missing.
+    ///
+    /// Why: the pre-fix order asked the sentinel FIRST, on its own 2 s budget,
+    /// and an absent marker ALONE errored the record and sent a `C-c` into the
+    /// pane. A slow start — live evidence: a `direnv` hook stalling on
+    /// `gh auth token` during the launch `cd` — was killed while the runtime
+    /// was still perfectly capable of coming up. The runtime poll now runs
+    /// first and the sentinel is only consulted to NAME a failure that already
+    /// happened, so nothing on this path interrupts anything.
+    /// What: drives the real entry point with a pane whose runtime comes up and
+    /// whose sentinel never does — the exact combination the old order
+    /// destroyed — and asserts no interrupt and no error.
+    /// Test: this function IS the test.
     #[tokio::test]
     async fn an_undelivered_launch_is_not_interrupted_while_the_runtime_may_come_up() {
-        let driver = InterruptDriver {
-            session_live: true,
+        /// A pane whose runtime IS up, counting every interrupt sent to it.
+        struct SlowStarter {
+            interrupts: std::sync::atomic::AtomicUsize,
+        }
+
+        impl ManagedTmuxDriver for SlowStarter {
+            fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+                Ok(())
+            }
+            fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+                Ok(())
+            }
+            fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+                Ok(())
+            }
+            fn send_interrupt(&self, _n: &str) -> Result<(), ManagedError> {
+                self.interrupts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn send_interrupt_to_pane(&self, _n: &str, _p: &str) -> Result<(), ManagedError> {
+                self.interrupts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+                Ok(String::new())
+            }
+            fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+                Ok(vec!["tmpm-probe".to_string()])
+            }
+            fn runtime_ready(&self, _n: &str) -> bool {
+                true
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = std::sync::Arc::new(
+            crate::session_manager::SessionManager::new(
+                dir.path(),
+                std::sync::Arc::new(crate::session_manager::FakeNoopTmuxDriver),
+            )
+            .await
+            .expect("session manager"),
+        );
+        let created = mgr
+            .create(
+                "slow-start".into(),
+                Some(dir.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        let mut record = created.clone();
+        record.tmux_name = "tmpm-probe".to_owned();
+        // The launch was published but its sentinel has not appeared — a shell
+        // still finishing its init hooks. The runtime comes up anyway.
+        if let Some(root) = crate::runtime::launch_spec::LaunchSpec::root() {
+            let _ = std::fs::create_dir_all(&root);
+            let _ = std::fs::write(
+                crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(
+                    &root,
+                    &record.id.to_string(),
+                ),
+                b"a-launch-whose-sentinel-never-lands",
+            );
+        }
+        let driver = SlowStarter {
             interrupts: std::sync::atomic::AtomicUsize::new(0),
         };
-        // The runtime IS up; the delivery diagnostic is never even consulted.
+
+        let verdict = record_spawn_outcome(&mgr, &driver, &record).await;
+
         assert_eq!(
-            verify_launch(&driver, "tmpm-probe", 3, TEST_INTERVAL).await,
-            LaunchOutcome::Running
+            verdict, None,
+            "a runtime that came up is a successful launch, whatever the sentinel says"
         );
         assert_eq!(
             driver.interrupts.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "a pane whose runtime came up must never be interrupted"
+            "a pane whose runtime came up must never be interrupted — the pre-fix order \
+             killed exactly this launch on a 2 s sentinel budget"
+        );
+        assert_ne!(
+            mgr.get(&record.id).await.expect("record").state,
+            crate::session_manager::ManagedSessionState::Errored,
+            "and it must not be errored either"
         );
     }
 
