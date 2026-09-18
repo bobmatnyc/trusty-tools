@@ -81,7 +81,13 @@ name = "trusty-mpm"
 # Also #8135/#8156 (this PR): same 1.6.1 patch bump applies here too, since
 # this PR also edits src/** (tm-delegation-patterns.md skill asset) after
 # 1.6.0's crates.io publish.
-version = "1.6.1"
+# 1.6.3 (milestone #89, refs #8274): patch — the release cut. crates.io is at
+# 1.6.0; 1.6.1 and 1.6.2 were bumped in-tree but never tagged or published, so
+# this release skips past both rather than reusing a number a reader might
+# expect to find on crates.io. Patch: trusty-mpm is excluded from the semver
+# gate (binary-only consumer surface, no library dependents), and the changes
+# folded in here are fixes plus additive skill/agent assets.
+version = "1.6.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
