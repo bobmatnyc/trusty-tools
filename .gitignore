@@ -1,5 +1,7 @@
 /target
 **/target/
+# Machine-local cargo config (shared CARGO_TARGET_DIR override, #8251)
+/.cargo/config.toml
 # #7177: worktree build output isolation. #7275: dispatch briefs name the dir
 # `target-<issue>` as often as `target-worktree`, and an unignored one makes
 # every such worktree read dirty, which blocks `tm pr cleanup` from reclaiming it.

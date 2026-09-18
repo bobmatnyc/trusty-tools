@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -12,11 +12,11 @@ import { CRATE_GROUPS, FACTS, FLAGSHIPS, GITHUB_URL, INSTALL_OPTIONS, STABLE_SET
  * agrees with a self-labelled draft that was excluded from publication. Prose
  * docs cannot be the authority for an executable claim.
  *
- * What: grounds each claim in the repository itself — the bootstrap URL
- * resolves to a tracked file, `cargo install --path` names a directory that
- * exists, `tctl` names members that appear in `stable_set.rs`, the MSRV
- * matches the workspace `rust-version`, and the platform list matches the
- * Tier-1 triples in `platform.rs`.
+ * What: grounds each claim in a file the `unit` project is triggered by — `tctl`
+ * names members that appear in `stable_set.rs`, the MSRV matches the workspace
+ * `rust-version` in root `Cargo.toml`, and the platform list matches the Tier-1
+ * triples in `platform.rs`. The claims resting on `crates/**` directories and on
+ * the root bootstrap script are `site.corpus.test.ts` (#8272).
  *
  * Not covered here, deliberately: whether the Homebrew tap's assets download.
  * That needs a network call, which does not belong in a unit suite. It was
@@ -34,26 +34,6 @@ const read = (rel: string) => readFileSync(path.join(REPO_ROOT, rel), 'utf8');
 const commands = INSTALL_OPTIONS.flatMap((o) => o.command.split('\n'));
 
 describe('install commands are grounded in the repository', () => {
-	it('the bootstrap URL points at a file that exists at the repo root', () => {
-		const line = commands.find((c) => c.includes('install.sh'));
-		expect(line, 'no bootstrap command present').toBeDefined();
-
-		const url = line!.match(/https:\/\/\S+install\.sh/)![0];
-		const prefix = `https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/`;
-		expect(url.startsWith(prefix)).toBe(true);
-		expect(existsSync(path.join(REPO_ROOT, url.slice(prefix.length)))).toBe(true);
-	});
-
-	it('every cargo install --path names a crate that exists', () => {
-		const paths = commands
-			.filter((c) => c.includes('cargo install --path'))
-			.map((c) => c.match(/--path\s+(\S+)/)![1]);
-		expect(paths.length).toBeGreaterThan(0);
-		for (const p of paths) {
-			expect(existsSync(path.join(REPO_ROOT, p, 'Cargo.toml')), p).toBe(true);
-		}
-	});
-
 	it('never tells a reader to build without installing', () => {
 		// `cargo build --release` produces a binary in target/ and installs
 		// nothing. The step a reader improvises next is copying it onto their
@@ -120,22 +100,6 @@ describe('stated facts match their source of truth', () => {
 });
 
 describe('landing-page content', () => {
-	it('names only crates that exist', () => {
-		const onDisk = new Set(
-			readdirSync(path.join(REPO_ROOT, 'crates'), { withFileTypes: true })
-				.filter((e) => e.isDirectory())
-				.map((e) => e.name)
-		);
-		const named = [
-			...FLAGSHIPS.map((f) => f.name),
-			...CRATE_GROUPS.flatMap((g) => g.crates.map((c) => c.name))
-		];
-		expect(named.length).toBeGreaterThan(10);
-		for (const name of named) {
-			expect(onDisk, `crates/${name}`).toContain(name);
-		}
-	});
-
 	it('carries no placeholder text', () => {
 		const prose = JSON.stringify({ FLAGSHIPS, CRATE_GROUPS, INSTALL_OPTIONS, FACTS });
 		for (const banned of ['lorem', 'ipsum', 'TODO', 'TBD', 'coming soon', 'placeholder']) {
