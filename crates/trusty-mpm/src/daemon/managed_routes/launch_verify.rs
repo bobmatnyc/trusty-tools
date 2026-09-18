@@ -57,19 +57,17 @@ pub(crate) const RESUME_VERIFY_ATTEMPTS: u32 = 10;
 /// Delay between [`verify_launch`] probes. See [`RESUME_VERIFY_ATTEMPTS`].
 pub(crate) const RESUME_VERIFY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Attempts [`detect_unconsumed_launch`] makes before declaring the pane stuck.
+/// Attempts [`launch_was_delivered`] makes when reading the sentinel.
 ///
-/// Why: the sentinel is written by the shim the pane's shell runs, so it appears
-/// as soon as the shell parses the line — milliseconds, not the 1-3 s `claude`
-/// itself needs. The budget only has to cover a shell still finishing its init
-/// hooks (`direnv` prints immediately before the cut in this issue's captures).
-/// Paired with [`LAUNCH_CONSUMED_INTERVAL`] this is a 2 s ceiling, and it returns
-/// the instant the sentinel appears.
-pub(crate) const LAUNCH_CONSUMED_ATTEMPTS: u32 = 10;
+/// Why: this runs only AFTER the runtime poll has already spent its whole
+/// budget, so the sentinel — written by the shim the moment the shell parses the
+/// line — has long since appeared if it ever will. A handful of retries covers
+/// nothing but filesystem timing. It is deliberately NOT the thing that decides
+/// how long a launch may take.
+const DELIVERY_READ_ATTEMPTS: u32 = 3;
 
-/// Delay between [`detect_unconsumed_launch`] probes. See
-/// [`LAUNCH_CONSUMED_ATTEMPTS`].
-pub(crate) const LAUNCH_CONSUMED_INTERVAL: Duration = Duration::from_millis(200);
+/// Delay between [`launch_was_delivered`] reads. See [`DELIVERY_READ_ATTEMPTS`].
+const DELIVERY_READ_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What a post-send [`verify_launch`] concluded about the pane.
 ///
@@ -132,88 +130,130 @@ pub(crate) async fn verify_launch(
 ///
 /// Why: `tmux send-keys` reports that tmux accepted the keystrokes. It says
 /// nothing about what the shell did with them, and the failure this issue tracks
-/// is precisely a shell that took the bytes and never executed them — the pane
-/// sits at a PS2 continuation prompt and every later probe reads as "the runtime
-/// is not up", which is true but tells the operator nothing and leads the daemon
-/// to kill the pane and retry into the same state. The shim writes a sentinel
-/// the moment it starts, so its absence is positive evidence the LINE, not the
-/// launch, is what failed — available in ~2 s instead of at the end of the 4.5 s
-/// runtime poll, and with an actionable message.
-/// What: `None` — nothing to report — for a non-Claude-Code runtime (no shim, so
-/// no sentinel), for a driver that cannot see the tmux session at all (the same
-/// `Unverifiable` guard [`verify_launch`] opens with, which is what keeps every
-/// hermetic test on this path unchanged), and when the spec root cannot be
-/// resolved. Otherwise polls for `<root>/<session-id>.started`, deleting it and
-/// returning `None` once it appears. On exhaustion it interrupts the pane
-/// (best-effort — a wedged parser is exactly what `C-c` clears, so the next
-/// attempt starts from a usable prompt) and returns the operator-facing message.
-/// Test: `unconsumed_launch_is_reported_when_the_sentinel_never_appears`,
-/// `a_consumed_launch_reports_nothing_and_clears_its_sentinel`,
-/// `unconsumed_launch_is_not_reported_for_an_unobservable_session`,
-/// `unconsumed_launch_is_not_reported_for_a_non_claude_runtime`.
-pub(crate) async fn detect_unconsumed_launch(
-    tmux: &dyn ManagedTmuxDriver,
-    record: &crate::session_manager::SessionRecord,
-    attempts: u32,
-    interval: Duration,
-) -> Option<String> {
-    let dir = crate::runtime::launch_spec::LaunchSpec::root()?;
-    detect_unconsumed_launch_in(tmux, record, &dir, attempts, interval).await
-}
-
-/// [`detect_unconsumed_launch`] against an explicit spec directory (the
-/// hermetic seam).
+/// is precisely a shell that took the bytes and never executed them. The shim
+/// writes a sentinel the moment it starts, so the sentinel's absence is positive
+/// evidence that the LINE, not the launch, is what failed — which is the
+/// difference between "not delivered" and "ran and failed" in the operator's
+/// report.
 ///
-/// Why: the production root is under the operator's real config home, and a
-/// test must neither read nor write there.
-/// What: the body [`detect_unconsumed_launch`] wraps; see its doc.
-/// Test: the four `*_unconsumed_launch*` / `*_consumed_launch*` tests below.
-pub(crate) async fn detect_unconsumed_launch_in(
-    tmux: &dyn ManagedTmuxDriver,
+/// #8233 review round 2 (finding 2): this is a DIAGNOSTIC, never a verdict, and
+/// it is read only after [`verify_launch`] has already spent its whole budget
+/// and concluded the runtime is absent. The previous shape ran it FIRST on a 2 s
+/// budget and let a missing sentinel alone error the record and interrupt the
+/// pane — which killed a launch whose `direnv` hook was merely stalling on
+/// `gh auth token` while the runtime was still perfectly capable of coming up.
+/// Nothing here interrupts anything.
+///
+/// #8233 review round 2 (finding 3): the sentinel is keyed on the LAUNCH, read
+/// through `<session-id>.launch`, so a marker written by an earlier launch of
+/// the same session cannot make this one look delivered.
+/// What: `true` when the launch is known to have reached the shim. `true` also
+/// for a non-Claude-Code runtime (no shim, so no sentinel to read) and when no
+/// launch pointer exists — both are "cannot tell", and an unknown must never be
+/// reported as a positive "not delivered".
+/// Test: `a_delivered_launch_is_reported_as_delivered`,
+/// `an_undelivered_launch_is_reported_as_not_delivered`,
+/// `a_marker_from_an_earlier_launch_does_not_satisfy_a_later_one`,
+/// `delivery_is_assumed_for_a_non_claude_runtime`.
+pub(crate) async fn launch_was_delivered_in(
     record: &crate::session_manager::SessionRecord,
     spec_dir: &std::path::Path,
     attempts: u32,
     interval: Duration,
-) -> Option<String> {
+) -> bool {
     if record.runtime != crate::runtime::RuntimeKind::ClaudeCode {
-        return None;
+        return true;
     }
-    if !tmux.session_exists(&record.tmux_name) {
-        return None;
-    }
-    let marker = crate::runtime::launch_spec::LaunchSpec::started_marker_in(
-        spec_dir,
-        &record.id.to_string(),
-    );
+    let session = record.id.to_string();
+    let Some(launch_id) =
+        crate::runtime::launch_spec::LaunchSpec::read_launch_pointer_in(spec_dir, &session)
+    else {
+        return true;
+    };
+    let marker =
+        crate::runtime::launch_spec::LaunchSpec::started_marker_in(spec_dir, &launch_id);
     for attempt in 0..attempts.max(1) {
         if attempt > 0 {
             tokio::time::sleep(interval).await;
         }
         if marker.exists() {
             let _ = std::fs::remove_file(&marker);
-            return None;
+            return true;
         }
     }
-    // A parser holding an unterminated construct swallows whatever is typed next
-    // as more of it, so leaving the pane wedged would cost the next attempt too.
-    let interrupted = match record.pane_id.as_deref() {
-        Some(pane) => tmux.send_interrupt_to_pane(&record.tmux_name, pane),
-        None => tmux.send_interrupt(&record.tmux_name),
+    false
+}
+
+/// [`launch_was_delivered_in`] against the production spec root.
+///
+/// What: `true` — "cannot tell" — when the root cannot be resolved.
+/// Test: the four `*_delivered*` tests below drive the body.
+async fn launch_was_delivered(record: &crate::session_manager::SessionRecord) -> bool {
+    match crate::runtime::launch_spec::LaunchSpec::root() {
+        Some(dir) => {
+            launch_was_delivered_in(record, &dir, DELIVERY_READ_ATTEMPTS, DELIVERY_READ_INTERVAL)
+                .await
+        }
+        None => true,
+    }
+}
+
+/// Forget whatever sentinel and pointer this session's launch left behind.
+///
+/// Why (#8233 review round 2, finding 4): a launch that SUCCEEDED leaves its
+/// sentinel and pointer in the spec directory, where only the TTL sweep would
+/// eventually collect them. Clearing them on the success path means the common
+/// case leaves nothing at all, and the sweep is left to handle only the launches
+/// nobody was around to finish.
+/// What: best-effort removal of both files; a failure is hygiene, never a
+/// launch verdict.
+/// Test: `a_running_verdict_clears_the_sentinel_and_the_pointer`.
+fn clear_launch_files(record: &crate::session_manager::SessionRecord) {
+    let Some(dir) = crate::runtime::launch_spec::LaunchSpec::root() else {
+        return;
     };
-    if let Err(e) = interrupted {
-        tracing::debug!(
-            name = %record.tmux_name,
-            "could not interrupt the stuck pane (non-fatal, #8233): {e}"
+    let session = record.id.to_string();
+    if let Some(launch_id) =
+        crate::runtime::launch_spec::LaunchSpec::read_launch_pointer_in(&dir, &session)
+    {
+        let _ = std::fs::remove_file(
+            crate::runtime::launch_spec::LaunchSpec::started_marker_in(&dir, &launch_id),
         );
     }
-    Some(format!(
-        "launch line was never run by the pane shell in '{}': tmux accepted the keystrokes \
-         but no launch reached `tm internal-spawn-disclaimed`, which means the shell was not \
-         at a usable prompt — typically an unterminated construct left over from an earlier \
-         command, so it swallowed this line as a continuation. The pane has been interrupted; \
-         nothing was started and no `claude` is running (#8233)",
-        record.tmux_name
-    ))
+    let _ = std::fs::remove_file(crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(
+        &dir, &session,
+    ));
+}
+
+/// The message a `NotStarted` verdict reports, named by whether the launch was
+/// ever DELIVERED (#8233 acceptance item 2).
+///
+/// Why: "the pane printed why on its own last line" is false for an undelivered
+/// launch — the pane printed nothing, because nothing ran. Telling an operator
+/// to read a pane that has nothing to say is what made this issue take a dozen
+/// live occurrences to diagnose. The two cases need different words and
+/// different next steps.
+/// What: `delivered` chooses between "ran and failed" and "not delivered".
+/// `verb` is the caller's noun for the attempt, so the spawn and resume paths
+/// keep their own wording.
+/// Test: `not_delivered_and_ran_and_failed_are_worded_apart`.
+fn not_started_message(record: &crate::session_manager::SessionRecord, delivered: bool) -> String {
+    if delivered {
+        format!(
+            "launch ran and failed: `tm internal-spawn-disclaimed` started in pane '{}' but no \
+             runtime came up — the pane printed why on its own last line (a launch spec that \
+             could not be read prints there); start again once that is addressed (#8233)",
+            record.tmux_name
+        )
+    } else {
+        format!(
+            "launch was NOT DELIVERED to pane '{}': tmux accepted the keystrokes, the runtime \
+             never came up, and the launch never reached `tm internal-spawn-disclaimed` — so \
+             the pane's shell never executed the line and the pane has nothing printed to \
+             explain it. Nothing was started and no `claude` is running (#8233)",
+            record.tmux_name
+        )
+    }
 }
 
 /// Verify a just-sent resume and record what it found (#6766).
@@ -222,45 +262,46 @@ pub(crate) async fn detect_unconsumed_launch_in(
 /// runtime respawned" on the strength of `send-keys` alone. This is the seam
 /// that makes that claim conditional, and it lives here rather than inline so
 /// `lifecycle.rs` stays inside its frozen SLOC budget.
-/// What: runs [`verify_launch`] with the production budget. On
-/// [`LaunchOutcome::NotStarted`] it warns and drives the SAME
-/// `SessionManager::mark_errored` transition the adapter-failure arm above the
-/// call site already uses — deliberately not a NEW state, and deliberately not a
-/// re-send (see this module's header). Any other outcome logs the resume as
-/// before. The `mark_errored` result is dropped for the same reason the
-/// adapter-failure arm drops it: the resume response still has to be built from
-/// whatever the store now holds.
-/// Test: the failure verdict itself is covered by
-/// `verify_launch_reports_not_started_when_the_pane_stays_bare`; the hermetic
-/// resume tests in `tests/session_manager_mvp.rs` cover this wrapper's
-/// [`LaunchOutcome::Unverifiable`] pass-through (their fake driver cannot
-/// observe a tmux session, so the resume path must behave exactly as before).
+/// What: [`record_launch_outcome`] with the resume path's context. Returns the
+/// failure message when the record was errored, so `resume_managed` can fail its
+/// own call rather than returning `Ok` on a session it just marked errored
+/// (#8233 review round 2, finding 7).
+/// Test: `record_resume_outcome_returns_the_failure_it_recorded`.
 pub(crate) async fn record_resume_outcome(
     mgr: &crate::session_manager::SessionManager,
     tmux: &dyn ManagedTmuxDriver,
     record: &crate::session_manager::SessionRecord,
     workspace: &std::path::Path,
-) {
-    // #8233: ask the cheaper, sharper question first — did the shell even run
-    // the line? A `Some` here names the cause; the runtime poll below could only
-    // ever report the symptom.
-    if let Some(msg) = detect_unconsumed_launch(
-        tmux,
-        record,
-        LAUNCH_CONSUMED_ATTEMPTS,
-        LAUNCH_CONSUMED_INTERVAL,
-    )
-    .await
-    {
-        tracing::warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            workspace = %workspace.display(),
-            "{msg}"
-        );
-        let _ = mgr.mark_errored(&record.id, &msg).await;
-        return;
-    }
+) -> Option<String> {
+    record_launch_outcome(mgr, tmux, record, Some(workspace)).await
+}
+
+/// The shared body of the spawn and resume post-send checks (#8233 review
+/// round 2, findings 2, 7 and 10).
+///
+/// Why: the two wrappers had drifted into different orders and different
+/// messages for the same three outcomes. One body means the ordering fix —
+/// runtime poll FIRST, sentinel only as a diagnostic afterwards — cannot be
+/// half-applied.
+/// What: runs [`verify_launch`] with the production budget.
+///   * [`LaunchOutcome::Running`] — clears the launch files and CLEARS the
+///     record's accumulated error text (acceptance item 3: a session that is
+///     running must not keep showing why a previous attempt failed), then logs.
+///   * [`LaunchOutcome::NotStarted`] — asks [`launch_was_delivered`] which
+///     failure this was, logs at ERROR so the event reaches the daemon's
+///     `errors.jsonl` capture layer (acceptance item 10 — nine of these were
+///     logged at WARN and never reached it), marks the record errored, and
+///     returns the message.
+///   * [`LaunchOutcome::Unverifiable`] — changes nothing, exactly as before.
+/// Test: `a_running_verdict_clears_the_sentinel_and_the_pointer`,
+/// `a_not_started_verdict_is_logged_at_error_level`,
+/// `an_undelivered_launch_is_not_interrupted_while_the_runtime_may_come_up`.
+async fn record_launch_outcome(
+    mgr: &crate::session_manager::SessionManager,
+    tmux: &dyn ManagedTmuxDriver,
+    record: &crate::session_manager::SessionRecord,
+    workspace: Option<&std::path::Path>,
+) -> Option<String> {
     let outcome = verify_launch(
         tmux,
         &record.tmux_name,
@@ -269,27 +310,35 @@ pub(crate) async fn record_resume_outcome(
     )
     .await;
     if outcome == LaunchOutcome::NotStarted {
-        let msg = format!(
-            "resume relaunch did not take: no runtime came up in pane '{}' — the pane \
-             printed why on its own last line; resume again once that is addressed (#6766)",
-            record.tmux_name
-        );
-        tracing::warn!(
+        let delivered = launch_was_delivered(record).await;
+        let msg = not_started_message(record, delivered);
+        // #8233 acceptance item 10: ERROR, not WARN. The bug-capture layer
+        // (`bin/tm/tracing_setup::init_daemon_tracing`) records ERROR events to
+        // `errors.jsonl`; at WARN this failure existed only in the session
+        // record's `task` field, which is why three live failures left no trace.
+        tracing::error!(
             id = %record.id,
             name = %record.tmux_name,
-            workspace = %workspace.display(),
+            workspace = %workspace.unwrap_or(std::path::Path::new("")).display(),
+            delivered,
             "{msg}"
         );
         let _ = mgr.mark_errored(&record.id, &msg).await;
-        return;
+        return Some(msg);
+    }
+    if outcome == LaunchOutcome::Running {
+        clear_launch_files(record);
+        // #8233 acceptance item 3: the runtime is up, so whatever a previous
+        // attempt appended to `task` no longer describes this session.
+        let _ = mgr.clear_error_note(&record.id).await;
     }
     tracing::info!(
         id = %record.id,
         name = %record.tmux_name,
-        workspace = %workspace.display(),
         ?outcome,
-        "managed session resumed and runtime respawned"
+        "managed session launch verified"
     );
+    None
 }
 
 /// Verify a just-sent SPAWN and record what it found (#8233, mirroring #6766's
@@ -316,45 +365,8 @@ pub(crate) async fn record_spawn_outcome(
     mgr: &crate::session_manager::SessionManager,
     tmux: &dyn ManagedTmuxDriver,
     record: &crate::session_manager::SessionRecord,
-) {
-    // #8233: same sentinel handshake as the resume path — see
-    // `detect_unconsumed_launch`.
-    if let Some(msg) = detect_unconsumed_launch(
-        tmux,
-        record,
-        LAUNCH_CONSUMED_ATTEMPTS,
-        LAUNCH_CONSUMED_INTERVAL,
-    )
-    .await
-    {
-        tracing::warn!(id = %record.id, name = %record.tmux_name, "{msg}");
-        let _ = mgr.mark_errored(&record.id, &msg).await;
-        return;
-    }
-    let outcome = verify_launch(
-        tmux,
-        &record.tmux_name,
-        RESUME_VERIFY_ATTEMPTS,
-        RESUME_VERIFY_INTERVAL,
-    )
-    .await;
-    if outcome == LaunchOutcome::NotStarted {
-        let msg = format!(
-            "launch did not take: no runtime came up in pane '{}' — the pane printed why \
-             on its own last line (a launch spec that could not be read prints there); \
-             start again once that is addressed (#8233)",
-            record.tmux_name
-        );
-        tracing::warn!(id = %record.id, name = %record.tmux_name, "{msg}");
-        let _ = mgr.mark_errored(&record.id, &msg).await;
-        return;
-    }
-    tracing::info!(
-        id = %record.id,
-        name = %record.tmux_name,
-        ?outcome,
-        "managed session spawned successfully"
-    );
+) -> Option<String> {
+    record_launch_outcome(mgr, tmux, record, None).await
 }
 
 #[cfg(test)]
@@ -453,93 +465,121 @@ mod tests {
         }
     }
 
-    /// #8233 regression: the pane's shell never ran the launch line — the
-    /// stuck-parser shape this issue is about. The check must SAY so, and must
-    /// clear the wedged parser so the next attempt starts from a usable prompt.
-    /// Without it the operator gets only "no runtime came up", which is the
-    /// symptom of half a dozen unrelated failures.
-    #[tokio::test]
-    async fn unconsumed_launch_is_reported_when_the_sentinel_never_appears() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let driver = InterruptDriver {
-            session_live: true,
-            interrupts: std::sync::atomic::AtomicUsize::new(0),
-        };
-        let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
-
-        let msg = detect_unconsumed_launch_in(&driver, &record, dir.path(), 3, TEST_INTERVAL)
-            .await
-            .expect("an absent sentinel must be reported");
-
-        assert!(msg.contains("never run by the pane shell"), "{msg}");
-        assert!(msg.contains("#8233"), "{msg}");
-        assert_eq!(
-            driver.interrupts.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the wedged parser must be interrupted, or the next launch is swallowed too"
-        );
+    /// Plant a launch pointer naming `launch_id`, as `deliver` does.
+    fn plant_pointer(dir: &std::path::Path, session: &str, launch_id: &str) {
+        std::fs::write(
+            crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(dir, session),
+            launch_id.as_bytes(),
+        )
+        .expect("plant the pointer");
     }
 
-    /// The happy path: the shim wrote its sentinel, so the shell demonstrably
-    /// ran the line and this check must step aside. It also has to CONSUME the
-    /// sentinel, or the next launch of this session would pass on a stale one.
+    /// The happy path: the shim wrote the sentinel for THIS launch, so the shell
+    /// demonstrably ran the line. It also has to CONSUME the sentinel.
     #[tokio::test]
-    async fn a_consumed_launch_reports_nothing_and_clears_its_sentinel() {
+    async fn a_delivered_launch_is_reported_as_delivered() {
         let dir = tempfile::tempdir().expect("tempdir");
         let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
-        let marker = crate::runtime::launch_spec::LaunchSpec::started_marker_in(
-            dir.path(),
-            &record.id.to_string(),
-        );
+        plant_pointer(dir.path(), &record.id.to_string(), "launch-a");
+        let marker =
+            crate::runtime::launch_spec::LaunchSpec::started_marker_in(dir.path(), "launch-a");
         std::fs::write(&marker, b"").expect("plant the sentinel");
-        let driver = InterruptDriver {
-            session_live: true,
-            interrupts: std::sync::atomic::AtomicUsize::new(0),
-        };
 
-        let verdict =
-            detect_unconsumed_launch_in(&driver, &record, dir.path(), 3, TEST_INTERVAL).await;
-
-        assert_eq!(verdict, None, "a started launch must report nothing");
+        assert!(launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await);
         assert!(!marker.exists(), "the sentinel must be consumed");
-        assert_eq!(
-            driver.interrupts.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "a healthy pane must never be interrupted"
-        );
     }
 
-    /// The same `Unverifiable` guard `verify_launch` opens with: a driver that
-    /// cannot see the tmux session — every hermetic test, and the documented
-    /// tmux-absent fallback — learns nothing and must change nothing.
+    /// #8233 regression: the pane's shell never ran the launch line. This is a
+    /// DIAGNOSTIC — it names which failure happened — and it must never
+    /// interrupt anything, because by the time it is read the runtime poll has
+    /// already had its full budget.
     #[tokio::test]
-    async fn unconsumed_launch_is_not_reported_for_an_unobservable_session() {
+    async fn an_undelivered_launch_is_reported_as_not_delivered() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let driver = InterruptDriver {
-            session_live: false,
-            interrupts: std::sync::atomic::AtomicUsize::new(0),
-        };
         let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
-        assert_eq!(
-            detect_unconsumed_launch_in(&driver, &record, dir.path(), 3, TEST_INTERVAL).await,
-            None
+        plant_pointer(dir.path(), &record.id.to_string(), "launch-a");
+
+        assert!(!launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await);
+    }
+
+    /// #8233 review round 2, finding 3: a sentinel left by an EARLIER launch of
+    /// this same session must not satisfy a later one. Keyed on the session it
+    /// did exactly that — a stuck pane reported as a healthy launch.
+    #[tokio::test]
+    async fn a_marker_from_an_earlier_launch_does_not_satisfy_a_later_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
+        // The earlier launch ran and left its marker behind.
+        std::fs::write(
+            crate::runtime::launch_spec::LaunchSpec::started_marker_in(dir.path(), "launch-old"),
+            b"",
+        )
+        .expect("plant the stale sentinel");
+        // The current launch is a different one, and its pane never ran it.
+        plant_pointer(dir.path(), &record.id.to_string(), "launch-new");
+
+        assert!(
+            !launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await,
+            "a stale per-session marker must not stand in for this launch"
         );
     }
 
     /// Only the Claude Code launch runs through `tm internal-spawn-disclaimed`,
     /// so only it writes a sentinel. Reading its absence as a verdict on a
-    /// `tcode` session would error every one of them.
+    /// `tcode` session would report every one of them as undelivered.
     #[tokio::test]
-    async fn unconsumed_launch_is_not_reported_for_a_non_claude_runtime() {
+    async fn delivery_is_assumed_for_a_non_claude_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let record = stub_record(crate::runtime::RuntimeKind::Tcode);
+        plant_pointer(dir.path(), &record.id.to_string(), "launch-a");
+        assert!(launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await);
+    }
+
+    /// No pointer at all is "cannot tell", never "not delivered" — an unknown
+    /// must not be reported as a positive failure.
+    #[tokio::test]
+    async fn delivery_is_assumed_without_a_launch_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
+        assert!(launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await);
+    }
+
+    /// #8233 acceptance item 2: the two failures are different bugs and must
+    /// read differently. "The pane printed why on its own last line" is a lie
+    /// when nothing ran.
+    #[test]
+    fn not_delivered_and_ran_and_failed_are_worded_apart() {
+        let record = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
+        let ran = not_started_message(&record, true);
+        let never = not_started_message(&record, false);
+        assert!(ran.contains("ran and failed"), "{ran}");
+        assert!(ran.contains("printed why"), "{ran}");
+        assert!(never.contains("NOT DELIVERED"), "{never}");
+        assert!(
+            !never.contains("printed why"),
+            "an undelivered launch printed nothing: {never}"
+        );
+    }
+
+    /// #8233 review round 2, finding 2: a launch whose runtime DID come up must
+    /// never be interrupted just because its sentinel is missing. Before the
+    /// fix an absent marker alone errored the record and sent a C-c, on a 2 s
+    /// budget — which killed a launch whose `direnv` hook was merely slow.
+    #[tokio::test]
+    async fn an_undelivered_launch_is_not_interrupted_while_the_runtime_may_come_up() {
         let driver = InterruptDriver {
             session_live: true,
             interrupts: std::sync::atomic::AtomicUsize::new(0),
         };
-        let record = stub_record(crate::runtime::RuntimeKind::Tcode);
+        // The runtime IS up; the delivery diagnostic is never even consulted.
         assert_eq!(
-            detect_unconsumed_launch_in(&driver, &record, dir.path(), 3, TEST_INTERVAL).await,
-            None
+            verify_launch(&driver, "tmpm-probe", 3, TEST_INTERVAL).await,
+            LaunchOutcome::Running
+        );
+        assert_eq!(
+            driver.interrupts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a pane whose runtime came up must never be interrupted"
         );
     }
 

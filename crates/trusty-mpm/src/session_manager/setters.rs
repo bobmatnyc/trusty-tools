@@ -56,6 +56,30 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Strip the `[error: …]` notes [`SessionManager::mark_errored`] appended.
+    ///
+    /// Why (#8233 acceptance item 3): `mark_errored` APPENDS its message to
+    /// `task`, and nothing ever removed it. A session that failed to launch
+    /// three times and then came up healthy showed three stale failures in
+    /// `tm ls` forever, which is how `tm-crm` sat `active` behind a live
+    /// `claude` still advertising "resume relaunch did not take". A verified
+    /// Running verdict is the moment those notes stop describing the session.
+    /// What: rewrites `task` with every `[error: …]` suffix removed, and
+    /// persists ONLY when something changed — a no-op costs no store write. The
+    /// state is not touched: this clears the note, never the verdict.
+    /// Test: `clear_error_note_strips_every_appended_error`,
+    /// `clear_error_note_leaves_a_clean_task_alone`.
+    pub async fn clear_error_note(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        let cleaned = strip_error_notes(&record.task);
+        if cleaned == record.task {
+            return Ok(());
+        }
+        record.task = cleaned;
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
     /// Update a session's workspace path and transition to a new state.
     ///
     /// Why: after the workspace path is resolved
@@ -229,5 +253,54 @@ impl SessionManager {
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
+    }
+}
+
+/// Remove every ` [error: …]` note from a task string.
+///
+/// Why: see [`SessionManager::clear_error_note`]. Pure, so the parsing of the
+/// shape `mark_errored` writes can be tested without a store.
+/// What: scans for the literal ` [error: ` opener and drops through its matching
+/// `]`. Nesting is impossible — the notes are appended, never wrapped — so a
+/// single forward scan is exact. Text with no note is returned unchanged.
+/// Test: `strip_error_notes_removes_one`, `strip_error_notes_removes_several`,
+/// `strip_error_notes_leaves_unrelated_brackets_alone`.
+pub(crate) fn strip_error_notes(task: &str) -> String {
+    const OPEN: &str = " [error: ";
+    let mut out = String::with_capacity(task.len());
+    let mut rest = task;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        match tail[OPEN.len()..].find(']') {
+            Some(end) => rest = &tail[OPEN.len() + end + 1..],
+            // An unterminated note is the whole remainder; drop it.
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::strip_error_notes;
+
+    #[test]
+    fn strip_error_notes_removes_one() {
+        assert_eq!(strip_error_notes("do the thing [error: boom]"), "do the thing");
+    }
+
+    #[test]
+    fn strip_error_notes_removes_several() {
+        assert_eq!(
+            strip_error_notes("task [error: one] [error: two]"),
+            "task"
+        );
+    }
+
+    #[test]
+    fn strip_error_notes_leaves_unrelated_brackets_alone() {
+        assert_eq!(strip_error_notes("fix [#8233] now"), "fix [#8233] now");
     }
 }

@@ -116,7 +116,9 @@ pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
     // #8233: the pane's shell parsed and ran the launch line — record that before
     // anything else can fail, so a stuck parser is distinguishable from a launch
     // that started and then broke.
-    trusty_mpm::runtime::launch_spec::LaunchSpec::mark_started(path, &spec.session_id);
+    // #8233 review round 2: keyed on the LAUNCH, so a marker from an earlier
+    // launch of this same session can never satisfy this one.
+    trusty_mpm::runtime::launch_spec::LaunchSpec::mark_started(path, &spec.launch_id);
     let mut cmd = spec.to_command();
     let started = std::time::Instant::now();
     let (status, code) = spawn_and_wait(&mut cmd, &spec.program)?;
@@ -168,6 +170,10 @@ fn spawn_and_wait(
 mod tests {
     use super::*;
 
+    /// This launch's id — #8233 keys the sentinel on the LAUNCH, not the
+    /// session, so a marker from an earlier launch cannot satisfy a later one.
+    const TEST_LAUNCH_ID: &str = "aaaabbbbccccddddeeeeffff00001111";
+
     /// Write a spec naming `program` into `dir`, and return its path.
     ///
     /// Why: both cases below need a spec that decodes cleanly, so the only
@@ -177,6 +183,7 @@ mod tests {
     fn spec_naming(dir: &std::path::Path, program: &str) -> std::path::PathBuf {
         let spec = trusty_mpm::runtime::launch_spec::LaunchSpec {
             session_id: "11111111-2222-3333-4444-555555555555".to_owned(),
+            launch_id: TEST_LAUNCH_ID.to_owned(),
             cwd: dir.to_path_buf(),
             program: program.to_owned(),
             args: Vec::new(),
@@ -222,7 +229,7 @@ mod tests {
 
         let marker = trusty_mpm::runtime::launch_spec::LaunchSpec::started_marker_in(
             dir.path(),
-            "11111111-2222-3333-4444-555555555555",
+            TEST_LAUNCH_ID,
         );
         assert!(
             marker.exists(),

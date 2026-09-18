@@ -29,6 +29,7 @@ mod claude_code;
 pub mod launch_report;
 pub mod launch_spec;
 mod managed_launch;
+mod pane_handshake;
 // #7568: the PM system-prompt file and its named-root compiled-prompt refresh.
 mod prompt_file;
 mod tcode;

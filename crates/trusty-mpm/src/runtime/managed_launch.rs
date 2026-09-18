@@ -169,6 +169,10 @@ impl ManagedLaunch<'_> {
     fn base(&self) -> LaunchSpec {
         LaunchSpec {
             session_id: self.session_id.to_owned(),
+            // #8233 review round 2 (finding 3): one id per LAUNCH, minted here
+            // so every builder gets a fresh one and no two launches of the same
+            // session can share a sentinel.
+            launch_id: uuid::Uuid::new_v4().simple().to_string(),
             cwd: self.cwd.to_path_buf(),
             program: self.claude_bin.to_owned(),
             args: Vec::new(),
@@ -341,21 +345,23 @@ fn abort_notice(session_id: &str) -> String {
 /// four steps in one function is what stops a future caller performing three of
 /// them.
 /// What: resolves the tm binary ([`crate::core::spawn_disclaim::launch_wrapper_bin`]);
-/// clears any stale `.started` sentinel for this session; writes the spec to its
-/// mode-0600 file; reads it back ([`LaunchSpec::verify`]); returns the pane to a
-/// primary prompt ([`reset_pane_input`]); types [`pane_line`] through
+/// CONFIRMS the pane's shell is executing what it is typed
+/// ([`super::pane_handshake::confirm_prompt`]) before anything else happens;
+/// writes the spec to its mode-0600 file; reads it back ([`LaunchSpec::verify`]);
+/// publishes this launch's id ([`LaunchSpec::write_launch_pointer_in`]); types
+/// [`pane_line`] through
 /// [`crate::session_manager::ManagedTmuxDriver::send_command_line`], which
 /// refuses an over-length line rather than letting the tty truncate it. The
 /// pane's shim then writes the sentinel, which
-/// `daemon::managed_routes::launch_verify::detect_unconsumed_launch` waits on —
-/// that is the half of the handshake that proves the SHELL, not just tmux, took
-/// the line. On any
-/// failure it types [`abort_notice`] (best-effort — a pane that cannot be typed
-/// into cannot be told either), removes the spec it wrote so no credential is
-/// left on disk, and returns the error.
+/// `daemon::managed_routes::launch_verify::launch_was_delivered` reads — that is
+/// the half of the handshake that proves the SHELL, not just tmux, took the
+/// line. On any failure it types [`abort_notice`] (best-effort — a pane that
+/// cannot be typed into cannot be told either), removes the spec it wrote so no
+/// credential is left on disk, and returns the error.
 /// Test: `deliver_types_a_short_line_and_leaves_a_readable_spec`,
 /// `deliver_announces_a_refused_line_in_the_pane`,
-/// `deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable`.
+/// `deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable`,
+/// `deliver_refuses_a_wedged_pane_and_writes_no_spec`.
 pub(super) fn deliver(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
     tmux_name: &str,
@@ -399,42 +405,6 @@ pub(super) fn deliver_in(
     }
 }
 
-/// Return the pane's shell to a PRIMARY prompt before anything is typed at it
-/// (#8233 review, defence in depth).
-///
-/// Why: the length guard makes THIS launch un-truncatable, but it cannot undo a
-/// pane the PREVIOUS one already wedged. A shell holding an unterminated `{`
-/// group sits at PS2 and silently swallows whatever is typed next as more of
-/// that command, so a perfectly short launch line would vanish into it — the
-/// exact "bare `tm` in the pane relaunched the session" recovery an operator had
-/// to perform by hand on this issue. `C-c` abandons a PS2 continuation and
-/// discards any half-typed line at PS1, which covers both states without
-/// needing to recognise either.
-/// What: pane-scoped when a `pane_id` is known (sibling-window hijack, #2456),
-/// else session-scoped. BEST-EFFORT by design: the trait default for both
-/// methods is an error, so every hermetic driver and the tmux-absent fallback
-/// simply skip this, and a pane that cannot be interrupted is reported by the
-/// send that follows rather than here.
-/// Test: `deliver_resets_the_pane_before_typing`,
-/// `deliver_resets_the_named_pane_when_one_is_known`.
-fn reset_pane_input(
-    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
-    tmux_name: &str,
-    pane_id: Option<&str>,
-) {
-    let sent = match pane_id {
-        Some(pane) => tmux.send_interrupt_to_pane(tmux_name, pane),
-        None => tmux.send_interrupt(tmux_name),
-    };
-    if let Err(e) = sent {
-        tracing::debug!(
-            session = %tmux_name,
-            "could not interrupt the pane before typing the launch line (non-fatal, \
-             expected for drivers with no interrupt support, #8233): {e}"
-        );
-    }
-}
-
 /// The steps [`deliver`] wraps; see its doc.
 fn deliver_inner(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
@@ -450,10 +420,27 @@ fn deliver_inner(
                 .to_owned(),
         )
     })?;
-    // #8233: a sentinel left by an EARLIER launch of this same session would make
-    // the post-send check pass without the pane having run anything. Clear it
-    // before the pane can write a new one.
-    let _ = std::fs::remove_file(LaunchSpec::started_marker_in(spec_dir, &spec.session_id));
+    // #8233 review round 2 (finding 1): confirm — do not assume — that the
+    // shell is executing what it is typed, BEFORE anything is written to disk
+    // or typed at the pane. A wedged or not-yet-reading shell refuses the
+    // launch here, so no spec carrying credentials is ever left behind for a
+    // line the pane was never going to run.
+    let state = super::pane_handshake::confirm_prompt(
+        tmux,
+        tmux_name,
+        pane_id,
+        super::pane_handshake::PROMPT_PROBE_ROUNDS,
+        super::pane_handshake::PROMPT_PROBE_ATTEMPTS,
+        super::pane_handshake::PROMPT_PROBE_INTERVAL,
+    );
+    if !state.may_launch() {
+        let reason = state
+            .refusal()
+            .unwrap_or_else(|| "the pane is not ready for a launch (#8233)".to_owned());
+        return Err(super::RuntimeError::Spawn(format!(
+            "refusing to launch into pane '{tmux_name}': {reason}"
+        )));
+    }
     let path = spec
         .write_in(spec_dir)
         .map_err(|e| super::RuntimeError::Spawn(e.to_string()))?;
@@ -461,10 +448,16 @@ fn deliver_inner(
         let _ = std::fs::remove_file(&path);
         return Err(super::RuntimeError::Spawn(e.to_string()));
     }
+    // #8233 review round 2 (finding 3): publish WHICH launch the checker should
+    // wait on. The sentinel is keyed on this launch's own id, so a marker left
+    // by an earlier launch of the same session cannot satisfy this one. Fatal:
+    // without the pointer the launch would be unverifiable, and an unverifiable
+    // launch is exactly what this issue is about.
+    if let Err(e) = spec.write_launch_pointer_in(spec_dir) {
+        let _ = std::fs::remove_file(&path);
+        return Err(super::RuntimeError::Spawn(e.to_string()));
+    }
     let line = pane_line(&spec.session_id, &wrapper, &path);
-    // #8233: last thing before the keystrokes — a pane left at a continuation
-    // prompt by an earlier launch would otherwise swallow this one too.
-    reset_pane_input(tmux, tmux_name, pane_id);
     if let Err(e) = tmux.send_command_line(tmux_name, pane_id, &line) {
         // The spec carries credentials and nothing will consume it now.
         let _ = std::fs::remove_file(&path);

@@ -53,10 +53,27 @@ const FILE_MODE: u32 = 0o600;
 /// that the pane's SHELL parsed and ran them. The whole defect this issue tracks
 /// is a shell left at a continuation prompt with the line unexecuted, so the
 /// launcher needs a signal that only exists once the shim actually started.
-/// What: `<session-uuid>.started`, written by
-/// [`LaunchSpec::mark_started`] beside the spec it was read from and observed by
+/// What: `<launch-id>.started`, written by [`LaunchSpec::mark_started`] beside
+/// the spec it was read from and observed by
 /// `daemon::managed_routes::launch_verify`.
+///
+/// #8233 review round 2 (HIGH): the sentinel is named for the LAUNCH, not for
+/// the session. Keyed on the session, a marker written by an earlier launch of
+/// the same session satisfied a later one that the shell never ran — the exact
+/// false "it started" this handshake exists to rule out. A per-launch uuid
+/// cannot be satisfied by anything but its own launch.
 const STARTED_SUFFIX: &str = ".started";
+
+/// Extension of the per-session pointer naming the CURRENT launch (#8233 review
+/// round 2).
+///
+/// Why: the sentinel is keyed on the launch, but the daemon's post-send check
+/// knows only the session record. This file is the one hop between them: the
+/// launcher writes it immediately before typing, so the checker resolves
+/// "this session's most recent launch" without the adapter having to thread the
+/// id back through `RuntimeAdapter::spawn`'s `Result<(), RuntimeError>`.
+/// What: `<session-uuid>.launch`, whose whole contents are the launch id.
+const LAUNCH_POINTER_SUFFIX: &str = ".launch";
 
 /// How long an unconsumed spec or sentinel may sit before it is reaped (#8233
 /// review, HIGH).
@@ -150,6 +167,13 @@ pub enum LaunchSpecError {
 pub struct LaunchSpec {
     /// The managed session's UUID (`TM_MANAGED_SESSION_ID`).
     pub session_id: String,
+    /// This LAUNCH's own id — the sentinel key (#8233 review round 2).
+    ///
+    /// Defaults on deserialize so a spec written by an older `tm` still decodes;
+    /// an empty id simply keys a sentinel no checker is looking for, which reads
+    /// as "not delivered" rather than as a false success.
+    #[serde(default)]
+    pub launch_id: String,
     /// Working directory for the spawned process.
     pub cwd: PathBuf,
     /// Absolute path to the program to launch (the resolved `claude`).
@@ -255,26 +279,58 @@ impl LaunchSpec {
         })
     }
 
-    /// The sentinel path proving the pane's shell RAN this session's launch.
+    /// The sentinel path proving the pane's shell RAN one SPECIFIC launch.
     ///
     /// Why: see [`STARTED_SUFFIX`]. Both sides have to compute the same path
     /// from what they each know — the shim from the spec it just consumed, the
-    /// daemon from the session record — so the derivation lives in one function
-    /// keyed on the session id.
-    /// What: `<dir>/<session_id>.started`.
-    /// Test: `started_marker_is_named_for_the_session`.
-    pub fn started_marker_in(dir: &Path, session_id: &str) -> PathBuf {
-        dir.join(format!("{session_id}{STARTED_SUFFIX}"))
+    /// daemon from [`LaunchSpec::read_launch_pointer_in`] — so the derivation
+    /// lives in one function keyed on the LAUNCH id.
+    /// What: `<dir>/<launch_id>.started`.
+    /// Test: `started_marker_is_named_for_the_launch_not_the_session`.
+    pub fn started_marker_in(dir: &Path, launch_id: &str) -> PathBuf {
+        dir.join(format!("{launch_id}{STARTED_SUFFIX}"))
     }
 
-    /// [`LaunchSpec::started_marker_in`] against the production root.
+    /// The per-session pointer file naming the launch currently in flight.
     ///
-    /// Why: the daemon's post-send check knows only the session record, not the
-    /// spec file the adapter wrote.
-    /// What: `None` when the home directory cannot be resolved.
-    /// Test: `started_marker_is_named_for_the_session`.
-    pub fn started_marker(session_id: &str) -> Option<PathBuf> {
-        Self::root().map(|dir| Self::started_marker_in(&dir, session_id))
+    /// Why: see [`LAUNCH_POINTER_SUFFIX`].
+    /// What: `<dir>/<session_id>.launch`.
+    /// Test: `launch_pointer_round_trips_the_launch_id`.
+    pub fn launch_pointer_in(dir: &Path, session_id: &str) -> PathBuf {
+        dir.join(format!("{session_id}{LAUNCH_POINTER_SUFFIX}"))
+    }
+
+    /// Publish this spec's launch id as the session's current launch.
+    ///
+    /// Why: written by the launcher immediately before the keystrokes, so a
+    /// checker that reads it afterwards can only ever be looking at THIS launch.
+    /// What: overwrites `<dir>/<session_id>.launch` with the launch id. Errors
+    /// are returned, not swallowed: without the pointer the checker cannot tell
+    /// a delivered launch from an undelivered one, so the launch is abandoned
+    /// rather than made unverifiable.
+    /// Test: `launch_pointer_round_trips_the_launch_id`.
+    pub fn write_launch_pointer_in(&self, dir: &Path) -> Result<PathBuf, LaunchSpecError> {
+        let path = Self::launch_pointer_in(dir, &self.session_id);
+        std::fs::write(&path, self.launch_id.as_bytes()).map_err(|source| {
+            LaunchSpecError::Write {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        Ok(path)
+    }
+
+    /// Read back the launch id the session's pointer names.
+    ///
+    /// Why: the daemon's post-send check knows only the session record.
+    /// What: `None` when no pointer exists or it cannot be read — which the
+    /// caller must treat as "cannot tell", never as "the launch failed".
+    /// Test: `launch_pointer_round_trips_the_launch_id`,
+    /// `launch_pointer_is_absent_before_any_launch`.
+    pub fn read_launch_pointer_in(dir: &Path, session_id: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(Self::launch_pointer_in(dir, session_id)).ok()?;
+        let id = raw.trim().to_owned();
+        (!id.is_empty()).then_some(id)
     }
 
     /// Record that the pane's shell reached this shim (#8233 review).
@@ -283,13 +339,13 @@ impl LaunchSpec {
     /// `claude` is spawned, so it separates "the shell never ran the line" — the
     /// stuck-parser failure this issue is about — from "the line ran and the
     /// launch then failed", which the pane's own output already explains.
-    /// What: creates `<spec dir>/<session_id>.started`, empty. Best-effort: a
+    /// What: creates `<spec dir>/<launch_id>.started`, empty. Best-effort: a
     /// launch must not be abandoned because a marker could not be written, but
     /// the failure is warned because it will read downstream as a stuck pane.
     /// Test: `mark_started_writes_the_sentinel_beside_the_spec`.
-    pub fn mark_started(spec_path: &Path, session_id: &str) {
+    pub fn mark_started(spec_path: &Path, launch_id: &str) {
         let dir = spec_path.parent().unwrap_or(Path::new("."));
-        let marker = Self::started_marker_in(dir, session_id);
+        let marker = Self::started_marker_in(dir, launch_id);
         if let Err(err) = std::fs::write(&marker, b"") {
             tracing::warn!(
                 marker = %marker.display(),
@@ -351,6 +407,25 @@ impl LaunchSpec {
         // table, same per-variable operator precedence, no shell needed.
         crate::core::alt_screen::apply_default_to_command(&mut cmd);
         cmd
+    }
+}
+
+/// Sweep the production spec root of everything an earlier launch abandoned.
+///
+/// Why (#8233 review round 2, HIGH): [`LaunchSpec::write_in`] reaps, but only
+/// when a NEXT launch happens. A fleet that stops launching — the daemon
+/// restarted, every session already up, the operator away for the weekend —
+/// leaves the last abandoned spec, and its `GH_TOKEN` and
+/// `CLAUDE_CODE_OAUTH_TOKEN`, on disk indefinitely. Exposing the sweep lets the
+/// supervisor's own heartbeat run it, which makes reaping depend on the daemon
+/// being alive rather than on a launch arriving.
+/// What: [`reap_orphans_in`] against [`LaunchSpec::root`], with the same TTL.
+/// Silent and non-fatal when the root cannot be resolved or does not exist.
+/// Test: `reap_orphans_is_a_no_op_without_a_root`, and `write_reaps_an_orphaned_spec`
+/// for the sweep itself.
+pub fn reap_orphans() {
+    if let Some(dir) = LaunchSpec::root() {
+        reap_orphans_in(&dir, ORPHAN_TTL);
     }
 }
 

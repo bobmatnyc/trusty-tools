@@ -719,10 +719,19 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             memory_reachable,
         };
+        // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
+        // here, which makes every pane-directed step — the interrupt that
+        // flushes a wedged parser above all — session-scoped, and tmux resolves
+        // a session-scoped target to whichever pane is ACTIVE. On a spawn into
+        // an existing tmux session that is the operator's own pane, so the C-c
+        // landed in their work rather than in the pane being launched into.
+        // Best-effort: `None` from a driver with no pane-id support keeps the
+        // previous session-scoped behaviour exactly.
+        let spawn_pane = self.tmux.get_pane_id(tmux_name);
         managed_launch::deliver(
             self.tmux.as_ref(),
             tmux_name,
-            None,
+            spawn_pane.as_deref(),
             &managed_launch::spawn_spec(&launch),
         )?;
         // #2157 item 1: durable publish, belt-and-suspenders alongside the

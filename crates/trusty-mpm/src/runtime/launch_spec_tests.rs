@@ -16,6 +16,7 @@ use super::{LaunchSpec, LaunchSpecError};
 fn sample() -> LaunchSpec {
     LaunchSpec {
         session_id: "11111111-2222-3333-4444-555555555555".to_owned(),
+        launch_id: "aaaabbbbccccddddeeeeffff00001111".to_owned(),
         cwd: PathBuf::from("/workspace/repo"),
         program: "/abs/claude".to_owned(),
         args: vec!["--resume".to_owned(), "abc".to_owned()],

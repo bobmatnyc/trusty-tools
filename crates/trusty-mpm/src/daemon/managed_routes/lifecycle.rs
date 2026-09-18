@@ -1240,20 +1240,27 @@ pub async fn resume_managed(
             runtime = %record.runtime.as_str(),
             "resume_managed: runtime adapter spawn_resume failed: {e}"
         );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
-            .await;
-    } else {
+        // #8233 review round 2 (finding 7): this arm marked the record errored
+        // and then fell through to `Ok(record)`, so the caller saw a successful
+        // resume and had to notice the state itself. `guided_resume` did not,
+        // and printed "restarted but runtime failed to start" from a later read.
+        let msg = format!("resume spawn failed: {e}");
+        let _ = mgr.mark_errored(&record.id, &msg).await;
+        return Err(ResumeManagedError::Other(msg));
+    } else if let Some(msg) = super::launch_verify::record_resume_outcome(
         // #6766: `spawn_resume` returning Ok means tmux accepted the keystrokes,
         // not that `claude` started. A launch-time refusal leaves the pane at a
         // bare shell, and this arm used to log a resume that never happened.
-        super::launch_verify::record_resume_outcome(
-            &mgr,
-            tmux_driver.as_ref(),
-            &record,
-            &workspace,
-        )
-        .await;
+        &mgr,
+        tmux_driver.as_ref(),
+        &record,
+        &workspace,
+    )
+    .await
+    {
+        // #8233 finding 7: same rule — the record is errored, so the resume is
+        // an error.
+        return Err(ResumeManagedError::Other(msg));
     }
 
     Ok(mgr.get(id).await.unwrap_or(record))
