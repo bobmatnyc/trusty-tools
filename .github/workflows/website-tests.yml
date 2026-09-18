@@ -32,15 +32,21 @@
 # WHAT EACH JOB IS RELEVANT TO (scripts/ci-website-relevance.sh owns the rule,
 # docs/reference/ci-gates.md states the policy):
 #
-#   Vitest (unit + smoke)  website/** minus website/src/content/**, plus the
-#                          two trusty-installer sources `site.test.ts` pins
-#                          values out of (UNIT_RUST_INPUTS in the classifier)
-#   Changelog corpus       crates/*/changelog.d/**, crates/*/CHANGELOG.md,
-#                          website/src/lib/changelog/**, and the flagship list
-#   Prettier + ESLint      website/** including prose content
+#   Vitest (unit + smoke)   website/** minus website/src/content/**, plus the
+#                           two trusty-installer sources `site.test.ts` pins
+#                           values out of (UNIT_RUST_INPUTS in the classifier),
+#                           plus root Cargo.toml when and only when the diff
+#                           touches its `rust-version` line
+#   Website content corpus  docs/**, website/src/content/**,
+#                           crates/*/changelog.d/**, crates/*/CHANGELOG.md,
+#                           crates/*/Cargo.toml, website/src/lib/**,
+#                           website/vite.config.ts, website/package.json,
+#                           install.sh, and the two crate sources a fact card
+#                           counts (CORPUS_RUST_INPUTS)
+#   Prettier + ESLint       website/** including prose content
 #
 # A DOCUMENTATION-ONLY change therefore runs no code test suite, and still
-# runs the content gate its own content owes (`Changelog corpus`). Every
+# runs the content gate its own content owes (`Website content corpus`). Every
 # failure arm of the classifier answers "relevant" and costs a full run.
 #
 # PNPM — the version is READ from `website/package.json`'s `packageManager`
@@ -176,15 +182,17 @@ jobs:
         working-directory: website
         run: pnpm run test
 
-  # The real-changelog gate, split out of the unit suite (owner ruling,
-  # 2026-09-18). It parses every released crate's CHANGELOG.md — ~21 s and
-  # growing with each release — and it is the only website test a changelog
-  # fragment can affect. As a block inside `Vitest (unit + smoke)` it made
-  # every release PR pay for the whole website suite and blew vitest's default
-  # 10 s `hookTimeout` in `beforeAll` (PR #8272). Its own check name means a
-  # red corpus is legible as a content problem, not a website-code problem.
+  # The CONTENT gate, split out of the unit suite (owner ruling, 2026-09-18):
+  # every website suite that reads real repository content runs here and
+  # NOWHERE else — the six-crate changelog corpus, the 27-page docs corpus, the
+  # flagship pages, and the landing-page claims grounded in crates/**. As blocks
+  # inside `Vitest (unit + smoke)` they made every release PR pay for the whole
+  # website suite and blew vitest's default 10 s `hookTimeout` in `beforeAll`
+  # (PR #8272). Its own check name means a red corpus is legible as a content
+  # problem, not a website-code problem — and it is the ONLY suite a docs,
+  # content or changelog change can turn red.
   website-corpus:
-    name: Changelog corpus
+    name: Website content corpus
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -201,7 +209,7 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
 
-      - name: Classify changelog corpus relevance
+      - name: Classify website content corpus relevance
         id: relevance
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -252,7 +260,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # No Chromium and no `vite build`: the `corpus` project is plain Node.
-      - name: Run the changelog corpus gate
+      - name: Run the website content corpus gate
         if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm run test:corpus

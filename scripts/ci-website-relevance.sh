@@ -19,13 +19,17 @@
 #
 #     unit    the website CODE suites (`pnpm run test` — unit + smoke).
 #             Relevant for a change under website/** that is not prose content
-#             (website/src/content/**), to this script / the workflow, or to
-#             one of the Rust SOURCE files `site.test.ts` pins values out of
-#             (UNIT_RUST_INPUTS below).
-#     corpus  the real-changelog gate (`pnpm run test:corpus`). Relevant for a
-#             changelog fragment, a crate CHANGELOG.md, the changelog module
-#             itself, or the flagship list that names which crates the corpus
-#             covers.
+#             (website/src/content/**), to this script / the workflow, to one of
+#             the Rust SOURCE files `site.test.ts` pins values out of
+#             (UNIT_RUST_INPUTS below), or to root Cargo.toml's `rust-version`
+#             line ALONE — see root_cargo_touches_msrv.
+#     corpus  the website CONTENT gate (`pnpm run test:corpus`), which is every
+#             suite that reads real repository content: the six-crate changelog
+#             corpus, the 27-page docs corpus, the flagship pages, and the
+#             landing-page claims grounded in crates/**. Relevant for docs/**,
+#             website/src/content/**, a changelog fragment, a crate CHANGELOG.md
+#             or Cargo.toml, the website library code under test, and the two
+#             crate sources a fact card counts (CORPUS_RUST_INPUTS below).
 #     lint    `pnpm lint` over website/**. Relevant for any website change,
 #             prose content included — Prettier checks content markdown too.
 #
@@ -34,7 +38,9 @@
 #   crates/*/CHANGELOG.md, or website/src/content/**. No such path makes `unit`
 #   relevant: a documentation change never has to pass a code test suite. The
 #   content gates it DOES owe (`corpus` here, plus the prose linters in their
-#   own workflows) still run.
+#   own workflows) still run — and since the unit project walks no repository
+#   content at all (#8272), `corpus` is the ONLY suite that can see a docs or
+#   content change, which is why its set below is the wider one.
 #
 #   NOT docs-only, by design and stated here because it looks like an
 #   exception: crates/*/src/** is code even when the file ends in `.md` —
@@ -76,6 +82,25 @@ crates/trusty-installer/src/commands/stable_set.rs
 crates/trusty-installer/src/download/platform.rs
 "
 
+# Rust SOURCE files the CORPUS suites count values out of: `tools.corpus.test.ts`
+# re-derives each "MCP tools: N" fact card from the crate source the daemon
+# actually serves. Exact paths, for the same reason UNIT_RUST_INPUTS is exact.
+CORPUS_RUST_INPUTS="
+crates/trusty-memory/src/tools/mod.rs
+crates/trusty-search/src/mcp/tools/descriptors.rs
+"
+
+# Root Cargo.toml, and the one line in it the website suite reads.
+#
+# `site.test.ts`'s `MSRV matches the workspace rust-version` pins the advertised
+# minimum against `[workspace.package] rust-version`, so the file IS a unit
+# input — but only for that line. Restoring the whole file as a trigger would
+# run the 7-minute unit suite on every version-bump PR, because a bump edits
+# dependency rows in the same file; that cost is what #8272 paid and what this
+# classifier exists to remove.
+ROOT_CARGO_PATH="Cargo.toml"
+MSRV_DIFF_LINE='^[+-][[:space:]]*rust-version[[:space:]]*='
+
 # emit <mode> <verdict> — the verdict on stdout, and as `relevant=<verdict>`
 # in $GITHUB_OUTPUT when a workflow step is what called this.
 emit() {
@@ -93,16 +118,38 @@ has_prefix() {
   return 1
 }
 
-# is_unit_rust_input <path> — exact membership in UNIT_RUST_INPUTS. Unquoted
-# expansion on purpose: the list is newline-separated and word-splits into one
-# candidate per entry.
-is_unit_rust_input() {
+# is_listed <path> <list> — exact membership in a newline-separated list.
+# Unquoted expansion on purpose: the list word-splits into one candidate per
+# entry.
+is_listed() {
   local candidate
   # shellcheck disable=SC2086
-  for candidate in ${UNIT_RUST_INPUTS}; do
+  for candidate in $2; do
     [ "$1" = "$candidate" ] && return 0
   done
   return 1
+}
+
+# root_cargo_touches_msrv — true when this event's diff of root Cargo.toml adds
+# or removes a `rust-version =` line, and only then.
+#
+# FAIL CLOSED: an uncomputable diff answers "relevant", the same rule every
+# other error arm in this script follows. ROOT_CARGO_DIFF is a test seam —
+# scripts/check-ci-helpers-selftest.sh feeds a diff in rather than minting a
+# repository — and is never set in CI.
+root_cargo_touches_msrv() {
+  local diff base
+  if [ -n "${ROOT_CARGO_DIFF:-}" ]; then
+    diff="${ROOT_CARGO_DIFF}"
+  elif ! base="$(resolve_base)"; then
+    echo "ci-website-relevance: no base for root ${ROOT_CARGO_PATH} diff — answering true (fail closed)" >&2
+    return 0
+  elif ! diff="$(git diff "${base}...HEAD" -- "${ROOT_CARGO_PATH}" 2>/dev/null)"; then
+    echo "ci-website-relevance: cannot diff root ${ROOT_CARGO_PATH} — answering true (fail closed)" >&2
+    return 0
+  fi
+
+  printf '%s\n' "$diff" | grep -qE "${MSRV_DIFF_LINE}"
 }
 
 # is_relevant <mode> <path>
@@ -119,23 +166,38 @@ is_relevant() {
     unit)
       has_prefix "$p" "website/src/content/" && return 1
       has_prefix "$p" "website/" && return 0
-      is_unit_rust_input "$p" && return 0
+      is_listed "$p" "${UNIT_RUST_INPUTS}" && return 0
+      if [ "$p" = "${ROOT_CARGO_PATH}" ]; then
+        root_cargo_touches_msrv && return 0
+        return 1
+      fi
       ;;
     lint)
       has_prefix "$p" "website/" && return 0
       ;;
     corpus)
-      has_prefix "$p" "website/src/lib/changelog/" && return 0
-      # RELEASED_FLAGSHIPS names the crates the corpus covers; a crate joining
-      # or leaving that list changes what the gate reads.
-      [ "$p" = "website/src/lib/site.ts" ] && return 0
-      [ "$p" = "website/src/lib/tools.ts" ] && return 0
-      # crates/<crate>/CHANGELOG.md and crates/<crate>/changelog.d/<file>.
-      # Segment-split, not globbed: in a bash `case`, `*` matches `/` too.
+      # The website library every corpus suite exercises: changelog, docs,
+      # flagship, install and the site/tools records they assert against.
+      has_prefix "$p" "website/src/lib/" && return 0
+      # The prose the flagship corpus renders, and the two files that decide
+      # which projects run at all.
+      has_prefix "$p" "website/src/content/" && return 0
+      [ "$p" = "website/vite.config.ts" ] && return 0
+      [ "$p" = "website/package.json" ] && return 0
+      # The documentation corpus itself — the 27 published pages, the manifest
+      # that publishes them, and every file a published page links to.
+      has_prefix "$p" "docs/" && return 0
+      # The bootstrap script the landing page tells a reader to curl.
+      [ "$p" = "install.sh" ] && return 0
+      is_listed "$p" "${CORPUS_RUST_INPUTS}" && return 0
+      # crates/<crate>/CHANGELOG.md, crates/<crate>/Cargo.toml (the package name
+      # and release state a flagship record claims), and
+      # crates/<crate>/changelog.d/<file>. Segment-split, not globbed: in a bash
+      # `case`, `*` matches `/` too.
       local -a seg
       IFS='/' read -r -a seg <<<"$p"
       if [ "${#seg[@]}" -eq 3 ] && [ "${seg[0]}" = "crates" ] &&
-        [ "${seg[2]}" = "CHANGELOG.md" ]; then
+        { [ "${seg[2]}" = "CHANGELOG.md" ] || [ "${seg[2]}" = "Cargo.toml" ]; }; then
         return 0
       fi
       if [ "${#seg[@]}" -ge 4 ] && [ "${seg[0]}" = "crates" ] &&
@@ -148,9 +210,10 @@ is_relevant() {
   return 1
 }
 
-# Resolve this event's changed paths, or fail closed. Mirrors
-# capabilities-drift.yml's classifier: every error arm answers "relevant".
-resolve_changed_paths() {
+# resolve_base — this event's merge-base on stdout, or non-zero when it cannot
+# be computed. Shared by the changed-path walk and the root-Cargo.toml probe so
+# both fail closed off the same base.
+resolve_base() {
   local base
   if [ "${EVENT_NAME:-}" = "pull_request" ]; then
     base="origin/${BASE_REF:-}"
@@ -164,11 +227,17 @@ resolve_changed_paths() {
     return 1
   fi
 
-  local merge_base
-  if ! merge_base="$(git merge-base "$base" HEAD 2>/dev/null)"; then
+  if ! git merge-base "$base" HEAD 2>/dev/null; then
     echo "ci-website-relevance: cannot resolve merge-base against '${base}' — answering true (fail closed)" >&2
     return 1
   fi
+}
+
+# Resolve this event's changed paths, or fail closed. Mirrors
+# capabilities-drift.yml's classifier: every error arm answers "relevant".
+resolve_changed_paths() {
+  local merge_base
+  merge_base="$(resolve_base)" || return 1
 
   if ! git diff --name-only --no-renames "$merge_base" HEAD; then
     echo "ci-website-relevance: git diff against ${merge_base} failed — answering true (fail closed)" >&2

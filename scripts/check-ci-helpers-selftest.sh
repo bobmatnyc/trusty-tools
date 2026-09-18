@@ -1321,6 +1321,50 @@ assert_eq "corpus: a crate source file is not" "false" \
 assert_eq "corpus: a bundled agent asset is not a changelog" "false" \
   "$(relevance_of corpus 'crates/trusty-mpm/src/assets/agents/engineer.md')"
 
+# The corpus job is the CONTENT gate (#8272). Since no test in the `unit`
+# project reads repository content any more, a docs, content, fragment or
+# crate-CHANGELOG change can only be caught here — and must be.
+assert_eq "corpus: a docs/ page is" "true" \
+  "$(relevance_of corpus 'docs/reference/ci-gates.md')"
+assert_eq "corpus: prose content under website/src/content is" "true" \
+  "$(relevance_of corpus 'website/src/content/tools/trusty-mpm.md')"
+assert_eq "corpus: the docs library is" "true" \
+  "$(relevance_of corpus 'website/src/lib/docs/site.ts')"
+assert_eq "corpus: the flagship library is" "true" \
+  "$(relevance_of corpus 'website/src/lib/flagship/content.ts')"
+assert_eq "corpus: a crate Cargo.toml is (the package name a record claims)" "true" \
+  "$(relevance_of corpus 'crates/trusty-common/Cargo.toml')"
+assert_eq "corpus: a crate source a fact card counts is" "true" \
+  "$(relevance_of corpus 'crates/trusty-memory/src/tools/mod.rs')"
+assert_eq "corpus: the project definition is" "true" \
+  "$(relevance_of corpus 'website/vite.config.ts')"
+
+# Root Cargo.toml, ONE line of it (#8272). `site.test.ts` pins the advertised
+# MSRV against `[workspace.package] rust-version`, and that test stayed in the
+# unit project, so the trigger belongs to the unit mode. Listing the whole file
+# would put the 7-minute unit suite back on every version-bump PR, because a
+# bump edits dependency rows in the same file — the exact trap this removes.
+relevance_of_root_cargo() {
+  printf 'Cargo.toml\n' |
+    ROOT_CARGO_DIFF="$1" bash scripts/ci-website-relevance.sh unit 2>/dev/null
+}
+assert_eq "unit: a root Cargo.toml dependency-row bump is not" "false" \
+  "$(relevance_of_root_cargo '+trusty-common = { version = "0.5.0" }')"
+assert_eq "unit: a root Cargo.toml rust-version change is" "true" \
+  "$(relevance_of_root_cargo '-rust-version = "1.94"
++rust-version = "1.95"')"
+# An indented declaration inside a table still counts; so does a pure deletion.
+assert_eq "unit: an indented rust-version line still counts" "true" \
+  "$(relevance_of_root_cargo '-  rust-version = "1.94"')"
+# No diff to read (no EVENT_NAME, so no base): the same fail-closed rule every
+# other error arm follows.
+assert_eq "unit: an uncomputable root Cargo.toml diff fails closed" "true" \
+  "$(relevance_of unit 'Cargo.toml')"
+# The carve-out is the unit mode's alone — root Cargo.toml reaches no corpus
+# suite, and a version bump must not pay for the content gate through it.
+assert_eq "corpus: root Cargo.toml is not" "false" \
+  "$(relevance_of corpus 'Cargo.toml')"
+
 assert_eq "lint: prose content still owes a Prettier run" "true" \
   "$(relevance_of lint 'website/src/content/tools/trusty-mpm.md')"
 assert_eq "lint: a changelog fragment does not" "false" \
@@ -1340,7 +1384,7 @@ assert_eq "website-tests.yml classifies relevance in each job" "3" \
   "$(grep -c '^        id: relevance$' "${web_wf}" || true)"
 assert_eq "website-tests.yml classifies from the diff, not the event" "3" \
   "$(grep -c 'bash scripts/ci-website-relevance.sh ' "${web_wf}" || true)"
-# 16 = 6 in Vitest (unit + smoke) + 5 in Changelog corpus + 5 in Prettier +
+# 16 = 6 in Vitest (unit + smoke) + 5 in Website content corpus + 5 in Prettier +
 # ESLint. Every pnpm/Node/Playwright install and every suite invocation is
 # gated; the two cheap steps (checkout-adjacent base refresh, reading the pnpm
 # pin) are not. Raise this ONLY together with a costly step that IS gated.
@@ -1351,7 +1395,7 @@ assert_eq "no gate in website-tests branches on the activity type" "0" \
 # The three check names branch protection can list. Renaming one silently
 # drops its required context, so they are pinned here.
 assert_eq "website-tests keeps its three check names" "3" \
-  "$(grep -cE '^    name: (Vitest \(unit \+ smoke\)|Changelog corpus|Prettier \+ ESLint)$' "${web_wf}" || true)"
+  "$(grep -cE '^    name: (Vitest \(unit \+ smoke\)|Website content corpus|Prettier \+ ESLint)$' "${web_wf}" || true)"
 # The unit run must not re-acquire the corpus: `pnpm test` names its projects.
 assert_eq "the default website test script excludes the corpus project" "1" \
   "$(grep -c '"test": "vitest run --project=unit --project=smoke"' website/package.json || true)"
