@@ -223,6 +223,44 @@ FAILED/error line is still raw. What is forbidden is YOU summarizing results
 in your own words. Raw output stays mandatory for failures, flakes, and
 performance claims.
 
+## Waiting on a Background Command (#8264)
+
+Wait on the PROCESS, never on log text. Start it with `<cmd> > scratch.txt
+2>&1 & pid=$!`, then `wait $pid` (or poll `kill -0 $pid`). Read the exit code
+after the process ends, not before.
+
+Never loop on `pgrep -f`/`ps | grep` for a pattern your own loop's command line
+also contains — it matches itself and never exits; three such loops ran for as
+long as 32 minutes in one day. Never loop on output text like `OK`/`FAIL`/
+`error` either — a `timeout` kill prints `EXIT=124` and matches none of those
+strings, so that loop waited five minutes past a command that had already died.
+
+Every wait has a bound. At the bound, stop and report the stage instead of
+waiting longer.
+
+## Never End a Gate Chain in a Pipe (#7440)
+
+A pipeline's exit status is the LAST command's, so `cargo test … | tail` exits
+0 on a failing suite. Redirect into a scratchpad file named for this task and
+step, then `echo "EXIT=$?"`, and read the file only on non-zero.
+
+Where a chain genuinely has to pipe, `set -o pipefail` (bash/zsh) makes the
+pipeline carry the first non-zero status, and `${PIPESTATUS[0]}` reads the
+producer's own code. Both are bashisms — they do not exist in `sh`. Under
+Claude Code worktree isolation a grouped `( … )` command is refused before it
+runs, so give each gate its own plain command, its own redirect, and its own
+`echo "EXIT=$?"` (#6937). Backgrounded the chain? The `echo` writes to the
+tool's stdout, not the file — append the sentinel into the file, or wait on
+the process itself (above).
+
+## Stack-Specific Gate Traps
+
+- `pnpm test -- --force` silently drops `--force` before turbo sees it,
+  replaying the cache. Use `pnpm exec turbo run test --force` and confirm
+  `Cached: 0 cached` in the output (#7560).
+- Stop a dev server with `lsof -ti tcp:<port> | xargs kill` FIRST — `pkill -f
+  <path>` misses a bundled server whose argv does not carry the path (#7562).
+
 ## The Bottom Line
 
 **No shortcuts for verification.**
