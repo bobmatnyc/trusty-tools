@@ -562,6 +562,12 @@ never touch the same lines. A shared `## [Unreleased]` section guarantees a
 conflict instead. Release time assembles the fragments into `CHANGELOG.md` and
 deletes them; never hand-edit `CHANGELOG.md` in a package that uses fragments.
 
+The file goes DIRECTLY in `changelog.d/`, never a subdirectory; a `README.md`
+already sitting there is the directory's placeholder, not a fragment to copy.
+One category per fragment — the first line IS the category and everything after
+it belongs to it, so a second category word inside the body is a gate failure
+and two categories mean two files (#7287).
+
 If the package has no `changelog.d/`, add the bullet to `CHANGELOG.md` under the
 topmost `## [Unreleased]` heading (create it if absent), matching the file's
 existing style.
