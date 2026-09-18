@@ -128,7 +128,10 @@ fn confirm(shell: &ScriptedShell) -> PaneState {
 
 #[test]
 fn confirm_prompt_is_ready_when_the_probe_echoes() {
-    assert_eq!(confirm(&ScriptedShell::new(Shell::Executes)), PaneState::Ready);
+    assert_eq!(
+        confirm(&ScriptedShell::new(Shell::Executes)),
+        PaneState::Ready
+    );
 }
 
 #[test]

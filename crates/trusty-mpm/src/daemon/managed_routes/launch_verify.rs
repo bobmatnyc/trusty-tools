@@ -170,8 +170,7 @@ pub(crate) async fn launch_was_delivered_in(
     else {
         return true;
     };
-    let marker =
-        crate::runtime::launch_spec::LaunchSpec::started_marker_in(spec_dir, &launch_id);
+    let marker = crate::runtime::launch_spec::LaunchSpec::started_marker_in(spec_dir, &launch_id);
     for attempt in 0..attempts.max(1) {
         if attempt > 0 {
             tokio::time::sleep(interval).await;
@@ -216,9 +215,9 @@ fn clear_launch_files(record: &crate::session_manager::SessionRecord) {
     if let Some(launch_id) =
         crate::runtime::launch_spec::LaunchSpec::read_launch_pointer_in(&dir, &session)
     {
-        let _ = std::fs::remove_file(
-            crate::runtime::launch_spec::LaunchSpec::started_marker_in(&dir, &launch_id),
-        );
+        let _ = std::fs::remove_file(crate::runtime::launch_spec::LaunchSpec::started_marker_in(
+            &dir, &launch_id,
+        ));
     }
     let _ = std::fs::remove_file(crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(
         &dir, &session,
@@ -293,8 +292,9 @@ pub(crate) async fn record_resume_outcome(
 ///     logged at WARN and never reached it), marks the record errored, and
 ///     returns the message.
 ///   * [`LaunchOutcome::Unverifiable`] — changes nothing, exactly as before.
-/// Test: `a_running_verdict_clears_the_sentinel_and_the_pointer`,
-/// `a_not_started_verdict_is_logged_at_error_level`,
+///
+/// Test: `not_delivered_and_ran_and_failed_are_worded_apart`,
+/// `an_undelivered_launch_is_reported_as_not_delivered`,
 /// `an_undelivered_launch_is_not_interrupted_while_the_runtime_may_come_up`.
 async fn record_launch_outcome(
     mgr: &crate::session_manager::SessionManager,

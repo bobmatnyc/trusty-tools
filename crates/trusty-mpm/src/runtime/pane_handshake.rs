@@ -226,6 +226,7 @@ fn probe_line(nonce: &str) -> String {
 /// so a double can also tell a probe apart from the launch line it is actually
 /// asserting on.
 /// Test: `probe_reply_answers_only_a_probe_line`.
+#[cfg(test)]
 pub(crate) fn probe_reply(text: &str) -> Option<String> {
     text.strip_prefix(PROBE_PREFIX).map(probe_output)
 }

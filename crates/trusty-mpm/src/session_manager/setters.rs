@@ -288,15 +288,15 @@ mod strip_tests {
 
     #[test]
     fn strip_error_notes_removes_one() {
-        assert_eq!(strip_error_notes("do the thing [error: boom]"), "do the thing");
+        assert_eq!(
+            strip_error_notes("do the thing [error: boom]"),
+            "do the thing"
+        );
     }
 
     #[test]
     fn strip_error_notes_removes_several() {
-        assert_eq!(
-            strip_error_notes("task [error: one] [error: two]"),
-            "task"
-        );
+        assert_eq!(strip_error_notes("task [error: one] [error: two]"), "task");
     }
 
     #[test]

@@ -78,13 +78,8 @@ impl RuntimeRelauncher for DaemonRelauncher {
             .map_err(|e| format!("runtime adapter spawn_resume failed: {e}"))?;
         // The SAME verification the interactive resume runs: a record becomes
         // `Active` only behind a runtime this actually saw.
-        match super::launch_verify::record_resume_outcome(
-            &mgr,
-            tmux.as_ref(),
-            record,
-            &workspace,
-        )
-        .await
+        match super::launch_verify::record_resume_outcome(&mgr, tmux.as_ref(), record, &workspace)
+            .await
         {
             Some(msg) => Err(msg),
             None => Ok(()),
