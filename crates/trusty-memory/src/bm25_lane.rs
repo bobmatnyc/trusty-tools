@@ -139,7 +139,9 @@ pub struct Bm25Stats {
 /// the SET of documents held, and stays correct however many documents the index
 /// holds that the caller never asked about (#5048, #5053).
 /// What: `missing` names the requested ids the index does not hold; `checked`
-/// echoes how many were examined.
+/// echoes how many were examined. Two methods produce this, and the producer
+/// decides which question `missing` answers: [`Bm25Lane::missing_docs`] asks
+/// about presence, [`Bm25Lane::outdated_docs`] about presence AND text (#8246).
 /// Test: `missing_docs_answers_by_identity`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Bm25Coverage {
@@ -329,6 +331,29 @@ impl Bm25Lane {
         self.with_index(palace, |idx| Bm25Coverage {
             missing: idx.missing_docs(doc_ids),
             checked: doc_ids.len(),
+        })
+        .await
+    }
+
+    /// Which of `docs` a palace's corpus does not hold at the text given.
+    ///
+    /// Why (#8246): [`Self::missing_docs`] is an id-presence question, and an
+    /// in-place edit keeps the id. A caller establishing that a palace is
+    /// CURRENT — the backfill — must ask this one instead, or it reads a corpus
+    /// holding every id at the wrong text as fully covered.
+    /// What: `missing` names the requested ids the index holds at different text
+    /// or does not hold at all; `checked` echoes how many were examined. Same
+    /// failure contract as [`Self::missing_docs`]: an index that cannot be
+    /// loaded returns `Err`, never an empty `missing` list.
+    /// Test: `outdated_docs_reports_an_edited_document`.
+    pub async fn outdated_docs(
+        &self,
+        palace: &str,
+        docs: &[(String, String)],
+    ) -> Result<Bm25Coverage> {
+        self.with_index(palace, |idx| Bm25Coverage {
+            missing: idx.outdated_docs(docs),
+            checked: docs.len(),
         })
         .await
     }

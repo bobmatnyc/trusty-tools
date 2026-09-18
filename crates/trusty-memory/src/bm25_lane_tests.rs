@@ -198,6 +198,51 @@ async fn missing_docs_answers_by_identity() {
     lane.shutdown().await;
 }
 
+/// Why (#8246): the lane is where the backfill asks its coverage question, so
+/// the content-aware answer has to survive the trip through it — including the
+/// case a resident index has served since before the edit.
+/// What: indexes a document, asks about the same id at NEW text, and asserts the
+/// lane names it; re-indexes and asserts the answer goes quiet again.
+/// Test: this test itself.
+#[tokio::test]
+async fn outdated_docs_reports_an_edited_document() {
+    let dir = tempdir();
+    let lane = Bm25Lane::with_limits(dir.path().to_path_buf(), 3, None);
+    lane.index("alpha", "a", "the body as first written")
+        .await
+        .unwrap();
+
+    let asked = vec![(
+        "a".to_string(),
+        "the body after an in-place edit".to_string(),
+    )];
+    assert!(
+        lane.missing_docs("alpha", &["a".to_string()])
+            .await
+            .unwrap()
+            .missing
+            .is_empty(),
+        "precondition: the id is present, which is all the old probe asked"
+    );
+
+    let cov = lane.outdated_docs("alpha", &asked).await.unwrap();
+    assert_eq!(cov.checked, 1);
+    assert_eq!(cov.missing, vec!["a".to_string()]);
+
+    lane.index("alpha", "a", "the body after an in-place edit")
+        .await
+        .unwrap();
+    assert!(
+        lane.outdated_docs("alpha", &asked)
+            .await
+            .unwrap()
+            .missing
+            .is_empty(),
+        "re-indexing the new text must settle the question"
+    );
+    lane.shutdown().await;
+}
+
 /// Why: replaces the daemon's `shutdown_flush.rs` coverage. The write path only
 /// marks the index dirty, so if the flush tick never fired, every write would
 /// live in memory until the process exited.

@@ -57,7 +57,9 @@ const CORRUPT_SUFFIX: &str = ".corrupt-";
 ///
 /// Why: serialising raw `BM25Index` internals would couple the on-disk format to
 /// the inverted-index layout. Storing `(doc_id, text)` lets the index be rebuilt
-/// from scratch on every load with no version constraints.
+/// from scratch on every load with no version constraints. #8246: `text` is
+/// also the freshness revision [`PalaceBm25Index::outdated_docs`] compares
+/// against, which is why that check needs no new field and no migration.
 /// What: a plain serde struct; the snapshot file is a JSON array of these.
 /// Test: `snapshot_written_by_the_daemon_is_read_in_place`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,29 @@ impl PalaceBm25Index {
             .iter()
             .filter(|id| !self.docs.contains_key(*id))
             .cloned()
+            .collect()
+    }
+
+    /// Which of `docs` this index does not hold AT THE TEXT GIVEN.
+    ///
+    /// Why (#8246): [`Self::missing_docs`] answers "is this id present", and the
+    /// backfill read that answer as "is this drawer's text current". A drawer
+    /// edited in place keeps its id, so an index still holding the pre-edit text
+    /// answered "present", the backfill short-circuited, and the new text was
+    /// never indexed while the old text kept matching queries.
+    /// What: reports a requested id when this index holds no document for it, OR
+    /// holds one whose text differs. The retained text IS the revision — there
+    /// is no separate digest to store, so a snapshot written before this change
+    /// answers the same question with no migration and no field to mis-parse,
+    /// and an unknown id resolves to "re-index" rather than to "fresh".
+    /// Comparison is over the exact bytes, so an unchanged corpus reports
+    /// nothing and the backfill's short-circuit survives.
+    /// Test: `outdated_docs_reports_absent_and_edited_documents`,
+    /// `outdated_docs_is_silent_when_every_document_is_current`.
+    pub fn outdated_docs(&self, docs: &[(String, String)]) -> Vec<String> {
+        docs.iter()
+            .filter(|(id, text)| self.docs.get(id).map(String::as_str) != Some(text.as_str()))
+            .map(|(id, _)| id.clone())
             .collect()
     }
 

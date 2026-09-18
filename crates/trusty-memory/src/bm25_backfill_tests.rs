@@ -354,11 +354,14 @@ fn startup_backfill_respects_the_opt_out() {
 async fn coverage_probe_classifies_an_unreadable_index_as_unreachable() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
-    let ids = vec!["a".to_string(), "b".to_string()];
+    let docs = vec![
+        ("a".to_string(), "alpha".to_string()),
+        ("b".to_string(), "beta".to_string()),
+    ];
 
     lane.index("ok", "a", "alpha").await.expect("seed");
     assert_eq!(
-        probe_coverage(&lane, "ok", &ids).await,
+        probe_coverage(&lane, "ok", &docs).await,
         Coverage::Missing(1),
         "a healthy index answers by identity: `a` is present, `b` is not"
     );
@@ -367,9 +370,44 @@ async fn coverage_probe_classifies_an_unreadable_index_as_unreachable() {
     std::fs::write(tmp.path().join("broken").join("bm25"), b"not a directory")
         .expect("block the index dir");
     assert_eq!(
-        probe_coverage(&lane, "broken", &ids).await,
+        probe_coverage(&lane, "broken", &docs).await,
         Coverage::Unreachable,
         "an index that cannot be opened must never report a missing set"
+    );
+
+    lane.shutdown().await;
+}
+
+/// Why (#8246): the probe is the single producer of every coverage claim, so
+/// the content check has to live in it — a caller that re-derived freshness
+/// anywhere else would leave the pre-flight skip reading presence alone.
+/// What: seeds a document, then probes the same id at edited text and asserts
+/// the probe counts it missing; re-probes at the seeded text to show an
+/// unchanged corpus still reports zero.
+/// Test: this test itself.
+#[tokio::test]
+async fn coverage_probe_counts_an_edited_drawer_as_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
+    lane.index("edits", "a", "the original body")
+        .await
+        .expect("seed");
+
+    let unchanged = vec![("a".to_string(), "the original body".to_string())];
+    assert_eq!(
+        probe_coverage(&lane, "edits", &unchanged).await,
+        Coverage::Missing(0),
+        "an unchanged drawer must not be re-fed on every sweep"
+    );
+
+    let edited = vec![(
+        "a".to_string(),
+        "the body after an in-place edit".to_string(),
+    )];
+    assert_eq!(
+        probe_coverage(&lane, "edits", &edited).await,
+        Coverage::Missing(1),
+        "an id held at pre-edit text is not coverage"
     );
 
     lane.shutdown().await;
