@@ -384,5 +384,4 @@ describe('links and metavariables inside an item', () => {
 			'align identity to tm-<project>-<n> naming'
 		);
 	});
-
 });

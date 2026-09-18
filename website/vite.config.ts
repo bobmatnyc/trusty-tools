@@ -5,8 +5,9 @@ import { defineConfig } from 'vitest/config';
  * Why: the token-parity suite is a plain Node test over two CSS files, while
  * the theme store needs a DOM. Running both under one environment would
  * either load jsdom for nothing or leave `document` undefined for the store.
- * What: three Vitest projects — `unit` (jsdom, `src/**`), `corpus` (node,
- * `src/**\/*.corpus.test.ts`, the real-changelog gate) and `smoke` (node,
+ * What: three Vitest projects — `unit` (jsdom, `src/**`, and nothing in it
+ * reads the repository), `corpus` (node, `src/**\/*.corpus.test.ts`, every
+ * suite that DOES read real repository content) and `smoke` (node,
  * `tests/**`, long timeout because it shells out to a real `vite build`).
  * `smoke` also disables file parallelism: more than one `tests/**` file now
  * shells out to `vite build` into the same fixed `.vercel/output`
@@ -16,8 +17,9 @@ import { defineConfig } from 'vitest/config';
  * still clears that directory, which is only safe run in turn.
  */
 /**
- * Hook AND test budget for the `corpus` project — the only suite that parses
- * the real six-crate changelog corpus.
+ * Hook AND test budget for the `corpus` project — every suite that reads real
+ * repository content: the six-crate changelog corpus, the 27-page docs corpus,
+ * the flagship pages, and the crate-grounded landing-page claims.
  *
  * MEASURED 2026-09-18 on this repo at 8df2360932: one `buildChangelogSite()`
  * over the corpus is ~49_000 ms under `unit`'s jsdom environment and
@@ -32,6 +34,23 @@ import { defineConfig } from 'vitest/config';
  * PR #8272 — a Rust-only fix — went red on "Website tests".
  */
 const CORPUS_TIMEOUT_MS = 300_000;
+
+/**
+ * Hook AND test budget for the `smoke` project, whose every file shells out to
+ * a real `vite build`.
+ *
+ * MEASURED 1m21s (81_000 ms) unloaded. OBSERVED 2026-09-18 on a machine also
+ * running `cargo` builds: the same build took 4m15s (255_000 ms), 3.1x the
+ * unloaded figure, and the previous `300_000 ms` — only 3.7x the measurement —
+ * left 45 s of headroom against a hosted runner that is slower again. 900_000 ms
+ * is >11x the measurement and >3.5x the loaded observation.
+ *
+ * `build-smoke.test.ts` and `mobile-overflow.test.ts` each run their OWN build,
+ * by design: Vitest guarantees no file ordering, so neither may assume the
+ * other's `.vercel/output` is present or current. `fileParallelism: false`
+ * below is what keeps the two builds from racing on that one fixed path.
+ */
+const SMOKE_TIMEOUT_MS = 900_000;
 
 export default defineConfig({
 	plugins: [sveltekit()],
@@ -62,12 +81,12 @@ export default defineConfig({
 					// a hosted runner is materially slower at than a laptop.
 					testTimeout: 120_000,
 					// `hookTimeout` does NOT follow `testTimeout` — it stays at
-					// vitest's 10s default until set. That gap is the defect
-					// behind PR #8272's red: three suites here build their corpus
-					// in `beforeAll` (docs/site.test.ts, flagship/content.test.ts,
-					// and, before the split, changelog/site.test.ts), and each one
-					// times out at 10s on a loaded machine while the 120s
-					// `testTimeout` above never applied to it.
+					// vitest's 10s default until set. That gap is half the defect
+					// behind PR #8272's red; the other half was three suites here
+					// building a real corpus in `beforeAll`. All of them are in
+					// the `corpus` project now, so nothing in this project reads
+					// the repository — but the budget stays, because a hosted
+					// runner is still slow at the small file reads that remain.
 					hookTimeout: 120_000
 				}
 			},
@@ -91,8 +110,8 @@ export default defineConfig({
 					name: 'smoke',
 					environment: 'node',
 					include: ['tests/**/*.test.ts'],
-					testTimeout: 300_000,
-					hookTimeout: 300_000,
+					testTimeout: SMOKE_TIMEOUT_MS,
+					hookTimeout: SMOKE_TIMEOUT_MS,
 					fileParallelism: false
 				}
 			}
