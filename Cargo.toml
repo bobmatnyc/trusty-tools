@@ -173,7 +173,7 @@ trusty-review = { path = "crates/trusty-review", version = "0.36", default-featu
 # `^0.9.0` excluded the crate's own 0.11.0 — in-tree the path override hid it, so
 # only a crates.io consumer (or `cargo publish`) resolved wrong. Guarded now by
 # scripts/check_workspace_dep_versions.sh.
-trusty-console = { path = "crates/trusty-console", version = "0.11" }
+trusty-console = { path = "crates/trusty-console", version = "0.12" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
