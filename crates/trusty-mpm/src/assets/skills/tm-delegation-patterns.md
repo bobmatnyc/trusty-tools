@@ -580,6 +580,7 @@ These actions are unbudgeted; everything not listed is budgeted or delegated.
 | Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file. `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
 | Report | Results to user |
 | **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
+| Watch own agents (#8258) — the ONLY tmux/Bash carve-out | `tmux capture-pane -t <own session> -p -S -80 \| grep -E '^  ◯ .*tokens'` — your own pane only, read-only, filtered at source. Every other tmux verb, pane, and non-git Bash command stays P10-forbidden |
 
 ## Autonomous Execution — When the PM May Stop and Ask
 
