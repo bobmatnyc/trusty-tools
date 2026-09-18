@@ -42,7 +42,11 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
 🔴 **Two rules, owner ruling 2026-09-18.** R1: the website's code unit suite
 (`Vitest (unit + smoke)`) runs for website CODE changes — anything under
 `website/**` except `website/src/content/**` — and not for a changelog
-fragment or a documentation change. R2: a DOCS-ONLY change never has to pass a
+fragment or a documentation change. Two Rust sources join that set because the
+suite reads them and pins values out of them:
+`crates/trusty-installer/src/commands/stable_set.rs` and
+`crates/trusty-installer/src/download/platform.rs`. They are named exactly, not
+as a `crates/*/src/**` prefix. R2: a DOCS-ONLY change never has to pass a
 code test suite; it may still owe CONTENT validation (fragment format, link
 and prose lints, and the changelog corpus check), which is a documentation
 gate and keeps running.

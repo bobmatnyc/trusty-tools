@@ -1283,6 +1283,22 @@ assert_eq "unit: this workflow is its own input" "true" \
 assert_eq "unit: the classifier is its own input" "true" \
   "$(relevance_of unit 'scripts/ci-website-relevance.sh')"
 assert_eq "unit: an empty change set fails closed" "true" "$(relevance_of unit '')"
+# The two Rust sources `site.test.ts` pins values out of. They were named in
+# website-tests.yml's old `paths:` filter, they are code rather than
+# documentation, and a change to either breaks the unit suite directly —
+# commit 819f55cc9 did exactly that on 2026-08-16.
+assert_eq "unit: stable_set.rs is a unit-suite input" "true" \
+  "$(relevance_of unit 'crates/trusty-installer/src/commands/stable_set.rs')"
+assert_eq "unit: platform.rs is a unit-suite input" "true" \
+  "$(relevance_of unit 'crates/trusty-installer/src/download/platform.rs')"
+# …and the list is exact, not a `crates/*/src/**` prefix. A prefix would put
+# the whole website suite back on most Rust PRs, which is the cost #8272 paid.
+assert_eq "unit: another file in the same crate is not" "false" \
+  "$(relevance_of unit 'crates/trusty-installer/src/download/mod.rs')"
+assert_eq "unit: another crate's source is not" "false" \
+  "$(relevance_of unit 'crates/trusty-common/src/host_metrics.rs')"
+assert_eq "unit: a crate CHANGELOG.md is not" "false" \
+  "$(relevance_of unit 'crates/trusty-search/CHANGELOG.md')"
 
 assert_eq "corpus: a changelog fragment is" "true" \
   "$(relevance_of corpus 'crates/trusty-common/changelog.d/8268-x.md')"

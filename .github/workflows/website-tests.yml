@@ -32,7 +32,9 @@
 # WHAT EACH JOB IS RELEVANT TO (scripts/ci-website-relevance.sh owns the rule,
 # docs/reference/ci-gates.md states the policy):
 #
-#   Vitest (unit + smoke)  website/** minus website/src/content/**
+#   Vitest (unit + smoke)  website/** minus website/src/content/**, plus the
+#                          two trusty-installer sources `site.test.ts` pins
+#                          values out of (UNIT_RUST_INPUTS in the classifier)
 #   Changelog corpus       crates/*/changelog.d/**, crates/*/CHANGELOG.md,
 #                          website/src/lib/changelog/**, and the flagship list
 #   Prettier + ESLint      website/** including prose content

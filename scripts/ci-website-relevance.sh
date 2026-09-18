@@ -19,7 +19,9 @@
 #
 #     unit    the website CODE suites (`pnpm run test` — unit + smoke).
 #             Relevant for a change under website/** that is not prose content
-#             (website/src/content/**), or to this script / the workflow.
+#             (website/src/content/**), to this script / the workflow, or to
+#             one of the Rust SOURCE files `site.test.ts` pins values out of
+#             (UNIT_RUST_INPUTS below).
 #     corpus  the real-changelog gate (`pnpm run test:corpus`). Relevant for a
 #             changelog fragment, a crate CHANGELOG.md, the changelog module
 #             itself, or the flagship list that names which crates the corpus
@@ -57,6 +59,23 @@ set -euo pipefail
 SELF_PATH="scripts/ci-website-relevance.sh"
 WORKFLOW_PATH=".github/workflows/website-tests.yml"
 
+# Rust SOURCE files the website unit suite reads and pins values out of:
+# `site.test.ts`'s `STABLE_SET matches stable_set.rs` re-derives the advertised
+# member list from the first, and its platform case re-derives the Tier-1
+# triples from the second. Both were named in website-tests.yml's old `paths:`
+# filter and are code, never documentation — a change to either must still pay
+# for the unit suite. Commit 819f55cc9 took `StableMember::new(` from 7
+# occurrences to 9 and broke this suite on 2026-08-16, which is the whole
+# reason the two paths were listed.
+#
+# An EXACT path list, never a `crates/*/src/**` prefix: every other crate
+# source file reaches no website test, and widening this to a prefix would put
+# the website suite back on most Rust PRs — the cost PR #8272 paid.
+UNIT_RUST_INPUTS="
+crates/trusty-installer/src/commands/stable_set.rs
+crates/trusty-installer/src/download/platform.rs
+"
+
 # emit <mode> <verdict> — the verdict on stdout, and as `relevant=<verdict>`
 # in $GITHUB_OUTPUT when a workflow step is what called this.
 emit() {
@@ -74,6 +93,18 @@ has_prefix() {
   return 1
 }
 
+# is_unit_rust_input <path> — exact membership in UNIT_RUST_INPUTS. Unquoted
+# expansion on purpose: the list is newline-separated and word-splits into one
+# candidate per entry.
+is_unit_rust_input() {
+  local candidate
+  # shellcheck disable=SC2086
+  for candidate in ${UNIT_RUST_INPUTS}; do
+    [ "$1" = "$candidate" ] && return 0
+  done
+  return 1
+}
+
 # is_relevant <mode> <path>
 is_relevant() {
   local mode="$1" p="$2"
@@ -88,6 +119,7 @@ is_relevant() {
     unit)
       has_prefix "$p" "website/src/content/" && return 1
       has_prefix "$p" "website/" && return 0
+      is_unit_rust_input "$p" && return 0
       ;;
     lint)
       has_prefix "$p" "website/" && return 0
