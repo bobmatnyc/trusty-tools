@@ -27,6 +27,9 @@ use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_protection;
 use super::worktree_registry;
 use super::worktree_safety::{DirtyWorktree, inspect_dirt, worktree_remove_command};
+// #7965: the removal and its ref cleanup run bounded.
+use super::git_ceiling::git_output;
+use crate::core::bounded_proc::{BoundedError, run_bounded};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
 /// per-session git worktree (#1845 item 5).
@@ -303,15 +306,34 @@ impl WorktreeRemoval {
 /// `remove_still_removes_a_healthy_worktree`; integration coverage via the
 /// decommission round-trip tests that set up real git worktrees.
 pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
-    remove_session_worktree_within(path, std::time::Duration::from_secs(15 * 60))
+    remove_session_worktree_within(path, WORKTREE_REMOVE_TIMEOUT)
 }
 
-/// RED STUB — replaced by the bounded removal in the next commit (#7965).
+/// Wall-clock ceiling on `git worktree remove --force` (#7965).
+///
+/// Why: the removal deletes the whole working tree, which on a checkout carrying
+/// a build directory legitimately takes minutes, so the 60 s per-call git ceiling
+/// would kill a healthy removal part-way. It is still finite, so a wedged removal
+/// cannot hold the sweep's blocking thread forever.
+/// Test: `remove_session_worktree_keeps_a_worktree_whose_removal_times_out`.
+pub(super) const WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// [`remove_session_worktree`], with the removal itself bounded by
+/// `remove_budget` (#7965).
+///
+/// Why: a test cannot wait out [`WORKTREE_REMOVE_TIMEOUT`], so the budget is a
+/// parameter and the timeout arm is provable.
+/// What: the same gates and outcomes, except `git worktree remove --force` runs
+/// under `remove_budget` and every other git call under the thread's git
+/// ceiling. A removal killed at its budget is [`Kept`](WorktreeRemoval::Kept)
+/// with no classification and no directory fallback: git may have deleted part
+/// of the tree while still registering it.
+/// Test: `remove_session_worktree_keeps_a_worktree_whose_removal_times_out`.
 pub(super) fn remove_session_worktree_within(
     path: &Path,
     remove_budget: std::time::Duration,
 ) -> WorktreeRemoval {
-    let _ = remove_budget;
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
         // previous partial run. Treat as success (idempotent removal).
@@ -387,7 +409,8 @@ pub(super) fn remove_session_worktree_within(
     // #6391: through the hardened builder, which keeps the #1840 OsStr-safe
     // Path args and additionally strips the env vars that would point
     // `git worktree` at a different repository than `-C` names.
-    let out = worktree_remove_command(repo_root, path).output();
+    // #7965: bounded by its own, longer ceiling — see `WORKTREE_REMOVE_TIMEOUT`.
+    let out = run_bounded(worktree_remove_command(repo_root, path), remove_budget);
     match out {
         Ok(o) if o.status.success() => {
             info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
@@ -398,9 +421,9 @@ pub(super) fn remove_session_worktree_within(
             // #4732: git exits 128 for every fatal condition, and `git worktree
             // lock` uses that exit to REFUSE. Classify the reason instead of
             // reading every non-zero exit as permission to delete by hand.
-            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stderr = o.stderr.as_str();
             let verdict =
-                worktree_protection::protection_after_failed_removal(path, repo_root, &stderr);
+                worktree_protection::protection_after_failed_removal(path, repo_root, stderr);
             if let Some(reason) = verdict.refusal() {
                 warn!(
                     path = %path.display(),
@@ -418,6 +441,16 @@ pub(super) fn remove_session_worktree_within(
                 o.status
             );
             remove_unclaimed_directory(path)
+        }
+        Err(BoundedError::TimedOut) => {
+            // #7965: killed mid-removal, the tree may be partly deleted AND still
+            // registered. Never classify it or fall back to a directory removal.
+            let reason = format!(
+                "git worktree remove --force did not finish within {remove_budget:?} and \
+                 was killed; the directory may be partly removed (#7965)"
+            );
+            warn!(path = %path.display(), "decommission: keeping worktree — {reason}");
+            WorktreeRemoval::Kept(reason)
         }
         Err(e) => {
             // #4732: git could not be run at all, so nothing is known about
@@ -472,9 +505,10 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // #7171: through the shared entry point — this runs on every session
         // teardown across the fleet, one of the storm-trigger commands named
         // by the incident.
-        let prune_out = trusty_common::git::command_in(repo_root)
-            .args(["worktree", "prune"])
-            .output();
+        // #7965: bounded by the thread's git ceiling.
+        let mut prune_cmd = trusty_common::git::command_in(repo_root);
+        prune_cmd.args(["worktree", "prune"]);
+        let prune_out = git_output(prune_cmd);
         if let Err(e) = prune_out {
             warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
         }
@@ -496,12 +530,14 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // this module keeps compiling with the `daemon` feature disabled.
         if let Some(session_name) = path.file_name().and_then(|n| n.to_str()) {
             let branch = crate::core::worktree_naming::worktree_branch_for(session_name);
-            let branch_out = std::process::Command::new("git")
+            // #7965: bounded by the thread's git ceiling.
+            let mut branch_cmd = std::process::Command::new("git");
+            branch_cmd
                 .arg("-C")
                 .arg(repo_root)
                 .args(["branch", "-D"])
-                .arg(&branch)
-                .output();
+                .arg(&branch);
+            let branch_out = git_output(branch_cmd);
             match branch_out {
                 Ok(o) if o.status.success() => {
                     info!(
@@ -516,13 +552,13 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
                         path = %path.display(),
                         "decommission: git branch -D {:?} not needed: {}",
                         branch,
-                        String::from_utf8_lossy(&o.stderr).trim()
+                        o.stderr.trim()
                     );
                 }
                 Err(e) => {
                     warn!(
                         path = %path.display(),
-                        "decommission: git branch -D failed to spawn: {e}"
+                        "decommission: git branch -D {e}"
                     );
                 }
             }

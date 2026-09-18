@@ -261,7 +261,14 @@ async fn a_wedged_git_status_neither_hangs_the_orphan_sweep_nor_delays_health() 
     let started = Instant::now();
     let (worst, outcome) = worst_health_gap_during(
         &state,
-        mgr.prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[]),
+        mgr.prune_orphaned_worktrees_within(
+            &fx.repos_root,
+            &[],
+            false,
+            DirtyWorktreePolicy::Skip,
+            &[],
+            Duration::from_secs(2),
+        ),
     )
     .await;
     let elapsed = started.elapsed();

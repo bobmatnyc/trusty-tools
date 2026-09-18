@@ -100,11 +100,12 @@
 //! Test: `worktree_safety_tests`.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde::Serialize;
+
+use super::git_ceiling::{git_output, git_output_with_input};
 
 /// The bookkeeping directory trusty-mpm writes into every managed workspace.
 const TRUSTY_MPM_DIR: &str = ".trusty-mpm";
@@ -843,24 +844,18 @@ fn patch_ids(path: &Path, args: &[&str]) -> Vec<(String, String)> {
     if patch.trim().is_empty() {
         return Vec::new();
     }
-    let Ok(mut child) = git_command(path, &["patch-id", "--stable"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(patch.as_bytes());
-    }
-    let Ok(out) = child.wait_with_output() else {
+    // #7965: bounded by the thread's git ceiling; the runner feeds the patch on
+    // its own thread, so a `patch-id` that never reads cannot block this one.
+    let Ok(out) = git_output_with_input(
+        git_command(path, &["patch-id", "--stable"]),
+        patch.into_bytes(),
+    ) else {
         return Vec::new();
     };
     if !out.status.success() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&out.stdout)
+    out.stdout
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -979,22 +974,25 @@ fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
 /// Why: every check in this module needs the same "ran, exited zero, gave me
 /// stdout" contract, and every deviation from it must surface as an `Err` the
 /// caller turns into DIRTY rather than being swallowed.
-/// What: non-zero exit and spawn failure both become `Err` carrying the
-/// command and git's own stderr; stdout is lossily decoded.
-/// Test: `inspect_dirt_treats_missing_path_as_dirty`.
+/// What: runs through [`git_output`], so the child is killed at this thread's
+/// git ceiling (#7965). A non-zero exit, a spawn failure and a timeout all
+/// become `Err` carrying the command and the reason; stdout is lossily decoded.
+/// Test: `inspect_dirt_treats_missing_path_as_dirty`,
+/// `inspect_dirt_treats_a_timed_out_git_call_as_dirty`.
 pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git_command(dir, args)
-        .output()
-        .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;
+    // #7965: a git that never answers is an `Err`, which every caller in this
+    // module turns into DIRTY.
+    let out = git_output(git_command(dir, args))
+        .map_err(|e| format!("`git {}` {e}", args.join(" ")))?;
     if !out.status.success() {
         return Err(format!(
             "`git {}` failed ({}): {}",
             args.join(" "),
             out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            out.stderr.trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 /// Build a `git` invocation that cannot be steered by ambient config or
@@ -1119,13 +1117,23 @@ pub(crate) fn dirt_blocks_removal(
 /// NOT the fail-safe gate; that role belongs to [`inspect_dirt`], which fails
 /// toward DIRTY. Returns `true` only when `candidate`'s canonicalized path
 /// appears among the registered worktrees.
+///
+/// A listing that TIMED OUT returns `false` (#7965). Git is present and wedged,
+/// so the registry state is unknown rather than unavailable, and a sweep must
+/// not delete a path it could not ask about.
 /// Test: `git_worktree_list_agrees_true_for_real_worktree`,
 ///       `git_worktree_list_agrees_false_for_untracked_dir`,
 ///       `git_worktree_list_agrees_true_for_worktree_registered_to_parent_repo`
-///       (#4207 — fails against the grandparent rule).
+///       (#4207 — fails against the grandparent rule),
+///       `git_worktree_list_agrees_false_when_the_listing_times_out` (#7965).
 pub(crate) fn git_worktree_list_agrees(candidate: &Path) -> bool {
-    let Some(worktrees) = super::worktree_registry::list_registered_worktrees(candidate) else {
-        return true; // best-effort: an unanswerable probe must never block a delete
+    use super::worktree_registry::{RegistryProbe, probe_registered_worktrees};
+    let worktrees = match probe_registered_worktrees(candidate) {
+        RegistryProbe::Listed(worktrees) => worktrees,
+        // #7965: wedged, not missing — keep the candidate.
+        RegistryProbe::TimedOut => return false,
+        // best-effort: an unanswerable probe must never block a delete
+        RegistryProbe::Unanswerable => return true,
     };
     let canonical_candidate =
         std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());

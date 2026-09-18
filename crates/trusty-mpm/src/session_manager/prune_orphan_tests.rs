@@ -16,6 +16,8 @@
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use super::*;
+// #7965: the gate itself moved out of `prune.rs` with the sweep body.
+use crate::session_manager::worktree_safety::git_worktree_list_agrees;
 
 /// A live session's worktree must never be returned as an orphan (#1840).
 ///

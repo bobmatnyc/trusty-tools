@@ -52,7 +52,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::git_ceiling::git_output;
 use super::worktree_safety::git_command;
+use crate::core::bounded_proc::BoundedError;
 
 /// The bare-clone checkout trusty-mpm provisions alongside a managed project.
 ///
@@ -269,17 +271,17 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
 /// Test: `registry_root_for_linked_worktree_is_the_owning_checkout`,
 /// `registry_root_for_non_repo_is_none`.
 pub(crate) fn registry_root_for(anchor: &Path) -> Option<PathBuf> {
-    let out = git_command(
+    // #7965: bounded by the thread's git ceiling. A timeout is `None`, which
+    // every caller already treats as "no answer", never as a guessed path.
+    let out = git_output(git_command(
         anchor,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .output()
+    ))
     .ok()?;
     if !out.status.success() {
         return None;
     }
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let common_dir = PathBuf::from(raw.trim());
+    let common_dir = PathBuf::from(out.stdout.trim());
     if common_dir.as_os_str().is_empty() {
         return None;
     }
@@ -306,13 +308,43 @@ pub(crate) fn registry_root_for(anchor: &Path) -> Option<PathBuf> {
 /// Test: `list_registered_worktrees_reports_a_real_worktree`,
 /// `list_registered_worktrees_none_outside_a_repo`.
 pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredWorktree>> {
-    let out = git_command(anchor, &["worktree", "list", "--porcelain"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    // #7965: a timeout is `None` here, like any other unanswerable probe.
+    match probe_registered_worktrees(anchor) {
+        RegistryProbe::Listed(worktrees) => Some(worktrees),
+        RegistryProbe::Unanswerable | RegistryProbe::TimedOut => None,
     }
-    Some(parse_worktree_list(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// What `git worktree list` answered for an anchor (#7965).
+///
+/// Why: a caller deciding whether to delete must tell "git could not be run or
+/// refused" from "git is there but did not answer in time". The first can be a
+/// best-effort pass; the second leaves the registry state unknown.
+/// Test: `git_worktree_list_agrees_false_when_the_listing_times_out`.
+pub(crate) enum RegistryProbe {
+    /// Git answered; the parsed registry.
+    Listed(Vec<RegisteredWorktree>),
+    /// Git could not be run, or exited non-zero.
+    Unanswerable,
+    /// Git was killed at this thread's git ceiling.
+    TimedOut,
+}
+
+/// `git -C <anchor> worktree list --porcelain`, bounded by the git ceiling
+/// (#7965).
+///
+/// What: [`RegistryProbe::Listed`] on a zero exit, [`RegistryProbe::TimedOut`]
+/// when the child was killed at the ceiling, [`RegistryProbe::Unanswerable`]
+/// for a spawn failure or a non-zero exit.
+/// Test: `git_worktree_list_agrees_false_when_the_listing_times_out`,
+/// `list_registered_worktrees_reports_a_real_worktree`.
+pub(crate) fn probe_registered_worktrees(anchor: &Path) -> RegistryProbe {
+    match git_output(git_command(anchor, &["worktree", "list", "--porcelain"])) {
+        Ok(out) if out.status.success() => RegistryProbe::Listed(parse_worktree_list(&out.stdout)),
+        Ok(_) => RegistryProbe::Unanswerable,
+        Err(BoundedError::TimedOut) => RegistryProbe::TimedOut,
+        Err(_) => RegistryProbe::Unanswerable,
+    }
 }
 
 /// Every git-registered worktree living under `repos_root` (#4207 slice 1).
