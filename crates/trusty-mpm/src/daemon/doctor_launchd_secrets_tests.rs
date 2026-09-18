@@ -100,6 +100,112 @@ fn scan_reports_an_unparseable_plist() {
     assert!(findings[0].unreadable.is_some(), "must not read as clean");
 }
 
+/// Why: a plist tm cannot OPEN is the same false negative as one it cannot
+/// parse — the scan learned nothing about it and must not drop it.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn scan_reports_an_unreadable_plist() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (tmp, path) = home_with("com.trusty.mpm.plist", &exposed_plist());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let findings = scan_launch_agents(tmp.path()).expect("scan");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("restore");
+
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].keys.is_empty());
+    let why = findings[0]
+        .unreadable
+        .as_ref()
+        .expect("an unopenable plist must not read as clean");
+    assert_value_never_echoed(why);
+}
+
+/// Why: `read_dir` failing for any reason other than "absent" means the scan
+/// never ran. `Ok(vec![])` there would render as a clean host.
+/// Test: this test.
+#[test]
+fn scan_errors_when_the_directory_cannot_be_listed() {
+    let tmp = TempDir::new().expect("temp home");
+    let library = tmp.path().join("Library");
+    std::fs::create_dir_all(&library).expect("create Library");
+    // A FILE where the directory belongs: `read_dir` returns ENOTDIR, which is
+    // neither "absent" nor listable.
+    std::fs::write(library.join("LaunchAgents"), "not a directory").expect("write");
+
+    assert!(
+        scan_launch_agents(tmp.path()).is_err(),
+        "an unlistable directory must not read as an empty scan"
+    );
+}
+
+/// Why: the row's own fail-open arm — the directory error must surface as
+/// UNKNOWN, never as the green "no plaintext credential in 0 plist(s)".
+/// Test: this test.
+#[test]
+fn row_is_unknown_when_the_directory_cannot_be_listed() {
+    let tmp = TempDir::new().expect("temp home");
+    let library = tmp.path().join("Library");
+    std::fs::create_dir_all(&library).expect("create Library");
+    std::fs::write(library.join("LaunchAgents"), "not a directory").expect("write");
+
+    let check = check_launchd_plist_secrets(tmp.path());
+    assert_eq!(check.status, CheckStatus::Unknown);
+    assert!(check.message.contains("UNKNOWN"), "{}", check.message);
+}
+
+/// Why: and the repair's — `--fix` must report the directory it could not read
+/// as a failed step, not as "nothing to do".
+/// Test: this test.
+#[test]
+fn repair_fails_loudly_when_the_directory_cannot_be_listed() {
+    let tmp = TempDir::new().expect("temp home");
+    let library = tmp.path().join("Library");
+    std::fs::create_dir_all(&library).expect("create Library");
+    std::fs::write(library.join("LaunchAgents"), "not a directory").expect("write");
+
+    let steps = repair_launchd_plist_secrets(tmp.path(), RepairMode::Apply);
+    assert_eq!(steps.len(), 1);
+    assert!(
+        matches!(steps[0].status, StepStatus::Failed(_)),
+        "an unlistable directory must fail, got {:?}",
+        steps[0].status
+    );
+    assert!(!steps[0].changed());
+}
+
+/// Why: ranking Fail above Unknown must not DELETE the unknown — an operator
+/// reading the failing row still has to learn which files went unjudged.
+/// Test: this test.
+#[test]
+fn row_fail_still_names_the_plists_it_could_not_judge() {
+    let (tmp, _) = home_with("com.trusty.mpm.plist", &exposed_plist());
+    let broken = "<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>\n";
+    std::fs::write(
+        tmp.path()
+            .join("Library/LaunchAgents/com.trusty.search.plist"),
+        broken,
+    )
+    .expect("write second plist");
+
+    let check = check_launchd_plist_secrets(tmp.path());
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(
+        check.message.contains("OPENROUTER_API_KEY"),
+        "{}",
+        check.message
+    );
+    assert!(
+        check.message.contains("com.trusty.search.plist"),
+        "the unjudged plist must still be named: {}",
+        check.message
+    );
+    assert_value_never_echoed(&check.message);
+}
+
 /// The #8236 row guard: a plist generated from inputs containing a credential
 /// must FAIL the diagnostic, and the message must name the key alone.
 ///

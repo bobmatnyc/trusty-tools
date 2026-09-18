@@ -242,7 +242,8 @@ pub mod launchd;
 /// installed plist.
 /// Deliberately NOT macOS-gated, unlike `launchd`, so `tm doctor`'s scan and
 /// the detection tests build on Linux CI too.
-/// Test: `cargo test -p trusty-common --features unconditional-only launchd_secrets`.
+/// Test: `credential_keys_are_detected`,
+/// `scrub_removes_the_credential_entry_and_keeps_the_rest`.
 pub mod launchd_secrets;
 
 /// Label-correct LaunchAgent activation with legacy eviction and rollback

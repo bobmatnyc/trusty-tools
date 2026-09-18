@@ -11,6 +11,21 @@ const FAKE_API_KEY: &str = "sk-or-v1-0000000000000000000000000000FAKE";
 /// A fake Telegram bot-token-shaped value, for the no-vendor-prefix path.
 const FAKE_BOT_TOKEN: &str = "1234567890:AAFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE";
 
+/// Assert a rendered error or finding never carries the fixture's value.
+///
+/// Why: every error arm here reports a file the scan could not read, and the
+/// unreadable region is exactly the region that may hold the credential.
+fn assert_value_never_echoed(text: &str) {
+    assert!(
+        !text.contains(FAKE_API_KEY),
+        "output must name the key, never the value: {text}"
+    );
+    assert!(
+        !text.contains("sk-or-"),
+        "output must not carry a credential prefix: {text}"
+    );
+}
+
 /// A generated unit carrying one credential entry among ordinary tunables.
 fn plist_with_credential() -> String {
     format!(
@@ -271,6 +286,58 @@ fn scrub_reports_a_key_with_no_value_element() {
         "was: {}",
         err.reason
     );
+}
+
+/// Why: the third false-negative arm — `EnvironmentVariables` announced and no
+/// `<dict>` anywhere after it. Returning "clean" here would pass a document
+/// whose environment block the scan never located.
+/// Test: this test.
+#[test]
+fn scrub_reports_environment_variables_with_no_dict() {
+    let xml = "<plist version=\"1.0\">\n<key>EnvironmentVariables</key>\n  \
+               <string>truncated</string>\n</plist>\n";
+    let err = scrub_plist_credential_env(xml).expect_err("a dictless environment is an error");
+    assert!(
+        err.reason.contains("not followed by a <dict>"),
+        "was: {}",
+        err.reason
+    );
+}
+
+/// Why: a `<key>` that never closes means the scan cannot even read the name
+/// of the variable, let alone decide whether it is a credential.
+/// Test: this test.
+#[test]
+fn scrub_reports_an_unterminated_key() {
+    let xml = "<key>EnvironmentVariables</key>\n<dict>\n<key>OPENROUTER_API_KEY\n\
+               <string>x</string>\n</dict>\n";
+    let err = scrub_plist_credential_env(xml).expect_err("an unterminated key is an error");
+    assert!(
+        err.reason.contains("<key> is unterminated"),
+        "was: {}",
+        err.reason
+    );
+    assert_value_never_echoed(&format!("{err}"));
+}
+
+/// Why: the last arm of the pairing walk — a value element that opens and
+/// never closes inside the dict. The credential is in that unterminated
+/// element, so a silent pass is the exact false negative this module exists to
+/// prevent.
+/// Test: this test.
+#[test]
+fn scrub_reports_a_value_element_with_no_closing_tag() {
+    let xml = format!(
+        "<key>EnvironmentVariables</key>\n<dict>\n<key>OPENROUTER_API_KEY</key>\n\
+         <string>{FAKE_API_KEY}\n</dict>\n"
+    );
+    let err = scrub_plist_credential_env(&xml).expect_err("an unterminated value is an error");
+    assert!(
+        err.reason.contains("no value element"),
+        "was: {}",
+        err.reason
+    );
+    assert_value_never_echoed(&format!("{err}"));
 }
 
 /// Why: a unit with no environment at all is the common case and must parse.

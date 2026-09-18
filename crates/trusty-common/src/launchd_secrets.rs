@@ -310,7 +310,8 @@ pub fn plist_credential_env_keys(xml: &str) -> Result<Vec<String>, PlistScrubErr
 /// Test: `scrub_removes_the_credential_entry_and_keeps_the_rest`,
 /// `scrub_is_byte_identical_when_clean`,
 /// `scrub_reports_an_unterminated_environment_dict`,
-/// `scrub_reports_a_key_with_no_value_element`.
+/// `scrub_reports_a_key_with_no_value_element`,
+/// `scrub_reports_an_unterminated_key`.
 pub fn scrub_plist_credential_env(xml: &str) -> Result<ScrubbedPlist, PlistScrubError> {
     let Some((start, end)) = env_dict_span(xml)? else {
         return Ok(ScrubbedPlist {
@@ -356,6 +357,7 @@ pub fn scrub_plist_credential_env(xml: &str) -> Result<ScrubbedPlist, PlistScrub
 /// When the key is present but its dict never opens or never closes.
 ///
 /// Test: `scrub_reports_an_unterminated_environment_dict`,
+/// `scrub_reports_environment_variables_with_no_dict`,
 /// `scrub_ignores_keys_outside_the_environment_dict`.
 fn env_dict_span(xml: &str) -> Result<Option<(usize, usize)>, PlistScrubError> {
     let Some(key_at) = xml.find("<key>EnvironmentVariables</key>") else {
@@ -405,6 +407,7 @@ fn env_dict_span(xml: &str) -> Result<Option<(usize, usize)>, PlistScrubError> {
 /// When no element follows the key, or its closing tag is absent.
 ///
 /// Test: `scrub_reports_a_key_with_no_value_element`,
+/// `scrub_reports_a_value_element_with_no_closing_tag`,
 /// `scrub_removes_a_self_closing_value`.
 fn value_element_end(xml: &str, from: usize, end: usize) -> Result<usize, PlistScrubError> {
     let missing = || PlistScrubError::new("an EnvironmentVariables <key> has no value element");

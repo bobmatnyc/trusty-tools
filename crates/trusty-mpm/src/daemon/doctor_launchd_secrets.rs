@@ -70,11 +70,15 @@ impl PlistFinding {
 /// [`scrub_plist_credential_env`] over it, discarding the rewrite. A file that
 /// cannot be read or parsed yields a finding with `unreadable` set — never a
 /// silent skip, because "could not read" is the one answer that must not
-/// render as clean. `Err` only when the directory itself cannot be listed;
-/// an ABSENT directory is `Ok(vec![])` (a host with no LaunchAgents has no
-/// exposure).
+/// render as clean. `Err` when the directory cannot be listed, or when any
+/// single entry in it cannot be resolved — an entry dropped from the walk is
+/// a file the scan did not judge, and the caller has to hear that as UNKNOWN
+/// rather than as one fewer clean plist. An ABSENT directory is `Ok(vec![])`
+/// (a host with no LaunchAgents has no exposure).
 /// Test: `scan_names_the_key_not_the_value`, `scan_reports_an_unparseable_plist`,
-/// `scan_ignores_foreign_plists`, `scan_is_empty_without_a_launch_agents_dir`.
+/// `scan_reports_an_unreadable_plist`, `scan_ignores_foreign_plists`,
+/// `scan_is_empty_without_a_launch_agents_dir`,
+/// `scan_errors_when_the_directory_cannot_be_listed`.
 pub fn scan_launch_agents(home: &Path) -> std::io::Result<Vec<PlistFinding>> {
     let dir = home.join("Library/LaunchAgents");
     let entries = match std::fs::read_dir(&dir) {
@@ -84,11 +88,16 @@ pub fn scan_launch_agents(home: &Path) -> std::io::Result<Vec<PlistFinding>> {
     };
 
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+    for entry in entries {
+        // #8236: `?`, never `.flatten()` — a dropped entry is a plist nobody
+        // judged, and the scan would report the host clean without it.
+        let path = entry?.path();
+        // Lossy, not `to_str()` — a name this cannot decode would be SKIPPED by
+        // a `?`-less `to_str()` arm, which is the same silent drop as above.
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !name.starts_with(TRUSTY_PLIST_PREFIX) || !name.ends_with(".plist") {
             continue;
         }
@@ -136,7 +145,8 @@ fn finding_for(path: PathBuf, xml: &str) -> PlistFinding {
 /// plist could not be read or parsed, because a scan that did not run has not
 /// shown the host clean. `Ok` otherwise.
 /// Test: `row_fails_and_names_the_key_not_the_value`, `row_is_ok_when_clean`,
-/// `row_is_unknown_when_a_plist_cannot_be_parsed`.
+/// `row_is_unknown_when_a_plist_cannot_be_parsed`,
+/// `row_is_unknown_when_the_directory_cannot_be_listed`.
 pub(crate) fn check_launchd_plist_secrets(home: &Path) -> DoctorCheck {
     match scan_launch_agents(home) {
         Ok(findings) => build_row(&findings),
@@ -156,30 +166,13 @@ pub(crate) fn check_launchd_plist_secrets(home: &Path) -> DoctorCheck {
 ///
 /// Why: keeps the three arms unit-testable without a real home directory.
 /// What: see [`check_launchd_plist_secrets`]. A credential found outranks an
-/// unreadable file — a confirmed exposure is worse news than an unknown one.
+/// unreadable file — a confirmed exposure is worse news than an unknown one —
+/// but the Fail message still NAMES the files it could not judge, so ranking
+/// the statuses never drops the unjudged file from the report.
 /// Test: `row_fails_and_names_the_key_not_the_value`, `row_is_ok_when_clean`,
-/// `row_is_unknown_when_a_plist_cannot_be_parsed`.
+/// `row_is_unknown_when_a_plist_cannot_be_parsed`,
+/// `row_fail_still_names_the_plists_it_could_not_judge`.
 fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
-    let exposed: Vec<&PlistFinding> = findings.iter().filter(|f| !f.keys.is_empty()).collect();
-    if !exposed.is_empty() {
-        let detail = exposed
-            .iter()
-            .map(|f| format!("{} ({})", f.path.display(), f.keys.join(", ")))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Fail,
-            format!(
-                "a LaunchAgent plist holds a plaintext credential — the file is \
-                 user-readable and lands in every backup: {detail}. Run \
-                 `tm doctor --fix --yes` to remove the entries, then ROTATE those \
-                 credentials and supply them at runtime (process env, `.env.local`, \
-                 or the 0600 credential store)"
-            ),
-        );
-    }
-
     let unreadable: Vec<String> = findings
         .iter()
         .filter_map(|f| {
@@ -188,6 +181,38 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
                 .map(|why| format!("{} ({why})", f.path.display()))
         })
         .collect();
+
+    let exposed: Vec<&PlistFinding> = findings.iter().filter(|f| !f.keys.is_empty()).collect();
+    if !exposed.is_empty() {
+        let detail = exposed
+            .iter()
+            .map(|f| format!("{} ({})", f.path.display(), f.keys.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        // #8236: a confirmed exposure outranks an unknown one, but it never
+        // hides it — the unjudged files ride along in the same message.
+        let unjudged = if unreadable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ". {} further plist(s) could not be judged at all: {}",
+                unreadable.len(),
+                unreadable.join("; ")
+            )
+        };
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Fail,
+            format!(
+                "a LaunchAgent plist holds a plaintext credential — the file is \
+                 user-readable and lands in every backup: {detail}. Run \
+                 `tm doctor --fix --yes` to remove the entries, then ROTATE those \
+                 credentials and supply them at runtime (process env, `.env.local`, \
+                 or the 0600 credential store){unjudged}"
+            ),
+        );
+    }
+
     if !unreadable.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,
@@ -230,6 +255,7 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
 /// Test: `repair_plans_without_writing`, `repair_removes_the_entry`,
 /// `repair_fails_loudly_on_an_unparseable_plist`,
 /// `repair_fails_loudly_when_the_plist_is_unwritable`,
+/// `repair_fails_loudly_when_the_directory_cannot_be_listed`,
 /// `repair_produces_no_steps_for_a_clean_host`.
 pub fn repair_launchd_plist_secrets(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let findings = match scan_launch_agents(home) {
