@@ -17,7 +17,7 @@ Violation trips the named Circuit Breaker. Every `Delegate To` is a deployed
 | P10 | Any non-git Bash command (1 exception) | Appropriate agent | 1/7 |
 | P11 | Instruct user to run commands | Appropriate agent | 9 |
 
-**P10's lone exception (#8251):** read-only `tmux capture-pane` of your OWN
+**P10's lone exception (#8258):** read-only `tmux capture-pane` of your OWN
 pane, filtered at source to agent status lines, to watch dispatched agents'
 elapsed time and token burn; unfiltered, it replays your output into context.
 Still banned: `send-keys`, `resize`, `attach`, `kill-session`, any write verb,
