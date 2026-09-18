@@ -101,15 +101,21 @@ run_or_cargo() {
     tcmd="gtimeout"
   fi
 
+  # The caller runs under `set -e` (this file is sourced, not exec'd), so a
+  # bare failing command right here would trigger errexit and exit the shell
+  # BEFORE the `rc=$?` assignment below ever ran — silently dropping both the
+  # named timeout message and the missing-binary summary this function exists
+  # to print. `&& rc=0 || rc=$?` keeps the failure inside a tested conditional,
+  # which is what `set -e` treats as "already handled".
   local rc=0
   if [ -n "$tcmd" ]; then
     CARGO_TARGET_DIR="$target_dir" "$tcmd" "$TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS" \
-      cargo run --quiet --locked "${offline_flags[@]}" -p "$crate" --bin "$cargo_bin" -- "$@"
-    rc=$?
+      cargo run --quiet --locked "${offline_flags[@]}" -p "$crate" --bin "$cargo_bin" -- "$@" \
+      && rc=0 || rc=$?
   else
     CARGO_TARGET_DIR="$target_dir" _run_or_cargo_bash_timeout "$TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS" \
-      cargo run --quiet --locked "${offline_flags[@]}" -p "$crate" --bin "$cargo_bin" -- "$@"
-    rc=$?
+      cargo run --quiet --locked "${offline_flags[@]}" -p "$crate" --bin "$cargo_bin" -- "$@" \
+      && rc=0 || rc=$?
   fi
 
   if [ "$rc" -eq 124 ]; then
