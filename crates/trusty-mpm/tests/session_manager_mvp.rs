@@ -70,6 +70,13 @@ struct RecordingTmux {
     /// Why: regression guard asserting the tmux session is created in the
     /// provisioned workspace, not $HOME.
     create_calls: std::sync::Mutex<Vec<(String, String)>>,
+    /// #8233: what this fake shell has PRINTED.
+    ///
+    /// The managed launch now confirms the pane executes what it is typed, by
+    /// running a short `echo` and waiting for its OUTPUT, so a driver that
+    /// prints nothing is an unresponsive shell and every resume here would be
+    /// refused for a reason the double invented. See [`RecordingTmux::run`].
+    printed: std::sync::Mutex<String>,
 }
 
 impl RecordingTmux {
@@ -77,7 +84,24 @@ impl RecordingTmux {
         Arc::new(Self {
             sends: std::sync::Mutex::new(Vec::new()),
             create_calls: std::sync::Mutex::new(Vec::new()),
+            printed: std::sync::Mutex::new(String::new()),
         })
+    }
+
+    /// Evaluate `text` as a shell would, returning `true` when it was a probe.
+    ///
+    /// What: `echo <word>` prints `<word>` with its shell quoting removed —
+    /// which is what makes the probe's PRINTED text differ from its TYPED text.
+    /// Probe lines are not recorded in `sends`, so every assertion on what the
+    /// adapter typed still sees exactly the launch lines it always did.
+    fn run(&self, text: &str) -> bool {
+        let Some(word) = text.strip_prefix("echo ") else {
+            return false;
+        };
+        let mut out = self.printed.lock().unwrap();
+        out.push_str(&word.replace('"', "").replace('\'', ""));
+        out.push('\n');
+        true
     }
 }
 
@@ -93,14 +117,23 @@ impl ManagedTmuxDriver for RecordingTmux {
         Ok(())
     }
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.run(text) {
+            return Ok(());
+        }
         self.sends
             .lock()
             .unwrap()
             .push((name.to_owned(), text.to_owned()));
         Ok(())
     }
+    fn send_line_to_pane(&self, name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        self.send_line(name, text)
+    }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-        Ok(String::new())
+        Ok(self.printed.lock().unwrap().clone())
+    }
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
@@ -959,10 +992,22 @@ async fn resume_managed_launches_despite_incomplete_deployment() {
         let _ = std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o755));
     }
 
-    let record = result.expect(
-        "resume_managed must still return Ok even when the deployment gate \
-         reports incomplete (P0 #2172) — the gate must never abort the handler",
+    // #8233 finding 7: `resume_managed` now RETURNS the failure it recorded
+    // instead of reporting `Ok` on a session it just marked errored, so a
+    // runtime adapter that cannot launch here (no real tmux/claude in CI) is
+    // legitimately an `Err`. The P0 property is unchanged and is asserted
+    // directly rather than through an `Ok` proxy: whatever happened, the
+    // deployment gate must not be what stopped it.
+    let failure = match &result {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        !failure.contains("deployment incomplete"),
+        "the #2158 deployment-completeness gate must be non-blocking (#2172): \
+         it must never be the reason a resume fails; got: {failure}"
     );
+    let record = mgr.get(&id).await.expect("the record survives the resume");
     assert!(
         !record.task.contains("deployment incomplete"),
         "the #2158 deployment-completeness gate must be non-blocking (#2172): \

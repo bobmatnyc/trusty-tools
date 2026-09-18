@@ -43,15 +43,41 @@ fn env_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|p| p.into_inner())
 }
 
-/// Records every line the adapter asks tmux to type, session- or pane-scoped.
+/// Records every line the adapter asks tmux to type, session- or pane-scoped,
+/// and behaves as a minimal SHELL so the pre-launch handshake can pass.
+///
+/// #8233: `deliver` now confirms the pane executes what it is typed before it
+/// types a launch, by running a short `echo` and waiting for its OUTPUT. A
+/// recorder that prints nothing is an unresponsive shell, so the launch this
+/// file measures would never be typed at all. [`Recorder::run`] evaluates the
+/// one construct the handshake uses — `echo <word>` — and keeps those probe
+/// lines out of [`Recorder::typed`], which therefore still holds exactly the
+/// launch lines whose length is under test.
 #[derive(Default)]
 struct Recorder {
     typed: Mutex<Vec<String>>,
+    printed: Mutex<String>,
 }
 
 impl Recorder {
     fn typed(&self) -> Vec<String> {
         self.typed.lock().expect("recorder mutex").clone()
+    }
+
+    /// Evaluate `text` as a shell would, returning `true` when it was a probe.
+    ///
+    /// What: an `echo <word>` prints `<word>` with its shell quoting removed —
+    /// which is exactly what makes the probe's PRINTED text differ from its
+    /// TYPED text, so scraping for the output cannot be satisfied by the echo
+    /// of the keystrokes. Anything else is a launch line and is recorded.
+    fn run(&self, text: &str) -> bool {
+        let Some(word) = text.strip_prefix("echo ") else {
+            return false;
+        };
+        let mut out = self.printed.lock().expect("recorder mutex");
+        out.push_str(&word.replace('"', "").replace('\'', ""));
+        out.push('\n');
+        true
     }
 }
 
@@ -63,6 +89,9 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.run(text) {
+            return Ok(());
+        }
         self.typed
             .lock()
             .expect("recorder mutex")
@@ -70,6 +99,9 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_line_to_pane(&self, _name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        if self.run(text) {
+            return Ok(());
+        }
         self.typed
             .lock()
             .expect("recorder mutex")
@@ -77,7 +109,10 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-        Ok(String::new())
+        Ok(self.printed.lock().expect("recorder mutex").clone())
+    }
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
