@@ -268,6 +268,11 @@ pub struct SessionManager {
     /// touching) for a session whose root has not changed. In-memory only,
     /// like `slots` and `residency_generation` above. See `residency_state.rs`.
     pub(crate) residency_cache: RwLock<HashMap<ManagedSessionId, ResidencyCacheEntry>>,
+    /// #8233: the runtime relaunch the AUTOMATIC resume paths use. Installed
+    /// once by the daemon; `None` everywhere else, which keeps `resume_auto`
+    /// behaving exactly as it did. See `relaunch.rs`.
+    pub(crate) relauncher:
+        std::sync::OnceLock<std::sync::Arc<dyn super::relaunch::RuntimeRelauncher>>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -309,6 +314,7 @@ impl SessionManager {
             resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
             residency_generation: AtomicU64::new(0),
             residency_cache: RwLock::new(HashMap::new()),
+            relauncher: std::sync::OnceLock::new(),
         })
     }
 

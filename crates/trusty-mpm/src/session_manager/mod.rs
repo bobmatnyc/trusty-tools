@@ -27,6 +27,7 @@ pub mod naming;
 mod numbering;
 pub mod prune;
 pub mod reactivate;
+pub mod relaunch;
 mod reconcile;
 pub mod record;
 pub mod rename;

@@ -25,6 +25,7 @@ use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
+pub(crate) mod auto_relaunch;
 pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;

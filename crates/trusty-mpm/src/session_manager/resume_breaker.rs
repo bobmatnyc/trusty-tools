@@ -447,6 +447,16 @@ impl super::SessionManager {
     /// does not.
     /// Test: `the_supervisor_parks_a_flapping_session_after_k_cycles` in
     /// `resume_breaker_tests.rs`.
+    ///
+    /// #8233 (owner ruling 2026-09-18): `resume_inner` only prepares the PANE.
+    /// It marked the record `Active` and returned, so an auto-resume whose pane
+    /// had died produced a bare shell behind an `Active` record and every later
+    /// operator resume refused with "cannot resume a session in state 'active'".
+    /// The installed [`super::relaunch::RuntimeRelauncher`] runs the same
+    /// adapter path and the same post-send verification the interactive resume
+    /// uses; a relaunch that produces no verified runtime demotes the record to
+    /// `Errored` and fails the call, so `Active` after this function means a
+    /// runtime was SEEN.
     pub async fn resume_auto(
         &self,
         id: &ManagedSessionId,
@@ -457,6 +467,18 @@ impl super::SessionManager {
             .await
             .note_auto_resume(id, Utc::now())
             .await;
+        if let Some(relauncher) = self.relauncher()
+            && let Err(msg) = relauncher.relaunch(&record).await
+        {
+            let msg = format!("auto-resume relaunch did not take: {msg}");
+            // Fail-closed: the record must not stay `Active` behind a pane with
+            // nothing in it. `mark_errored` is best-effort in the sense that a
+            // store failure must not mask the relaunch failure below.
+            if let Err(e) = self.mark_errored(id, &msg).await {
+                tracing::error!(id = %id, "could not mark a failed auto-resume errored: {e}");
+            }
+            return Err(super::manager::ManagedError::TmuxUnavailable(msg));
+        }
         Ok(record)
     }
 
