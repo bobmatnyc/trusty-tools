@@ -1343,7 +1343,15 @@ fn spawn_errors_when_the_line_is_refused() {
     let err = adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect_err("a refused send must not report a successful spawn");
-    assert!(matches!(err, RuntimeError::TmuxUnavailable(_)), "{err}");
+    // #8233 review round 2: a driver that refuses every send is a pane nothing
+    // is reading, and the pre-launch handshake now catches that BEFORE a spec
+    // carrying credentials is written — a strictly earlier refusal than the
+    // send-time `TmuxUnavailable` this used to produce.
+    assert!(matches!(err, RuntimeError::Spawn(_)), "{err}");
+    assert!(
+        err.to_string().contains("refusing to launch into pane"),
+        "the refusal must name the pane it declined: {err}"
+    );
 }
 
 /// #1744/#2013: a stored id that still resolves on disk resumes by id.

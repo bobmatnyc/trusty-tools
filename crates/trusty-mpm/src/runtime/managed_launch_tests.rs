@@ -430,6 +430,11 @@ struct Recorder {
     /// fail for a reason the double invented. Answering the probe — and only
     /// the probe — makes this a shell that works.
     pane_text: Mutex<String>,
+    /// #8233: every reset and every typed line IN ORDER, as `reset:<pane>` and
+    /// `line:<text>`. Two separate logs cannot show that the interrupt happened
+    /// BEFORE the keystrokes, which is the whole property the reset has —
+    /// flushing a wedged parser after typing into it protects nothing.
+    events: Mutex<Vec<String>>,
 }
 
 impl Recorder {
@@ -439,7 +444,21 @@ impl Recorder {
             fail_first,
             interrupts: Mutex::new(Vec::new()),
             pane_text: Mutex::new("~ %".to_owned()),
+            events: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A Recorder whose pane is WEDGED at a `quote>` continuation prompt until
+    /// it is interrupted — the live `tm-apex-companion` state.
+    fn wedged() -> Self {
+        let r = Self::new(0);
+        *r.pane_text.lock().expect("recorder mutex") = "quote>".to_owned();
+        r
+    }
+
+    /// Every reset and typed line, in the order they happened.
+    fn events(&self) -> Vec<String> {
+        self.events.lock().expect("recorder mutex").clone()
     }
 
     /// Answer a probe line as a working shell would, without recording it, so
@@ -449,6 +468,11 @@ impl Recorder {
             return false;
         };
         let mut pane = self.pane_text.lock().expect("recorder mutex");
+        // A wedged parser swallows the probe as more of its open construct, so
+        // nothing is printed until an interrupt has cleared it.
+        if pane.trim_end().ends_with("quote>") {
+            return true;
+        }
         pane.push('\n');
         pane.push_str(&out);
         true
@@ -472,6 +496,10 @@ impl ManagedTmuxDriver for Recorder {
         if self.answer_probe(text) {
             return Ok(());
         }
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push(format!("line:{text}"));
         let mut log = self.sends.lock().expect("recorder mutex");
         log.push(text.to_owned());
         if log.len() <= self.fail_first {
@@ -483,6 +511,10 @@ impl ManagedTmuxDriver for Recorder {
         if self.answer_probe(text) {
             return Ok(());
         }
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push(format!("line:{text}"));
         let mut log = self.sends.lock().expect("recorder mutex");
         log.push(text.to_owned());
         if log.len() <= self.fail_first {
@@ -491,6 +523,11 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push("reset:session".to_owned());
+        *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
         self.interrupts
             .lock()
             .expect("recorder mutex")
@@ -498,6 +535,11 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_interrupt_to_pane(&self, name: &str, pane: &str) -> Result<(), ManagedError> {
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push(format!("reset:{pane}"));
+        *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
         self.interrupts
             .lock()
             .expect("recorder mutex")
@@ -534,10 +576,13 @@ fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
     );
 
     // The spec the line names must still be there for the shim to consume.
+    // #8233: the directory also holds this session's `<id>.launch` pointer,
+    // which names the launch the sentinel is keyed on. Specs are the `.json`.
     let written: Vec<_> = std::fs::read_dir(dir.path())
         .expect("readdir")
         .filter_map(Result::ok)
         .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     assert_eq!(written.len(), 1, "one spec per launch: {written:?}");
     assert_eq!(LaunchSpec::verify(&written[0]).expect("verify"), spec);
@@ -545,23 +590,37 @@ fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
 
 /// #8233 review (defence in depth, independent of line length): the length
 /// guard makes THIS line un-truncatable, but it cannot undo a pane an earlier
-/// launch already wedged. A shell at a PS2 continuation prompt swallows whatever
-/// is typed next as more of the open construct, so a short line would vanish
-/// into it just as the long one did. The reset must happen BEFORE the
-/// keystrokes, or it protects nothing.
+/// launch already wedged. A shell at a PS2 continuation prompt swallows
+/// whatever is typed next as more of the open construct, so a short line would
+/// vanish into it just as the long one did. The reset must happen BEFORE the
+/// keystrokes, or it protects nothing — which is why this asserts the ORDER,
+/// not merely that both happened.
 #[test]
 fn deliver_resets_the_pane_before_typing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
     let spec = spawn_spec(&bare_launch(&cwd, &[]));
-    let tmux = Recorder::new(0);
+    let tmux = Recorder::wedged();
 
     deliver_in(&tmux, "tm-sess", None, &spec, dir.path()).expect("deliver");
 
     assert_eq!(
         tmux.resets(),
         vec![("tm-sess".to_owned(), None)],
-        "the pane must be interrupted exactly once, session-scoped with no pane id"
+        "the wedged pane must be interrupted exactly once, session-scoped with no pane id"
+    );
+    let events = tmux.events();
+    let reset_at = events
+        .iter()
+        .position(|e| e.starts_with("reset:"))
+        .expect("the pane was reset");
+    let line_at = events
+        .iter()
+        .position(|e| e.starts_with("line:"))
+        .expect("the launch line was typed");
+    assert!(
+        reset_at < line_at,
+        "the reset must precede the keystrokes, or the open construct swallows them: {events:?}"
     );
     assert_eq!(tmux.lines().len(), 1, "and then the launch line is typed");
 }
@@ -574,7 +633,7 @@ fn deliver_resets_the_named_pane_when_one_is_known() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
     let spec = spawn_spec(&bare_launch(&cwd, &[]));
-    let tmux = Recorder::new(0);
+    let tmux = Recorder::wedged();
 
     deliver_in(&tmux, "tm-sess", Some("%9"), &spec, dir.path()).expect("deliver");
 
@@ -582,26 +641,48 @@ fn deliver_resets_the_named_pane_when_one_is_known() {
         tmux.resets(),
         vec![("tm-sess".to_owned(), Some("%9".to_owned()))]
     );
+    let events = tmux.events();
+    assert!(
+        events.iter().any(|e| e == "reset:%9"),
+        "the interrupt must name the pane, never the session: {events:?}"
+    );
+    let reset_at = events.iter().position(|e| e == "reset:%9").expect("reset");
+    let line_at = events
+        .iter()
+        .position(|e| e.starts_with("line:"))
+        .expect("launch line");
+    assert!(reset_at < line_at, "{events:?}");
 }
 
-/// #8233 review: the post-send handshake reads a `<session>.started` sentinel.
-/// One left by an EARLIER launch of the same session would make a stuck pane
-/// look healthy, so delivery must clear it before the pane can write a new one.
+/// #8233 review round 2 (finding 3): the post-send handshake reads a sentinel
+/// keyed on the LAUNCH. One left by an EARLIER launch of the same session used
+/// to make a stuck pane look healthy; now it names a different launch id, so it
+/// cannot satisfy this one no matter how long it survives.
 #[test]
 fn deliver_clears_a_stale_started_sentinel() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
     let spec = spawn_spec(&bare_launch(&cwd, &[]));
-    let stale = LaunchSpec::started_marker_in(dir.path(), &spec.session_id);
     std::fs::create_dir_all(dir.path()).expect("mkdir");
+    // An earlier launch of this same session ran and left its sentinel behind.
+    let stale_launch_id = "0000staleaaaabbbbccccddddeeee1111";
+    let stale = LaunchSpec::started_marker_in(dir.path(), stale_launch_id);
     std::fs::write(&stale, b"").expect("plant a stale sentinel");
 
     deliver_in(&Recorder::new(0), "tm-sess", None, &spec, dir.path()).expect("deliver");
 
+    // The pointer the checker reads names THIS launch, not the stale one.
+    let current = LaunchSpec::read_launch_pointer_in(dir.path(), &spec.session_id)
+        .expect("delivery publishes the launch this checker must wait on");
+    assert_eq!(current, spec.launch_id);
+    assert_ne!(
+        current, stale_launch_id,
+        "a launch must never inherit an earlier launch's id"
+    );
     assert!(
-        !stale.exists(),
-        "a previous launch's sentinel must not survive into this one: {}",
-        stale.display()
+        !LaunchSpec::started_marker_in(dir.path(), &current).exists(),
+        "the pane has not run this launch yet, so its own sentinel must be absent \
+         even though a previous launch's survives"
     );
 }
 
@@ -627,12 +708,18 @@ fn deliver_announces_a_refused_line_in_the_pane() {
     assert!(lines[1].contains("aborted"), "{:?}", lines[1]);
     assert!(lines[1].contains(&spec.session_id), "{:?}", lines[1]);
 
-    // The unconsumed spec carries credentials; it must not be left behind.
+    // The unconsumed spec carries credentials; it must not be left behind. The
+    // `<id>.launch` pointer holds only a uuid and is swept on its own TTL.
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .expect("readdir")
         .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
-    assert!(leftovers.is_empty(), "an abandoned spec must be removed");
+    assert!(
+        leftovers.is_empty(),
+        "an abandoned spec must be removed: {leftovers:?}"
+    );
 }
 
 #[cfg(unix)]
