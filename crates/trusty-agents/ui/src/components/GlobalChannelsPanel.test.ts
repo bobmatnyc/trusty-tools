@@ -27,7 +27,18 @@ let revision = 'r1';
 let puts: { body: string; authorization: string | undefined }[] = [];
 let putFailures: { status: number; error: string }[] = [];
 let reads = 0;
+let readFails = false;
 let catalogFails = false;
+// #8187: the create and delete halves. `providers` is what the daemon serves —
+// including the opt-in `stub` adapter, which must never be offered — and
+// `routable_assistants` is the dispatch roster, which is NOT the assistant
+// catalog `/api/agents` answers with.
+let posts: { url: string; body: string; authorization: string | undefined }[] = [];
+let deletes: { url: string; authorization: string | undefined }[] = [];
+let writeFailures: { status: number; body: Record<string, unknown> }[] = [];
+let providers: { id: string; name: string }[] = [];
+let routable: string[] = [];
+let inertBindings: string[] = [];
 
 // A refused write runs probe -> PUT -> 401 -> re-probe -> PUT, so the
 // microtask budget has to cover four network round trips, not one.
@@ -41,7 +52,14 @@ beforeEach(() => {
   puts = [];
   putFailures = [];
   reads = 0;
+  readFails = false;
   catalogFails = false;
+  posts = [];
+  deletes = [];
+  writeFailures = [];
+  inertBindings = [];
+  providers = [{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'gworkspace', name: 'Google Workspace' }];
+  routable = ['izzie', 'cto-assistant', 'pm'];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), headers = (init?.headers ?? {}) as Record<string, string>;
     if (url.endsWith('/api/config')) return new Response(JSON.stringify({ auth_required: false, channel_write_token: 'minted' }), { status: 200 });
@@ -55,8 +73,25 @@ beforeEach(() => {
       if (failure) return new Response(JSON.stringify({ error: failure.error }), { status: failure.status });
       channels = JSON.parse(String(init.body)).channels;
       revision = 'r2';
-    } else reads += 1;
-    return new Response(JSON.stringify({ scope: 'global', revision, channels, providers: [] }), { status: 200 });
+    } else if (init?.method === 'POST') {
+      posts.push({ url, body: String(init.body), authorization: headers.Authorization });
+      const failure = writeFailures.shift();
+      if (failure) return new Response(JSON.stringify(failure.body), { status: failure.status });
+      channels = [...channels, JSON.parse(String(init.body)).channel];
+      revision = 'r2';
+    } else if (init?.method === 'DELETE') {
+      deletes.push({ url, authorization: headers.Authorization });
+      const failure = writeFailures.shift();
+      if (failure) return new Response(JSON.stringify(failure.body), { status: failure.status });
+      const id = decodeURIComponent(url.split('/api/channels/')[1].split('?')[0]);
+      channels = channels.filter(channel => channel.id !== id);
+      revision = 'r2';
+      return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings }), { status: 200 });
+    } else {
+      reads += 1;
+      if (readFails) return new Response(JSON.stringify({ error: 'read refused' }), { status: 503 });
+    }
+    return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable }), { status: 200 });
   });
 });
 
@@ -224,4 +259,290 @@ it('raises onSaved only for a save that landed', async () => {
   button('Save channels').click();
   await settle();
   expect(saved).toHaveBeenCalledTimes(1);
+});
+
+// #8187 — the add and delete halves. Both write through the per-channel routes
+// under the revision the list was READ at, so the assertions are on the wire:
+// which URL, which query string, which body keys.
+const type = (label: string, value: string) => {
+  const input = document.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
+  input.value = value;
+  input.dispatchEvent(new Event('input'));
+};
+const picker = (label: string) => document.querySelector(`[aria-label="${label}"]`) as HTMLSelectElement;
+const deleteButton = (label: string) => document.querySelector(`[aria-label="Delete ${label}"]`) as HTMLButtonElement;
+const alerts = () => [...document.querySelectorAll('[role="alert"]')].map(node => node.textContent ?? '').join(' ');
+
+async function openAdd(id = 'ops-telegram', name = 'Ops alerts') {
+  button('Add channel').click();
+  await settle();
+  type('New channel ID', id);
+  type('New channel name', name);
+  await settle();
+}
+
+it('creates a channel through POST at the revision the list was read at', async () => {
+  await render();
+  await openAdd();
+  const routes = picker('New channel routes to');
+  [...routes.options].find(option => option.value === 'pm')!.selected = true;
+  routes.dispatchEvent(new Event('change'));
+  await settle();
+  button('Create channel').click();
+  await settle();
+  expect(posts).toHaveLength(1);
+  expect(posts[0].url).toMatch(/\/api\/channels$/);
+  expect(posts[0].authorization).toBe('Bearer minted');
+  const body = JSON.parse(posts[0].body);
+  // The whole body: `ChannelWrite` is `deny_unknown_fields`, and the revision
+  // is the compare-and-swap — a create that omitted it would overwrite whatever
+  // another writer had just published.
+  expect(Object.keys(body)).toEqual(['revision', 'channel']);
+  expect(body.revision).toBe('r1');
+  expect(body.channel).toMatchObject({
+    id: 'ops-telegram', name: 'Ops alerts', provider: 'telegram', target: '',
+    enabled: false, send_enabled: false, receive_enabled: false, route_to: ['pm'],
+  });
+  // Nothing goes through the whole-list PUT, which would republish a stale list.
+  expect(puts).toHaveLength(0);
+  expect(document.body.textContent).toContain('Ops alerts added');
+});
+
+it('offers the providers the daemon serves, and never the test-only stub', async () => {
+  // `discord` is an id this build has never heard of — it is in no type, no
+  // constant and no list here. Offering it is what makes the page's provider
+  // list the DAEMON's: an adapter shipped after this bundle was built is
+  // pickable without a UI release. A list hard-coded here would pass the
+  // `stub` half of this test and fail this line (critic MEDIUM-3).
+  providers = [{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'discord', name: 'Discord' }];
+  await render();
+  button('Add channel').click();
+  await settle();
+  expect([...picker('New channel provider').options].map(option => option.value)).toEqual(['telegram', 'discord']);
+  expect(picker('New channel provider').textContent).toContain('Discord');
+  expect(document.body.textContent).not.toContain('Stub');
+});
+
+it('routes a new channel to the dispatch roster, not the assistant catalog', async () => {
+  await render();
+  button('Add channel').click();
+  await settle();
+  // `pm` is routable and absent from `GET /api/agents`; a form built from the
+  // catalog could never offer it, and the server accepts it.
+  expect([...picker('New channel routes to').options].map(option => option.value)).toEqual(['izzie', 'cto-assistant', 'pm']);
+});
+
+it('shows a duplicate ID inline instead of issuing a create', async () => {
+  await render();
+  await openAdd('slack-ops', 'Another ops');
+  button('Create channel').click();
+  await settle();
+  expect(posts).toHaveLength(0);
+  expect(alerts()).toContain('already exists');
+});
+
+it('tells a duplicate ID from a lost compare-and-swap by the reloaded list', async () => {
+  await render();
+  await openAdd();
+  // Another writer declared the same id between the read and this create. The
+  // server answers 409 for that AND for a stale revision; only the stored list
+  // says which happened.
+  writeFailures.push({ status: 409, body: { error: 'A global channel with this ID already exists' } });
+  channels = [...channels, channel({ id: 'ops-telegram', name: 'Theirs' })];
+  revision = 'r9';
+  button('Create channel').click();
+  await settle();
+  expect(alerts()).toContain('already exists');
+  expect(document.body.textContent).not.toContain('Another writer changed the global channels');
+  // The draft survives, so the operator renames rather than retypes.
+  expect((document.querySelector('[aria-label="New channel ID"]') as HTMLInputElement).value).toBe('ops-telegram');
+});
+
+it('reloads and says so when a create loses the compare-and-swap', async () => {
+  await render();
+  await openAdd();
+  const before = reads;
+  writeFailures.push({ status: 409, body: { error: 'Channel settings changed. Reload before saving.' } });
+  channels = [channel({ name: 'Renamed elsewhere' })];
+  revision = 'r9';
+  button('Create channel').click();
+  await settle();
+  expect(reads).toBe(before + 1);
+  expect(document.body.textContent).toContain('Another writer changed the global channels');
+  expect(document.body.textContent).toContain('Renamed elsewhere');
+  expect(picker('New channel provider')).toBeTruthy();
+});
+
+it('deletes one channel through DELETE at the current revision', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('This removes the channel from this host');
+  button('Delete channel').click();
+  await settle();
+  expect(deletes).toHaveLength(1);
+  expect(deletes[0].url).toMatch(/\/api\/channels\/slack-ops\?revision=r1$/);
+  expect(deletes[0].authorization).toBe('Bearer minted');
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.body.textContent).toContain('Ops deleted.');
+  expect(document.body.textContent).not.toContain('slack · C123');
+});
+
+it('names the assistants a refused delete would strand, then forces explicitly', async () => {
+  await render();
+  writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie', 'cto-assistant'] } });
+  inertBindings = ['izzie', 'cto-assistant'];
+  deleteButton('Personal mail').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  // The first click never forces: the operator has not been told the cost yet.
+  expect(deletes).toHaveLength(1);
+  expect(deletes[0].url).not.toContain('force');
+  const dialog = document.querySelector('[role="dialog"]')!;
+  expect(dialog.textContent).toContain('izzie, cto-assistant');
+  expect(dialog.textContent).toContain('inert');
+  button('Delete anyway').click();
+  await settle();
+  expect(deletes[1].url).toMatch(/\?revision=r1&force=true$/);
+  expect(document.body.textContent).toContain('those bindings now address nothing');
+  expect(document.body.textContent).toContain('izzie, cto-assistant');
+});
+
+it('reloads and says so when a delete loses the compare-and-swap', async () => {
+  await render();
+  const before = reads;
+  writeFailures.push({ status: 409, body: { error: 'Channel settings changed. Reload before saving.' } });
+  channels = [channel({ name: 'Renamed elsewhere' })];
+  revision = 'r9';
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(reads).toBe(before + 1);
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(alerts()).toContain('Another writer changed the global channels');
+  expect(document.body.textContent).toContain('Renamed elsewhere');
+});
+
+it('will not add or delete over an unsaved field edit', async () => {
+  await render();
+  box('gmail-personal enabled').click();
+  await settle();
+  // A create or delete publishes the STORED list; either would throw this edit
+  // away without saying so.
+  expect(button('Add channel').disabled).toBe(true);
+  expect(deleteButton('Ops').disabled).toBe(true);
+  expect(document.body.textContent).toContain('Save or discard these changes');
+});
+
+// Guarding only the ENTRY buttons left the list editable once an editor was
+// open, and a create or delete that landed then called `apply(result)`, which
+// replaces `channels` wholesale (critic HIGH). Two guards, tested separately:
+// the list goes read-only, AND both writes re-check before going to the wire.
+const listFieldset = () => document.querySelector('fieldset') as HTMLFieldSetElement;
+
+it('makes the stored list read-only while either editor is open', async () => {
+  await render();
+  button('Add channel').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(true);
+  // The click an operator would make is inert, so the list cannot go dirty
+  // underneath the open form and Save has nothing to publish.
+  box('gmail-personal enabled').click();
+  await settle();
+  expect(box('gmail-personal enabled').checked).toBe(true);
+  expect(button('Save channels').disabled).toBe(true);
+  button('Cancel').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(false);
+  deleteButton('Ops').click();
+  await settle();
+  expect(listFieldset().disabled).toBe(true);
+});
+
+/** Drive a checkbox past a disabled fieldset, which blocks clicks but not events. */
+function forceEdit(label: string) {
+  const input = box(label);
+  input.checked = !input.checked;
+  input.dispatchEvent(new Event('change'));
+}
+
+it('refuses a create while the list is dirty instead of overwriting the edit', async () => {
+  await render();
+  await openAdd();
+  // The race the read-only fieldset cannot catch: a change that reaches the
+  // binding anyway. Without the re-check, `apply(result)` replaces `channels`
+  // and the edit disappears under an "added" notice.
+  forceEdit('gmail-personal enabled');
+  await settle();
+  button('Create channel').click();
+  await settle();
+  expect(posts).toHaveLength(0);
+  expect(alerts()).toContain('unsaved changes');
+  expect(box('gmail-personal enabled').checked).toBe(false);
+});
+
+it('refuses a delete while the list is dirty instead of overwriting the edit', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  forceEdit('gmail-personal enabled');
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(deletes).toHaveLength(0);
+  expect(alerts()).toContain('unsaved changes');
+  expect(box('gmail-personal enabled').checked).toBe(false);
+});
+
+// The confirmation claimed `aria-modal` while focus stayed on the Delete
+// button behind it, so Escape reached a handler on the backdrop that nothing
+// was focused inside (critic MEDIUM-2).
+it('closes the delete confirmation on Escape and hands focus back', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  expect(document.activeElement?.textContent).toBe('Cancel');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(deletes).toHaveLength(0);
+  // Focus returns to what opened it, not to the top of the document.
+  expect(document.activeElement).toBe(deleteButton('Ops'));
+});
+
+it('leaves the confirmation open on Escape while the delete is in flight', async () => {
+  await render();
+  let release = () => {};
+  writeFailures.push({ status: 409, body: { error: 'still bound', referenced_by: ['izzie'] } });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'DELETE') await gate;
+    return realFetch(input, init);
+  });
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  // Dismissing mid-flight would leave the operator with no answer to a write
+  // that is still going to land.
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  release();
+  await settle();
+});
+
+it('states why the create failed when the reload after the conflict also fails', async () => {
+  await render();
+  await openAdd();
+  writeFailures.push({ status: 409, body: { error: 'Channel settings changed. Reload before saving.' } });
+  readFails = true;
+  button('Create channel').click();
+  await settle();
+  // The reload is what tells a duplicate id from a lost race. When it fails
+  // too, the create's own refusal is the only thing left to say (critic LOW).
+  expect(alerts()).toContain('Channel settings changed');
 });
