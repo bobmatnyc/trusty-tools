@@ -1,0 +1,2 @@
+Fixed
+- `tcode tui`'s "never home on a home directory" guard no longer fails open when the home path cannot be canonicalized. A home that exists but does not resolve used to collapse to the same "no home" as a platform reporting none, which skipped the guard and let a repository enclosing `$HOME` bind anyway; the raw path is now kept and compared. Only a platform with no home path at all disables the guard, which the rule now states. (#8205)
