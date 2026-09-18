@@ -1205,7 +1205,18 @@ assert_eq "capabilities-drift.yml has a relevance-classifying step" "1" \
   "$(grep -c '^        id: relevance$' "${cap_wf}" || true)"
 assert_eq "capabilities-drift.yml classifies relevance from the diff, not the event" "1" \
   "$(grep -c 'bash scripts/ci-crate-relevance.sh trusty-mpm' "${cap_wf}" || true)"
-assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "3" \
+# FOUR, not three, since PR #8263 added `Install tm` — the step that installs
+# the binary `scripts/lib/run_or_cargo.sh` prefers over `cargo run`, so the
+# drift check below never takes the shared build lock. The other three:
+# Install Rust toolchain, Cache cargo build, and the drift check itself. Every
+# one of them is worthless on an inert diff, and the last two would run
+# against a binary that was never installed if this count ever drops.
+#
+# ANCHORED ON `$`, for the same reason the semver-checks assertion below is
+# (#5501): unanchored, this is a substring match that a widened condition
+# would also satisfy, so it would keep counting the old total and report green
+# over the exact regression it exists to catch.
+assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "4" \
   "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
 # Structural, not string-matched on the old wording (#5407): no JOB the check
 # reports from may decide anything from the activity type. `concurrency:` may

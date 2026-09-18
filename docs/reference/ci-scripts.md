@@ -20,6 +20,22 @@ here: `check_line_cap.sh` ([sloc-cap.md](sloc-cap.md)), `check_semver.sh`
 ([DOC-38](../specs/spec-linked-documentation.md)), and
 `check_generated_regions.sh` ([generated-doc-regions.md](generated-doc-regions.md)).
 
+**Installed-binary-first gate wrappers.** `check_sld.sh` (`sld-lint`),
+`check-version-parity.sh` (`publish-guard`) and `check_capabilities.sh` (`tm`)
+are each a thin wrapper around one binary that used to run unconditionally via
+`exec cargo run`. `cargo run` takes the workspace build lock shared with every
+other cargo invocation on the machine — a docs-only PR queued behind an
+agent's Rust build and timed out at 180s. All three now source
+`scripts/lib/run_or_cargo.sh`, which execs an already-installed copy of the
+binary from PATH when one exists (no lock taken at all) and falls back to
+`cargo run --locked`, scoped to its own `CARGO_TARGET_DIR`
+(`TRUSTY_SCRIPTS_TARGET_DIR`, default `~/.trusty-tools/cargo-target/scripts`)
+with a 180s timeout, only when it is absent. Each run prints which path it
+took on stderr. `check_capabilities.sh` carries one caveat worth reading
+before relying on the fast path: an installed `tm` reflects whatever checkout
+last ran `cargo install`, not necessarily this checkout's own uncommitted
+`trusty-mpm` changes.
+
 Every script here reads its own header first. This table says where it runs and
 what it stops; the header says why it exists.
 
