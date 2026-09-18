@@ -421,9 +421,15 @@ fn abort_notice_is_short_enough_to_always_type() {
 struct Recorder {
     sends: Mutex<Vec<String>>,
     fail_first: usize,
-    /// #8233: every pane reset, as `(session, pane_id)` — the pre-send `C-c`
-    /// that returns a wedged shell to a primary prompt.
+    /// #8233: every pane reset, as `(session, pane_id)` — the interrupt the
+    /// handshake sends to flush a wedged parser.
     interrupts: Mutex<Vec<(String, Option<String>)>>,
+    /// #8233: what this fake shell has PRINTED. `deliver` now confirms the pane
+    /// executes what it is typed before it types a launch, so a double that
+    /// prints nothing is an unresponsive shell and every delivery test would
+    /// fail for a reason the double invented. Answering the probe — and only
+    /// the probe — makes this a shell that works.
+    pane_text: Mutex<String>,
 }
 
 impl Recorder {
@@ -432,7 +438,20 @@ impl Recorder {
             sends: Mutex::new(Vec::new()),
             fail_first,
             interrupts: Mutex::new(Vec::new()),
+            pane_text: Mutex::new("~ %".to_owned()),
         }
+    }
+
+    /// Answer a probe line as a working shell would, without recording it, so
+    /// `lines()` still holds exactly the launch lines it always did.
+    fn answer_probe(&self, text: &str) -> bool {
+        let Some(out) = super::super::pane_handshake::probe_reply(text) else {
+            return false;
+        };
+        let mut pane = self.pane_text.lock().expect("recorder mutex");
+        pane.push('\n');
+        pane.push_str(&out);
+        true
     }
     fn lines(&self) -> Vec<String> {
         self.sends.lock().expect("recorder mutex").clone()
@@ -450,6 +469,9 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.answer_probe(text) {
+            return Ok(());
+        }
         let mut log = self.sends.lock().expect("recorder mutex");
         log.push(text.to_owned());
         if log.len() <= self.fail_first {
@@ -458,6 +480,9 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn send_line_to_pane(&self, _name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        if self.answer_probe(text) {
+            return Ok(());
+        }
         let mut log = self.sends.lock().expect("recorder mutex");
         log.push(text.to_owned());
         if log.len() <= self.fail_first {
@@ -480,7 +505,10 @@ impl ManagedTmuxDriver for Recorder {
         Ok(())
     }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-        Ok(String::new())
+        Ok(self.pane_text.lock().expect("recorder mutex").clone())
+    }
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
