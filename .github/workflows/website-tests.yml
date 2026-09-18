@@ -1,47 +1,45 @@
 # #5200: nothing in CI ran `website/`'s Vitest suite — this workflow does.
 # #5918: nothing ran `pnpm lint` over it either — the `Prettier + ESLint` job
-# at the bottom does, as a second, independent job. Both are ADVISORY: neither
-# is a required branch-protection context.
+# at the bottom does, as a second, independent job.
 #
-# The gap this closes: `scripts/detect-docs-only.sh` buckets `website/**` as
-# inert (same as `docs/**`) on the strength of a comment claiming the site
-# "builds and lints under its own workflow". That workflow did not exist, so a
-# website-only PR set `docs_only=true`, `ci.yml`'s `Test` job skipped, and the
-# `ui-checks` matrix — the only pnpm surface in `ci.yml` — never listed
-# `website/`. Every website PR merged on a green that tested nothing.
+# The gap #5200 closed: `scripts/detect-docs-only.sh` buckets `website/**` as
+# inert (same as `docs/**`), so a website-only PR set `docs_only=true`,
+# `ci.yml`'s `Test` job skipped, and the `ui-checks` matrix — the only pnpm
+# surface in `ci.yml` — never listed `website/`. Every website PR merged on a
+# green that tested nothing. A leg on that matrix cannot fix it: every step
+# there is gated on `docs_only != 'true'`, and `website/**` IS docs-only by
+# that classifier's rule, so the leg would skip on exactly the PRs it exists
+# to check.
 #
-# WHY A SEPARATE WORKFLOW, not a ninth leg on `ci.yml`'s `ui-checks` matrix:
-# every step in that matrix is gated on `needs.changes.outputs.docs_only !=
-# 'true'`, and `website/**` IS `docs_only` by that classifier's own rule. A
-# website leg bolted onto that matrix would skip on exactly the PRs it exists
-# to check. Its own workflow with its own `paths:` filter inverts that — it
-# runs when `website/` changes and stays quiet otherwise.
+# NO `paths:` FILTERS, AND WHY THEY WENT AWAY. The three jobs below run on
+# every push to main and every pull request, and each classifies relevance
+# ITSELF in its own first step (`scripts/ci-website-relevance.sh`). Two
+# reasons, both already established in this repo:
 #
-# TRIGGER PATHS — derived from what the suite READS, not from Vercel's
-# rebuild set. The two overlap but are not the same list:
-#   website/**                        the suite and its sources
-#   docs/**                           `docs/public-manifest.tsv` drives the
-#                                     `/docs/**` routes `build-smoke.test.ts`
-#                                     asserts exist; a PAGE row naming a
-#                                     missing file fails the build
-#   Cargo.toml                        `site.test.ts` pins the advertised MSRV
-#                                     to `rust-version`
-#   crates/*/Cargo.toml               `site.test.ts` / `tools.test.ts` assert
-#                                     every advertised crate exists and its
-#                                     version matches
-#   crates/*/CHANGELOG.md             `changelog/parse.test.ts` and
-#                                     `changelog/site.test.ts` parse the real
-#                                     six-crate corpus
-#   .../commands/stable_set.rs        `site.test.ts` pins `STABLE_SET` to the
-#                                     Rust declaration
-#   .../download/platform.rs          `site.test.ts` pins the platform list to
-#                                     the Tier-1 triples
+#   1. A `paths:` filter on a job that is (or becomes) a required context
+#      wedges the PR forever: GitHub never creates the check run, and a
+#      required context with no run is pending, not passing. Same trap
+#      documented in capabilities-drift.yml and detect-docs-only.sh. Nothing
+#      here is required TODAY — read the live list with `gh api
+#      repos/bobmatnyc/trusty-tools/branches/main/protection --jq
+#      '.required_status_checks.contexts'`, never a copy — but promoting one
+#      must not require rewriting the trigger.
+#   2. The old filter list was derived from what the suite READS, and included
+#      `crates/*/Cargo.toml` and `docs/**`. That made every release PR pay for
+#      the whole website suite: PR #8272, a Rust-only fix, went red here on a
+#      changelog-corpus hook timeout while touching the website not at all.
 #
-# `Cargo.lock` is in Vercel's rebuild set and deliberately NOT here: nothing
-# in the build or the suite reads it. The two `trusty-installer` source files
-# are here and NOT in Vercel's set — they are test inputs, not build inputs,
-# and a change to either is exactly what broke this suite on 2026-08-16
-# (commit 819f55cc9 took `StableMember::new(` from 7 occurrences to 9).
+# WHAT EACH JOB IS RELEVANT TO (scripts/ci-website-relevance.sh owns the rule,
+# docs/reference/ci-gates.md states the policy):
+#
+#   Vitest (unit + smoke)  website/** minus website/src/content/**
+#   Changelog corpus       crates/*/changelog.d/**, crates/*/CHANGELOG.md,
+#                          website/src/lib/changelog/**, and the flagship list
+#   Prettier + ESLint      website/** including prose content
+#
+# A DOCUMENTATION-ONLY change therefore runs no code test suite, and still
+# runs the content gate its own content owes (`Changelog corpus`). Every
+# failure arm of the classifier answers "relevant" and costs a full run.
 #
 # PNPM — the version is READ from `website/package.json`'s `packageManager`
 # field rather than hardcoded, then asserted after install. `ui-checks` pins
@@ -50,7 +48,7 @@
 # field keeps one source of truth, and the assertion makes a mis-resolution
 # fail loudly instead of running the suite under some other pnpm.
 #
-# NODE 22 — `website/` declares no `engines` field and has no `.nvmrc`. Both
+# NODE 22 — `website/` declares no `engines` field and has no `.nvmrc`. All
 # jobs pin 22, which every floor accepts: vitest 4 wants `^20 || ^22 || >=24`,
 # vite 6 wants `^18 || ^20 || >=22`, SvelteKit 2 wants `>=18.13`. A local Node
 # on a different line can report `localStorage` failures in
@@ -67,18 +65,6 @@ name: Website tests
 on:
   push:
     branches: [main]
-    # Duplicated verbatim under `pull_request` below: GitHub Actions does not
-    # expand YAML anchors in workflow files, so the two lists are kept in sync
-    # by hand — same as token-drift.yml.
-    paths:
-      - "website/**"
-      - "docs/**"
-      - "Cargo.toml"
-      - "crates/*/Cargo.toml"
-      - "crates/*/CHANGELOG.md"
-      - "crates/trusty-installer/src/commands/stable_set.rs"
-      - "crates/trusty-installer/src/download/platform.rs"
-      - ".github/workflows/website-tests.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -87,15 +73,6 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
-    paths:
-      - "website/**"
-      - "docs/**"
-      - "Cargo.toml"
-      - "crates/*/Cargo.toml"
-      - "crates/*/CHANGELOG.md"
-      - "crates/trusty-installer/src/commands/stable_set.rs"
-      - "crates/trusty-installer/src/download/platform.rs"
-      - ".github/workflows/website-tests.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -105,9 +82,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
+  # No job-level `if:` keyed on the pull_request ACTIVITY TYPE in any job here
+  # (#5407, and capabilities-drift.yml's note): a title edit shares this
+  # workflow's PR concurrency group with the real run, so an edit-triggered run
+  # that reports without doing the work can bury a real failure under the same
+  # context name. The jobs always run; the relevance step is what stays cheap.
   website-tests:
     name: Vitest (unit + smoke)
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     # The `smoke` project shells out to a real `vite build` twice (once per
     # `tests/**` file, `fileParallelism: false`) and then drives Chromium over
@@ -115,7 +96,29 @@ jobs:
     # slower hosted runner without letting a hang burn a full hour.
     timeout-minutes: 20
     steps:
+      # fetch-depth: 0 — the relevance classifier needs `git merge-base`
+      # against the base branch (pull_request) or the push's `before` SHA,
+      # which a shallow checkout cannot resolve. Matches ci.yml's `changes`.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Classify website code relevance
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-website-relevance.sh unit
 
       - name: Read the pinned pnpm version from website/package.json
         id: pin
@@ -129,11 +132,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install pnpm
+        if: steps.relevance.outputs.relevant != 'false'
         uses: pnpm/action-setup@v4
         with:
           version: ${{ steps.pin.outputs.version }}
 
       - name: Install Node.js
+        if: steps.relevance.outputs.relevant != 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -141,6 +146,7 @@ jobs:
           cache-dependency-path: website/pnpm-lock.yaml
 
       - name: Verify the resolved pnpm is the pinned one
+        if: steps.relevance.outputs.relevant != 'false'
         run: |
           set -euo pipefail
           resolved="$(pnpm --version)"
@@ -152,24 +158,105 @@ jobs:
           echo "pnpm $resolved matches the pin"
 
       - name: Install dependencies
+        if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm install --frozen-lockfile
 
       - name: Install Chromium for the mobile-overflow smoke test
+        if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm exec playwright install --with-deps chromium
 
+      # `pnpm run test` is the `unit` and `smoke` projects. The `corpus`
+      # project is deliberately NOT in it — see the job below.
       - name: Run the website test suite
+        if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm run test
 
+  # The real-changelog gate, split out of the unit suite (owner ruling,
+  # 2026-09-18). It parses every released crate's CHANGELOG.md — ~21 s and
+  # growing with each release — and it is the only website test a changelog
+  # fragment can affect. As a block inside `Vitest (unit + smoke)` it made
+  # every release PR pay for the whole website suite and blew vitest's default
+  # 10 s `hookTimeout` in `beforeAll` (PR #8272). Its own check name means a
+  # red corpus is legible as a content problem, not a website-code problem.
+  website-corpus:
+    name: Changelog corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Classify changelog corpus relevance
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-website-relevance.sh corpus
+
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        if: steps.relevance.outputs.relevant != 'false'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        if: steps.relevance.outputs.relevant != 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Verify the resolved pnpm is the pinned one
+        if: steps.relevance.outputs.relevant != 'false'
+        run: |
+          set -euo pipefail
+          resolved="$(pnpm --version)"
+          expected="${{ steps.pin.outputs.version }}"
+          if [ "$resolved" != "$expected" ]; then
+            echo "::error::pnpm $resolved resolved, but website/package.json pins $expected" >&2
+            exit 1
+          fi
+          echo "pnpm $resolved matches the pin"
+
+      - name: Install dependencies
+        if: steps.relevance.outputs.relevant != 'false'
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      # No Chromium and no `vite build`: the `corpus` project is plain Node.
+      - name: Run the changelog corpus gate
+        if: steps.relevance.outputs.relevant != 'false'
+        working-directory: website
+        run: pnpm run test:corpus
+
   # #5918: nothing in CI ran `pnpm lint` over `website/`, and `main` carried a
-  # Prettier violation because of it. The gap is the same shape as the one this
-  # workflow was created for (#5200): `ci.yml`'s `ui-checks` matrix is the only
-  # other pnpm surface, every step in it is gated on `docs_only != 'true'`, and
-  # `scripts/detect-docs-only.sh:114` buckets `website/**` as docs-only — so a
-  # lint leg bolted onto that matrix would skip on exactly the PRs it exists to
-  # check. It goes here, beside the suite that already solved that.
+  # Prettier violation because of it.
   #
   # A SEPARATE JOB, not a step in `website-tests`. Two reasons. A Prettier nit
   # and a broken assertion are different problems and deserve different red
@@ -177,22 +264,37 @@ jobs:
   # needs neither Chromium nor a `vite build`, so it settles in well under a
   # minute while the suite takes up to twenty.
   #
-  # ADVISORY, stated explicitly (#5918's third closure condition). Neither job
-  # in this workflow is a required branch-protection context — read the live
-  # list with `gh api repos/bobmatnyc/trusty-tools/branches/main/protection
-  # --jq '.required_status_checks.contexts'`, never a copy of it. A red lint
-  # here does not block a merge; it is a signal a reviewer is expected to read.
+  # Its relevance includes `website/src/content/**`, which the unit job's does
+  # not: Prettier formats prose markdown, so a content edit still owes a lint.
   website-lint:
     name: Prettier + ESLint
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      # Same pin-then-verify sequence as the job above, and for the same reason:
-      # `website/` pins an exact pnpm in `packageManager` and a shell at the repo
-      # root has no pin at all, so the version is READ rather than hardcoded.
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Classify website lint relevance
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-website-relevance.sh lint
+
+      # Same pin-then-verify sequence as the jobs above, and for the same
+      # reason: `website/` pins an exact pnpm in `packageManager` and a shell at
+      # the repo root has no pin at all, so the version is READ, not hardcoded.
       - name: Read the pinned pnpm version from website/package.json
         id: pin
         run: |
@@ -205,11 +307,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install pnpm
+        if: steps.relevance.outputs.relevant != 'false'
         uses: pnpm/action-setup@v4
         with:
           version: ${{ steps.pin.outputs.version }}
 
       - name: Install Node.js
+        if: steps.relevance.outputs.relevant != 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -217,6 +321,7 @@ jobs:
           cache-dependency-path: website/pnpm-lock.yaml
 
       - name: Verify the resolved pnpm is the pinned one
+        if: steps.relevance.outputs.relevant != 'false'
         run: |
           set -euo pipefail
           resolved="$(pnpm --version)"
@@ -228,6 +333,7 @@ jobs:
           echo "pnpm $resolved matches the pin"
 
       - name: Install dependencies
+        if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm install --frozen-lockfile
 
@@ -235,5 +341,6 @@ jobs:
       # already defines, so a developer running `pnpm lint` locally runs exactly
       # what this job runs. `pnpm format` writes the fixes.
       - name: Lint the website
+        if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm run lint

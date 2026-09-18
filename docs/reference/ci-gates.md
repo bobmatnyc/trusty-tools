@@ -37,6 +37,43 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
 
+## A documentation change owes content gates, never a code test suite
+
+🔴 **Two rules, owner ruling 2026-09-18.** R1: the website's code unit suite
+(`Vitest (unit + smoke)`) runs for website CODE changes — anything under
+`website/**` except `website/src/content/**` — and not for a changelog
+fragment or a documentation change. R2: a DOCS-ONLY change never has to pass a
+code test suite; it may still owe CONTENT validation (fragment format, link
+and prose lints, and the changelog corpus check), which is a documentation
+gate and keeps running.
+
+**DOCS-ONLY** means every changed path matches one of `docs/**`, a repo-root
+`*.md`, `crates/*/changelog.d/**`, `crates/*/README.md`, `crates/*/CHANGELOG.md`,
+or `website/src/content/**`. Three path classes are **not** docs-only by
+design: anything under `crates/*/src/**` **even when it ends in `.md`** —
+bundled agent and skill assets are compiled into binaries with `include_str!`
+and tests assert on their text — plus `.github/**` and `scripts/**`.
+`scripts/detect-docs-only.sh` is the Cargo-side classifier;
+`scripts/ci-website-relevance.sh` is the website-side one.
+
+🟡 **`Refuse a test run that ran nothing` (`test-count.yml`) gates the same
+way** — it wraps two live `cargo test` invocations, so a Cargo-inert diff
+skips the toolchain, the cache and both cargo steps. Its shell fixtures still
+run on every PR, and the job still reports. The documentation gates —
+`check_sld.sh`, `check_test_pointers.sh`, the changelog-fragment check, the
+path-citation lint, the public-docs allowlist — are deliberately NOT gated
+this way: they are what a docs change owes.
+
+🟡 **New check name: `Changelog corpus`** (`website-tests.yml`). The real
+six-crate changelog parse moved out of the unit suite into
+`website/src/lib/changelog/site.corpus.test.ts` and its own vitest project, so
+a release PR's fragment no longer drags the whole website suite behind it —
+PR #8272, a Rust-only fix, went red on exactly that. All three jobs in that
+workflow now run unconditionally and gate only their costly steps, so the
+`paths:` filters are gone; adding `Changelog corpus` to
+`required_status_checks.contexts` is a branch-protection decision, made by
+hand, not by this change.
+
 ## The pre-publish shards do not run on a PR
 
 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
