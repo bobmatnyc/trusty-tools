@@ -17,6 +17,13 @@
 #   Documented pre-existing exceptions are grandfathered in
 #   .sld-lint-allowlist.tsv (a ratchet that can only shrink).
 #
+#   Prefers an already-installed `sld-lint` on PATH over `cargo run`, so this
+#   gate never waits on the workspace build lock a concurrent agent build holds
+#   (owner-verified: this wrapper's `cargo run` timed out at 180s behind one).
+#   `cargo run` remains the fallback, scoped to its own CARGO_TARGET_DIR — see
+#   scripts/lib/run_or_cargo.sh's header for the full mechanism and the CI
+#   install-step alternative documented in docs/reference/ci-scripts.md.
+#
 # Usage:
 #   bash scripts/check_sld.sh            # default (grandfathering) mode
 #   bash scripts/check_sld.sh --strict   # full checks on EVERY spec (post-retrofit)
@@ -30,7 +37,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Reuse the lightweight `sld` grammar from trusty-common; only builds the linter
-# crate + its deps, not the whole workspace.
-exec cargo run --quiet --locked -p trusty-sld-lint --bin sld-lint -- \
-  --root "$REPO_ROOT" "$@"
+# shellcheck source=lib/run_or_cargo.sh
+. "$REPO_ROOT/scripts/lib/run_or_cargo.sh"
+run_or_cargo sld-lint trusty-sld-lint sld-lint -- --root "$REPO_ROOT" "$@"
