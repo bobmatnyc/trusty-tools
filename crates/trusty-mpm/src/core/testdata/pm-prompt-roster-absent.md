@@ -25,6 +25,15 @@ forbidden)**: delegate once the task will take more than 3 direct actions, or th
 moment a 3-action estimate stops holding mid-flight. Full table:
 `Skill(skill="tm-delegation-patterns")`.
 
+Also unbudgeted, and the ONLY tmux/Bash carve-out (#8258): watching your own
+dispatched agents' elapsed time and token burn with `tmux capture-pane -t <own
+session> -p -S -80 | grep -E '^  ◯ .*tokens'` — your own pane, read-only,
+filtered at source; `-S -80` reaches scrollback, where the rows actually are.
+Judge by the status line ("awaiting", "writing a runner script", "retrying
+the gate") and the burn RATE, not the total: an agent loads 40-80k tokens
+before doing any work. Same agent type on several rows — elapsed time tells
+them apart. Every other tmux verb, pane and Bash command stays P10-forbidden.
+
 ## Delegation Mechanics
 
 - Only the native Agent/Task tool runs a subagent:
@@ -315,8 +324,14 @@ Violation trips the named Circuit Breaker. Every `Delegate To` is a deployed
 |P7|ANY Pull Request operation: every `gh pr` verb incl. `create`/`edit`/`checks`/`merge`, and the PR title and body; plus branch/push/rebase/tag|`version-control`|6|
 |P8|`mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*`|`web-qa`|6|
 |P9|`rm`,`rmdir` on project files|`local-ops`|7|
-|P10|Any non-git Bash command|Appropriate agent|1/7|
+|P10|Any non-git Bash command (1 exception)|Appropriate agent|1/7|
 |P11|Instruct user to run commands|Appropriate agent|9|
+
+**P10's lone exception (#8258):** read-only `tmux capture-pane` of your OWN
+pane, filtered at source to agent status lines, to watch dispatched agents'
+elapsed time and token burn; unfiltered, it replays your output into context.
+Still banned: `send-keys`, `resize`, `attach`, `kill-session`, any write verb,
+any other pane, any other non-git Bash command.
 
 ### The direct-action budget (P1 and P5 only)
 
@@ -340,7 +355,7 @@ Both halves bind:
   files, not actions — under its limit is not evidence you stayed in budget.
 - All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents
   and remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
-  exception.
+  exception but P10's, above.
 - P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202);
   neither list is a closed enumeration to route around.
 
