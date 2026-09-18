@@ -153,18 +153,42 @@ async fn sample_services(
 /// `interval`. Sampling itself never fails, so there is no error path to log.
 /// Test: see the module docs.
 pub fn start(state: AppState, interval: Duration) {
+    start_with_disk_interval(
+        state,
+        interval,
+        Duration::from_secs(trusty_common::host_metrics::history::DISK_SAMPLE_INTERVAL_SECS),
+    );
+}
+
+/// Spawn the sampling loop with an explicit disk-refresh cadence.
+///
+/// Why: the disk half of a host sample walks every mounted volume, which is
+///      the whole cost of a sample on macOS and is not worth paying at the 1 s
+///      graph cadence. `serve --disk-sample-interval` reaches the sampler
+///      through here; [`start`] keeps the default for every other caller.
+/// What: as [`start`], but the [`HostSampler`] is built with `disk_interval`
+///      as the minimum age of its cached disk snapshot. The loop cadence,
+///      the per-service half, and the panic guards are unchanged.
+/// Test: `test_serve_args_defaults` covers the flag's default; the cadence
+///      itself is `disk_refresh_is_skipped_inside_the_interval` in trusty-common.
+pub fn start_with_disk_interval(state: AppState, interval: Duration, disk_interval: Duration) {
     state
         .machine_history()
         .set_sample_interval(interval.as_secs());
     let loop_task = tokio::spawn(async move {
         info!(
-            "machine_history: sampling host metrics every {}s (window={} points)",
+            "machine_history: sampling host metrics every {}s (disks every {}s, window={} points)",
             interval.as_secs(),
+            disk_interval.as_secs(),
             state.machine_history().snapshot().await.sample_capacity
         );
-        let mut sampler = HostSampler::new();
+        let mut sampler = HostSampler::with_thresholds_and_disk_interval(
+            trusty_common::host_metrics::HostThresholds::default(),
+            disk_interval,
+        );
         // #6642: one sampler across ticks — `sysinfo` derives CPU% from the
-        // delta between two refreshes, so it cannot be rebuilt per tick.
+        // delta between two refreshes, so it cannot be rebuilt per tick. The
+        // disk cache lives on the same sampler, so it also survives the ticks.
         let mut service_metrics = ServiceMetricsSampler::new();
         loop {
             // #6642: each half is guarded separately, so a panic in one leaves a

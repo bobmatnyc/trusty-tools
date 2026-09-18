@@ -90,7 +90,12 @@ name = "trusty-common"
 # additive (rebuilds the local session cache from `refs/tm/sessions/**`); no
 # existing public item was removed or changed, so a MINOR bump under Cargo's
 # 0.x rule.
-version = "0.51.0"
+# 0.51.1 (#8268, PR #8272): patch — the new public `history::DISK_SAMPLE_INTERVAL_SECS`
+# constant and `HostSampler::with_thresholds_and_disk_interval` are additions
+# to the existing `host_metrics` module, and `HostSampler`'s new fields are
+# private. No public item was removed or changed shape, so this is not a 0.x
+# break.
+version = "0.51.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -192,8 +192,24 @@ Requirements:
   Success Criteria: [Conditions a wrong implementation fails]
   Testing: MANDATORY - Provide logs
   Constraints: [Performance, security, timeline]
+  Time Box / Token Box: [N minutes / M tokens]
   Verification: Evidence of criteria met
 ```
+
+**Dispatch budget, every brief.** State a time box and a token box. Default
+when unstated: 45 minutes or 150k tokens for a single-crate fix; 20 minutes
+or 60k for a research or ticketing pass. Size up for cross-crate work and say
+so in the brief.
+
+The PM checks the box, not the clock — no periodic status pings. A message
+to a busy agent queues until its next tool round and costs it a turn; the
+harness already notifies on completion. Past the box, send ONE corrective
+message with a specific instruction. A second overrun means stop and
+re-dispatch with a narrower brief, never another nudge.
+
+A brief never asks for output that scales with build length ("raw output",
+"full log") — it asks for gate summary lines per the gate-output rule
+(BASE-AGENT, "Gate Output: Quote Results, Summarize Progress").
 
 **Rust-conditional line (#8192).** When the Detected Project Stack includes
 `rust-engineer`, the brief must instruct the agent to prefix
@@ -604,9 +620,11 @@ with this text, verbatim:
 
 > Before returning: run linters/formatters, fix any issues, run tests, verify all
 > pass. Verify ALL deliverables from the prompt are present (README, config,
-> etc.). Show raw test output. Plus this project's own doc gates, if it defines
-> any — its CLAUDE.md names them and `scripts/` holds them; name the ones you
-> ran. A project that defines none owes no such run.
+> etc.). Report gate summary lines per the gate-output rule (BASE-AGENT, "Gate
+> Output: Quote Results, Summarize Progress") — never a full raw log. Plus this
+> project's own doc gates, if it defines any — its CLAUDE.md names them and
+> `scripts/` holds them; name the ones you ran. A project that defines none owes
+> no such run.
 
 ## A Running Agent's Scope Is Fixed
 
