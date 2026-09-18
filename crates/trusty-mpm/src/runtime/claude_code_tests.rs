@@ -1593,6 +1593,122 @@ fn spawn_resume_targets_stored_pane_id_when_known() {
     assert_eq!(pane_sends[0].1, "%9");
 }
 
+/// #8233 review round 2 (finding 6): a FRESH spawn must interrupt the pane it
+/// is launching into, never whichever pane tmux currently considers active.
+///
+/// Why: `spawn` passed `None` as the pane id, so every pane-directed step went
+/// session-scoped, and tmux resolves a session-scoped target to the ACTIVE
+/// pane. On a spawn into an existing tmux session that is the operator's own
+/// pane, so the pre-launch `C-c` landed in their work instead of in the pane
+/// being launched into. The adapter now asks the driver for the session's pane
+/// id first.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
+    /// A driver that knows its pane id and is WEDGED, so an interrupt fires and
+    /// its target can be observed.
+    use crate::session_manager::{ManagedError, ManagedTmuxDriver};
+
+    #[derive(Default)]
+    struct PaneAware {
+        session_interrupts: std::sync::Mutex<Vec<String>>,
+        pane_interrupts: std::sync::Mutex<Vec<String>>,
+        printed: std::sync::Mutex<String>,
+        freed: std::sync::Mutex<bool>,
+    }
+
+    impl PaneAware {
+        /// Run `text` as a shell would; `true` when it was the readiness probe.
+        /// A wedged parser swallows it, so nothing prints until the interrupt.
+        fn run(&self, text: &str) -> bool {
+            let Some(word) = text.strip_prefix("echo ") else {
+                return false;
+            };
+            if !*self.freed.lock().expect("freed") {
+                return true;
+            }
+            let mut out = self.printed.lock().expect("printed");
+            out.push_str(&word.replace('"', "").replace('\'', ""));
+            out.push('\n');
+            true
+        }
+    }
+
+    impl ManagedTmuxDriver for PaneAware {
+        fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _n: &str, text: &str) -> Result<(), ManagedError> {
+            self.run(text);
+            Ok(())
+        }
+        fn send_line_to_pane(&self, _n: &str, _p: &str, text: &str) -> Result<(), ManagedError> {
+            self.run(text);
+            Ok(())
+        }
+        fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+            self.session_interrupts
+                .lock()
+                .expect("log")
+                .push(name.to_owned());
+            *self.freed.lock().expect("freed") = true;
+            Ok(())
+        }
+        fn send_interrupt_to_pane(&self, _n: &str, pane: &str) -> Result<(), ManagedError> {
+            self.pane_interrupts
+                .lock()
+                .expect("log")
+                .push(pane.to_owned());
+            *self.freed.lock().expect("freed") = true;
+            Ok(())
+        }
+        fn get_pane_id(&self, _name: &str) -> Option<String> {
+            Some("%3".to_owned())
+        }
+        fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+            // Wedged at a continuation prompt until interrupted.
+            if *self.freed.lock().expect("freed") {
+                Ok(self.printed.lock().expect("printed").clone())
+            } else {
+                Ok("quote>".to_owned())
+            }
+        }
+        fn capture_pane(&self, n: &str, _p: &str, l: usize) -> Result<String, ManagedError> {
+            self.capture(n, l)
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+    }
+
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+
+    let tmux = std::sync::Arc::new(PaneAware::default());
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), Some(true));
+    adapter
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect("the spawn must reach the pane");
+
+    assert_eq!(
+        tmux.pane_interrupts.lock().expect("log").clone(),
+        vec!["%3".to_owned()],
+        "the interrupt must go to the session's OWN pane, resolved from the driver"
+    );
+    assert!(
+        tmux.session_interrupts.lock().expect("log").is_empty(),
+        "a session-scoped interrupt lands in whichever pane is active — the \
+         operator's, on a spawn into an existing session"
+    );
+}
+
 /// #6765: with no usable id the resume launches FRESH — never a bare
 /// `--continue`, which would resolve "most recent" against a managed store this
 /// process did not choose.

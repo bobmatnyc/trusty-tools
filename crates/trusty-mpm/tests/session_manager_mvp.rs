@@ -904,6 +904,71 @@ async fn resume_managed_backfills_missing_status_line() {
     );
 }
 
+/// #8233 review round 2 (finding 7): `resume_managed` must RETURN the failure
+/// it recorded, on BOTH failing arms.
+///
+/// Why: both arms — the adapter refusing to launch, and the post-send check
+/// finding no runtime — called `mark_errored` and then fell through to
+/// `Ok(record)`. The caller saw a successful resume and had to notice the
+/// record's state for itself. `guided_resume` did not, which is where the
+/// operator-visible "restarted but runtime failed to start (state=errored)"
+/// came from: a later, racing read of a record the handler had already given
+/// up on while reporting success.
+/// What: drives a resume whose pane cannot accept a launch (the hermetic
+/// driver is a pane nothing reads), and asserts the call is an `Err` whose
+/// message is the same one the record carries — not an `Ok` beside an errored
+/// record.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
+    use trusty_mpm::session_manager::ManagedSessionState;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let ws = root.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+    let record = mgr
+        .create(
+            "resume-err".into(),
+            Some(ws.clone()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("seed session");
+    let id = record.id;
+    mgr.set_workspace(&id, ws.clone(), ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+    mgr.stop(&id).await.expect("stop");
+
+    let result = resume_managed(&state, &id).await;
+
+    let err = result
+        .err()
+        .expect("a resume that could not put a runtime in the pane must not report success");
+    let message = err.to_string();
+    assert!(
+        message.contains("#8233") || message.contains("spawn failed"),
+        "the returned error must name the launch failure: {message}"
+    );
+
+    let after = mgr.get(&id).await.expect("the record survives");
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Errored,
+        "the record is errored, which is exactly why the call must not be Ok"
+    );
+    assert!(
+        after.task.contains("[error:"),
+        "the failure must also be recorded on the record: {}",
+        after.task
+    );
+}
+
 /// P0 regression (#2172): the #2158 deployment-completeness check must NEVER
 /// prevent `resume_managed` from reaching the runtime spawn, even when
 /// validation (and its auto-repair attempt) still reports the workspace

@@ -544,6 +544,76 @@ mod tests {
         assert!(launch_was_delivered_in(&record, dir.path(), 3, TEST_INTERVAL).await);
     }
 
+    /// #8233 acceptance item 10: a relaunch that does not take must be logged
+    /// at ERROR, because ERROR is the level the daemon's bug-capture layer
+    /// (`bin/tm/tracing_setup::init_daemon_tracing`) records into
+    /// `errors.jsonl`.
+    ///
+    /// Why: at WARN this failure existed only in the session record's `task`
+    /// field. Three live launch failures on 2026-09-18 left nothing in
+    /// `errors.jsonl` at all, which is why the defect took a dozen occurrences
+    /// to diagnose. Fails on a212f8efd, where both wrappers used `warn!`.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn a_relaunch_that_does_not_take_is_recorded_at_error_level() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = std::sync::Arc::new(
+            crate::session_manager::SessionManager::new(
+                dir.path(),
+                std::sync::Arc::new(crate::session_manager::FakeNoopTmuxDriver),
+            )
+            .await
+            .expect("session manager"),
+        );
+        let created = mgr
+            .create(
+                "launch-verify".into(),
+                Some(dir.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        let mut record = created.clone();
+        record.tmux_name = "tmpm-probe".to_owned();
+        // Observable session, runtime never comes up: the NotStarted verdict.
+        let driver = ProbeDriver {
+            session_live: true,
+            runtime_up: false,
+        };
+
+        // #4181/#4931: `tracing` short-circuits every macro on a process-global
+        // MAX_LEVEL a thread-local dispatcher does not raise.
+        crate::test_support::enable_event_capture();
+        let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+        let subscriber = tracing_subscriber::registry().with(
+            trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+        );
+        // `set_default` returns a guard rather than taking a closure, so the
+        // await below runs on the test's own tokio runtime. A `block_on`
+        // closure would not drive tokio's timer and `verify_launch`'s sleep
+        // would hang forever.
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let msg = record_spawn_outcome(&mgr, &driver, &record).await;
+        drop(_guard);
+
+        let msg = msg.expect("a runtime that never came up must be reported");
+        let lines = buffer.tail(64);
+        let recorded = lines
+            .iter()
+            .find(|l| l.contains("no `claude` is running") || l.contains("ran and failed"))
+            .unwrap_or_else(|| panic!("the launch failure must be logged at all; got: {lines:?}"));
+        assert!(
+            recorded.contains("ERROR"),
+            "the failure must be logged at ERROR so it reaches errors.jsonl; got: {recorded}"
+        );
+        assert!(msg.contains("#8233"), "{msg}");
+    }
+
     /// #8233 acceptance item 2: the two failures are different bugs and must
     /// read differently. "The pane printed why on its own last line" is a lie
     /// when nothing ran.
