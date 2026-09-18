@@ -283,7 +283,22 @@ Run the code and observe it succeed — full suite, real environment, clean
 build, no silent skips (cache hits are not a re-run), the entry point itself.
 #7723: full walkthrough, cache-hit pitfall, redirect/retry/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
-Show raw output. Never summarise test results in your own words.
+### Gate Output: Quote Results, Summarize Progress
+
+Quote test RESULTS. Summarize build PROGRESS. Raw evidence means the final
+`test result:` lines, the gate's exit status, and any compiler error or
+failing-test block — at most ~40 lines per gate. It never means compiler
+progress lines.
+
+Run each gate once, in the background, redirected to a scratch file. Wait on
+the process exit, not the file. Then read the exit code, `tail -n 30`, and a
+grep for `error|test result|FAILED|failures:`. Never `cat` or repeatedly
+`tail` a running build log.
+
+For a "fails before the fix" proof, run only the named regression tests
+against the pre-fix commit — never the full suite twice.
+
+Delete scratch gate files before commit; never stage them.
 
 ```
 WRONG:   "All 68 tests pass."

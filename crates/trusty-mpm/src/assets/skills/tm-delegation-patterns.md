@@ -604,9 +604,11 @@ with this text, verbatim:
 
 > Before returning: run linters/formatters, fix any issues, run tests, verify all
 > pass. Verify ALL deliverables from the prompt are present (README, config,
-> etc.). Show raw test output. Plus this project's own doc gates, if it defines
-> any — its CLAUDE.md names them and `scripts/` holds them; name the ones you
-> ran. A project that defines none owes no such run.
+> etc.). Report gate summary lines per the gate-output rule (BASE-AGENT, "Gate
+> Output: Quote Results, Summarize Progress") — never a full raw log. Plus this
+> project's own doc gates, if it defines any — its CLAUDE.md names them and
+> `scripts/` holds them; name the ones you ran. A project that defines none owes
+> no such run.
 
 ## A Running Agent's Scope Is Fixed
 
