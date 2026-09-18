@@ -25,7 +25,12 @@ name        = "trusty-console"
 # (src/connector.rs:100) and `enum_variant_added` for
 # `machine_history::events::HistoryEvent::Services`. Both are the shape the
 # console's per-service graphs are read from, so neither is avoidable.
-version     = "0.11.2"
+# 0.12.0 (#8268, PR #8272): MINOR, the breaking position for a 0.x crate.
+# `ServeArgs` gains the public field `disk_sample_interval` (src/lib.rs:219),
+# the same `constructible_struct_adds_field` shape 0.9.3 -> 0.10.0 hit for
+# `host_sample_interval` — the struct has no `#[non_exhaustive]`, so an
+# external struct-literal construction stops compiling.
+version     = "0.12.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
