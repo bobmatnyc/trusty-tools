@@ -68,14 +68,20 @@ run on every PR, and the job still reports. The documentation gates —
 path-citation lint, the public-docs allowlist — are deliberately NOT gated
 this way: they are what a docs change owes.
 
-🟡 **New check name: `Changelog corpus`** (`website-tests.yml`). The real
-six-crate changelog parse moved out of the unit suite into
-`website/src/lib/changelog/site.corpus.test.ts` and its own vitest project, so
-a release PR's fragment no longer drags the whole website suite behind it —
-PR #8272, a Rust-only fix, went red on exactly that. All three jobs in that
-workflow now run unconditionally and gate only their costly steps, so the
-`paths:` filters are gone; adding `Changelog corpus` to
-`required_status_checks.contexts` is a branch-protection decision, made by
+🟡 **New check name: `Website content corpus`** (`website-tests.yml`). Every
+website test that reads real repository content — the six-crate changelog
+parse, the 27-page docs corpus, the flagship pages, the landing-page claims
+grounded in `crates/**` — now lives in `*.corpus.test.ts` files and the vitest
+`corpus` project, so the `unit` project walks no repository content at all and
+a release PR's fragment no longer drags the whole website suite behind it (PR
+#8272, a Rust-only fix, went red on exactly that). `Website content corpus` is
+therefore the content gate a `docs/**`, `website/src/content/**`,
+`crates/*/changelog.d/**` or `crates/*/CHANGELOG.md` change owes, and the only
+website check such a change can turn red; `Vitest (unit + smoke)` stays off
+those paths, and reads root `Cargo.toml` only when the diff touches its
+`rust-version` line. All three jobs run unconditionally and gate only their
+costly steps, so the `paths:` filters are gone; adding `Website content corpus`
+to `required_status_checks.contexts` is a branch-protection decision, made by
 hand, not by this change.
 
 ## The pre-publish shards do not run on a PR

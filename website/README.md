@@ -14,17 +14,17 @@ pnpm install
 pnpm dev        # http://localhost:5173
 ```
 
-| Command             | What it does                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------- |
-| `pnpm dev`          | Dev server with HMR                                                                      |
-| `pnpm build`        | Production build into `.vercel/output/`                                                  |
-| `pnpm preview`      | Serve the production build locally                                                       |
-| `pnpm check`        | `svelte-check` typecheck                                                                 |
-| `pnpm lint`         | `prettier --check` + `eslint`                                                            |
-| `pnpm format`       | Rewrite with Prettier                                                                    |
-| `pnpm test`         | Vitest `unit` + `smoke`: docs reader, flagship content, token parity, theme store, build |
-| `pnpm test:corpus`  | Vitest `corpus`: the real six-crate changelog parse, CI check `Changelog corpus`         |
-| `pnpm check:tokens` | Repo-wide Foundry drift gate (`scripts/check_token_drift.mjs`)                           |
+| Command             | What it does                                                                     |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `pnpm dev`          | Dev server with HMR                                                              |
+| `pnpm build`        | Production build into `.vercel/output/`                                          |
+| `pnpm preview`      | Serve the production build locally                                               |
+| `pnpm check`        | `svelte-check` typecheck                                                         |
+| `pnpm lint`         | `prettier --check` + `eslint`                                                    |
+| `pnpm format`       | Rewrite with Prettier                                                            |
+| `pnpm test`         | Vitest `unit` + `smoke`: the code suites, none of which read the repository      |
+| `pnpm test:corpus`  | Vitest `corpus`: every suite that DOES — changelog, docs, flagship, crate claims |
+| `pnpm check:tokens` | Repo-wide Foundry drift gate (`scripts/check_token_drift.mjs`)                   |
 
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
@@ -43,9 +43,13 @@ exactly the PRs it exists to check.
 That workflow's three jobs carry no `paths:` filter: each runs every time and
 gates only its costly steps on `scripts/ci-website-relevance.sh`, so a
 changelog fragment or a `src/content/**` edit no longer drags the whole suite
-behind it. The real-changelog parse is its own project and its own check —
-`pnpm test:corpus`, reported as `Changelog corpus`. Policy and the DOCS-ONLY
-definition: [docs/reference/ci-gates.md](../docs/reference/ci-gates.md).
+behind it. Every suite that reads real repository content is its own project
+and its own check — `pnpm test:corpus`, reported as `Website content corpus`,
+which is the content gate a docs, `src/content/**` or changelog change owes.
+A test that walks `crates/**`, `docs/**` or `src/content/**` belongs in a
+`*.corpus.test.ts` file; the `unit` project excludes them by name. Policy and
+the DOCS-ONLY definition:
+[docs/reference/ci-gates.md](../docs/reference/ci-gates.md).
 
 ### `pnpm.overrides` — do not remove without checking Dependabot
 

@@ -48,7 +48,7 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 
 | # | Change class | Risk | PR gate, in short |
 |---|---|---|---|
-| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, `check_test_pointers.sh`, + line-cap if touched). No Cargo test and no website code suite; a fragment owes the `Changelog corpus` content check. |
+| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, `check_test_pointers.sh`, + line-cap if touched). No Cargo test and no website code suite; a fragment owes the `Website content corpus` content check. |
 | 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, flake re-run ~10× |
 | 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast` `-p <crate>`, + one regression test that failed before |
 | 4 | **Cross-crate change** — public API or shared library | Normal → High | Rung 3 on the library, then `SKIP_UI_BUILD=1 check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
