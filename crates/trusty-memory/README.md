@@ -99,18 +99,20 @@ None — the daemon is self-contained and requires no external databases or conf
 
 #### Optional: OpenRouter API Key
 
-The embedded memory UI includes a chat panel that requires an OpenRouter API key for the language model integration. Set `OPENROUTER_API_KEY` in your environment or enter it in the UI to enable chat features.
+The daemon reads `OPENROUTER_API_KEY` for two features: the `memory.chat` MCP method, and the dream cycle's semantic-consolidation summarization pass. There is no UI to enter a key into — set it in the environment before starting the daemon.
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
-trusty-memory              # Start the daemon with chat enabled
+trusty-memory              # Start the daemon with chat and consolidation summaries enabled
 ```
 
-Chat is optional; the daemon fully functions without it.
+Both features are optional; the daemon fully functions without a key.
 
-#### Note: Embedded Svelte UI
+#### Note: no embedded UI
 
-This crate embeds a Svelte admin UI (built and compiled into the binary). The UI is pre-built and included in releases; no additional steps are needed. The embedded UI runs on `http://127.0.0.1:<port>` — see the daemon output for the live port.
+This crate has no embedded UI and no HTTP listener — it serves one Unix
+domain socket (`transport::uds`). The admin dashboard moved to the separate
+`trusty-console` crate; see [Web UI](#web-ui) below.
 
 ### Verify Installation
 
@@ -152,18 +154,13 @@ curl http://127.0.0.1:$(trusty-memory port)/health
 Exits non-zero with a message on stderr when no daemon is running, so shell
 substitution fails cleanly.
 
-### Browser dashboard + REST API
+### Dashboard
 
-The same `trusty-memory start` daemon serves the embedded Svelte admin UI
-at the bound address (printed by `trusty-memory monitor web` once the
-daemon is running) and a REST API under `/api/v1/`.
-
-Key REST API field names (verified against `src/transport/methods/palaces.rs`
-and `src/service/core.rs`):
-- Recall endpoints (`GET /api/v1/palaces/{id}/recall` and `GET /api/v1/recall`) accept
-  the query string as **`q`** (not `query`): `?q=my+search+term&top_k=5`.
-- Drawer-create body (`POST /api/v1/palaces/{id}/drawers`) expects a **`content`** field
-  (not `text`) for the drawer body.
+`trusty-memory start` serves no HTTP and no embedded UI — one Unix domain
+socket only. The dashboard lives in the separate `trusty-console` crate,
+which reads the daemon over that socket; see [Web UI](#web-ui) below. For the
+tool surface (MCP and the equivalent socket methods), see
+[Available MCP Tools](#available-mcp-tools).
 
 ### Bind to a named palace
 
@@ -245,8 +242,8 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-All tools are exposed via both the MCP protocol (over the `serve --stdio`
-path) and the HTTP API (`/api/v1/`). The `palace` argument is required unless
+All tools are exposed via the MCP protocol (over the `serve --stdio` path).
+The `palace` argument is required unless
 the server was started with `--palace <name>`, which makes it optional
 everywhere.
 
@@ -550,11 +547,12 @@ existing palaces.
 
 ## Web UI
 
-When running in HTTP mode, the embedded Svelte admin dashboard is available at:
-
-```
-http://127.0.0.1:<port>/
-```
+trusty-memory has no HTTP listener or embedded UI of its own — the daemon
+serves one Unix domain socket ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286)).
+The admin dashboard moved to the separate `trusty-console` crate
+([#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155)), which reads
+the daemon over that socket and serves the dashboard at `/tools/memory/`.
+Install it separately: `cargo install trusty-console`.
 
 The dashboard provides:
 - Real-time palace overview (drawer counts, vector counts, KG triple counts)
@@ -569,7 +567,7 @@ The dashboard provides:
 | Variable | Default | Description |
 |---|---|---|
 | `RUST_LOG` | `warn` | Tracing filter. E.g. `RUST_LOG=info` or `RUST_LOG=trusty_memory=debug`. |
-| `OPENROUTER_API_KEY` | — | Enables chat completions via OpenRouter (`/api/v1/chat`). |
+| `OPENROUTER_API_KEY` | — | Enables chat completions via OpenRouter for the `memory.chat` MCP method and dream-cycle summarization. |
 | `TRUSTY_DATA_DIR_OVERRIDE` | — | Override the data directory (intended for tests). |
 
 ### Config file
@@ -605,13 +603,13 @@ Each palace directory contains:
 
 ```
 trusty-memory (this crate)          trusty-common `memory-core` feature
-  axum HTTP/SSE server     ──────►  PalaceRegistry
-  serve --stdio (JSON-RPC) ──────►  HNSW vector index (index.usearch)
-  embedded Svelte UI               redb metadata + KG (kg.redb)
-  MCP tool surface                 fastembed (AllMiniLML6V2Q)
+  serve/start (Unix socket) ─────►  PalaceRegistry
+  serve --stdio (JSON-RPC)  ─────►  HNSW vector index (index.usearch)
+  MCP tool surface                  redb metadata + KG (kg.redb)
+                                     fastembed (AllMiniLML6V2Q)
 
 Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
-                                  ──POST /rpc (HTTP)──► trusty-memory daemon
+                                  ──Unix socket──► trusty-memory daemon
 ```
 
 The `memory-core` feature of `trusty-common` owns the storage engine: `hnsw_rs` for approximate
@@ -619,20 +617,22 @@ nearest-neighbor search, `redb` for drawer metadata and knowledge-graph triples,
 `fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
 thin protocol layer on top.
 
-The embedded Svelte UI is compiled at build time and served via `rust-embed` —
-no separate web server or Node.js installation is needed at runtime.
+This crate has no embedded UI and no HTTP listener
+([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286)):
+`trusty_common::uds::server` serves one Unix domain socket, and
+`trusty-console` reads it to render the dashboard — see [Web UI](#web-ui).
 
 ## Feature Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `axum-server` | **enabled** | Compiles the HTTP server, SSE endpoint, and axum-based REST API. Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). |
+| `daemon` | **enabled** | Compiles the socket-serving surface (`transport::uds`, `serve` / `start`). Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
 
 ```toml
-# Full daemon build — no change needed (axum-server is on by default)
+# Full daemon build — no change needed (daemon is on by default)
 trusty-memory = { workspace = true }
 
-# rlib consumer — omit the HTTP stack
+# rlib consumer — omit the socket-serving surface
 trusty-memory = { workspace = true, default-features = false }
 ```
 
