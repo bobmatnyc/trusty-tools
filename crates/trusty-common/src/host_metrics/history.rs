@@ -304,16 +304,15 @@ mod tests {
     /// Test: this test.
     #[test]
     fn disk_cadence_is_slower_than_the_host_cadence() {
-        assert_eq!(DISK_SAMPLE_INTERVAL_SECS, 15);
-        assert!(
-            DISK_SAMPLE_INTERVAL_SECS > HOST_SAMPLE_INTERVAL_SECS,
+        // Both pinned by value rather than compared: two consts compared with
+        // `assert!` fold to a constant, which `clippy::assertions_on_constants`
+        // rejects. Equalising the two cadences changes one of these numbers and
+        // still turns this test red.
+        assert_eq!(
+            DISK_SAMPLE_INTERVAL_SECS, 15,
             "a disk refresh is the expensive part of a sample; it must not run every host tick"
         );
-        assert_eq!(
-            DISK_SAMPLE_INTERVAL_SECS % HOST_SAMPLE_INTERVAL_SECS,
-            0,
-            "the disk cadence lands on a host tick"
-        );
+        assert_eq!(HOST_SAMPLE_INTERVAL_SECS, 1, "the graph cadence is unmoved");
     }
 
     /// Why: a zero-capacity ring would drop every sample and report an empty
