@@ -241,16 +241,22 @@ waiting longer.
 ## Never End a Gate Chain in a Pipe (#7440)
 
 A pipeline's exit status is the LAST command's, so `cargo test … | tail` exits
-0 on a failing suite. Redirect into a scratchpad file named for this task and
-step, then `echo "EXIT=$?"`, and read the file only on non-zero.
+0 on a failing suite. Redirect and read `EXIT=$?` — the rule above.
 
-Where a chain genuinely has to pipe, `set -o pipefail` (bash/zsh) makes the
-pipeline carry the first non-zero status, and `${PIPESTATUS[0]}` reads the
-producer's own code. Both are bashisms — they do not exist in `sh`. Under
-Claude Code worktree isolation a grouped `( … )` command is refused before it
-runs, so give each gate its own plain command, its own redirect, and its own
-`echo "EXIT=$?"` (#6937). Backgrounded the chain? The `echo` writes to the
-tool's stdout, not the file — append the sentinel into the file, or wait on
+Where a chain must pipe, know what each mechanism actually gives you.
+`set -o pipefail` carries the LAST non-zero status, not the first:
+`set -o pipefail; false | bash -c "exit 3"` exits `3`. Per-stage codes are
+`${PIPESTATUS[0]}` in bash and `${pipestatus[1]}` in zsh, which indexes from 1;
+neither exists in `sh`, and reaching for the wrong one FAILS OPEN. This
+harness's Bash tool is zsh 5.9, where `${PIPESTATUS[0]}` expands to nothing,
+`[ -ne 0 ]` aborts with `unknown condition: -ne`, and the `if` takes its else
+branch — a green verdict over a stage that exited 3. Redirect-then-read stays
+the default for exactly that reason.
+
+Under Claude Code worktree isolation a grouped `( … )` command is refused
+before it runs, so give each gate its own plain command, its own redirect, and
+its own `echo "EXIT=$?"` (#6937). Backgrounded the chain? The `echo` writes to
+the tool's stdout, not the file — append the sentinel into the file, or wait on
 the process itself (above).
 
 ## Stack-Specific Gate Traps

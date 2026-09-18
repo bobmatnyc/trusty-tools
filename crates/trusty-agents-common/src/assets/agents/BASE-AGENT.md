@@ -370,8 +370,9 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
   see "Never Narrate a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
-- Stack-specific gate traps — a task runner that replays its cache, a dev
-  server a `pkill` cannot reach: same skill as above (#7560, #7562).
+- Stack-specific gate traps — a cache-replaying task runner, a dev server
+  `pkill` misses: Read
+  `{{TM_SKILLS}}/verification-before-completion/SKILL.md` (#7560, #7562).
 
 ### Never end a gate chain in a pipe
 
