@@ -121,40 +121,143 @@ fn keychain_backend_debug_never_contains_a_value() {
     assert!(rendered.contains("trusty/bobmatnyc/trusty-tools"));
 }
 
+/// Every `.tmp` scratch file left in the index's directory.
+fn leftover_scratch_files(index: &std::path::Path) -> Vec<String> {
+    let dir = index.parent().expect("the index always has a parent");
+    std::fs::read_dir(dir)
+        .expect("the index directory exists after a write")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect()
+}
+
 /// Why: a crash mid-write would leave truncated JSON at the final path, and
 /// `read_index` (correctly) refuses that forever — a vault that lists nothing
-/// and refuses every add. The write must therefore land by rename, and a
-/// failed write must leave the previous index intact.
+/// and refuses every add. The write must therefore be PUBLISHED by rename, not
+/// copied into the live file, and a failed write must leave the previous index
+/// intact.
+///
+/// The inode assertion is what makes this a rename test rather than a
+/// "temp file plus copy" test: `rename(2)` moves a new inode onto the name, so
+/// the published index's inode changes; any copy-into-place — the shape that
+/// CAN be observed half-written — reuses the destination inode and fails here.
 /// Test: itself.
 #[test]
-fn keychain_backend_index_write_is_atomic() {
+fn keychain_backend_index_write_publishes_by_rename() {
     let (_tmp, _store, backend) = fixture();
     backend.set("FIRST", FAKE_VALUE).unwrap();
-
-    let tmp_path = backend.index_path().with_extension("json.tmp");
-    assert!(
-        !tmp_path.exists(),
-        "no scratch file may survive a successful write"
-    );
     assert_eq!(backend.list().unwrap(), vec!["FIRST".to_string()]);
+    assert!(
+        leftover_scratch_files(backend.index_path()).is_empty(),
+        "no scratch file may survive a successful write: {:?}",
+        leftover_scratch_files(backend.index_path())
+    );
+
+    #[cfg(unix)]
+    let first_inode = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(backend.index_path()).unwrap().ino()
+    };
+
+    backend.set("SECOND", FAKE_VALUE).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let second_inode = std::fs::metadata(backend.index_path()).unwrap().ino();
+        assert_ne!(
+            first_inode, second_inode,
+            "the index must be published by rename (a fresh inode), not written \
+             or copied over the live file"
+        );
+    }
+
     let before = std::fs::read_to_string(backend.index_path()).unwrap();
 
-    // Make the scratch write fail: a directory cannot be opened for writing.
-    std::fs::create_dir(&tmp_path).unwrap();
-    let err = backend.set("SECOND", FAKE_VALUE);
-    assert!(err.is_err(), "a failed scratch write must surface");
+    // Make the scratch write fail without naming it: creating a file needs
+    // WRITE permission on the directory, so a 0500 directory refuses the
+    // scratch create while leaving the already-created lock sidecar openable.
+    let dir = backend.index_path().parent().unwrap().to_path_buf();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            backend.set("THIRD", FAKE_VALUE).is_err(),
+            "a failed scratch write must surface, never be swallowed"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     assert_eq!(
         std::fs::read_to_string(backend.index_path()).unwrap(),
         before,
         "a failed write must leave the previous index byte-identical"
     );
-    assert_eq!(backend.list().unwrap(), vec!["FIRST".to_string()]);
-
-    std::fs::remove_dir(&tmp_path).unwrap();
-    backend.set("SECOND", FAKE_VALUE).unwrap();
     assert_eq!(
         backend.list().unwrap(),
         vec!["FIRST".to_string(), "SECOND".to_string()]
+    );
+    assert!(
+        leftover_scratch_files(backend.index_path()).is_empty(),
+        "a failed write may not leave a scratch file behind: {:?}",
+        leftover_scratch_files(backend.index_path())
+    );
+}
+
+/// Why: `set`/`remove` are read-modify-write cycles over one shared file, run
+/// by whatever `tm secrets` processes the operator happens to start at once.
+/// Without cross-process serialisation two writers interleave
+/// read/read/write/write and one name is lost — with its keychain entry still
+/// present, so `list` under-reports what is stored — or they publish a
+/// half-written index that `read_index` then refuses forever.
+///
+/// Each writer gets its OWN [`KeychainBackend`] and its own store, so nothing
+/// is shared in-process but the index file itself: an in-struct `Mutex` would
+/// not make this pass, and neither does a sequential run of the same calls.
+/// Test: itself.
+#[test]
+fn keychain_backend_concurrent_writers_never_lose_a_name() {
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 6;
+
+    let tmp = TempDir::new().unwrap();
+    let index = index_path_at(tmp.path(), GROUP);
+    let open = |path: std::path::PathBuf| {
+        KeychainBackend::with_store(
+            GROUP,
+            Arc::new(MemoryKeyStore::new()) as Arc<dyn KeyStore>,
+            path,
+        )
+        .unwrap()
+    };
+
+    for round in 0..ROUNDS {
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let path = index.clone();
+                scope.spawn(move || {
+                    open(path)
+                        .set(&format!("KEY_{round}_{writer}"), FAKE_VALUE)
+                        .expect("a concurrent add must not fail");
+                });
+            }
+        });
+    }
+
+    let names = open(index.clone())
+        .list()
+        .expect("the index must still parse after concurrent writers");
+    let mut expected: Vec<String> = (0..ROUNDS)
+        .flat_map(|round| (0..WRITERS).map(move |writer| format!("KEY_{round}_{writer}")))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "every concurrently added name must survive; {} of {} present",
+        names.len(),
+        expected.len()
     );
 }
 

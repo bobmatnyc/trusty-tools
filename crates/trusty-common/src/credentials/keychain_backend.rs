@@ -17,15 +17,19 @@
 //! something to enumerate. The index never holds a value — only names, which
 //! are not secret (T-2). Every write path is fail-closed: an unreachable
 //! keychain, an unparsable index, or an invalid group/key is an error, never a
-//! warning-and-continue. The backing store is the [`KeyStore`] trait, so a
-//! test can inject [`super::MemoryKeyStore`] and no unit test ever touches a
-//! real keychain.
+//! warning-and-continue. Every index mutation runs under the cross-process
+//! advisory lock `json_rmw`/`file_lock` already own, so concurrent
+//! `tm secrets` processes cannot lose a row or publish a half-written file.
+//! The backing store is the [`KeyStore`] trait, so a test can inject
+//! [`super::MemoryKeyStore`] and no unit test ever touches a real keychain.
 //!
 //! Test: the sibling keychain_backend_tests.rs file —
 //! `keychain_backend_namespaces_by_group_and_key`,
 //! `keychain_backend_list_reads_index_names_only`,
 //! `keychain_backend_remove_deletes_entry_and_index_row`,
-//! `keychain_backend_debug_never_contains_a_value`, and the `#[ignore]`
+//! `keychain_backend_debug_never_contains_a_value`,
+//! `keychain_backend_concurrent_writers_never_lose_a_name`,
+//! `keychain_backend_index_write_publishes_by_rename`, and the `#[ignore]`
 //! `keychain_backend_real_roundtrip_add_list_remove` against the real
 //! keychain.
 
@@ -295,18 +299,20 @@ impl KeychainBackend {
     ///
     /// Why: `tm secrets add`'s only write path.
     /// What: validates the key, writes the keychain entry, and only then adds
-    /// the name to the `0600` index — a refused backend write leaves the index
+    /// the name to the `0600` index under the cross-process lock
+    /// ([`Self::update_index`]) — a refused backend write leaves the index
     /// untouched. `value` is never logged, returned, or placed in an error.
     /// Test: `keychain_backend_namespaces_by_group_and_key`,
-    /// `keychain_backend_debug_never_contains_a_value`.
+    /// `keychain_backend_debug_never_contains_a_value`,
+    /// `keychain_backend_concurrent_writers_never_lose_a_name`.
     pub fn set(&self, key: &str, value: &str) -> Result<(), KeyStoreError> {
         validate_key(key)?;
         self.store.set(key, value)?;
-        let mut index = self.read_index()?;
-        if !index.names.iter().any(|n| n == key) {
-            index.names.push(key.to_string());
-        }
-        self.write_index(index)
+        self.update_index(|names| {
+            if !names.iter().any(|n| n == key) {
+                names.push(key.to_string());
+            }
+        })
     }
 
     /// Read `key`'s value, or `None` when it is absent/unreachable.
@@ -345,9 +351,43 @@ impl KeychainBackend {
     pub fn remove(&self, key: &str) -> Result<(), KeyStoreError> {
         validate_key(key)?;
         self.store.unset(key)?;
-        let mut index = self.read_index()?;
-        index.names.retain(|n| n != key);
-        self.write_index(index)
+        self.update_index(|names| names.retain(|n| n != key))
+    }
+
+    /// Read-modify-write the index's name list under the cross-process lock.
+    ///
+    /// Why: #7521 — `set` and `remove` are each a read → mutate → write cycle
+    /// over ONE file that any number of `tm secrets` PROCESSES can run at
+    /// once. Unserialised, two writers interleave read/read/write/write and
+    /// one name is lost while its keychain entry survives, so `list`
+    /// under-reports what is stored. An in-process `Mutex` cannot fix that:
+    /// the writers are separate processes.
+    /// What: takes the exclusive advisory lock on the index's `.lock` sidecar
+    /// via [`crate::file_lock::with_exclusive_lock`] — the same primitive
+    /// `json_rmw` uses for `projects.json` — then re-reads the index from disk
+    /// UNDER that lock (never trusting a copy read before it), applies
+    /// `mutate`, and publishes via [`Self::write_index`]. `json_rmw::update`
+    /// itself is not reusable here: it publishes with `File::create`, which
+    /// would widen the index past `0600`.
+    ///
+    /// Errors: a lock that cannot be created or is still held after
+    /// [`crate::file_lock::DEFAULT_LOCK_TIMEOUT`] is a
+    /// [`KeyStoreError::Io`] naming the sidecar — fail-closed, never a write
+    /// that skipped the lock.
+    /// Test: `keychain_backend_concurrent_writers_never_lose_a_name`.
+    fn update_index(&self, mutate: impl FnOnce(&mut Vec<String>)) -> Result<(), KeyStoreError> {
+        let locked = crate::file_lock::with_exclusive_lock(&self.index_path, || {
+            let mut index = self.read_index()?;
+            mutate(&mut index.names);
+            self.write_index(index)
+        });
+        match locked {
+            Ok(result) => result,
+            Err(source) => Err(KeyStoreError::Io {
+                path: crate::file_lock::lock_path(&self.index_path),
+                source,
+            }),
+        }
     }
 
     /// Parse the index file; a missing file is an empty index.
@@ -388,10 +428,12 @@ impl KeychainBackend {
     /// final path, which [`Self::read_index`] then refuses forever — a vault
     /// that lists nothing and refuses every add. Same tmp-then-rename shape
     /// `FileKeyStore::write` uses for the credentials file.
-    /// What: renders, writes to `<index>.json.tmp` at `0600` from birth, then
-    /// renames onto the final path. A failed tmp write leaves the previous
+    /// What: renders, writes to a per-attempt scratch path ([`scratch_path`])
+    /// at `0600` from birth, then renames onto the final path. `rename(2)`
+    /// within a filesystem is atomic, so a reader sees the whole previous
+    /// index or the whole new one. A failed scratch write leaves the previous
     /// index untouched.
-    /// Test: `keychain_backend_index_write_is_atomic`.
+    /// Test: `keychain_backend_index_write_publishes_by_rename`.
     fn write_index(&self, mut index: SecretsIndex) -> Result<(), KeyStoreError> {
         index.group = self.group.clone();
         index.names.sort();
@@ -406,13 +448,39 @@ impl KeychainBackend {
             path: self.index_path.clone(),
             source: std::io::Error::other(e.to_string()),
         })?;
-        let tmp = self.index_path.with_extension("json.tmp");
+        let tmp = scratch_path(&self.index_path);
         write_owner_only(&tmp, &json)?;
-        std::fs::rename(&tmp, &self.index_path).map_err(|e| KeyStoreError::Io {
-            path: self.index_path.clone(),
-            source: e,
+        std::fs::rename(&tmp, &self.index_path).map_err(|e| {
+            // Never leave a half-written scratch file behind.
+            let _ = std::fs::remove_file(&tmp);
+            KeyStoreError::Io {
+                path: self.index_path.clone(),
+                source: e,
+            }
         })
     }
+}
+
+/// Scratch path for ONE publish attempt — unique per writer and per attempt.
+///
+/// Why: #7521 — the fixed `<index>.json.tmp` this replaced was shared by every
+/// process. Two `tm secrets add` runs wrote it at once and each renamed it over
+/// the real index, so one rename hit `ENOENT` and the survivor published a
+/// document assembled from both writers. Uniqueness removes that class of
+/// failure independently of [`KeychainBackend::update_index`]'s lock, the same
+/// reasoning `json_rmw::temp_path` records for `projects.json`.
+/// What: `<file_name>.<pid>.<nanos>.tmp`, alongside the target so the publish
+/// stays a same-filesystem `rename`.
+/// Test: `keychain_backend_index_write_publishes_by_rename`,
+/// `keychain_backend_concurrent_writers_never_lose_a_name`.
+fn scratch_path(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{nanos}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
