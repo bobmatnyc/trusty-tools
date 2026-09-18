@@ -297,12 +297,22 @@ pub(crate) async fn index_status_report(
     // `stages` block introduced in v0.9.0 (issue #109, Phase 1) — that field
     // tracks lexical → semantic → graph progress and grows
     // `search_capabilities` as each lane comes online.
+    // #8134: `degraded` is a THIRD value this field can take. A migration that
+    // failed — including one that restored zero rows from a populated
+    // snapshot — leaves the index serving an empty corpus, and this field said
+    // `ready` over it while `migration_error` carried the whole story one field
+    // away. Health tooling branching on `status == "ready"` counted such an
+    // index as healthy. Precedence is unchanged for the two existing values: a
+    // running reindex still reports `indexing`, because that work may be what
+    // repairs the fault.
+    let migration_faults = indexer.migration_faults();
     let legacy_status = match state
         .reindex_progress
         .get(&index_id)
         .map(|p| p.status.load())
     {
         Some(ReindexStatus::Running) => "indexing",
+        _ if !migration_faults.is_empty() => "degraded",
         _ => "ready",
     };
     // Issue #109 Phase 1: snapshot the staged-pipeline state so the response
@@ -362,7 +372,7 @@ pub(crate) async fn index_status_report(
     // an ordinary empty one. `null` means no migration has failed.
     // The two runners are independent and both can be outstanding at once, so
     // this is the SET of faults, stage-ordered — not the most recent one.
-    let faults = indexer.migration_faults();
+    let faults = &migration_faults;
     let migration_error = (!faults.is_empty()).then(|| {
         serde_json::Value::Array(
             faults

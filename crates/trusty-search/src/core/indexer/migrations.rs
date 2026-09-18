@@ -77,16 +77,10 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
     }
 
     fn apply(&self, indexer: &CodeIndexer) -> Result<()> {
-        let index_id = indexer.index_id.clone();
-        let chunks_path = match persistence::chunks_path(&index_id) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "migrations: cannot resolve chunks.json path for '{index_id}' ({e}) — \
-                     skipping legacy JSON load"
-                );
-                return Ok(());
-            }
+        // #8134: read the snapshot where THIS index's artifacts live, not only
+        // where the global layout would have put it.
+        let Some(chunks_path) = legacy_snapshot_source(indexer) else {
+            return Ok(());
         };
 
         // Bridge the sync runner into the existing async migration helpers.
@@ -111,6 +105,77 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
     }
 }
 
+/// Resolve the legacy `chunks.json` this index would have been left with
+/// (#8134).
+///
+/// Why: `persistence::chunks_path` names the GLOBAL data dir and nothing else.
+/// A colocated index (issue #403) keeps every other artifact — `index.redb`,
+/// `hnsw.usearch`, `schema_version.json` — under `<root>/.trusty-search/`, and
+/// its `chunks.json` sits there too. Reading only the global path meant the
+/// migration found nothing, reported the genuine-first-boot success, and let
+/// the runner stamp v1; the populated snapshot next to `index.redb` was then
+/// never read again and the index served zero chunks while `status` said
+/// `ready`. The reporter's 0.27.1 artifact is exactly that shape.
+/// What: returns the first candidate that EXISTS as a file — the colocated
+/// probe first, then the legacy global path — or `None` when neither does,
+/// which is the real first-boot case. Order matters only when both exist: the
+/// colocated file is the one sitting beside the corpus this index opens.
+/// A global path that cannot be resolved at all is treated as absent, as
+/// before.
+/// Test: `colocated_snapshot_is_the_resolved_source`,
+/// `legacy_global_snapshot_is_still_resolved`,
+/// `no_snapshot_anywhere_resolves_to_none`.
+fn legacy_snapshot_source(indexer: &CodeIndexer) -> Option<std::path::PathBuf> {
+    let colocated = crate::service::colocated_storage::colocated_chunks_path(&indexer.root_path);
+    if colocated.is_file() {
+        return Some(colocated);
+    }
+    match persistence::chunks_path(&indexer.index_id) {
+        Ok(p) if p.is_file() => Some(p),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                "migrations: cannot resolve chunks.json path for '{}' ({e}) — \
+                 skipping legacy JSON load",
+                indexer.index_id
+            );
+            None
+        }
+    }
+}
+
+/// Refuse to call a zero-row restore a success when the source held rows
+/// (#8134).
+///
+/// Why: the migration's early return treated "restored nothing" as the
+/// first-boot case unconditionally, so a source the daemon failed to read
+/// produced `Ok`, the runner stamped the schema as migrated, and
+/// `GET /indexes/{id}/status` reported `ready` over an empty corpus. The stamp
+/// is what makes this permanent: it is never retried.
+/// What: `Err` when the snapshot carried at least one chunk entry and none of
+/// them survived into memory; `Ok` when the source itself was empty, which is
+/// the genuine first boot and must keep succeeding. The `Err` reaches
+/// `service::persistence_loader::run_migrations_for_entry`, which records it
+/// through the #7979 fault machinery, so the fault is reported rather than
+/// logged once.
+/// Test: `a_populated_source_restoring_zero_rows_is_a_failed_migration`,
+/// `an_empty_source_restoring_zero_rows_still_succeeds`.
+fn ensure_restore_is_not_silently_empty(
+    index_id: &str,
+    path: &std::path::Path,
+    loaded: &crate::core::indexer::SnapshotRestore,
+) -> Result<()> {
+    anyhow::ensure!(
+        loaded.restored > 0 || loaded.source_entries == 0,
+        "index '{index_id}': {} holds {} chunk entr{} but the restore produced 0 rows — \
+         refusing to stamp this migration as done over a corpus it never read (#8134)",
+        path.display(),
+        loaded.source_entries,
+        if loaded.source_entries == 1 { "y" } else { "ies" }
+    );
+    Ok(())
+}
+
 /// Core async migration body: load JSON snapshot, then seed redb.
 ///
 /// Why: extracted into its own function so the two runtime-flavour bridges
@@ -120,10 +185,13 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
 /// install case). #7923: returns `Err` — so the runner does not stamp v1 and
 /// the next boot retries — when no corpus store is wired, the snapshot is
 /// unreadable or corrupt, or the redb write fails or comes up short. The
-/// snapshot file is never modified.
+/// snapshot file is never modified. #8134: a source that held chunk entries
+/// and restored none of them is `Err` too — see
+/// [`ensure_restore_is_not_silently_empty`].
 /// Test: `tests::json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids`,
 /// `json_migration_fails_on_corrupt_snapshot_and_keeps_it`,
-/// `json_migration_fails_without_a_corpus_store_and_keeps_snapshot`.
+/// `json_migration_fails_without_a_corpus_store_and_keeps_snapshot`,
+/// `a_populated_source_restoring_zero_rows_is_a_failed_migration`.
 async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<()> {
     // #7923: "success" with no store to seed stamped v1, so the snapshot was
     // never read again once the store did open.
@@ -137,6 +205,9 @@ async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Pat
     );
     // Step 1: read the JSON snapshot. Missing → nothing to do; corrupt → Err.
     let loaded = indexer.restore_chunk_snapshot(chunks_path).await?;
+    // #8134: a populated source that restored nothing is a failed migration,
+    // never the first-boot success it used to be reported as.
+    ensure_restore_is_not_silently_empty(&indexer.index_id, chunks_path, &loaded)?;
     if loaded.restored == 0 {
         return Ok(());
     }
@@ -267,7 +338,9 @@ mod tests {
             report,
             crate::core::indexer::SnapshotRestore {
                 restored: 4,
-                duplicate_ids: 1
+                duplicate_ids: 1,
+                // #8134: the file carried five entries; four ids survived.
+                source_entries: 5,
             }
         );
     }
@@ -331,6 +404,113 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(indexer.chunk_count(), 1, "the in-memory corpus stays live");
+    }
+
+    // ── #8134: a zero-row restore is not automatically a first boot ──────────
+
+    /// Why (#8134): the migration's early return read "restored nothing" as
+    /// "there was nothing to restore", so a source it failed to read was
+    /// reported as a success and the runner stamped the schema — after which
+    /// the snapshot was never read again and the index served zero chunks
+    /// under `status: ready`.
+    /// What: the error arm — a source carrying entries whose restore produced
+    /// no rows must fail the step.
+    /// Test: this test.
+    #[test]
+    fn a_populated_source_restoring_zero_rows_is_a_failed_migration() {
+        let loaded = crate::core::indexer::SnapshotRestore {
+            restored: 0,
+            duplicate_ids: 0,
+            source_entries: 19_639,
+        };
+        let err = ensure_restore_is_not_silently_empty(
+            "code-intelligence",
+            std::path::Path::new("/x/.trusty-search/chunks.json"),
+            &loaded,
+        )
+        .expect_err("a populated source that restored nothing must not report success");
+        assert!(err.to_string().contains("19639 chunk entries"), "{err:#}");
+        assert!(err.to_string().contains("#8134"), "{err:#}");
+    }
+
+    /// Why (#8134): the guard must not turn a genuine first boot into a fault.
+    /// The two cases are told apart by the SOURCE's own entry count, not by
+    /// the restored count they share: an absent or empty snapshot reports
+    /// `source_entries: 0`, a populated one reports what the file held.
+    /// What: the success arm — zero entries in, zero rows out, still `Ok`.
+    /// Test: this test.
+    #[test]
+    fn an_empty_source_restoring_zero_rows_still_succeeds() {
+        let loaded = crate::core::indexer::SnapshotRestore::default();
+        assert_eq!(loaded.source_entries, 0);
+        ensure_restore_is_not_silently_empty(
+            "fresh-index",
+            std::path::Path::new("/x/chunks.json"),
+            &loaded,
+        )
+        .expect("a genuinely empty source is the first-boot case and must succeed");
+    }
+
+    /// Why (#8134): a colocated index keeps its `chunks.json` beside
+    /// `index.redb`, and the migration only ever looked in the global data dir.
+    /// What: with a snapshot under `<root>/.trusty-search/`, that file is the
+    /// resolved source.
+    /// Test: this test.
+    #[test]
+    fn colocated_snapshot_is_the_resolved_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let colocated = dir.path().join(".trusty-search");
+        std::fs::create_dir_all(&colocated).unwrap();
+        let path = colocated.join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn a() {}")]);
+
+        let indexer = CodeIndexer::new("colocated-8134", dir.path());
+        assert_eq!(legacy_snapshot_source(&indexer).as_deref(), Some(&*path));
+    }
+
+    /// Restore `TRUSTY_DATA_DIR` when the test that pinned it ends.
+    ///
+    /// Why: the variable is process-global, so a test that leaves it pointing
+    /// at a deleted temp dir breaks every later test in this binary. Mirrors
+    /// the guard `tests::snapshot_guard_7920` uses for the same variable.
+    struct RestoreDataDir(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreDataDir {
+        fn drop(&mut self) {
+            // SAFETY: dropped inside the same #[serial] span that set it.
+            match self.0.take() {
+                Some(v) => unsafe { std::env::set_var("TRUSTY_DATA_DIR", v) },
+                None => unsafe { std::env::remove_var("TRUSTY_DATA_DIR") },
+            }
+        }
+    }
+
+    /// Why (#8134): the colocated probe must not cost a legacy index its own
+    /// snapshot — the global path stays the fallback.
+    /// What: with no colocated file, resolution falls through to
+    /// `persistence::chunks_path`, and `None` only when neither exists.
+    /// Test: this test covers both, under a pinned `TRUSTY_DATA_DIR`.
+    #[test]
+    #[serial_test::serial]
+    fn legacy_global_snapshot_is_still_resolved_and_absence_is_none() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Declared after `data_dir`, so the variable is restored before the
+        // directory it names is removed.
+        let _restore = RestoreDataDir(std::env::var_os("TRUSTY_DATA_DIR"));
+        // SAFETY: #[serial] excludes every other #[serial] test for this span.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+
+        let root = tempfile::tempdir().unwrap();
+        let indexer = CodeIndexer::new("global-8134", root.path());
+        assert_eq!(
+            legacy_snapshot_source(&indexer),
+            None,
+            "no snapshot in either location resolves to None — the real first boot"
+        );
+
+        let global = persistence::chunks_path("global-8134").unwrap();
+        write_snapshot(&global, &[chunk("a", "fn a() {}")]);
+        assert_eq!(legacy_snapshot_source(&indexer).as_deref(), Some(&*global));
     }
 
     /// #7923: a store holding fewer rows than were migrated fails the step.

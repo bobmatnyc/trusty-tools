@@ -11,7 +11,8 @@
 //! Test: `failed_schema_chain_is_reported_as_migration_error_in_status`,
 //! `a_succeeding_chain_clears_an_earlier_recorded_fault`,
 //! `a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault`,
-//! `both_stages_are_reported_when_both_are_outstanding`.
+//! `both_stages_are_reported_when_both_are_outstanding`,
+//! `a_recorded_migration_fault_reports_degraded_not_ready` (#8134).
 
 use super::*;
 use crate::core::indexer::CodeIndexer;
@@ -164,6 +165,54 @@ async fn a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault() {
         faults[0]["stage"],
         crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
         "#7979: a schema chain with nothing to do must not clear another stage"
+    );
+}
+
+/// #8134: the top-level `status` must not read `ready` over a failed migration.
+///
+/// Why: `migration_error` told the whole story, but health tooling branches on
+/// `status`, and `status` was `"ready"` for every index that was not mid-
+/// reindex — including one whose corpus migration restored nothing. The
+/// reporting host counted 222 of 222 indexes healthy while a consumer got empty
+/// results.
+/// What: records a fault the way `run_migrations_for_entry` does, then asserts
+/// `status` reads `degraded` and returns to `ready` once the fault clears — an
+/// over-refusing guard would be its own outage.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_recorded_migration_fault_reports_degraded_not_ready() {
+    let (state, handle) = state_with_index("migration-degraded-8134");
+    assert_eq!(
+        index_status_report(&state, "migration-degraded-8134")
+            .await
+            .expect("status 200")["status"],
+        "ready",
+        "precondition: a fault-free index reports ready"
+    );
+
+    handle.indexer.read().await.record_migration_failure(
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+        "chunks.json holds 19639 chunk entries but the restore produced 0 rows (#8134)",
+    );
+    assert_eq!(
+        index_status_report(&state, "migration-degraded-8134")
+            .await
+            .expect("status 200")["status"],
+        "degraded",
+        "#8134: an index whose migration failed must never report ready"
+    );
+
+    handle
+        .indexer
+        .read()
+        .await
+        .clear_migration_failure(crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB);
+    assert_eq!(
+        index_status_report(&state, "migration-degraded-8134")
+            .await
+            .expect("status 200")["status"],
+        "ready",
+        "the degraded verdict must not outlive the fault that produced it"
     );
 }
 

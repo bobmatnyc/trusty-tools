@@ -110,6 +110,59 @@ async fn search_against_corpus_failed_index_returns_503_not_empty_200() {
     );
 }
 
+/// Why (#8085): the 503 for a CONTENTION failure said `retryable: true`
+/// alongside a reason promising "TRANSIENT and self-heals: retry shortly". The
+/// state is a write quarantine only a successful `CorpusStore::open` lifts, and
+/// nothing in this process re-attempts one — a serving host watched 220 indexes
+/// stay failed for ten minutes after every lock holder released, because it
+/// believed both. The CAUSE is still transient; the STATE it left is not.
+/// What: asserts the two questions are answered separately — `transient: true`
+/// for the cause, `retryable: false` and `write_quarantined: true` for the
+/// state — and that the reason text no longer promises a self-heal.
+/// Test: this test. Against pre-fix code `retryable` reads `true`.
+#[tokio::test]
+async fn degraded_status_names_quarantine_not_self_heal_while_quarantined() {
+    let (state, embedder) = build_state_with(&[("contended", Some(CorpusOpenFailure::Contention))]);
+    state.install_embedder(embedder).await;
+
+    let (status, Json(body)) = search_handler(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path("contended".to_string()),
+        axum::extract::Json(probe_query()),
+    )
+    .await
+    .expect_err("a corpus-failed index must not answer 200");
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["failure_kind"], "contention");
+    assert_eq!(
+        body["transient"], true,
+        "#4333: the CAUSE is still transient — the corpus was never read, so it \
+         must not be rebuilt"
+    );
+    assert_eq!(
+        body["retryable"], false,
+        "#8085: the STATE is a write quarantine no retry can clear"
+    );
+    assert_eq!(
+        body["write_quarantined"], true,
+        "#8085: health tooling must not have to parse prose to learn this"
+    );
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("self-heals") && !message.contains("Retry shortly"),
+        "the body must not promise a recovery that cannot happen: {message}"
+    );
+    assert!(
+        body["remedy"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("restart the daemon"),
+        "the body must name the action that does lift it, got: {}",
+        body["remedy"]
+    );
+}
+
 /// Why (#4333): the same 503 must carry the OPPOSITE guidance for a genuine
 /// format incompatibility — the fix must not swing to never recommending a
 /// rebuild.

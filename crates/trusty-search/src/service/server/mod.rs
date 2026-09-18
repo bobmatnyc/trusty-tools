@@ -68,6 +68,9 @@ mod list_vector_health_tests;
 mod test_support;
 #[cfg(test)]
 mod tests_1073;
+// #8105: a reindex against a write-quarantined index is refused, not queued.
+#[cfg(test)]
+mod tests_write_quarantine_8105;
 #[cfg(test)]
 mod tests_2336;
 #[cfg(test)]
