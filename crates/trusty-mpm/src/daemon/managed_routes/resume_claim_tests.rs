@@ -32,14 +32,19 @@ use crate::session_manager::ManagedSessionState;
 #[tokio::test]
 async fn a_second_operator_resume_is_refused_while_one_is_in_flight() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(
-        DaemonState::with_root_isolated_managed(dir.path().to_path_buf()).await,
-    );
+    let state = Arc::new(DaemonState::with_root_isolated_managed(dir.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).expect("workspace dir");
     let record = mgr
-        .create("claim-span".into(), Some(ws.clone()), None, None, None, None)
+        .create(
+            "claim-span".into(),
+            Some(ws.clone()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .expect("create");
     let id = record.id;
