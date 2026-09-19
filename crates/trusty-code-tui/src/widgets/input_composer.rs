@@ -38,6 +38,16 @@ const BUSY_HINT: &str = "↑ to cancel";
 /// buffer contents — matches tagent's `thinking_label`.
 const BUSY_LABEL: &str = "[thinking...]";
 
+/// Right-aligned decoration that REPLACES [`BUSY_LABEL`] while a dispatched
+/// cancel is unconfirmed (#8207).
+///
+/// Why: the run is no longer thinking on the operator's behalf, it is being
+/// stopped, and the row is the only always-visible place that says so — the
+/// scrollback line scrolls away. Same bracket shape and width class as
+/// `[thinking...]`, so the padding math needs no special case.
+/// Test: `tests::draw_input_shows_cancelling_label_instead_of_thinking`.
+const CANCELLING_LABEL: &str = "[cancelling...]";
+
 /// Stand-in glyph for a newline queued into `input_buf` (#8240).
 ///
 /// Why: a raw `\n` inside one ratatui `Span` renders as nothing, so
@@ -54,7 +64,8 @@ const NEWLINE_GLYPH: char = '⏎';
 /// What: empty input shows a dim italic placeholder (busy vs. idle hint);
 /// non-empty input renders the buffer with each queued newline shown as
 /// [`NEWLINE_GLYPH`] (#8240) and everything else verbatim; either way, a busy
-/// state additionally right-aligns `[thinking...]` if the row is wide enough.
+/// state additionally right-aligns `[thinking...]` — or `[cancelling...]` while
+/// a dispatched cancel is unconfirmed (#8207) — if the row is wide enough.
 /// The cursor is positioned by counting chars up to `app.cursor_pos`, not
 /// bytes, so multi-byte input doesn't desync the visual cursor from the true
 /// edit point — the glyph is one char for one `\n`, so that count is
@@ -89,7 +100,13 @@ fn compose_line(app: &ReplApp, width: usize) -> (Line<'static>, usize) {
 
     let mut spans: Vec<Span<'static>> = vec![Span::raw(prompt.clone())];
     if app.input_buf.is_empty() {
-        let placeholder = if app.busy { BUSY_HINT } else { IDLE_HINT };
+        // #8207: the cancel window is a held-input state too — `↑ to cancel`
+        // still reads correctly there, since a repeat gesture re-asks.
+        let placeholder = if app.accepts_submit() {
+            IDLE_HINT
+        } else {
+            BUSY_HINT
+        };
         spans.push(Span::styled(
             placeholder.to_string(),
             Style::default()
@@ -110,14 +127,21 @@ fn compose_line(app: &ReplApp, width: usize) -> (Line<'static>, usize) {
     // empty (matches tagent's `chat.rs::draw_input`: `used` is computed from
     // `input_buf`'s real length, not the placeholder text, so both the
     // empty-buffer placeholder AND this label can render together).
-    if app.busy {
+    // #8207: an unconfirmed cancel outranks `busy` here — both are true during
+    // the cancel window, and "cancelling" is the state the operator needs.
+    if app.cancelling || app.busy {
+        let label = if app.cancelling {
+            CANCELLING_LABEL
+        } else {
+            BUSY_LABEL
+        };
         let used = prompt_width + app.input_buf.chars().count();
-        let label_w = BUSY_LABEL.chars().count();
+        let label_w = label.chars().count();
         if width > used + label_w + 1 {
             let pad = width - used - label_w;
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(
-                BUSY_LABEL,
+                label,
                 Style::default().add_modifier(Modifier::DIM),
             ));
         }
@@ -216,6 +240,23 @@ mod tests {
         assert!(
             text.contains(BUSY_LABEL),
             "busy label must render even with a non-empty buffer: {text}"
+        );
+    }
+
+    /// #8207: during the unconfirmed-cancel window the row must say the run is
+    /// being stopped, not that it is still thinking — the always-visible half of
+    /// the cancelling state (the scrollback line scrolls away).
+    #[test]
+    fn draw_input_shows_cancelling_label_instead_of_thinking() {
+        let mut app = ReplApp::new("demo", "u");
+        app.busy = true;
+        app.cancelling = true;
+        let (line, _) = compose_line(&app, WIDE);
+        let text = line_text(&line);
+        assert!(text.contains(CANCELLING_LABEL), "{text}");
+        assert!(
+            !text.contains(BUSY_LABEL),
+            "a cancelling run is not thinking: {text}"
         );
     }
 

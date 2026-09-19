@@ -158,29 +158,26 @@ pub trait TuiModel {
     }
 
     /// Called by [`run`]'s dispatch step immediately after a drained cancel
-    /// signal, before the `cancel_session` call is even dispatched.
+    /// signal, before the cancel RPC is even dispatched.
     ///
-    /// Why: the actual `TuiEngine::cancel_session` RPC is async and runs on
-    /// a spawned task (so a slow/hung backend never freezes the render
-    /// loop), but the visible "busy" state should clear the moment the user
-    /// asked to cancel, not whenever the RPC eventually resolves — direct
-    /// parity with tagent's real cancel path
-    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`), which
-    /// resets `thinking`/`busy_since` synchronously, before `h.abort()` even
-    /// runs. DOC-50 §5 Slice 5's "blocks user input until cancel completes"
-    /// is implemented literally, not reasoned away: `crate::app::ReplApp`'s
-    /// `submit_line` refuses a second turn while `busy` is `true`
-    /// ([`crate::app::ReplApp::submit_line`]'s doc comment), so this method
-    /// clearing `busy` is exactly the moment new input becomes acceptable
-    /// again — before that, Enter/Submit is a genuine no-op, not merely
-    /// cosmetically blocked. [`dispatch_pending`] separately bumps the
-    /// generation counter in the SAME cancel branch this method is called
-    /// from, so any output still in flight from the just-cancelled turn is
-    /// dropped rather than rendered once it eventually arrives (see that
-    /// function's doc comment for the generation mechanism).
-    /// What: default no-op — a model with no busy/streaming state to reset
-    /// needs no override.
-    fn on_cancelled(&mut self) {}
+    /// Why: the RPC is async and runs on a spawned task (so a slow or hung
+    /// backend never freezes the render loop), so the model needs a hook that
+    /// runs at REQUEST time — but #8207 is the proof that this hook must not
+    /// announce an outcome. An earlier revision cleared the busy state and
+    /// printed "cancelled" here; the daemon's cancel is cooperative, so the run
+    /// was often still executing, and the prompt the reopened input accepted
+    /// came back `-32003 already has a task running`. DOC-50 §5 Slice 5's
+    /// "blocks user input until cancel completes" is now literal in the strict
+    /// sense: input stays blocked until
+    /// [`crate::event::ReplEvent::CancelSettled`] reports a confirmed stop.
+    /// [`dispatch_pending`] separately bumps the generation counter in the SAME
+    /// cancel branch this method is called from, so any output still in flight
+    /// from the just-cancelled turn is dropped rather than rendered once it
+    /// eventually arrives (see that function's doc comment for the generation
+    /// mechanism).
+    /// What: default no-op — a model with no cancelling state to enter needs no
+    /// override.
+    fn on_cancel_requested(&mut self) {}
 
     /// Record the generation number [`dispatch_pending`] just assigned to a
     /// new turn (submit) or bumped past (cancel), so a later
@@ -509,8 +506,9 @@ type Generation = Arc<std::sync::atomic::AtomicU64>;
 /// returned `Ok(true)` without ever producing a terminal signal (see
 /// `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy` deadlock
 /// that gap causes). A message dropped for generation mismatch does NOT set
-/// `saw_terminal` — that turn was already superseded/cancelled, and
-/// `TuiModel::on_cancelled` already reset `busy` for it independently.
+/// `saw_terminal` — that turn was already superseded/cancelled, and the
+/// cancel's own `ReplEvent::CancelSettled` reply is what resets `busy` for it
+/// (#8207), independently of this forwarder.
 /// Test: [`tests::forward_while_current_generation_drops_stale_generation_message`],
 /// [`tests::forward_while_current_generation_forwards_matching_generation_message`],
 /// [`tests::forward_while_current_generation_flags_terminal_assistant_output`],
@@ -579,10 +577,13 @@ async fn forward_while_current_generation(
 ///
 /// What: cancel is drained and dispatched FIRST — bumps `generation`
 /// (invalidating the in-flight turn's forwarder before anything else
-/// happens), calls [`TuiModel::on_cancelled`] synchronously so the UI's busy
-/// state clears immediately (see that method's doc comment for why), aborts
-/// the stashed `JoinHandle`, then relays `engine.cancel_session()` on its
-/// own task so a slow backend never blocks the render loop. Submit is
+/// happens), calls [`TuiModel::on_cancel_requested`] synchronously so the UI
+/// enters its cancelling state immediately (see that method's doc comment for
+/// why it announces no outcome there), aborts the stashed `JoinHandle`, then
+/// relays `engine.cancel_session_reply()` on its own task so a slow backend
+/// never blocks the render loop — that task's answer returns as
+/// `ReplEvent::CancelSettled`, the only thing entitled to end the turn
+/// (#8207). Submit is
 /// drained second: assigned the next generation, any previous task in
 /// `current_task` is aborted (defensive — busy-gating should prevent
 /// overlapping submits, same caveat as tagent's precedent) and replaced.
@@ -633,7 +634,10 @@ async fn forward_while_current_generation(
 /// leaves `busy == false` once no task is in flight, and a stale completion
 /// from a superseded turn never clobbers a newer one.
 /// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
-/// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
+/// [`tests::dispatch_pending_cancel_reaches_cancel_session_reply`],
+/// [`tests::dispatch_pending_cancel_holds_input_until_the_reply_lands`],
+/// [`tests::dispatch_pending_cancel_still_cancelling_keeps_input_closed`],
+/// [`tests::dispatch_pending_cancel_failure_never_reports_cancelled`],
 /// [`tests::dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task`],
 /// [`tests::dispatch_pending_noop_when_nothing_pending`],
 /// [`tests::forward_while_current_generation_drops_stale_generation_message`],
@@ -665,16 +669,21 @@ fn dispatch_pending<E, M>(
         // a spawned completion task's `TurnFinished` send.
         let new_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
         model.set_current_generation(new_gen);
-        model.on_cancelled();
+        model.on_cancel_requested();
         if let Some(handle) = current_task.lock().unwrap().take() {
             handle.abort();
         }
         let engine = Arc::clone(engine);
         let tx = tx.clone();
+        // #8207: the reply comes back as an event instead of being dropped on
+        // the floor. Only that reply can end the turn — the model is in its
+        // cancelling state until it lands, so no prompt reaches the backend
+        // while the run it would collide with may still be executing. Every
+        // outcome, failure included, is a `CancelReply`, so no arm can be
+        // forgotten here and leave the pane cancelling forever.
         tokio::spawn(async move {
-            if let Err(e) = engine.cancel_session().await {
-                let _ = tx.send(ReplEvent::StatusMessage(format!("cancel failed: {e:#}")));
-            }
+            let reply = engine.cancel_session_reply().await;
+            let _ = tx.send(ReplEvent::CancelSettled(reply));
         });
     }
 

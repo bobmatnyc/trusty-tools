@@ -19,7 +19,7 @@
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
 
-use crate::model::{PendingPermission, StatuslineSegment};
+use crate::model::{CancelReply, PendingPermission, StatuslineSegment};
 use serde::{Deserialize, Serialize};
 
 /// Every event that can flow through the shared TUI's event channel.
@@ -59,10 +59,26 @@ pub enum ReplEvent {
     /// resolving to a slash command). Consumed by `TuiEngine::handle_input`.
     Submit(String),
     /// The user requested cancellation of the in-flight request (Ctrl-C).
-    /// The shared event loop relays this to `TuiEngine::cancel_session`
-    /// (DOC-50 §5 Slice 5) rather than only clearing local UI state, per the
-    /// thin-client axiom (C-2).
+    /// The shared event loop relays this to
+    /// `TuiEngine::cancel_session_reply` (DOC-50 §5 Slice 5) rather than only
+    /// clearing local UI state, per the thin-client axiom (C-2).
     Cancel,
+    /// The reply to that relay landed (#8207) — synthesized by
+    /// `crate::run::dispatch_pending`'s spawned cancel task, never by a key
+    /// press or a `TuiEngine` implementation directly.
+    ///
+    /// Why: the cancel RPC runs on its own task so a slow backend cannot freeze
+    /// the render loop, and a spawned task cannot reach `&mut ReplApp` — so the
+    /// answer comes back as an event, like every other backend-originated
+    /// signal here. It exists at all because the TUI must not say "cancelled"
+    /// on request: until this event arrives the run may still be going, and
+    /// accepting a prompt in that window is what produced #8207's
+    /// `-32003 already has a task running`.
+    /// What: the payload names which of the three outcomes came back — see
+    /// [`CancelReply`]. A reply arriving when no cancel is outstanding is
+    /// ignored by the reducer (`crate::app::reduce`), so a straggler from an
+    /// already-settled cancel cannot clobber a newer turn's state.
+    CancelSettled(CancelReply),
     /// The engine's `handle_input` returned `Ok(false)` (DOC-50 §5 Slice 5) —
     /// synthesized by `crate::run::run`'s dispatch step, never by a key press
     /// directly (Ctrl-D sets `ReplApp::quit` straight from the reducer since
@@ -88,7 +104,7 @@ pub enum ReplEvent {
     /// Slice 5's busy-gating (`ReplApp::submit_line` refuses a second turn
     /// while `busy`), any such path left `busy` stuck `true` forever —
     /// input permanently bricked, recoverable only by the accident of
-    /// Ctrl-C's `on_cancelled` reset. This variant is the fix: a dedicated,
+    /// Ctrl-C's own reset. This variant is the fix: a dedicated,
     /// minimal reset that touches ONLY `busy`/`streaming_idx`, deliberately
     /// NOT reusing an empty `AssistantOutput { done: true, .. }` for this
     /// (that would push a stray blank chat entry via the `None`-

@@ -125,6 +125,17 @@ use crate::model::{
 use crate::run::TuiModel;
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
+/// The scrollback line a dispatched, not-yet-confirmed cancel shows (#8207).
+///
+/// Why: kept next to [`CANCELLED_STATUS`] so the one word that claims the run
+/// actually stopped is visibly separate from the one that only claims it was
+/// asked to.
+pub(crate) const CANCELLING_STATUS: &str = "cancelling…";
+
+/// The scrollback line a CONFIRMED stop shows (#8207) — the only cancel line
+/// in this crate that says the run is over.
+pub(crate) const CANCELLED_STATUS: &str = "cancelled";
+
 /// One rendered chat entry in the scrollback.
 ///
 /// Why: a direct, unmodified port of tagent's `ChatLine`
@@ -361,6 +372,21 @@ pub struct ReplApp {
     /// Whether a response is currently streaming in. Drives the input
     /// composer's placeholder text.
     pub busy: bool,
+    /// Whether a dispatched cancel is still unconfirmed (#8207).
+    ///
+    /// Why: the daemon's `session.cancel` only returns once the run has
+    /// actually stopped, and can answer "not stopped yet". Between the Ctrl-C
+    /// and that answer the turn may still be running, so the TUI shows a
+    /// cancelling state and accepts no new prompt — printing "cancelled" and
+    /// reopening input on request is what earned the next prompt a
+    /// `-32003 already has a task running` refusal in #8207's transcript.
+    /// What: set by [`TuiModel::on_cancel_requested`] when the cancel is
+    /// dispatched, cleared by [`crate::event::ReplEvent::CancelSettled`] on
+    /// every arm except [`crate::model::CancelReply::StillCancelling`], which
+    /// keeps it set because the run genuinely has not stopped. Read by
+    /// [`Self::accepts_submit`] and by
+    /// [`crate::widgets::input_composer`]'s label.
+    pub cancelling: bool,
     /// Index into `chat` of the in-progress streaming assistant entry, if
     /// any. `None` when idle.
     pub streaming_idx: Option<usize>,
@@ -465,6 +491,7 @@ impl ReplApp {
             pending_permission_response: None,
             permission_error: None,
             busy: false,
+            cancelling: false,
             streaming_idx: None,
             delegations: Vec::new(),
             agent_streams: HashMap::new(),
@@ -692,11 +719,11 @@ impl ReplApp {
     /// [`reduce::tests::apply_submit_event_is_noop_while_busy`],
     /// [`reduce::tests::submit_line_is_noop_while_a_permission_prompt_is_pending`].
     pub(crate) fn submit_line(&mut self, line: String) {
-        // #3422: a suspended permission request blocks the turn for the same
-        // reason `busy` does — the backend will not accept new work until it
-        // is answered — so the guard is the same shape, and authoritative
-        // here rather than only at the key-handling call site.
-        if self.busy || self.pending_permission.is_some() {
+        // #3422/#8207: a suspended permission request and an unconfirmed cancel
+        // block the turn for the same reason `busy` does — the backend will not
+        // accept new work — so all three live behind one predicate, and it is
+        // authoritative here rather than only at the key-handling call site.
+        if !self.accepts_submit() {
             return;
         }
         self.remember_input(&line);
@@ -719,14 +746,34 @@ impl ReplApp {
         }
     }
 
+    /// Whether the backend can be handed a new turn right now (#8207).
+    ///
+    /// Why: three independent conditions mean "the backend will refuse new
+    /// work" — a turn in flight ([`Self::busy`]), a suspended permission
+    /// request ([`Self::pending_permission`]), and a dispatched cancel the
+    /// backend has not confirmed yet ([`Self::cancelling`]). They were checked
+    /// ad hoc in two places, so the cancel window was easy to add to one and
+    /// miss in the other; one predicate makes both call sites ask the same
+    /// question. The Enter key must consult it BEFORE taking the input buffer,
+    /// or the typed line is consumed and then dropped by
+    /// [`Self::submit_line`]'s own guard.
+    /// What: pure read, no mutation. `false` does not mean the keystroke is
+    /// lost — [`reduce::apply_key`] queues the typed text in the composer
+    /// instead (#8240).
+    /// Test: `reduce::tests::a_prompt_submitted_while_cancelling_is_not_dispatched`,
+    /// `reduce::tests::apply_cancel_settled_stopped_reopens_input`.
+    pub fn accepts_submit(&self) -> bool {
+        !self.busy && !self.cancelling && self.pending_permission.is_none()
+    }
+
     /// Answer the open permission prompt (#3422), staging the answer for the
     /// outer driver and releasing the input block.
     ///
     /// Why: the prompt is modal, so it must close the moment the user
     /// answers rather than waiting on the RPC — the same reasoning
-    /// [`TuiModel::on_cancelled`] documents for clearing `busy` ahead of
-    /// `cancel_session`. A backend that is slow to confirm must not leave
-    /// the keyboard dead. The backend's own
+    /// [`TuiModel::on_cancel_requested`] documents for entering the cancelling
+    /// state ahead of the cancel RPC. A backend that is slow to confirm must
+    /// not leave the keyboard dead. The backend's own
     /// [`crate::event::ReplEvent::PermissionResolved`] is what records the
     /// outcome in the scrollback; this method records nothing, because the
     /// TUI's belief about the decision is not evidence that it was applied.
@@ -947,24 +994,30 @@ impl TuiModel for ReplApp {
         self.pending_permission_response.take()
     }
 
-    /// Reset the in-flight-request UI state the moment a cancel is
-    /// dispatched (before the `TuiEngine::cancel_session` RPC even starts) —
-    /// direct parity with tagent's real cancel path, which resets
-    /// `thinking`/`busy_since` synchronously ahead of `h.abort()`
-    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`). See
-    /// [`crate::run::TuiModel::on_cancelled`]'s doc comment for why this is
-    /// synchronous rather than waiting on the RPC.
-    /// What: clears [`Self::busy`] and abandons the in-progress streaming
-    /// entry index (a future response starts a fresh chat entry rather than
-    /// appending to one no more chunks will ever arrive for), then pushes a
-    /// "cancelled" status line.
-    /// Test: `reduce::tests::apply_ctrl_c_signals_pending_cancel` covers
-    /// the reducer half; `crate::run::tests` covers this method being
-    /// invoked from the dispatch step.
-    fn on_cancelled(&mut self) {
-        self.busy = false;
+    /// Enter the cancelling state the moment a cancel is dispatched (#8207).
+    ///
+    /// Why: this used to clear [`Self::busy`] and push "cancelled" here, ahead
+    /// of the RPC — the bug in #8207. The daemon's cancel is cooperative, so
+    /// on request the run may still be executing; saying "cancelled" and
+    /// reopening input let the next prompt reach a daemon that still had a task
+    /// running, and the user saw a raw
+    /// `-32003 already has a task running` instead. `busy` therefore STAYS set
+    /// until [`crate::event::ReplEvent::CancelSettled`] reports a confirmed
+    /// stop, which is also what keeps #8240's queued-input behaviour covering
+    /// the cancel window: keystrokes and Enter accumulate in the composer
+    /// instead of starting a turn the backend would refuse.
+    /// What: sets [`Self::cancelling`], abandons the in-progress streaming
+    /// entry index (a later response starts a fresh chat entry rather than
+    /// appending to one no more chunks will ever arrive for), and pushes a
+    /// "cancelling…" status line. It deliberately reports no outcome — the
+    /// TUI's belief about the cancel is not evidence the run stopped, the same
+    /// reasoning [`Self::answer_permission`] records for a permission answer.
+    /// Test: `reduce::tests::a_prompt_submitted_while_cancelling_is_not_dispatched`,
+    /// `crate::run::tests::dispatch_pending_cancel_holds_input_until_the_reply_lands`.
+    fn on_cancel_requested(&mut self) {
+        self.cancelling = true;
         self.streaming_idx = None;
-        self.push_status("cancelled");
+        self.push_status(CANCELLING_STATUS);
     }
 
     /// Record `generation` into [`Self::current_generation`] — see

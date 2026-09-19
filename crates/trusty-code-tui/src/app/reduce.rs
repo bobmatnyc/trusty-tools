@@ -33,9 +33,9 @@
 //! # Spec References
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
 
-use super::{ChatLine, ChatRole, Delegation, ReplApp, ToolCard};
+use super::{CANCELLED_STATUS, ChatLine, ChatRole, Delegation, ReplApp, ToolCard};
 use crate::event::{DelegationOutcome, KeyCode, KeyInput, ReplEvent};
-use crate::model::{PendingPermission, PermissionAnswer};
+use crate::model::{CancelReply, PendingPermission, PermissionAnswer};
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 // #8237: the scrollback permission row folds a multi-line subject through the
 // same helper the boxed prompt uses, rather than a second copy that can drift.
@@ -65,6 +65,8 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::Scroll(delta) => app.scroll(delta),
         ReplEvent::Submit(line) => app.submit_line(line),
         ReplEvent::Cancel => app.pending_cancel = true,
+        // #8207: the cancel's reply, not the request, is what ends the turn.
+        ReplEvent::CancelSettled(reply) => apply_cancel_settled(app, reply),
         ReplEvent::Quit => app.quit = true,
         // `crate::run::dispatch_pending`'s completion safety net (see
         // `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy`
@@ -182,6 +184,51 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         }
         ReplEvent::ConnectionLost { reason } => {
             app.push_status(format!("Connection lost: {reason}"))
+        }
+    }
+}
+
+/// Apply the backend's answer to a dispatched cancel (#8207).
+///
+/// Why: this is the only place the TUI is entitled to say a run stopped, and
+/// the three arms differ in exactly that. `Stopped` ends the turn and reopens
+/// input. `StillCancelling` keeps both [`ReplApp::busy`] and
+/// [`ReplApp::cancelling`] set, because the run has not stopped — reopening
+/// input there is #8207's original bug, and the operator's next Ctrl-C simply
+/// asks again. `Failed` leaves the cancelling state (so the pane cannot sit on
+/// "cancelling…" forever behind a dead transport) but NOT `busy`: the cancel
+/// never landed, so the turn is still presumed in flight and Ctrl-C retries it.
+/// No arm prints a protocol code — each payload string is the plain sentence
+/// [`CancelReply`] requires of its producer.
+/// What: a reply arriving with no cancel outstanding is ignored, so a straggler
+/// from an already-settled cancel (a second Ctrl-C's reply, say) cannot clear
+/// `busy` for a turn the user has since started.
+/// Test: [`tests::apply_cancel_settled_stopped_reopens_input`],
+/// [`tests::apply_cancel_settled_still_cancelling_keeps_input_closed`],
+/// [`tests::apply_cancel_settled_failed_leaves_the_cancelling_state_without_claiming_a_stop`],
+/// [`tests::apply_cancel_settled_is_ignored_when_no_cancel_is_outstanding`],
+/// [`tests::no_cancel_settled_arm_renders_a_protocol_code`].
+fn apply_cancel_settled(app: &mut ReplApp, reply: CancelReply) {
+    if !app.cancelling {
+        return;
+    }
+    match reply {
+        CancelReply::Stopped => {
+            app.cancelling = false;
+            app.busy = false;
+            app.streaming_idx = None;
+            app.push_status(CANCELLED_STATUS);
+        }
+        CancelReply::StillCancelling { detail } => {
+            app.push_status(format!(
+                "still cancelling — the run has not stopped yet: {detail}. Ctrl-C asks again."
+            ));
+        }
+        CancelReply::Failed { error } => {
+            app.cancelling = false;
+            app.push_status(format!(
+                "cancel failed: {error}. The turn is still assumed to be running — Ctrl-C retries the cancel."
+            ));
         }
     }
 }
@@ -643,14 +690,15 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
-        // Gated on `!app.busy` BEFORE `take_input()` runs (not just inside
-        // `submit_line`, which also guards): while a turn is in flight, the
-        // typed line stays in `input_buf` untouched rather than being taken
-        // out and then silently dropped by `submit_line`'s own guard — DOC-50
-        // §5 Slice 5's "blocks user input until cancel completes", made
-        // literal so a second turn genuinely cannot start (see
+        // Gated on `ReplApp::accepts_submit` BEFORE `take_input()` runs (not
+        // just inside `submit_line`, which also guards): while a turn is in
+        // flight, the typed line stays in `input_buf` untouched rather than
+        // being taken out and then silently dropped by `submit_line`'s own
+        // guard — DOC-50 §5 Slice 5's "blocks user input until cancel
+        // completes", made literal so a second turn genuinely cannot start (see
         // `ReplApp::submit_line`'s doc comment for the corruption bug this
-        // closes).
+        // closes). #8207 widened the gate from `busy` alone to that predicate,
+        // so the unconfirmed-cancel window queues exactly like a live turn.
         KeyCode::Enter => {
             // #8240: printable keys ALREADY queue into `input_buf` while a
             // turn runs, so a busy Enter that did nothing at all welded the
@@ -659,7 +707,7 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
             // whole buffer submits verbatim, newlines included, on the first
             // Enter after the turn ends. An empty buffer still gets nothing —
             // a bare Enter must not open the queue with a blank line.
-            if app.busy {
+            if !app.accepts_submit() {
                 if !app.input_buf.is_empty() {
                     app.insert_char('\n');
                 }
