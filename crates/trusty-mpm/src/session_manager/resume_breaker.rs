@@ -483,7 +483,11 @@ impl super::SessionManager {
             if let Err(e) = self.mark_errored(id, &msg).await {
                 tracing::error!(id = %id, "could not mark a failed auto-resume errored: {e}");
             }
-            return Err(super::manager::ManagedError::TmuxUnavailable(msg));
+            // #8233 round 3, finding 3: typed as ALREADY RECORDED. The
+            // supervisor's generic arm used to mark the record errored a second
+            // time, so one failed auto-resume left two `[error: …]` notes on the
+            // task the next relaunch feeds back to the runtime.
+            return Err(super::manager::ManagedError::AutoResumeRecorded(msg));
         }
         Ok(record)
     }

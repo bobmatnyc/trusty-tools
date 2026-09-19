@@ -1369,3 +1369,111 @@ async fn supervisor_metrics_merge_reports_real_run_stats() {
         "the daemon must report the supervisor's real auto-resume count: {block}"
     );
 }
+
+/// A relauncher whose verdict the test chooses, counting its calls.
+struct ScriptedRelauncher {
+    calls: std::sync::atomic::AtomicUsize,
+    verdict: Result<(), String>,
+}
+
+#[async_trait::async_trait]
+impl crate::session_manager::relaunch::RuntimeRelauncher for ScriptedRelauncher {
+    async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.verdict.clone()
+    }
+}
+
+/// #8233 round 3, finding 3: ONE failed auto-resume leaves exactly ONE
+/// `[error: …]` note on the record.
+///
+/// Why: `resume_auto` marks the record errored itself, and the supervisor's
+/// generic failure arm marked it errored a second time — so the task grew two
+/// notes per failure, and `auto_relaunch` hands that task straight to the next
+/// relaunch. The count still has to rise; only the second note goes.
+/// What: drives a real tick whose relaunch fails, then counts the notes. Fails
+/// on e1ee6cf52 with two.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn one_failed_auto_resume_appends_exactly_one_error_note() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+    let relauncher = Arc::new(ScriptedRelauncher {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        verdict: Err("no runtime came up in pane 'tmpm-fleet-0'".to_owned()),
+    });
+    assert!(mgr.install_relauncher(relauncher.clone()));
+
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert_eq!(
+        report.resume_failures, 1,
+        "the failure must still be counted — the fix removes a note, not the count"
+    );
+    let record = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        record.task.matches("[error:").count(),
+        1,
+        "one failure, one note — the task is what the next relaunch is handed: {}",
+        record.task
+    );
+    assert_eq!(
+        record.state,
+        ManagedSessionState::Errored,
+        "and the record is still errored, which `resume_auto` did"
+    );
+}
+
+/// #8233 item 4: a tick observes a session another path is resuming and does
+/// NOTHING — no launch, no error note, no counted failure.
+///
+/// Why: the acceptance criterion in full. The supervisor is the second writer
+/// in the live race; the record it sees is `Stopped` for the whole first half of
+/// the other path's resume, so state alone admits it.
+/// What: holds a real claim on the session — the claim `resume_managed` now
+/// holds for its whole body — and runs a tick against it. Deterministic: the
+/// claim is taken before the tick starts, never raced into place.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+    let before = mgr.get(&ids[0]).await.expect("record").task;
+
+    let claim = mgr.begin_resume(&ids[0]).expect("the first claim is granted");
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert!(report.resumed.is_empty(), "no launch: {:?}", report.resumed);
+    assert_eq!(report.resume_failures, 0, "and nothing failed either");
+    let record = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        record.state,
+        ManagedSessionState::Stopped,
+        "the tick must leave the record to the path that holds it"
+    );
+    assert_eq!(record.task, before, "and append nothing to its task");
+    assert_eq!(
+        *tmux.create_calls.lock().unwrap(),
+        0,
+        "above all, no second launch line reaches the pane"
+    );
+
+    // Released, the session is admitted again — a claim that outlived its
+    // resume would make it permanently unresumable.
+    drop(claim);
+    let after = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    assert_eq!(
+        after.resumed.len(),
+        1,
+        "once the claim is gone the sweep resumes it as usual: {after:?}"
+    );
+}

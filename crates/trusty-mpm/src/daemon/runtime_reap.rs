@@ -179,6 +179,13 @@ pub async fn stop_runtime_exited(
                     "runtime-reap: marked managed session Stopped (runtime process exited, #1814, pane left alive #2023)"
                 );
             }
+            // #8233: nothing failed — another path is resuming this session and
+            // wrote `Active` before its runtime exists. Stopping it here would
+            // hand the next supervisor tick a second launch.
+            Err(crate::session_manager::ManagedError::ResumeInFlight(_)) => info!(
+                id = %id,
+                "runtime-reap: a resume is in flight for this session; leaving it alone (#8233)"
+            ),
             Err(e) => warn!(
                 id = %id,
                 "runtime-reap: failed to mark managed session Stopped: {e}"

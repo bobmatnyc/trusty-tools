@@ -92,6 +92,27 @@ impl super::SessionManager {
             set: Arc::clone(&self.resume_in_flight),
         })
     }
+
+    /// Is some path currently resuming `id`?
+    ///
+    /// Why (#8233): a claim only excludes the writers that ASK for one. The
+    /// runtime reaper asks for none — it flips an `Active` record to `Stopped`
+    /// 60 s after the runtime it can see goes away — and
+    /// [`SessionManager::resume_inner`](super::SessionManager::resume_inner)
+    /// writes `Active` before any runtime exists. So the reaper could stop a
+    /// session mid-resume, and the next supervisor tick would then see a
+    /// `Stopped` record it is free to launch a SECOND time. Callers that mutate
+    /// state without taking a claim read this instead.
+    /// What: a set-membership read. Never a substitute for
+    /// [`Self::begin_resume`] where a claim can be held — this answers about an
+    /// instant, it reserves nothing.
+    /// Test: `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone`.
+    pub(crate) fn is_resume_in_flight(&self, id: &ManagedSessionId) -> bool {
+        self.resume_in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(id)
+    }
 }
 
 #[cfg(test)]

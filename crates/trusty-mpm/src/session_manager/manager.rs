@@ -91,6 +91,19 @@ pub enum ManagedError {
     #[error("a resume is already in flight for session {0}; not starting a second one")]
     ResumeInFlight(String),
 
+    /// An auto-resume failed AND has already recorded the failure (#8233).
+    ///
+    /// Why: `resume_auto` marks the record errored itself, which APPENDS
+    /// `[error: …]` to `record.task`. The supervisor's generic failure arm then
+    /// marked it errored a second time, so one failed auto-resume left TWO
+    /// notes on the task the next relaunch hands to the runtime. Typed rather
+    /// than string-matched: the poller must be able to tell "already recorded"
+    /// from "failed before anything was written" without reading the message.
+    /// What: carries the failure text, which is also what the record now holds.
+    /// Test: `one_failed_auto_resume_appends_exactly_one_error_note`.
+    #[error("{0}")]
+    AutoResumeRecorded(String),
+
     /// Adoption was requested for a tmux session that does not exist on the host.
     ///
     /// Why: adoption CONNECTS to a pre-existing, unmanaged pane — there is nothing
@@ -743,7 +756,9 @@ impl SessionManager {
     /// (this module's tests) asserts the CAS guard below;
     /// `generation_increments_across_mark_runtime_exited_stopped` in
     /// `daemon::managed_routes::residency`'s route tests asserts the #7087
-    /// residency bump.
+    /// residency bump;
+    /// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` asserts the
+    /// #8233 in-flight refusal below.
     ///
     /// CAS guard (#2453 review finding 3): the pre-fix implementation read
     /// the record via [`Self::get`] (which acquires and releases the store's
@@ -767,6 +782,15 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
     ) -> Result<SessionRecord, ManagedError> {
+        // #8233: a resume writes `Active` before the runtime exists, so for the
+        // whole rest of that resume this reconcile would see "Active, no
+        // runtime" and stop the record under the path that is still working on
+        // it — handing the next supervisor tick a `Stopped` record to launch a
+        // SECOND time. The claim is not a lock this caller can take (it must
+        // not queue behind the resume, it must decline), so it reads it.
+        if self.is_resume_in_flight(id) {
+            return Err(ManagedError::ResumeInFlight(id.to_string()));
+        }
         let mut guard = self.store.write().await;
         if let Err(e) = guard.reload_if_changed().await {
             // Reload failed (transient I/O): do NOT surface as "not found" —

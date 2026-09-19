@@ -113,6 +113,19 @@ pub async fn run_tick<C: LlmClassifier>(
                             "supervisor: another path is resuming this session; skipping this tick"
                         );
                     }
+                    // #8233 round 3, finding 3: `resume_auto` already marked the
+                    // record errored with this very message. Counting the
+                    // failure is right; appending a SECOND `[error: …]` note to
+                    // the task is not — `auto_relaunch` hands that task to the
+                    // next relaunch.
+                    Err(ManagedError::AutoResumeRecorded(msg)) => {
+                        error!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: auto-resume failed (already recorded on the record): {msg}"
+                        );
+                        report.resume_failures += 1;
+                    }
                     Err(e) => {
                         error!(
                             id = %record.id,

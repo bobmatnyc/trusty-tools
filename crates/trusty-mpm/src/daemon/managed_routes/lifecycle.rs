@@ -1109,10 +1109,13 @@ pub(super) async fn front_gate_or_escalate(
 /// Why: the HTTP resume handler and the MCP `session_resume` tool must both
 /// resume the record AND re-spawn the runtime so the session is actually live;
 /// centralising avoids the MCP path silently resuming without re-spawning.
-/// What: calls [`crate::session_manager::SessionManager::resume`] (which performs
-/// the existence + state check in a SINGLE round-trip — no pre-flight `get`, so
+/// What: takes the #8233 in-flight claim for the WHOLE route (see the body),
+/// then calls `SessionManager::resume_inner` (which performs the existence +
+/// state check in a SINGLE round-trip — no pre-flight `get`, so
 /// no TOCTOU window) and maps its typed [`ManagedError`](crate::session_manager::ManagedError) into a typed
-/// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`Other`). It then re-spawns
+/// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`AlreadyResuming`/`Other`).
+/// `SessionManager::resume` remains the claiming wrapper every OTHER caller
+/// uses; only this route needs the claim held past the record transition. It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
 /// the final record.
 ///
@@ -1153,8 +1156,11 @@ pub(super) async fn front_gate_or_escalate(
 /// best-effort and never block the resume — a long-lived session worktree
 /// that was previously frozen at its creation commit now catches up to
 /// `origin/main` on every resume instead of silently drifting forever.
-/// Test: covered by the HTTP `resume_managed_session` tests and the MCP
-/// `session_resume_unknown_id_errors` test;
+/// Test: `a_second_operator_resume_is_refused_while_one_is_in_flight`,
+/// `a_supervisor_tick_does_nothing_to_a_session_being_resumed`,
+/// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` cover the
+/// #8233 claim; the HTTP `resume_managed_session` tests and the MCP
+/// `session_resume_unknown_id_errors` test cover the route;
 /// `resume_managed_backfills_missing_status_line` in
 /// `tests/session_manager_mvp.rs` covers the self-heal call added here;
 /// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
@@ -1164,7 +1170,19 @@ pub async fn resume_managed(
     id: &ManagedSessionId,
 ) -> Result<SessionRecord, ResumeManagedError> {
     let mgr = state.session_manager().await;
-    let record = mgr.resume(id).await.map_err(ResumeManagedError::from)?;
+    // #8233 item 4: the claim spans THIS WHOLE FUNCTION, not just the record
+    // transition. `SessionManager::resume` released it the moment it returned,
+    // leaving the self-heal, the prompt refresh, the pane handshake, the spawn
+    // and the post-send check to run unclaimed over a record already written
+    // `Active` with a bare shell behind it — which the reaper stopped and the
+    // next supervisor tick launched a second time. Dropped on every exit path,
+    // including each `?` below and a cancelled request future.
+    let _in_flight = mgr.begin_resume(id).map_err(ResumeManagedError::from)?;
+    let record = mgr
+        .resume_inner(id)
+        .await
+        .map_err(ResumeManagedError::from)?;
+    mgr.note_operator_resume(id).await;
 
     let workspace = record
         .workspace_path
