@@ -264,6 +264,67 @@ impl ManagedTmuxDriver for BareShellTmux {
     }
 }
 
+/// A live pane that refuses every launch line (#8233).
+///
+/// Why: the adapter-refusal arm needs a pane that is OBSERVABLE — since the
+/// handshake asks observability first, a driver naming no session is "cannot
+/// tell", which is deliberately not a refusal any more.
+/// What: names its session, answers the handshake probe, and errors on the
+/// launch line.
+/// Test: `resume_managed_returns_err_after_it_marks_the_record_errored`.
+struct RefusingTmux {
+    inner: Arc<BareShellTmux>,
+}
+
+impl RefusingTmux {
+    fn new(name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner: BareShellTmux::new(name),
+        })
+    }
+
+    fn is_probe(text: &str) -> bool {
+        text.starts_with("echo tm-rea\"dy\"-")
+    }
+}
+
+impl ManagedTmuxDriver for RefusingTmux {
+    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        self.inner.create_session(name, workdir)
+    }
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        self.inner.kill_session(name)
+    }
+    fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        if Self::is_probe(text) {
+            return self.inner.send_line(name, text);
+        }
+        Err(ManagedError::TmuxUnavailable(
+            "pane refuses the line".into(),
+        ))
+    }
+    fn send_line_to_pane(&self, n: &str, p: &str, text: &str) -> Result<(), ManagedError> {
+        if Self::is_probe(text) {
+            return self.inner.send_line_to_pane(n, p, text);
+        }
+        Err(ManagedError::TmuxUnavailable(
+            "pane refuses the line".into(),
+        ))
+    }
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        self.inner.capture(name, lines)
+    }
+    fn capture_pane(&self, n: &str, p: &str, l: usize) -> Result<String, ManagedError> {
+        self.inner.capture_pane(n, p, l)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        self.inner.list_sessions()
+    }
+    fn runtime_ready(&self, name: &str) -> bool {
+        self.inner.runtime_ready(name)
+    }
+}
+
 #[test]
 fn catalog_sync_respects_ttl() {
     use trusty_mpm::content::CatalogSync;
@@ -993,7 +1054,17 @@ async fn resume_managed_backfills_missing_status_line() {
 async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
     use trusty_mpm::session_manager::ManagedSessionState;
     let root = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    // #8233 round 3, finding 7: a LIVE pane that refuses the launch line. The
+    // hermetic noop driver no longer reaches any failing arm — an unobservable
+    // pane is "cannot tell", which changes nothing — so pinning this arm needs
+    // a pane that is observably there and observably refuses.
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            RefusingTmux::new("tmpm-seed"),
+        )
+        .await,
+    );
     let mgr = state.session_manager().await;
 
     let ws = root.path().join("ws");
