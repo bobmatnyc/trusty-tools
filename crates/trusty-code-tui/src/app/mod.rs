@@ -687,7 +687,8 @@ impl ReplApp {
     /// [`crate::commands::tests::submit_line_builtin_quit_sets_quit`],
     /// [`crate::commands::tests::submit_line_builtin_help_lists_commands`],
     /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`],
-    /// [`reduce::tests::apply_enter_is_noop_while_busy_and_preserves_buffer`],
+    /// [`reduce::tests::apply_enter_while_busy_inserts_a_newline_instead_of_submitting`],
+    /// [`reduce::tests::queued_multi_line_type_ahead_submits_byte_identical_text`],
     /// [`reduce::tests::apply_submit_event_is_noop_while_busy`],
     /// [`reduce::tests::submit_line_is_noop_while_a_permission_prompt_is_pending`].
     pub(crate) fn submit_line(&mut self, line: String) {

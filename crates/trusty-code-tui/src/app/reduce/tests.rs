@@ -84,8 +84,13 @@ fn apply_submit_event_mirrors_enter() {
 /// This is the direct fix for the double-submit corruption a code-review
 /// pass caught on PR #3477 (task B's chunks splicing into task A's orphaned
 /// `streaming_idx` entry).
+///
+/// #8240 narrowed "no-op" to "does not submit": the Enter now records the
+/// newline it stands for, because printable keys were already queueing into
+/// the same buffer and a fully-dropped Enter welded the next line onto the
+/// previous one.
 #[test]
-fn apply_enter_is_noop_while_busy_and_preserves_buffer() {
+fn apply_enter_while_busy_inserts_a_newline_instead_of_submitting() {
     let mut app = ReplApp::new("demo", "u");
     app.busy = true;
     for c in "explain Y".chars() {
@@ -94,15 +99,66 @@ fn apply_enter_is_noop_while_busy_and_preserves_buffer() {
     let chat_len_before = app.chat.len();
     apply(&mut app, key(KeyCode::Enter));
     assert_eq!(
-        app.input_buf, "explain Y",
-        "typed text must survive a blocked Enter, not be discarded"
+        app.input_buf, "explain Y\n",
+        "typed text must survive a blocked Enter, and keep the line break"
     );
+    assert_eq!(app.cursor_pos, "explain Y\n".len());
     assert!(app.pending_submit.is_none(), "must not stage a second turn");
     assert_eq!(
         app.chat.len(),
         chat_len_before,
         "must not echo a second user line while busy"
     );
+}
+
+/// A bare Enter on an empty composer stays a true no-op even while busy —
+/// queued type-ahead must not open with a blank line (#8240).
+#[test]
+fn apply_enter_while_busy_with_an_empty_buffer_stays_a_noop() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.input_buf, "");
+    assert_eq!(app.cursor_pos, 0);
+    assert!(app.pending_submit.is_none());
+}
+
+/// #8240's headline regression: type a three-statement command while a turn
+/// is in flight, then submit once the turn ends. The forwarded text must be
+/// BYTE-IDENTICAL to what was typed, newlines included. Fails pre-fix with
+/// `echo oneecho twoecho three` — the busy Enter was dropped entirely while
+/// the printable keys around it were not.
+#[test]
+fn queued_multi_line_type_ahead_submits_byte_identical_text() {
+    const TYPED: &str = "echo one\necho two\necho three";
+
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    for c in TYPED.chars() {
+        let ev = match c {
+            '\n' => key(KeyCode::Enter),
+            c => key(KeyCode::Char(c)),
+        };
+        apply(&mut app, ev);
+    }
+    assert_eq!(
+        app.input_buf, TYPED,
+        "the queued buffer must hold exactly what was typed"
+    );
+    assert!(
+        app.pending_submit.is_none(),
+        "nothing may be submitted while the turn is in flight"
+    );
+
+    // The turn ends; the operator's next Enter sends the queued command.
+    app.busy = false;
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        app.pending_submit.as_deref(),
+        Some(TYPED),
+        "the submitted text must be byte-identical to what was typed"
+    );
+    assert!(app.input_buf.is_empty());
 }
 
 /// Same guard, exercised via the synthesized `ReplEvent::Submit` path
