@@ -203,6 +203,13 @@ impl RpcError {
     /// matching on `data.error_type` alone would see nothing.
     /// What: `data.error_type = "cancel_unconfirmed"`. `-32010` is the next
     /// free slot after [`Self::already_exists`]'s `-32009`.
+    ///
+    /// The three consumers in this repo: `crate::serve::rest::rpc_error_to_status`
+    /// and `trusty_code_gui::bridge::BridgeError::status` map it to HTTP 503 —
+    /// "not yet, retry", distinct from the 500 both used to send — and
+    /// `crate::tui_client::CodeEngine::cancel_session_outcome` returns it as
+    /// `CancelOutcome::StillCancelling`. The TUI's own "still cancelling…" render
+    /// on top of that outcome is `trusty-code-tui`'s, and is not in this crate.
     /// Test: `rpc_error_cancel_unconfirmed_sets_code_and_type`.
     pub fn cancel_unconfirmed(message: impl Into<String>) -> Self {
         Self::domain(-32010, "cancel_unconfirmed", message)

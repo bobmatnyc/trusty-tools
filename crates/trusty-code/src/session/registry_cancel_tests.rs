@@ -176,20 +176,23 @@ fn spawn_flag_watching_run(registry: &Arc<SessionRegistry>, id: &str, flag: Arc<
     registry.attach_execution_handle(id, handle);
 }
 
-/// A run that PANICKED must not leave its execution slot held (#8207,
+/// A run that PANICKED must release its slot AND say so over the wire (#8207,
 /// fail-open check).
 ///
-/// Why: a panicked task joins instantly, so `timeout(..).await.is_err()` — the
-/// first cut's only test — was false and the cancel answered `Ok` +
-/// `cancelled`. But `run_and_record` never reached `finish_execution`, so the
-/// slot stayed occupied and every later prompt on that session was rejected
-/// with `-32003`: exactly the bug #8207 reports, reintroduced through the
-/// crash path.
-/// What: spawn a task that panics, confirm the cancel, then assert the slot is
-/// free by starting a real new execution on the SAME session.
+/// Why: two fail-open arms, one after the other. A panicked task joins
+/// instantly, so `timeout(..).await.is_err()` — the first cut's only test — was
+/// false and the cancel answered `Ok`; `run_and_record` never reached
+/// `finish_execution`, so the slot stayed occupied and every later prompt was
+/// rejected with `-32003`. Releasing the slot fixed that but landed `Cancelled`
+/// with no result, and `Cancelled` is resumable — so a crashed run became
+/// indistinguishable from a clean Esc and the next prompt resumed it. The status
+/// and the `TaskResult` are the only two things a client reads off
+/// `session.status`, so those are what this asserts.
+/// What: spawn a task that panics, confirm the cancel, then read the session the
+/// way the RPC surface does.
 /// Test: this test.
 #[tokio::test]
-async fn a_panicked_run_releases_its_execution_slot() {
+async fn a_panicked_run_lands_failed_and_releases_its_slot() {
     let registry = Arc::new(SessionRegistry::new());
     let (id, _flag) = executing_session(&registry);
 
@@ -208,10 +211,109 @@ async fn a_panicked_run_releases_its_execution_slot() {
         !registry.is_executing(&id),
         "the dead task's execution slot must not stay held"
     );
-    assert!(
-        registry.begin_execution(&id).is_ok(),
-        "the next prompt on this session must be accepted"
+
+    let snapshot = registry.status(&id).expect("session exists");
+    assert_eq!(
+        snapshot.status,
+        SessionStatus::Failed,
+        "a crashed run must not land in the same status a clean cancel does"
     );
+    let result = snapshot
+        .result
+        .expect("a crashed run must record a result, not only a log line");
+    assert_eq!(
+        result.status,
+        crate::session::task_result::TaskResultStatus::Failed
+    );
+    assert!(
+        result
+            .summary
+            .as_deref()
+            .is_some_and(|s| s.contains("did not exit cleanly")),
+        "the result must say WHY the run ended: {result:?}"
+    );
+    assert_eq!(
+        registry.begin_execution(&id).unwrap_err().code,
+        -32003,
+        "a crashed session must not resume as if it had been cleanly cancelled"
+    );
+}
+
+/// A dead handle joining LATE must not fail a newer run that already holds the
+/// slot (#8207, code-critic round 3).
+///
+/// Why: landing `Failed` for a crashed run is only safe while that run is still
+/// the session's current one. The interleave is the same one
+/// `the_grace_timeout_never_clobbers_a_newer_runs_handle` drives, one arm over:
+/// the old run clears its own slot, a new `task.run` is accepted, and only THEN
+/// does the old task's panic reach the waiting cancel. Failing the session there
+/// would kill a live run for its predecessor's crash.
+/// What: drives that order explicitly, then asserts the session is neither
+/// terminal nor resultful and the new run is still confirmable on its own.
+/// Test: this test.
+#[tokio::test]
+async fn a_dead_handle_never_fails_a_newer_run() {
+    let registry = Arc::new(SessionRegistry::new());
+    let (id, _old_flag) = executing_session(&registry);
+
+    // The old run releases its slot on cue, then panics a beat later — long
+    // enough for the new run below to take the slot first.
+    let release = Arc::new(tokio::sync::Notify::new());
+    let old_handle = {
+        let registry = Arc::clone(&registry);
+        let id = id.clone();
+        let release = Arc::clone(&release);
+        tokio::spawn(async move {
+            release.notified().await;
+            registry.finish_execution(&id);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            panic!("the old run died after releasing its slot");
+        })
+    };
+    registry.attach_execution_handle(&id, old_handle);
+    registry.request_cancel(&id).expect("session exists");
+
+    let confirming = {
+        let registry = Arc::clone(&registry);
+        let id = id.clone();
+        tokio::spawn(async move { registry.await_cancelled(&id, Duration::from_secs(5)).await })
+    };
+
+    // Let the cancel claim the old handle, then run the interleave.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    release.notify_one();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let new_flag = registry
+        .begin_execution(&id)
+        .expect("the old run released its slot");
+    spawn_flag_watching_run(&registry, &id, Arc::clone(&new_flag));
+
+    confirming
+        .await
+        .expect("the confirming task must not panic")
+        .expect("a panicked run is still a stopped run");
+
+    let snapshot = registry.status(&id).expect("session exists");
+    assert!(
+        !snapshot.status.is_terminal(),
+        "the newer run must not be ended by its predecessor's crash, got {:?}",
+        snapshot.status
+    );
+    assert!(
+        snapshot.result.is_none(),
+        "the newer run has not finished, so it owns no result yet: {:?}",
+        snapshot.result
+    );
+    assert!(
+        registry.is_executing(&id),
+        "the newer run must still be tracked"
+    );
+
+    registry.request_cancel(&id).expect("session exists");
+    registry
+        .await_cancelled(&id, Duration::from_secs(5))
+        .await
+        .expect("the newer run confirms on its own handle");
 }
 
 /// The grace timeout must never restore a dead handle over a NEWER run's live

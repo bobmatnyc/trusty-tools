@@ -208,6 +208,95 @@ impl CodeEngine {
     pub fn daemon_socket(&self) -> &std::path::Path {
         self.state.rpc.socket()
     }
+
+    /// Ask the daemon to cancel this session's run and report WHICH of the two
+    /// cancel outcomes came back (#8207).
+    ///
+    /// Why: the daemon answers a confirmed stop and an unconfirmed one with two
+    /// different things — a session snapshot and `-32010 cancel_unconfirmed` —
+    /// but [`TuiEngine::cancel_session`] returns `anyhow::Result<()>`, which
+    /// flattens the second into an opaque error string. That made the domain code
+    /// unreadable from the only client that reaches it, which is what the code was
+    /// minted to prevent. This is the typed half; the trait method below adapts it
+    /// to the signature `trusty-code-tui` owns, and the TUI's own
+    /// "still cancelling…" render is a separate change in that crate.
+    /// What: `-32010` becomes [`CancelOutcome::StillCancelling`] carrying the
+    /// daemon's own sentence. Every other RPC or transport failure stays an error,
+    /// and no session at all is [`CancelOutcome::NoSession`] — there was nothing
+    /// to stop.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Rpc`] for any daemon refusal other than `-32010`, and
+    /// [`EngineError::Transport`] for a socket failure.
+    /// Test: `engine_tests::cancel_unconfirmed_is_a_still_cancelling_outcome`,
+    /// `engine_tests::any_other_refusal_stays_an_error`.
+    pub async fn cancel_session_outcome(&self) -> Result<CancelOutcome, EngineError> {
+        let session_id = {
+            self.state
+                .session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
+        let Some(session_id) = session_id else {
+            return Ok(CancelOutcome::NoSession);
+        };
+        // Thin-client axiom (DOC-39 §2.1 C-2): the daemon performs the real
+        // cancellation via `session.cancel` — this call is not optional
+        // client-side render-stop.
+        match self
+            .state
+            .rpc
+            .call("session.cancel", json!({ "session_id": session_id }))
+            .await
+        {
+            Ok(_) => Ok(CancelOutcome::Stopped),
+            Err(err) => Ok(classify_cancel_error(err)?),
+        }
+    }
+}
+
+/// What a `session.cancel` achieved (#8207).
+///
+/// Why: "the run stopped" and "the run has not stopped yet" are both successful
+/// answers to the question the cancel asked, and the TUI has to render them
+/// differently — one ends the turn, the other keeps a cancelling state on screen.
+/// Collapsing the second into an error is what made `-32010` unreadable.
+/// Test: `engine_tests::cancel_unconfirmed_is_a_still_cancelling_outcome`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The daemon confirmed the run has terminated.
+    Stopped,
+    /// The cancel was accepted; the run had not stopped within the daemon's
+    /// grace. `detail` is the daemon's own sentence, safe to show verbatim.
+    StillCancelling {
+        /// The daemon's account of what it is still waiting on.
+        detail: String,
+    },
+    /// `setup` has not minted a session yet, so there was nothing to cancel.
+    NoSession,
+}
+
+/// The JSON-RPC error code `RpcError::cancel_unconfirmed` carries (#8207) — the
+/// daemon-side constant lives in `crate::jsonrpc::error`, which does not export
+/// it as a named code.
+const CODE_CANCEL_UNCONFIRMED: i32 = -32010;
+
+/// Split a failed `session.cancel` into "still cancelling" and a real failure
+/// (#8207).
+///
+/// Why: exactly one code is not a failure, and keeping the test for it in one
+/// named function is what lets a unit test assert the split without a daemon.
+/// Test: `engine_tests::cancel_unconfirmed_is_a_still_cancelling_outcome`,
+/// `engine_tests::any_other_refusal_stays_an_error`.
+fn classify_cancel_error(err: EngineError) -> Result<CancelOutcome, EngineError> {
+    match err {
+        EngineError::Rpc { code, message, .. } if code == CODE_CANCEL_UNCONFIRMED => {
+            Ok(CancelOutcome::StillCancelling { detail: message })
+        }
+        other => Err(other),
+    }
 }
 
 #[async_trait::async_trait]
@@ -327,25 +416,18 @@ impl TuiEngine for CodeEngine {
         Ok(())
     }
 
+    /// #8207: the trait's `Result<()>` cannot carry the two-way outcome, so this
+    /// adapts [`CodeEngine::cancel_session_outcome`] to it. An unconfirmed cancel
+    /// stays an error — a cancel that did not land must not read as one that did —
+    /// but with the daemon's plain sentence rather than an opaque `-32010` dump,
+    /// until the TUI renders the typed outcome itself.
     async fn cancel_session(&self) -> anyhow::Result<()> {
-        let session_id = {
-            self.state
-                .session_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-        };
-        let Some(session_id) = session_id else {
-            return Ok(());
-        };
-        // Thin-client axiom (DOC-39 §2.1 C-2): the daemon performs the real
-        // cancellation via `session.cancel` — this call is not optional
-        // client-side render-stop.
-        self.state
-            .rpc
-            .call("session.cancel", json!({ "session_id": session_id }))
-            .await?;
-        Ok(())
+        match self.cancel_session_outcome().await? {
+            CancelOutcome::Stopped | CancelOutcome::NoSession => Ok(()),
+            CancelOutcome::StillCancelling { detail } => {
+                Err(anyhow::anyhow!("still cancelling: {detail}"))
+            }
+        }
     }
 
     /// Answer one suspended permission request over

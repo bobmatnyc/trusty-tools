@@ -141,12 +141,19 @@ pub async fn call(
 /// 404, `-32001 permission_denied` -> 403, `-32003 invalid_argument` and
 /// `-32602 Invalid params` -> 400, `-32007 session_not_found` -> 404,
 /// `-32008 active_conflict` (DOC-48 §5.2, issue #3294) and `-32009
-/// already_exists` (issue #3449) -> 409, `-32603
+/// already_exists` (issue #3449) -> 409, `-32010 cancel_unconfirmed`
+/// (issue #8207) -> 503, `-32603
 /// Internal error` -> 500. Any other/future code (including
 /// `-32601`/`-32600`, which a REST handler should never see because it
 /// calls `call` with a hardcoded, known-good method name) falls back to 500
 /// — an unmapped domain error is a bug to fix by adding a mapping, not a
 /// client-facing 4xx.
+///
+/// (#8207) `-32010` is the one arm that is neither the caller's fault nor a
+/// daemon fault: the cancel was accepted and the run has not stopped YET. 503 is
+/// the status whose whole meaning is "not now, try again", which is what a
+/// `POST /sessions/{id}/cancel` caller must do — 500 told it the daemon was
+/// broken and 4xx told it its request was, and both are wrong.
 /// Test: `status_mapping_*` — one case per mapped code, plus the unknown ->
 /// 500 fallback.
 pub fn rpc_error_to_status(err: &RpcError) -> axum::http::StatusCode {
@@ -159,6 +166,8 @@ pub fn rpc_error_to_status(err: &RpcError) -> axum::http::StatusCode {
         -32003 => StatusCode::BAD_REQUEST, // invalid_argument
         -32008 => StatusCode::CONFLICT,    // active_conflict (DOC-48 §5.2)
         -32009 => StatusCode::CONFLICT,    // already_exists (issue #3449)
+        // #8207: still cancelling — retryable, not a fault on either side.
+        -32010 => StatusCode::SERVICE_UNAVAILABLE,
         c if c == error_codes::INVALID_PARAMS => StatusCode::BAD_REQUEST,
         c if c == error_codes::INTERNAL_ERROR => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -344,6 +353,21 @@ mod tests {
         assert_eq!(
             rpc_error_to_status(&RpcError::already_exists("dup")),
             axum::http::StatusCode::CONFLICT
+        );
+    }
+
+    /// A cancel that has not confirmed yet must not read as a fault (#8207).
+    ///
+    /// Why: the code exists so a client can show "still cancelling…" instead of
+    /// an error, and the REST mapping is where that distinction either survives
+    /// or is flattened. It fell through to 500 — indistinguishable from
+    /// `-32603`, which is exactly what the domain code was minted to avoid.
+    /// Test: this test.
+    #[test]
+    fn status_mapping_cancel_unconfirmed_is_503_not_500() {
+        assert_eq!(
+            rpc_error_to_status(&RpcError::cancel_unconfirmed("s-1: still cancelling")),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

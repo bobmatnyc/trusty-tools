@@ -994,18 +994,70 @@ async fn begin_execution_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
-/// `begin_execution` on an already-terminal session must be rejected.
+/// Which statuses `begin_execution` must REFUSE, decided by an exhaustive
+/// match so a new [`SessionStatus`] variant cannot be added without ruling on
+/// it here (#2344, #3888, #8207).
+///
+/// Why: the refusal set has moved twice — `Finished` left it in #2344,
+/// `TurnCapExceeded` in #3888, `Cancelled` in #8207 — and each move silently
+/// invalidated a test that had hard-coded one member of it. A table keyed off
+/// the enum itself moves with it.
+fn begin_execution_must_refuse(status: SessionStatus) -> bool {
+    match status {
+        // Not terminal at all: a live or fresh session is accepted (a second
+        // overlapping run is refused by the execution slot, not by status —
+        // see `begin_execution_rejects_second_overlapping_run`).
+        SessionStatus::Created | SessionStatus::Running => false,
+        // Terminal for this CALL, resumable for the session.
+        SessionStatus::Finished | SessionStatus::TurnCapExceeded | SessionStatus::Cancelled => {
+            false
+        }
+        // Dead forever: the run broke without the user asking.
+        SessionStatus::Failed | SessionStatus::DeadlineExceeded => true,
+    }
+}
+
+/// `begin_execution` must refuse exactly the statuses that are still terminal,
+/// and refuse them with `invalid_argument` rather than `session_not_found`
+/// (#2344, #3888, #8207).
+///
+/// Why: this test used to assert the refusal on a CANCELLED session, which #8207
+/// made resumable — so it passed for the wrong reason and then failed outright.
+/// Driving every landable status through one table is what keeps it honest: it
+/// subsumes the earlier `begin_execution_still_rejects_failed_and_deadline_exceeded`
+/// (its two cases are two rows here) and adds the three resumable statuses plus
+/// the error-code claim.
+/// Test: this test.
 #[tokio::test]
 async fn begin_execution_rejects_terminal_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    registry.cancel(&session.id).unwrap();
+    for status in [
+        SessionStatus::Finished,
+        SessionStatus::TurnCapExceeded,
+        SessionStatus::Cancelled,
+        SessionStatus::Failed,
+        SessionStatus::DeadlineExceeded,
+    ] {
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        registry.finish(&session.id, status).unwrap();
+        assert_eq!(registry.status(&session.id).unwrap().status, status);
 
-    let err = registry.begin_execution(&session.id).unwrap_err();
-    assert_eq!(
-        err.code, -32003,
-        "must be invalid_argument, not session_not_found"
-    );
+        let outcome = registry.begin_execution(&session.id);
+        if begin_execution_must_refuse(status) {
+            let err = outcome.expect_err(&format!("{status:?} must stay terminal"));
+            assert_eq!(
+                err.code, -32003,
+                "{status:?} must be invalid_argument, not session_not_found"
+            );
+            assert!(
+                err.message.contains("already terminal"),
+                "{status:?} must be refused for its status, not for a held \
+                 execution slot: {err:?}"
+            );
+        } else {
+            outcome.unwrap_or_else(|e| panic!("{status:?} must be resumable: {e:?}"));
+        }
+    }
 }
 
 /// A second `begin_execution` while one is already in flight must be
@@ -1185,29 +1237,11 @@ async fn begin_execution_resumes_a_cancelled_session() {
     );
 }
 
-/// `begin_execution` must still reject `Failed`/`DeadlineExceeded` sessions:
-/// those ended without the user asking, in a state the daemon cannot describe,
-/// so resuming one still requires a fresh session (#2344, #8207).
-#[tokio::test]
-async fn begin_execution_still_rejects_failed_and_deadline_exceeded() {
-    let registry = SessionRegistry::new();
-
-    let failed = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    registry.finish(&failed.id, SessionStatus::Failed).unwrap();
-    assert_eq!(
-        registry.begin_execution(&failed.id).unwrap_err().code,
-        -32003
-    );
-
-    let deadline = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    registry
-        .finish(&deadline.id, SessionStatus::DeadlineExceeded)
-        .unwrap();
-    assert_eq!(
-        registry.begin_execution(&deadline.id).unwrap_err().code,
-        -32003
-    );
-}
+// #8207 round 3: `begin_execution_still_rejects_failed_and_deadline_exceeded`
+// lived here. Every claim it made — `Failed` and `DeadlineExceeded` refused with
+// `-32003` — is now two rows of `begin_execution_rejects_terminal_session`'s
+// table above, which also pins the error code's reason and the three resumable
+// statuses. Keeping both left two tests asserting one fact.
 
 // ── #2344: persistent PM transcript ─────────────────────────────────────────────
 

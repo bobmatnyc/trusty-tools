@@ -471,29 +471,41 @@ async fn cancel_that_cannot_confirm_the_stop_is_an_error() {
     );
 }
 
-/// The daemon's cancel grace and the TUI's per-call budget are ONE contract
-/// (#8207).
+/// The daemon's cancel grace and EVERY in-repo client's per-call budget are ONE
+/// contract (#8207).
 ///
 /// Why: the first cut paired a thirty-second daemon grace with the TUI's
 /// fifteen-second `DEFAULT_CALL_TIMEOUT`, so every cancel taking 15-30s reached
 /// the user as a transport timeout and the `cancel_unconfirmed` reply the grace
-/// exists to produce was unreachable from the TUI. A compile-time assertion
-/// beside `CANCEL_CONFIRM_GRACE` blocks the two being changed out of order;
+/// exists to produce was unreachable from the TUI. Two compile-time assertions
+/// beside `CANCEL_CONFIRM_GRACE` block the halves being changed out of order;
 /// this test states the same contract where a reader of the cancel tests will
-/// find it.
+/// find it. The CLI client is the second budget over the same call: pinning only
+/// the TUI's left `cli_client::stdio` free to drop below the grace and
+/// reintroduce the identical transport timeout for `tcode session cancel`.
 /// Test: this test.
 #[test]
 fn the_cancel_grace_fits_inside_the_clients_call_budget() {
-    let budget = crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT;
-    assert!(
-        CANCEL_CONFIRM_GRACE < budget,
-        "the daemon's answer must arrive inside the client's call budget: \
-         grace {CANCEL_CONFIRM_GRACE:?} vs budget {budget:?}"
-    );
-    assert!(
-        CANCEL_CONFIRM_GRACE + CANCEL_ANSWER_HEADROOM <= budget,
-        "the grace must leave headroom for the reply itself: \
-         grace {CANCEL_CONFIRM_GRACE:?} + headroom {CANCEL_ANSWER_HEADROOM:?} \
-         vs budget {budget:?}"
-    );
+    for (client, budget) in [
+        (
+            "tui_client::uds_rpc",
+            crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT,
+        ),
+        (
+            "cli_client::stdio",
+            crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT,
+        ),
+    ] {
+        assert!(
+            CANCEL_CONFIRM_GRACE < budget,
+            "{client}: the daemon's answer must arrive inside the client's call \
+             budget: grace {CANCEL_CONFIRM_GRACE:?} vs budget {budget:?}"
+        );
+        assert!(
+            CANCEL_CONFIRM_GRACE + CANCEL_ANSWER_HEADROOM <= budget,
+            "{client}: the grace must leave headroom for the reply itself: \
+             grace {CANCEL_CONFIRM_GRACE:?} + headroom {CANCEL_ANSWER_HEADROOM:?} \
+             vs budget {budget:?}"
+        );
+    }
 }

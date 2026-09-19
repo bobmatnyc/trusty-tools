@@ -51,8 +51,9 @@ use super::registry::SessionRegistry;
 /// Why: cancellation is observed at TURN boundaries, so the wait has to cover
 /// finishing whatever tool call is in flight — a `bash` step, a delegated
 /// sub-agent's turn — not just the flag check. The upper bound is not a taste
-/// question: this grace and the TUI's
-/// [`crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT`] are ONE contract,
+/// question: this grace and EVERY in-repo client's per-call budget — the TUI's
+/// [`crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT`] and the CLI's
+/// [`crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT`] — are ONE contract,
 /// because the client's budget covers the daemon's whole wait. The first cut
 /// was thirty seconds against a fifteen-second client budget, so every cancel
 /// taking 15-30s reached the user as a transport timeout and the fail-closed
@@ -76,6 +77,18 @@ const _: () = assert!(
     CANCEL_CONFIRM_GRACE.as_secs() + CANCEL_ANSWER_HEADROOM.as_secs()
         <= crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT.as_secs(),
     "CANCEL_CONFIRM_GRACE must fit inside tui_client's DEFAULT_CALL_TIMEOUT \
+     with headroom for the reply — see #8207"
+);
+
+/// #8207: the SAME stop for the second client over the same call. `tcode`'s CLI
+/// subcommands reach `session.cancel` through
+/// [`crate::cli_client::stdio::StdioRpcClient`], which carries its own 15s
+/// budget — pinning only the TUI's left that one free to drop below the grace
+/// and turn every slow cancel into a transport timeout there instead.
+const _: () = assert!(
+    CANCEL_CONFIRM_GRACE.as_secs() + CANCEL_ANSWER_HEADROOM.as_secs()
+        <= crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT.as_secs(),
+    "CANCEL_CONFIRM_GRACE must fit inside cli_client's DEFAULT_CALL_TIMEOUT \
      with headroom for the reply — see #8207"
 );
 
@@ -498,9 +511,13 @@ async fn detach(
 /// "reported cancelled" and "actually stopped" one fact instead of two. The
 /// wait is FAIL-CLOSED: a run that outlives [`CANCEL_CONFIRM_GRACE`] answers
 /// with `await_cancelled`'s `-32010 cancel_unconfirmed` error, never a
-/// cancelled snapshot, so a client can say "still cancelling" rather than lie
-/// — and can tell that apart from a `-32603` daemon fault, which is why the
-/// code is a domain one rather than `internal`.
+/// cancelled snapshot — see [`RpcError::cancel_unconfirmed`] for what each
+/// client in this repo does with that code.
+///
+/// KNOWN LIMITATION (#8207): the permission gate (`crate::permissions::gate`)
+/// waits up to its own `timeout` for an answer WITHOUT watching the cancel flag,
+/// so Esc at an open permission prompt cannot stop the run until the prompt
+/// resolves — that cancel spends the whole grace and answers `-32010`.
 /// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`,
 /// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`,
 /// `protocol::tests::cancel_waits_for_the_task_to_stop_before_reporting`,

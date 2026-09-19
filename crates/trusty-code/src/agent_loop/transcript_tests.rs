@@ -840,6 +840,32 @@ fn push_response_appends_a_turn_that_says_something() {
     assert_eq!(messages[2].content.as_deref(), Some("here is the answer"));
 }
 
+/// Build a `ChatResponse` fixture carrying one tool call and NO text.
+///
+/// Why: the shape `push_response`'s drop must not catch. It has to travel
+/// through `push_response` itself — the first cut of the test below called
+/// `push_assistant` directly, which is downstream of the guard, so widening the
+/// guard to drop tool-call turns left the test green.
+fn tool_call_response() -> crate::llm::ChatResponse {
+    serde_json::from_value(serde_json::json!({
+        "id": "gen-2",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": { "name": "echo", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1 }
+    }))
+    .expect("valid ChatResponse fixture")
+}
+
 /// An assistant turn with tool calls but no text is still recorded (#8238).
 ///
 /// Why: that is the ordinary tool-calling shape — every provider builds a
@@ -849,10 +875,19 @@ fn push_response_appends_a_turn_that_says_something() {
 #[test]
 fn push_response_keeps_a_tool_call_turn_with_no_text() {
     let mut t = Transcript::seed("s", "task");
-    t.push_assistant(None, &[sample_call("call-1", "echo")]);
+    t.push_response(&tool_call_response());
 
     let messages = t.messages();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(
+        messages.len(),
+        3,
+        "the guard must drop only turns with no calls AND no text: {messages:?}"
+    );
     assert_eq!(messages[2].role, "assistant");
-    assert!(messages[2].tool_calls.is_some());
+    let calls = messages[2]
+        .tool_calls
+        .as_ref()
+        .expect("the tool call must survive the round trip");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "echo");
 }

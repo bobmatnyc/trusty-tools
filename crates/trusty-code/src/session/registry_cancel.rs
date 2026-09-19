@@ -11,6 +11,7 @@
 //! Test: `registry_cancel_tests::*`.
 
 use super::*;
+use crate::session::task_result::{TaskResult, TaskResultStatus};
 
 /// How often a cancel that found a PEER already confirming re-checks whether
 /// the run it is waiting on is gone (#8207).
@@ -68,7 +69,8 @@ impl SessionRegistry {
     /// `registry_cancel_tests::await_cancelled_is_ok_when_nothing_is_executing`,
     /// `registry_cancel_tests::await_cancelled_errors_when_the_execution_has_no_handle`,
     /// `registry_cancel_tests::await_cancelled_unknown_session_errors`,
-    /// `registry_cancel_tests::a_panicked_run_releases_its_execution_slot`,
+    /// `registry_cancel_tests::a_panicked_run_lands_failed_and_releases_its_slot`,
+    /// `registry_cancel_tests::a_dead_handle_never_fails_a_newer_run`,
     /// `registry_cancel_tests::the_grace_timeout_never_clobbers_a_newer_runs_handle`,
     /// `registry_cancel_tests::two_concurrent_cancels_both_learn_the_run_stopped`.
     pub async fn await_cancelled(&self, id: &str, grace: Duration) -> Result<(), RpcError> {
@@ -122,12 +124,10 @@ impl SessionRegistry {
     /// `finish_execution`: the slot stayed held and every later prompt on that
     /// session failed with `-32003`.
     /// What: a clean join is `Ok(())`. A `JoinError` (panic or abort) is still
-    /// a stopped run, so it stays `Ok(())` — but the slot the dead task never
-    /// released is released here, and the session is landed `Cancelled` (the
-    /// transition `task::executor` would have made), with the panic logged at
-    /// `error` so it is not swallowed. An elapsed `grace` restores the handle
-    /// and fails closed.
-    /// Test: `registry_cancel_tests::a_panicked_run_releases_its_execution_slot`,
+    /// a stopped run, so the WAIT stays `Ok(())` — but the run itself failed,
+    /// and [`Self::land_dead_run`] is what makes that visible instead of
+    /// logging it. An elapsed `grace` restores the handle and fails closed.
+    /// Test: `registry_cancel_tests::a_panicked_run_lands_failed_and_releases_its_slot`,
     /// `registry_cancel_tests::await_cancelled_errors_when_the_task_outlives_the_grace`.
     async fn join_owned(
         &self,
@@ -139,13 +139,7 @@ impl SessionRegistry {
         match tokio::time::timeout(grace, &mut handle).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(join_error)) => {
-                tracing::error!(
-                    session_id = %id,
-                    error = %join_error,
-                    "cancelled run did not exit cleanly; releasing its execution slot"
-                );
-                self.release_claimed_execution(id, cancel);
-                let _ = self.finish(id, SessionStatus::Cancelled);
+                self.land_dead_run(id, cancel, &join_error);
                 Ok(())
             }
             Err(_elapsed) => {
@@ -211,14 +205,69 @@ impl SessionRegistry {
             .is_some_and(|execution| Arc::ptr_eq(&execution.cancel, cancel))
     }
 
+    /// Land a run that died without unwinding: release its slot, record a
+    /// `Failed` result, and finish the session `Failed` (#8207).
+    ///
+    /// Why: a `JoinError` means the run PANICKED (or was aborted) — it never
+    /// reached `task::executor::run_and_record`'s own
+    /// `set_task_result`/`finish` pair, so without this the only trace is a log
+    /// line the client never sees. Landing `Cancelled` with no result was worse
+    /// than silent: `Cancelled` is resumable (`SessionStatus::is_resumable`), so
+    /// the next prompt resumed a crashed session as if the user had stopped it
+    /// on purpose. `Failed` is the status `finish_with_failure` already uses for
+    /// a run that broke, and it is not resumable, so the next prompt is refused
+    /// with a reason rather than silently continuing.
+    /// What: mirrors `executor::finish_with_failure`'s shape (failed
+    /// `TaskResult` carrying the reason, then `finish(Failed)`) but only when
+    /// [`Self::release_claimed_execution`] confirms the dead run still holds the
+    /// slot — a NEWER run that has already taken it owns both the slot and the
+    /// session's status, and must not be failed for its predecessor's crash.
+    /// Test: `registry_cancel_tests::a_panicked_run_lands_failed_and_releases_its_slot`,
+    /// `registry_cancel_tests::a_dead_handle_never_fails_a_newer_run`.
+    fn land_dead_run(
+        &self,
+        id: &str,
+        cancel: &Arc<AtomicBool>,
+        join_error: &tokio::task::JoinError,
+    ) {
+        tracing::error!(
+            session_id = %id,
+            error = %join_error,
+            "cancelled run did not exit cleanly"
+        );
+        if !self.release_claimed_execution(id, cancel) {
+            // A newer run owns the slot; its lifecycle is not this one's to end.
+            return;
+        }
+        let reason = format!("the run did not exit cleanly: {join_error}");
+        self.set_task_result(
+            id,
+            TaskResult::new(TaskResultStatus::Failed).with_summary(Some(reason)),
+        );
+        // The only error `finish` returns is `session_not_found`, which a
+        // session pruned mid-cancel reaches legitimately — there is nothing left
+        // to land, so log it rather than inventing a caller-facing failure out
+        // of a run that did in fact stop.
+        if let Err(err) = self.finish(id, SessionStatus::Failed) {
+            tracing::warn!(
+                session_id = %id,
+                error = %err.message,
+                "could not land Failed for a crashed run"
+            );
+        }
+    }
+
     /// Clear the execution slot still held by a run that died without clearing
     /// it (#8207).
     ///
     /// Why: `finish_execution` clears whatever is there; if a NEWER run has
     /// already taken the slot, that would cancel-by-accident a run nobody
     /// asked about.
-    /// What: clears the slot only when it still holds the claimed execution.
-    fn release_claimed_execution(&self, id: &str, cancel: &Arc<AtomicBool>) {
+    /// What: clears the slot only when it still holds the claimed execution,
+    /// returning whether it did — the caller reads that as "the dead run is
+    /// still the session's current run", which is what makes the terminal
+    /// transition in [`Self::land_dead_run`] safe.
+    fn release_claimed_execution(&self, id: &str, cancel: &Arc<AtomicBool>) -> bool {
         let mut sessions = self.lock();
         if let Some(entry) = sessions.get_mut(id)
             && entry
@@ -227,7 +276,9 @@ impl SessionRegistry {
                 .is_some_and(|execution| Arc::ptr_eq(&execution.cancel, cancel))
         {
             entry.execution = None;
+            return true;
         }
+        false
     }
 
     /// Put a timed-out run's handle back, but only if the slot still holds

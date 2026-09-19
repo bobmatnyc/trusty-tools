@@ -810,3 +810,54 @@ fn session_shape_summary_names_the_delegating_pm() {
     }));
     assert_eq!(summary, "delegating PM, file tools rooted at /tmp/repo");
 }
+
+// ── #8207: the cancel outcome the TUI can render ──────────────────────────────
+
+/// `-32010` must reach this client as a NAMED outcome, not an opaque error.
+///
+/// Why: the daemon mints a domain code for "accepted, not stopped yet" precisely
+/// so a client can hold a cancelling state instead of showing a fault — and
+/// before this, every client in the repo flattened it. The daemon's own sentence
+/// has to survive too: it names what the wait is still on, which is the whole
+/// content of a "still cancelling…" line.
+/// Test: this test.
+#[test]
+fn cancel_unconfirmed_is_a_still_cancelling_outcome() {
+    let outcome = classify_cancel_error(EngineError::Rpc {
+        code: -32010,
+        message: "session s-1: cancellation requested but the task did not stop within 10s"
+            .to_string(),
+        data: None,
+    })
+    .expect("an unconfirmed cancel is an outcome, not a failure");
+
+    assert_eq!(
+        outcome,
+        CancelOutcome::StillCancelling {
+            detail: "session s-1: cancellation requested but the task did not stop within 10s"
+                .to_string()
+        }
+    );
+}
+
+/// Every other refusal stays an error (#8207).
+///
+/// Why: the split has to be exactly one code wide. Reading a `-32603` daemon
+/// fault or a `-32007 session_not_found` as "still cancelling" would hide a real
+/// failure behind a spinner that never resolves.
+/// Test: this test.
+#[test]
+fn any_other_refusal_stays_an_error() {
+    for code in [-32603, -32007, -32003] {
+        let err = classify_cancel_error(EngineError::Rpc {
+            code,
+            message: "nope".to_string(),
+            data: None,
+        })
+        .expect_err("only -32010 is an outcome");
+        assert!(
+            matches!(err, EngineError::Rpc { code: got, .. } if got == code),
+            "code {code} must pass through verbatim, got {err:?}"
+        );
+    }
+}

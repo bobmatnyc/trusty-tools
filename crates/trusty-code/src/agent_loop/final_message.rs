@@ -8,6 +8,11 @@
 //! parity transcripts). The client's only source of assistant text is
 //! `ToolEventSink::agent_message`, so an empty turn means the user sees
 //! literally nothing after the last tool result.
+//!
+//! This is a MITIGATION, not a diagnosis. Why the model emitted a turn with no
+//! text and no tool calls is unknown; #8238 reports the behaviour only. What is
+//! covered is exactly that shape — a turn ending silent for any other reason
+//! reaches none of this.
 //! What: [`nudge_once`] recognises that turn and appends
 //! [`FINAL_MESSAGE_NUDGE`] instead of letting the loop accept the silence.
 //! Test: `agent_loop::tests::sink_events::silent_terminal_turn_is_nudged_into_a_real_final_message`.
