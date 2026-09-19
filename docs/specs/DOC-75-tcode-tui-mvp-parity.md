@@ -82,6 +82,13 @@ delegation stays opt-in. Ruling comment:
 Ordered delegation cut:
 [#7939 (comment)](https://github.com/bobmatnyc/trusty-tools/issues/7939#issuecomment-5741947036).
 
+**Owner ruling, 2026-09-19 (session tm-code):** epic
+[#2892](https://github.com/bobmatnyc/trusty-tools/issues/2892) is pulled into
+milestone [87](https://github.com/bobmatnyc/trusty-tools/milestone/87); see
+§5. Ruling comments:
+[#2892 (comment)](https://github.com/bobmatnyc/trusty-tools/issues/2892#issuecomment-5742140703),
+[#7939 (comment)](https://github.com/bobmatnyc/trusty-tools/issues/7939#issuecomment-5742140837).
+
 ## 3. Parity target {#SPEC-TCMVP-03~draft}
 
 State as of 2026-09-19. This table is the milestone-relevant slice; the full
@@ -102,6 +109,7 @@ comparison it is drawn from, including rows not in this cut, lives in
 | Streaming output, Ctrl-C turn interrupt | Present | Present | `crates/trusty-code-tui/src/run/mod.rs`, `app/reduce.rs` |
 | PM routes research → engineer → qa (delegate mode) | N/A — Claude Code has no PM router | Absent — `pm`'s routing text does not yet name `research`/`qa` as delegation targets | [#8287](https://github.com/bobmatnyc/trusty-tools/issues/8287) |
 | PM cannot write source in delegate mode | N/A | Broken — the ask-gate on write/edit can be bypassed by the delegating PM | [#8288](https://github.com/bobmatnyc/trusty-tools/issues/8288) |
+| PM instructions shared with trusty-mpm | N/A — Claude Code has no PM router | Absent — own `pm.md` (`crates/trusty-code/src/assets/agents/pm.md`), assembled by `crates/trusty-code/src/prompt/assembler.rs:162-186`, not trusty-mpm's routing/prohibition sources | [#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293), [#8294](https://github.com/bobmatnyc/trusty-tools/issues/8294) |
 | Todo checklist (delegate mode) | `TodoWrite` populates a visible checklist | Absent — no `TodoWrite`-shaped tool; roster `todos` is always empty | [#8235](https://github.com/bobmatnyc/trusty-tools/issues/8235) |
 | Subagent panel | N/A — Claude Code has no PM-router concept to panel | Absent — delegation events render as inline chat-log lines only (`crates/trusty-code-tui/src/app/reduce.rs::apply_delegation_started`/`apply_delegation_finished`), no standing list | [#8182](https://github.com/bobmatnyc/trusty-tools/issues/8182) |
 | Structured `finish_task` result | N/A | Partial — the payload carries structured fields but the TUI flattens them to one text blob | [#8204](https://github.com/bobmatnyc/trusty-tools/issues/8204) |
@@ -148,20 +156,39 @@ Ordered per the 2026-09-19 ruling's [delegation cut](https://github.com/bobmatny
 |---|---|---|---|
 | 1 | [#8227](https://github.com/bobmatnyc/trusty-tools/issues/8227) — supporting agents (research, documentation, ticketing, version-control) present in the roster and behaving per their cards | — | first: the PM's routing text (row 2) can only name delegation targets that already work |
 | 2 | [#8287](https://github.com/bobmatnyc/trusty-tools/issues/8287) — PM routing text names `research` and `qa` as delegation targets | S | depends on row 1 |
-| 3 | [#8235](https://github.com/bobmatnyc/trusty-tools/issues/8235) — `TodoWrite`-shaped session checklist tool; roster `todos` populated | — | runs parallel with row 2 |
-| 4 | [#8204](https://github.com/bobmatnyc/trusty-tools/issues/8204) — parse structured `finish_task` fields into dedicated slots | — | needed before row 6 can carry test output in a dedicated slot |
-| 5 | [#8182](https://github.com/bobmatnyc/trusty-tools/issues/8182) — persistent statusline and subagent panel | M | the panel is where a delegate run's research/engineer/qa steps become visible |
-| 6 | [#8289](https://github.com/bobmatnyc/trusty-tools/issues/8289) — `finish_task` verification requires real test-result output in the transcript | S | depends on row 4's structured slots |
-| 7 | [#8288](https://github.com/bobmatnyc/trusty-tools/issues/8288) — delegate-mode PM can bypass the ask-gate on write/edit of bound project source | M | closes before the §6 delegate run can claim "the PM never writes source" |
-| 8 | [#8201](https://github.com/bobmatnyc/trusty-tools/issues/8201) — native trusty-memory and trusty-search tools registered for the interactive session by default | — | last: brings the delegate session's tool set to parity with the solo path once rows 1–7 land |
+| 3 | [#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293) — trusty-mpm's and tcode's PM prompts take the agent-routing table from one shared source neither product crate owns, with a drift check | M | rung 4; blocked by row 2 ([#8287](https://github.com/bobmatnyc/trusty-tools/issues/8287)) |
+| 4 | [#8235](https://github.com/bobmatnyc/trusty-tools/issues/8235) — `TodoWrite`-shaped session checklist tool; roster `todos` populated | — | runs parallel with row 2 |
+| 5 | [#8204](https://github.com/bobmatnyc/trusty-tools/issues/8204) — parse structured `finish_task` fields into dedicated slots | — | needed before row 7 can carry test output in a dedicated slot |
+| 6 | [#8182](https://github.com/bobmatnyc/trusty-tools/issues/8182) — persistent statusline and subagent panel | M | the panel is where a delegate run's research/engineer/qa steps become visible |
+| 7 | [#8289](https://github.com/bobmatnyc/trusty-tools/issues/8289) — `finish_task` verification requires real test-result output in the transcript | S | depends on row 5's structured slots |
+| 8 | [#8288](https://github.com/bobmatnyc/trusty-tools/issues/8288) — delegate-mode PM can bypass the ask-gate on write/edit of bound project source | M | closes before the §6 delegate run can claim "the PM never writes source" |
+| 9 | [#8294](https://github.com/bobmatnyc/trusty-tools/issues/8294) — tcode's delegate-mode PM states the shared prohibitions and workflow-risk rules from that source, with no tmux / `tm` CLI / Claude Code harness wording | M | rung 4; blocked by row 3 ([#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293)); [#8288](https://github.com/bobmatnyc/trusty-tools/issues/8288) remains the mechanical enforcement half |
+| 10 | [#8201](https://github.com/bobmatnyc/trusty-tools/issues/8201) — native trusty-memory and trusty-search tools registered for the interactive session by default | — | last: brings the delegate session's tool set to parity with the solo path once rows 1–9 land |
+
+Rows 3 and 9 ([#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293),
+[#8294](https://github.com/bobmatnyc/trusty-tools/issues/8294)) share one
+constraint: tcode's resident PM prompt stays within 2x its current size
+(~700 tokens today versus ~6,300 for trusty-mpm's sections) and points at no
+skill tcode does not ship.
 
 ## 5. Explicitly out of MVP {#SPEC-TCMVP-05~draft}
 
-PM delegation is no longer on this list — see §2's 2026-09-19 ruling. v0.7.0
-extends tcode's own `pm.md` agent card and `delegate_to_agent` tool; it does
-not run trusty-mpm's instruction-assembly or delegation pipeline inside
-tcode (see [DOC-76](./DOC-76-tcode-tui-parity-map.md) §2 for the two
-stacks' differences).
+PM delegation is no longer on this list — see §2's 2026-09-19 ruling. v0.7.0's
+delegate-mode PM shares PM instructions with trusty-mpm, for the sections
+that apply: the agent-routing table
+([#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293)) and the
+shared prohibitions and workflow-risk rules
+([#8294](https://github.com/bobmatnyc/trusty-tools/issues/8294)).
+
+Out of this milestone, tracked in epic
+[#2892](https://github.com/bobmatnyc/trusty-tools/issues/2892): an on-demand
+detail mechanism for tcode's PM prompt, memory-protocol parity, CLAUDE.md
+marker-override parity, identity/session-context text, multi-session
+merge-queue rules, and this epic's open children
+[#2074](https://github.com/bobmatnyc/trusty-tools/issues/2074),
+[#5206](https://github.com/bobmatnyc/trusty-tools/issues/5206),
+[#5418](https://github.com/bobmatnyc/trusty-tools/issues/5418), and
+[#5421](https://github.com/bobmatnyc/trusty-tools/issues/5421).
 
 Out of this milestone: the `/model` picker, degraded-terminal fallback,
 IDE/hooks/plugins/MCP authoring, cost/billing UI. The subagent panel is not
@@ -169,10 +196,7 @@ on this list — it is in scope, folded into
 [#8182](https://github.com/bobmatnyc/trusty-tools/issues/8182) (§4a row 6,
 §4b row 5).
 Also out: full issue→PR workflow parity and per-run cost reporting
-([#8127](https://github.com/bobmatnyc/trusty-tools/issues/8127)), a shared
-instruction/agent/skill catalog between tcode and trusty-mpm
-([#2892](https://github.com/bobmatnyc/trusty-tools/issues/2892),
-[#2074](https://github.com/bobmatnyc/trusty-tools/issues/2074)), and
+([#8127](https://github.com/bobmatnyc/trusty-tools/issues/8127)) and
 agent-class certification
 ([#7944](https://github.com/bobmatnyc/trusty-tools/issues/7944)).
 
@@ -197,7 +221,8 @@ rule), and both §1 runs are recorded against that build:
   and watch the PM hand context to `research`, code to `engineer`, and
   verification to `qa` — each step visible in the subagent panel — ending
   with the real changed-file list and test output in the transcript, the PM
-  never writing source itself.
+  never writing source itself and running on PM instructions shared with
+  trusty-mpm.
 
 ## Related
 
