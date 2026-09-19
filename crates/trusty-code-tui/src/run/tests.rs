@@ -208,6 +208,88 @@ async fn event_loop_stops_when_model_requests_quit() {
     );
 }
 
+/// #8240's render-desync regression. One `terminal.draw` per event is what
+/// made the pane fall minutes behind a streaming turn: `crate::layout::draw`
+/// rebuilds the whole transcript per frame, so the loop could not keep up
+/// with the arrival rate and the backlog grew without bound. Every event
+/// must still be applied, in order — only the frames nobody could have seen
+/// are skipped. Pre-fix this drew 52 times for 50 events; post-fix it draws
+/// a handful, independent of the burst size.
+#[tokio::test]
+async fn event_loop_coalesces_a_burst_into_one_redraw() {
+    const BURST: usize = 50;
+
+    let backend = TestBackend::new(20, 5);
+    let mut terminal = Terminal::new(backend).expect("construct terminal");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+
+    for i in 0..BURST {
+        tx.send(ReplEvent::StatusMessage(format!("chunk {i}")))
+            .expect("queue the burst before the loop starts");
+    }
+    drop(tx); // the loop exits once the backlog is drained
+
+    let redraws = Arc::new(AtomicUsize::new(0));
+    let redraws_in_render = redraws.clone();
+
+    let model = event_loop(
+        &mut terminal,
+        CountingModel::default(),
+        rx,
+        |m, _ev| m.events_seen += 1,
+        move |f, m| {
+            redraws_in_render.fetch_add(1, Ordering::SeqCst);
+            render_counts(f, m);
+        },
+    )
+    .await
+    .expect("event_loop must succeed");
+
+    assert_eq!(
+        model.events_seen, BURST,
+        "coalescing must drop nothing — every event still reaches `apply`"
+    );
+    let drawn = redraws.load(Ordering::SeqCst);
+    assert!(
+        drawn < BURST,
+        "a burst of {BURST} events must not cost {BURST} frames; drew {drawn}"
+    );
+}
+
+/// The drain must honour `should_quit` mid-backlog, exactly as the one-event-
+/// per-frame loop did — a `Quit` sitting third in the queue stops the loop
+/// there rather than applying the seven events behind it (#8240).
+#[tokio::test]
+async fn event_loop_stops_draining_at_a_quit() {
+    let backend = TestBackend::new(20, 5);
+    let mut terminal = Terminal::new(backend).expect("construct terminal");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+
+    for _ in 0..10 {
+        tx.send(ReplEvent::StatusMessage("x".into())).unwrap();
+    }
+
+    let model = event_loop(
+        &mut terminal,
+        CountingModel::default(),
+        rx,
+        |m, _ev| {
+            m.events_seen += 1;
+            if m.events_seen == 3 {
+                m.quit = true;
+            }
+        },
+        render_counts,
+    )
+    .await
+    .expect("event_loop must succeed");
+
+    assert_eq!(
+        model.events_seen, 3,
+        "the drain must stop at the quit, not finish the backlog"
+    );
+}
+
 #[tokio::test]
 async fn event_loop_stops_when_channel_closes() {
     let backend = TestBackend::new(20, 5);
