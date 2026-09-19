@@ -166,7 +166,6 @@ crates/trusty-code/src/agent_loop/cadence.rs	stays_under_budget_every_turn
 crates/trusty-code/src/agent_loop/mod.rs	sink_receives_tool_error_for_fatal_failures
 crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
 crates/trusty-code/src/agent_loop/transcript.rs	maybe_compact_marks_middle_span_only
-crates/trusty-code/src/agent_loop/transcript.rs	push_response_appends_assistant
 crates/trusty-code/src/agents/config.rs	agent_config_llm_params
 crates/trusty-code/src/agents/config.rs	agent_config_runner_kind
 crates/trusty-code/src/agents/config.rs	agent_config_system_prompt

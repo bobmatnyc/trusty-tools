@@ -40,20 +40,34 @@ Do not call a tool in this turn.";
 /// would let a model that answers every nudge with silence burn the whole turn
 /// budget, which is a longer stall than the bug it replaces.
 /// What: returns `true` — meaning "take another turn" — only when the turn is
-/// blank AND `already_nudged` is still `false`, appending the nudge as a user
-/// turn and latching `already_nudged` on the way. Returns `false` otherwise,
-/// leaving the caller's terminate-now path untouched.
+/// blank, `already_nudged` is still `false`, AND `turns_left` leaves a turn for
+/// the answer, appending the nudge as a user turn and latching
+/// `already_nudged` on the way. Returns `false` otherwise, leaving the caller's
+/// terminate-now path untouched. `turns_left` counts the current turn, so `1`
+/// means this is the last budgeted one.
+///
+/// The `turns_left` guard costs nothing and avoids a behaviour regression: a
+/// nudge on the final turn cannot be answered, so the loop would fall out of
+/// its range and report `AgentLoopError::TurnCapExceeded` where the same run
+/// used to return `Ok`. The run ends silent either way on that turn — there is
+/// no round-trip left to spend — so the nudge buys nothing and only changes
+/// the reported outcome.
 /// Test: `agent_loop::tests::sink_events::silent_terminal_turn_is_nudged_into_a_real_final_message`,
 /// `agent_loop::tests::sink_events::a_second_silent_turn_ends_the_run_instead_of_nudging_again`,
-/// `agent_loop::tests::sink_events::a_terminal_turn_with_text_is_never_nudged`.
+/// `agent_loop::tests::sink_events::a_terminal_turn_with_text_is_never_nudged`,
+/// `agent_loop::tests::sink_events::a_silent_turn_with_no_budget_left_is_not_nudged`.
 pub(super) fn nudge_once(
     response: &ChatResponse,
     transcript: &mut Transcript,
     already_nudged: &mut bool,
+    turns_left: u32,
 ) -> bool {
     // A `None` text is as silent as an empty one — `unwrap_or_default` folds
     // the two shapes providers use for "this turn said nothing" into one.
-    if *already_nudged || !response.first_text().unwrap_or_default().trim().is_empty() {
+    if *already_nudged
+        || turns_left < 2
+        || !response.first_text().unwrap_or_default().trim().is_empty()
+    {
         return false;
     }
     *already_nudged = true;

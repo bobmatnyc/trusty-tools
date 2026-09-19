@@ -628,7 +628,7 @@ impl AgentLoop {
         // the ask for a closing message is one-shot.
         let mut nudged = false;
 
-        for _turn in 0..self.config.max_turns {
+        for turns_left in (1..=self.config.max_turns).rev() {
             // #2056: checked at the top of every turn boundary — never
             // mid-tool-call — matching the vision spec's "cancellation is not
             // instantaneous" semantics (§12, 11.6).
@@ -706,7 +706,7 @@ impl AgentLoop {
             if tool_calls.is_empty() {
                 // #8238: a turn with neither tool calls NOR text is the run
                 // going idle with nothing said, not a completion.
-                if final_message::nudge_once(&response, transcript, &mut nudged) {
+                if final_message::nudge_once(&response, transcript, &mut nudged, turns_left) {
                     continue;
                 }
                 return Ok(build_output(transcript, perf));

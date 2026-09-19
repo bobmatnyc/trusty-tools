@@ -848,6 +848,101 @@ async fn a_second_silent_turn_ends_the_run_instead_of_nudging_again() {
     );
 }
 
+/// The nudge request must carry NO empty assistant turn (#8238).
+///
+/// Why: the loop recorded the silent turn before appending the nudge, so the
+/// next request carried an assistant message with no text and no tool calls
+/// followed by a user message. Bedrock Converse builds each wire message from
+/// content blocks, drops the empty text, emits no message at all for that turn,
+/// and the surrounding tool result then merges with the nudge into two
+/// consecutive user messages — which Converse rejects. So on a `bedrock/*`
+/// model the nudge call FAILED and a run that used to end `Finished` ended
+/// `Failed`. Every existing #8238 test uses `ScriptedLlm`, which accepts any
+/// shape, so none of them can see this.
+/// What: asserts on the request list the loop actually sent — no assistant
+/// message contributes zero content, and once zero-content messages are
+/// impossible the merged user/assistant sequence alternates on every provider.
+/// Test: this test.
+#[tokio::test]
+async fn the_nudge_request_carries_no_empty_assistant_turn() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "listing files"),
+        silent_response(),
+        stop_response(CLOSING_TEXT),
+    ]));
+
+    make_loop(
+        Arc::clone(&llm),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    )
+    .with_agent("pm")
+    .run("sys", "task")
+    .await
+    .expect("loop should complete");
+
+    let nudge_request = llm
+        .requests()
+        .last()
+        .cloned()
+        .expect("the loop sent at least one request");
+    let empty_assistant = nudge_request.iter().find(|m| {
+        m.role == "assistant"
+            && m.tool_calls.as_ref().is_none_or(|c| c.is_empty())
+            && m.content.as_deref().unwrap_or_default().trim().is_empty()
+    });
+    assert!(
+        empty_assistant.is_none(),
+        "an assistant turn with no text and no tool calls contributes no content \
+         block, so the messages around it merge and alternation breaks: {:?}",
+        nudge_request
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        nudge_request
+            .last()
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default(),
+        crate::agent_loop::final_message::FINAL_MESSAGE_NUDGE,
+        "the nudge must be the last message in the request it triggers"
+    );
+}
+
+/// A silent turn with no budget left must NOT be nudged (#8238).
+///
+/// Why: a nudge on the final budgeted turn cannot be answered — the loop falls
+/// out of its range and reports `TurnCapExceeded` where the very same run used
+/// to return `Ok`. The run ends silent either way on that turn, so the nudge
+/// buys nothing and only changes the reported outcome.
+/// What: `max_turns = 1` plus a silent first turn. Assert the run returns `Ok`
+/// and spends exactly one round-trip.
+/// Test: this test.
+#[tokio::test]
+async fn a_silent_turn_with_no_budget_left_is_not_nudged() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        silent_response(),
+        stop_response("unreachable"),
+    ]));
+    let config = AgentLoopConfig {
+        max_turns: 1,
+        ..AgentLoopConfig::default()
+    };
+
+    make_loop(Arc::clone(&llm), registry_with_echo(false), config)
+        .with_agent("pm")
+        .run("sys", "task")
+        .await
+        .expect("a silent last turn must still return Ok, not TurnCapExceeded");
+
+    assert_eq!(
+        llm.calls(),
+        1,
+        "a nudge with no turn left to answer it is a pure cost"
+    );
+}
+
 /// A terminal turn that DOES carry text is returned untouched (#8238).
 ///
 /// Why: the nudge must be invisible to every run that already ends properly;
