@@ -158,6 +158,8 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
 - Docs/config stay writable in the main checkout; commits never land on
   local `main` — docs/session notes reach origin only via the fast-path PR
   ([ADR-0061](docs/adr/0061-commits-never-land-on-local-main.md)).
+  Exception (owner ruling 2026-09-19): the PM may commit a NEW documentation
+  file straight to `main`; the pre-push credential scan still applies.
 - 🔴 **`.trusty-mpm/sessions/` is gitignored, local-only** (ruling 2026-09-13).
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in
   a worktree — bare `git diff`, `bash scripts/…`, a heredoc. Substitute for
