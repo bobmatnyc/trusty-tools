@@ -1151,19 +1151,46 @@ async fn begin_execution_resumes_a_turn_cap_exceeded_session() {
     );
 }
 
-/// `begin_execution` must still reject `Cancelled`/`Failed`/
-/// `DeadlineExceeded` sessions even after the #2344 `Finished`-resumption
-/// change — only a successful finish is resumable.
+/// (#8207) A `Cancelled` session must accept the NEXT prompt.
+///
+/// Why: the TUI holds one session for the whole conversation, so rejecting a
+/// cancelled session as terminal is the second way the prompt after Esc failed
+/// — the first being the still-held execution slot `await_cancelled` closes. A
+/// user cancel ends one RUN; `Failed`/`DeadlineExceeded` still end the session.
+/// Test: this test.
 #[tokio::test]
-async fn begin_execution_still_rejects_cancelled_failed_and_deadline_exceeded() {
+async fn begin_execution_resumes_a_cancelled_session() {
     let registry = SessionRegistry::new();
-
-    let cancelled = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    registry.cancel(&cancelled.id).unwrap();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    registry.cancel(&session.id).unwrap();
     assert_eq!(
-        registry.begin_execution(&cancelled.id).unwrap_err().code,
-        -32003
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Cancelled
     );
+
+    let mut events = crate::events::subscribe();
+    registry
+        .begin_execution(&session.id)
+        .expect("a cancelled session must accept the next prompt");
+
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Running,
+        "resuming must transition back to Running"
+    );
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert!(
+        matches!(envelope.event, Event::SessionStatusChanged { status, .. } if status == "running"),
+        "resuming must publish the SAME SessionStatusChanged event other transitions do"
+    );
+}
+
+/// `begin_execution` must still reject `Failed`/`DeadlineExceeded` sessions:
+/// those ended without the user asking, in a state the daemon cannot describe,
+/// so resuming one still requires a fresh session (#2344, #8207).
+#[tokio::test]
+async fn begin_execution_still_rejects_failed_and_deadline_exceeded() {
+    let registry = SessionRegistry::new();
 
     let failed = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.finish(&failed.id, SessionStatus::Failed).unwrap();

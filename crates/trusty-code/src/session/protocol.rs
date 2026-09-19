@@ -50,12 +50,38 @@ use super::registry::SessionRegistry;
 ///
 /// Why: cancellation is observed at TURN boundaries, so the wait has to cover
 /// finishing whatever tool call is in flight — a `bash` step, a delegated
-/// sub-agent's turn — not just the flag check. Thirty seconds is long enough
-/// for those and short enough that a wedged run answers the user rather than
-/// hanging the connection indefinitely.
+/// sub-agent's turn — not just the flag check. The upper bound is not a taste
+/// question: this grace and the TUI's
+/// [`crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT`] are ONE contract,
+/// because the client's budget covers the daemon's whole wait. The first cut
+/// was thirty seconds against a fifteen-second client budget, so every cancel
+/// taking 15-30s reached the user as a transport timeout and the fail-closed
+/// `cancel_unconfirmed` reply was unreachable from the TUI. Ten seconds leaves
+/// the answer five seconds to be written and read.
+///
+/// It also bounds a second stall: `crate::serve::transport` awaits each
+/// dispatch inline, so a connection serving STDIO is blocked for exactly this
+/// long while a cancel is confirming. Shortening the grace is the whole of the
+/// mitigation here — restructuring that transport is not in #8207's scope.
 /// Test: `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`
-/// pins the fail-closed arm this bound exists to reach.
-const CANCEL_CONFIRM_GRACE: Duration = Duration::from_secs(30);
+/// pins the fail-closed arm this bound exists to reach;
+/// `protocol::tests::the_cancel_grace_fits_inside_the_clients_call_budget`
+/// pins the contract with the client constant.
+const CANCEL_CONFIRM_GRACE: Duration = Duration::from_secs(10);
+
+/// #8207: a build-time stop on the two halves of the cancel contract being
+/// changed out of order — the daemon's wait must leave the client's call
+/// budget room to carry the answer back.
+const _: () = assert!(
+    CANCEL_CONFIRM_GRACE.as_secs() + CANCEL_ANSWER_HEADROOM.as_secs()
+        <= crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT.as_secs(),
+    "CANCEL_CONFIRM_GRACE must fit inside tui_client's DEFAULT_CALL_TIMEOUT \
+     with headroom for the reply — see #8207"
+);
+
+/// How much of the client's call budget is reserved for everything that is not
+/// the wait itself: dialling the socket, framing, and writing the reply.
+const CANCEL_ANSWER_HEADROOM: Duration = Duration::from_secs(5);
 
 /// Register every `session.*` method onto `router`, all sharing `registry`.
 ///
@@ -471,13 +497,16 @@ async fn detach(
 /// running"). The reply is now the answer to "did it stop", which makes
 /// "reported cancelled" and "actually stopped" one fact instead of two. The
 /// wait is FAIL-CLOSED: a run that outlives [`CANCEL_CONFIRM_GRACE`] answers
-/// with `await_cancelled`'s `-32603 internal` error, never a cancelled
-/// snapshot, so a client can say "still cancelling" rather than lie.
+/// with `await_cancelled`'s `-32010 cancel_unconfirmed` error, never a
+/// cancelled snapshot, so a client can say "still cancelling" rather than lie
+/// — and can tell that apart from a `-32603` daemon fault, which is why the
+/// code is a domain one rather than `internal`.
 /// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`,
 /// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`,
 /// `protocol::tests::cancel_waits_for_the_task_to_stop_before_reporting`,
 /// `protocol::tests::a_prompt_right_after_cancel_is_accepted_not_rejected`,
-/// `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`.
+/// `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`,
+/// `protocol::tests::the_cancel_grace_fits_inside_the_clients_call_budget`.
 async fn cancel(
     registry: &SessionRegistry,
     params: Value,

@@ -389,13 +389,18 @@ async fn cancel_waits_for_the_task_to_stop_before_reporting() {
     );
 }
 
-/// A prompt submitted straight after a cancel must be accepted, not rejected
-/// with `-32003` (#8207).
+/// A prompt submitted straight after a cancel must be accepted on the SAME
+/// session, not rejected with `-32003` (#8207).
 ///
 /// Why: this is the user-visible half of the bug — `session <id> already has a
 /// task running` reached the TUI as a raw JSON-RPC error on the very next
-/// prompt. `begin_execution` is the exact call that produced it, so driving it
-/// immediately after `cancel` returns reproduces the report.
+/// prompt. The session identity is the whole point: the TUI holds ONE session
+/// for the conversation (`tui_client::engine_state::run_chat_turn` reuses the
+/// same id for every prompt), so an earlier cut of this test that started a
+/// BRAND NEW session proved nothing about the reported bug — the real session
+/// landed `Cancelled` and `begin_execution` rejected it as terminal, which is
+/// the SECOND way the next prompt failed. Both are closed here: the slot is
+/// released, and a cancelled session is resumable.
 /// Test: this test.
 #[tokio::test]
 async fn a_prompt_right_after_cancel_is_accepted_not_rejected() {
@@ -408,19 +413,26 @@ async fn a_prompt_right_after_cancel_is_accepted_not_rejected() {
         .await
         .unwrap();
 
-    // A cancelled session needs a fresh one for the next prompt (that is the
-    // #2344 rule, unchanged); what must NOT happen is the OLD session's slot
-    // still being occupied by a run everybody was told had stopped.
     assert!(
         !registry.is_executing(&session.id),
         "the cancelled run must have released its execution slot"
     );
-    let next = registry.create("t2".to_string(), None, crate::binding::ProjectBinding::None);
-    let started = registry.begin_execution(&next.id);
+    assert_eq!(
+        registry.status(&session.id).unwrap().status.as_str(),
+        "cancelled",
+        "the run really did land Cancelled — that is the state the next prompt \
+         has to be accepted from"
+    );
+    let started = registry.begin_execution(&session.id);
     assert!(
         started.is_ok(),
-        "a prompt right after cancel must start, got {:?}",
+        "a prompt on the SAME session right after cancel must start, got {:?}",
         started.err()
+    );
+    assert_eq!(
+        registry.status(&session.id).unwrap().status.as_str(),
+        "running",
+        "resuming must publish the same Running transition every other resume does"
     );
 }
 
@@ -445,11 +457,43 @@ async fn cancel_that_cannot_confirm_the_stop_is_an_error() {
         .await
         .expect_err("an unconfirmable stop must not report success");
 
-    assert_eq!(err.code, -32603, "unexpected error shape: {err:?}");
+    assert_eq!(err.code, -32010, "unexpected error shape: {err:?}");
+    assert_eq!(
+        err.data,
+        Some(json!({"error_type": "cancel_unconfirmed"})),
+        "an unconfirmed cancel must be distinguishable from a daemon fault"
+    );
     let status = registry.status(&session.id).unwrap();
     assert_ne!(
         status.status.as_str(),
         "cancelled",
         "a cancel that could not be confirmed must not claim the session stopped"
+    );
+}
+
+/// The daemon's cancel grace and the TUI's per-call budget are ONE contract
+/// (#8207).
+///
+/// Why: the first cut paired a thirty-second daemon grace with the TUI's
+/// fifteen-second `DEFAULT_CALL_TIMEOUT`, so every cancel taking 15-30s reached
+/// the user as a transport timeout and the `cancel_unconfirmed` reply the grace
+/// exists to produce was unreachable from the TUI. A compile-time assertion
+/// beside `CANCEL_CONFIRM_GRACE` blocks the two being changed out of order;
+/// this test states the same contract where a reader of the cancel tests will
+/// find it.
+/// Test: this test.
+#[test]
+fn the_cancel_grace_fits_inside_the_clients_call_budget() {
+    let budget = crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT;
+    assert!(
+        CANCEL_CONFIRM_GRACE < budget,
+        "the daemon's answer must arrive inside the client's call budget: \
+         grace {CANCEL_CONFIRM_GRACE:?} vs budget {budget:?}"
+    );
+    assert!(
+        CANCEL_CONFIRM_GRACE + CANCEL_ANSWER_HEADROOM <= budget,
+        "the grace must leave headroom for the reply itself: \
+         grace {CANCEL_CONFIRM_GRACE:?} + headroom {CANCEL_ANSWER_HEADROOM:?} \
+         vs budget {budget:?}"
     );
 }

@@ -12,6 +12,34 @@
 
 use super::*;
 
+/// How often a cancel that found a PEER already confirming re-checks whether
+/// the run it is waiting on is gone (#8207).
+///
+/// Why: the peer owns the `JoinHandle`, so this caller has nothing to await
+/// directly; the observable it can poll is the execution slot itself. Ten
+/// milliseconds is far below any human-perceptible cancel latency and costs
+/// one uncontended mutex acquisition per tick.
+const PEER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// What a `session.cancel` found when it went looking for the run it must
+/// confirm has stopped (#8207).
+///
+/// Why: `handle: None` meant two opposite things — "nobody has attached a
+/// handle yet" (unconfirmable, fail closed) and "a concurrent cancel is
+/// already joining it" (confirmable, just not by me). Collapsing them into one
+/// `Option` is what made a second Esc answer `-32603 internal`.
+enum CancelClaim {
+    /// This caller owns the handle and must join it itself.
+    Owned(Arc<AtomicBool>, JoinHandle<()>),
+    /// A concurrent cancel holds the handle; wait on the execution slot.
+    Peer(Arc<AtomicBool>),
+    /// Tracked, never joinable: the window between `begin_execution` and
+    /// `attach_execution_handle`.
+    Unjoinable,
+    /// Nothing is executing — already stopped.
+    Idle,
+}
+
 impl SessionRegistry {
     /// Wait, bounded by `grace`, for `id`'s cancelled execution to ACTUALLY
     /// stop (#8207).
@@ -26,52 +54,209 @@ impl SessionRegistry {
     /// clears its own slot as its last act (`task::executor::run_and_record`
     /// calls `finish_execution`), so a resolved handle IS the guarantee that a
     /// following `begin_execution` will be accepted.
-    /// What: takes the handle out of the entry, awaits it under `grace`, and
-    /// returns `Ok(())` on a clean join. Never downgrades a failure to
-    /// success: a `grace` that elapses first RESTORES the handle (so a later
-    /// `shutdown_executions` still awaits it) and returns `RpcError::internal`
-    /// — the caller must surface "still cancelling", never "cancelled". A
-    /// panicked task is a stopped task, so a `JoinError` still counts as
-    /// confirmation. `Err(session_not_found)` for an unknown `id`. An entry
-    /// with no execution (already finished, or never started) is `Ok(())`:
-    /// there is nothing left to wait for. An execution tracked with NO handle
-    /// is the one case that cannot be confirmed — the window between
-    /// `begin_execution` and [`Self::attach_execution_handle`] — and is an
-    /// error for the same fail-closed reason as a timeout.
+    /// What: claims the run via [`Self::claim_cancel_confirm`] and then, per
+    /// claim: joins the handle it owns ([`Self::join_owned`]), waits for the
+    /// peer that owns it ([`Self::await_peer_confirm`]), returns `Ok(())` for
+    /// an idle session (nothing left to wait for), or fails closed for an
+    /// execution that is tracked with no handle at all. Never downgrades a
+    /// failure to success: every unconfirmed outcome is
+    /// `RpcError::cancel_unconfirmed`, so the caller can say "still
+    /// cancelling" rather than lie. `Err(session_not_found)` for an unknown
+    /// `id`.
     /// Test: `registry_cancel_tests::await_cancelled_returns_once_the_task_has_stopped`,
     /// `registry_cancel_tests::await_cancelled_errors_when_the_task_outlives_the_grace`,
     /// `registry_cancel_tests::await_cancelled_is_ok_when_nothing_is_executing`,
     /// `registry_cancel_tests::await_cancelled_errors_when_the_execution_has_no_handle`,
-    /// `registry_cancel_tests::await_cancelled_unknown_session_errors`.
+    /// `registry_cancel_tests::await_cancelled_unknown_session_errors`,
+    /// `registry_cancel_tests::a_panicked_run_releases_its_execution_slot`,
+    /// `registry_cancel_tests::the_grace_timeout_never_clobbers_a_newer_runs_handle`,
+    /// `registry_cancel_tests::two_concurrent_cancels_both_learn_the_run_stopped`.
     pub async fn await_cancelled(&self, id: &str, grace: Duration) -> Result<(), RpcError> {
-        let handle = {
-            let mut sessions = self.lock();
-            let entry = sessions
-                .get_mut(id)
-                .ok_or_else(|| RpcError::session_not_found(id))?;
-            match entry.execution.as_mut() {
-                None => return Ok(()),
-                Some(execution) => execution.handle.take(),
-            }
-        };
-        let Some(mut handle) = handle else {
-            return Err(RpcError::internal(format!(
+        match self.claim_cancel_confirm(id)? {
+            CancelClaim::Idle => Ok(()),
+            CancelClaim::Unjoinable => Err(RpcError::cancel_unconfirmed(format!(
                 "session {id}: cancellation could not be confirmed — its run is \
                  tracked but not yet joinable"
-            )));
-        };
-        if tokio::time::timeout(grace, &mut handle).await.is_err() {
-            // #8207: put the handle back rather than dropping it — a dropped
-            // `JoinHandle` detaches the task, and graceful shutdown would then
-            // have nothing left to await.
-            self.attach_execution_handle(id, handle);
-            return Err(RpcError::internal(format!(
-                "session {id}: cancellation requested but the task did not stop \
-                 within {}s",
-                grace.as_secs_f32()
-            )));
+            ))),
+            CancelClaim::Owned(cancel, handle) => self.join_owned(id, &cancel, handle, grace).await,
+            CancelClaim::Peer(cancel) => self.await_peer_confirm(id, &cancel, grace).await,
         }
-        Ok(())
+    }
+
+    /// Decide, under one lock, which half of the cancel-confirm protocol this
+    /// caller is running (#8207).
+    ///
+    /// Why: taking the handle and marking the execution "being confirmed" must
+    /// be one atomic step, or two concurrent cancels both see an untaken
+    /// handle or both see an untouched `None`.
+    /// What: takes the handle when there is one (latching `confirming`), and
+    /// otherwise reports whether a peer already took it. Returns the
+    /// execution's cancel flag alongside, as the identity token the restore
+    /// and peer-wait paths compare against.
+    /// Test: covered through [`Self::await_cancelled`]'s tests.
+    fn claim_cancel_confirm(&self, id: &str) -> Result<CancelClaim, RpcError> {
+        let mut sessions = self.lock();
+        let entry = sessions
+            .get_mut(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        let Some(execution) = entry.execution.as_mut() else {
+            return Ok(CancelClaim::Idle);
+        };
+        let cancel = Arc::clone(&execution.cancel);
+        Ok(match execution.handle.take() {
+            Some(handle) => {
+                execution.confirming = true;
+                CancelClaim::Owned(cancel, handle)
+            }
+            None if execution.confirming => CancelClaim::Peer(cancel),
+            None => CancelClaim::Unjoinable,
+        })
+    }
+
+    /// Join the handle this caller took, bounded by `grace` (#8207).
+    ///
+    /// Why: three outcomes hide behind `timeout(..).await`, and the original
+    /// cut tested only whether the OUTER `Elapsed` fired — folding a
+    /// `JoinError` into "confirmed stop". A panicked run joins instantly, so
+    /// that arm answered `Ok` while `run_and_record` had never reached
+    /// `finish_execution`: the slot stayed held and every later prompt on that
+    /// session failed with `-32003`.
+    /// What: a clean join is `Ok(())`. A `JoinError` (panic or abort) is still
+    /// a stopped run, so it stays `Ok(())` — but the slot the dead task never
+    /// released is released here, and the session is landed `Cancelled` (the
+    /// transition `task::executor` would have made), with the panic logged at
+    /// `error` so it is not swallowed. An elapsed `grace` restores the handle
+    /// and fails closed.
+    /// Test: `registry_cancel_tests::a_panicked_run_releases_its_execution_slot`,
+    /// `registry_cancel_tests::await_cancelled_errors_when_the_task_outlives_the_grace`.
+    async fn join_owned(
+        &self,
+        id: &str,
+        cancel: &Arc<AtomicBool>,
+        mut handle: JoinHandle<()>,
+        grace: Duration,
+    ) -> Result<(), RpcError> {
+        match tokio::time::timeout(grace, &mut handle).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(join_error)) => {
+                tracing::error!(
+                    session_id = %id,
+                    error = %join_error,
+                    "cancelled run did not exit cleanly; releasing its execution slot"
+                );
+                self.release_claimed_execution(id, cancel);
+                let _ = self.finish(id, SessionStatus::Cancelled);
+                Ok(())
+            }
+            Err(_elapsed) => {
+                self.restore_claimed_handle(id, cancel, handle);
+                Err(RpcError::cancel_unconfirmed(format!(
+                    "session {id}: cancellation requested but the task did not stop \
+                     within {}s",
+                    grace.as_secs_f32()
+                )))
+            }
+        }
+    }
+
+    /// Wait for the concurrent cancel that owns the handle to finish
+    /// confirming (#8207).
+    ///
+    /// Why: a second Esc (or a second GUI click through
+    /// `trusty-code-gui`'s `POST /sessions/{id}/cancel`) must learn the truth
+    /// about the run, not `-32603 internal`. This caller cannot join a handle
+    /// it does not hold, so it polls the one observable that tells it the run
+    /// is over: the execution slot the run clears on its way out.
+    /// What: returns `Ok(())` as soon as the claimed execution is gone or has
+    /// been replaced by a newer one (identity by `Arc::ptr_eq` on the cancel
+    /// flag), and `cancel_unconfirmed` if `grace` elapses first — the same
+    /// fail-closed answer the owning caller gets for the same run.
+    /// Test: `registry_cancel_tests::two_concurrent_cancels_both_learn_the_run_stopped`,
+    /// `registry_cancel_tests::a_concurrent_cancel_that_never_confirms_fails_closed`.
+    async fn await_peer_confirm(
+        &self,
+        id: &str,
+        cancel: &Arc<AtomicBool>,
+        grace: Duration,
+    ) -> Result<(), RpcError> {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            if !self.execution_is(id, cancel) {
+                return Ok(());
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(RpcError::cancel_unconfirmed(format!(
+                    "session {id}: another cancel is still confirming this run, \
+                     which did not stop within {}s",
+                    grace.as_secs_f32()
+                )));
+            }
+            tokio::time::sleep(PEER_POLL_INTERVAL.min(deadline - now)).await;
+        }
+    }
+
+    /// Whether `id`'s tracked execution is still the one identified by
+    /// `cancel` (#8207).
+    ///
+    /// Why: "the slot is occupied" is not the question — "the slot is occupied
+    /// by the run I am waiting on" is. A newer run holds a different cancel
+    /// `Arc`, and every waiter keeps a strong clone of the one it claimed, so
+    /// the old allocation cannot be freed and its address reused underneath
+    /// the comparison.
+    fn execution_is(&self, id: &str, cancel: &Arc<AtomicBool>) -> bool {
+        self.lock()
+            .get(id)
+            .and_then(|entry| entry.execution.as_ref())
+            .is_some_and(|execution| Arc::ptr_eq(&execution.cancel, cancel))
+    }
+
+    /// Clear the execution slot still held by a run that died without clearing
+    /// it (#8207).
+    ///
+    /// Why: `finish_execution` clears whatever is there; if a NEWER run has
+    /// already taken the slot, that would cancel-by-accident a run nobody
+    /// asked about.
+    /// What: clears the slot only when it still holds the claimed execution.
+    fn release_claimed_execution(&self, id: &str, cancel: &Arc<AtomicBool>) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id)
+            && entry
+                .execution
+                .as_ref()
+                .is_some_and(|execution| Arc::ptr_eq(&execution.cancel, cancel))
+        {
+            entry.execution = None;
+        }
+    }
+
+    /// Put a timed-out run's handle back, but only if the slot still holds
+    /// THAT run (#8207).
+    ///
+    /// Why: the handle has to go back or `shutdown_executions` would have
+    /// nothing left to await for this session — a dropped `JoinHandle`
+    /// detaches its task. But the restore used to be unconditional, and the
+    /// race it loses is real: the old run can clear its slot just before the
+    /// grace ends, a new `task.run` can be accepted and attach its own live
+    /// handle, and the restore then overwrites that live handle with the dead
+    /// one. The new run becomes invisible to `shutdown_executions`, and a
+    /// later cancel joins the dead handle and reports a stop while the new run
+    /// is still going.
+    /// What: restores under the same lock that checks identity, clearing
+    /// `confirming` with it. When the slot has moved on, the stale handle is
+    /// dropped instead — that run's slot was already released by the run
+    /// itself, so there is nothing left to await.
+    /// Test: `registry_cancel_tests::await_cancelled_errors_when_the_task_outlives_the_grace`,
+    /// `registry_cancel_tests::the_grace_timeout_never_clobbers_a_newer_runs_handle`.
+    fn restore_claimed_handle(&self, id: &str, cancel: &Arc<AtomicBool>, handle: JoinHandle<()>) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id)
+            && let Some(execution) = entry.execution.as_mut()
+            && Arc::ptr_eq(&execution.cancel, cancel)
+        {
+            execution.handle = Some(handle);
+            execution.confirming = false;
+        }
     }
 }
 

@@ -189,6 +189,24 @@ impl RpcError {
     pub fn already_exists(message: impl Into<String>) -> Self {
         Self::domain(-32009, "already_exists", message)
     }
+
+    /// Build a `-32010 cancel_unconfirmed` error (#8207).
+    ///
+    /// Why: `session.cancel` blocks until the signalled run has actually
+    /// stopped, and the run that does not stop in time is NOT an internal
+    /// fault — it is "still cancelling", the one answer a client can act on by
+    /// staying in a cancelling state instead of reporting a daemon bug. The
+    /// `-32603 internal` this replaces made the two indistinguishable. The
+    /// numeric code carries the distinction on its own because
+    /// [`trusty_common::uds::server::RpcError`] has no field for `data`, so the
+    /// `error_type` tag never reaches the TUI over the socket — a client
+    /// matching on `data.error_type` alone would see nothing.
+    /// What: `data.error_type = "cancel_unconfirmed"`. `-32010` is the next
+    /// free slot after [`Self::already_exists`]'s `-32009`.
+    /// Test: `rpc_error_cancel_unconfirmed_sets_code_and_type`.
+    pub fn cancel_unconfirmed(message: impl Into<String>) -> Self {
+        Self::domain(-32010, "cancel_unconfirmed", message)
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -322,6 +340,25 @@ mod tests {
         assert_eq!(e.code, -32009);
         assert_ne!(e.code, RpcError::active_conflict("x").code);
         assert_eq!(e.data, Some(json!({"error_type": "already_exists"})));
+    }
+
+    /// `cancel_unconfirmed` must use `-32010` — its OWN slot, distinguishable
+    /// from a genuine `-32603 internal` fault (#8207).
+    #[test]
+    fn rpc_error_cancel_unconfirmed_sets_code_and_type() {
+        let e = RpcError::cancel_unconfirmed("session s-1: still cancelling");
+        assert_eq!(e.code, -32010);
+        assert_ne!(e.code, RpcError::internal("x").code);
+        assert_eq!(e.data, Some(json!({"error_type": "cancel_unconfirmed"})));
+    }
+
+    /// #8207: the code — not the `data` tag — is what a socket client reads,
+    /// because the transport error has no field to carry `data`.
+    #[test]
+    fn cancel_unconfirmed_stays_distinguishable_across_the_uds_transport() {
+        let converted: trusty_common::uds::server::RpcError =
+            RpcError::cancel_unconfirmed("still cancelling").into();
+        assert_eq!(converted.code, -32010);
     }
 
     /// #6637: the socket transport must report the SAME code and message a
