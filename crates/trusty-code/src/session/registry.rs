@@ -1096,6 +1096,11 @@ mod search_audit;
 #[path = "registry_task_result.rs"]
 mod task_result_ops;
 
+/// #8207's `SessionRegistry::await_cancelled`, split out into its own file for
+/// the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_cancel.rs"]
+mod cancel_confirm;
+
 #[cfg(test)]
 #[path = "registry_tests.rs"]
 mod registry_tests;

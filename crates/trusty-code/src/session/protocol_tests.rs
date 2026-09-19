@@ -310,26 +310,146 @@ async fn cancel_unknown_session_maps_to_session_not_found() {
     assert_eq!(err.code, -32007);
 }
 
-/// `session.cancel` on a session with an in-flight execution must request
-/// cooperative cancellation (set the flag) rather than immediately
-/// transitioning to `cancelled` — the executor lands that transition once
-/// it actually observes the flag.
+/// `session.cancel` on a session with an in-flight execution must set the
+/// cooperative-cancel flag the executing loop observes (#2056).
+///
+/// (#8207) It must ALSO wait for that loop to stop before answering — see
+/// `cancel_waits_for_the_task_to_stop_before_reporting`, which is where the
+/// wait itself is pinned. This one covers only the signal.
 #[tokio::test]
 async fn cancel_executing_session_requests_cooperative_cancel() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
 
-    let result = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
         .await
         .unwrap();
 
-    assert_eq!(
-        result["status"], "running",
-        "status must NOT be transitioned immediately for an executing session"
-    );
     assert!(
         flag.load(std::sync::atomic::Ordering::Relaxed),
         "the shared cancel flag must have been set"
+    );
+}
+
+// ── #8207: cancel reports a stop, not a request ───────────────────────────────
+
+/// Spawn a stand-in for `task::executor::run_and_record`: a run that polls the
+/// cooperative-cancel flag and, like the real one, clears its own execution
+/// slot as its last act.
+///
+/// Why: the #8207 wait is a claim about a REAL spawned task's lifetime, so a
+/// test that only flips registry fields would prove nothing. This is the
+/// smallest double with the two properties the wait depends on — it outlives
+/// the cancel request, and it calls `finish_execution` before returning.
+/// What: spawns the poller, attaches its `JoinHandle` exactly where
+/// `spawn_task_run` does, and returns once the handle is attached.
+fn spawn_flag_watching_run(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let registry_for_task = Arc::clone(registry);
+    let id = session_id.to_string();
+    let handle = tokio::spawn(async move {
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _ = registry_for_task.finish(&id, crate::session::SessionStatus::Cancelled);
+        registry_for_task.finish_execution(&id);
+    });
+    registry.attach_execution_handle(session_id, handle);
+}
+
+/// `session.cancel` must not answer until the daemon-side task has actually
+/// stopped (#8207).
+///
+/// Why: the owner's transcript showed `[tcode] cancelled` printed while the
+/// run kept going. The reply used to be sent the instant the flag was set, so
+/// "reported cancelled" and "actually stopped" were two different facts. A
+/// test that only checked the reported status would pass against that bug —
+/// so this asserts the EXECUTION SLOT is empty by the time cancel returns,
+/// which is only true once the spawned task has run to completion.
+/// Test: this test.
+#[tokio::test]
+async fn cancel_waits_for_the_task_to_stop_before_reporting() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
+
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .unwrap();
+
+    assert!(
+        !registry.is_executing(&session.id),
+        "cancel must not return while the daemon-side task is still running"
+    );
+}
+
+/// A prompt submitted straight after a cancel must be accepted, not rejected
+/// with `-32003` (#8207).
+///
+/// Why: this is the user-visible half of the bug — `session <id> already has a
+/// task running` reached the TUI as a raw JSON-RPC error on the very next
+/// prompt. `begin_execution` is the exact call that produced it, so driving it
+/// immediately after `cancel` returns reproduces the report.
+/// Test: this test.
+#[tokio::test]
+async fn a_prompt_right_after_cancel_is_accepted_not_rejected() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
+
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .unwrap();
+
+    // A cancelled session needs a fresh one for the next prompt (that is the
+    // #2344 rule, unchanged); what must NOT happen is the OLD session's slot
+    // still being occupied by a run everybody was told had stopped.
+    assert!(
+        !registry.is_executing(&session.id),
+        "the cancelled run must have released its execution slot"
+    );
+    let next = registry.create("t2".to_string(), None, crate::binding::ProjectBinding::None);
+    let started = registry.begin_execution(&next.id);
+    assert!(
+        started.is_ok(),
+        "a prompt right after cancel must start, got {:?}",
+        started.err()
+    );
+}
+
+/// A cancel the daemon cannot confirm must be an ERROR, never a cancelled
+/// snapshot (#8207, fail-open check).
+///
+/// Why: the whole point of the wait is that the client stops being told a
+/// comfortable lie. Downgrading an unconfirmed stop back to "cancelled" would
+/// reintroduce the bug with extra latency. The execution-tracked-but-not-yet-
+/// joinable window is the cheapest deterministic way to reach that arm.
+/// What: begin an execution and never attach a handle, so the stop cannot be
+/// confirmed; assert `cancel` errors and that the session is NOT reported
+/// cancelled.
+/// Test: this test.
+#[tokio::test]
+async fn cancel_that_cannot_confirm_the_stop_is_an_error() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let _flag = registry.begin_execution(&session.id).unwrap();
+
+    let err = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .expect_err("an unconfirmable stop must not report success");
+
+    assert_eq!(err.code, -32603, "unexpected error shape: {err:?}");
+    let status = registry.status(&session.id).unwrap();
+    assert_ne!(
+        status.status.as_str(),
+        "cancelled",
+        "a cancel that could not be confirmed must not claim the session stopped"
     );
 }

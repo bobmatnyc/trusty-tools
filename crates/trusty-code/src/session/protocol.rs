@@ -33,6 +33,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -43,6 +44,18 @@ use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 use crate::workstreams::SharedWorkstreamStore;
 
 use super::registry::SessionRegistry;
+
+/// How long [`cancel`] waits for a signalled run to actually stop before
+/// answering with an error instead of a cancelled snapshot (#8207).
+///
+/// Why: cancellation is observed at TURN boundaries, so the wait has to cover
+/// finishing whatever tool call is in flight — a `bash` step, a delegated
+/// sub-agent's turn — not just the flag check. Thirty seconds is long enough
+/// for those and short enough that a wedged run answers the user rather than
+/// hanging the connection indefinitely.
+/// Test: `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`
+/// pins the fail-closed arm this bound exists to reach.
+const CANCEL_CONFIRM_GRACE: Duration = Duration::from_secs(30);
 
 /// Register every `session.*` method onto `router`, all sharing `registry`.
 ///
@@ -446,12 +459,25 @@ async fn detach(
 /// behaviour.
 /// What: idempotent either way. `-32007 session_not_found` if `session_id`
 /// is unknown. When `SessionRegistry::is_executing` is true, calls
-/// `request_cancel` (sets the flag) and returns the CURRENT snapshot — still
-/// `status: "running"` until the executor actually observes cancellation and
-/// transitions it. Otherwise falls back to `SessionRegistry::cancel` (the
-/// #2054 immediate `status: "cancelled"` path).
+/// `request_cancel` (sets the flag) and then BLOCKS on
+/// `SessionRegistry::await_cancelled` until the spawned run has actually
+/// stopped, returning the post-stop snapshot. Otherwise falls back to
+/// `SessionRegistry::cancel` (the #2054 immediate `status: "cancelled"` path).
+///
+/// (#8207) The wait is the fix for a client being told a task had stopped
+/// while it had not: this used to return the still-`running` snapshot the
+/// instant the flag was set, so the caller reopened its input and the next
+/// `task.run` was rejected with `-32003 invalid_argument` ("already has a task
+/// running"). The reply is now the answer to "did it stop", which makes
+/// "reported cancelled" and "actually stopped" one fact instead of two. The
+/// wait is FAIL-CLOSED: a run that outlives [`CANCEL_CONFIRM_GRACE`] answers
+/// with `await_cancelled`'s `-32603 internal` error, never a cancelled
+/// snapshot, so a client can say "still cancelling" rather than lie.
 /// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`,
-/// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`.
+/// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`,
+/// `protocol::tests::cancel_waits_for_the_task_to_stop_before_reporting`,
+/// `protocol::tests::a_prompt_right_after_cancel_is_accepted_not_rejected`,
+/// `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`.
 async fn cancel(
     registry: &SessionRegistry,
     params: Value,
@@ -460,6 +486,9 @@ async fn cancel(
     let p: SessionIdParams = parse(params, "session.cancel")?;
     if registry.is_executing(&p.session_id) {
         registry.request_cancel(&p.session_id)?;
+        registry
+            .await_cancelled(&p.session_id, CANCEL_CONFIRM_GRACE)
+            .await?;
         Ok(json!(registry.status(&p.session_id)?))
     } else {
         Ok(json!(registry.cancel(&p.session_id)?))
