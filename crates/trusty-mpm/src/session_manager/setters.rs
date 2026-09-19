@@ -304,3 +304,82 @@ mod strip_tests {
         assert_eq!(strip_error_notes("fix [#8233] now"), "fix [#8233] now");
     }
 }
+
+/// Tests for the record-level clear, as opposed to the string helper above.
+///
+/// Why: `strip_tests` proves the substring rule; these prove the method applies
+/// it to a persisted record and leaves a clean one untouched, which is the
+/// #8233 acceptance-item-3 behaviour the caller depends on.
+#[cfg(test)]
+mod clear_error_note_tests {
+    use std::sync::Arc;
+
+    use crate::session_manager::{FakeNoopTmuxDriver, SessionManager};
+
+    /// A hermetic manager plus one session whose `task` the caller chooses.
+    async fn manager_with_task(
+        dir: &tempfile::TempDir,
+        task: &str,
+    ) -> (Arc<SessionManager>, crate::session_manager::SessionRecord) {
+        let mgr = Arc::new(
+            SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+                .await
+                .expect("session manager"),
+        );
+        let mut record = mgr
+            .create(
+                "clear-note".into(),
+                Some(dir.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        record.task = task.to_owned();
+        mgr.store
+            .write()
+            .await
+            .upsert(record.clone())
+            .await
+            .expect("seed the task");
+        (mgr, record)
+    }
+
+    #[tokio::test]
+    async fn clear_error_note_strips_every_appended_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mgr, record) = manager_with_task(
+            &dir,
+            "run the fleet [error: resume relaunch did not take] [error: no runtime came up]",
+        )
+        .await;
+
+        mgr.clear_error_note(&record.id).await.expect("clear");
+
+        let cleaned = mgr.get(&record.id).await.expect("record");
+        assert_eq!(
+            cleaned.task, "run the fleet",
+            "a Running verdict must leave no stale failure in `tm ls`"
+        );
+        assert_eq!(
+            cleaned.state, record.state,
+            "clearing the note must not touch the verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_error_note_leaves_a_clean_task_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mgr, record) = manager_with_task(&dir, "fix [#8233] now").await;
+
+        mgr.clear_error_note(&record.id).await.expect("clear");
+
+        assert_eq!(
+            mgr.get(&record.id).await.expect("record").task,
+            "fix [#8233] now",
+            "a task carrying no error note must survive byte-for-byte"
+        );
+    }
+}

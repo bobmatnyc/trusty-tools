@@ -361,7 +361,8 @@ fn abort_notice(session_id: &str) -> String {
 /// Test: `deliver_types_a_short_line_and_leaves_a_readable_spec`,
 /// `deliver_announces_a_refused_line_in_the_pane`,
 /// `deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable`,
-/// `deliver_refuses_a_wedged_pane_and_writes_no_spec`.
+/// `deliver_resets_the_pane_before_typing` — the wedged-pane handshake, and
+/// that it precedes the keystrokes.
 pub(super) fn deliver(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
     tmux_name: &str,

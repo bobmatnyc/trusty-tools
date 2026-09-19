@@ -286,7 +286,9 @@ impl LaunchSpec {
     /// daemon from [`LaunchSpec::read_launch_pointer_in`] — so the derivation
     /// lives in one function keyed on the LAUNCH id.
     /// What: `<dir>/<launch_id>.started`.
-    /// Test: `started_marker_is_named_for_the_launch_not_the_session`.
+    /// Test: `a_marker_from_an_earlier_launch_does_not_satisfy_a_later_one`
+    /// (`launch_verify.rs`), `deliver_clears_a_stale_started_sentinel`
+    /// (`managed_launch_tests.rs`).
     pub fn started_marker_in(dir: &Path, launch_id: &str) -> PathBuf {
         dir.join(format!("{launch_id}{STARTED_SUFFIX}"))
     }
@@ -295,7 +297,8 @@ impl LaunchSpec {
     ///
     /// Why: see [`LAUNCH_POINTER_SUFFIX`].
     /// What: `<dir>/<session_id>.launch`.
-    /// Test: `launch_pointer_round_trips_the_launch_id`.
+    /// Test: `deliver_clears_a_stale_started_sentinel` (`managed_launch_tests.rs`)
+    /// writes and reads one back through this derivation.
     pub fn launch_pointer_in(dir: &Path, session_id: &str) -> PathBuf {
         dir.join(format!("{session_id}{LAUNCH_POINTER_SUFFIX}"))
     }
@@ -308,7 +311,8 @@ impl LaunchSpec {
     /// are returned, not swallowed: without the pointer the checker cannot tell
     /// a delivered launch from an undelivered one, so the launch is abandoned
     /// rather than made unverifiable.
-    /// Test: `launch_pointer_round_trips_the_launch_id`.
+    /// Test: `deliver_clears_a_stale_started_sentinel` (`managed_launch_tests.rs`)
+    /// — delivery publishes this launch's id and the test reads it back.
     pub fn write_launch_pointer_in(&self, dir: &Path) -> Result<PathBuf, LaunchSpecError> {
         let path = Self::launch_pointer_in(dir, &self.session_id);
         std::fs::write(&path, self.launch_id.as_bytes()).map_err(|source| {
@@ -325,8 +329,9 @@ impl LaunchSpec {
     /// Why: the daemon's post-send check knows only the session record.
     /// What: `None` when no pointer exists or it cannot be read — which the
     /// caller must treat as "cannot tell", never as "the launch failed".
-    /// Test: `launch_pointer_round_trips_the_launch_id`,
-    /// `launch_pointer_is_absent_before_any_launch`.
+    /// Test: `deliver_clears_a_stale_started_sentinel` (`managed_launch_tests.rs`)
+    /// for the round trip; `delivery_is_assumed_without_a_launch_pointer`
+    /// (`launch_verify.rs`) for the `None` arm.
     pub fn read_launch_pointer_in(dir: &Path, session_id: &str) -> Option<String> {
         let raw = std::fs::read_to_string(Self::launch_pointer_in(dir, session_id)).ok()?;
         let id = raw.trim().to_owned();
@@ -421,8 +426,8 @@ impl LaunchSpec {
 /// being alive rather than on a launch arriving.
 /// What: [`reap_orphans_in`] against [`LaunchSpec::root`], with the same TTL.
 /// Silent and non-fatal when the root cannot be resolved or does not exist.
-/// Test: `reap_orphans_is_a_no_op_without_a_root`, and `write_reaps_an_orphaned_spec`
-/// for the sweep itself.
+/// Test: `reap_survives_a_missing_directory` for the absent-root arm, and
+/// `write_reaps_an_orphaned_spec` for the sweep itself.
 pub fn reap_orphans() {
     if let Some(dir) = LaunchSpec::root() {
         reap_orphans_in(&dir, ORPHAN_TTL);

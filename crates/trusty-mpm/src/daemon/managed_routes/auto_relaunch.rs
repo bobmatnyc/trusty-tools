@@ -51,8 +51,10 @@ impl RuntimeRelauncher for DaemonRelauncher {
     /// record's OWN pane, and then runs the post-send verification. Every
     /// failure is an `Err(message)` — never a warning beside a record left
     /// `Active`, which is the defect this exists to close.
-    /// Test: `a_relaunch_that_finds_no_runtime_reports_an_error` and
-    /// `a_dropped_daemon_state_fails_the_relaunch` in `auto_relaunch_tests.rs`.
+    /// Test: `a_dropped_daemon_state_fails_the_relaunch` in
+    /// `auto_relaunch_tests.rs`. The no-runtime arm is proven one level up, by
+    /// `an_auto_resume_whose_relaunch_finds_no_runtime_is_not_left_active`
+    /// (`session_manager/relaunch_tests.rs`), over a scripted relauncher.
     async fn relaunch(&self, record: &SessionRecord) -> Result<(), String> {
         let Some(state) = self.state.upgrade() else {
             return Err("the daemon state is gone, so no runtime could be started".to_owned());
