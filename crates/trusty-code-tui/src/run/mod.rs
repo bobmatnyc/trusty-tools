@@ -80,6 +80,16 @@ pub const TICK: Duration = Duration::from_millis(100);
 /// to busy-loop.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Ceiling on how many already-queued events [`drain_ready`] folds into one
+/// frame (#8240).
+///
+/// Why: a producer that outruns the terminal indefinitely would otherwise let
+/// the drain loop run forever and the screen never update at all — the
+/// opposite of the freeze this fix exists to cure. The bound guarantees a
+/// frame at least every `DRAIN_LIMIT` events while still collapsing any
+/// realistic streaming burst into a single draw.
+const DRAIN_LIMIT: usize = 512;
+
 /// Mouse-wheel scroll delta per notch, matching tagent's existing convention
 /// (`crates/trusty-agents/src/repl/tui/run.rs`): negative scrolls toward
 /// older history, positive toward newer.
@@ -325,15 +335,18 @@ pub fn spawn_key_reader(tx: UnboundedSender<ReplEvent>) -> KeyReaderGuard {
 /// against `ratatui::backend::TestBackend` — `run` itself requires a real
 /// TTY (via [`TerminalGuard::enter`]) and so cannot run in CI/sandboxes.
 /// What: draws once immediately, then loops a biased `tokio::select!` between
-/// the [`TICK`] interval (redraw only) and `rx.recv()` (apply the event via
-/// `apply`, then redraw). Exits when `model.should_quit()` becomes true or
-/// `rx` closes (all senders dropped — mirrors
+/// the [`TICK`] interval (redraw only) and `rx.recv()`. A received event is
+/// applied, and then every event ALREADY queued behind it is applied too
+/// (`try_recv`, which never waits) before the single redraw that follows —
+/// see [`drain_ready`] for why (#8240). Exits when `model.should_quit()`
+/// becomes true or `rx` closes (all senders dropped — mirrors
 /// `crates/trusty-agents/src/repl/tui/run.rs::event_loop`'s `None => return
 /// Ok(())`). Returns the final model so callers/tests can inspect it.
 /// Test: `tests::event_loop_applies_events_and_redraws`,
 /// `tests::event_loop_stops_when_model_requests_quit`,
 /// `tests::event_loop_stops_when_channel_closes`,
-/// `tests::event_loop_redraws_on_tick_even_without_events`.
+/// `tests::event_loop_redraws_on_tick_even_without_events`,
+/// `tests::event_loop_coalesces_a_burst_into_one_redraw`.
 pub async fn event_loop<B, M>(
     terminal: &mut Terminal<B>,
     mut model: M,
@@ -364,6 +377,11 @@ where
                 match ev {
                     Some(ev) => {
                         apply(&mut model, ev);
+                        // #8240: apply the backlog before drawing, not one
+                        // frame per event — see `drain_ready`.
+                        if !model.should_quit() {
+                            drain_ready(&mut model, &mut rx, &mut apply);
+                        }
                         terminal.draw(|f| render(f, &model))?;
                         if model.should_quit() {
                             return Ok(model);
@@ -372,6 +390,45 @@ where
                     None => return Ok(model),
                 }
             }
+        }
+    }
+}
+
+/// Apply every event already sitting in `rx` — without ever waiting for one
+/// more — so [`event_loop`] can draw the result as a single frame.
+///
+/// Why: #8240's render desync. One `terminal.draw` per event is fine for
+/// keystrokes and fatal for a streaming turn: `crate::layout::draw` rebuilds
+/// the WHOLE scrollback (`chat_line_count` and `draw_chat` each call
+/// `build_chat_lines`), so a frame costs O(transcript) and the transcript
+/// only grows. A daemon emitting chunks faster than a frame costs makes the
+/// loop fall permanently behind, and the pane shows minutes-old state while
+/// the daemon's own log shows the turn progressing normally. Coalescing
+/// bounds the frame count to the arrival RATE the terminal can sustain
+/// instead of the event count, and drops nothing: every event still reaches
+/// `apply`, in order, on the same serial task — only the intermediate frames
+/// nobody could have seen are skipped.
+/// What: `try_recv` in a loop, stopping on the first empty/closed channel, on
+/// [`TuiModel::should_quit`] (so a `Quit` is never followed by more work),
+/// and at [`DRAIN_LIMIT`]. A closed channel is not reported here — the next
+/// `rx.recv()` returns `None` and [`event_loop`] exits through its existing
+/// path.
+/// Test: `tests::event_loop_coalesces_a_burst_into_one_redraw`,
+/// `tests::event_loop_stops_draining_at_a_quit`.
+fn drain_ready<M: TuiModel>(
+    model: &mut M,
+    rx: &mut UnboundedReceiver<ReplEvent>,
+    mut apply: impl FnMut(&mut M, ReplEvent),
+) {
+    for _ in 0..DRAIN_LIMIT {
+        match rx.try_recv() {
+            Ok(ev) => {
+                apply(model, ev);
+                if model.should_quit() {
+                    return;
+                }
+            }
+            Err(_) => return,
         }
     }
 }

@@ -38,18 +38,29 @@ const BUSY_HINT: &str = "↑ to cancel";
 /// buffer contents — matches tagent's `thinking_label`.
 const BUSY_LABEL: &str = "[thinking...]";
 
+/// Stand-in glyph for a newline queued into `input_buf` (#8240).
+///
+/// Why: a raw `\n` inside one ratatui `Span` renders as nothing, so
+/// type-ahead queued across an Enter would LOOK glued (`echo twoecho three`)
+/// even though the buffer holds the separator. Exactly one char wide, so
+/// [`compose_line`]'s cursor-column arithmetic stays a plain char count.
+const NEWLINE_GLYPH: char = '⏎';
+
 /// Render the input composer row into `area` and position the terminal
 /// cursor at the true edit position.
 ///
 /// Why: a borderless single row (Claude Code style) — the `<label>> ` prompt
 /// is sufficient demarcation without spending a row on a border.
 /// What: empty input shows a dim italic placeholder (busy vs. idle hint);
-/// non-empty input renders the buffer verbatim; either way, a busy state
-/// additionally right-aligns `[thinking...]` if the row is wide enough.
+/// non-empty input renders the buffer with each queued newline shown as
+/// [`NEWLINE_GLYPH`] (#8240) and everything else verbatim; either way, a busy
+/// state additionally right-aligns `[thinking...]` if the row is wide enough.
 /// The cursor is positioned by counting chars up to `app.cursor_pos`, not
 /// bytes, so multi-byte input doesn't desync the visual cursor from the true
-/// edit point.
-/// Test: `tests::draw_input_shows_idle_placeholder_when_empty` and
+/// edit point — the glyph is one char for one `\n`, so that count is
+/// unaffected by the substitution.
+/// Test: `tests::draw_input_shows_idle_placeholder_when_empty`,
+/// `tests::draw_input_shows_queued_newlines_as_a_glyph` and
 /// friends exercise the pure text composition via [`compose_line`]; the
 /// `Frame`/cursor-position side effects are integration-level and covered by
 /// [`crate::layout::draw`]'s manual/visual verification.
@@ -86,7 +97,11 @@ fn compose_line(app: &ReplApp, width: usize) -> (Line<'static>, usize) {
                 .add_modifier(Modifier::ITALIC),
         ));
     } else {
-        spans.push(Span::raw(app.input_buf.clone()));
+        // #8240: display-only substitution — `input_buf` itself keeps the real
+        // `\n` so the submitted text stays byte-identical to what was typed.
+        spans.push(Span::raw(
+            app.input_buf.replace('\n', &NEWLINE_GLYPH.to_string()),
+        ));
     }
 
     let cursor_col = prompt_width + app.input_buf[..app.cursor_pos].chars().count();
@@ -148,6 +163,29 @@ mod tests {
         let (line, cursor) = compose_line(&app, WIDE);
         assert!(line_text(&line).contains("hello"));
         assert_eq!(cursor, "demo> hello".chars().count());
+    }
+
+    /// #8240: a newline queued while a turn is in flight must be VISIBLE.
+    /// A raw `\n` inside a `Span` renders as nothing, so pre-fix this row
+    /// read `echo oneecho two` — the same glued text the bug reported. The
+    /// glyph is one char, so the cursor column stays a plain char count.
+    #[test]
+    fn draw_input_shows_queued_newlines_as_a_glyph() {
+        let mut app = ReplApp::new("demo", "u");
+        app.busy = true;
+        app.set_input("echo one\necho two".to_string());
+        let (line, cursor) = compose_line(&app, WIDE);
+        let text = line_text(&line);
+        assert!(!text.contains('\n'), "the composer is one row: {text:?}");
+        assert!(
+            text.contains("echo one⏎echo two"),
+            "the line break must render as a glyph: {text:?}"
+        );
+        assert_eq!(
+            app.input_buf, "echo one\necho two",
+            "rendering must not mutate the buffer"
+        );
+        assert_eq!(cursor, "demo> echo one\necho two".chars().count());
     }
 
     #[test]
