@@ -1363,6 +1363,46 @@ fn permission_requested_opens_a_prompt_and_records_it() {
     );
 }
 
+/// #8237: a multi-statement `bash` command carries real `0x0A` bytes in
+/// `subject`. The scrollback row is a single ratatui `Span`, where a raw
+/// `\n` renders as nothing — so every statement must survive the fold, in
+/// order, separated by something visible. Fails pre-fix: the verbatim
+/// `format!` produced `echo oneecho twoecho three`.
+#[test]
+fn permission_requested_folds_a_multi_line_subject_in_scrollback() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::PermissionRequested {
+            request_id: "req-multi".into(),
+            agent: "python-engineer".into(),
+            agent_id: "spawn-1".into(),
+            tool: "bash".into(),
+            subject: "echo one\necho two\n\necho three".into(),
+            rule: "bash[echo *]".into(),
+        },
+    );
+    let row = &app.chat[0].text;
+    assert_eq!(app.chat[0].role, ChatRole::Status);
+    assert!(
+        !row.contains('\n'),
+        "the scrollback permission row must stay one line: {row:?}"
+    );
+    assert!(
+        !row.contains("oneecho") && !row.contains("twoecho"),
+        "statements must not be glued together: {row:?}"
+    );
+    // Every statement present, in the order it was typed.
+    let one = row.find("echo one").expect("first statement present");
+    let two = row.find("echo two").expect("second statement present");
+    let three = row.find("echo three").expect("third statement present");
+    assert!(one < two && two < three, "statements out of order: {row:?}");
+    assert!(
+        row.contains("echo one · echo two · echo three"),
+        "must fold exactly as the boxed widget does: {row:?}"
+    );
+}
+
 /// A second request replaces the first rather than stacking — see
 /// `super::apply_permission_requested`'s doc comment.
 #[test]

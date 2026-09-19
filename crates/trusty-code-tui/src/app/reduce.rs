@@ -37,6 +37,9 @@ use super::{ChatLine, ChatRole, Delegation, ReplApp, ToolCard};
 use crate::event::{DelegationOutcome, KeyCode, KeyInput, ReplEvent};
 use crate::model::{PendingPermission, PermissionAnswer};
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
+// #8237: the scrollback permission row folds a multi-line subject through the
+// same helper the boxed prompt uses, rather than a second copy that can drift.
+use crate::widgets::permission_prompt::fold_to_one_line;
 
 /// How many lines a Page-Up/Page-Down key press scrolls.
 const PAGE_SCROLL: isize = 10;
@@ -449,16 +452,23 @@ fn apply_delegation_finished(
 /// re-rendered every frame and addressed by `request_id`.
 /// What: pushes one [`ChatRole::Status`] line naming the tool, the
 /// already-redacted subject and the matched rule, then stores the request.
-/// A second request arriving while one is open REPLACES it: the backend
-/// suspends one call per agent loop, so an overlap means the first is
+/// The subject goes through the SAME
+/// [`fold_to_one_line`](crate::widgets::permission_prompt::fold_to_one_line)
+/// the boxed widget uses, so a multi-statement command reads the same in
+/// both places. A second request arriving while one is open REPLACES it: the
+/// backend suspends one call per agent loop, so an overlap means the first is
 /// already resolved (its `PermissionResolved` may simply not have landed
 /// yet) and stacking prompts would block on a request nobody can answer.
 /// Test: [`tests::permission_requested_opens_a_prompt_and_records_it`],
-/// [`tests::permission_requested_twice_keeps_only_the_newest_prompt`].
+/// [`tests::permission_requested_twice_keeps_only_the_newest_prompt`],
+/// [`tests::permission_requested_folds_a_multi_line_subject_in_scrollback`].
 fn apply_permission_requested(app: &mut ReplApp, pending: PendingPermission) {
     let mut text = format!("permission: {} wants {}", pending.agent, pending.tool);
     if !pending.subject.trim().is_empty() {
-        text.push_str(&format!(" — {}", pending.subject));
+        // #8237: the scrollback row is one `Span`, and a raw `\n` inside a
+        // `Span` renders as nothing — folding is what keeps `echo one` and
+        // `echo two` from appearing as `echo oneecho two`.
+        text.push_str(&format!(" — {}", fold_to_one_line(&pending.subject)));
     }
     text.push_str(&format!(" (rule: {})", pending.rule));
     app.push_status(text);
