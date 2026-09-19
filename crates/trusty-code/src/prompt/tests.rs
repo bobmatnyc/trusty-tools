@@ -540,6 +540,8 @@ fn known_tool_names() -> Vec<String> {
             crate::tools::RECALL_SESSION_TOOL_NAME,
             crate::tools::SET_GOAL_TOOL_NAME,
             crate::tools::CLEAR_GOAL_TOOL_NAME,
+            // #8235: needs a live session's checklist store to construct.
+            crate::tools::TODO_WRITE_TOOL_NAME,
         ]
         .iter()
         .map(|name| (*name).to_string()),

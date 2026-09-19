@@ -28,7 +28,8 @@ use super::*;
 /// convention). An empty roster (no tool activity recorded yet) is a
 /// success, not an error.
 /// Test: `tests::get_agents_wraps_roster_under_agents_key`,
-/// `tests::get_agents_unknown_session_maps_to_session_not_found`.
+/// `tests::get_agents_unknown_session_maps_to_session_not_found`,
+/// `tests::get_agents_reports_a_written_checklist`.
 pub(super) async fn get_agents(
     registry: &SessionRegistry,
     params: Value,
@@ -77,8 +78,45 @@ mod tests {
         assert_eq!(agents[0]["state"], "running");
         assert!(agents[0]["model"].is_null());
         assert!(agents[0]["task"].is_null());
+        // #8235: an agent that has never called `todo_write` still reports an
+        // empty checklist, not a null.
         assert_eq!(agents[0]["todos"].as_array().unwrap().len(), 0);
         assert_eq!(agents[0]["files_changed"].as_array().unwrap().len(), 0);
+    }
+
+    /// A written checklist reaches the RPC response (#8235) — the read path
+    /// the issue names, asserted on the JSON a client actually receives.
+    #[tokio::test]
+    async fn get_agents_reports_a_written_checklist() {
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        registry
+            .set_agent_todos(
+                &session.id,
+                "pm",
+                "pm-1",
+                vec![
+                    crate::events::TodoItem {
+                        content: "add the --json flag".to_string(),
+                        status: crate::events::TodoStatus::Completed,
+                    },
+                    crate::events::TodoItem {
+                        content: "add a test".to_string(),
+                        status: crate::events::TodoStatus::InProgress,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let result = get_agents(&registry, json!({"session_id": session.id}), test_ctx())
+            .await
+            .unwrap();
+
+        let todos = result["agents"][0]["todos"].as_array().unwrap();
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0]["content"], "add the --json flag");
+        assert_eq!(todos[0]["status"], "completed");
+        assert_eq!(todos[1]["status"], "in_progress");
     }
 
     /// A session with no tool activity yet returns an empty `"agents"`

@@ -469,7 +469,10 @@ fn agent_attributed_kind(event: &Event) -> Option<&'static str> {
         // (#7948) Both carry `agent`/`agent_id` so a client can route a
         // permission prompt to the delegation that raised it.
         | Event::PermissionRequested { .. }
-        | Event::PermissionResolved { .. } => Some(event.kind()),
+        | Event::PermissionResolved { .. }
+        // (#8235) Carries `agent`/`agent_id` so a client can tell whose
+        // checklist changed.
+        | Event::TodosChanged { .. } => Some(event.kind()),
         // Not agent-attributed. `AgentStarted`/`ReportGenerated` carry an
         // `agent_name`, not an `agent`, and neither has a producer on this
         // daemon's session path.
@@ -519,6 +522,12 @@ const INTENTIONALLY_IGNORED: &[(&str, &str)] = &[
     // list: both now map, and
     // `forward_permission_requested_opens_the_prompt` /
     // `forward_permission_resolved_closes_the_prompt` pin the mapping.
+    (
+        "todos_changed",
+        "the checklist panel is #8182's work; until it lands this client has no \
+         ReplEvent to render a checklist into, and the roster read path \
+         (session.get_agents) carries the same list",
+    ),
 ];
 
 /// Every agent-attributed `Event` the daemon can emit during a delegation
@@ -646,6 +655,16 @@ fn delegation_event_samples() -> Vec<Event> {
             agent_id: "spawn-1".into(),
             decision: "deny".into(),
             source: "client".into(),
+        },
+        // #8235: the session checklist's change event.
+        Event::TodosChanged {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            todos: vec![crate::events::TodoItem {
+                content: "write the test".into(),
+                status: crate::events::TodoStatus::InProgress,
+            }],
         },
     ]
 }

@@ -183,6 +183,14 @@ struct AgentRosterState {
     agent_id: String,
     name: String,
     running: bool,
+    /// (#8235) This agent's session checklist, as `todo_write` last replaced
+    /// it — empty until its first call. Per-agent, not per-session, so a
+    /// delegated sub-agent's list can never overwrite the PM's plan (DOC-39
+    /// §4.5 requires per-agent checklists). Written only by
+    /// `SessionRegistry::set_agent_todos` (`registry_todos.rs`) and read only
+    /// by `get_agents`; `note_agent_activity` never touches it, so ordinary
+    /// tool traffic cannot clear a list.
+    todos: Vec<crate::events::TodoItem>,
 }
 
 impl SessionEntry {
@@ -214,6 +222,7 @@ impl SessionEntry {
                 agent_id: agent_id.to_string(),
                 name: agent.to_string(),
                 running,
+                todos: Vec::new(),
             }),
         }
     }
@@ -1114,6 +1123,12 @@ mod task_result_ops;
 /// the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_cancel.rs"]
 mod cancel_confirm;
+
+/// #8235's `SessionRegistry::set_agent_todos` (the session checklist's write
+/// path), split out into its own file for the same 500-SLOC-cap reason as
+/// `events` above.
+#[path = "registry_todos.rs"]
+mod todo_ops;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]
