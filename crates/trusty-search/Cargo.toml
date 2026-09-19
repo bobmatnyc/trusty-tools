@@ -133,7 +133,11 @@ trusty-common = { workspace = true, features = ["knowledge-document", "chat-atta
 # glibc-2.38-bound bundled ORT libs into the bundled trusty-embedderd binary.
 # The `bundled-ort`/`load-dynamic`/`cuda` features below forward this crate's
 # own ORT-mode selection down to `trusty-embedderd/*` explicitly.
-trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.10", default-features = false, features = [
+# The floor is `0.4` (#7062, the 1.6.3 cut), not `0.3.x`: the `daemon` feature
+# named below EXISTS ONLY FROM 0.4.0. Published 0.3.11 spells it `http-server`
+# and gates the axum listener ADR-0032 retired, so a registry resolve against
+# any 0.3.x cannot satisfy this edge at all.
+trusty-embedderd = { path = "../trusty-embedderd", version = "0.4", default-features = false, features = [
     "daemon",
 ] }
 # Opt-in Python/MPS embedding sidecar launcher (epic #3524, slices 2-4). Pulls

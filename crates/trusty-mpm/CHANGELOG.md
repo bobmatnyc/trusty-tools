@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.6.3] — 2026-09-18
+
+### Added
+
+- `tm doctor` `rust_build_env` row: on a project whose detected stack includes Rust, reports the shared `CARGO_TARGET_DIR` (exists, writable, size), the resolved `CARGO_BUILD_JOBS`, and whether sccache is on PATH and wired as `build.rustc-wrapper`, closing with the `CARGO_TARGET_DIR=… CARGO_BUILD_JOBS=… SKIP_UI_BUILD=1` line a PM pastes into an engineer brief. A non-Rust project reports the row as not applicable.
+- `build:` section in `~/.trusty-tools/trusty-mpm/config.yaml` — `cargo_target_dir` (default `~/.trusty-tools/cargo-target/<owner>/<repo>`, derived from the `origin` remote), `build_jobs` (default: half the host's cores, minimum 2), and `sccache` (default `false`). An absent section is the defaults and never a finding.
+- `tm doctor --fix` creates the shared target directory with its parents and seeds the `build:` defaults when no `build` key is present, preserving every existing key. It never writes `~/.cargo/config.toml`, which is machine-global for every Rust project on the host.
+- `rust-delivery-workflow` bundled skill — the Rust DELIVERY-PROCESS rules, split out from `rust-build-performance`'s build-speed scope so neither skill carries the other's concern. Eight sections: scope and precedence against `rust-build-performance`/`cargo-commands`/`tm-workflow`; commit-and-push before the gate chain so a crash mid-gate cannot destroy uncommitted work; CI-equivalent clippy (the CI workflow file is the pin's source of truth, and a crate-scoped local exit 0 is not CI evidence — PR #5488); build concurrency (a Rust build is CPU and RAM bound, so two on one host can OOM regardless of worktree isolation, with the cap read off `tm` (#8193) and the doctor check (#6868) rather than hardcoded, and `CARGO_BUILD_JOBS` prefixed inline per command because agent shell env does not persist); a pointer to BASE-AGENT's gate-output economy (#4790) rather than a copy; an sccache-posture pointer to `rust-build-performance` section 6; batching merges behind one `cargo install` and one live-probe pass for rung 4-6 closes; and a test-scope-by-stage pointer to `tm-workflow`. Wired into `framework-manifest.toml`'s `universal` list, the `ALL` bundle table, and the `rust-build` skill-override family, so it deploys everywhere `rust-build-performance` does. `tm-delegation-patterns`'s engineer-brief template gains the Rust-conditional line instructing a dispatched agent to prefix `RUSTC_WRAPPER=sccache CARGO_BUILD_JOBS=<n>` inline on every cargo command (Refs #8192).
+- `verification-before-completion` skill now carries the background-command wait protocol, the gate-chain pipe recipe (corrected: `pipefail` reports the LAST non-zero status, and `${PIPESTATUS[0]}` is unset under this harness's zsh, where `${pipestatus[1]}` is the per-stage code), and the stack-specific gate traps, all moved out of the resident BASE-AGENT body; `tm-workflow` gains a copy of the changelog-fragment placement and one-category rules, which stay resident in BASE-AGENT too (#8274).
+
+### Changed
+
+- PM prohibition P10 gains one narrow exception: a read-only `tmux capture-pane`
+  of the PM's own session pane, filtered at source to agent status lines, so the
+  PM can observe its dispatched agents' elapsed time and token burn. Every other
+  tmux verb, every other pane, and every other non-git Bash command stay
+  forbidden. The PM Allowlist carries the matching entry.
+- Fixed the documented filter: `-S -80` now reaches scrollback, where agent
+  status rows actually sit, and the pattern anchors on the row's own leading
+  `  ◯ ` shape so it stops self-matching the echoed command or PM prose that
+  quotes the filter. `tm-delegation-patterns`'s "PM Allowlist, in Full" table
+  now carries the same carve-out as the two instruction sections.
+
+### Documentation
+
+- `tm-delegation-patterns`'s mandatory engineer-delegation closing instruction now points at BASE-AGENT's "Gate Output: Quote Results, Summarize Progress" rule instead of the bare "Show raw test output" phrase that led one engineer to tail a full build log for 280k tokens
+- `tm-delegation-patterns`'s dispatch brief template adds a mandatory Time Box / Token Box line, with defaults (45 min/150k tokens single-crate, 20 min/60k research or ticketing) and a rule that the PM checks the box rather than pinging on a clock, sending one corrective message on overrun and re-dispatching narrower on a second
+- `tm-delegation-patterns` adds a row to the acceptance-criteria table: a review of a `count`-gated resource flipping 0 to 1 must read the first plan's computed attribute values, names in particular, not only the resource count (Refs [#8130](https://github.com/bobmatnyc/trusty-tools/issues/8130))
+- `code-review-standards` adds a Liveness Criteria Require a Sampled Check section: an acceptance criterion asserting a certificate or endpoint is live must cite a sample with a stated count, never a single request (Refs [#8131](https://github.com/bobmatnyc/trusty-tools/issues/8131))
+- `code-review-standards` adds a Lifecycle-Guard Escape-Path Verification check: an acceptance record for a `prevent_destroy` or other lifecycle-guard change must state how the documented escape path was actually exercised, never MET on prose alone (Refs [#8132](https://github.com/bobmatnyc/trusty-tools/issues/8132))
+- `code-review-standards` adds a Check Block Red-Path Coverage check: a Terraform `check` block on a scoped data source needs evidence for both the assertion-failure and read-failure paths, not the assertion path alone (Refs [#8143](https://github.com/bobmatnyc/trusty-tools/issues/8143))
+- `code-review-standards` adds a Check Block Transient-State Coverage check: a Terraform `check` block reviewed only against the final steady-state plan misses failures that appear only during resource replacement (Refs [#8144](https://github.com/bobmatnyc/trusty-tools/issues/8144))
+- `tm-delegation-patterns` documents the `version-control` isolation carve-out: a dispatch that commits source declares `isolation: "worktree"` even though `version-control` otherwise runs without isolation (#8156)
+
 ## [1.6.0] — 2026-09-16
 
 ### Added

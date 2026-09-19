@@ -1,3 +1,0 @@
-Added
-- All five search tools — `search`, `search_lexical`, `search_semantic`, `search_kg`, and `search_all` — take an optional `compact` flag (default false). A compact hit carries only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason`; `content`, `id`, `file`, and the KG/ranking metadata are absent from the JSON. Measured at 63% fewer bytes on a 10-hit `search` (#7676).
-- `list_chunks` takes an optional `path_prefix`, matched at a path-segment boundary, so one file or directory can be enumerated in a single call with no seed cursor. The filter runs before paging, so `total` and `next_cursor` describe the scoped set (#7677).

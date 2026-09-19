@@ -256,7 +256,7 @@ tm --version</pre>
 					<thead>
 						<tr>
 							<th scope="col">Daemon</th>
-							<th scope="col">Address</th>
+							<th scope="col">Transport</th>
 							<th scope="col">What it holds</th>
 						</tr>
 					</thead>
@@ -272,7 +272,7 @@ tm --version</pre>
 						</tr>
 						<tr>
 							<td><code class="whitespace-nowrap">trusty-memory</code></td>
-							<td><code class="whitespace-nowrap">127.0.0.1:7070</code></td>
+							<td><code class="whitespace-nowrap">Unix socket</code></td>
 							<td class="text-foundry-secondary"
 								>Memory palaces — long-term recall organised per project, over an HNSW vector index,
 								a redb store, and a knowledge graph.</td
@@ -291,9 +291,10 @@ tm --version</pre>
 			</div>
 
 			<p class="mt-6 max-w-3xl text-foundry-secondary">
-				Every one of those addresses is loopback. Nothing in the fleet listens on an external
-				interface, and the HTTP routers additionally reject requests whose origin is not the machine
-				itself, so a page you happen to have open cannot reach them.
+				Every one of those is local-only. trusty-mpm and trusty-search bind loopback HTTP and
+				additionally reject requests whose origin is not the machine itself; trusty-memory's daemon
+				has no network listener at all — its transport is a Unix domain socket, reachable only to
+				processes on the same host. Either way, a page you happen to have open cannot reach them.
 			</p>
 
 			<div class="mt-6 grid max-w-3xl gap-4 sm:grid-cols-2">

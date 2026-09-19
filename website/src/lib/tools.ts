@@ -145,7 +145,7 @@ export const TOOLS: Tool[] = [
 		lede: 'Long-term memory an assistant can write to and recall from across sessions, organised per project rather than per conversation.',
 		facts: [
 			{ label: 'Package', value: 'trusty-memory' },
-			{ label: 'Default port', value: '7070' },
+			{ label: 'Transport', value: 'Unix socket; dashboard via trusty-console' },
 			{ label: 'MCP tools', value: '49' },
 			{ label: 'Storage', value: 'usearch + redb, on disk' }
 		],
@@ -187,12 +187,12 @@ export const TOOLS: Tool[] = [
 			'Cyclomatic and cognitive complexity per chunk, file, and index',
 			'Code-smell detection with configurable thresholds and named categories',
 			'Git-blame temporal decay, so stale complex code sorts to the top',
-			'Tree-sitter adapters for 14 languages, behind one HTTP API and one MCP server'
+			'Tree-sitter adapters for 14 languages, behind a Unix socket and one MCP server'
 		],
 		lede: 'A second daemon that reads trusty-search’s corpus and answers the question search cannot: not where the code is, but how bad it is.',
 		facts: [
 			{ label: 'Package', value: 'trusty-analyze' },
-			{ label: 'Default port', value: '7879' },
+			{ label: 'Transport', value: 'Unix socket; dashboard via trusty-console' },
 			{ label: 'Languages', value: '14 tree-sitter adapters' },
 			{ label: 'Requires', value: 'trusty-search on 7878' }
 		],
@@ -215,7 +215,7 @@ export const TOOLS: Tool[] = [
 		lede: 'A reviewer that reads the rest of the repository before it reads your diff, and says so plainly when it cannot.',
 		facts: [
 			{ label: 'Package', value: 'trusty-review' },
-			{ label: 'Default port', value: '7880' },
+			{ label: 'Transport', value: 'Unix socket + MCP stdio' },
 			{ label: 'Providers', value: 'AWS Bedrock, OpenRouter' },
 			{ label: 'MCP tools', value: 'review_pr, review_diff, review_health' }
 		],

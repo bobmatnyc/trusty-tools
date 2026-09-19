@@ -60,7 +60,10 @@ over, and what genuinely behaves differently.
 
 ## When it goes wrong
 
-`tm doctor` runs a full diagnostic of the stack. `tm validate` checks a
+`tm doctor` runs a full diagnostic of the stack. On a Rust project it now
+reports the shared build environment too — the target directory, the build job
+count, and whether sccache is wired in — closing with the line a PM pastes
+straight into a dispatched engineer's brief. `tm validate` checks a
 workspace's deployed agents, skills, and settings against the canonical roster,
 and `tm repair` recovers from a deploy state that has drifted. `tm health`
 reports daemon reachability and a fleet summary in one line.

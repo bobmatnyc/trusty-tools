@@ -159,7 +159,7 @@ export const PREREQUISITES: Prerequisite[] = [
 	{
 		id: 'ram-16',
 		title: '16 GB RAM, ~2 GB disk',
-		body: 'trusty-search checks available memory at startup and refuses to run below 16 GB; TRUSTY_SKIP_RAM_CHECK=1 bypasses that check. The disk is for the ONNX embedding model it downloads on first run. Apple Silicon uses CoreML automatically; NVIDIA CUDA is an opt-in --features cuda build.',
+		body: 'trusty-search checks available memory at startup; below 16 GB it warns once and runs on a reduced memory tier (smaller embedding cache, BM25 corpus and knowledge-graph caps) instead of refusing to start. TRUSTY_SKIP_RAM_CHECK=1 silences that warning. The disk is for the ONNX embedding model it downloads on first run. Apple Silicon uses CoreML automatically; NVIDIA CUDA is an opt-in --features cuda build.',
 		commands: []
 	},
 	{
@@ -208,7 +208,7 @@ export const AUDIENCES: Audience[] = [
 			{
 				id: 'llm-key',
 				requirement: 'optional',
-				note: 'Only the embedded chat panel reads OPENROUTER_API_KEY. Everything else works without it.'
+				note: 'trusty-memory reads OPENROUTER_API_KEY for the memory.chat MCP method and the dream cycle’s summarization pass; there is no web chat panel. Everything else works without it.'
 			}
 		],
 		steps: [
@@ -261,8 +261,8 @@ export const AUDIENCES: Audience[] = [
 			{ id: 'tctl', requirement: 'recommended', note: 'The install path this page recommends.' },
 			{
 				id: 'ram-16',
-				requirement: 'required',
-				note: 'Checked at startup. This is the highest floor of any product here.'
+				requirement: 'recommended',
+				note: 'Checked at startup; below this trusty-search still runs, on a reduced memory tier.'
 			}
 		],
 		steps: [
@@ -315,13 +315,13 @@ export const AUDIENCES: Audience[] = [
 			{ id: 'tctl', requirement: 'recommended', note: 'Installs both in one command.' },
 			{
 				id: 'ram-16',
-				requirement: 'required',
-				note: 'trusty-search sets the floor; trusty-memory adds no requirement of its own.'
+				requirement: 'recommended',
+				note: 'trusty-search recommends this; trusty-memory adds no requirement of its own.'
 			},
 			{
 				id: 'llm-key',
 				requirement: 'optional',
-				note: 'Only trusty-memory’s chat panel reads OPENROUTER_API_KEY.'
+				note: 'Only trusty-memory’s memory.chat MCP method and dream-cycle summarization read OPENROUTER_API_KEY.'
 			}
 		],
 		steps: [
