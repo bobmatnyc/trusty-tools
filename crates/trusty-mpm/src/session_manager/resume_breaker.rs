@@ -461,6 +461,12 @@ impl super::SessionManager {
         &self,
         id: &ManagedSessionId,
     ) -> Result<super::SessionRecord, super::manager::ManagedError> {
+        // #8233 item 4: refuse before the breaker stamp, the relaunch and the
+        // `mark_errored` below, so a session the operator's resume already
+        // holds gets no second launch line and no appended error from this
+        // tick. Dropped on every exit path, including each `?` and a cancelled
+        // poller future.
+        let _in_flight = self.begin_resume(id)?;
         let record = self.resume_inner(id).await?;
         self.resume_breaker
             .write()

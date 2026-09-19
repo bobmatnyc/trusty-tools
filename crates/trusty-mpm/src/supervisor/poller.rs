@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
+use crate::session_manager::manager::ManagedError;
 use crate::session_manager::{ManagedSessionState, SessionManager};
 
 use super::config::SupervisorConfig;
@@ -100,6 +101,17 @@ pub async fn run_tick<C: LlmClassifier>(
                             "supervisor: auto-resumed stopped session"
                         );
                         report.resumed.push(record.id.to_string());
+                    }
+                    // #8233 item 4: another path is mid-resume on this session.
+                    // Nothing failed, so the tick neither errors the record nor
+                    // counts a failure — it leaves the session to the writer
+                    // that holds it and looks again next tick.
+                    Err(ManagedError::ResumeInFlight(_)) => {
+                        info!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: another path is resuming this session; skipping this tick"
+                        );
                     }
                     Err(e) => {
                         error!(

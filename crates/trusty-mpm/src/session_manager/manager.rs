@@ -21,7 +21,7 @@
 //! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
 //! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -75,6 +75,21 @@ pub enum ManagedError {
     /// The operation is not valid for the current session state.
     #[error("invalid state transition for session {0}: {1}")]
     InvalidState(String, String),
+
+    /// Another path is already resuming this session (#8233 item 4).
+    ///
+    /// Why: distinct from [`InvalidState`](Self::InvalidState), which says the
+    /// RECORD forbids a resume. This says the record permits one and someone
+    /// else got there first, so the caller's correct response is to leave the
+    /// session alone — the supervisor must not append an error to a record the
+    /// operator's resume is still working on, and a second launch line must
+    /// never reach the pane. Typed so the supervisor can tell this apart from
+    /// a real failure instead of matching on message text.
+    /// What: carries the session id. Raised only by
+    /// [`SessionManager::begin_resume`](super::SessionManager::begin_resume).
+    /// Test: `a_second_concurrent_resume_of_one_session_is_refused`.
+    #[error("a resume is already in flight for session {0}; not starting a second one")]
+    ResumeInFlight(String),
 
     /// Adoption was requested for a tmux session that does not exist on the host.
     ///
@@ -273,6 +288,11 @@ pub struct SessionManager {
     /// behaving exactly as it did. See `relaunch.rs`.
     pub(crate) relauncher:
         std::sync::OnceLock<std::sync::Arc<dyn super::relaunch::RuntimeRelauncher>>,
+    /// #8233 item 4: session ids with a resume in flight. In-memory only, like
+    /// `slots` — it guards two callers inside ONE daemon process (the operator
+    /// path and the supervisor tick), and a fresh process has no resume in
+    /// flight to remember. See `resume_in_flight.rs`.
+    pub(crate) resume_in_flight: super::resume_in_flight::InFlightSet,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -315,6 +335,9 @@ impl SessionManager {
             residency_generation: AtomicU64::new(0),
             residency_cache: RwLock::new(HashMap::new()),
             relauncher: std::sync::OnceLock::new(),
+            // #8233 item 4: empty at construction; every entry is added and
+            // removed by a `ResumeInFlightGuard` within one resume call.
+            resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         })
     }
 
@@ -899,6 +922,10 @@ impl SessionManager {
     /// [`Self::resume_auto`] instead (in the sibling `resume_breaker` module),
     /// which stamps the attempt without forgiving anything.
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        // #8233 item 4: held across the whole resume, so the supervisor tick
+        // cannot enter this session's `resume_auto` mid-flight. Dropped on
+        // every exit path below, including the `?`.
+        let _in_flight = self.begin_resume(id)?;
         let record = self.resume_inner(id).await?;
         self.note_operator_resume(id).await;
         Ok(record)
