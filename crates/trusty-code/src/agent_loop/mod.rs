@@ -113,6 +113,11 @@ const PERF_PHASE: &str = "agent_loop";
 /// Workflow label used to construct the loop's `PerfCollector`.
 const PERF_WORKFLOW: &str = "agent_loop";
 
+/// #8238's "a turn must never end in silence" rule, split out into its own
+/// file for the crate's 500-SLOC cap.
+#[path = "final_message.rs"]
+mod final_message;
+
 /// Tuning knobs for a single agent-loop run.
 ///
 /// Why: The three limits (turn cap, wall-clock timeout, model) are the dials a
@@ -611,13 +616,17 @@ impl AgentLoop {
     /// transcript.
     /// Test: Same tests as `run`, plus `cancel_flag_aborts_before_next_turn`,
     /// `stop_signal_aborts_before_next_turn`,
-    /// `explicit_finish_task_terminates_loop_with_structured_summary`.
+    /// `explicit_finish_task_terminates_loop_with_structured_summary`,
+    /// `tests::sink_events::silent_terminal_turn_is_nudged_into_a_real_final_message`.
     async fn run_inner(
         &self,
         transcript: &mut Transcript,
         perf: &mut PerfCollector,
     ) -> Result<AgentOutput, AgentLoopError> {
         let schemas = self.tool_definitions();
+        // #8238: latched by `final_message::nudge_once` — see its docs for why
+        // the ask for a closing message is one-shot.
+        let mut nudged = false;
 
         for _turn in 0..self.config.max_turns {
             // #2056: checked at the top of every turn boundary — never
@@ -695,6 +704,11 @@ impl AgentLoop {
             // or those calls would be silently dropped and the run would end with
             // an unanswered tool request.
             if tool_calls.is_empty() {
+                // #8238: a turn with neither tool calls NOR text is the run
+                // going idle with nothing said, not a completion.
+                if final_message::nudge_once(&response, transcript, &mut nudged) {
+                    continue;
+                }
                 return Ok(build_output(transcript, perf));
             }
 
