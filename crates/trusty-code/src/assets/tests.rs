@@ -671,3 +671,125 @@ fn delivery_workflow_names_resolve_to_exactly_one_body() {
         );
     }
 }
+
+// -- #8227: supporting-agent delegability. --
+
+/// A directory path no `.claude/agents/` tier occupies, so
+/// [`crate::agents::resolve_agent`] always falls through to the embedded roster.
+///
+/// Why: `resolve_agent` is disk-first. Pointing it at a real directory would
+/// make these tests depend on whatever the developer's checkout happens to hold;
+/// pointing it at a path that cannot exist exercises exactly the tier
+/// `delegate_to_agent` reaches for a stock session.
+/// What: an absolute path under a name no filesystem root uses.
+/// Test: used by the tests below.
+const NO_DISK_AGENTS_DIR: &str = "/tcode-tests-no-such-agents-dir";
+
+/// Resolve `name` through the same path `delegate_to_agent` uses, or panic.
+///
+/// Why: a routing target that `resolve_agent` cannot return is not delegable,
+/// whatever `DEFAULT_AGENTS` says — the roster table and the resolver are two
+/// steps, and only the second one a delegation actually takes.
+/// What: calls [`crate::agents::resolve_agent`] against [`NO_DISK_AGENTS_DIR`].
+/// Test: used by the tests below.
+fn resolve_embedded(name: &str) -> crate::agents::AgentConfig {
+    crate::agents::resolve_agent(std::path::Path::new(NO_DISK_AGENTS_DIR), name)
+        .unwrap_or_else(|e| panic!("'{name}' is not delegable — resolve_agent failed: {e}"))
+}
+
+/// The raw `.md` source behind a roster dispatch name.
+///
+/// Why: the #8227 test compares each agent's PROJECTED grant against what its
+/// own card declares, so it needs the card bytes — which live in two different
+/// tables depending on whether the agent is `Direct` or `Composed`.
+/// What: the `Direct` entry's `md` when one exists, else the
+/// [`EMBEDDED_TM_AGENT_SOURCES`] entry keyed `<name>.md`.
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn card_source(name: &str) -> &'static str {
+    DEFAULT_AGENTS
+        .iter()
+        .find_map(|a| match a {
+            EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
+            _ => None,
+        })
+        .or_else(|| {
+            let key = format!("{name}.md");
+            EMBEDDED_TM_AGENT_SOURCES
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                .map(|(_, md)| *md)
+        })
+        .unwrap_or_else(|| panic!("no embedded card source for '{name}'"))
+}
+
+/// A scalar frontmatter value from a raw agent card, trimmed.
+///
+/// Why/What: scans the card's leading `---` fence for `<key>:` and returns the
+/// remainder of that line. `None` when the key is absent, which for
+/// `tcode_tools:` is itself the declared grant (every tool allowed).
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn frontmatter_value(md: &str, key: &str) -> Option<String> {
+    let fenced = md.strip_prefix("---\n")?.split_once("\n---")?.0;
+    fenced
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}:")))
+        .map(|value| value.trim().to_string())
+}
+
+/// The tool allowlist a card declares, as [`crate::agents::AgentConfig`] would
+/// hold it.
+///
+/// Why/What: parses `tcode_tools: [a, b, c]` into the same `Option<Vec<String>>`
+/// shape `cfg.tools.allowed` carries — `None` when the card declares no
+/// `tcode_tools:` line at all.
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn declared_tool_grant(md: &str) -> Option<Vec<String>> {
+    let raw = frontmatter_value(md, "tcode_tools")?;
+    let inner = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    Some(
+        inner
+            .split(',')
+            .map(|tool| tool.trim().to_string())
+            .filter(|tool| !tool.is_empty())
+            .collect(),
+    )
+}
+
+/// Each of #8227's four supporting agents resolves, carries a real prompt with
+/// its card's role, and projects exactly the tool grant its card declares.
+///
+/// Why: this is #8227's deterministic half. #8129 verified roster PRESENCE only;
+/// what the PM's routing table now depends on is that each name resolves through
+/// `resolve_agent` and arrives with the grant its author wrote — the #8199 class
+/// of defect is precisely a frontmatter key silently dropped on the way through,
+/// leaving an agent with a grant nobody chose. Comparing against the card's OWN
+/// frontmatter rather than a transcribed list is what makes an edit to either
+/// side fail here.
+/// What: for `research`, `documentation`, `ticketing` and `version-control`:
+/// resolves each, asserts a non-empty prompt, asserts `cfg.agent.role` equals
+/// the card's `role:` line, and asserts `cfg.tools.allowed` equals the card's
+/// `tcode_tools:` list (or `None` where the card declares none — `research`,
+/// whose unrestricted grant is the 2026-07-18 owner ruling).
+/// Test: this test.
+#[test]
+fn supporting_agents_resolve_with_their_declared_tool_grant() {
+    for name in ["research", "documentation", "ticketing", "version-control"] {
+        let card = card_source(name);
+        let cfg = resolve_embedded(name);
+
+        assert!(
+            !cfg.system_prompt.content.trim().is_empty(),
+            "'{name}' resolves to an empty prompt"
+        );
+        assert_eq!(
+            cfg.agent.role,
+            frontmatter_value(card, "role"),
+            "'{name}' must arrive carrying the role its card declares"
+        );
+        assert_eq!(
+            cfg.tools.and_then(|t| t.allowed),
+            declared_tool_grant(card),
+            "'{name}' projects a tool grant its card did not declare (#8199)"
+        );
+    }
+}
