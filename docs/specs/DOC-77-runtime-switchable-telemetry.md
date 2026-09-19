@@ -1,10 +1,12 @@
 # DOC-77 — Runtime-Switchable Telemetry for Trusty Daemons
 
 **Status:** Draft
-**Spec ID:** `SPEC-TELEM-01~draft` … `SPEC-TELEM-10~draft` (DOC-77)
+**Spec ID:** `SPEC-TELEM-01~draft` … `SPEC-TELEM-16~draft` (DOC-77)
 **Subsystem:** new workspace crate `trusty-telemetry` (unpublished); first
 consumer `trusty-search`; later phases add `trusty-memory`, `trusty-mpm`,
-`trusty-analyze`, `trusty-embedderd`, `trusty-console`
+`trusty-analyze`, `trusty-embedderd`, `trusty-console`. Phase 2 (§11-§16)
+attributes telemetry per session/agent inside the harness daemons —
+`trusty-mpm`, `trusty-code`, `trusty-agents` — independent of crate adoption.
 **Owner:** Engineering (trusty-common / trusty-search)
 **Last-updated:** 2026-09-19
 **DOC-N claim:** `DOC-77`, scan-before-claim per
@@ -24,6 +26,10 @@ recorded there.
 [#8296](https://github.com/bobmatnyc/trusty-tools/issues/8296). Independent
 of [#6572](https://github.com/bobmatnyc/trusty-tools/issues/6572) (narrower,
 trusty-mpm-local logging fixes; this spec does not subsume it).
+[#8298](https://github.com/bobmatnyc/trusty-tools/issues/8298),
+[#6872](https://github.com/bobmatnyc/trusty-tools/issues/6872), and
+[#6931](https://github.com/bobmatnyc/trusty-tools/issues/6931) are related,
+non-duplicate work — §14 states which signal each issue owns.
 
 ---
 
@@ -353,6 +359,17 @@ correlate against, and a stable pilot binary to attach to.
 | REQ-8 | `trusty-search` wraps MCP handlers, embedder calls, and index queries in `latency` spans, enough to explain an 8-second query | integration (regression against the observed case) |
 | REQ-9 | MCP schema change → rung 6 gate, with rung 5 failure-path coverage on the auto-off and sink-failure paths | process gate |
 
+**Phase 2 — per-session and per-agent attribution (§11-§16).** Acceptance,
+restated as testable requirements, continuing the phase-1 series:
+
+| ID | Requirement | Test kind |
+|---|---|---|
+| REQ-10 | `session_id`, `agent_id`, `agent_type`, `parent_session_id` are optional, additive fields on the JSONL schema (§6) and the `telemetry_summary` payload (§3); a line or payload with none of them stays valid | unit (serde round-trip / schema) |
+| REQ-11 | trusty-mpm's daemon attaches whichever of `session_id`/`agent_id`/`agent_type`/`parent_session_id` it knows (§11) to any span or sample recorded for one of its own delegations | integration |
+| REQ-12 | The compile-activity signal (§12) reports `true` only while a `cargo`/`rustc` descendant process is running under the attributed session or agent, and reports "unattributable" — never `false` — for a delegation sharing its dispatcher's OS process with no pid of its own | integration + failure-path (the shared-process case) |
+| REQ-13 | trusty-console's AGGREGATE panel and each adopting crate's own DETAIL dashboard read distinguishable payloads, with no signal double-owned per §14's table | integration |
+| REQ-14 | The always-on readings (§16) keep working, unchanged, while every telemetry category (`latency`/`memory`/`runtime`) sits at `off` | integration (regression against #8298's own "a non-compiling dispatch is never refused" and "admitted even at low load" cases) |
+
 **Test-ladder rung.** This is an MCP schema change (three new tools) —
 **rung 6** on `CLAUDE.md`'s Rust Test Ladder, at minimum rung 4 (cross-crate:
 a shared library plus one daemon's public MCP surface). Given the new
@@ -364,16 +381,19 @@ respects the 500-line production-file SLOC cap — split the sink, the MCP
 handlers, and the category/atomics module into separate files from the
 start rather than growing one file past the cap.
 
-**Later phases** (filed when scheduled, per the epic's own convention):
+**Later phases** (filed when scheduled, per the epic's own convention; this
+order matches [#8295](https://github.com/bobmatnyc/trusty-tools/issues/8295)'s
+own checklist):
 
 | Phase | Content |
 |---|---|
 | 1.5 | `samply` trial (§8) — evaluation only, no crate code, blocks nothing |
-| 2 | `memory` category from existing `sys_metrics`/`host_metrics`, plus low-frequency fd/index-size polls |
-| 3 | Roll out to `trusty-memory`, `trusty-mpm`, `trusty-analyze` (cold-start spans for #8279), `trusty-embedderd` |
-| 4 | `trusty-console` panel consuming `telemetry_summary`'s payload |
-| 5 | `runtime` category, and the rebuild-only heavy tier (`console-subscriber`, `tokio-metrics` unstable fields, `dhat`, `pprof-rs`); a `telemetry_profile` control wrapping `samply`, contingent on the §8 trial passing |
-| 6 | `tm` CLI verb, wrapping the same entry point §3's MCP tools call |
+| 2 | Per-session and per-agent telemetry attribution (§11-§16) — harness daemons `trusty-mpm`, `trusty-code`, `trusty-agents`; feeds [#8298](https://github.com/bobmatnyc/trusty-tools/issues/8298)'s admission rule (§15) |
+| 3 | `memory` category from existing `sys_metrics`/`host_metrics`, plus low-frequency fd/index-size polls |
+| 4 | Roll out to `trusty-memory`, `trusty-mpm`, `trusty-analyze` (cold-start spans for #8279), `trusty-embedderd` |
+| 5 | `trusty-console` AGGREGATE panel consuming `telemetry_summary`'s payload (§13); per-session/per-agent DETAIL lands in phase 2, not here |
+| 6 | `runtime` category, and the rebuild-only heavy tier (`console-subscriber`, `tokio-metrics` unstable fields, `dhat`, `pprof-rs`); a `telemetry_profile` control wrapping `samply`, contingent on the §8 trial passing |
+| 7 | `tm` CLI verb, wrapping the same entry point §3's MCP tools call |
 
 ## 10. Open questions for an owner decision {#SPEC-TELEM-10~draft}
 
@@ -384,6 +404,142 @@ start rather than growing one file past the cap.
    converts a Firefox Profiler JSON file into a bounded top-N hot-function
    digest an agent could read in place of the raw file. Whether this is a
    small new offline parser, or deferred indefinitely, is unsettled.
+3. **Live transcript path for a still-running subagent.** Whether
+   `agent_transcript_path` (`hook_payload.rs:25-27`, known only at
+   `SubagentStop`) is discoverable before the stop, for mid-run burn (§12).
+4. **One identity space or three.** §11 finds three separate session/agent
+   identity types with no shared type; whether phase 2 unifies or
+   translates at the boundary is unresolved.
+5. **Splitting CPU/RSS/compile-activity within one shared process.** §12
+   marks this NOT obtainable today; whether any future technique could
+   split it is unresolved.
+
+## 11. Per-session and per-agent attribution model (Phase 2) {#SPEC-TELEM-11~draft}
+
+Owner ruling, 2026-09-19, verbatim: "The harness daemons should report per
+session/assistant (agents) telemetry, which should be reported in aggregate
+in console, and in detail in the crate dashboards."
+
+**Harness daemons** run sessions and dispatch agents inside them; a service
+daemon (`trusty-search`, `trusty-memory`, `trusty-analyze`,
+`trusty-embedderd`) answers requests and owns no session — `trusty-mpm`
+PROVISIONS `trusty-search`/`trusty-memory` into managed sessions
+(`docs/reference/crate-map.md:79-80`), the provisioning daemon runs the
+session, not the provisioned service. Verified per README: `trusty-mpm`
+(this repo's daemon); `trusty-code` — "runs the PM main-loop... delegates
+authority to typed coding sub-agents", one `tcode serve` per project
+(`crates/trusty-code/README.md:7-12`); `trusty-agents` — "runs a PM... that
+delegates tasks to specialized sub-agent subprocesses"
+(`crates/trusty-agents/README.md:15-19`). `trusty-console` does not qualify —
+it displays other daemons' state, owning none of its own
+(`docs/reference/crate-map.md:84-85`).
+
+**Identity keys — no single type spans all three today.** `trusty-mpm`:
+`SessionId(Uuid)` (`crates/trusty-mpm/src/core/session.rs:19`); `Delegation`
+carries `id`, `session: SessionId`, `parent: Option<DelegationId>` (parent
+DELEGATION, not session), `agent: String` (declared type name), `agent_id:
+Option<String>` (Claude Code's subagent key, matched against `SubagentStop`)
+— `crates/trusty-mpm/src/core/agent.rs:227-265`. Parent-SESSION linkage
+exists only on `AgentWorktreeOwner.parent_session_id`
+(`crates/trusty-mpm/src/session_manager/worktree_ownership.rs:109-116`), not
+on `Delegation`. The raw `agent_type` and the subagent's own
+`agent_transcript_path` already reach the daemon via `SubagentStop`
+(`crates/trusty-mpm/src/bin/tm/commands/hook_payload.rs:25-27, 42-52`) but
+are not yet promoted onto `Delegation` — only `agent_id` is. `trusty-code`
+has its own `Session { id: String, agent: Option<String>, ... }`
+(`crates/trusty-code/src/session/model.rs:138-166`), no parent/subagent-id
+field. `trusty-agents` correlates each sub-agent subprocess by a per-task
+UUID over NDJSON (`crates/trusty-agents/src/session.rs:77-79`). Phase 2 is
+new cross-daemon work, not a re-export of one existing type (§10.4).
+
+**Wire carriage.** Extend §6's schema with four optional, additive fields:
+`session_id`, `agent_id` (absent for a top-level/PM span), `agent_type`
+(absent when unknown), `parent_session_id` (absent with no dispatcher). **A
+line without attribution stays valid** — the same `#[serde(default)]`
+convention already on `HookEventRecord.payload`
+(`crates/trusty-mpm/src/core/hook.rs:265`) and `Delegation`'s optional
+fields (`crates/trusty-mpm/src/core/agent.rs:249-268`).
+
+## 12. Attribution signals (Phase 2) {#SPEC-TELEM-12~draft}
+
+| Signal | Source | Obtainable, macOS + Linux, no elevated rights | Sampling cost | NOT obtainable |
+|---|---|---|---|---|
+| CPU time / CPU% | `ProcessCpuSampler::cpu_pct`, a `sysinfo`-backed per-pid sampler (`crates/trusty-common/src/sys_metrics.rs:272-300`) | Yes, for any tracked pid | One `refresh_processes_specifics` over the tracked pid set, no disk I/O (`sys_metrics.rs:355-380`) | Per-delegation split — see below |
+| RSS | `ProcessCpuSampler::rss_bytes`, same sampler (`sys_metrics.rs:272-300, 425+`) | Yes | Same refresh, no extra syscall | Same per-delegation limit as CPU time |
+| Elapsed time | `Session.created_at`/`last_seen` (`session.rs:137-141`); `Delegation.created_at` (`agent.rs:247`) | Yes, always | Zero — timestamp arithmetic on records already persisted | Nothing; always available |
+| Token burn | Transcript `message.usage`, read the way `latest_context_tokens` reads the newest one (`crates/trusty-mpm/src/core/agent_cost.rs:204-244`) | Yes, a plain file read | Bounded by transcript tail size, same order as the budget guard's own read | A running TOTAL needs a new running sum — `latest_context_tokens` is deliberately last-record-only, for its own O(1) budget-guard cost (`agent_cost.rs:194-203`), and is not reusable as-is. A still-running subagent's OWN burn before `SubagentStop` reveals `agent_transcript_path` is open (§10.3) |
+| Compile activity (a compiler process running under this agent) | Not implemented today — verified: no process-tree/child-enumeration helper exists in `sys_metrics`/`host_metrics` | New capability: enumerate descendants of a session's pid, match against `cargo`/`rustc` names | Bounded by descendant-process count, same order as the static `agent_is_builder` check it replaces (`crates/trusty-mpm/src/bin/tm/commands/pm_guard_builder_cap.rs:11, 65`) | Only for a session/agent that IS its own OS process with a known pid (a native session, `session.rs:173-179`, or a `trusty-agents` subprocess) |
+
+**Shared-process limitation, stated once:** `trusty-mpm`/`trusty-code` run
+Task-tool subagents in the SAME OS process as the dispatcher (`Delegation`
+carries no pid field, verified) — CPU/RSS/compile activity attribute to the
+SESSION there; `trusty-agents`' subagents are separate processes, so
+per-agent figures ARE obtainable there (§10.5).
+
+## 13. Two views — aggregate and detail (Phase 2 UI) {#SPEC-TELEM-13~draft}
+
+**AGGREGATE, trusty-console:** totals/top-consumers across sessions and
+daemons, mirroring the bounded, opaque-payload shape `ConsoleMetricsReport`
+already establishes (`metrics: Value`, `crates/trusty-common/src/console_metrics/mod.rs:93-113`),
+fed by `telemetry_summary`'s bounded, `top_n`-capped shape (§3).
+
+**DETAIL, each crate's own dashboard:** per-session/per-agent rows, the
+per-service `console_metrics` precedent (`crates/trusty-analyze/src/mcp/console_metrics.rs`).
+`trusty-mpm` already exposes a per-session read — `tm session activity` /
+`commands::managed::session_activity` (`crates/trusty-mpm/src/bin/tm/commands/managed.rs:367`)
+— extended with the per-agent rows §12 defines.
+
+**UI placement:** all trusty-* UI builds to Foundry, never crate-local
+(`docs/design/UI/README.md:34`; DOC-39 §8, `docs/specs/trusty-code-harness-ui.md:1618`).
+
+## 14. Ownership against existing issues {#SPEC-TELEM-14~draft}
+
+| Signal / view | Owner | Note |
+|---|---|---|
+| Identity keys + attribution wiring (§11) | #8295 (DOC-77 phase 2) | New cross-daemon work, no prior issue |
+| CPU/RSS/elapsed-time/compile-activity signals (§12) | #8295 (DOC-77 phase 2) | Neither #6872 nor #6931 reads process-level signals |
+| Per-session/day token+cost ledger, pricing table | #6872 | DOC-77 defers — §12's token-burn reading feeds #6872's ledger; DOC-77 builds no ledger or pricing table |
+| Console session view: live agents, action controls | #6931 | DOC-77 defers — §13's AGGREGATE is machine-wide totals, not #6931's per-session live-agent row; complementary, not duplicate |
+| trusty-console AGGREGATE telemetry panel (§13, phase 5) | #8295 (DOC-77) | Fed by `telemetry_summary`, not #6931's feed |
+| Crate-dashboard DETAIL view (§13, phase 2) | #8295 (DOC-77) | Extends `session_activity`'s existing read |
+| Admission rule reading load/memory/compile-activity | #8298 | DOC-77 supplies the data only (§15) |
+
+Where DOC-77 would duplicate #6872 or #6931 it defers rather than
+re-specifying the same closure condition.
+
+## 15. Admission consumer (#8298) {#SPEC-TELEM-15~draft}
+
+The shared reader already exists: `HostSampler::sample()`
+(`crates/trusty-common/src/host_metrics.rs:446`) returns `CpuMetrics.usage_pct`
+(machine-wide, averaged across cores, POINT-IN-TIME, `host_metrics.rs:161-163`)
+and `MemoryMetrics.available_bytes` (`host_metrics.rs:181-187`). Neither is a
+smoothed, multi-sample load average today; no `load_average` usage exists
+anywhere in `trusty-common`.
+
+**Contract:** admission MAY rely on the freshest `HostSampler` sample and on
+this spec's compile-activity signal (§12), keyed by session/delegation id. A
+reading is usable only if no older than §16's always-on interval; DOC-77
+does not define #8298's own hysteresis/averaging window — that is #8298's
+responsibility. An unobtainable reading (a sampler error, or compile
+activity §12 marks NOT obtainable) is reported ABSENT, never re-served
+stale; #8298's own closure condition fails that case closed to the fixed
+cap. **DOC-77 specifies and exposes the data; #8298 owns the rule** — the
+threshold, the averaging window, the refusal message.
+
+## 16. Always-on versus switchable {#SPEC-TELEM-16~draft}
+
+Per-session accounting that feeds admission (§15) cannot depend on telemetry
+being armed — §2's categories may all sit at `off` while #8298 still needs a
+live reading. **Always-on, low frequency:** identity keys (§11); elapsed
+time (free — timestamp arithmetic); compile activity and the CPU/memory
+readings §15 consumes, sampled at a fixed low cadence independent of
+`telemetry_set`, the same kind of interval `HostSampler`'s own disk-refresh
+cache already uses (`host_metrics.rs:372-411`). **Switchable**, part of
+`latency`/`memory`/`runtime`: the per-span JSONL trace and its
+`telemetry_summary` histogram (§3, §6) — OFF by default, per §2. **Cost
+budget:** the same "one atomic load, no allocation" target §2 sets for OFF,
+plus one low-cadence `HostSampler`/`ProcessCpuSampler` refresh — no JSONL
+write, no span, until armed.
 
 ## Related
 
