@@ -406,39 +406,6 @@ mod tests {
         }
     }
 
-    /// A [`ProbeDriver`] that also counts the `C-c` the stuck-pane arm sends.
-    struct InterruptDriver {
-        session_live: bool,
-        interrupts: std::sync::atomic::AtomicUsize,
-    }
-
-    impl ManagedTmuxDriver for InterruptDriver {
-        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-        fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
-            self.interrupts
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }
-        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-            Ok(String::new())
-        }
-        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(if self.session_live {
-                vec!["tmpm-probe".to_string()]
-            } else {
-                Vec::new()
-            })
-        }
-    }
-
     /// A record naming `tmpm-probe`, on the given runtime.
     #[rustfmt::skip]
     fn stub_record(runtime: crate::runtime::RuntimeKind) -> crate::session_manager::SessionRecord {

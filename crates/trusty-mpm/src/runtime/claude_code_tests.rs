@@ -1629,7 +1629,7 @@ fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
                 return true;
             }
             let mut out = self.printed.lock().expect("printed");
-            out.push_str(&word.replace('"', "").replace('\'', ""));
+            out.push_str(&word.replace(['"', '\''], ""));
             out.push('\n');
             true
         }

@@ -75,7 +75,7 @@ impl Recorder {
             return false;
         };
         let mut out = self.printed.lock().expect("recorder mutex");
-        out.push_str(&word.replace('"', "").replace('\'', ""));
+        out.push_str(&word.replace(['"', '\''], ""));
         out.push('\n');
         true
     }
