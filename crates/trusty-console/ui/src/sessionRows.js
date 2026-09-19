@@ -1,6 +1,6 @@
 /**
- * How the Sessions tab buckets, dates, and orders one session row
- * (#6430 last-used sort, #6431 unknown-bucket selection).
+ * How the Sessions tab buckets, dates, orders, and now folds away one session
+ * row (#6430 last-used sort, #6431 unknown-bucket selection, #8282 collapse).
  *
  * Why: both features turn on the same two decisions the tab used to make inline
  * — which bucket a record lands in, and what its last activity is — and neither
@@ -51,6 +51,102 @@ export const OTHER_STATE = 'other';
 
 /** Display order: the known states, then the catch-all. */
 export const GROUP_ORDER = [...STATE_ORDER, OTHER_STATE];
+
+/**
+ * Groups that start COLLAPSED when the viewer has stored no preference (#8282).
+ *
+ * Why: a long-lived fleet accumulates far more inactive records than live ones,
+ * and the three lifecycle ends — `stopped`, `decommissioned`, `deleted` — pushed
+ * the groups an operator acts on off the first screen. `errored` is deliberately
+ * NOT here: an errored session is the one that needs attention, so it stays
+ * open. `other` is not here either — it is the bulk delete's target set (#6431),
+ * and hiding that set by default hides the only view of it.
+ * Test: `sessionRows.test.js` — "the three inactive groups start collapsed and
+ * the rest start open".
+ */
+export const DEFAULT_COLLAPSED_GROUPS = Object.freeze([
+  'stopped',
+  'decommissioned',
+  'deleted',
+]);
+
+/** `localStorage` key holding the viewer's per-group collapse choices (#8282). */
+export const COLLAPSED_GROUPS_KEY = 'trusty-console-sessions-collapsed-groups';
+
+/** Keep only `group -> boolean` entries for groups that still exist. */
+function knownGroupsOnly(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const group of GROUP_ORDER) {
+    if (typeof value[group] === 'boolean') out[group] = value[group];
+  }
+  return out;
+}
+
+/**
+ * The stored collapse map a raw `localStorage` string represents.
+ *
+ * Everything unusable collapses to `{}` — the defaults — rather than throwing:
+ * a hand-edited key, a value written by an older console, or an entry for a
+ * group that no longer exists must leave the tab working. Unknown keys are
+ * dropped rather than carried, so a renamed group cannot resurrect a stale
+ * choice under its old name.
+ */
+export function parseCollapsedGroups(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return {};
+  try {
+    return knownGroupsOnly(JSON.parse(raw));
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Whether `group` renders collapsed, given the viewer's stored map.
+ *
+ * The one decision this feature makes, kept pure so both halves — "what does a
+ * first visit show" and "what does a click persist" — are answerable from a
+ * test. A stored boolean always wins; the default applies only where nothing is
+ * stored for that group.
+ */
+export function resolveCollapsed(stored, group) {
+  const saved = stored?.[group];
+  if (typeof saved === 'boolean') return saved;
+  return DEFAULT_COLLAPSED_GROUPS.includes(group);
+}
+
+/**
+ * Read the collapse map from `localStorage`; the defaults when unreadable.
+ *
+ * `localStorage` throws outright in some privacy modes and this runs at the
+ * tab's mount — the same defensive read `screensaver.js` and `theme.svelte.js`
+ * perform for their own keys.
+ */
+export function readCollapsedGroups() {
+  try {
+    return parseCollapsedGroups(localStorage.getItem(COLLAPSED_GROUPS_KEY));
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Persist the collapse map; `false` when storage refused it.
+ *
+ * A blocked or full store degrades to a session-only choice — the tab keeps the
+ * toggle the viewer just made, it simply will not survive the reload.
+ */
+export function writeCollapsedGroups(state) {
+  try {
+    localStorage.setItem(
+      COLLAPSED_GROUPS_KEY,
+      JSON.stringify(knownGroupsOnly(state)),
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 /**
  * The lifecycle label to show on a row.

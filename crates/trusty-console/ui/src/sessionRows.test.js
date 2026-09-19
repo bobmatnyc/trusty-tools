@@ -10,6 +10,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  COLLAPSED_GROUPS_KEY,
+  DEFAULT_COLLAPSED_GROUPS,
   GROUP_ORDER,
   NEVER,
   OTHER_STATE,
@@ -22,10 +24,14 @@ import {
   lastUsedTitleFor,
   lastUsedUnix,
   nameOf,
+  parseCollapsedGroups,
   rawState,
+  readCollapsedGroups,
   reportedStatus,
+  resolveCollapsed,
   sortByLastUsed,
   summariseBulkDelete,
+  writeCollapsedGroups,
 } from './sessionRows.js';
 
 /** A managed record, as `record_to_json` emits it. */
@@ -239,4 +245,113 @@ test('failed rows are exactly the rows that did not report deleted:true', () => 
   };
   assert.deepEqual(failedRows(payload).map((r) => r.session_id), ['b', 'c']);
   assert.deepEqual(failedRows(null), []);
+});
+
+// ── #8282: which groups render collapsed, and where that choice is kept ──────
+
+/**
+ * A `localStorage` stand-in. `throwing: true` models the privacy modes where
+ * every access raises, which is the case the tab has to survive at mount.
+ */
+function fakeStorage({ throwing = false, seed = null } = {}) {
+  const store = new Map();
+  if (seed !== null) store.set(COLLAPSED_GROUPS_KEY, seed);
+  return {
+    getItem(key) {
+      if (throwing) throw new Error('storage is blocked');
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      if (throwing) throw new Error('storage is blocked');
+      store.set(key, String(value));
+    },
+  };
+}
+
+/** Run `fn` with `globalThis.localStorage` bound to `storage`. */
+function withStorage(storage, fn) {
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage');
+  const previous = globalThis.localStorage;
+  globalThis.localStorage = storage;
+  try {
+    return fn();
+  } finally {
+    if (had) globalThis.localStorage = previous;
+    else delete globalThis.localStorage;
+  }
+}
+
+test('the three inactive groups start collapsed and the rest start open', () => {
+  // The whole of the default: nothing is stored, so the set decides. `errored`
+  // stays open on purpose — it is the group that needs attention — and so does
+  // `other`, which is the bulk delete's target set (#6431).
+  const collapsed = GROUP_ORDER.filter((g) => resolveCollapsed({}, g));
+  assert.deepEqual(collapsed, ['stopped', 'decommissioned', 'deleted']);
+  assert.deepEqual([...DEFAULT_COLLAPSED_GROUPS], collapsed);
+  for (const group of ['active', 'provisioning', 'errored', OTHER_STATE]) {
+    assert.equal(resolveCollapsed({}, group), false);
+  }
+});
+
+test('a stored choice beats the default in both directions', () => {
+  const stored = { stopped: false, active: true };
+  assert.equal(resolveCollapsed(stored, 'stopped'), false);
+  assert.equal(resolveCollapsed(stored, 'active'), true);
+  // Untouched groups still take the default.
+  assert.equal(resolveCollapsed(stored, 'deleted'), true);
+  assert.equal(resolveCollapsed(stored, 'errored'), false);
+});
+
+test('a stored entry for a group that no longer exists is ignored', () => {
+  const parsed = parseCollapsedGroups('{"stopped":true,"retired":true}');
+  assert.deepEqual(parsed, { stopped: true });
+  // A non-boolean value for a real group is not a choice either.
+  assert.deepEqual(parseCollapsedGroups('{"deleted":"yes"}'), {});
+});
+
+test('unusable stored text falls back to the defaults', () => {
+  for (const raw of [null, '', 'not json', '[]', '"deleted"', '7']) {
+    assert.deepEqual(parseCollapsedGroups(raw), {});
+  }
+  assert.equal(resolveCollapsed(parseCollapsedGroups('not json'), 'deleted'), true);
+});
+
+test('a toggle survives a remount through storage', () => {
+  const storage = fakeStorage();
+  withStorage(storage, () => {
+    const first = readCollapsedGroups();
+    assert.equal(resolveCollapsed(first, 'deleted'), true);
+    // One click on the `deleted` header, persisted.
+    assert.equal(writeCollapsedGroups({ ...first, deleted: false }), true);
+    // A remount reads storage again and must not fall back to the default.
+    const remounted = readCollapsedGroups();
+    assert.equal(resolveCollapsed(remounted, 'deleted'), false);
+    assert.equal(resolveCollapsed(remounted, 'stopped'), true);
+  });
+});
+
+test('a storage that throws degrades to the defaults instead of erroring', () => {
+  withStorage(fakeStorage({ throwing: true }), () => {
+    assert.deepEqual(readCollapsedGroups(), {});
+    // The write reports the refusal rather than raising into the click handler.
+    assert.equal(writeCollapsedGroups({ deleted: false }), false);
+    assert.equal(resolveCollapsed(readCollapsedGroups(), 'deleted'), true);
+  });
+});
+
+test('an absent localStorage is the same degraded path, not a crash', () => {
+  // `readCollapsedGroups` runs at mount; a host with no web storage at all
+  // reaches the same defaults rather than throwing into the render.
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage');
+  assert.equal(had, false, 'node has no localStorage; the bare read is the test');
+  assert.deepEqual(readCollapsedGroups(), {});
+  assert.equal(writeCollapsedGroups({ deleted: false }), false);
+});
+
+test('only known groups are written back to storage', () => {
+  const storage = fakeStorage();
+  withStorage(storage, () => {
+    writeCollapsedGroups({ deleted: true, retired: true, stopped: 'yes' });
+    assert.equal(storage.getItem(COLLAPSED_GROUPS_KEY), '{"deleted":true}');
+  });
 });
