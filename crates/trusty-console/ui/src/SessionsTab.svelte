@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
+  import SessionGroupHeader from './SessionGroupHeader.svelte';
   import { autoResumeEffective, autoResumeLabel } from './autoResume.js';
   import {
     GROUP_ORDER,
@@ -12,9 +13,12 @@
     lastUsedTitleFor,
     nameOf,
     rawState,
+    readCollapsedGroups,
     reportedStatus,
+    resolveCollapsed,
     sortByLastUsed,
     summariseBulkDelete,
+    writeCollapsedGroups,
   } from './sessionRows.js';
 
   /**
@@ -41,6 +45,10 @@
    *      entries — gets multi-select and a record-only bulk delete. `deleted`
    *      tombstones now have their own group, so they are no longer swept into
    *      that bucket. Deletion never removes a worktree or workspace (#1511).
+   * #8282: every group heading is a disclosure button, and `stopped`,
+   *      `decommissioned` and `deleted` start collapsed. The decision and its
+   *      storage are `sessionRows.js`'s (`resolveCollapsed`); this file only
+   *      renders it. Coverage: `sessionsTabCollapse.test.js`.
    */
 
   // ── poll interval (RFC Q3: poll-based refresh; 15s flagged too coarse) ──────
@@ -114,6 +122,26 @@
   function clearSelection() {
     selected = new Set();
     confirming = false;
+  }
+
+  // #8282: which groups are folded away. Read once at init — a poll never
+  // touches this, so a refresh cannot reopen a group the viewer closed — and
+  // written back on every toggle, so the choice survives a reload.
+  let collapsedGroups = $state(readCollapsedGroups());
+
+  function isCollapsed(group) {
+    return resolveCollapsed(collapsedGroups, group);
+  }
+
+  function toggleGroup(group) {
+    const next = { ...collapsedGroups, [group]: !isCollapsed(group) };
+    collapsedGroups = next;
+    // A refused write is a session-only choice, not an error the viewer sees.
+    writeCollapsedGroups(next);
+    // #8282: the bulk bar and its checkboxes live inside the collapsed region,
+    // so a selection made before collapsing would be a destructive action aimed
+    // at rows nobody can see. Collapsing the bucket drops it.
+    if (next[group] && group === OTHER_STATE) clearSelection();
   }
 
   async function runBulkDelete() {
@@ -361,11 +389,26 @@
     </div>
     {#each GROUP_ORDER as st}
       {#if grouped[st] && grouped[st].length > 0}
-        <h3 class="group-title {st}">{st} ({grouped[st].length})</h3>
+        {@const collapsed = isCollapsed(st)}
+        <!-- #8282: the heading is the disclosure control, and the region it
+             names is always in the DOM so `aria-controls` resolves. Its rows
+             are rendered only while the group is open, which keeps a collapsed
+             group out of the tab order and the screen-reader flow entirely. -->
+        <SessionGroupHeader
+          group={st}
+          count={grouped[st].length}
+          {collapsed}
+          controls={`session-group-${st}`}
+          onToggle={() => toggleGroup(st)}
+        />
+        <div id={`session-group-${st}`} class="group-body">
+        {#if !collapsed}
         {#if st === OTHER_STATE}
           <!-- #6431: bulk delete, scoped to this bucket only. Nothing is
                pre-selected, and the action is RECORD-deletion only — it never
-               removes a worktree or workspace directory (#1511). -->
+               removes a worktree or workspace directory (#1511).
+               #8282: it sits INSIDE the collapsible region, so the selection and
+               the rows it targets are shown or hidden together. -->
           <div class="bulk-bar">
             <span class="bulk-count">{selected.size} selected</span>
             <button
@@ -449,6 +492,8 @@
             </div>
           {/each}
         </div>
+        {/if}
+        </div>
       {/if}
     {/each}
     {#if sessions.length === 0}
@@ -492,12 +537,8 @@
   .auto-resume { display: flex; align-items: center; gap: 0.6rem; }
   .ar-label { font-size: 0.8rem; color: var(--trusty-text-secondary); }
 
-  .group-title { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin: 1rem 0 0.5rem; color: var(--trusty-text-secondary); }
-  .group-title.active { color: var(--trusty-success); }
-  .group-title.errored { color: var(--trusty-danger); }
-  .group-title.deleted { color: var(--trusty-text-muted); }
-  .group-title.other { color: var(--trusty-warning); }
-
+  /* #8282: the group heading and its colours moved to SessionGroupHeader.svelte
+     with the disclosure button; Svelte scopes styles per component. */
   .session-list { display: flex; flex-direction: column; gap: 0.5rem; }
   .session-card { background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.5rem; padding: 0.75rem 1rem; }
   .session-head { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
