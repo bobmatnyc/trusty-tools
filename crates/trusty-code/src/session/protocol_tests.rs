@@ -310,26 +310,202 @@ async fn cancel_unknown_session_maps_to_session_not_found() {
     assert_eq!(err.code, -32007);
 }
 
-/// `session.cancel` on a session with an in-flight execution must request
-/// cooperative cancellation (set the flag) rather than immediately
-/// transitioning to `cancelled` — the executor lands that transition once
-/// it actually observes the flag.
+/// `session.cancel` on a session with an in-flight execution must set the
+/// cooperative-cancel flag the executing loop observes (#2056).
+///
+/// (#8207) It must ALSO wait for that loop to stop before answering — see
+/// `cancel_waits_for_the_task_to_stop_before_reporting`, which is where the
+/// wait itself is pinned. This one covers only the signal.
 #[tokio::test]
 async fn cancel_executing_session_requests_cooperative_cancel() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
 
-    let result = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
         .await
         .unwrap();
 
-    assert_eq!(
-        result["status"], "running",
-        "status must NOT be transitioned immediately for an executing session"
-    );
     assert!(
         flag.load(std::sync::atomic::Ordering::Relaxed),
         "the shared cancel flag must have been set"
     );
+}
+
+// ── #8207: cancel reports a stop, not a request ───────────────────────────────
+
+/// Spawn a stand-in for `task::executor::run_and_record`: a run that polls the
+/// cooperative-cancel flag and, like the real one, clears its own execution
+/// slot as its last act.
+///
+/// Why: the #8207 wait is a claim about a REAL spawned task's lifetime, so a
+/// test that only flips registry fields would prove nothing. This is the
+/// smallest double with the two properties the wait depends on — it outlives
+/// the cancel request, and it calls `finish_execution` before returning.
+/// What: spawns the poller, attaches its `JoinHandle` exactly where
+/// `spawn_task_run` does, and returns once the handle is attached.
+fn spawn_flag_watching_run(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let registry_for_task = Arc::clone(registry);
+    let id = session_id.to_string();
+    let handle = tokio::spawn(async move {
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _ = registry_for_task.finish(&id, crate::session::SessionStatus::Cancelled);
+        registry_for_task.finish_execution(&id);
+    });
+    registry.attach_execution_handle(session_id, handle);
+}
+
+/// `session.cancel` must not answer until the daemon-side task has actually
+/// stopped (#8207).
+///
+/// Why: the owner's transcript showed `[tcode] cancelled` printed while the
+/// run kept going. The reply used to be sent the instant the flag was set, so
+/// "reported cancelled" and "actually stopped" were two different facts. A
+/// test that only checked the reported status would pass against that bug —
+/// so this asserts the EXECUTION SLOT is empty by the time cancel returns,
+/// which is only true once the spawned task has run to completion.
+/// Test: this test.
+#[tokio::test]
+async fn cancel_waits_for_the_task_to_stop_before_reporting() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
+
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .unwrap();
+
+    assert!(
+        !registry.is_executing(&session.id),
+        "cancel must not return while the daemon-side task is still running"
+    );
+}
+
+/// A prompt submitted straight after a cancel must be accepted on the SAME
+/// session, not rejected with `-32003` (#8207).
+///
+/// Why: this is the user-visible half of the bug — `session <id> already has a
+/// task running` reached the TUI as a raw JSON-RPC error on the very next
+/// prompt. The session identity is the whole point: the TUI holds ONE session
+/// for the conversation (`tui_client::engine_state::run_chat_turn` reuses the
+/// same id for every prompt), so an earlier cut of this test that started a
+/// BRAND NEW session proved nothing about the reported bug — the real session
+/// landed `Cancelled` and `begin_execution` rejected it as terminal, which is
+/// the SECOND way the next prompt failed. Both are closed here: the slot is
+/// released, and a cancelled session is resumable.
+/// Test: this test.
+#[tokio::test]
+async fn a_prompt_right_after_cancel_is_accepted_not_rejected() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let flag = registry.begin_execution(&session.id).unwrap();
+    spawn_flag_watching_run(&registry, &session.id, Arc::clone(&flag));
+
+    cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .unwrap();
+
+    assert!(
+        !registry.is_executing(&session.id),
+        "the cancelled run must have released its execution slot"
+    );
+    assert_eq!(
+        registry.status(&session.id).unwrap().status.as_str(),
+        "cancelled",
+        "the run really did land Cancelled — that is the state the next prompt \
+         has to be accepted from"
+    );
+    let started = registry.begin_execution(&session.id);
+    assert!(
+        started.is_ok(),
+        "a prompt on the SAME session right after cancel must start, got {:?}",
+        started.err()
+    );
+    assert_eq!(
+        registry.status(&session.id).unwrap().status.as_str(),
+        "running",
+        "resuming must publish the same Running transition every other resume does"
+    );
+}
+
+/// A cancel the daemon cannot confirm must be an ERROR, never a cancelled
+/// snapshot (#8207, fail-open check).
+///
+/// Why: the whole point of the wait is that the client stops being told a
+/// comfortable lie. Downgrading an unconfirmed stop back to "cancelled" would
+/// reintroduce the bug with extra latency. The execution-tracked-but-not-yet-
+/// joinable window is the cheapest deterministic way to reach that arm.
+/// What: begin an execution and never attach a handle, so the stop cannot be
+/// confirmed; assert `cancel` errors and that the session is NOT reported
+/// cancelled.
+/// Test: this test.
+#[tokio::test]
+async fn cancel_that_cannot_confirm_the_stop_is_an_error() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let _flag = registry.begin_execution(&session.id).unwrap();
+
+    let err = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+        .await
+        .expect_err("an unconfirmable stop must not report success");
+
+    assert_eq!(err.code, -32010, "unexpected error shape: {err:?}");
+    assert_eq!(
+        err.data,
+        Some(json!({"error_type": "cancel_unconfirmed"})),
+        "an unconfirmed cancel must be distinguishable from a daemon fault"
+    );
+    let status = registry.status(&session.id).unwrap();
+    assert_ne!(
+        status.status.as_str(),
+        "cancelled",
+        "a cancel that could not be confirmed must not claim the session stopped"
+    );
+}
+
+/// The daemon's cancel grace and EVERY in-repo client's per-call budget are ONE
+/// contract (#8207).
+///
+/// Why: the first cut paired a thirty-second daemon grace with the TUI's
+/// fifteen-second `DEFAULT_CALL_TIMEOUT`, so every cancel taking 15-30s reached
+/// the user as a transport timeout and the `cancel_unconfirmed` reply the grace
+/// exists to produce was unreachable from the TUI. Two compile-time assertions
+/// beside `CANCEL_CONFIRM_GRACE` block the halves being changed out of order;
+/// this test states the same contract where a reader of the cancel tests will
+/// find it. The CLI client is the second budget over the same call: pinning only
+/// the TUI's left `cli_client::stdio` free to drop below the grace and
+/// reintroduce the identical transport timeout for `tcode session cancel`.
+/// Test: this test.
+#[test]
+fn the_cancel_grace_fits_inside_the_clients_call_budget() {
+    for (client, budget) in [
+        (
+            "tui_client::uds_rpc",
+            crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT,
+        ),
+        (
+            "cli_client::stdio",
+            crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT,
+        ),
+    ] {
+        assert!(
+            CANCEL_CONFIRM_GRACE < budget,
+            "{client}: the daemon's answer must arrive inside the client's call \
+             budget: grace {CANCEL_CONFIRM_GRACE:?} vs budget {budget:?}"
+        );
+        assert!(
+            CANCEL_CONFIRM_GRACE + CANCEL_ANSWER_HEADROOM <= budget,
+            "{client}: the grace must leave headroom for the reply itself: \
+             grace {CANCEL_CONFIRM_GRACE:?} + headroom {CANCEL_ANSWER_HEADROOM:?} \
+             vs budget {budget:?}"
+        );
+    }
 }

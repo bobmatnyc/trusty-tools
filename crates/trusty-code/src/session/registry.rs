@@ -260,9 +260,21 @@ fn tool_attribution(event: &Event) -> Option<(&str, &str, bool)> {
 /// `tokio::spawn` join handle, attached shortly after `begin_execution`
 /// returns (see [`SessionRegistry::attach_execution_handle`]) since the
 /// handle does not exist until the caller has actually spawned the task.
+///
+/// (#8207) `cancel` doubles as this execution's IDENTITY: `begin_execution`
+/// mints a fresh `Arc` per run and every holder keeps a strong clone, so
+/// `Arc::ptr_eq` against a captured clone answers "is the tracked execution
+/// still the one I started waiting on" with no generation counter to keep in
+/// sync. `SessionRegistry::await_cancelled` uses exactly that to avoid
+/// restoring a finished run's handle over a newer run's live one.
 struct Execution {
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// (#8207) Set while a `session.cancel` holds this execution's handle, so
+    /// a CONCURRENT cancel can tell "a peer is confirming the stop" from "the
+    /// handle was never attached" — two states that otherwise look identical
+    /// (`handle: None`) and mean opposite things.
+    confirming: bool,
 }
 
 /// The daemon-owned session registry (Axiom 4).
@@ -652,13 +664,13 @@ impl SessionRegistry {
     /// Why: `task.run` (and `session.send` on an idle session) must not start
     /// a second overlapping run for the same session, and the returned flag
     /// is how the executor's `AgentLoop`(s) later observe cancellation.
-    /// (#2344/#3888) A `Finished` or `TurnCapExceeded` session is NOT dead —
-    /// see [`SessionStatus::is_resumable`] for which statuses resume and why.
-    /// Only `Cancelled`/`Failed`/`DeadlineExceeded` remain genuinely
-    /// terminal: those represent a broken run, and resuming one still
-    /// requires a fresh session.
+    /// (#2344/#3888/#8207) A `Finished`, `TurnCapExceeded` or `Cancelled`
+    /// session is NOT dead — see [`SessionStatus::is_resumable`] for which
+    /// statuses resume and why. Only `Failed`/`DeadlineExceeded` remain
+    /// genuinely terminal: those represent a broken run, and resuming one
+    /// still requires a fresh session.
     /// What: errors with `session_not_found` if `id` is unknown,
-    /// `invalid_argument` if the session is `Cancelled`/`Failed`/
+    /// `invalid_argument` if the session is `Failed`/
     /// `DeadlineExceeded`, or already has an execution in flight — this
     /// SINGLE in-flight-execution guard is also this ticket's concurrency
     /// guard for `pm_transcript`: two overlapping `task.run` calls on one
@@ -675,7 +687,8 @@ impl SessionRegistry {
     /// `registry_tests::begin_execution_rejects_terminal_session`,
     /// `registry_tests::begin_execution_unknown_session_errors`,
     /// `registry_tests::begin_execution_resumes_a_finished_session`,
-    /// `registry_tests::begin_execution_resumes_a_turn_cap_exceeded_session`.
+    /// `registry_tests::begin_execution_resumes_a_turn_cap_exceeded_session`,
+    /// `registry_tests::begin_execution_resumes_a_cancelled_session`.
     pub fn begin_execution(&self, id: &str) -> Result<Arc<AtomicBool>, RpcError> {
         let (cancel, resumed) = {
             let mut sessions = self.lock();
@@ -684,7 +697,7 @@ impl SessionRegistry {
                 .ok_or_else(|| RpcError::session_not_found(id))?;
             if matches!(
                 entry.session.status,
-                SessionStatus::Cancelled | SessionStatus::Failed | SessionStatus::DeadlineExceeded
+                SessionStatus::Failed | SessionStatus::DeadlineExceeded
             ) {
                 return Err(RpcError::invalid_argument(format!(
                     "session {id} is already terminal"
@@ -703,6 +716,7 @@ impl SessionRegistry {
             entry.execution = Some(Execution {
                 cancel: Arc::clone(&cancel),
                 handle: None,
+                confirming: false,
             });
             (cancel, resumed)
         };
@@ -1095,6 +1109,11 @@ mod search_audit;
 /// the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_task_result.rs"]
 mod task_result_ops;
+
+/// #8207's `SessionRegistry::await_cancelled`, split out into its own file for
+/// the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_cancel.rs"]
+mod cancel_confirm;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]
