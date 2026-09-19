@@ -1156,10 +1156,11 @@ pub(super) async fn front_gate_or_escalate(
 /// best-effort and never block the resume — a long-lived session worktree
 /// that was previously frozen at its creation commit now catches up to
 /// `origin/main` on every resume instead of silently drifting forever.
-/// Test: `a_second_operator_resume_is_refused_while_one_is_in_flight`,
-/// `a_supervisor_tick_does_nothing_to_a_session_being_resumed`,
-/// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` cover the
-/// #8233 claim; the HTTP `resume_managed_session` tests and the MCP
+/// Test: `a_second_operator_resume_is_refused_while_one_is_in_flight` covers
+/// the route's own refusal, and
+/// `a_supervisor_tick_does_nothing_to_a_session_being_resumed` /
+/// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` cover the two
+/// consequences of the #8233 claim's span; the HTTP `resume_managed_session` tests and the MCP
 /// `session_resume_unknown_id_errors` test cover the route;
 /// `resume_managed_backfills_missing_status_line` in
 /// `tests/session_manager_mvp.rs` covers the self-heal call added here;

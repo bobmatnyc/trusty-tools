@@ -1328,8 +1328,11 @@ fn spawn_errors_when_the_line_is_refused() {
         fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
             Ok(String::new())
         }
+        /// #8233 round 3, finding 4: the pane is LIVE — it is the shell behind
+        /// it that reads nothing. An unnamed session would be "cannot see the
+        /// pane", which is a different case and no longer a refusal.
         fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
+            Ok(vec!["tm-sess".to_owned()])
         }
     }
 
@@ -1680,8 +1683,10 @@ fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
         fn capture_pane(&self, n: &str, _p: &str, l: usize) -> Result<String, ManagedError> {
             self.capture(n, l)
         }
+        /// #8233 round 3, finding 4: the handshake asks observability first, so
+        /// a double that models a live wedged pane names its own session.
         fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
+            Ok(vec!["tm-sess".to_owned()])
         }
     }
 

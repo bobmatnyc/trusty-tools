@@ -205,6 +205,65 @@ async fn a_dropped_resume_future_releases_the_guard() {
     );
 }
 
+/// #8233 item 1: the runtime reaper must not stop a session another path is
+/// resuming.
+///
+/// Why: a claim only excludes the writers that ASK for one, and the reaper asks
+/// for none. `resume_inner` writes `Active` before any runtime exists, so for
+/// the rest of that resume the reaper sees "Active, no runtime" and marks the
+/// record `Stopped` — handing the next supervisor tick a record it is free to
+/// launch a SECOND time. That is the live race in full.
+/// What: holds a real claim over an `Active` record and calls the transition the
+/// reaper uses, asserting the typed refusal and that the state is untouched.
+/// Fails on e1ee6cf52, where the record becomes `Stopped`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn the_reaper_leaves_a_session_whose_resume_is_in_flight_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mgr = Arc::new(
+        SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+            .await
+            .expect("session manager"),
+    );
+    let workdir = dir.path().to_path_buf();
+    let record = mgr
+        .create(
+            "reaper-race".into(),
+            Some(workdir.clone()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let id = record.id;
+    mgr.set_workspace(&id, workdir, ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+
+    let claim = mgr.begin_resume(&id).expect("the resume takes the claim");
+    let reaped = mgr.mark_runtime_exited_stopped(&id).await;
+
+    assert!(
+        matches!(reaped, Err(ManagedError::ResumeInFlight(ref s)) if s == &id.to_string()),
+        "the reaper must decline, typed, rather than flip the state under the \
+         path that holds it: {reaped:?}"
+    );
+    assert_eq!(
+        mgr.get(&id).await.expect("record").state,
+        ManagedSessionState::Active,
+        "and the record must be exactly as the resume left it"
+    );
+
+    // Released, the reaper does its ordinary job again.
+    drop(claim);
+    assert!(
+        mgr.mark_runtime_exited_stopped(&id).await.is_ok(),
+        "a released claim must not leave the record permanently unreapable"
+    );
+}
+
 /// The guard is per-session, not a global resume lock: one slow session must
 /// not stall the whole fleet's supervisor tick.
 #[tokio::test]

@@ -813,15 +813,10 @@ mod tests {
             runtime_up: false,
         };
 
-        let msg = record_resume_outcome_in(
-            &mgr,
-            &driver,
-            &record,
-            dir.path(),
-            Some(spec_dir.path()),
-        )
-        .await
-        .expect("a runtime that never came up must be reported to the caller");
+        let msg =
+            record_resume_outcome_in(&mgr, &driver, &record, dir.path(), Some(spec_dir.path()))
+                .await
+                .expect("a runtime that never came up must be reported to the caller");
 
         assert!(msg.contains("#8233"), "{msg}");
         let after = mgr.get(&record.id).await.expect("record");
@@ -872,7 +867,10 @@ mod tests {
         let msg = record_spawn_outcome_in(&mgr, &driver, &orphan, Some(spec_dir.path())).await;
         drop(_guard);
 
-        assert!(msg.is_some(), "the launch still failed, whatever the store did");
+        assert!(
+            msg.is_some(),
+            "the launch still failed, whatever the store did"
+        );
         let lines = buffer.tail(64);
         let recorded = lines
             .iter()
@@ -904,8 +902,10 @@ mod tests {
         let (mgr, record) = manager_with_session(dir.path()).await;
         let session = record.id.to_string();
         plant_pointer(spec_dir.path(), &session, "launch-live");
-        let marker =
-            crate::runtime::launch_spec::LaunchSpec::started_marker_in(spec_dir.path(), "launch-live");
+        let marker = crate::runtime::launch_spec::LaunchSpec::started_marker_in(
+            spec_dir.path(),
+            "launch-live",
+        );
         std::fs::write(&marker, b"").expect("plant the sentinel");
         let pointer =
             crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(spec_dir.path(), &session);
@@ -916,7 +916,10 @@ mod tests {
 
         let verdict = record_spawn_outcome_in(&mgr, &driver, &record, Some(spec_dir.path())).await;
 
-        assert_eq!(verdict, None, "a runtime that came up is a successful launch");
+        assert_eq!(
+            verdict, None,
+            "a runtime that came up is a successful launch"
+        );
         assert!(!marker.exists(), "the sentinel must be cleared on success");
         assert!(!pointer.exists(), "and so must the launch pointer");
     }

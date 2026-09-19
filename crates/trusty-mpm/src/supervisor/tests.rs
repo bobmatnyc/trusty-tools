@@ -1379,8 +1379,7 @@ struct ScriptedRelauncher {
 #[async_trait::async_trait]
 impl crate::session_manager::relaunch::RuntimeRelauncher for ScriptedRelauncher {
     async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.verdict.clone()
     }
 }
@@ -1449,7 +1448,9 @@ async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
     set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
     let before = mgr.get(&ids[0]).await.expect("record").task;
 
-    let claim = mgr.begin_resume(&ids[0]).expect("the first claim is granted");
+    let claim = mgr
+        .begin_resume(&ids[0])
+        .expect("the first claim is granted");
     let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
 
     assert!(report.resumed.is_empty(), "no launch: {:?}", report.resumed);

@@ -999,7 +999,6 @@ crates/trusty-mpm/src/core/tmux.rs	send_keys_literal_argv
 crates/trusty-mpm/src/daemon/bug_report/ratelimit.rs	fingerprint_stamp_persists
 crates/trusty-mpm/src/daemon/bug_report/token.rs	mock_token_exchange
 crates/trusty-mpm/src/daemon/managed_routes/inproject.rs	create_session_worktree_writes_owner_sentinel
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	session_resume_unknown_id_errors
 crates/trusty-mpm/src/daemon/services/tmux_service.rs	send_command_returns_output_shape
 crates/trusty-mpm/src/daemon/state/overseer.rs	new_builds_audit_logger
 crates/trusty-mpm/src/daemon/tmux.rs	list_panes_argv

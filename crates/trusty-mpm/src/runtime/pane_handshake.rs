@@ -287,9 +287,7 @@ fn flush_pane(tmux: &dyn ManagedTmuxDriver, tmux_name: &str, pane_id: Option<&st
 /// Test: `the_handshake_does_not_park_a_tokio_worker`.
 fn park(interval: Duration) {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-        {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| std::thread::sleep(interval));
         }
         _ => std::thread::sleep(interval),

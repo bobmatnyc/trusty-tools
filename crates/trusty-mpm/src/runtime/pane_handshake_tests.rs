@@ -276,7 +276,14 @@ fn the_handshake_does_not_park_a_tokio_worker() {
                 let shell = ScriptedShell::new(Shell::Deaf);
                 probing.notify_one();
                 // A long enough budget that a parked worker would be obvious.
-                confirm_prompt(&shell, "tmpm-x", Some("%1"), 1, 4, Duration::from_millis(50))
+                confirm_prompt(
+                    &shell,
+                    "tmpm-x",
+                    Some("%1"),
+                    1,
+                    4,
+                    Duration::from_millis(50),
+                )
             }
         });
         // The sibling task must reach its own completion WHILE the handshake is
