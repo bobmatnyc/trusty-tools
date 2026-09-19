@@ -45,10 +45,13 @@
    *      entries — gets multi-select and a record-only bulk delete. `deleted`
    *      tombstones now have their own group, so they are no longer swept into
    *      that bucket. Deletion never removes a worktree or workspace (#1511).
-   * #8282: every group heading is a disclosure button, and `stopped`,
-   *      `decommissioned` and `deleted` start collapsed. The decision and its
-   *      storage are `sessionRows.js`'s (`resolveCollapsed`); this file only
-   *      renders it. Coverage: `sessionsTabCollapse.test.js`.
+   * #8282: every group heading is a disclosure button, and the four inactive
+   *      ends — `stopped`, `errored`, `decommissioned`, `deleted` — start
+   *      collapsed (owner ruling 2026-09-19 added `errored`). The decision and
+   *      its storage are `sessionRows.js`'s (`resolveCollapsed`); this file only
+   *      renders it. A collapsed group still shows its name and count in the
+   *      header, and the supervisor bar above carries its own errored count.
+   *      Coverage: `sessionsTabCollapse.test.js`.
    */
 
   // ── poll interval (RFC Q3: poll-based refresh; 15s flagged too coarse) ──────

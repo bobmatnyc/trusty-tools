@@ -281,16 +281,28 @@ function withStorage(storage, fn) {
   }
 }
 
-test('the three inactive groups start collapsed and the rest start open', () => {
-  // The whole of the default: nothing is stored, so the set decides. `errored`
-  // stays open on purpose — it is the group that needs attention — and so does
-  // `other`, which is the bulk delete's target set (#6431).
+test('the four inactive groups start collapsed and the rest start open', () => {
+  // The whole of the default: nothing is stored, so the set decides. `other`
+  // stays open on purpose — it is the bulk delete's target set (#6431), and
+  // hiding it by default hides the only view of what that action would delete.
   const collapsed = GROUP_ORDER.filter((g) => resolveCollapsed({}, g));
-  assert.deepEqual(collapsed, ['stopped', 'decommissioned', 'deleted']);
+  assert.deepEqual(collapsed, ['stopped', 'errored', 'decommissioned', 'deleted']);
   assert.deepEqual([...DEFAULT_COLLAPSED_GROUPS], collapsed);
-  for (const group of ['active', 'provisioning', 'errored', OTHER_STATE]) {
+  for (const group of ['active', 'provisioning', OTHER_STATE]) {
     assert.equal(resolveCollapsed({}, group), false);
   }
+});
+
+test('an errored group starts collapsed', () => {
+  // Owner ruling 2026-09-19, reversing the first cut of #8282: `errored` is an
+  // inactive lifecycle end and folds away with the others. Its own test because
+  // this is the decision that changed, and because the visibility it trades
+  // against — the header still naming the group and its count — is asserted
+  // next door in `sessionsTabCollapse.test.js`.
+  assert.equal(resolveCollapsed({}, 'errored'), true);
+  assert.ok(DEFAULT_COLLAPSED_GROUPS.includes('errored'));
+  // A viewer who opens it keeps it open; the default is a default, not a rule.
+  assert.equal(resolveCollapsed({ errored: false }, 'errored'), false);
 });
 
 test('a stored choice beats the default in both directions', () => {
@@ -299,7 +311,7 @@ test('a stored choice beats the default in both directions', () => {
   assert.equal(resolveCollapsed(stored, 'active'), true);
   // Untouched groups still take the default.
   assert.equal(resolveCollapsed(stored, 'deleted'), true);
-  assert.equal(resolveCollapsed(stored, 'errored'), false);
+  assert.equal(resolveCollapsed(stored, 'errored'), true);
 });
 
 test('a stored entry for a group that no longer exists is ignored', () => {

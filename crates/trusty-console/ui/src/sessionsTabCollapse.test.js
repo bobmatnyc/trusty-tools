@@ -53,6 +53,25 @@ test('a collapsed group renders its count but none of its rows', () => {
   assert.ok(rows > guard, 'the row list renders inside the collapsed guard');
 });
 
+test('a collapsed errored group still reads as errored', () => {
+  // The trade the owner ruling (2026-09-19) makes: `errored` folds away with
+  // the other inactive ends, so the header is the ONLY thing left saying a
+  // session failed. It therefore has to name the group, count it, and colour it
+  // — all outside any collapse guard.
+  assert.match(HEADER, /<span class="group-name">\{group\}<\/span>/);
+  assert.match(HEADER, /<span class="group-count">\(\{count\}\)<\/span>/);
+  assert.match(HEADER, /\.group-title\.errored \{ color: var\(--trusty-danger\); \}/);
+  assert.match(HEADER, /<h3 class="group-title \{group\}">/);
+  assert.ok(!HEADER.includes('{#if'), 'nothing in the header is conditional');
+
+  // Second, independent signal: the supervisor bar's fleet-wide errored count
+  // is rendered above the groups, so it cannot be inside a collapsed one.
+  const supervisor = TAB.indexOf('<span class="count errored">');
+  const firstGroup = TAB.indexOf('{#each GROUP_ORDER as st}');
+  assert.ok(supervisor > 0, 'the supervisor bar reports an errored count');
+  assert.ok(supervisor < firstGroup, 'that count renders before any group');
+});
+
 test('empty groups are still not rendered at all', () => {
   // Pre-existing behaviour the collapse must not turn into "an empty header".
   assert.match(TAB, /\{#if grouped\[st\] && grouped\[st\]\.length > 0\}/);

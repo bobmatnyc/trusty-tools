@@ -56,16 +56,21 @@ export const GROUP_ORDER = [...STATE_ORDER, OTHER_STATE];
  * Groups that start COLLAPSED when the viewer has stored no preference (#8282).
  *
  * Why: a long-lived fleet accumulates far more inactive records than live ones,
- * and the three lifecycle ends — `stopped`, `decommissioned`, `deleted` — pushed
- * the groups an operator acts on off the first screen. `errored` is deliberately
- * NOT here: an errored session is the one that needs attention, so it stays
- * open. `other` is not here either — it is the bulk delete's target set (#6431),
- * and hiding that set by default hides the only view of it.
- * Test: `sessionRows.test.js` — "the three inactive groups start collapsed and
- * the rest start open".
+ * and the lifecycle ends — `stopped`, `errored`, `decommissioned`, `deleted` —
+ * pushed the groups an operator acts on off the first screen. `errored` is one
+ * of them (owner ruling 2026-09-19): an errored session is inactive, it is
+ * usually the largest of the four on an aged fleet, and collapsing it does not
+ * hide the error — `SessionGroupHeader.svelte` renders `errored (N)` in the
+ * danger colour whether the group is open or shut, and the supervisor bar above
+ * the groups carries its own fleet-wide errored count. `other` is NOT here: it
+ * is the bulk delete's target set (#6431), and hiding that set by default hides
+ * the only view of it.
+ * Test: `sessionRows.test.js` — "the four inactive groups start collapsed and
+ * the rest start open", "an errored group starts collapsed".
  */
 export const DEFAULT_COLLAPSED_GROUPS = Object.freeze([
   'stopped',
+  'errored',
   'decommissioned',
   'deleted',
 ]);

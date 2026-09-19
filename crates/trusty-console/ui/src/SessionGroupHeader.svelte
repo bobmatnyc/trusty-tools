@@ -7,12 +7,15 @@
   and carrying `aria-expanded` / `aria-controls` so a screen reader announces
   the state and can reach the region it controls. A heading that toggled on a
   bare `<h3 onclick>` would do neither.
-  What: renders the group name, its row count (which stays visible while the
-  group is collapsed — the count is the whole point of a collapsed header) and a
-  disclosure triangle. It owns no state: `collapsed` comes in, `onToggle` goes
-  out, and `sessionRows.js` decides both.
+  What: renders the group name, its row count and a disclosure triangle, none
+  of them behind a condition — a collapsed group's header is the only thing left
+  describing it, which is what lets `errored` collapse with the other inactive
+  ends (owner ruling 2026-09-19) without the failure going silent. It owns no
+  state: `collapsed` comes in, `onToggle` goes out, and `sessionRows.js` decides
+  both.
   Test: `sessionsTabCollapse.test.js` — "the group header is a button carrying
-  aria-expanded and aria-controls".
+  aria-expanded and aria-controls", "a collapsed errored group still reads as
+  errored".
 -->
 <script>
   let { group, count, collapsed = false, controls, onToggle } = $props();
