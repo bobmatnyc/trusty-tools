@@ -99,7 +99,7 @@ impl RecordingTmux {
             return false;
         };
         let mut out = self.printed.lock().unwrap();
-        out.push_str(&word.replace('"', "").replace('\'', ""));
+        out.push_str(&word.replace(['"', '\''], ""));
         out.push('\n');
         true
     }
@@ -948,8 +948,7 @@ async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
     let result = resume_managed(&state, &id).await;
 
     let err = result
-        .err()
-        .expect("a resume that could not put a runtime in the pane must not report success");
+        .expect_err("a resume that could not put a runtime in the pane must not report success");
     let message = err.to_string();
     assert!(
         message.contains("#8233") || message.contains("spawn failed"),
