@@ -223,11 +223,21 @@ async fn concurrent_resumes_of_different_sessions_both_proceed() {
     gate.entered.notified().await;
 
     // A is parked inside its relaunch holding ITS guard. B must still enter.
-    let b = tokio::spawn({
+    let mut b = tokio::spawn({
         let mgr = Arc::clone(&mgr);
         async move { mgr.resume_auto(&second_id).await }
     });
-    gate.entered.notified().await;
+    // Racing B's ENTRY against B's COMPLETION is what makes a wrongly-global
+    // lock fail this test instead of hanging it: a refused B never reaches the
+    // relaunch, so it finishes early and this arm reports the refusal. A plain
+    // wait on `entered` would block forever — a hung test proves nothing.
+    tokio::select! {
+        () = gate.entered.notified() => {}
+        joined = &mut b => panic!(
+            "a resume of a different session must enter the relaunch, not return early — \
+             the guard is per-session, not a global resume lock: {joined:?}"
+        ),
+    }
     assert_eq!(
         gate.spawns.load(Ordering::SeqCst),
         2,
