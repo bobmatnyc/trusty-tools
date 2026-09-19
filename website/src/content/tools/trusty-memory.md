@@ -27,6 +27,9 @@ files. Nothing is shipped to a hosted memory service.
 - A chat-session store keeps conversation turns verbatim, bypassing the signal
   filters that apply to ordinary memories — a transcript is not a fact and
   should not be deduplicated like one.
+- `memory_recall` takes an optional `min_score` floor, so a caller can ask for
+  only the hits that clear a relevance bar instead of filtering the response
+  itself.
 
 ## The dream cycle
 
@@ -47,8 +50,10 @@ cache, and patches the Claude settings files it finds with the right server
 entry. From then on the daemon is just there.
 
 For a manual configuration, the canonical entry runs
-`trusty-memory serve --stdio`, which forwards every request to the running HTTP
-daemon and returns its answers verbatim. The stdio process never opens the
-database itself, so it coexists safely with the daemon and with other clients.
-The same daemon serves a REST API and an embedded browser dashboard on the port
-it bound.
+`trusty-memory serve --stdio`, which forwards every request over the daemon's
+Unix domain socket and returns its answers verbatim. The stdio process never
+opens the database itself, so it coexists safely with the daemon and with
+other clients. The daemon has no HTTP listener and no REST API — everything
+goes through that one socket. The admin dashboard that used to live here moved
+to trusty-console, which reads the same socket and serves it at
+`/tools/memory/`.
