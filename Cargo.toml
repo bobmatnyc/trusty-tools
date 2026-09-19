@@ -136,7 +136,12 @@ trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.2" }
 #      (`http-server`, `bundled-ort`) unless this entry states the override
 #      too. No workspace member depends on `trusty-embedderd = { workspace =
 #      true }` today, so this has no effect on current feature resolution.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", default-features = false }
+# 0.4.0 (#7062, the 1.6.3 cut): the floor moves off `0.3.x` because
+# `preflight-publish.sh` CHECK 5 refused 0.3.12 against 0.3.11 on five counts —
+# `--http`'s removal took `AppState`, `embed_handler`, `health_handler` and
+# `Args.http_addr` with it, and `http-server` left the default feature set.
+# Under Cargo's 0.x rule a break needs the MINOR position.
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.4", default-features = false }
 # Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
 # per-palace subprocess never ran in any shipped configuration, and its index is
 # now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
