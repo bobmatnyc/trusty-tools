@@ -260,11 +260,17 @@ impl SessionManager {
 ///
 /// Why: see [`SessionManager::clear_error_note`]. Pure, so the parsing of the
 /// shape `mark_errored` writes can be tested without a store.
-/// What: scans for the literal ` [error: ` opener and drops through its matching
-/// `]`. Nesting is impossible — the notes are appended, never wrapped — so a
-/// single forward scan is exact. Text with no note is returned unchanged.
+/// What: scans for the literal ` [error: ` opener and drops through the note's
+/// closing `]`. That close is the LAST `]` before the next opener (or before the
+/// end), not the first one after the opener — #8233 round 3, finding 8: a
+/// message containing its own `]` (`[error: launch spec [tm-x] unreadable]`)
+/// closed the note early and left the tail behind, which is precisely the stale
+/// text acceptance item 3 exists to remove. Nesting is impossible — the notes
+/// are appended, never wrapped — so a single forward scan is still exact. Text
+/// with no note is returned unchanged.
 /// Test: `strip_error_notes_removes_one`, `strip_error_notes_removes_several`,
-/// `strip_error_notes_leaves_unrelated_brackets_alone`.
+/// `strip_error_notes_leaves_unrelated_brackets_alone`,
+/// `strip_error_notes_removes_a_note_whose_message_contains_a_bracket`.
 pub(crate) fn strip_error_notes(task: &str) -> String {
     const OPEN: &str = " [error: ";
     let mut out = String::with_capacity(task.len());
@@ -272,8 +278,10 @@ pub(crate) fn strip_error_notes(task: &str) -> String {
     while let Some(at) = rest.find(OPEN) {
         let (head, tail) = rest.split_at(at);
         out.push_str(head);
-        match tail[OPEN.len()..].find(']') {
-            Some(end) => rest = &tail[OPEN.len() + end + 1..],
+        let body = &tail[OPEN.len()..];
+        let limit = body.find(OPEN).unwrap_or(body.len());
+        match body[..limit].rfind(']') {
+            Some(end) => rest = &body[end + 1..],
             // An unterminated note is the whole remainder; drop it.
             None => return out,
         }
@@ -297,6 +305,23 @@ mod strip_tests {
     #[test]
     fn strip_error_notes_removes_several() {
         assert_eq!(strip_error_notes("task [error: one] [error: two]"), "task");
+    }
+
+    /// #8233 round 3, finding 8: the note's own message can contain `]` — the
+    /// launch failures this issue produces name specs and panes in brackets.
+    /// Closing on the FIRST `]` left the rest of the message on the task
+    /// forever, which is the stale text acceptance item 3 removes.
+    /// Fails on e1ee6cf52 with `"do the thing unreadable]"`.
+    #[test]
+    fn strip_error_notes_removes_a_note_whose_message_contains_a_bracket() {
+        assert_eq!(
+            strip_error_notes("do the thing [error: launch spec [tm-x] unreadable]"),
+            "do the thing"
+        );
+        assert_eq!(
+            strip_error_notes("t [error: a [b] c] [error: d [e] f]"),
+            "t"
+        );
     }
 
     #[test]

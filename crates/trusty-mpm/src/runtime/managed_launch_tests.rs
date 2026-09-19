@@ -435,6 +435,8 @@ struct Recorder {
     /// BEFORE the keystrokes, which is the whole property the reset has —
     /// flushing a wedged parser after typing into it protects nothing.
     events: Mutex<Vec<String>>,
+    /// #8233: an interrupt does NOT free this pane — the refusal shape.
+    stays_wedged: bool,
 }
 
 impl Recorder {
@@ -445,6 +447,7 @@ impl Recorder {
             interrupts: Mutex::new(Vec::new()),
             pane_text: Mutex::new("~ %".to_owned()),
             events: Mutex::new(Vec::new()),
+            stays_wedged: false,
         }
     }
 
@@ -453,6 +456,14 @@ impl Recorder {
     fn wedged() -> Self {
         let r = Self::new(0);
         *r.pane_text.lock().expect("recorder mutex") = "quote>".to_owned();
+        r
+    }
+
+    /// A Recorder whose pane stays wedged however often it is interrupted —
+    /// the shape the handshake must REFUSE rather than type into (#8233).
+    fn wedged_forever() -> Self {
+        let mut r = Self::wedged();
+        r.stays_wedged = true;
         r
     }
 
@@ -527,7 +538,9 @@ impl ManagedTmuxDriver for Recorder {
             .lock()
             .expect("recorder mutex")
             .push("reset:session".to_owned());
-        *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
+        if !self.stays_wedged {
+            *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
+        }
         self.interrupts
             .lock()
             .expect("recorder mutex")
@@ -539,7 +552,9 @@ impl ManagedTmuxDriver for Recorder {
             .lock()
             .expect("recorder mutex")
             .push(format!("reset:{pane}"));
-        *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
+        if !self.stays_wedged {
+            *self.pane_text.lock().expect("recorder mutex") = "~ %".to_owned();
+        }
         self.interrupts
             .lock()
             .expect("recorder mutex")
@@ -552,8 +567,11 @@ impl ManagedTmuxDriver for Recorder {
     fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
         self.capture(name, lines)
     }
+    /// #8233 round 3, finding 4: the pre-launch handshake asks observability
+    /// first, so a double that models a live pane must name its own session —
+    /// the one every `deliver_*` test below launches into.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-        Ok(Vec::new())
+        Ok(vec!["tm-sess".to_owned()])
     }
 }
 
@@ -749,4 +767,46 @@ fn deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable() {
     assert!(lines[0].contains("aborted"), "{:?}", lines[0]);
 
     let _ = std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700));
+}
+
+/// #8233 item 9c: a pane the handshake refuses gets NO launch and leaves NO
+/// spec on disk.
+///
+/// Why: the refusal arm of `deliver_inner` had no covering test. A launch spec
+/// holds `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in cleartext, so a refusal
+/// that still wrote one would leave credentials behind for a line the pane was
+/// never going to run — which is the whole reason the prompt is confirmed
+/// BEFORE anything is written.
+/// What: a `Recorder` whose pane stays wedged through every interrupt, so the
+/// handshake exhausts its rounds and answers `Continuation`. Asserts the typed
+/// error, the refusal wording, and an empty spec directory.
+/// Test: this function IS the test.
+#[test]
+fn deliver_refuses_a_wedged_pane_and_writes_no_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = PathBuf::from("/w");
+    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let tmux = Recorder::wedged_forever();
+
+    let err = deliver_in(&tmux, "tm-sess", None, &spec, dir.path())
+        .expect_err("a pane that never executes what it is typed must refuse the launch");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("refusing to launch into pane 'tm-sess'"),
+        "the refusal must name the pane and the reason: {msg}"
+    );
+    let written: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("readdir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        written.is_empty(),
+        "a refused launch must leave no spec and no pointer behind — they carry \
+         credentials in cleartext: {written:?}"
+    );
+    let lines = tmux.lines();
+    assert_eq!(lines.len(), 1, "only the abort notice is typed: {lines:?}");
+    assert!(lines[0].contains("aborted"), "{:?}", lines[0]);
 }

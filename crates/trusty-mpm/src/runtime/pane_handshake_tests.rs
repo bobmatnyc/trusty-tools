@@ -117,8 +117,14 @@ impl ManagedTmuxDriver for ScriptedShell {
     fn capture_pane(&self, n: &str, _p: &str, l: usize) -> Result<String, ManagedError> {
         self.capture(n, l)
     }
+    /// #8233 round 3, finding 4: the handshake now asks observability first, so
+    /// a double that models a LIVE pane has to name its own session. An
+    /// `Unobservable` driver answers the probe failure it always did.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-        Ok(Vec::new())
+        if self.behaviour == Shell::Unobservable {
+            return Err(ManagedError::TmuxUnavailable("no server".into()));
+        }
+        Ok(vec!["tmpm-x".to_owned()])
     }
 }
 
@@ -194,6 +200,103 @@ fn confirm_prompt_is_unobservable_when_the_driver_cannot_capture() {
         shell.sent.lock().expect("sent").is_empty(),
         "an unobservable pane must cost no probe and no delay"
     );
+}
+
+/// #8233 round 3, finding 4: a driver that cannot see the tmux session answers
+/// `Ok("")` to a capture, and an empty tail is NOT evidence that the shell read
+/// nothing.
+///
+/// Why: `FakeNoopTmuxDriver` — the documented tmux-absent fallback and the
+/// crate's default hermetic double — returns `Ok("")` from `capture` and names
+/// no session. The handshake classified that as `Unresponsive` and REFUSED the
+/// launch, after spending the whole blocking budget to learn nothing. This is
+/// the guard `launch_verify::verify_launch` has had since #6766.
+/// What: drives the real entry point with that exact driver and asserts the
+/// "cannot tell" answer, plus that it cost no probe. Fails on e1ee6cf52 with
+/// `Unresponsive`.
+/// Test: this function IS the test.
+#[test]
+fn an_unobservable_session_is_not_called_unresponsive() {
+    let driver = crate::session_manager::FakeNoopTmuxDriver;
+    let started = std::time::Instant::now();
+    let state = confirm_prompt(
+        &driver,
+        "tmpm-absent",
+        None,
+        2,
+        20,
+        Duration::from_millis(50),
+    );
+    assert_eq!(
+        state,
+        PaneState::Unobservable,
+        "a driver that cannot see the session teaches nothing; refusing the launch on it \
+         is the false positive this module's own `may_launch` rule forbids"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "and it must cost none of the blocking budget, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// #8233 round 3, finding 5: the handshake's wait must not park a Tokio worker.
+///
+/// Why: four async call sites reach `confirm_prompt` from the runtime that also
+/// serves the daemon's HTTP routes, and its `std::thread::sleep` held a worker
+/// for up to 3 s per launch. `launch_verify` documents the opposite discipline
+/// for the same reason.
+/// What: on a single-worker multi-thread runtime, runs a full exhausted
+/// handshake in one task and a plain counter in another. If the handshake parks
+/// the only worker, the counter cannot advance until it is over. Deterministic:
+/// the assertion is ordering, established by `notified()`, never a duration.
+/// Fails on e1ee6cf52, where the second task never runs.
+/// Test: this function IS the test.
+#[test]
+fn the_handshake_does_not_park_a_tokio_worker() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let ran = std::sync::Arc::new(tokio::sync::Notify::new());
+        let probing = std::sync::Arc::new(tokio::sync::Notify::new());
+        let other = tokio::spawn({
+            let ran = std::sync::Arc::clone(&ran);
+            let probing = std::sync::Arc::clone(&probing);
+            async move {
+                probing.notified().await;
+                ran.notify_one();
+            }
+        });
+        let handshake = tokio::spawn({
+            let probing = std::sync::Arc::clone(&probing);
+            async move {
+                let shell = ScriptedShell::new(Shell::Deaf);
+                probing.notify_one();
+                // A long enough budget that a parked worker would be obvious.
+                confirm_prompt(&shell, "tmpm-x", Some("%1"), 1, 4, Duration::from_millis(50))
+            }
+        });
+        // The sibling task must reach its own completion WHILE the handshake is
+        // still sleeping through its four attempts. `block_on` drives THIS
+        // future on the calling thread, so the bound below is reached even when
+        // the runtime's only worker is parked — the pre-fix shape fails here
+        // rather than hanging.
+        tokio::time::timeout(Duration::from_secs(5), ran.notified())
+            .await
+            .expect(
+                "a sibling task must make progress while the handshake waits — the \
+                 handshake parked the runtime's only worker",
+            );
+        other.await.expect("the sibling task joins");
+        assert_eq!(
+            handshake.await.expect("the handshake joins"),
+            PaneState::Unresponsive,
+            "the handshake still reaches its own verdict"
+        );
+    });
 }
 
 #[test]

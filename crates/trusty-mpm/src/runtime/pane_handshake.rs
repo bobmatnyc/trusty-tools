@@ -268,6 +268,34 @@ fn flush_pane(tmux: &dyn ManagedTmuxDriver, tmux_name: &str, pane_id: Option<&st
     }
 }
 
+/// Wait `interval` without parking a Tokio worker (#8233 round 3, finding 5).
+///
+/// Why: every `RuntimeAdapter` entry point is synchronous, but four async call
+/// sites (`lifecycle::resume_managed`, `launch_on_main`, `auto_relaunch`) reach
+/// this from the runtime that also serves the daemon's HTTP routes. A bare
+/// `std::thread::sleep` of up to 3 s there stalls whatever else that worker was
+/// going to run — the discipline `launch_verify::verify_launch` documents.
+/// What: on a multi-thread runtime, `block_in_place` hands this task's worker
+/// back to the scheduler for the duration; anywhere else (a current-thread
+/// runtime, or no runtime at all — the CLI's own launch path) it is a plain
+/// sleep, because `block_in_place` panics outside a multi-thread runtime.
+/// `spawn_blocking` was the review's suggestion and is rejected here: it needs
+/// every argument `Send + 'static`, so it would clone the driver `Arc` and the
+/// spec at four call sites to move a wait that `block_in_place` moves in place —
+/// and the #8233 claim `resume_managed` holds is a local guard in that future,
+/// which `block_in_place` leaves exactly where it is.
+/// Test: `the_handshake_does_not_park_a_tokio_worker`.
+fn park(interval: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(|| std::thread::sleep(interval));
+        }
+        _ => std::thread::sleep(interval),
+    }
+}
+
 /// Prove the pane's shell is executing what it is typed, recovering once.
 ///
 /// Why: see this module's header — this is the CONFIRMED prompt that finding 1
@@ -282,10 +310,12 @@ fn flush_pane(tmux: &dyn ManagedTmuxDriver, tmux_name: &str, pane_id: Option<&st
 /// A probe the driver refuses to send is [`PaneState::Unresponsive`] at once —
 /// a pane that cannot be typed into cannot be launched into either.
 ///
-/// Sleeps with `std::thread::sleep` because every `RuntimeAdapter` entry point
-/// is synchronous; `attempts`/`interval` are parameters so tests spend none of
-/// the production budget.
+/// Waits through [`park`], which never stalls a Tokio worker;
+/// `attempts`/`interval` are parameters so tests spend none of the production
+/// budget.
 /// Test: `confirm_prompt_is_ready_when_the_probe_echoes`,
+/// `an_unobservable_session_is_not_called_unresponsive`,
+/// `the_handshake_does_not_park_a_tokio_worker`,
 /// `confirm_prompt_reports_a_wedged_continuation_prompt`,
 /// `confirm_prompt_reports_an_unresponsive_shell`,
 /// `confirm_prompt_interrupts_a_continuation_prompt_before_probing`,
@@ -300,6 +330,16 @@ pub(crate) fn confirm_prompt(
     attempts: u32,
     interval: Duration,
 ) -> PaneState {
+    // #8233 round 3, finding 4: ask observability FIRST, exactly as
+    // `launch_verify::verify_launch` does. A driver that cannot see the session
+    // answers `Ok("")` to a capture — the documented tmux-absent fallback and
+    // every hermetic double — and an empty tail is indistinguishable from a
+    // shell that read nothing, so the launch was refused as `Unresponsive`
+    // after the full blocking budget. "Cannot tell" must never become a
+    // refusal; this module's own rule at `PaneState::may_launch`.
+    if !tmux.session_exists(tmux_name) {
+        return PaneState::Unobservable;
+    }
     let Some(first) = capture_tail(tmux, tmux_name, pane_id) else {
         return PaneState::Unobservable;
     };
@@ -319,7 +359,7 @@ pub(crate) fn confirm_prompt(
             return PaneState::Unresponsive;
         }
         for _ in 0..attempts.max(1) {
-            std::thread::sleep(interval);
+            park(interval);
             let Some(tail) = capture_tail(tmux, tmux_name, pane_id) else {
                 return PaneState::Unobservable;
             };

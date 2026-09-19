@@ -194,6 +194,76 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     }
 }
 
+/// A live pane whose SHELL works and whose runtime never comes up (#8233).
+///
+/// Why: the two failing arms of `resume_managed` are different bugs — the pane
+/// refusing the launch (pre-send) and the runtime never appearing after it was
+/// typed (post-send). A double that refuses the handshake can only ever reach
+/// the first. This one answers the pre-launch probe exactly as a working shell
+/// does, so the launch IS typed, and then reports no runtime.
+/// What: `list_sessions` names the session, so it is observable; `send_line`
+/// echoes a probe line's output into the captured tail; `runtime_ready` is
+/// always false.
+/// Test: `resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears`.
+struct BareShellTmux {
+    text: std::sync::Mutex<String>,
+    names: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl BareShellTmux {
+    fn new(name: &str) -> Arc<Self> {
+        let mut names = std::collections::HashSet::new();
+        names.insert(name.to_owned());
+        Arc::new(Self {
+            text: std::sync::Mutex::new("~ %".to_owned()),
+            names: std::sync::Mutex::new(names),
+        })
+    }
+
+    /// Emulate the shell half of the handshake protocol: `echo tm-rea"dy"-<n>`
+    /// prints `tm-ready-<n>`. The crate's own `probe_reply` helper is
+    /// `cfg(test)`-only and therefore not reachable from an integration test,
+    /// so the double spells the protocol out.
+    fn run(&self, text: &str) {
+        const PREFIX: &str = "echo tm-rea\"dy\"-";
+        if let Some(nonce) = text.strip_prefix(PREFIX) {
+            let mut t = self.text.lock().unwrap();
+            t.push('\n');
+            t.push_str(&format!("tm-ready-{nonce}"));
+        }
+    }
+}
+
+impl ManagedTmuxDriver for BareShellTmux {
+    fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        self.names.lock().unwrap().insert(name.to_owned());
+        Ok(())
+    }
+    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        self.run(text);
+        Ok(())
+    }
+    fn send_line_to_pane(&self, _n: &str, _p: &str, text: &str) -> Result<(), ManagedError> {
+        self.run(text);
+        Ok(())
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(self.text.lock().unwrap().clone())
+    }
+    fn capture_pane(&self, n: &str, _p: &str, l: usize) -> Result<String, ManagedError> {
+        self.capture(n, l)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(self.names.lock().unwrap().iter().cloned().collect())
+    }
+    fn runtime_ready(&self, _name: &str) -> bool {
+        false
+    }
+}
+
 #[test]
 fn catalog_sync_respects_ttl() {
     use trusty_mpm::content::CatalogSync;
@@ -950,9 +1020,12 @@ async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
     let err = result
         .expect_err("a resume that could not put a runtime in the pane must not report success");
     let message = err.to_string();
+    // #8233 round 3, finding 7: each test pins ONE arm. This driver's pane is
+    // never observable, so the launch fails at the adapter — the post-send arm
+    // is covered by its own test below.
     assert!(
-        message.contains("#8233") || message.contains("spawn failed"),
-        "the returned error must name the launch failure: {message}"
+        message.contains("spawn failed"),
+        "this driver must fail at the adapter, not somewhere else: {message}"
     );
 
     let after = mgr.get(&id).await.expect("the record survives");
@@ -965,6 +1038,61 @@ async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
         after.task.contains("[error:"),
         "the failure must also be recorded on the record: {}",
         after.task
+    );
+}
+
+/// #8233 round 3, finding 7: the OTHER failing arm — the launch WAS typed and
+/// no runtime appeared.
+///
+/// Why: the sibling test above only ever reaches the adapter refusal, so the
+/// post-send check that #6766 added and #8233 made fatal had no end-to-end
+/// coverage at all through `resume_managed`. The two arms are different bugs
+/// with different operator remedies, and only this one proves a launch that
+/// LEFT the daemon is still turned into an errored record.
+/// What: a driver whose shell answers the pre-launch handshake (so the launch
+/// line is typed) and whose `runtime_ready` never becomes true, then asserts the
+/// returned error is the post-send wording, not the adapter's.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears() {
+    use trusty_mpm::session_manager::ManagedSessionState;
+    let root = tempfile::tempdir().expect("tempdir");
+    let ws = root.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+
+    // `create` below registers the session's real name through `create_session`,
+    // so the driver reports it live from then on.
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            BareShellTmux::new("tmpm-seed"),
+        )
+        .await,
+    );
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create("post-send".into(), Some(ws.clone()), None, None, None, None)
+        .await
+        .expect("seed session");
+    let id = record.id;
+    mgr.set_workspace(&id, ws.clone(), ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+    mgr.stop(&id).await.expect("stop");
+
+    let err = resume_managed(&state, &id)
+        .await
+        .expect_err("a launch that produced no runtime must not report success");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("NOT DELIVERED") || message.contains("ran and failed"),
+        "this arm is the POST-SEND check, not the adapter refusal: {message}"
+    );
+    assert_eq!(
+        mgr.get(&id).await.expect("the record survives").state,
+        ManagedSessionState::Errored,
+        "and the record carries the same verdict"
     );
 }
 

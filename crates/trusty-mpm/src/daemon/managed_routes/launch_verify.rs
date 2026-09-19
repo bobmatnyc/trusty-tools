@@ -183,20 +183,6 @@ pub(crate) async fn launch_was_delivered_in(
     false
 }
 
-/// [`launch_was_delivered_in`] against the production spec root.
-///
-/// What: `true` — "cannot tell" — when the root cannot be resolved.
-/// Test: the four `*_delivered*` tests below drive the body.
-async fn launch_was_delivered(record: &crate::session_manager::SessionRecord) -> bool {
-    match crate::runtime::launch_spec::LaunchSpec::root() {
-        Some(dir) => {
-            launch_was_delivered_in(record, &dir, DELIVERY_READ_ATTEMPTS, DELIVERY_READ_INTERVAL)
-                .await
-        }
-        None => true,
-    }
-}
-
 /// Forget whatever sentinel and pointer this session's launch left behind.
 ///
 /// Why (#8233 review round 2, finding 4): a launch that SUCCEEDED leaves its
@@ -207,20 +193,17 @@ async fn launch_was_delivered(record: &crate::session_manager::SessionRecord) ->
 /// What: best-effort removal of both files; a failure is hygiene, never a
 /// launch verdict.
 /// Test: `a_running_verdict_clears_the_sentinel_and_the_pointer`.
-fn clear_launch_files(record: &crate::session_manager::SessionRecord) {
-    let Some(dir) = crate::runtime::launch_spec::LaunchSpec::root() else {
-        return;
-    };
+fn clear_launch_files_in(record: &crate::session_manager::SessionRecord, dir: &std::path::Path) {
     let session = record.id.to_string();
     if let Some(launch_id) =
-        crate::runtime::launch_spec::LaunchSpec::read_launch_pointer_in(&dir, &session)
+        crate::runtime::launch_spec::LaunchSpec::read_launch_pointer_in(dir, &session)
     {
         let _ = std::fs::remove_file(crate::runtime::launch_spec::LaunchSpec::started_marker_in(
-            &dir, &launch_id,
+            dir, &launch_id,
         ));
     }
     let _ = std::fs::remove_file(crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(
-        &dir, &session,
+        dir, &session,
     ));
 }
 
@@ -272,7 +255,33 @@ pub(crate) async fn record_resume_outcome(
     record: &crate::session_manager::SessionRecord,
     workspace: &std::path::Path,
 ) -> Option<String> {
-    record_launch_outcome(mgr, tmux, record, Some(workspace)).await
+    record_resume_outcome_in(
+        mgr,
+        tmux,
+        record,
+        workspace,
+        crate::runtime::launch_spec::LaunchSpec::root().as_deref(),
+    )
+    .await
+}
+
+/// [`record_resume_outcome`] against an explicit spec directory.
+///
+/// Why (#8233 round 3, finding 6): the production root is the OPERATOR's, and
+/// `launch_spec.rs` says tests must not touch it — yet every test reaching this
+/// path read and DELETED files there. `deliver_in` already established the `_in`
+/// seam for exactly this; this is its post-send half.
+/// What: `None` means the root could not be resolved, which is "cannot tell" —
+/// delivery is assumed and nothing is cleared, the pre-existing behaviour.
+/// Test: `record_resume_outcome_returns_the_failure_it_recorded`.
+pub(crate) async fn record_resume_outcome_in(
+    mgr: &crate::session_manager::SessionManager,
+    tmux: &dyn ManagedTmuxDriver,
+    record: &crate::session_manager::SessionRecord,
+    workspace: &std::path::Path,
+    spec_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    record_launch_outcome(mgr, tmux, record, Some(workspace), spec_dir).await
 }
 
 /// The shared body of the spawn and resume post-send checks (#8233 review
@@ -301,6 +310,7 @@ async fn record_launch_outcome(
     tmux: &dyn ManagedTmuxDriver,
     record: &crate::session_manager::SessionRecord,
     workspace: Option<&std::path::Path>,
+    spec_dir: Option<&std::path::Path>,
 ) -> Option<String> {
     let outcome = verify_launch(
         tmux,
@@ -310,7 +320,14 @@ async fn record_launch_outcome(
     )
     .await;
     if outcome == LaunchOutcome::NotStarted {
-        let delivered = launch_was_delivered(record).await;
+        let delivered = match spec_dir {
+            Some(dir) => {
+                launch_was_delivered_in(record, dir, DELIVERY_READ_ATTEMPTS, DELIVERY_READ_INTERVAL)
+                    .await
+            }
+            // No resolvable root is "cannot tell", never a positive failure.
+            None => true,
+        };
         let msg = not_started_message(record, delivered);
         // #8233 acceptance item 10: ERROR, not WARN. The bug-capture layer
         // (`bin/tm/tracing_setup::init_daemon_tracing`) records ERROR events to
@@ -323,11 +340,27 @@ async fn record_launch_outcome(
             delivered,
             "{msg}"
         );
-        let _ = mgr.mark_errored(&record.id, &msg).await;
+        // #8233 round 3, finding 2: a discarded store failure leaves the record
+        // `Active` with no runtime behind it — the exact state this whole check
+        // exists to prevent — and nothing anywhere says so. It cannot change the
+        // verdict (the launch failed either way), so it is logged, at the same
+        // level and for the same reason as `resume_breaker`'s sibling site.
+        if let Err(e) = mgr.mark_errored(&record.id, &msg).await {
+            tracing::error!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "could not mark a launch that never came up as errored; the record stays \
+                 as it was and no runtime is behind it: {e}"
+            );
+        }
         return Some(msg);
     }
+    if outcome == LaunchOutcome::Running
+        && let Some(dir) = spec_dir
+    {
+        clear_launch_files_in(record, dir);
+    }
     if outcome == LaunchOutcome::Running {
-        clear_launch_files(record);
         // #8233 acceptance item 3: the runtime is up, so whatever a previous
         // attempt appended to `task` no longer describes this session.
         let _ = mgr.clear_error_note(&record.id).await;
@@ -366,7 +399,27 @@ pub(crate) async fn record_spawn_outcome(
     tmux: &dyn ManagedTmuxDriver,
     record: &crate::session_manager::SessionRecord,
 ) -> Option<String> {
-    record_launch_outcome(mgr, tmux, record, None).await
+    record_spawn_outcome_in(
+        mgr,
+        tmux,
+        record,
+        crate::runtime::launch_spec::LaunchSpec::root().as_deref(),
+    )
+    .await
+}
+
+/// [`record_spawn_outcome`] against an explicit spec directory — see
+/// [`record_resume_outcome_in`] for why the seam exists.
+///
+/// Test: `a_running_verdict_clears_the_sentinel_and_the_pointer`,
+/// `an_undelivered_launch_is_not_interrupted_while_the_runtime_may_come_up`.
+pub(crate) async fn record_spawn_outcome_in(
+    mgr: &crate::session_manager::SessionManager,
+    tmux: &dyn ManagedTmuxDriver,
+    record: &crate::session_manager::SessionRecord,
+    spec_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    record_launch_outcome(mgr, tmux, record, None, spec_dir).await
 }
 
 #[cfg(test)]
@@ -565,7 +618,9 @@ mod tests {
         // closure would not drive tokio's timer and `verify_launch`'s sleep
         // would hang forever.
         let _guard = tracing::subscriber::set_default(subscriber);
-        let msg = record_spawn_outcome(&mgr, &driver, &record).await;
+        // #8233 round 3, finding 6: a tempdir, never `LaunchSpec::root()` —
+        // that is the operator's own directory and this reads and deletes in it.
+        let msg = record_spawn_outcome_in(&mgr, &driver, &record, Some(dir.path())).await;
         drop(_guard);
 
         let msg = msg.expect("a runtime that never came up must be reported");
@@ -674,21 +729,20 @@ mod tests {
         record.tmux_name = "tmpm-probe".to_owned();
         // The launch was published but its sentinel has not appeared — a shell
         // still finishing its init hooks. The runtime comes up anyway.
-        if let Some(root) = crate::runtime::launch_spec::LaunchSpec::root() {
-            let _ = std::fs::create_dir_all(&root);
-            let _ = std::fs::write(
-                crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(
-                    &root,
-                    &record.id.to_string(),
-                ),
-                b"a-launch-whose-sentinel-never-lands",
-            );
-        }
+        // #8233 round 3, finding 6: planted in a TEMPDIR. This used to write
+        // into `LaunchSpec::root()` — the operator's own spec directory, which
+        // `launch_spec.rs` says no test may touch.
+        let spec_dir = tempfile::tempdir().expect("spec dir");
+        plant_pointer(
+            spec_dir.path(),
+            &record.id.to_string(),
+            "a-launch-whose-sentinel-never-lands",
+        );
         let driver = SlowStarter {
             interrupts: std::sync::atomic::AtomicUsize::new(0),
         };
 
-        let verdict = record_spawn_outcome(&mgr, &driver, &record).await;
+        let verdict = record_spawn_outcome_in(&mgr, &driver, &record, Some(spec_dir.path())).await;
 
         assert_eq!(
             verdict, None,
@@ -705,6 +759,166 @@ mod tests {
             crate::session_manager::ManagedSessionState::Errored,
             "and it must not be errored either"
         );
+    }
+
+    /// A hermetic manager plus one real, stored session record.
+    async fn manager_with_session(
+        dir: &std::path::Path,
+    ) -> (
+        std::sync::Arc<crate::session_manager::SessionManager>,
+        crate::session_manager::SessionRecord,
+    ) {
+        let mgr = std::sync::Arc::new(
+            crate::session_manager::SessionManager::new(
+                dir,
+                std::sync::Arc::new(crate::session_manager::FakeNoopTmuxDriver),
+            )
+            .await
+            .expect("session manager"),
+        );
+        let created = mgr
+            .create(
+                "launch-verify".into(),
+                Some(dir.to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        let mut record = created.clone();
+        record.tmux_name = "tmpm-probe".to_owned();
+        (mgr, record)
+    }
+
+    /// #8233 item 9a: the resume wrapper must RETURN the failure it recorded,
+    /// so `resume_managed` can fail its own call instead of reporting success
+    /// beside a record it just errored.
+    ///
+    /// Why: this wrapper had no covering test at all, which left
+    /// `scripts/check_test_pointers.sh` with a dangling `Test:` pointer — and
+    /// left the one behaviour `lifecycle.rs:resume_managed` depends on unpinned.
+    /// What: drives the real entry point with an observable pane whose runtime
+    /// never comes up, and asserts both halves — the message is returned AND
+    /// the record carries it.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn record_resume_outcome_returns_the_failure_it_recorded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_dir = tempfile::tempdir().expect("spec dir");
+        let (mgr, record) = manager_with_session(dir.path()).await;
+        let driver = ProbeDriver {
+            session_live: true,
+            runtime_up: false,
+        };
+
+        let msg = record_resume_outcome_in(
+            &mgr,
+            &driver,
+            &record,
+            dir.path(),
+            Some(spec_dir.path()),
+        )
+        .await
+        .expect("a runtime that never came up must be reported to the caller");
+
+        assert!(msg.contains("#8233"), "{msg}");
+        let after = mgr.get(&record.id).await.expect("record");
+        assert_eq!(
+            after.state,
+            crate::session_manager::ManagedSessionState::Errored,
+            "the same call must also record the failure"
+        );
+        assert!(
+            after.task.contains(&msg),
+            "the returned message and the recorded one must be the SAME failure; got: {}",
+            after.task
+        );
+    }
+
+    /// #8233 round 3, finding 2: a store failure while recording the launch
+    /// failure must not be silent.
+    ///
+    /// Why: `let _ = mgr.mark_errored(…)` left the record exactly as it was —
+    /// `Active`, with no runtime behind it — and said nothing anywhere. That is
+    /// the state this whole check exists to remove, and it was reachable by
+    /// discarding one `Result`.
+    /// What: drives the `NotStarted` arm with a record the store does not hold,
+    /// so `mark_errored` fails for real, and asserts the ERROR line. Fails on
+    /// e1ee6cf52, where nothing was logged.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn a_failed_error_mark_is_logged_rather_than_discarded() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_dir = tempfile::tempdir().expect("spec dir");
+        let (mgr, _real) = manager_with_session(dir.path()).await;
+        // A record the store has never heard of: `mark_errored`'s own `get`
+        // fails, which is the store failure the discarded `Result` carried.
+        let orphan = stub_record(crate::runtime::RuntimeKind::ClaudeCode);
+        let driver = ProbeDriver {
+            session_live: true,
+            runtime_up: false,
+        };
+
+        crate::test_support::enable_event_capture();
+        let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+        let subscriber = tracing_subscriber::registry().with(
+            trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+        );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let msg = record_spawn_outcome_in(&mgr, &driver, &orphan, Some(spec_dir.path())).await;
+        drop(_guard);
+
+        assert!(msg.is_some(), "the launch still failed, whatever the store did");
+        let lines = buffer.tail(64);
+        let recorded = lines
+            .iter()
+            .find(|l| l.contains("could not mark a launch that never came up as errored"))
+            .unwrap_or_else(|| {
+                panic!("the discarded store failure must be logged; got: {lines:?}")
+            });
+        assert!(
+            recorded.contains("ERROR"),
+            "and at ERROR, so it reaches errors.jsonl; got: {recorded}"
+        );
+    }
+
+    /// #8233 item 9b: a verified `Running` launch clears its own sentinel and
+    /// pointer, so the common case leaves nothing behind for the TTL sweep.
+    ///
+    /// Why: `clear_launch_files` had no covering test — a dangling `Test:`
+    /// pointer, and a file-hygiene step that could silently stop running. A
+    /// spec file holds `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in cleartext,
+    /// so "eventually swept" is not the same as "removed on success".
+    /// What: plants a pointer and its sentinel in a TEMPDIR, drives the real
+    /// entry point with a pane whose runtime IS up, and asserts both files are
+    /// gone.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn a_running_verdict_clears_the_sentinel_and_the_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_dir = tempfile::tempdir().expect("spec dir");
+        let (mgr, record) = manager_with_session(dir.path()).await;
+        let session = record.id.to_string();
+        plant_pointer(spec_dir.path(), &session, "launch-live");
+        let marker =
+            crate::runtime::launch_spec::LaunchSpec::started_marker_in(spec_dir.path(), "launch-live");
+        std::fs::write(&marker, b"").expect("plant the sentinel");
+        let pointer =
+            crate::runtime::launch_spec::LaunchSpec::launch_pointer_in(spec_dir.path(), &session);
+        let driver = ProbeDriver {
+            session_live: true,
+            runtime_up: true,
+        };
+
+        let verdict = record_spawn_outcome_in(&mgr, &driver, &record, Some(spec_dir.path())).await;
+
+        assert_eq!(verdict, None, "a runtime that came up is a successful launch");
+        assert!(!marker.exists(), "the sentinel must be cleared on success");
+        assert!(!pointer.exists(), "and so must the launch pointer");
     }
 
     /// A short budget so the failure path does not spend the production ceiling.
