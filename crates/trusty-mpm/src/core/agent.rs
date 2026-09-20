@@ -269,6 +269,19 @@ pub struct Delegation {
     /// Working directory the dispatch was issued from, when known.
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
+    /// Which builder slot this delegation leases, when it is a builder (#8261).
+    ///
+    /// Why: the lease IS this record (see `daemon::state::builder_slots`), so
+    /// the slot index belongs on it too — a parallel map would be a second
+    /// lifecycle to keep in sync, and the reason #6892 put the lease here in the
+    /// first place. Recording the INDEX rather than the path keeps the record
+    /// independent of where the operator moved `builders.slot_pool_root`.
+    /// What: `Some(n)` for a builder admitted since #8261; `None` for every
+    /// non-builder, and for a record written by a daemon predating it.
+    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
+    /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
+    #[serde(default)]
+    pub builder_slot: Option<u32>,
     /// The working tree the subagent is actually running in, when it differs
     /// from [`Self::cwd`] (#4311).
     ///
@@ -383,6 +396,7 @@ impl Delegation {
             last_agent_cwd: None,
             stale_by_agent_type: false,
             isolation: None,
+            builder_slot: None,
             started_at: None,
             ended_at: None,
         }
@@ -425,6 +439,7 @@ impl Delegation {
             last_agent_cwd: None,
             stale_by_agent_type: false,
             isolation: None,
+            builder_slot: None,
             started_at: Some(now),
             ended_at: None,
         }
