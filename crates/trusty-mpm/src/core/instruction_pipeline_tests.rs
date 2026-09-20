@@ -880,7 +880,7 @@ fn delegation_doctrine_carries_the_precedence_note() {
     // manifest. The doctrine string every composer uses must still be the asset
     // followed by that note, in that order.
     let doctrine = delegation_doctrine();
-    assert!(doctrine.starts_with(AGENT_DELEGATION.trim()));
+    assert!(doctrine.starts_with(agent_delegation().trim()));
     assert!(doctrine.ends_with("do not retry the same agent."));
     assert!(doctrine.contains("trust the harness listing"));
 }

@@ -28,8 +28,8 @@ use crate::core::instruction_package::{
     ValidationError,
 };
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS,
-    SECTION_IDENTITY, SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, WORKFLOW,
+    SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
+    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, WORKFLOW, agent_delegation,
     section_source, section_sources, workflow_section,
 };
 use crate::core::stack_profile::stack_profile_section;
@@ -693,7 +693,7 @@ fn every_authored_block_is_exactly_its_section_source() {
         (SectionId::Memory, SECTION_MEMORY),
         (SectionId::Search, SECTION_SEARCH),
         (SectionId::Workflow, WORKFLOW),
-        (SectionId::AgentDelegation, AGENT_DELEGATION),
+        (SectionId::AgentDelegation, agent_delegation()),
         (SectionId::Identity, SECTION_IDENTITY),
         (SectionId::Enforcement, SECTION_ENFORCEMENT),
         (
