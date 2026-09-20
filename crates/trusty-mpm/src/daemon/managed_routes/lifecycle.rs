@@ -881,7 +881,7 @@ async fn spawn_managed_inproject(
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, reachable);
+    let adapter = build_adapter(record.runtime, tmux_arc, reachable, state.framework_root());
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -998,7 +998,7 @@ pub async fn spawn_runtime_for(
     // #8233: the post-send launch check needs the driver after the adapter takes
     // ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None);
+    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
     let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -1252,7 +1252,7 @@ pub async fn resume_managed(
     // #6766: the post-send launch check below needs the driver after the
     // adapter has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None);
+    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume

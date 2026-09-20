@@ -55,6 +55,14 @@ fn spec_root_nests_under_the_tm_config_home() {
     }
 }
 
+// #8233: the managed launch resolves this directory from the layout the daemon
+// holds, never from the process home.
+#[test]
+fn spec_root_at_nests_under_the_named_state_home() {
+    let root = std::path::Path::new("/tmp/fake-home/.trusty-tools/trusty-mpm");
+    assert_eq!(LaunchSpec::root_at(root), root.join("launch-specs"));
+}
+
 #[test]
 fn spec_round_trips_through_the_file() {
     // What the shim reads must be exactly what the daemon wrote — this is the

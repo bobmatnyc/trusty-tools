@@ -66,7 +66,13 @@ impl RuntimeRelauncher for DaemonRelauncher {
             .unwrap_or_else(|| record.cwd.clone());
         let tmux = mgr.tmux_driver();
         let gh_env = super::lifecycle::resolve_gh_env(&state, &workspace).await;
-        let adapter = crate::runtime::build_adapter(record.runtime, tmux.clone(), None);
+        // #8233: the daemon's own framework root, never the process home.
+        let adapter = crate::runtime::build_adapter(
+            record.runtime,
+            tmux.clone(),
+            None,
+            state.framework_root(),
+        );
         adapter
             .spawn_resume(
                 &record.tmux_name,

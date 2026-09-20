@@ -254,13 +254,26 @@ impl FromStr for RuntimeKind {
 /// decide about and ignores it.
 /// Test: `build_adapter_returns_matching_identify`,
 /// `spawn_uses_the_launch_resolved_reachability`.
+///
+/// #8233: `framework_root` is the `…/.trusty-mpm` directory the launch reads and
+/// writes — `DaemonState::framework_root()` on every daemon route,
+/// `FrameworkPaths::default().root` in the `tm` CLI. It is an ARGUMENT because
+/// `ClaudeCodeAdapter` used to resolve it (and the `~/.trusty-tools` state home
+/// beside it) from the process home on each spawn, which made a test driving the
+/// real route redeploy the bundled catalog into the operator's live framework
+/// directory. `TcodeAdapter` writes neither and ignores it.
 pub fn build_adapter(
     kind: RuntimeKind,
     tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
     memory_reachable: Option<bool>,
+    framework_root: &std::path::Path,
 ) -> Box<dyn RuntimeAdapter> {
     match kind {
-        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(tmux, memory_reachable)),
+        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(
+            tmux,
+            memory_reachable,
+            framework_root,
+        )),
         RuntimeKind::Tcode => Box::new(TcodeAdapter::new(tmux)),
     }
 }
@@ -344,9 +357,12 @@ mod tests {
     #[test]
     fn build_adapter_returns_matching_identify() {
         let tmux = FakeTmux::new();
-        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), None);
+        // #8233: a named root; neither adapter touches it while merely
+        // identifying itself.
+        let root = std::env::temp_dir().join("tm-inert-root").join(".trusty-mpm");
+        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), None, &root);
         assert_eq!(claude.identify(), "claude-code");
-        let tcode = build_adapter(RuntimeKind::Tcode, tmux, None);
+        let tcode = build_adapter(RuntimeKind::Tcode, tmux, None, &root);
         assert_eq!(tcode.identify(), "tcode");
     }
 }

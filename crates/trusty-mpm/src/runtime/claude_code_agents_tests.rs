@@ -117,6 +117,8 @@ fn inputs(cwd: &Path) -> ManagedLaunch<'_> {
         // this file was written against.
         memory_reachable: true,
         mcp_env: &[],
+        // #8233: `config_dir: None`, so the launch provisioned no scoped file.
+        mcp_config: None,
     }
 }
 

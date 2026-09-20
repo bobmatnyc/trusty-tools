@@ -32,6 +32,10 @@ fn long_path(prefix: &str, segments: usize) -> PathBuf {
 struct Worst {
     cwd: PathBuf,
     config_dir: PathBuf,
+    /// #8233: the composed session-MCP file the launch provisioned — carried
+    /// rather than re-derived from `$HOME`, so the worst case is stated here
+    /// instead of depending on how long the running operator's home is.
+    mcp_config: PathBuf,
     prompt: PathBuf,
     mcp_env: Vec<(String, String)>,
     gh_env: Vec<(String, String)>,
@@ -43,6 +47,11 @@ impl Worst {
         Self {
             cwd: long_path("/Users/an-operator-with-a-long-name/trusty-mpm-projects", 5),
             config_dir: long_path("/Users/an-operator-with-a-long-name/.trusty-tools", 3),
+            mcp_config: long_path(
+                "/Users/an-operator-with-a-long-name/.trusty-tools/trusty-mpm/session-mcp",
+                3,
+            )
+            .join("0123456789abcdef0123456789abcdef.json"),
             prompt: long_path("/var/folders/qv/8k3p1x9n5cl7g2vy_0000gn/T", 4)
                 .join("trusty-mpm-prompt.txt"),
             mcp_env: vec![
@@ -80,6 +89,7 @@ impl Worst {
             oauth_token: Some(&self.oauth_token),
             gh_env: &self.gh_env,
             mcp_env: &self.mcp_env,
+            mcp_config: Some(&self.mcp_config),
             memory_reachable: true,
         }
     }
@@ -96,6 +106,8 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         oauth_token: None,
         gh_env,
         mcp_env: &[],
+        // #8233: `config_dir: None`, so no scoped file was provisioned.
+        mcp_config: None,
         memory_reachable: false,
     }
 }
@@ -241,9 +253,10 @@ fn spawn_argv_matches_the_shell_line_it_replaces() {
             .split_whitespace()
             .map(str::to_owned),
     );
-    expected.extend(crate::core::session_mcp_scope::mcp_config_argv(
-        crate::core::session_mcp_scope::scoped_for(&w.cwd, Some(&w.config_dir)).as_deref(),
-    ));
+    // #8233: the path the launch provisioned, which is what the builder renders.
+    expected.extend(crate::core::session_mcp_scope::mcp_config_argv(Some(
+        &w.mcp_config,
+    )));
     expected.extend(
         crate::core::model_inject::PERMISSION_MODE_FLAG
             .split_whitespace()

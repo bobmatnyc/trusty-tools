@@ -108,10 +108,20 @@ impl Drop for HomeGuard {
     }
 }
 
+/// A framework root for a test that never provisions anything (#8233).
+///
+/// Why: `ClaudeCodeAdapter::new` takes the root as an argument, but `identify`
+/// and `publish_session_env` touch no filesystem at all — a literal keeps those
+/// three tests free of a tempdir they would never write into.
+/// What: an absolute path under the system temp dir; never created.
+fn inert_framework_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("tm-inert-root").join(".trusty-mpm")
+}
+
 #[test]
 fn claude_code_adapter_identifies() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake, None);
+    let adapter = ClaudeCodeAdapter::new(fake, None, &inert_framework_root());
     assert_eq!(adapter.identify(), "claude-code");
 }
 
@@ -133,7 +143,7 @@ fn publish_session_env_sets_id_and_config_dir() {
     // assertion runs unconditionally in CI, unlike the full-spawn tests
     // below which are gated on a real `claude` binary being present.
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &inert_framework_root());
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, Some("/tmp/config-dir"));
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -156,7 +166,7 @@ fn publish_session_env_sets_id_and_config_dir() {
 #[test]
 fn publish_session_env_omits_config_dir_when_absent() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &inert_framework_root());
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, None);
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -960,7 +970,9 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
     );
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
+    // #8233: the root is now an argument; it names the same redirected home the
+    // assertions above pinned, so this test still proves the containment.
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &home.path().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tmpm-4206",
@@ -1017,23 +1029,24 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
 /// `prepare_managed_config_pins_all_builtins_on_success` and
 /// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`, whose
 /// subject — per-run pin evidence feeding an approval — no longer exists.
-/// What: runs the real function under a redirected `$HOME` and asserts the
+/// What: runs the real function against a NAMED framework root (#8233 — it no
+/// longer redirects `$HOME`, so nothing here is process-global) and asserts the
 /// workspace gains no `.mcp.json` while the config dir's project entry carries
 /// the trust keys and no `enabledMcpjsonServers`.
 /// Test: itself.
-#[serial_test::serial]
 #[test]
 fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
-    let _home = HomeGuard::set();
+    let root_dir = tempfile::tempdir().expect("root tempdir");
+    let fw = crate::core::paths::FrameworkPaths::under(root_dir.path());
     let cwd_root = tempfile::tempdir().expect("tempdir");
     let cwd = cwd_root.path();
 
     let config_dir = prepare_managed_config_with_exe(
+        &fw,
         "test-session",
         cwd,
         Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    )
-    .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+    );
 
     assert!(
         !cwd.join(".mcp.json").exists(),
@@ -1086,14 +1099,14 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
 /// `tm hook` group therefore never gained it, however many times it was
 /// resumed — no savings row under the live Claude session id, no 💸 segment.
 /// What: seeds the incident file (memory hook only under `SessionStart`),
-/// runs the real function under a redirected `$HOME` with a pinned
+/// runs the real function against a NAMED framework root (#8233) with a pinned
 /// installed-looking hook binary, and asserts the lifecycle entry arrived and
 /// the project's own entry stayed.
 /// Test: itself.
-#[serial_test::serial]
 #[test]
 fn prepare_managed_config_merges_the_project_hook_group() {
-    let _home = HomeGuard::set();
+    let root_dir = tempfile::tempdir().expect("root tempdir");
+    let fw = crate::core::paths::FrameworkPaths::under(root_dir.path());
     let cwd_root = tempfile::tempdir().expect("tempdir");
     let cwd = cwd_root.path();
     let claude = cwd.join(".claude");
@@ -1116,11 +1129,11 @@ fn prepare_managed_config_merges_the_project_hook_group() {
     .expect("seed settings");
 
     prepare_managed_config_with_exe(
+        &fw,
         "test-session",
         cwd,
         Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    )
-    .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+    );
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
@@ -1134,6 +1147,78 @@ fn prepare_managed_config_merges_the_project_hook_group() {
         session_start.contains("trusty-memory inbox-check"),
         "the project's own SessionStart entry must survive: {session_start}"
     );
+}
+
+/// THE #8233 REGRESSION TEST — a Fail-Open Check surface: the defect it guards
+/// is SILENT, because a launch that writes into the operator's real home
+/// succeeds exactly as loudly as one that does not.
+///
+/// Why: `prepare_managed_config` resolved both the managed `CLAUDE_CONFIG_DIR`
+/// and the framework layout from the PROCESS home
+/// (`trusty_tools_config::managed_claude_config_dir` +
+/// `FrameworkPaths::default`), so every test driving the real resume route
+/// redeployed the branch's bundled agent and skill catalog into the live
+/// `~/.trusty-mpm/framework/`. Nothing failed; the operator's framework
+/// directory simply became whichever branch last ran its tests. Reintroducing
+/// any home-derived root on this path makes the returned dir escape `root_dir`
+/// and fails this assertion.
+/// What: drives the real `prepare_managed_config_with_exe` against a temp
+/// framework root and asserts BOTH halves land under it — the config dir it
+/// returns, and the framework root the deploy actually wrote to.
+/// Test: itself.
+#[test]
+fn prepare_managed_config_writes_only_under_the_named_framework_root() {
+    let root_dir = tempfile::tempdir().expect("root tempdir");
+    let base = root_dir.path();
+    let fw = crate::core::paths::FrameworkPaths::under(base);
+    let cwd_root = tempfile::tempdir().expect("cwd tempdir");
+
+    let config_dir = prepare_managed_config_with_exe(
+        &fw,
+        "test-session",
+        cwd_root.path(),
+        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
+    );
+
+    assert!(
+        config_dir.starts_with(base),
+        "the managed CLAUDE_CONFIG_DIR must sit under the named root, got {}",
+        config_dir.display()
+    );
+    assert!(
+        config_dir.join(".claude.json").is_file(),
+        "the provisioning must actually have run there, not merely named it"
+    );
+    // The bundled catalog is the payload the defect misplaced; assert it landed
+    // under the named root rather than anywhere home-derived.
+    assert!(
+        fw.root.starts_with(base) && config_dir.join("agents").is_dir(),
+        "the roster deploy must land under the named root: {}",
+        fw.root.display()
+    );
+}
+
+/// The launch-spec directory follows the same named root (#8233).
+///
+/// Why: a spec file carries this launch's `CLAUDE_CODE_OAUTH_TOKEN` and
+/// `GH_TOKEN`. `LaunchSpec::root()` reads the process home, so a test driving a
+/// real spawn wrote those credentials into the operator's own config home —
+/// another silent, always-succeeding write.
+/// What: builds the adapter with a temp root and asserts its `spec_dir` is under
+/// that root and named `launch-specs`.
+/// Test: itself.
+#[test]
+fn spawn_writes_its_launch_spec_under_the_named_framework_root() {
+    let root_dir = tempfile::tempdir().expect("root tempdir");
+    let root = root_dir.path().join(".trusty-mpm");
+    let adapter = ClaudeCodeAdapter::new(FakeTmux::new(), None, &root);
+    let dir = adapter.spec_dir();
+    assert!(
+        dir.starts_with(root_dir.path()),
+        "launch specs must not leave the named root: {}",
+        dir.display()
+    );
+    assert!(dir.ends_with("launch-specs"), "{}", dir.display());
 }
 
 // ── #6765: a managed relaunch never emits a bare `--continue` ───────────
@@ -1216,7 +1301,7 @@ fn drive_spawn(fake: &std::sync::Arc<FakeTmux>, home: &HomeGuard) -> String {
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn(
             "tm-sess",
@@ -1342,7 +1427,11 @@ fn spawn_errors_when_the_line_is_refused() {
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
 
-    let adapter = ClaudeCodeAdapter::new(std::sync::Arc::new(Refusing), Some(true));
+    let adapter = ClaudeCodeAdapter::new(
+        std::sync::Arc::new(Refusing),
+        Some(true),
+        &home.home().join(".trusty-mpm"),
+    );
     let err = adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect_err("a refused send must not report a successful spawn");
@@ -1378,7 +1467,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     std::fs::write(projects.join("conv-77.jsonl"), b"{}").expect("seed conversation");
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1423,7 +1512,7 @@ fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1472,7 +1561,7 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1510,7 +1599,7 @@ fn spawn_uses_the_launch_resolved_reachability() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(false));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(false), &home.home().join(".trusty-mpm"));
     adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("spawn must succeed");
@@ -1562,7 +1651,7 @@ fn drive_resume(
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1697,7 +1786,7 @@ fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let tmux = std::sync::Arc::new(PaneAware::default());
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), Some(true));
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("the spawn must reach the pane");

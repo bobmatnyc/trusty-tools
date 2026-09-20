@@ -154,6 +154,10 @@ pub(super) struct ManagedLaunch<'a> {
     pub oauth_token: Option<&'a str>,
     pub gh_env: &'a [(String, String)],
     pub mcp_env: &'a [(String, String)],
+    /// #8233: the composed session-MCP file this launch actually PROVISIONED,
+    /// carried rather than re-derived so the `--mcp-config` token can never name
+    /// a path under a different home than the one written.
+    pub mcp_config: Option<&'a Path>,
     /// #7685: whether trusty-memory answered at launch.
     pub memory_reachable: bool,
 }
@@ -217,8 +221,9 @@ impl ManagedLaunch<'_> {
                 .split_whitespace()
                 .map(str::to_owned),
         );
+        // #8233: the provisioner's own answer, not a second home-derived one.
         args.extend(crate::core::session_mcp_scope::mcp_config_argv(
-            crate::core::session_mcp_scope::scoped_for(self.cwd, self.config_dir).as_deref(),
+            self.mcp_config,
         ));
         args.extend(
             crate::core::model_inject::PERMISSION_MODE_FLAG

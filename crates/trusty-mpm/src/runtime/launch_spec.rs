@@ -199,6 +199,19 @@ impl LaunchSpec {
             .map(|dir| dir.join(SPEC_SUBDIR))
     }
 
+    /// [`LaunchSpec::root`] under an explicitly named state home (#8233).
+    ///
+    /// Why: [`root`](Self::root) reads the process home, so a test driving the
+    /// real managed launch left credential-bearing spec files in the operator's
+    /// own `~/.trusty-tools/`. The daemon already holds the layout the launch
+    /// belongs to — see [`crate::core::paths::FrameworkPaths::crate_config_root`].
+    /// What: `<crate_config_root>/launch-specs`, the same subdirectory
+    /// [`root`](Self::root) names.
+    /// Test: `spec_root_at_nests_under_the_named_state_home`.
+    pub fn root_at(crate_config_root: &Path) -> PathBuf {
+        crate_config_root.join(SPEC_SUBDIR)
+    }
+
     /// Write this spec to a fresh mode-0600 file under [`LaunchSpec::root`].
     ///
     /// Why: the launch's parameters have to reach the pane somehow, and a file

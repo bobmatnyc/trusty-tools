@@ -527,6 +527,28 @@ impl FrameworkPaths {
             .unwrap_or_else(|| self.agent_deploy.clone())
     }
 
+    /// The `~/.trusty-tools/trusty-mpm` state home this layout was resolved
+    /// against (#8233).
+    ///
+    /// Why: the managed launch writes three siblings there — the relocated
+    /// `claude-config` dir, the per-session `session-mcp` file, and the
+    /// `launch-specs` dir. Each had its own `dirs::home_dir()` accessor, so a
+    /// test driving the real launch path wrote into the operator's own home no
+    /// matter which root the daemon held. Deriving all three from the layout the
+    /// caller already named is what makes `DaemonState::framework_root()` the
+    /// single answer.
+    /// What: the parent of [`managed_claude_config_dir`](Self::managed_claude_config_dir),
+    /// i.e. `<base>/.trusty-tools/trusty-mpm`. A path with no parent yields that
+    /// directory itself, matching `managed_claude_config_dir`'s own fallback.
+    /// Test: `crate_config_root_is_the_managed_config_parent`.
+    pub fn crate_config_root(&self) -> PathBuf {
+        let managed = self.managed_claude_config_dir();
+        managed
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| managed.clone())
+    }
+
     /// Directory Claude Code reads skill files from (`~/.claude/skills`).
     ///
     /// Why: the skill deploy step writes `.md` skill files here so Claude Code
@@ -704,6 +726,22 @@ mod tests {
             paths.managed_claude_config_dir().join("skills"),
             paths.skill_deploy_dir(),
             "skill_deploy_dir must stay the `skills` child of this one answer"
+        );
+    }
+
+    // #8233: the launch's session-mcp file and launch-spec dir are siblings of
+    // the managed config dir, so they must come off the same named base.
+    #[test]
+    fn crate_config_root_is_the_managed_config_parent() {
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.crate_config_root(),
+            PathBuf::from("/base/.trusty-tools/trusty-mpm"),
+        );
+        assert_eq!(
+            paths.crate_config_root().join("claude-config"),
+            paths.managed_claude_config_dir(),
+            "the managed config dir must stay a child of this one answer"
         );
     }
 

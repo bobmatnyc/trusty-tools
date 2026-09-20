@@ -239,7 +239,13 @@ pub(super) async fn spawn_managed_on_main(
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
     // #7685: hand the adapter what preparation resolved, so it does not re-probe.
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, memory_reachable);
+    // #8233: the daemon's own framework root, never the process home.
+    let adapter = crate::runtime::build_adapter(
+        record.runtime,
+        tmux_arc,
+        memory_reachable,
+        state.framework_root(),
+    );
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,

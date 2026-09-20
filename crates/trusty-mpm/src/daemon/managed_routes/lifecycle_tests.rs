@@ -891,8 +891,11 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
 async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
     const SRC: &str = include_str!("launch_on_main.rs");
     assert!(
-        SRC.contains("build_adapter(record.runtime, tmux_arc, memory_reachable)"),
-        "launch-on-main must hand the adapter the reachability preparation resolved"
+        // #8233: the call is now multi-line and also carries the framework root,
+        // so the pin names the two arguments rather than the whole call text.
+        SRC.contains("memory_reachable,\n        state.framework_root(),"),
+        "launch-on-main must hand the adapter the reachability preparation \
+         resolved, and the daemon's own framework root"
     );
 
     let tmp_home = tempfile::TempDir::new().expect("tmp home");

@@ -37,10 +37,16 @@ fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
         oauth_token: None,
         gh_env: &[],
         mcp_env: &[],
+        // #8233: the flag now renders the path the launch PROVISIONED, so these
+        // builder tests supply it the same way the launch does.
+        mcp_config: config_dir.map(|_| Path::new(SCOPE_MCP_CONFIG)),
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
         memory_reachable: true,
     }
 }
+
+/// The composed session-MCP file [`scope_launch`] hands the builders (#8233).
+const SCOPE_MCP_CONFIG: &str = "/tm/state/session-mcp/abc123.json";
 
 /// Representative managed-session UUID; not a real session.
 const SCOPE_SESSION_ID: &str = "99999999-8888-7777-6666-555555555555";
@@ -53,23 +59,14 @@ const SCOPE_CONFIG_DIR: &str = "/tm/claude-config";
 
 /// The `--mcp-config` path a session rooted at [`SCOPE_CWD`] must name.
 ///
-/// Why: derived from `$HOME`, which [`PoisonedStateRoot`] rewrites from the
-/// fail-closed tests further down THIS BINARY. An in-process `cargo test` runs
-/// both sets on threads of one process, so a flag test reading `$HOME` while a
-/// poisoned root is installed would compare against the tempdir and fail for a
-/// reason that has nothing to do with the flags. Every test in this file is
-/// therefore `#[serial_test::serial]` — the flag tests included, so the rule
-/// holds for the whole file rather than for whichever tests happen to read
-/// `$HOME` today (#7422).
-/// What: `scoped_for` against the representative cwd and config dir.
+/// Why (#8233): this used to be derived from `$HOME` through `scoped_for`, which
+/// [`PoisonedStateRoot`] rewrites from the fail-closed tests further down THIS
+/// BINARY — so a flag test could compare against a tempdir for a reason that has
+/// nothing to do with the flags. The builders now render the path the launch
+/// PROVISIONED, so the expectation is that literal and reads no environment.
+/// What: [`SCOPE_MCP_CONFIG`].
 fn expected_path() -> String {
-    crate::core::session_mcp_scope::scoped_for(
-        Path::new(SCOPE_CWD),
-        Some(Path::new(SCOPE_CONFIG_DIR)),
-    )
-    .expect("HOME resolves in a test environment")
-    .display()
-    .to_string()
+    SCOPE_MCP_CONFIG.to_owned()
 }
 
 #[test]
@@ -159,37 +156,63 @@ fn compose_inplace_args_omits_the_mcp_config_flag_without_a_config_dir() {
 // Fail-closed arms: `provision` cannot write, so no command may be built.
 // ---------------------------------------------------------------------------
 
-/// A `$HOME` whose `session-mcp` state path is a regular FILE.
+/// A framework root whose `session-mcp` state path is a regular FILE.
 ///
 /// Why: every fail-closed test below needs `provision` to fail for a reason
 /// that is deterministic on any machine and needs no permission games. A file
 /// where `create_dir_all` must make a directory is exactly that.
+///
+/// // #8233: this used to redirect the PROCESS-GLOBAL `$HOME` — the class of
+/// state `docs/reference/common-pitfalls.md` bans, and the reason every test in
+/// this file was `#[serial]`. The adapter now takes its framework root as an
+/// argument, so the poisoning is local to the returned tempdir and nothing is
+/// serialized.
+/// What: a tempdir holding `<tmp>/.trusty-mpm` (the root the adapter is built
+/// with) with `<tmp>/.trusty-tools/trusty-mpm/session-mcp` planted as a file.
+/// Test: used by every `…_fails_when_the_composed_file_cannot_be_written` test.
+fn poisoned_state_root() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join(".trusty-mpm");
+    let dir = crate::core::paths::FrameworkPaths::from_root(&root)
+        .crate_config_root()
+        .join(crate::core::session_mcp_scope::SESSION_MCP_DIR);
+    std::fs::create_dir_all(dir.parent().expect("the state dir has a parent")).unwrap();
+    std::fs::write(&dir, "not a directory").unwrap();
+    (tmp, root)
+}
+
+/// [`poisoned_state_root`] for the one caller that still reads the process home.
+///
+/// Why: `build_inplace_resume_command` IS the `tm` process running inside the
+/// managed pane, so its layout is the ambient one by design (#8233) — the only
+/// way to poison its state root is to redirect `$HOME`. Its caller stays
+/// `#[serial_test::serial]`; nothing else in this file needs to be.
 /// What: redirects `$HOME` to a fresh tempdir, plants
 /// `<home>/.trusty-tools/trusty-mpm/session-mcp` as a file, and restores the
-/// prior `$HOME` on drop. Callers MUST be `#[serial_test::serial]`.
-/// Test: used by every `…_fails_when_the_composed_file_cannot_be_written` test.
-struct PoisonedStateRoot {
+/// prior `$HOME` on drop.
+/// Test: `build_inplace_resume_command_fails_when_the_composed_file_cannot_be_written`.
+struct PoisonedHome {
     prev: Option<std::ffi::OsString>,
     _tmp: tempfile::TempDir,
 }
 
-impl PoisonedStateRoot {
+impl PoisonedHome {
     fn set() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
-        // SAFETY: every caller is `#[serial]`, so no other test thread races
-        // this set/restore; Drop restores it even on an unwinding panic.
+        // SAFETY: the single caller is `#[serial]`, so no other test thread
+        // races this set/restore; Drop restores it even on an unwinding panic.
         unsafe { std::env::set_var("HOME", tmp.path()) };
-        let root = crate::core::session_mcp_scope::session_mcp_path(Path::new("/tmp"))
+        let file = crate::core::session_mcp_scope::session_mcp_path(Path::new("/tmp"))
             .expect("HOME was just set");
-        let dir = root.parent().expect("the composed file has a parent");
+        let dir = file.parent().expect("the composed file has a parent");
         std::fs::create_dir_all(dir.parent().expect("…which has a parent")).unwrap();
         std::fs::write(dir, "not a directory").unwrap();
         Self { prev, _tmp: tmp }
     }
 }
 
-impl Drop for PoisonedStateRoot {
+impl Drop for PoisonedHome {
     fn drop(&mut self) {
         // SAFETY: see `set`.
         match self.prev.take() {
@@ -213,11 +236,10 @@ fn assert_scope_failure(err: &RuntimeError) {
 }
 
 #[test]
-#[serial_test::serial]
 fn spawn_fails_when_the_composed_file_cannot_be_written() {
-    let _home = PoisonedStateRoot::set();
+    let (_tmp, root) = poisoned_state_root();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &root);
 
     let err = adapter
         .spawn(
@@ -237,11 +259,10 @@ fn spawn_fails_when_the_composed_file_cannot_be_written() {
 }
 
 #[test]
-#[serial_test::serial]
 fn spawn_resume_fails_when_the_composed_file_cannot_be_written() {
-    let _home = PoisonedStateRoot::set();
+    let (_tmp, root) = poisoned_state_root();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &root);
 
     let err = adapter
         .spawn_resume(
@@ -265,7 +286,7 @@ fn spawn_resume_fails_when_the_composed_file_cannot_be_written() {
 #[test]
 #[serial_test::serial]
 fn build_inplace_resume_command_fails_when_the_composed_file_cannot_be_written() {
-    let _home = PoisonedStateRoot::set();
+    let _home = PoisonedHome::set();
 
     let err = build_inplace_resume_command(Path::new("/tmp"), Some("abc-123"))
         .expect_err("the in-place relaunch must not drop the flag and continue");

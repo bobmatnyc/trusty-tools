@@ -239,7 +239,15 @@ pub(crate) async fn launch_and_wait(
     // the existing scope boundary around the bare-`tm` in-place relaunch
     // path (`build_inplace_resume_command`).
     // #7685: `None` only when preparation failed before resolving one.
-    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), memory_reachable);
+    // #8233: no `DaemonState` on this CLI path, so the ambient framework root IS
+    // the right answer — resolved once, here, rather than inside the adapter.
+    let framework_root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    let adapter = build_adapter(
+        RuntimeKind::ClaudeCode,
+        mgr.tmux_driver(),
+        memory_reachable,
+        &framework_root,
+    );
     adapter
         .spawn(
             &record.tmux_name,

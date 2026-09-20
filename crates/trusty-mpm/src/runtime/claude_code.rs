@@ -40,7 +40,14 @@ mod claude_code_agents;
 
 // #7568: the prompt-file writer and its named-root seam live in
 // `super::prompt_file`; `claude_code.rs` was at the 500-SLOC production cap.
-use super::prompt_file::build_prompt_file;
+// #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
+// relaunch below is a real run in the operator's own home and keeps the ambient
+// form.
+use super::prompt_file::{build_prompt_file, build_prompt_file_in};
+
+/// #8233: every home-derived launch path reads this layout instead of
+/// `dirs::home_dir()`.
+use crate::core::paths::FrameworkPaths;
 
 /// Length at which Claude Code truncates a project key and appends a path hash
 /// (its `MAX_SANITIZED_LENGTH`). Verified live: a 370-character cwd produced a
@@ -256,15 +263,25 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// This centralises the three coupled steps — resolve the path,
 /// provision it, and seed workspace trust — so `spawn` and `spawn_resume` stay
 /// identical and cannot drift.
-/// What: resolves [`crate::core::trusty_tools_config::managed_claude_config_dir`].
-/// When `Some`: provisions it via
-/// [`crate::core::managed_config::ensure_managed_config_dir`] and seeds managed
-/// trust via [`crate::core::standalone::preseed_managed_trust`] (both non-fatal —
-/// a failure logs a warning but the dir is still returned so the session never
-/// silently falls back to the project's `.claude/`), returning `Some(dir)`. When
-/// `None` (home unresolved): falls back to the legacy
-/// [`crate::core::home_trust_seed::preseed_home_trust`] and returns `None`
-/// (no `CLAUDE_CONFIG_DIR` to inject).
+/// What: takes the config dir from `fw`
+/// ([`FrameworkPaths::managed_claude_config_dir`]), provisions it via
+/// [`crate::core::managed_config::ensure_managed_config_dir_with_root_and_exe`]
+/// and seeds managed trust via
+/// [`crate::core::standalone::preseed_managed_trust`] (both non-fatal — a
+/// failure logs a warning but the dir is still returned so the session never
+/// silently falls back to the project's `.claude/`).
+///
+/// // #8233: `fw` replaces the ambient
+/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] +
+/// [`FrameworkPaths::default`] pair, both of which read the PROCESS home. A test
+/// driving the real resume route therefore redeployed the branch's bundled
+/// agent and skill catalog into the operator's live `~/.trusty-mpm/framework/`
+/// on every run. The daemon resolves the default layout once, in
+/// `DaemonState::new`, and hands it down from there; production reads the same
+/// home it always did. The only behavioural change is that the old "home
+/// unresolved → no `CLAUDE_CONFIG_DIR`, seed `~/.claude.json` instead" arm is
+/// gone: `fw` always names a layout, and relocating is what this module already
+/// calls strictly safer than not relocating.
 ///
 /// // #4181 (ADR-0042): this function used to re-run the four `.mcp.json`
 /// force-overwrite injectors on every spawn and resume, and derive
@@ -280,8 +297,12 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// the provisioning itself is covered in `core::managed_config`;
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
-fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::PathBuf> {
-    prepare_managed_config_with_exe(tmux_name, cwd, None)
+fn prepare_managed_config(
+    fw: &FrameworkPaths,
+    tmux_name: &str,
+    cwd: &Path,
+) -> std::path::PathBuf {
+    prepare_managed_config_with_exe(fw, tmux_name, cwd, None)
 }
 
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
@@ -291,25 +312,17 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 /// no installed `tm` to fall back to. The provisioning then never reached the
 /// `.claude.json` seeding this function's test asserts on.
 /// What: the body of [`prepare_managed_config`], forwarding `hook_exe` to
-/// [`crate::core::managed_config::ensure_managed_config_dir_with_exe`].
-/// Test: `prepare_managed_config_writes_no_mcp_json_and_no_approval`.
+/// [`crate::core::managed_config::ensure_managed_config_dir_with_root_and_exe`].
+/// Test: `prepare_managed_config_writes_no_mcp_json_and_no_approval`,
+/// `prepare_managed_config_writes_only_under_the_named_framework_root`.
 fn prepare_managed_config_with_exe(
+    fw: &FrameworkPaths,
     tmux_name: &str,
     cwd: &Path,
     hook_exe: Option<&Path>,
-) -> Option<std::path::PathBuf> {
-    let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
-        // Home unresolved (stripped env): no config dir to point at. Fall back
-        // to the legacy home-trust seed so startup prompts are still dismissed.
-        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
-            tracing::warn!(
-                session = %tmux_name,
-                cwd = %cwd.display(),
-                "home trust pre-seed failed (non-fatal): {e}"
-            );
-        }
-        return None;
-    };
+) -> std::path::PathBuf {
+    // #8233: the layout the caller named, never `dirs::home_dir()`.
+    let config_dir = fw.managed_claude_config_dir();
 
     // Provision the tm-owned config dir with the full framework roster. Non-fatal:
     // even on a partial provisioning error we still point CLAUDE_CONFIG_DIR at it,
@@ -318,9 +331,12 @@ fn prepare_managed_config_with_exe(
     // #4880: `cwd` is the workspace, so the same call also refreshes the
     // PROJECT skill tier (`<cwd>/.claude/skills`) when the project manifest
     // moved — the tier that outranks everything this config dir carries.
-    if let Err(e) =
-        crate::core::managed_config::ensure_managed_config_dir_with_exe(&config_dir, cwd, hook_exe)
-    {
+    if let Err(e) = crate::core::managed_config::ensure_managed_config_dir_with_root_and_exe(
+        fw,
+        &config_dir,
+        cwd,
+        hook_exe,
+    ) {
         tracing::warn!(
             session = %tmux_name,
             config_dir = %config_dir.display(),
@@ -353,7 +369,7 @@ fn prepare_managed_config_with_exe(
         );
     }
 
-    Some(config_dir)
+    config_dir
 }
 
 /// Owned pieces of an in-place `claude` relaunch command, built for direct
@@ -489,12 +505,16 @@ pub fn build_inplace_resume_command(
     cwd: &Path,
     claude_session_id: Option<&str>,
 ) -> Result<InPlaceResumeCommand, RuntimeError> {
-    let config_dir = prepare_managed_config("in-place-relaunch", cwd);
+    // #8233: this path IS the `tm` process running inside the managed pane, so
+    // the ambient home is its own correct layout — unlike the daemon adapter,
+    // which holds the root it was built with.
+    let fw = FrameworkPaths::default();
+    let config_dir = prepare_managed_config(&fw, "in-place-relaunch", cwd);
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
     // failure here abandons the relaunch rather than dropping the flag, which
     // would hand the pane the unscoped shared server map.
-    crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
+    crate::core::session_mcp_scope::provision_for_spawn(cwd, Some(&config_dir))
         .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     let claude_bin = ClaudeCodeAdapter::resolve_claude().ok_or_else(|| {
         RuntimeError::BinaryNotFound(
@@ -508,7 +528,7 @@ pub fn build_inplace_resume_command(
     let prompt_file = build_prompt_file(cwd, None);
     let args = compose_inplace_args(
         cwd,
-        config_dir.as_deref(),
+        Some(&config_dir),
         claude_session_id,
         prompt_file.as_deref(),
     );
@@ -518,7 +538,7 @@ pub fn build_inplace_resume_command(
     Ok(InPlaceResumeCommand {
         claude_bin,
         args,
-        config_dir,
+        config_dir: Some(config_dir),
         oauth_token,
         mcp_env,
     })
@@ -538,6 +558,10 @@ pub struct ClaudeCodeAdapter {
     /// What the launch already resolved about trusty-memory (#7685); `None`
     /// means this adapter must ask the host itself.
     memory_reachable: Option<bool>,
+    /// #8233: the framework layout every home-derived launch path now reads,
+    /// resolved once by the caller (`DaemonState::framework_root`) instead of
+    /// from `dirs::home_dir()` on each spawn.
+    fw: FrameworkPaths,
 }
 
 impl ClaudeCodeAdapter {
@@ -550,16 +574,27 @@ impl ClaudeCodeAdapter {
     /// setter is what stops a caller spawning before pinning it. `None` — from a
     /// caller that ran no preparation — keeps the probe, so the answer is never
     /// guessed.
-    /// What: stores both.
+    /// `framework_root` (#8233) is the `…/.trusty-mpm` directory this adapter's
+    /// launches read and write — `DaemonState::framework_root()` on the daemon
+    /// path, `FrameworkPaths::default().root` in the `tm` CLI. Taking it at
+    /// CONSTRUCTION, like `memory_reachable`, is what stops a launch resolving
+    /// it from the process home instead.
+    /// What: stores the driver and the reachability, and expands
+    /// `framework_root` into a [`FrameworkPaths`] via
+    /// [`FrameworkPaths::from_root`].
     /// Test: used in every `ClaudeCodeAdapter` test;
-    /// `spawn_uses_the_launch_resolved_reachability` pins the reachability half.
+    /// `spawn_uses_the_launch_resolved_reachability` pins the reachability half,
+    /// `prepare_managed_config_writes_only_under_the_named_framework_root` the
+    /// root half.
     pub fn new(
         tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
         memory_reachable: Option<bool>,
+        framework_root: &Path,
     ) -> Self {
         Self {
             tmux,
             memory_reachable,
+            fw: FrameworkPaths::from_root(framework_root),
         }
     }
 
@@ -574,6 +609,19 @@ impl ClaudeCodeAdapter {
     /// checks the live `PATH` first then the well-known daemon dirs (Homebrew +
     /// `~/.local/bin` + `~/.cargo/bin`); returns the resolved path as a `String`.
     /// Test: `claude_code_adapter_binary_check_returns_option`.
+    /// Where this adapter's launch specs are written (#8233).
+    ///
+    /// Why: `LaunchSpec::root()` reads the process home, and a spec carries the
+    /// OAuth and `gh` tokens — a test driving a real launch left them in the
+    /// operator's own config home. One accessor keeps `spawn` and `spawn_resume`
+    /// from drifting apart on it.
+    /// What: [`super::launch_spec::LaunchSpec::root_at`] against this adapter's
+    /// [`FrameworkPaths::crate_config_root`].
+    /// Test: `spawn_writes_its_launch_spec_under_the_named_framework_root`.
+    fn spec_dir(&self) -> std::path::PathBuf {
+        super::launch_spec::LaunchSpec::root_at(&self.fw.crate_config_root())
+    }
+
     fn resolve_claude() -> Option<String> {
         trusty_common::bin_resolve::resolve_binary("claude")
             .and_then(|p| p.to_str().map(str::to_owned))
@@ -659,13 +707,19 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // present, and `user` is the tier it relocates. The older comment here
         // claimed the project layer under `project,local`; see
         // `prepare_managed_config`. Non-fatal throughout (closes #1696).
-        let config_dir = prepare_managed_config(tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
         // #7422: compose this session's MCP config before anything else, so the
         // fail-closed gate does not depend on a binary lookup succeeding first.
         // Fatal by design — the only fallback is a spawn with no
         // `--mcp-config`, which loads the whole shared server map.
-        crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
-            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+        // #8233: under the named state home, and the written path is what the
+        // `--mcp-config` token below names.
+        let mcp_config = crate::core::session_mcp_scope::provision_for_spawn_at(
+            &self.fw.crate_config_root(),
+            cwd,
+            Some(&config_dir),
+        )
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
                 "claude binary not found on PATH or in well-known dirs \
@@ -684,7 +738,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // the default daemon on-ramp, can no longer silently spawn vanilla
         // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
         // out a CLAUDE.md-carrier fallback, so there is no other carrier).
-        let prompt_file = build_prompt_file(cwd, Some(session_id));
+        // #8233: the compiled-prompt ledger under the NAMED framework root.
+        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -699,7 +754,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // #4181: the per-project MCP pins the shared user-scope declarations
         // cannot carry as arguments. Resolved once per spawn (it touches the
         // trusty-search daemon), never inside the spec builder.
-        let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
+        // #8233: same named root — `session_mcp_env` alone read `$HOME`.
+        let mcp_env = crate::core::mcp_session_env::session_mcp_env_with(
+            &FrameworkPaths::for_managed_project(&self.fw.root, cwd),
+            cwd,
+            None,
+        );
         // #7685: auto memory is the FALLBACK, so the kill switch goes into the
         // spec only when trusty-memory answered. The launch resolved this
         // already where it could; this only probes when nothing did, so the
@@ -711,12 +771,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let launch = ManagedLaunch {
             cwd,
             claude_bin: &claude_bin,
-            config_dir: config_dir.as_deref(),
+            config_dir: Some(&config_dir),
             session_id,
             prompt_file: prompt_file.as_deref(),
             oauth_token: oauth_token.as_deref(),
             gh_env,
             mcp_env: &mcp_env,
+            mcp_config: mcp_config.as_deref(),
             memory_reachable,
         };
         // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
@@ -728,19 +789,17 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Best-effort: `None` from a driver with no pane-id support keeps the
         // previous session-scoped behaviour exactly.
         let spawn_pane = self.tmux.get_pane_id(tmux_name);
-        managed_launch::deliver(
+        // #8233: spec files land under the named state home, not `$HOME`.
+        managed_launch::deliver_in(
             self.tmux.as_ref(),
             tmux_name,
             spawn_pane.as_deref(),
             &managed_launch::spawn_spec(&launch),
+            &self.spec_dir(),
         )?;
         // #2157 item 1: durable publish, belt-and-suspenders alongside the
         // pane-shell export the launch line still carries.
-        self.publish_session_env(
-            tmux_name,
-            session_id,
-            config_dir.as_deref().and_then(|p| p.to_str()),
-        );
+        self.publish_session_env(tmux_name, session_id, config_dir.to_str());
         Ok(())
     }
 
@@ -794,12 +853,16 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
-        let config_dir = prepare_managed_config(tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
         // #7422: same fail-closed MCP composition as `spawn`, in the same
         // position — a resumed pane must not be the one path that still loads
-        // every shared server.
-        crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
-            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+        // every shared server. #8233: under the same named state home.
+        let mcp_config = crate::core::session_mcp_scope::provision_for_spawn_at(
+            &self.fw.crate_config_root(),
+            cwd,
+            Some(&config_dir),
+        )
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
                 "claude binary not found on PATH or in well-known dirs \
@@ -811,7 +874,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // this fix only spawn() passed --append-system-prompt-file, so every
         // resumed/guided-resume/crash-recovery session silently ran vanilla
         // Claude Code. Non-fatal: a write failure omits the flag.
-        let prompt_file = build_prompt_file(cwd, Some(session_id));
+        // #8233: named framework root, exactly as `spawn` uses.
+        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to
@@ -824,13 +888,18 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // #4181: the per-project MCP pins the shared user-scope declarations
         // cannot carry as arguments. Resolved once per spawn (it touches the
         // trusty-search daemon), never inside the spec builder.
-        let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
+        // #8233: named root, as in `spawn`.
+        let mcp_env = crate::core::mcp_session_env::session_mcp_env_with(
+            &FrameworkPaths::for_managed_project(&self.fw.root, cwd),
+            cwd,
+            None,
+        );
 
         // #2013: a stored id can go stale — existence-check it before trusting
         // `--resume <id>` so a missing session falls back gracefully instead
         // of a hard `claude` failure.
         let effective_id = claude_session_id.filter(|id| {
-            let exists = session_id_exists(cwd, config_dir.as_deref(), id);
+            let exists = session_id_exists(cwd, Some(&config_dir), id);
             if !exists {
                 tracing::warn!(
                     session = %tmux_name,
@@ -867,12 +936,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let launch = ManagedLaunch {
             cwd,
             claude_bin: &claude_bin,
-            config_dir: config_dir.as_deref(),
+            config_dir: Some(&config_dir),
             session_id,
             prompt_file: prompt_file.as_deref(),
             oauth_token: oauth_token.as_deref(),
             gh_env,
             mcp_env: &mcp_env,
+            mcp_config: mcp_config.as_deref(),
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
             memory_reachable: resolve_memory_reachable(self.memory_reachable),
@@ -885,7 +955,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // nothing to look up and must not spawn `claude` at all.
         let spec =
             claude_code_agents::relaunch_spec(&launch, claude_session_id, effective_id, || {
-                claude_code_agents::query_registry(&claude_bin, config_dir.as_deref())
+                claude_code_agents::query_registry(&claude_bin, Some(&config_dir))
             });
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
@@ -894,15 +964,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // the pane this resume is actually about. `None` (a legacy record
         // predating pane-id capture) preserves the prior session-scoped
         // behavior — there is no stronger signal available.
-        managed_launch::deliver(self.tmux.as_ref(), tmux_name, pane_id, &spec)?;
+        // #8233: named spec dir, as in `spawn`.
+        managed_launch::deliver_in(self.tmux.as_ref(), tmux_name, pane_id, &spec, &self.spec_dir())?;
         // #2157 item 1: durable publish for the RESUME path too — a fresh tmux
         // session is created on resume, so it needs the same belt-and-suspenders
         // set-environment call as spawn().
-        self.publish_session_env(
-            tmux_name,
-            session_id,
-            config_dir.as_deref().and_then(|p| p.to_str()),
-        );
+        self.publish_session_env(tmux_name, session_id, config_dir.to_str());
         Ok(())
     }
 

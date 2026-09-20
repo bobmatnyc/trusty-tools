@@ -498,6 +498,32 @@ pub fn provision_for_spawn(
     }
 }
 
+/// [`provision_for_spawn`] against an explicit `~/.trusty-tools/trusty-mpm`
+/// root (#8233).
+///
+/// Why: [`provision_for_spawn`] resolves that root from the process home, so a
+/// test driving the real managed-launch path wrote a session-mcp file into the
+/// operator's own `~/.trusty-tools/`. The daemon already holds the layout this
+/// launch belongs to; naming the root here is what lets it reach the write.
+/// What: `Ok(None)` when `config_dir` is `None`; otherwise [`provision_at`]
+/// against [`session_mcp_path_at`]`(root, cwd)`, wrapped in `Some`.
+///
+/// # Errors
+///
+/// Propagates [`provision_at`]'s error unchanged.
+/// Test: `provision_for_spawn_at_writes_under_the_named_root`,
+/// `provision_for_spawn_at_declines_a_non_relocated_spawn`.
+pub fn provision_for_spawn_at(
+    root: &Path,
+    cwd: &Path,
+    config_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, ScopeError> {
+    match config_dir {
+        None => Ok(None),
+        Some(dir) => provision_at(&session_mcp_path_at(root, cwd), dir).map(Some),
+    }
+}
+
 #[cfg(test)]
 #[path = "session_mcp_scope_tests.rs"]
 mod tests;
