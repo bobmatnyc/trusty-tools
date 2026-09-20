@@ -66,7 +66,11 @@ async fn register_ok(state: &Arc<SearchAppState>, id: &str, root: PathBuf) {
     let response =
         super::indexes::create_index_handler(State(Arc::clone(state)), Json(create_req(id, root)))
             .await;
-    assert_eq!(response.status(), StatusCode::OK, "first create must succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "first create must succeed"
+    );
 }
 
 /// Read a refusal's JSON body.

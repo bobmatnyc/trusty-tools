@@ -447,12 +447,8 @@ pub(crate) async fn create_index_report(
     // an existing index's root, or that encloses one, was accepted — and an
     // overlapping root is how #402 / #2178 let a reindex prune another index's
     // corpus. An unrunnable check is an error, never an implicit "no overlap".
-    match super::root_overlap::find_root_overlap(
-        &handles,
-        &cold_entries,
-        &req.root_path,
-        Some(&id),
-    ) {
+    match super::root_overlap::find_root_overlap(&handles, &cold_entries, &req.root_path, Some(&id))
+    {
         Ok(None) => {}
         Ok(Some(conflict)) => {
             tracing::warn!(
