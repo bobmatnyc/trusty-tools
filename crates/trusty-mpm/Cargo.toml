@@ -87,7 +87,7 @@ name = "trusty-mpm"
 # expect to find on crates.io. Patch: trusty-mpm is excluded from the semver
 # gate (binary-only consumer surface, no library dependents), and the changes
 # folded in here are fixes plus additive skill/agent assets.
-version = "1.6.3"
+version = "1.6.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
