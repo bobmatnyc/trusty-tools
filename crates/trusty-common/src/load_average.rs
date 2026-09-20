@@ -77,10 +77,14 @@ pub enum LoadAverageError {
         errno: Option<i32>,
     },
     /// The source was readable but did not contain three parsable numbers.
-    #[error("load-average source {source} is malformed: {detail}")]
+    ///
+    // #8261: the field is `origin`, not `source` — `thiserror` reads a field
+    // literally named `source` as the error's `std::error::Error::source()`,
+    // and a `&'static str` does not implement `StdError`.
+    #[error("load-average source {origin} is malformed: {detail}")]
     Malformed {
         /// Where the unparsable text came from.
-        source: &'static str,
+        origin: &'static str,
         /// What was wrong with it.
         detail: String,
     },
@@ -195,13 +199,13 @@ pub fn parse_proc_loadavg(raw: &str) -> Result<LoadAverage, LoadAverageError> {
         let field = fields
             .next()
             .ok_or_else(|| LoadAverageError::Malformed {
-                source: "/proc/loadavg",
+                origin: "/proc/loadavg",
                 detail: format!("missing the {which} field"),
             })?;
         field
             .parse::<f64>()
             .map_err(|err| LoadAverageError::Malformed {
-                source: "/proc/loadavg",
+                origin: "/proc/loadavg",
                 detail: format!("{which} field {field:?} does not parse: {err}"),
             })
     };
@@ -278,7 +282,7 @@ mod tests {
         // A malformed reading has no errno, and the refusal message must not
         // invent one.
         let malformed = LoadAverageError::Malformed {
-            source: "/proc/loadavg",
+            origin: "/proc/loadavg",
             detail: "x".to_string(),
         };
         assert_eq!(malformed.errno(), None);

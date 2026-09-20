@@ -36,7 +36,7 @@
 
 use std::fmt;
 
-use crate::core::builders::{BuildersConfig, BuildersConfigError};
+use crate::core::builders::BuildersConfig;
 
 /// Which capacity reading could not be taken.
 ///
@@ -444,7 +444,9 @@ fn fail_closed(ceiling: u32, reason: CapacityReason) -> Capacity {
 
 /// The config error type, re-exported so a caller matching on
 /// [`CapacityReason::ConfigRefused`] can find its source next door.
-pub use BuildersConfigError as CapacityConfigError;
+// #8261: the full path, not the local `use` alias — a `pub use` of a privately
+// imported name is E0365, and a bare alias also reads as an unused import.
+pub use crate::core::builders::BuildersConfigError as CapacityConfigError;
 
 /// Take both readings from THIS machine, right now.
 ///
