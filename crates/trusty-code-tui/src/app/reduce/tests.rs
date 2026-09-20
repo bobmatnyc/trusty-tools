@@ -229,6 +229,69 @@ fn a_prompt_submitted_while_cancelling_is_not_dispatched() {
     );
 }
 
+/// #8207, the one window where [`ReplApp::cancelling`] is the DECIDING term of
+/// [`ReplApp::accepts_submit`]. `busy` masks it everywhere else, because a
+/// cancel dispatched on a live turn deliberately leaves `busy` set until the
+/// reply lands. The turn can finish on its own first: Ctrl-C carries no `busy`
+/// guard (`apply_key`'s `'c'` arm), and the turn's own `TurnFinished` safety net
+/// clears `busy` while it is still the live generation — so a Ctrl-C pressed as
+/// the turn ends leaves `busy == false` with `session.cancel` still in flight.
+/// Deleting `&& !self.cancelling` from `accepts_submit` reopens input there and
+/// sends the next prompt into a session whose cancel the daemon is still
+/// processing, which is the `-32003 already has a task running` collision #8207
+/// was filed for.
+#[test]
+fn an_unsettled_cancel_keeps_input_closed_after_the_turn_finished_on_its_own() {
+    let mut app = ReplApp::new("demo", "u");
+    for c in "explain X".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.pending_submit.take().as_deref(), Some("explain X"));
+    assert!(app.busy, "the turn is running");
+    // The generation `crate::run::dispatch_pending` stamps the dispatched turn
+    // with, so the `TurnFinished` below is the live one and not a straggler.
+    app.set_current_generation(1);
+
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 });
+    assert!(
+        !app.busy,
+        "a matching TurnFinished ends the turn on its own"
+    );
+
+    // Only now does the Ctrl-C the operator pressed a moment earlier reach the
+    // reducer. `busy` is already false, so nothing but `cancelling` holds the
+    // gate shut while the cancel RPC is outstanding.
+    request_cancel(&mut app);
+    assert!(
+        app.cancelling && !app.busy,
+        "the deciding state: a cancel outstanding over an already-finished turn"
+    );
+
+    apply(&mut app, ReplEvent::Submit("q".to_string()));
+    assert!(
+        app.pending_submit.is_none(),
+        "an unsettled cancel must not dispatch a prompt, turn finished or not"
+    );
+
+    for c in "next".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Enter));
+    assert!(
+        app.pending_submit.is_none(),
+        "Enter must not dispatch a prompt while the cancel is unsettled"
+    );
+    assert_eq!(
+        app.input_buf, "next\n",
+        "the typed line must stay queued in the composer, newline included"
+    );
+
+    // The window is bounded: the reply still arrives and settles the state.
+    apply(&mut app, ReplEvent::CancelSettled(CancelReply::Stopped));
+    assert!(app.accepts_submit(), "the cancel's reply reopens input");
+}
+
 /// #8207: only a CONFIRMED stop says "cancelled" and reopens input.
 #[test]
 fn apply_cancel_settled_stopped_reopens_input() {

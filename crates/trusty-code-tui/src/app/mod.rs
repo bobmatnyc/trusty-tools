@@ -758,9 +758,14 @@ impl ReplApp {
     /// or the typed line is consumed and then dropped by
     /// [`Self::submit_line`]'s own guard.
     /// What: pure read, no mutation. `false` does not mean the keystroke is
-    /// lost — [`reduce::apply_key`] queues the typed text in the composer
-    /// instead (#8240).
+    /// lost — `reduce::apply_key` queues the typed text in the composer
+    /// instead (#8240). Not a link: it is a private free function in a private
+    /// module, which rustdoc cannot resolve at all under
+    /// `deny(rustdoc::broken_intra_doc_links)`.
     /// Test: `reduce::tests::a_prompt_submitted_while_cancelling_is_not_dispatched`,
+    /// `reduce::tests::an_unsettled_cancel_keeps_input_closed_after_the_turn_finished_on_its_own`
+    /// (the only case where [`Self::cancelling`] is the deciding term — `busy`
+    /// closes the gate in the others),
     /// `reduce::tests::apply_cancel_settled_stopped_reopens_input`.
     pub fn accepts_submit(&self) -> bool {
         !self.busy && !self.cancelling && self.pending_permission.is_none()
