@@ -120,7 +120,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.7" }
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.8" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9" }
 trusty-common = { path = "crates/trusty-common", version = "0.51" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).

@@ -87,7 +87,11 @@ name = "trusty-mpm"
 # expect to find on crates.io. Patch: trusty-mpm is excluded from the semver
 # gate (binary-only consumer surface, no library dependents), and the changes
 # folded in here are fixes plus additive skill/agent assets.
-version = "1.6.3"
+# 1.6.4 (#8293): patch — 1.6.3 is already published on crates.io and this PR
+# edits src/** (rendering the shared PM routing table), so the "PR version
+# bump vs crates.io" gate (#4421) requires the bump. Patch: trusty-mpm is
+# excluded from the semver gate (binary-only consumer surface).
+version = "1.6.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
