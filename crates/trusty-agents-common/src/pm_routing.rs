@@ -17,6 +17,14 @@
 //! Test: `pm_routing_tests` — table/pipeline rendering, the shared spine, and
 //! the per-consumer cell-order invariants.
 //!
+//! The public surface is deliberately narrow (#8293): [`fill`], [`Consumer`],
+//! [`FillError`], [`agents`], [`render_table`], [`render_pipeline`], the two
+//! placeholder constants, and the two pipeline constants [`MPM_PIPELINE`] /
+//! [`TCODE_PIPELINE`]. The rows themselves and the types they are built from
+//! are `pub(crate)`: a consumer that read a [`Route`] directly could route work
+//! without the drift test seeing it, and every one of those items would
+//! otherwise be a semver-gated signature on a published crate.
+//!
 //! The rows are deliberately NOT one shared string both products `include_str!`.
 //! trusty-mpm's cells point at `Skill(...)` references, `make`/`mise run`
 //! targets and the tmux-hosted Claude Code harness; trusty-code hosts none of
@@ -75,13 +83,13 @@ impl Consumer {
 /// `label` and `text` are the cell bodies, rendered verbatim between pipes.
 /// Test: `cell_order_is_unique_and_contiguous_per_consumer`.
 #[derive(Debug, Clone, Copy)]
-pub struct Cell {
+pub(crate) struct Cell {
     /// 1-based position in the consumer's rendered table.
-    pub order: u8,
+    pub(crate) order: u8,
     /// Left column — the class of work, as that consumer names it.
-    pub label: &'static str,
+    pub(crate) label: &'static str,
     /// Right column — the agent(s), as that consumer names them.
-    pub text: &'static str,
+    pub(crate) text: &'static str,
 }
 
 /// How one consumer routes one class of work.
@@ -96,19 +104,22 @@ pub struct Cell {
 /// `None` when the consumer routes the class but renders no row for it.
 /// Test: `every_route_agent_is_named_by_its_own_cell`.
 #[derive(Debug, Clone, Copy)]
-pub struct Route {
+pub(crate) struct Route {
     /// The agent this consumer dispatches this class of work to.
-    pub agent: &'static str,
+    pub(crate) agent: &'static str,
     /// Other agents the cell names, beyond `agent`. Routing targets only.
-    pub also: &'static [&'static str],
+    pub(crate) also: &'static [&'static str],
     /// The cell's remaining backtick-quoted spans — the ones that are NOT
     /// routing targets and must never be resolved against a roster: a retired
     /// agent the cell names in order to forbid it (`ops`), or a build verb
     /// (`make`, `mise run`). Declaring them is what lets the drift test treat
-    /// every span in the cell as accounted for.
-    pub non_agents: &'static [&'static str],
+    /// every span in the cell as accounted for. Read only by
+    /// `every_route_agent_is_named_by_its_own_cell` — a declaration the tests
+    /// hold the cell prose to, never a runtime input.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) non_agents: &'static [&'static str],
     /// The rendered table row, when this consumer's table carries one.
-    pub cell: Option<Cell>,
+    pub(crate) cell: Option<Cell>,
 }
 
 /// One class of work, routed by every consumer that handles it.
@@ -118,20 +129,20 @@ pub struct Route {
 /// nowhere.
 /// Test: `row_ids_are_unique`.
 #[derive(Debug, Clone, Copy)]
-pub struct RoutingRow {
+pub(crate) struct RoutingRow {
     /// Stable identifier for the class of work.
-    pub id: &'static str,
+    pub(crate) id: &'static str,
     /// trusty-mpm's route, or `None` when it routes this class nowhere.
-    pub mpm: Option<Route>,
+    pub(crate) mpm: Option<Route>,
     /// trusty-code's route, or `None` when it routes this class nowhere.
-    pub tcode: Option<Route>,
+    pub(crate) tcode: Option<Route>,
 }
 
 impl RoutingRow {
     /// This row's route for one consumer.
     ///
     /// Test: `routes_yields_only_the_consumers_rows`.
-    pub fn route(&self, consumer: Consumer) -> Option<&Route> {
+    pub(crate) fn route(&self, consumer: Consumer) -> Option<&Route> {
         match consumer {
             Consumer::Mpm => self.mpm.as_ref(),
             Consumer::Tcode => self.tcode.as_ref(),
@@ -148,7 +159,11 @@ impl RoutingRow {
 /// What: three [`ROUTING_ROWS`] ids. Each consumer's pipeline must name these
 /// rows' agents in this relative order.
 /// Test: `every_pipeline_follows_the_shared_spine`.
-pub const SIMPLE_TASK_SPINE: &[&str] = &["context", "source-change", "verification"];
+///
+/// Read only by that test — the spine is an invariant each consumer's pipeline
+/// is held to, not a value either product dispatches from.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const SIMPLE_TASK_SPINE: &[&str] = &["context", "source-change", "verification"];
 
 /// trusty-mpm's full-pipeline chain, in dispatch order.
 ///
@@ -165,8 +180,14 @@ pub const TCODE_PIPELINE: &[&str] = &["research", "engineer", "qa-agent"];
 
 /// The marker an authored template carries where the rendered table belongs.
 ///
-/// Why: a Markdown comment contributes nothing to what the model reads, so the
-/// delivered prompt is the table alone — no residual scaffolding.
+/// Why: a Markdown comment is invisible to a renderer, so the marker can sit in
+/// the template exactly where the table belongs. [`fill`] consumes this line
+/// itself in both products — what it is replaced by is the table alone.
+/// Whether OTHER comments in a template survive delivery is a per-consumer
+/// fact, not a property of this marker: trusty-mpm's compose-time fold
+/// (`core::instruction_fold`) drops every whole-line HTML comment, while
+/// trusty-code delivers an agent card verbatim, so `pm.md`'s own
+/// `<!-- pm-routing-table:begin/end -->` block markers do reach the model.
 /// Test: `fill_replaces_both_placeholders`.
 pub const TABLE_PLACEHOLDER: &str = "<!-- pm-routing-table -->";
 
@@ -184,7 +205,7 @@ pub const PIPELINE_PLACEHOLDER: &str = "<!-- pm-routing-pipeline -->";
 /// table byte for byte as authored before the lift.
 /// Test: `mpm_table_renders_its_four_choice_rows`,
 /// `tcode_table_renders_its_seven_rows`, plus each consumer's own drift test.
-pub const ROUTING_ROWS: &[RoutingRow] = &[
+pub(crate) const ROUTING_ROWS: &[RoutingRow] = &[
     RoutingRow {
         id: "context",
         mpm: Some(Route {
@@ -363,7 +384,7 @@ pub const ROUTING_ROWS: &[RoutingRow] = &[
 /// Every `(id, route)` pair one consumer holds, in declaration order.
 ///
 /// Test: `routes_yields_only_the_consumers_rows`.
-pub fn routes(consumer: Consumer) -> impl Iterator<Item = (&'static str, &'static Route)> {
+pub(crate) fn routes(consumer: Consumer) -> impl Iterator<Item = (&'static str, &'static Route)> {
     ROUTING_ROWS
         .iter()
         .filter_map(move |row| row.route(consumer).map(|route| (row.id, route)))
@@ -392,7 +413,7 @@ pub fn agents(consumer: Consumer) -> Vec<&'static str> {
 /// The dispatch order one consumer's PM follows for a whole task.
 ///
 /// Test: `every_pipeline_follows_the_shared_spine`.
-pub fn pipeline(consumer: Consumer) -> &'static [&'static str] {
+pub(crate) fn pipeline(consumer: Consumer) -> &'static [&'static str] {
     match consumer {
         Consumer::Mpm => MPM_PIPELINE,
         Consumer::Tcode => TCODE_PIPELINE,
@@ -436,21 +457,57 @@ pub fn render_pipeline(consumer: Consumer) -> String {
         .join(consumer.pipeline_join())
 }
 
+/// Why a consumer's template cannot be filled.
+///
+/// Why: a template that authors a placeholder twice is a defect no drift test
+/// can see — each consumer's check asserts the delivered text CONTAINS the
+/// rendered table, which a prompt carrying it twice satisfies. Returning an
+/// error is what stops that prompt from being delivered at all (#8293).
+/// What: one variant, carrying the marker and how many times it occurs.
+/// Test: `fill_refuses_a_duplicated_placeholder`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FillError {
+    /// A routing placeholder occurs more than once in the template.
+    #[error(
+        "the routing placeholder {placeholder:?} occurs {count} times in this template; \
+         at most one occurrence is allowed, or the prompt ships the routing table twice"
+    )]
+    DuplicatePlaceholder {
+        /// The marker that repeats — [`TABLE_PLACEHOLDER`] or
+        /// [`PIPELINE_PLACEHOLDER`].
+        placeholder: &'static str,
+        /// How many times it occurs in the template.
+        count: usize,
+    },
+}
+
 /// Substitute both placeholders in a consumer's authored template.
 ///
 /// Why: the consumers' templates are Markdown assets (a prompt section, an agent
 /// card), so the seam between authored prose and generated rows is a marker in
 /// the text rather than a call at the consumer's assembly site. One function
 /// means neither product can substitute only half of it.
-/// What: replaces every [`TABLE_PLACEHOLDER`] with [`render_table`] and every
-/// [`PIPELINE_PLACEHOLDER`] with [`render_pipeline`]. A template carrying
-/// neither is returned unchanged — each consumer's own test asserts its template
-/// carries the markers it expects.
-/// Test: `fill_replaces_both_placeholders`, `fill_leaves_an_unmarked_template_alone`.
-pub fn fill(template: &str, consumer: Consumer) -> String {
-    template
-        .replace(TABLE_PLACEHOLDER, &render_table(consumer))
-        .replace(PIPELINE_PLACEHOLDER, &render_pipeline(consumer))
+/// What: replaces [`TABLE_PLACEHOLDER`] with [`render_table`] and
+/// [`PIPELINE_PLACEHOLDER`] with [`render_pipeline`]. Each marker may occur at
+/// most once; a second occurrence is [`FillError::DuplicatePlaceholder`] rather
+/// than a second rendered table. A template carrying neither marker is returned
+/// unchanged — each consumer's own test asserts its template carries the markers
+/// it expects.
+/// Test: `fill_replaces_both_placeholders`, `fill_leaves_an_unmarked_template_alone`,
+/// `fill_refuses_a_duplicated_placeholder`.
+pub fn fill(template: &str, consumer: Consumer) -> Result<String, FillError> {
+    let mut filled = template.to_string();
+    for (placeholder, rendered) in [
+        (TABLE_PLACEHOLDER, render_table(consumer)),
+        (PIPELINE_PLACEHOLDER, render_pipeline(consumer)),
+    ] {
+        let count = template.matches(placeholder).count();
+        if count > 1 {
+            return Err(FillError::DuplicatePlaceholder { placeholder, count });
+        }
+        filled = filled.replace(placeholder, &rendered);
+    }
+    Ok(filled)
 }
 
 #[cfg(test)]

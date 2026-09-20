@@ -877,8 +877,9 @@ fn pm_routing_block_names_only_delegable_roster_agents() {
 /// delivered text is the shared rows' output. Asserting the template still
 /// carries the placeholders is the other half: without them `fill` is a no-op
 /// and the block would silently ship empty.
-/// What: asserts [`PM_CARD_TEMPLATE`] carries both placeholders, that the
-/// rendered card carries neither, and that the routing block of the rendered
+/// What: asserts [`PM_CARD_TEMPLATE`] carries each placeholder exactly once —
+/// twice would render the table twice, which `pm_routing::fill` refuses — that
+/// the rendered card carries neither, and that the routing block of the rendered
 /// card contains exactly what `pm_routing::render_table`/`render_pipeline`
 /// produce for [`Consumer::Tcode`].
 /// Test: this test.
@@ -889,10 +890,12 @@ fn pm_card_routing_block_is_rendered_from_the_shared_rows() {
     };
 
     for placeholder in [TABLE_PLACEHOLDER, PIPELINE_PLACEHOLDER] {
-        assert!(
-            PM_CARD_TEMPLATE.contains(placeholder),
-            "pm.md must carry {placeholder:?} — without it the routing block is \
-             authored here again instead of rendered from the shared rows (#8293)"
+        assert_eq!(
+            PM_CARD_TEMPLATE.matches(placeholder).count(),
+            1,
+            "pm.md must carry {placeholder:?} exactly once — absent, the routing block \
+             is authored here again instead of rendered from the shared rows; twice, \
+             `pm_routing::fill` refuses the card outright (#8293)"
         );
         assert!(
             !pm_card().contains(placeholder),

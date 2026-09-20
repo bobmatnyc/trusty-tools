@@ -258,7 +258,8 @@ fn fill_replaces_both_placeholders() {
     let filled = fill(
         &format!("before\n\n{TABLE_PLACEHOLDER}\n\nmid {PIPELINE_PLACEHOLDER}.\n"),
         Consumer::Tcode,
-    );
+    )
+    .expect("a template with one of each placeholder fills");
     assert!(!filled.contains(TABLE_PLACEHOLDER));
     assert!(!filled.contains(PIPELINE_PLACEHOLDER));
     assert!(filled.contains(&render_table(Consumer::Tcode)));
@@ -268,5 +269,43 @@ fn fill_replaces_both_placeholders() {
 #[test]
 fn fill_leaves_an_unmarked_template_alone() {
     let template = "no markers here\n";
-    assert_eq!(fill(template, Consumer::Mpm), template);
+    assert_eq!(
+        fill(template, Consumer::Mpm).expect("an unmarked template fills"),
+        template
+    );
+}
+
+/// A placeholder authored twice is refused, never rendered twice (#8293).
+///
+/// Why: `fill` used `str::replace`, which substitutes EVERY occurrence, so a
+/// template that duplicated a marker shipped two routing tables and both
+/// consumers' drift tests stayed green — each asserts only that the delivered
+/// text CONTAINS the rendered table. The failure arm has to refuse rather than
+/// render, or the defect reaches a session transcript.
+/// What: fills a template carrying [`TABLE_PLACEHOLDER`] twice and a second one
+/// carrying [`PIPELINE_PLACEHOLDER`] twice, asserting each is
+/// [`FillError::DuplicatePlaceholder`] with its count, and that no output was
+/// produced to advance on.
+/// Test: this test.
+#[test]
+fn fill_refuses_a_duplicated_placeholder() {
+    for (placeholder, template) in [
+        (
+            TABLE_PLACEHOLDER,
+            format!("{TABLE_PLACEHOLDER}\n\nand again\n\n{TABLE_PLACEHOLDER}\n"),
+        ),
+        (
+            PIPELINE_PLACEHOLDER,
+            format!("{PIPELINE_PLACEHOLDER} and {PIPELINE_PLACEHOLDER}\n"),
+        ),
+    ] {
+        assert_eq!(
+            fill(&template, Consumer::Mpm),
+            Err(FillError::DuplicatePlaceholder {
+                placeholder,
+                count: 2
+            }),
+            "a template carrying {placeholder:?} twice must be refused, not rendered twice"
+        );
+    }
 }

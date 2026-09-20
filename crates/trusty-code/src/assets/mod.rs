@@ -300,10 +300,16 @@ pub const PM_CARD_BASELINE_BYTES: usize = 2863;
 /// Test: `assets::tests::pm_card_routing_block_is_rendered_from_the_shared_rows`.
 pub fn pm_card() -> &'static str {
     static FILLED: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        // #8293: the card is embedded at compile time and
+        // `pm_card_routing_block_is_rendered_from_the_shared_rows` asserts each
+        // placeholder occurs exactly once, so the error arm is unreachable in a
+        // build whose own tests pass — and must still refuse rather than deliver
+        // a card carrying the routing table twice.
         let rendered = trusty_agents_common::pm_routing::fill(
             PM_CARD_TEMPLATE,
             trusty_agents_common::pm_routing::Consumer::Tcode,
-        );
+        )
+        .expect("agents/pm.md duplicates a routing placeholder");
         // Leaked deliberately: one ~4 KB allocation for the process lifetime,
         // in exchange for the `&'static str` the embedded roster is built from.
         Box::leak(rendered.into_boxed_str())

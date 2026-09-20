@@ -103,10 +103,16 @@ const AGENT_DELEGATION_TEMPLATE: &str =
 /// `assemble_system_prompt_contains_all_sections`.
 pub(crate) fn agent_delegation() -> &'static str {
     static FILLED: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        // #8293: the template is embedded at compile time and
+        // `mpm_delegation_section_is_rendered_from_the_shared_rows` asserts each
+        // placeholder occurs exactly once, so the error arm is unreachable in a
+        // build whose own tests pass — and must still refuse the launch rather
+        // than deliver a prompt carrying the routing table twice.
         let rendered = trusty_agents_common::pm_routing::fill(
             AGENT_DELEGATION_TEMPLATE,
             trusty_agents_common::pm_routing::Consumer::Mpm,
-        );
+        )
+        .expect("sections/agent-delegation.md duplicates a routing placeholder");
         // Leaked deliberately: one ~4 KB allocation for the process lifetime,
         // in exchange for the `&'static str` the section table is built from.
         Box::leak(rendered.into_boxed_str())
