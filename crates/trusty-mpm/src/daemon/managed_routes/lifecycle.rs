@@ -1239,11 +1239,10 @@ pub async fn resume_managed(
     // unchanged — `DaemonState::new` sets exactly that root — and a test that
     // drives this route no longer writes a usage fold into the operator's own
     // home, which is what kept `resume_managed` untestable past this line.
-    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt_in(
-        state.framework_root(),
-        &workspace,
-        &record.id,
-    ) {
+    let fw_root = state.framework_root();
+    if let Err(msg) =
+        super::session_prep::refresh_resume_compiled_prompt_in(fw_root, &workspace, &record.id)
+    {
         warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
         let _ = mgr.mark_errored(&record.id, &msg).await;
         return Err(ResumeManagedError::Other(msg));
