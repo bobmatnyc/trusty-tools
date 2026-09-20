@@ -12066,7 +12066,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "anyhow",
  "arc-swap",

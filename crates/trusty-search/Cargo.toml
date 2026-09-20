@@ -45,7 +45,7 @@ name = "trusty-search"
 # is the in-tree tip (crates.io is still at 0.52.0) and this bump exists solely
 # so the reinstalled binary reports a distinct version. No src change; not
 # published.
-version = "0.54.2"
+version = "0.54.3"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
