@@ -1114,8 +1114,15 @@ pub(super) async fn front_gate_or_escalate(
 /// state check in a SINGLE round-trip — no pre-flight `get`, so
 /// no TOCTOU window) and maps its typed [`ManagedError`](crate::session_manager::ManagedError) into a typed
 /// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`AlreadyResuming`/`Other`).
-/// `SessionManager::resume` remains the claiming wrapper every OTHER caller
-/// uses; only this route needs the claim held past the record transition. It then re-spawns
+/// #8233 r7 correction: this route is now the ONLY production path that
+/// resumes a managed session, so `SessionManager::resume` — the crate's public
+/// claiming one-shot, which takes the claim and releases it the moment the
+/// record transition returns — has no production caller left. It is kept as
+/// public API and as the seam the manager-level resume tests drive; deleting it
+/// would rewrite ten test modules to open-code `begin_resume` + `resume_inner`
+/// + `note_operator_resume`, which buys nothing this issue is about. The claim
+/// SPAN is what differs: this route holds it past the transition, through the
+/// prompt refresh, the spawn and the post-send check. It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
 /// the final record.
 ///
@@ -1156,7 +1163,10 @@ pub(super) async fn front_gate_or_escalate(
 /// best-effort and never block the resume — a long-lived session worktree
 /// that was previously frozen at its creation commit now catches up to
 /// `origin/main` on every resume instead of silently drifting forever.
-/// Test: `a_second_operator_resume_is_refused_while_one_is_in_flight` covers
+/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane` pins the
+/// claim's SPAN — that it is still held at the first driver call made after the
+/// record reads `Active` on disk, which is the whole of this issue's P0;
+/// `a_second_operator_resume_is_refused_while_one_is_in_flight` covers
 /// the route's own refusal, and
 /// `a_supervisor_tick_does_nothing_to_a_session_being_resumed` /
 /// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` cover the two
@@ -1223,7 +1233,17 @@ pub async fn resume_managed(
     // #4752: the resume path never runs `prepare_session*`, so the compiled PM
     // prompt is refreshed here — fatal, exactly as on the start path; #4832
     // scopes it to this session's id. See `session_prep`'s own doc.
-    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt(&workspace, &record.id) {
+    // #8233 r7: the root-taking seam, anchored to the root THIS daemon runs on
+    // (`~/.trusty-mpm` in production, a tempdir under test) rather than
+    // re-deriving `FrameworkPaths::default()`. Production behaviour is
+    // unchanged — `DaemonState::new` sets exactly that root — and a test that
+    // drives this route no longer writes a usage fold into the operator's own
+    // home, which is what kept `resume_managed` untestable past this line.
+    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt_in(
+        state.framework_root(),
+        &workspace,
+        &record.id,
+    ) {
         warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
         let _ = mgr.mark_errored(&record.id, &msg).await;
         return Err(ResumeManagedError::Other(msg));
