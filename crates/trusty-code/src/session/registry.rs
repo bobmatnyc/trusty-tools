@@ -1130,6 +1130,11 @@ mod cancel_confirm;
 #[path = "registry_todos.rs"]
 mod todo_ops;
 
+/// #8204's `SessionRegistry::record_task_finished` (the structured
+/// completion report's publish path), split out for the same cap.
+#[path = "registry_finish.rs"]
+mod finish_ops;
+
 #[cfg(test)]
 #[path = "registry_tests.rs"]
 mod registry_tests;

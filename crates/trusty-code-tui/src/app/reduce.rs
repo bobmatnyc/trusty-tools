@@ -153,6 +153,13 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::PermissionAnswerFailed { pending, error } => {
             apply_permission_answer_failed(app, pending, &error)
         }
+        // #8204: rendered field by field into labelled slots — see
+        // `super::task_result`. Nothing here parses the report's prose.
+        ReplEvent::TaskResult {
+            agent,
+            agent_id,
+            report,
+        } => super::task_result::apply_task_result(app, agent, agent_id, report),
         ReplEvent::StatusMessage(msg) => app.push_status(msg),
         ReplEvent::ClearScrollback => app.clear_scrollback(),
         // #8164: the splash replaces the banner's identity row — see

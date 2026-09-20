@@ -1984,3 +1984,190 @@ fn permission_unbound_key_leaves_the_prompt_pending() {
     );
     assert!(app.input_buf.is_empty(), "no key reached the line editor");
 }
+
+// ── #8204: structured completion slots ────────────────────────────────────
+
+use crate::event::{TaskChange, TaskEvidence, TaskReport};
+
+fn report_with(changes: Vec<&str>, tests: Option<(i64, i64)>) -> TaskReport {
+    TaskReport {
+        status: "completed".to_string(),
+        summary: "added the flag".to_string(),
+        changes: changes
+            .into_iter()
+            .map(|file| TaskChange {
+                file: file.to_string(),
+                lines_added: Some(3),
+                lines_removed: Some(1),
+            })
+            .collect(),
+        tests_run: tests.map(|(run, _)| run),
+        tests_passed: tests.map(|(_, passed)| passed),
+        evidence: None,
+        verified: false,
+    }
+}
+
+fn task_result(report: TaskReport) -> ReplEvent {
+    ReplEvent::TaskResult {
+        agent: "engineer".to_string(),
+        agent_id: "eng-1".to_string(),
+        report,
+    }
+}
+
+/// THE #8204 criterion: three changed files each get their OWN slot line,
+/// each path appearing exactly once, and none of them is the summary line.
+///
+/// Why: the pre-#8204 render put all of this inside one prose blob, so a
+/// path was findable only by reading the paragraph. A regression back to
+/// that shape fails the "distinct from the summary" assertion below.
+#[test]
+fn task_result_renders_each_changed_path_once() {
+    let mut app = ReplApp::new("demo", "u");
+    let paths = ["crates/a/src/lib.rs", "crates/a/src/b.rs", "README.md"];
+
+    apply(&mut app, task_result(report_with(paths.to_vec(), None)));
+
+    let summary_rows: Vec<&ChatLine> = app
+        .chat
+        .iter()
+        .filter(|l| l.text.contains("added the flag"))
+        .collect();
+    assert_eq!(summary_rows.len(), 1, "one summary slot");
+
+    for path in paths {
+        let rows: Vec<&ChatLine> = app.chat.iter().filter(|l| l.text.contains(path)).collect();
+        assert_eq!(rows.len(), 1, "{path} must appear in exactly one slot");
+        assert!(
+            !rows[0].text.contains("added the flag"),
+            "{path} must not share the summary's slot: {:?}",
+            rows[0].text
+        );
+    }
+    assert!(
+        app.chat
+            .iter()
+            .any(|l| l.text.contains("changed files (3)")),
+        "the changed-files slot must be labelled: {:?}",
+        app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+/// A completion with nothing to report beyond its summary renders no empty
+/// slots — no "changed files", no "tests", no "evidence" headers.
+#[test]
+fn task_result_without_changes_or_tests_has_no_empty_slots() {
+    let mut app = ReplApp::new("demo", "u");
+
+    apply(&mut app, task_result(report_with(vec![], None)));
+
+    for noise in ["changed files", "tests:", "evidence"] {
+        assert!(
+            !app.chat.iter().any(|l| l.text.contains(noise)),
+            "empty slot rendered: {noise} in {:?}",
+            app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(app.chat.len(), 2, "header + summary only");
+}
+
+/// The test counts render in their own slot, as counts.
+#[test]
+fn task_result_renders_the_test_counts_in_their_own_slot() {
+    let mut app = ReplApp::new("demo", "u");
+
+    apply(&mut app, task_result(report_with(vec![], Some((12, 11)))));
+
+    assert!(
+        app.chat
+            .iter()
+            .any(|l| l.text.contains("tests: 11/12 passed")),
+        "{:?}",
+        app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+/// #8289 in the TUI: a claim the captured output does not back is labelled
+/// UNVERIFIED on the header, and the real output lines render in their own
+/// slot beneath it.
+#[test]
+fn task_result_marks_an_unbacked_claim_unverified() {
+    let mut app = ReplApp::new("demo", "u");
+    let mut report = report_with(vec![], Some((12, 12)));
+    report.evidence = Some(TaskEvidence {
+        command: "cargo test -p a".to_string(),
+        lines: vec!["test result: FAILED. 10 passed; 2 failed".to_string()],
+        truncated: false,
+        outcome: "failed".to_string(),
+    });
+
+    apply(&mut app, task_result(report));
+
+    assert!(
+        app.chat[0].text.contains("(unverified)"),
+        "header must not present an unbacked claim as done: {:?}",
+        app.chat[0].text
+    );
+    assert!(
+        app.chat
+            .iter()
+            .any(|l| l.text.contains("test result: FAILED. 10 passed; 2 failed")),
+        "the real output must render: {:?}",
+        app.chat.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+/// A run with no test command at all carries NO verification marker — an
+/// "(unverified)" badge on every chat answer would be noise, not signal.
+#[test]
+fn task_result_with_nothing_to_verify_has_no_marker() {
+    let mut app = ReplApp::new("demo", "u");
+
+    apply(&mut app, task_result(report_with(vec![], None)));
+
+    assert!(
+        !app.chat[0].text.contains("verified"),
+        "{:?}",
+        app.chat[0].text
+    );
+}
+
+/// The report is kept as typed state for #8182's subagent panel, one entry
+/// per `agent_id` — a second completion from the same agent replaces the
+/// first rather than stacking a stale row.
+#[test]
+fn task_result_replaces_an_earlier_report_from_the_same_agent() {
+    let mut app = ReplApp::new("demo", "u");
+
+    apply(&mut app, task_result(report_with(vec!["a.rs"], None)));
+    apply(&mut app, task_result(report_with(vec!["b.rs"], None)));
+
+    assert_eq!(app.finished_tasks.len(), 1);
+    assert_eq!(app.finished_tasks[0].agent_id, "eng-1");
+    assert_eq!(app.finished_tasks[0].report.changes[0].file, "b.rs");
+}
+
+/// A completion inside an open delegation renders indented within that
+/// block, not at top level.
+#[test]
+fn task_result_inside_a_delegation_renders_indented() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::DelegationStarted {
+            agent_id: "eng-1".to_string(),
+            agent: "engineer".to_string(),
+            task: "add the flag".to_string(),
+        },
+    );
+
+    apply(&mut app, task_result(report_with(vec!["a.rs"], None)));
+
+    let path_row = app
+        .chat
+        .iter()
+        .find(|l| l.text.contains("a.rs"))
+        .expect("the changed-file slot");
+    assert_eq!(path_row.role, ChatRole::Delegated);
+}

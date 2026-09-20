@@ -342,6 +342,90 @@ pub enum ReplEvent {
     /// `subscribe_workstream_events` call attempts to reconnect (DOC-50
     /// §2.4).
     ConnectionLost { reason: String },
+
+    /// An agent finished its task, with the structured report the backend
+    /// validated (#8204).
+    ///
+    /// Why: the same completion also arrives as an `AssistantOutput` blob of
+    /// rendered prose, which is all the scrollback could show — the changed
+    /// files, the test counts and the captured test output were there but
+    /// unreachable without re-parsing the text. This variant carries them as
+    /// data, so the reducer fills labelled slots instead.
+    /// What: `agent`/`agent_id` are the same attribution pair
+    /// [`Self::DelegationStarted`] carries, so a completion can be placed
+    /// inside the delegation that produced it — and so #8182's subagent panel
+    /// can key a finished row on `agent_id` without a further protocol
+    /// change. `report` is rendered field by field and never parsed; see
+    /// [`TaskReport`].
+    TaskResult {
+        agent: String,
+        agent_id: String,
+        report: TaskReport,
+    },
+}
+
+/// One agent's structured completion report (#8204, #8289) — the payload of
+/// [`ReplEvent::TaskResult`].
+///
+/// Why: the shape this crate renders into dedicated slots. It mirrors
+/// `trusty_code::finish_report::FinishReport` field for field WITHOUT
+/// depending on that crate (the dependency runs the other way: `trusty-code`
+/// builds these values and hands them over), the same arrangement
+/// [`DelegationOutcome`] uses.
+/// What: `status` is the backend's own word (`completed`/`failed`/
+/// `cancelled`), rendered verbatim. `summary`, `changes`, `tests_run` and
+/// `tests_passed` are the agent's own report. `evidence` is what the test
+/// command actually printed, and `verified` says whether THAT output — not
+/// the agent — states a pass. A consumer that renders only one thing renders
+/// `verified`, because it is the only field an agent cannot overstate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReport {
+    /// `completed` / `failed` / `cancelled`, as the backend spelled it.
+    pub status: String,
+    /// The agent's free-text summary.
+    pub summary: String,
+    /// The files the agent reported changing, each with a non-empty path.
+    pub changes: Vec<TaskChange>,
+    /// The agent's own count of tests run.
+    pub tests_run: Option<i64>,
+    /// The agent's own count of tests passed.
+    pub tests_passed: Option<i64>,
+    /// What the test command printed, when one ran.
+    pub evidence: Option<TaskEvidence>,
+    /// Whether captured output states a pass. Never the agent's claim.
+    pub verified: bool,
+}
+
+/// One changed file in a [`TaskReport`] (#8204).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskChange {
+    /// The file's path.
+    pub file: String,
+    /// Lines added, when the agent reported a count.
+    pub lines_added: Option<i64>,
+    /// Lines removed, when the agent reported a count.
+    pub lines_removed: Option<i64>,
+}
+
+/// The captured output of the test command a run ended on (#8289).
+///
+/// Why: the evidence slot exists so an operator can read the suite's own
+/// verdict beside the agent's claim about it.
+/// What: `command` is the invocation; `lines` are the verdict lines the
+/// backend captured, already capped and truncated there — this crate renders
+/// them verbatim and never re-derives a verdict from them. `truncated` says
+/// earlier lines were dropped; `outcome` is the backend's classification
+/// (`passed`/`failed`/`unverified`), rendered as the slot's label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEvidence {
+    /// The shell command whose output this is.
+    pub command: String,
+    /// The captured verdict lines, in printed order.
+    pub lines: Vec<String>,
+    /// Whether earlier lines were dropped by the backend's cap.
+    pub truncated: bool,
+    /// The backend's classification of `lines`.
+    pub outcome: String,
 }
 
 /// How a delegated sub-agent's run ended (#7940) — the payload of
