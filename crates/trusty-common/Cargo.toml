@@ -159,6 +159,10 @@ lanes = [
         # the machine; keeping them in one lane is what makes the "sizing budget
         # vs. live telemetry" split visible to whoever edits either.
         "machine-tier",
+        # #8261: load-average joins the same lane as host-metrics and
+        # machine-tier — all three read the machine, and the lane that owns two
+        # of them is the one whose editor must see the third.
+        "load-average",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -895,6 +899,15 @@ console-metrics = ["stdio-mcp-client"]
 # consumer's build. Adds no new crate to the lockfile — only two extra sysinfo
 # features, and only for a consumer that opts in.
 host-metrics = ["sysinfo/disk", "sysinfo/network"]
+# #8261: the `load_average` module — the kernel's 1-minute load average, which
+# builder admission reads and which `host_metrics` does not expose (its
+# `CpuMetrics::usage_pct` is an instantaneous sample, so a machine between two
+# `rustc` bursts reads idle through it). Adds no crate to the lockfile: `libc`
+# is already a `cfg(unix)` dependency here and the Linux path is a plain file
+# read; the only reason this is a feature at all is that `thiserror` is optional
+# in this crate, and the module's error enum uses it per the workspace's
+# libraries-use-thiserror rule.
+load-average = ["dep:thiserror"]
 # #6820: machine-tier detection + proportional memory budget, hoisted out of
 # trusty-search so trusty-memory reads the same numbers. Zero new dependencies —
 # the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
