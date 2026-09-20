@@ -661,6 +661,23 @@ pub mod stdio_mcp_client;
 #[cfg(feature = "host-metrics")]
 pub mod host_metrics;
 
+/// The host's 1-minute load average (#8261).
+///
+/// Why: builder admission needs a SUSTAINED saturation measure, and
+/// [`host_metrics`]' `CpuMetrics::usage_pct` is an instantaneous sample — a
+/// machine between two `rustc` bursts reads idle through it. The kernel's own
+/// load average is a different primitive from anything `sysinfo` exposes, so it
+/// sits beside `host_metrics` rather than inside it. Gated behind
+/// `load-average`, which adds no crate to the lockfile — `libc` is already a
+/// `cfg(unix)` dependency here and the Linux path is a plain file read; the
+/// feature exists only because `thiserror` is optional in this crate.
+/// What: [`load_average::read_load_average`] returns the 1/5/15-minute triple
+/// from `getloadavg(3)` (macOS/BSD) or `/proc/loadavg` (Linux), as a `Result`
+/// that never substitutes a guessed value for a failed reading.
+/// Test: `cargo test -p trusty-common --features load-average -- load_average`.
+#[cfg(feature = "load-average")]
+pub mod load_average;
+
 /// Machine-tier detection + the proportional memory budget (#6820).
 ///
 /// Why: the suite's supported-hardware bar — 24 GB supported, 16 GB minimum,

@@ -267,6 +267,10 @@ trusty-common = { workspace = true, features = [
     # unconditional dependency here, and this only turns on its disk/network
     # features.
     "host-metrics",
+    # #8261: `load_average::read_load_average` — the 1-minute load average the
+    # builder capacity formula reads. `host-metrics` above cannot answer it;
+    # its CPU figure is an instantaneous sample, not a sustained one.
+    "load-average",
     "intent-source",
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
