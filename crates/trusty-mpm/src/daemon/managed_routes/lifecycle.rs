@@ -1119,8 +1119,8 @@ pub(super) async fn front_gate_or_escalate(
 /// claiming one-shot, which takes the claim and releases it the moment the
 /// record transition returns — has no production caller left. It is kept as
 /// public API and as the seam the manager-level resume tests drive; deleting it
-/// would rewrite ten test modules to open-code `begin_resume` + `resume_inner`
-/// + `note_operator_resume`, which buys nothing this issue is about. The claim
+/// would rewrite ten test modules to open-code the three calls it composes,
+/// which buys nothing this issue is about. The claim
 /// SPAN is what differs: this route holds it past the transition, through the
 /// prompt refresh, the spawn and the post-send check. It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
