@@ -245,7 +245,7 @@ fn plausible_prompt_above_the_floor() -> String {
 #[test]
 fn folded_source_bytes_counts_the_bundled_sections() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let bundled: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let bundled: usize = crate::core::instruction_pipeline::section_sources()
         .iter()
         .map(|(_, body)| body.len())
         .sum();
@@ -711,7 +711,7 @@ fn the_no_override_fold_clears_the_prose_floor() {
     let sources = folded_source_bytes(project.path(), roster_read);
     let saved = sources.saturating_sub(prompt.len());
 
-    let prose_floor: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let prose_floor: usize = crate::core::instruction_pipeline::section_sources()
         .iter()
         .map(|(_, body)| {
             body.len() - crate::core::instruction_fold::fold_delivered_prompt(body).len()

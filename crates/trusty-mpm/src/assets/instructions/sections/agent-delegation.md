@@ -9,19 +9,14 @@
 - ALL `make` and `mise run` targets are delegated —
   the PM never runs one directly.
 - On "just do it" or "handle it", delegate the full pipeline:
-  `research` → `engineer` → `local-ops` → `qa` → `documentation`.
+  <!-- pm-routing-pipeline -->.
 - Per-agent trigger lists, default models, and language-engineer selection:
   `Skill(skill="tm-delegation-patterns")`.
 
 Resident here are the four choices that get made wrong — these are
 EXAMPLES of routing, not an exhaustive list:
 
-| Choice | Which agent |
-|---|---|
-| Review BEFORE implementation vs. of code that already exists | `code-analyzer` before, verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED; `code-critic` after, adversarially. Separate agents, not interchangeable |
-| Issue work vs. PR/git work | Route by artifact (#5202): the Issue is `ticketing`'s, whole (P6); the Pull Request — including its title and body — plus every git operation is `version-control`'s (P7). Never split one PR edit across both |
-| Ops, build, release | `local-ops` — every `make` and `mise run` target, ports, processes, install, publish, deploy. Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
-| Testing | `qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa`, never chrome-devtools, claude-in-chrome, or playwright directly |
+<!-- pm-routing-table -->
 
 This table routes tasks to agents; it is NOT a statement of which agents this
 project has. The generated roster appended below is — route to a name only if it

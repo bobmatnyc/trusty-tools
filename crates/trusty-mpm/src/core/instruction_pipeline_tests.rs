@@ -1245,7 +1245,7 @@ fn a_recording_compiled_write_reaches_the_named_framework_root() {
     let project = TempDir::new().expect("project");
     let dest = compiled_prompt_path(project.path(), "sess-7514");
     // #7616: the source set is no longer the bundled sections alone — it also
-    // carries this machine's undeduped roster, so summing `SECTION_SOURCES` here
+    // carries this machine's undeduped roster, so summing `section_sources()` here
     // would undercount and the fixture would land on the folded branch instead.
     // #7746: the roster count itself is fixed at zero rather than read from the
     // ambient machine-global tiers — see the fn doc above for why.
@@ -1637,4 +1637,99 @@ fn no_seed_test_reads_the_ambient_home_directory() {
         0,
         "pass a fixture home under the test's temp dir, not the ambient one"
     );
+}
+
+// ── #8293: the routing table comes from the shared rows ─────────────────────
+
+/// The delegation section's table and pipeline chain are RENDERED from
+/// `trusty_agents_common::pm_routing` (#8293).
+///
+/// Why: this is #8293's drift check for trusty-mpm. Re-authoring the table in
+/// `sections/agent-delegation.md` would leave every other test green — they read
+/// the composed prompt, which would still say something plausible — while the
+/// two products' routing quietly diverged again. Asserting the template keeps
+/// its placeholders is the other half: without them `fill` is a no-op and the
+/// delivered section loses its table entirely.
+/// What: asserts the authored section carries both placeholders and no literal
+/// table, that the delivered [`agent_delegation`] carries neither placeholder,
+/// and that it contains exactly what `render_table`/`render_pipeline` produce
+/// for [`Consumer::Mpm`] — end to end, through `assemble_system_prompt`.
+/// Test: this test.
+#[test]
+fn mpm_delegation_section_is_rendered_from_the_shared_rows() {
+    use trusty_agents_common::pm_routing::{
+        Consumer, PIPELINE_PLACEHOLDER, TABLE_PLACEHOLDER, render_pipeline, render_table,
+    };
+
+    let delivered = agent_delegation();
+    for placeholder in [TABLE_PLACEHOLDER, PIPELINE_PLACEHOLDER] {
+        assert!(
+            AGENT_DELEGATION_TEMPLATE.contains(placeholder),
+            "agent-delegation.md must carry {placeholder:?} — without it the routing \
+             table is authored in this crate again instead of rendered (#8293)"
+        );
+        assert!(
+            !delivered.contains(placeholder),
+            "the delivered section still carries {placeholder:?}, so `fill` did not run"
+        );
+    }
+
+    let table = render_table(Consumer::Mpm);
+    assert!(
+        delivered.contains(&table),
+        "the delegation section has drifted from the shared rows.\n\
+         expected to contain:\n{table}\n\ndelivered:\n{delivered}"
+    );
+    let chain = render_pipeline(Consumer::Mpm);
+    assert!(
+        delivered.contains(&chain),
+        "the full-pipeline bullet has drifted from the shared rows: expected {chain:?}"
+    );
+
+    // The section reaches a launched session through the assembler, not through
+    // the constant — a fill that stopped at the constant would still be a defect.
+    let composed = assemble_system_prompt();
+    assert!(
+        composed.contains(&table) && composed.contains(&chain),
+        "the composed PM prompt carries no rendered routing table (#8293)"
+    );
+}
+
+/// Every agent the shared rows route trusty-mpm's work to is bundled (#8293).
+///
+/// Why: the rows are edited in a crate that cannot see this roster, so a row
+/// naming an agent trusty-mpm does not deploy would send the PM at a
+/// `subagent_type` that fails to dispatch (#4594). `ops` is the deliberate
+/// counter-case: the section names it to forbid it, the shared rows declare it
+/// a non-agent, and it must NOT appear here.
+/// What: for every name in `pm_routing::agents(Consumer::Mpm)` and every entry
+/// of `MPM_PIPELINE`, asserts `agents/<name>.md` is an artifact in
+/// [`crate::core::bundle::ALL`].
+/// Test: this test.
+#[test]
+fn shared_routing_rows_name_only_bundled_mpm_agents() {
+    use trusty_agents_common::pm_routing::{Consumer, MPM_PIPELINE, agents};
+
+    let bundled: Vec<&str> = crate::core::bundle::ALL
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .rel_path
+                .strip_prefix("agents/")
+                .and_then(|name| name.strip_suffix(".md"))
+        })
+        .collect();
+
+    let named = agents(Consumer::Mpm);
+    assert!(
+        !named.contains(&"ops"),
+        "`ops` is DEPRECATED — the section names it to forbid it, so it must not \
+         be declared a routing target: {named:?}"
+    );
+    for name in named.iter().chain(MPM_PIPELINE.iter()) {
+        assert!(
+            bundled.contains(name),
+            "the shared routing rows name '{name}', which trusty-mpm does not bundle"
+        );
+    }
 }

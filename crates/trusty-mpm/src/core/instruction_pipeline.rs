@@ -75,13 +75,44 @@ pub(crate) const SECTION_SEARCH: &str = include_str!("../assets/instructions/sec
 /// `pub(crate)` so the override resolver can use it when no `WORKFLOW.md`
 /// override is present.
 pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/workflow.md");
-/// Agent delegation routing doctrine (the live roster is appended at compose
-/// time, never authored here).
+/// Agent delegation routing doctrine AS AUTHORED — the routing table and the
+/// full-pipeline chain are still placeholders here (the live roster is appended
+/// at compose time, never authored here).
 ///
-/// `pub(crate)` so the override resolver can use it when no
-/// `AGENT_DELEGATION.md` override is present.
-pub(crate) const AGENT_DELEGATION: &str =
+/// #8293: read this only to fill it. [`agent_delegation`] is the delivered
+/// section; the placeholders it substitutes come from the shared routing rows,
+/// so no consumer may hand this template to a session verbatim.
+const AGENT_DELEGATION_TEMPLATE: &str =
     include_str!("../assets/instructions/sections/agent-delegation.md");
+
+/// The delegation doctrine with the shared routing table and pipeline chain
+/// rendered into it (#8293).
+///
+/// Why: the routing rows are owned by `trusty_agents_common::pm_routing`, which
+/// trusty-code renders the same rows from. Filling here — at the one place every
+/// delivery path already reads the section through — means a routing correction
+/// reaches a launched session without a second copy to update, and the
+/// `mpm_delegation_section_is_rendered_from_the_shared_rows` drift test fails if
+/// the delivered text stops matching the rows.
+/// What: [`AGENT_DELEGATION_TEMPLATE`] with
+/// `trusty_agents_common::pm_routing::fill` applied for
+/// [`trusty_agents_common::pm_routing::Consumer::Mpm`], computed once and leaked
+/// so it keeps the `&'static str` shape every caller and the `SECTION_SOURCES`
+/// table already require.
+/// Test: `mpm_delegation_section_is_rendered_from_the_shared_rows`,
+/// `assemble_system_prompt_contains_all_sections`.
+pub(crate) fn agent_delegation() -> &'static str {
+    static FILLED: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        let rendered = trusty_agents_common::pm_routing::fill(
+            AGENT_DELEGATION_TEMPLATE,
+            trusty_agents_common::pm_routing::Consumer::Mpm,
+        );
+        // Leaked deliberately: one ~4 KB allocation for the process lifetime,
+        // in exchange for the `&'static str` the section table is built from.
+        Box::leak(rendered.into_boxed_str())
+    });
+    &FILLED
+}
 /// The canonical Prohibitions and Circuit Breakers tables. Floor, tier `fixed`.
 ///
 /// Split out of `core.md` by #4573: both tables sat inside the `project`-tier
@@ -111,35 +142,42 @@ pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
 /// uses — relative to `assets/instructions/`. Table order is irrelevant; the
 /// manifest's `blocks` array alone decides emission order.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
-    ("sections/identity.md", SECTION_IDENTITY),
-    ("sections/core.md", SECTION_CORE),
-    ("sections/memory.md", SECTION_MEMORY),
-    ("sections/search.md", SECTION_SEARCH),
-    ("sections/workflow.md", WORKFLOW),
-    ("sections/agent-delegation.md", AGENT_DELEGATION),
-    ("sections/enforcement.md", SECTION_ENFORCEMENT),
-    (
-        "sections/non-overridable-rules.md",
-        SECTION_NON_OVERRIDABLE_RULES,
-    ),
-    (
-        "sections/framework-guaranteed-conventions.md",
-        SECTION_FRAMEWORK_CONVENTIONS,
-    ),
-];
+///
+/// #8293: a function rather than a const, because the delegation entry is
+/// rendered from the shared routing rows at first use. Every caller reads it
+/// once per measurement, so rebuilding a nine-element array of `&'static str`
+/// pairs costs nothing worth a cache.
+pub(crate) fn section_sources() -> [(&'static str, &'static str); 9] {
+    [
+        ("sections/identity.md", SECTION_IDENTITY),
+        ("sections/core.md", SECTION_CORE),
+        ("sections/memory.md", SECTION_MEMORY),
+        ("sections/search.md", SECTION_SEARCH),
+        ("sections/workflow.md", WORKFLOW),
+        ("sections/agent-delegation.md", agent_delegation()),
+        ("sections/enforcement.md", SECTION_ENFORCEMENT),
+        (
+            "sections/non-overridable-rules.md",
+            SECTION_NON_OVERRIDABLE_RULES,
+        ),
+        (
+            "sections/framework-guaranteed-conventions.md",
+            SECTION_FRAMEWORK_CONVENTIONS,
+        ),
+    ]
+}
 
 /// Resolve a manifest `file` body path to its embedded source.
 ///
 /// Why: one lookup point means a path typo in the manifest becomes a named
 /// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
 /// instead of an empty block.
-/// What: a linear scan of [`SECTION_SOURCES`] — nine entries, called a handful
+/// What: a linear scan of [`section_sources`] — nine entries, called a handful
 /// of times per process, so a map would buy nothing and would reintroduce the
 /// iteration-order hazard the package format exists to avoid.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
 pub(crate) fn section_source(path: &str) -> Option<&'static str> {
-    SECTION_SOURCES
+    section_sources()
         .iter()
         .find(|(key, _)| *key == path)
         .map(|(_, body)| *body)
@@ -222,7 +260,7 @@ pub(crate) fn workflow_section() -> &'static str {
 pub(crate) fn delegation_doctrine() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         manifest_run(&[SectionId::AgentDelegation])
-            .unwrap_or_else(|| AGENT_DELEGATION.trim().to_string())
+            .unwrap_or_else(|| agent_delegation().trim().to_string())
     });
     &JOINED
 }
@@ -285,7 +323,7 @@ pub fn assemble_system_prompt() -> String {
     [
         pm_instructions(),
         workflow_section(),
-        AGENT_DELEGATION,
+        agent_delegation(),
         base_pm(),
     ]
     .join(SECTION_SEPARATOR)

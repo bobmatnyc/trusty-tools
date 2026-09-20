@@ -127,7 +127,7 @@ mod tests {
     /// place a prompt deliberately on either side of it without hard-coding a
     /// byte count that moves whenever a section is edited.
     fn bundled_bytes() -> usize {
-        crate::core::instruction_pipeline::SECTION_SOURCES
+        crate::core::instruction_pipeline::section_sources()
             .iter()
             .map(|(_, body)| body.len())
             .sum()

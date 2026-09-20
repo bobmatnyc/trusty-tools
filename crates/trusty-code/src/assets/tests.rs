@@ -33,7 +33,7 @@ fn default_agents_parse_and_names_match() {
         "4 originals (engineer, qa-agent, code-reviewer, pm) + 26 roster agents \
          + the 4 delivery-workflow agents (#8129, which absorbed #4027's ticketing)"
     );
-    for agent in DEFAULT_AGENTS {
+    for agent in DEFAULT_AGENTS.iter() {
         let cfg = match agent {
             EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
                 .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
@@ -205,7 +205,7 @@ fn embedded_fallback_still_fires_and_yields_34_agents_with_original_4_intact() {
 /// Test: this test.
 #[test]
 fn base_templates_are_never_dispatchable() {
-    for agent in DEFAULT_AGENTS {
+    for agent in DEFAULT_AGENTS.iter() {
         let lower = agent.name().to_ascii_lowercase();
         assert!(
             !BASE_AGENT_NAMES.contains(&lower.as_str()),
@@ -410,12 +410,12 @@ fn workflow_agents_declare_the_prefixes_the_pm_parses() {
     );
     for token in ["ticketing", "version-control", "local-ops", "documentation"] {
         assert!(
-            PM_MD.contains(token),
+            pm_card().contains(token),
             "pm.md's delegation guidance must name '{token}'"
         );
     }
     assert!(
-        PM_MD.contains("ISSUE:") && PM_MD.contains("PR:"),
+        pm_card().contains("ISSUE:") && pm_card().contains("PR:"),
         "pm.md must name both parseable result prefixes"
     );
 }
@@ -439,7 +439,7 @@ fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
         .map(|(name, _)| name.trim_end_matches(".md").to_ascii_lowercase())
         .collect();
 
-    for agent in DEFAULT_AGENTS {
+    for agent in DEFAULT_AGENTS.iter() {
         if let EmbeddedAgent::Composed { name } = agent {
             assert!(
                 source_keys.iter().any(|k| k == name),
@@ -517,7 +517,7 @@ fn default_task_run_agent_resolves_against_default_agents() {
 fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
     const KNOWN_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
 
-    for agent in DEFAULT_AGENTS {
+    for agent in DEFAULT_AGENTS.iter() {
         let cfg = match agent {
             EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
                 .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
@@ -540,7 +540,7 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
     // The new `pm` agent (#3437) specifically: its declared `model: sonnet`
     // must resolve, end-to-end through `resolve_model`, to a concrete slug —
     // not the bare alias — closing #3438 for the exact agent #3437 adds.
-    let pm_cfg = project_embedded_md("pm", PM_MD).expect("pm loads");
+    let pm_cfg = project_embedded_md("pm", pm_card()).expect("pm loads");
     let resolved = crate::provider::resolve_model(&pm_cfg, None);
     assert!(
         resolved.contains('/'),
@@ -792,14 +792,15 @@ fn declared_tool_grant(md: &str) -> Option<Vec<String>> {
 /// assertion on the verification target is what pins `qa-agent` over `qa`:
 /// DOC-75 §6 requires real test output in the transcript, and tcode's `qa` fork
 /// carries no `bash`.
-/// What: extracts the block from `PM_MD` via [`pm_routing_block`], asserts every
+/// What: extracts the block from the RENDERED card ([`pm_card`]) via
+/// [`pm_routing_block`], asserts every
 /// backticked agent-shaped token in it resolves and is delegable, asserts
 /// [`PM_ROUTING_ORDER`]'s three names appear in that relative order, and asserts
 /// the third one can run commands.
 /// Test: this test.
 #[test]
 fn pm_routing_block_names_only_delegable_roster_agents() {
-    let block = pm_routing_block(PM_MD).unwrap_or_else(|| {
+    let block = pm_routing_block(pm_card()).unwrap_or_else(|| {
         panic!(
             "pm.md carries no routing block — #8287 requires one delimited by \
              {PM_ROUTING_BLOCK_BEGIN:?} .. {PM_ROUTING_BLOCK_END:?}"
@@ -868,22 +869,105 @@ fn pm_routing_block_names_only_delegable_roster_agents() {
     );
 }
 
+/// The card's routing block is RENDERED from the shared routing rows (#8293).
+///
+/// Why: this is #8293's drift check for trusty-code. A card that went back to
+/// authoring its own table would still pass every #8287 test — those only read
+/// what the card says — so the property that actually has to hold is that the
+/// delivered text is the shared rows' output. Asserting the template still
+/// carries the placeholders is the other half: without them `fill` is a no-op
+/// and the block would silently ship empty.
+/// What: asserts [`PM_CARD_TEMPLATE`] carries both placeholders, that the
+/// rendered card carries neither, and that the routing block of the rendered
+/// card contains exactly what `pm_routing::render_table`/`render_pipeline`
+/// produce for [`Consumer::Tcode`].
+/// Test: this test.
+#[test]
+fn pm_card_routing_block_is_rendered_from_the_shared_rows() {
+    use trusty_agents_common::pm_routing::{
+        Consumer, PIPELINE_PLACEHOLDER, TABLE_PLACEHOLDER, render_pipeline, render_table,
+    };
+
+    for placeholder in [TABLE_PLACEHOLDER, PIPELINE_PLACEHOLDER] {
+        assert!(
+            PM_CARD_TEMPLATE.contains(placeholder),
+            "pm.md must carry {placeholder:?} — without it the routing block is \
+             authored here again instead of rendered from the shared rows (#8293)"
+        );
+        assert!(
+            !pm_card().contains(placeholder),
+            "the rendered card still carries {placeholder:?}, so `fill` did not run"
+        );
+    }
+
+    let block = pm_routing_block(pm_card())
+        .unwrap_or_else(|| panic!("the rendered card carries no routing block"));
+    let table = render_table(Consumer::Tcode);
+    assert!(
+        block.contains(&table),
+        "the card's routing block has drifted from the shared rows.\n\
+         expected to contain:\n{table}\n\nblock:\n{block}"
+    );
+    let chain = render_pipeline(Consumer::Tcode);
+    assert!(
+        block.contains(&chain),
+        "the card's pipeline sentence has drifted from the shared rows: \
+         expected {chain:?} in:\n{block}"
+    );
+}
+
+/// Every agent the shared rows route trusty-code's work to is delegable (#8293).
+///
+/// Why: the rows are edited in a crate that cannot see tcode's roster, so a row
+/// naming an agent trusty-code does not bundle would ship a PM that emits a
+/// delegation failing agent resolution (#4594). This check is what makes the
+/// shared source safe to edit from the other product's side.
+/// What: for every name in `pm_routing::agents(Consumer::Tcode)`, asserts a
+/// [`DEFAULT_AGENTS`] entry exists and [`crate::agents::resolve_agent`] returns
+/// it with a non-empty prompt.
+/// Test: this test.
+#[test]
+fn shared_routing_rows_name_only_delegable_tcode_agents() {
+    let named =
+        trusty_agents_common::pm_routing::agents(trusty_agents_common::pm_routing::Consumer::Tcode);
+    assert!(
+        named.len() >= PM_ROUTING_ORDER.len(),
+        "the shared rows route too few agents to run a coding task: {named:?}"
+    );
+    for name in named {
+        assert!(
+            DEFAULT_AGENTS.iter().any(|a| a.name() == name),
+            "the shared routing rows name '{name}', which is not in DEFAULT_AGENTS"
+        );
+        assert!(
+            !resolve_embedded(name)
+                .system_prompt
+                .content
+                .trim()
+                .is_empty(),
+            "'{name}' resolves to an empty prompt, so delegating to it is a no-op"
+        );
+    }
+}
+
 /// The PM card stays under DOC-75 §4b's 2x token-budget cap (#8287).
 ///
 /// Why: token budget is a first-class axis for tcode (vision spec), and this
 /// card is resident in every delegate-mode turn. #8293 and #8294 both add to it
 /// next, so the cap needs a mechanical floor now rather than after the third
 /// edit.
-/// What: asserts `PM_MD.len()` is at most twice [`PM_CARD_BASELINE_BYTES`].
+/// What: asserts the RENDERED card's length — what a session actually
+/// receives, never the shorter authored template — is at most twice
+/// [`PM_CARD_BASELINE_BYTES`].
 /// Test: this test.
 #[test]
 fn pm_card_stays_within_the_doc_75_size_cap() {
     let cap = PM_CARD_BASELINE_BYTES * 2;
     assert!(
-        PM_MD.len() <= cap,
+        pm_card().len() <= cap,
         "pm.md is {} bytes, over DOC-75 §4b's cap of {cap} (2x the \
          {PM_CARD_BASELINE_BYTES}-byte 2026-09-19 baseline)",
-        PM_MD.len()
+        pm_card().len()
     );
 }
 

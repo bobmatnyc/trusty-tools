@@ -377,7 +377,7 @@ fn session_and_root(dest: &Path) -> Option<(String, std::path::PathBuf)> {
 /// `folded_source_bytes_adds_an_override_body`,
 /// `the_roster_dedup_counts_as_folded_source`.
 fn folded_source_bytes(project_dir: &Path, roster_source_bytes: usize) -> usize {
-    let bundled: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let bundled: usize = crate::core::instruction_pipeline::section_sources()
         .iter()
         .map(|(_, body)| body.len())
         .sum();
@@ -417,7 +417,7 @@ pub(crate) fn measure_project_fold(project_dir: &Path) -> Option<(usize, usize)>
 /// Why (#7616): three callers need the same number — the doctor check, and two
 /// tests that must build a fixture prompt provably ABOVE the source set to
 /// exercise the decline branch. Before the roster joined the source side they
-/// could sum [`crate::core::instruction_pipeline::SECTION_SOURCES`] themselves;
+/// could sum [`crate::core::instruction_pipeline::section_sources`] themselves;
 /// now that would undercount and the fixture would land on the wrong branch.
 /// What: the bundled sections, the project's override bodies, and the undeduped
 /// roster for `project_dir`'s tiers.
@@ -455,7 +455,7 @@ pub(crate) fn source_bytes_with(
 /// Test: `a_stub_compiled_prompt_writes_no_row`,
 /// `the_row_reports_the_compiled_prompts_own_size`.
 pub(crate) fn min_plausible_compiled_bytes() -> usize {
-    crate::core::instruction_pipeline::SECTION_SOURCES
+    crate::core::instruction_pipeline::section_sources()
         .iter()
         .map(|(_, body)| body.len())
         .min()

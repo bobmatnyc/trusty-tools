@@ -96,6 +96,9 @@ PINS="scripts/agent-asset-pins.tsv"
 # There is no upstream content to reconcile against, so they are TCODE_ONLY and
 # carry no pin. See the "Delivery-workflow agents" doc block in
 # crates/trusty-code/src/assets/mod.rs.
+# #8293: `pm.md`'s exemption is no longer total — its routing table IS shared
+# (trusty_agents_common::pm_routing), so the scan below requires the card to
+# carry the render placeholders rather than a table of its own.
 TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md \
 ticketing.md version-control.md local-ops.md documentation.md"
 
@@ -303,6 +306,27 @@ while IFS= read -r f; do
   SEEN_COUNT=$((SEEN_COUNT + 1))
 
   if is_in "$base" "${TCODE_ONLY_ARR[@]}"; then
+    # #8293: pm.md is tcode-only, but its routing table is no longer authored
+    # here — it is rendered from trusty_agents_common::pm_routing at load time,
+    # and the card must carry the placeholders that substitution keys on. A
+    # re-authored table would restore the drift this issue closed, so the
+    # tcode-only exemption stops short of the routing block.
+    if [ "$base" = "pm.md" ]; then
+      for marker in '<!-- pm-routing-table -->' '<!-- pm-routing-pipeline -->'; do
+        if ! grep -qF "$marker" "$f"; then
+          echo "FAIL: PM ROUTING SOURCE — $f does not carry '$marker'." >&2
+          echo "      The routing table and pipeline chain come from the shared rows" >&2
+          echo "      in crates/trusty-agents-common/src/pm_routing.rs (#8293); the" >&2
+          echo "      card carries placeholders, never a table of its own." >&2
+          FAIL=1
+        fi
+      done
+      if grep -qF '| The task needs |' "$f"; then
+        echo "FAIL: PM ROUTING SOURCE — $f authors a routing table of its own." >&2
+        echo "      Edit the shared rows in trusty-agents-common instead (#8293)." >&2
+        FAIL=1
+      fi
+    fi
     continue
   fi
   if is_in "$base" "${DEVIATED_ARR[@]}"; then

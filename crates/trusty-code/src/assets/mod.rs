@@ -233,7 +233,9 @@ pub struct EmbeddedSkill {
 const ENGINEER_MD: &str = include_str!("agents/engineer.md");
 const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
 const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
-const PM_MD: &str = include_str!("agents/pm.md");
+/// The PM card AS AUTHORED — its routing table and pipeline chain are still
+/// placeholders (#8293). [`pm_card`] is the card every consumer reads.
+const PM_CARD_TEMPLATE: &str = include_str!("agents/pm.md");
 // #8129: the four delivery-workflow agents. tcode-NATIVE, not forks of the
 // shared roster's same-named files — see this module's "Delivery-workflow
 // agents" doc section.
@@ -259,26 +261,55 @@ pub const PM_ROUTING_BLOCK_END: &str = "<!-- pm-routing-table:end -->";
 /// (#8287).
 ///
 /// Why: DOC-75 §1's delegate run is "research, then engineer, then qa" — the
-/// ORDER is the behaviour, not just the membership, so it is declared here
+/// ORDER is the behaviour, not just the membership, so it is declared once
 /// rather than re-read from the card's prose by each test. `qa-agent` and not
 /// `qa` because DOC-75 §6 requires real test output in the transcript and
 /// tcode's `qa` fork carries no `bash` (see this module's "Tools-restriction
 /// deviation" section) — it recommends commands it cannot run.
-/// What: three roster names, each an [`EmbeddedAgent`] entry in
-/// [`DEFAULT_AGENTS`], in the order the card's routing block must name them.
+/// What: #8293 moved the declaration itself into the shared routing rows, which
+/// render the same three names into the card's pipeline sentence; this is a
+/// re-export, so a reordering there cannot leave tcode's tests asserting the old
+/// order. Each name is an [`EmbeddedAgent`] entry in [`DEFAULT_AGENTS`].
 /// Test: `assets::tests::pm_routing_block_names_only_delegable_roster_agents`.
-pub const PM_ROUTING_ORDER: &[&str] = &["research", "engineer", "qa-agent"];
+pub const PM_ROUTING_ORDER: &[&str] = trusty_agents_common::pm_routing::TCODE_PIPELINE;
 
 /// `pm.md`'s size before #8287 added the routing block, in bytes.
 ///
 /// Why: DOC-75 §4b caps tcode's resident PM prompt at 2x its 2026-09-19 size —
 /// token budget is a first-class axis for tcode. A hardcoded baseline is what
-/// lets a test enforce that cap; deriving it from `PM_MD.len()` would make the
-/// assertion vacuous.
+/// lets a test enforce that cap; deriving it from the card's own length would
+/// make the assertion vacuous.
 /// What: `wc -c` of `crates/trusty-code/src/assets/agents/pm.md` at commit
 /// `3473119`, the tip of `main` when #8287 landed.
 /// Test: `assets::tests::pm_card_stays_within_the_doc_75_size_cap`.
 pub const PM_CARD_BASELINE_BYTES: usize = 2863;
+
+/// The PM card as every consumer reads it: the authored template with the
+/// shared routing table and pipeline chain rendered in (#8293).
+///
+/// Why: the routing rows are owned by `trusty_agents_common::pm_routing`, which
+/// trusty-mpm's PM instructions render the same rows from. Filling once, here,
+/// puts the generated text inside [`DEFAULT_AGENTS`] itself, so every path that
+/// already reads the card — `agents::resolve_agent`, `agents::load_all_agents`,
+/// `agents::deploy` — gets the rendered card with no call-site change and no
+/// second place to forget.
+/// What: [`PM_CARD_TEMPLATE`] with
+/// `trusty_agents_common::pm_routing::fill` applied for
+/// [`trusty_agents_common::pm_routing::Consumer::Tcode`], computed once and
+/// leaked to keep the `&'static str` shape [`EmbeddedAgent::Direct`] requires.
+/// Test: `assets::tests::pm_card_routing_block_is_rendered_from_the_shared_rows`.
+pub fn pm_card() -> &'static str {
+    static FILLED: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        let rendered = trusty_agents_common::pm_routing::fill(
+            PM_CARD_TEMPLATE,
+            trusty_agents_common::pm_routing::Consumer::Tcode,
+        );
+        // Leaked deliberately: one ~4 KB allocation for the process lifetime,
+        // in exchange for the `&'static str` the embedded roster is built from.
+        Box::leak(rendered.into_boxed_str())
+    });
+    &FILLED
+}
 
 /// The routing block's inner text, or `None` when the markers are absent.
 ///
@@ -347,124 +378,132 @@ const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 /// `assets::tests::research_remains_unrestricted`,
 /// `assets::tests::default_task_run_agent_resolves_against_default_agents`,
 /// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
-pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
-    EmbeddedAgent::Direct {
-        name: "engineer",
-        md: ENGINEER_MD,
-    },
-    EmbeddedAgent::Direct {
-        name: "qa-agent",
-        md: QA_AGENT_MD,
-    },
-    EmbeddedAgent::Direct {
-        name: "code-reviewer",
-        md: CODE_REVIEWER_MD,
-    },
-    // #8184: `pm` is the default agent of an INTERACTIVE session, which runs
-    // SOLO since #8184 — it edits and runs commands itself, in the user's real
-    // project root, instead of delegating. Its card is therefore the only
-    // bundled one carrying a `permissions:` block: every mutating tool asks
-    // first (#3422), reads stay unprompted. A headless run has nobody to ask,
-    // so an `ask` there denies (#8100) unless TCODE_PERMISSION_MODE=allow-asks.
-    // #8287: in DELEGATE mode the same card is the only routing text the PM has,
-    // so its contiguous routing block (see [`PM_ROUTING_BLOCK_BEGIN`]) is what
-    // decides whether `research`/`engineer`/`qa-agent` get dispatched at all.
-    EmbeddedAgent::Direct {
-        name: "pm",
-        md: PM_MD,
-    },
-    EmbeddedAgent::Composed { name: "api-qa" },
-    EmbeddedAgent::Composed {
-        name: "code-analyzer",
-    },
-    EmbeddedAgent::Composed {
-        name: "code-critic",
-    },
-    EmbeddedAgent::Composed {
-        name: "dart-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "data-engineer",
-    },
-    // #8129: tcode-native, not the shared roster's `documentation.md`.
-    EmbeddedAgent::Direct {
-        name: "documentation",
-        md: DOCUMENTATION_MD,
-    },
-    EmbeddedAgent::Composed {
-        name: "golang-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "java-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "javascript-engineer",
-    },
-    // #8129: tcode-native build/test/version-bump/changelog agent.
-    EmbeddedAgent::Direct {
-        name: "local-ops",
-        md: LOCAL_OPS_MD,
-    },
-    EmbeddedAgent::Composed {
-        name: "nextjs-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "elixir-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "phoenix-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "php-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "prompt-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "python-engineer",
-    },
-    EmbeddedAgent::Composed { name: "qa" },
-    EmbeddedAgent::Composed {
-        name: "react-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "refactoring-engineer",
-    },
-    EmbeddedAgent::Composed { name: "research" },
-    EmbeddedAgent::Composed {
-        name: "ruby-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "rust-engineer",
-    },
-    EmbeddedAgent::Composed { name: "security" },
-    EmbeddedAgent::Composed {
-        name: "svelte-engineer",
-    },
-    EmbeddedAgent::Composed {
-        name: "tauri-engineer",
-    },
-    // #4027: non-coding ticketing specialist, reachable from trusty-agents'
-    // widened cross-product bridge (#4026). See this module's "Non-coding
-    // cross-product roster addition" doc section. #8129 replaced the shared
-    // copy with a tcode-native one carrying a `tcode_tools:` allowlist.
-    EmbeddedAgent::Direct {
-        name: "ticketing",
-        md: TICKETING_MD,
-    },
-    EmbeddedAgent::Composed {
-        name: "typescript-engineer",
-    },
-    // #8129: the branch/commit/push/PR half of the delivery workflow.
-    EmbeddedAgent::Direct {
-        name: "version-control",
-        md: VERSION_CONTROL_MD,
-    },
-    EmbeddedAgent::Composed { name: "web-qa" },
-    EmbeddedAgent::Composed {
-        name: "web-ui-engineer",
-    },
-];
+///
+/// #8293: a `LazyLock` rather than a const, because the `pm` entry's card is
+/// rendered from the shared routing rows at first use ([`pm_card`]). Every
+/// existing caller reaches it through `.iter()`, which `LazyLock` derefs to
+/// unchanged.
+pub static DEFAULT_AGENTS: std::sync::LazyLock<Vec<EmbeddedAgent>> =
+    std::sync::LazyLock::new(|| {
+        vec![
+            EmbeddedAgent::Direct {
+                name: "engineer",
+                md: ENGINEER_MD,
+            },
+            EmbeddedAgent::Direct {
+                name: "qa-agent",
+                md: QA_AGENT_MD,
+            },
+            EmbeddedAgent::Direct {
+                name: "code-reviewer",
+                md: CODE_REVIEWER_MD,
+            },
+            // #8184: `pm` is the default agent of an INTERACTIVE session, which runs
+            // SOLO since #8184 — it edits and runs commands itself, in the user's real
+            // project root, instead of delegating. Its card is therefore the only
+            // bundled one carrying a `permissions:` block: every mutating tool asks
+            // first (#3422), reads stay unprompted. A headless run has nobody to ask,
+            // so an `ask` there denies (#8100) unless TCODE_PERMISSION_MODE=allow-asks.
+            // #8287: in DELEGATE mode the same card is the only routing text the PM has,
+            // so its contiguous routing block (see [`PM_ROUTING_BLOCK_BEGIN`]) is what
+            // decides whether `research`/`engineer`/`qa-agent` get dispatched at all.
+            EmbeddedAgent::Direct {
+                name: "pm",
+                md: pm_card(),
+            },
+            EmbeddedAgent::Composed { name: "api-qa" },
+            EmbeddedAgent::Composed {
+                name: "code-analyzer",
+            },
+            EmbeddedAgent::Composed {
+                name: "code-critic",
+            },
+            EmbeddedAgent::Composed {
+                name: "dart-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "data-engineer",
+            },
+            // #8129: tcode-native, not the shared roster's `documentation.md`.
+            EmbeddedAgent::Direct {
+                name: "documentation",
+                md: DOCUMENTATION_MD,
+            },
+            EmbeddedAgent::Composed {
+                name: "golang-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "java-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "javascript-engineer",
+            },
+            // #8129: tcode-native build/test/version-bump/changelog agent.
+            EmbeddedAgent::Direct {
+                name: "local-ops",
+                md: LOCAL_OPS_MD,
+            },
+            EmbeddedAgent::Composed {
+                name: "nextjs-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "elixir-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "phoenix-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "php-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "prompt-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "python-engineer",
+            },
+            EmbeddedAgent::Composed { name: "qa" },
+            EmbeddedAgent::Composed {
+                name: "react-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "refactoring-engineer",
+            },
+            EmbeddedAgent::Composed { name: "research" },
+            EmbeddedAgent::Composed {
+                name: "ruby-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "rust-engineer",
+            },
+            EmbeddedAgent::Composed { name: "security" },
+            EmbeddedAgent::Composed {
+                name: "svelte-engineer",
+            },
+            EmbeddedAgent::Composed {
+                name: "tauri-engineer",
+            },
+            // #4027: non-coding ticketing specialist, reachable from trusty-agents'
+            // widened cross-product bridge (#4026). See this module's "Non-coding
+            // cross-product roster addition" doc section. #8129 replaced the shared
+            // copy with a tcode-native one carrying a `tcode_tools:` allowlist.
+            EmbeddedAgent::Direct {
+                name: "ticketing",
+                md: TICKETING_MD,
+            },
+            EmbeddedAgent::Composed {
+                name: "typescript-engineer",
+            },
+            // #8129: the branch/commit/push/PR half of the delivery workflow.
+            EmbeddedAgent::Direct {
+                name: "version-control",
+                md: VERSION_CONTROL_MD,
+            },
+            EmbeddedAgent::Composed { name: "web-qa" },
+            EmbeddedAgent::Composed {
+                name: "web-ui-engineer",
+            },
+        ]
+    });
 
 // -- Slice E2 (#2958): embedded tm agent catalog, for `md_loader`'s in-memory
 // extends-composer. Slice E3 wires the 26 roster names above into

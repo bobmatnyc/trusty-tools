@@ -427,7 +427,7 @@ fn resolve_plugin_agent(
 /// Test: `available_agent_names_unions_disk_and_embedded`.
 pub fn available_agent_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = discover_agents(dir).into_iter().map(|(n, _)| n).collect();
-    for embedded in crate::assets::DEFAULT_AGENTS {
+    for embedded in crate::assets::DEFAULT_AGENTS.iter() {
         let n = embedded.name().to_string();
         if !names.contains(&n) {
             names.push(n);
