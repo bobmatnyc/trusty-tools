@@ -45,9 +45,16 @@
 //! - `task` — always `None`. `PmDelegating.agent`/`task_preview` predates
 //!   `agent_id` and is keyed by name only, so it cannot be joined onto a
 //!   specific spawn without the same name-collision risk as `model` above.
-//! - `todos`, `files_changed` — always `[]`. No event or registry state
-//!   tracks either today; §5.4 lists them in the target result shape but
-//!   they are net-new domain state, not a folding gap.
+//! - `files_changed` — always `[]`. No event or registry state tracks it
+//!   today; §5.4 lists it in the target result shape but it is net-new domain
+//!   state, not a folding gap.
+//!
+//! (#8235) `todos` is no longer one of those deferred defaults: the
+//! `todo_write` tool (`tools::checklist`) writes it through
+//! `SessionRegistry::set_agent_todos` (`registry_todos.rs`) and this endpoint
+//! projects it. It is a `Vec<TodoItem>`, not a `Vec<String>` — the reserved
+//! field's element type was never exercised, and a rendered string would
+//! force every reader to parse a done-mark back out, which §2.1 C-1 forbids.
 //!
 //! `AgentSpawned`/`AgentStarted`/`AgentDone`/`AgentFailed` (DOC-39 AC-13)
 //! are NOT sources here even though their shape looks purpose-built for a
@@ -88,7 +95,9 @@ pub struct AgentRosterEntry {
     pub model: Option<String>,
     pub state: String,
     pub task: Option<String>,
-    pub todos: Vec<String>,
+    /// (#8235) This agent's session checklist, newest write wins — `[]` until
+    /// its first `todo_write` call.
+    pub todos: Vec<crate::events::TodoItem>,
     pub files_changed: Vec<String>,
 }
 
@@ -127,7 +136,9 @@ impl SessionRegistry {
                 model: None,
                 state: if a.running { STATE_RUNNING } else { STATE_IDLE }.to_string(),
                 task: None,
-                todos: Vec::new(),
+                // #8235: the roster row's own list, as `todo_write` last
+                // replaced it.
+                todos: a.todos.clone(),
                 files_changed: Vec::new(),
             })
             .collect())

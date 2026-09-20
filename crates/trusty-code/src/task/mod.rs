@@ -33,6 +33,10 @@ pub mod protocol;
 /// `executor` is its only caller.
 mod result_capture;
 pub mod sink;
+/// (#8235) The `todo_write` tool's concrete `TodoStore` — writes a validated
+/// checklist onto one session's roster row.
+pub mod todo_store;
 
 pub use executor::{TaskRunParams, spawn_task_run};
 pub use sink::SessionToolEventSink;
+pub use todo_store::SessionTodoStore;
