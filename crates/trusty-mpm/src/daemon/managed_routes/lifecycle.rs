@@ -1226,8 +1226,8 @@ pub async fn resume_managed(
     // resolves the base through `default()`, so the deployment repair below wrote
     // its agent and skill manifests into the operator's own
     // `~/.trusty-tools/trusty-mpm/claude-config/` on every test run of this route.
-    let fw =
-        crate::core::paths::FrameworkPaths::for_managed_project(state.framework_root(), &workspace);
+    let fw_root = state.framework_root();
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
     // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
     // `None` keeps the single probe the repair pipeline makes for itself.
     let url = record.repo_url.as_deref();
@@ -1244,7 +1244,6 @@ pub async fn resume_managed(
     // unchanged — `DaemonState::new` sets exactly that root — and a test that
     // drives this route no longer writes a usage fold into the operator's own
     // home, which is what kept `resume_managed` untestable past this line.
-    let fw_root = state.framework_root();
     if let Err(msg) =
         super::session_prep::refresh_resume_compiled_prompt_in(fw_root, &workspace, &record.id)
     {
