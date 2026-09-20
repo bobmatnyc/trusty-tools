@@ -41,6 +41,10 @@ pub mod events;
 
 pub mod harness_doc;
 
+// #8293: the one agent-routing table trusty-mpm's PM instructions and
+// trusty-code's delegate-mode PM card are both rendered from.
+pub mod pm_routing;
+
 pub mod agent_assets;
 
 pub mod compress;
