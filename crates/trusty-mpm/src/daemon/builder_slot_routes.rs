@@ -40,6 +40,8 @@ use serde_json::Value;
 
 use crate::core::agent::is_subagent_dispatch_tool;
 use crate::core::builder_capacity::Capacity;
+#[cfg(test)]
+use crate::core::builder_capacity::CapacityReason;
 use crate::core::builders::resolve_max_concurrent;
 use crate::core::config::MpmConfig;
 use crate::core::dispatch_isolation::{agent_is_builder, dispatch_agent};
@@ -334,6 +336,114 @@ mod tests {
         d.status = DelegationStatus::Running;
         d.started_at = Some(chrono::Utc::now());
         state.upsert_delegation(d);
+    }
+
+    /// #8261: a `Capacity` the test scripts outright, so no reading of the real
+    /// machine enters the assertion.
+    fn capacity(n_effective: u32, ceiling: u32, reason: CapacityReason) -> Capacity {
+        Capacity {
+            n_effective,
+            ceiling,
+            reason,
+        }
+    }
+
+    /// #8261 closure condition: the route admits against the MEASURED count, and
+    /// the answer carries the configured ceiling so the refusal can show both.
+    #[test]
+    fn the_route_admits_against_the_measured_count_and_reports_the_ceiling() {
+        let (state, _dir, session) = hermetic();
+        insert_builder(&state, session, "rust-engineer");
+        // Ceiling 4, but a loaded machine measures room for only the 1 holder.
+        let measured = capacity(
+            1,
+            4,
+            CapacityReason::LoadAboveThreshold {
+                load: 40.0,
+                threshold: 32.0,
+            },
+        );
+
+        let body = builder_slot_op_with_capacity(
+            &state,
+            &session.0.to_string(),
+            dispatch("python-engineer", Some("toolu_M")),
+            &measured,
+        )
+        .expect("route succeeds");
+
+        assert!(
+            !body.claimed,
+            "a second builder is refused at a measured count of 1, though the ceiling is 4"
+        );
+        assert_eq!(body.cap, 1, "the refusal reports the MEASURED count");
+        assert_eq!(body.ceiling, 4, "and the configured ceiling beside it");
+        assert!(body.capacity_reason.contains("40.00"), "{}", body.capacity_reason);
+        assert!(body.capacity_reason.contains("32.00"), "{}", body.capacity_reason);
+        assert_eq!(
+            body.fail_closed_surface, None,
+            "an EXCEEDED limit is not an UNREADABLE one"
+        );
+    }
+
+    /// #8261 Fail-Open Check: an unreadable reading fails CLOSED to the fixed
+    /// ceiling — the pre-#8261 behaviour — and is NAMED in the answer.
+    #[test]
+    fn a_fail_closed_reading_is_named_in_the_answer() {
+        let (state, _dir, session) = hermetic();
+        let failed = capacity(
+            4,
+            4,
+            CapacityReason::FailedClosedToCeiling(
+                crate::core::builder_capacity::ReadFailure {
+                    surface: crate::core::builder_capacity::FailClosedSurface::Load,
+                    detail: "operation not permitted".to_string(),
+                    errno: Some(1),
+                },
+            ),
+        );
+
+        let body = builder_slot_op_with_capacity(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_F")),
+            &failed,
+        )
+        .expect("route succeeds");
+
+        assert!(body.claimed, "fail CLOSED is the fixed ceiling, not zero slots");
+        assert_eq!(body.cap, 4);
+        assert_eq!(
+            body.fail_closed_surface.as_deref(),
+            Some("builder-cap-load-read-failure"),
+        );
+        assert!(body.capacity_reason.contains("errno 1"), "{}", body.capacity_reason);
+    }
+
+    /// #8261: the daemon derives N itself, against its OWN quiet window, so two
+    /// decisions a moment apart cannot disagree about whether the window closed.
+    #[test]
+    fn the_daemon_resolves_capacity_against_its_own_quiet_window() {
+        let (state, _dir, session) = hermetic();
+        insert_builder(&state, session, "rust-engineer");
+        let config = crate::core::builders::BuildersConfig {
+            // A ceiling the live readings cannot lower it below: this asserts
+            // the plumbing, not the machine's current load.
+            max_concurrent: Some(4),
+            ..crate::core::builders::BuildersConfig::default()
+        };
+
+        let capacity = state.builder_capacity(&config, 4, None);
+
+        assert_eq!(capacity.ceiling, 4);
+        assert!(
+            capacity.n_effective >= 1 && capacity.n_effective <= 4,
+            "N is clamped into floor..=ceiling whatever this host reads: {capacity:?}"
+        );
+        assert!(
+            !capacity.reason.to_string().is_empty(),
+            "the number never travels without its reason"
+        );
     }
 
     #[test]
