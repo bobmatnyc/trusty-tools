@@ -83,7 +83,7 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 
 - Conventional commits: `feat/fix/docs/refactor/perf/test/chore: <subject>`.
 - Atomic commits — one logical change each.
-- Reference issues in the body (`Closes #N`) to auto-close on merge.
+- Use `Refs #N`; close issues through the project's verified lifecycle policy.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
 - **Fetch before you branch, and fetch again after you merge.** `git fetch
@@ -127,8 +127,8 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 - **Never remove a worktree — the PM runs the removal (#5791).** `tm hook
   --pm-guard` denies an agent's `git worktree remove`, and `rm -rf` is never
   the workaround. Report the merged PR, the worktree path, and the branch, then
-  stop — the PM reclaims the tree with `tm session prune-worktrees
-  --merged-prs --force`. #7723: `version-control` is the sole, guard-verified
+  stop. Cleanup covers task-owned paths only; a global prune requires separate
+  scope and ownership checks. #7723: `version-control` is the sole, guard-verified
   exception (ADR-0056, ADR-0057), carrying the mechanics in its own body; every
   other agent's refusal is unconditional.
 - The commit and PR footer comes from the `attribution` key tm writes into the
@@ -270,8 +270,9 @@ during verification can discard an uncommitted fix — WIP-commit first
 
 ### Direct observation of success (mandatory)
 
-Run the code and observe it succeed — full suite, real environment, clean
-build, no silent skips (cache hits are not a re-run), the entry point itself.
+Use the project risk/stage test ladder; reuse matching raw evidence and
+preserve caches. Verify runtime claims in the target environment; account for
+skipped tests and distinguish cached results from a fresh execution.
 #7723: full walkthrough, cache-hit pitfall, redirect/retry/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ### Gate Output: Quote Results, Summarize Progress

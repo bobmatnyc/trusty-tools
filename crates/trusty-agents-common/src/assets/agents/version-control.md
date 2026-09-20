@@ -188,7 +188,7 @@ or report, not a note for later.
 | Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears every listed PR to merge; exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; full procedure in `tm-workflow.md`'s "Merge-Queue Ownership" section |
 | Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
-| After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it; it may hold real work |
+| After the task PR's `state: MERGED` is confirmed | `git worktree remove /absolute/repo/.claude/worktrees/task-name` (verified literal path) | A guard refusal is reported; preserve the tree until ownership, clean state and merged status are established |
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
@@ -248,28 +248,20 @@ status:coded -> status:merged; PM to route to ticketing.
 
 You never make that edit yourself. `ticketing` owns every issue verb.
 
-**3. Reclaim the merged worktrees and their local branches.** Only after each
-PR's own `state: MERGED` check:
+**3. Reclaim only this task's merged worktrees and local branches.** Confirm
+each PR's `state: MERGED`, inspect dirty/unpushed work, and verify no other
+session or agent owns the target. Write the verified path literally; shell
+variables and loops can fail static guard checks (#8021):
 
 ```bash
-tm session prune-worktrees --merged-prs          # preview, the default
-tm session prune-worktrees --merged-prs --force  # reclaim
+git worktree remove /absolute/repo/.claude/worktrees/task-name
 ```
 
-That pass spares any tree holding unsaved work, a managed-session claim, or a
-live agent, reporting each spared tree with its reason — why it stays the
-default. Its scans are wider than the direct path below: it also inspects
-nested repositories and high-value gitignored files. `rm -rf` on a worktree is
-never the workaround; a tree whose PR is not MERGED stays, since it may hold
-the only copy of real work.
-
-**You may also remove ONE tree directly (ADR-0057).** The sweep touches every
-registered worktree on the machine; when you have just merged a single PR and
-want only that PR's tree back, run:
-
-```bash
-git worktree remove <path>
-```
+Replace the example with the actual task-owned path. `rm -rf` is never a
+workaround. A global `tm sessions prune-worktrees --merged-prs` sweep inspects
+every registered worktree; use it only when that broader cleanup is authorized,
+preview first, and preserve every spared tree. Do not run a fleet sweep after
+every individual merge.
 
 `tm hook --pm-guard` allows that for you and for no other agent, and only when
 all five of these hold. It checks each one itself — a claim from you counts for

@@ -109,6 +109,13 @@ resumes you. NEVER end a turn narrating an intention to wait ("I'll wait for
 the pull to finish", "monitoring in the background") — that strands the task
 until a human notices, and FOREGROUND `sleep` is blocked in this harness.
 
+Set the tool timeout on the first long command. Auto-backgrounding is not
+failure: retain its task handle/PID and await that same run; do not stop and
+restart it just to change timeout settings. Capture its terminal exit status,
+or append an unconditional `EXIT=` sentinel to its unique log. Wait for that
+sentinel, never a success word such as `passed`; process exit alone does not
+prove success. See #8021.
+
 **Use `tm wait` instead of a fixed timer.** It polls the actual condition in a
 bounded slice and returns before the harness's ~120s auto-background ceiling,
 so you re-issue the same command instead of parking:

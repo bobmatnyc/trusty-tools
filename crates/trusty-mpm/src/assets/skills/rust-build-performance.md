@@ -24,7 +24,7 @@ Practical inner loop, in order:
 
 Reach for `cargo check` by default; reach for a full build only when you
 actually need generated code (running the binary, running tests that need it,
-or the workspace-wide quality gate before shipping).
+or the project-required shipping gate).
 
 ## 2. `cargo check` While Coding
 
@@ -35,16 +35,21 @@ cargo check -p trusty-search # narrow to the crate you're actually editing
 
 `cargo check` runs the same type-checking and borrow-checking as `cargo
 build` but skips code generation, so it's dramatically faster for the
-edit-check-edit cycle. In a large workspace (this one has 21+ crates), always
+edit-check-edit cycle. In a large workspace, always
 narrow with `-p <crate>` unless you specifically need cross-crate diagnostics
 — checking the whole workspace on every keystroke-adjacent save wastes the
 exact time `cargo check` exists to save.
 
-**This does not change the shipping gate.** This project's quality bar still
-requires the full `cargo build --workspace`, `cargo test`, `cargo clippy
---workspace --all-targets -- -D warnings`, and `cargo fmt --check` before any
-change lands — see the project `CLAUDE.md` Build and Test Commands section.
-`cargo check` is for the inner loop only; it never substitutes for the gate.
+**The project's risk/stage test ladder defines the shipping gate.** Run its
+required crate, consumer and release checks; prose-only changes need its doc
+gates. Do not add a workspace build merely because work is ready to land.
+
+**Before a concurrent build**, name the actual assigned `CARGO_TARGET_DIR`,
+job limit, profile/features and lock-wait bound in the brief. Use the existing
+allocator if available; otherwise coordinate ownership with the PM. Do not
+invent a slot command or assume a fixed slot count. On a lock wait, identify
+the holder and report the bound; never kill another session's build or start
+a duplicate. Preserve the assigned cache across compatible runs. See #8021.
 
 ## 3. Measure Before Tuning
 
