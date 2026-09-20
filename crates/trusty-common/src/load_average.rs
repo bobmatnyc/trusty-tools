@@ -196,12 +196,10 @@ fn read_proc_loadavg() -> Result<LoadAverage, LoadAverageError> {
 pub fn parse_proc_loadavg(raw: &str) -> Result<LoadAverage, LoadAverageError> {
     let mut fields = raw.split_whitespace();
     let mut next = |which: &str| -> Result<f64, LoadAverageError> {
-        let field = fields
-            .next()
-            .ok_or_else(|| LoadAverageError::Malformed {
-                origin: "/proc/loadavg",
-                detail: format!("missing the {which} field"),
-            })?;
+        let field = fields.next().ok_or_else(|| LoadAverageError::Malformed {
+            origin: "/proc/loadavg",
+            detail: format!("missing the {which} field"),
+        })?;
         field
             .parse::<f64>()
             .map_err(|err| LoadAverageError::Malformed {

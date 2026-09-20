@@ -372,13 +372,19 @@ pub fn resolve_capacity(
     let load = match &readings.load_avg_1min {
         Ok(load) => *load,
         Err(failure) => {
-            return fail_closed(ceiling, CapacityReason::FailedClosedToCeiling(failure.clone()));
+            return fail_closed(
+                ceiling,
+                CapacityReason::FailedClosedToCeiling(failure.clone()),
+            );
         }
     };
     let available_bytes = match &readings.available_bytes {
         Ok(bytes) => *bytes,
         Err(failure) => {
-            return fail_closed(ceiling, CapacityReason::FailedClosedToCeiling(failure.clone()));
+            return fail_closed(
+                ceiling,
+                CapacityReason::FailedClosedToCeiling(failure.clone()),
+            );
         }
     };
 
@@ -492,8 +498,7 @@ pub fn sample_capacity_readings() -> CapacityReadings {
     CapacityReadings {
         load_avg_1min,
         available_bytes,
-        logical_cores: std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get),
+        logical_cores: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
     }
 }
 
