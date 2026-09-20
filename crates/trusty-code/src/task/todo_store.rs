@@ -1,5 +1,5 @@
-//! Concrete [`TodoStore`] writing the `todo_write` tool's list onto one
-//! session's roster row (#8235).
+//! Concrete [`TodoStore`](crate::tools::TodoStore) writing the `todo_write`
+//! tool's list onto one session's roster row (#8235).
 //!
 //! Why: `tools::checklist` must not depend on `session`, and the tool must not
 //! learn which session or agent it serves — the same layering, and the same
@@ -9,7 +9,8 @@
 //! What: [`SessionTodoStore`] holds an `Arc<SessionRegistry>` plus the
 //! session id and the WRITER's `agent`/`agent_id`, so the tool's every write
 //! is attributed to the loop that registered it and cannot address another
-//! agent's list. A registry error becomes [`TodoError::Unavailable`], which
+//! agent's list. A registry error becomes
+//! [`TodoError::Unavailable`](crate::tools::TodoError::Unavailable), which
 //! the tool reports to the model as a recoverable failure over an unchanged
 //! list.
 //! Test: `tests::*` — the tool-to-`session.get_agents` round trip #8235 asks
