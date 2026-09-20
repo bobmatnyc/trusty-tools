@@ -1649,11 +1649,16 @@ fn no_seed_test_reads_the_ambient_home_directory() {
 /// the composed prompt, which would still say something plausible — while the
 /// two products' routing quietly diverged again. Asserting the template keeps
 /// its placeholders is the other half: without them `fill` is a no-op and the
-/// delivered section loses its table entirely.
-/// What: asserts the authored section carries both placeholders and no literal
-/// table, that the delivered [`agent_delegation`] carries neither placeholder,
-/// and that it contains exactly what `render_table`/`render_pipeline` produce
-/// for [`Consumer::Mpm`] — end to end, through `assemble_system_prompt`.
+/// delivered section loses its table entirely. A placeholder is not enough on
+/// its own — a template that KEPT the marker and re-authored a table beneath it
+/// would satisfy every containment check while shipping two routing tables, so
+/// the authored file is also asserted to contain no Markdown table at all.
+/// What: asserts the authored section carries each placeholder exactly once and
+/// no Markdown table rule (`|---|---|`, keyed on the rule rather than a header,
+/// so a re-authored table under any heading is caught), that the delivered
+/// [`agent_delegation`] carries neither placeholder, and that it contains
+/// exactly what `render_table`/`render_pipeline` produce for [`Consumer::Mpm`]
+/// — end to end, through `assemble_system_prompt`.
 /// Test: this test.
 #[test]
 fn mpm_delegation_section_is_rendered_from_the_shared_rows() {
@@ -1663,16 +1668,27 @@ fn mpm_delegation_section_is_rendered_from_the_shared_rows() {
 
     let delivered = agent_delegation();
     for placeholder in [TABLE_PLACEHOLDER, PIPELINE_PLACEHOLDER] {
-        assert!(
-            AGENT_DELEGATION_TEMPLATE.contains(placeholder),
-            "agent-delegation.md must carry {placeholder:?} — without it the routing \
-             table is authored in this crate again instead of rendered (#8293)"
+        assert_eq!(
+            AGENT_DELEGATION_TEMPLATE.matches(placeholder).count(),
+            1,
+            "agent-delegation.md must carry {placeholder:?} exactly once — absent, the \
+             routing table is authored in this crate again instead of rendered; twice, \
+             the section ships the rendered table twice (#8293)"
         );
         assert!(
             !delivered.contains(placeholder),
             "the delivered section still carries {placeholder:?}, so `fill` did not run"
         );
     }
+
+    // The rule row is the one line every Markdown table must carry and the one
+    // part of it no header rename can move.
+    assert!(
+        !AGENT_DELEGATION_TEMPLATE.contains("|---|---|"),
+        "agent-delegation.md authors a routing table of its own — the placeholder alone \
+         does not stop one being re-authored beneath it. Edit the shared rows in \
+         trusty_agents_common::pm_routing instead (#8293).\n\nauthored:\n{AGENT_DELEGATION_TEMPLATE}"
+    );
 
     let table = render_table(Consumer::Mpm);
     assert!(
@@ -1692,6 +1708,44 @@ fn mpm_delegation_section_is_rendered_from_the_shared_rows() {
     assert!(
         composed.contains(&table) && composed.contains(&chain),
         "the composed PM prompt carries no rendered routing table (#8293)"
+    );
+}
+
+/// The delegation section's byte ceiling, measured on the RENDERED text.
+///
+/// Why: `scripts/check_context_budget.sh` weighs the authored
+/// `sections/agent-delegation.md`, and #8293 moved ~930 bytes of routing table
+/// out of that file into `trusty_agents_common::pm_routing`. Every byte still
+/// reaches turn 1, but no budget gate can see it any more — growth in a cell's
+/// text is now invisible to the script. This cap is the replacement: it is
+/// measured where the bytes are actually assembled.
+/// What: the rendered section's size on 2026-09-20 (2029 B — the same figure
+/// `scripts/check_context_budget.sh` recorded for the authored file before the
+/// lift, since #8293 moved bytes without changing them) plus ~10% headroom,
+/// rounded to 2240. Headroom, not an exact pin, so an ordinary wording fix does
+/// not need a test edit; small enough that a new table row or paragraph does.
+/// Test: `the_rendered_delegation_section_stays_within_its_byte_cap`.
+const AGENT_DELEGATION_RENDERED_CAP_BYTES: usize = 2240;
+
+/// The rendered delegation section stays inside its byte cap (#8293).
+///
+/// Why: see [`AGENT_DELEGATION_RENDERED_CAP_BYTES`] — after #8293 the authored
+/// file under-reports what a session pays for the routing doctrine, so the only
+/// honest measurement is of [`agent_delegation`]'s output.
+/// What: asserts the rendered section is at most the cap, and reports the
+/// authored/rendered pair in the failure so the difference the budget script
+/// cannot see is visible in the message.
+/// Test: this test.
+#[test]
+fn the_rendered_delegation_section_stays_within_its_byte_cap() {
+    let rendered = agent_delegation().len();
+    assert!(
+        rendered <= AGENT_DELEGATION_RENDERED_CAP_BYTES,
+        "the rendered delegation section is {rendered} bytes, over its \
+         {AGENT_DELEGATION_RENDERED_CAP_BYTES}-byte cap (authored template: {} bytes). \
+         Every byte here is paid on turn 1 of every session — cut a row or a \
+         paragraph, or raise the cap deliberately in the same PR (#8293).",
+        AGENT_DELEGATION_TEMPLATE.len()
     );
 }
 
