@@ -431,9 +431,11 @@ impl CodeIndexer {
         } else {
             None
         };
+        // #7434: decode `@root<n>/…` chunk paths back to their own root.
+        let extra_roots = self.additional_roots.clone();
         let page: Vec<CodeChunk> = slice
             .iter()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root, &extra_roots))
             .collect();
         Ok((total, page, next_cursor))
     }

@@ -77,11 +77,6 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> WalkedRoots {
     }
 }
 
-/// [`walk_roots`] for callers that only need the files.
-pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
-    walk_roots(handle).result
-}
-
 /// Walk ONE root of `handle` under the current admission policy (#7434).
 ///
 /// Why: the dropped-event rescan keys each walked file through the root that
@@ -388,12 +383,9 @@ mod tests {
         };
         let handle = registry.register(make(vec!["md".into()], vec!["**/private.md".into()]));
         let expected = vec![root.join("notes/maya.md")];
-        assert_eq!(walk(&handle).files, expected);
+        assert_eq!(walk_roots(&handle).result.files, expected);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
         for path in [
             "notes/maya.md",
             "notes/private.md",
@@ -404,7 +396,7 @@ mod tests {
                 &registry,
                 &id,
                 &root.join(path),
-                roots,
+                &roots,
                 &indexer,
                 &files,
                 None,
@@ -430,7 +422,7 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            roots,
+            &roots,
             &indexer,
             &files,
             None,
@@ -445,8 +437,7 @@ mod tests {
         let handle = registry.register(make(vec!["md".into()], vec![]));
         crate::service::watch_rescan::reconcile_with_policy(
             &id,
-            &root,
-            &root,
+            std::slice::from_ref(&roots),
             &indexer,
             &files,
             Some(&handle),
@@ -477,7 +468,7 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            roots,
+            &roots,
             &indexer,
             &files,
             None,
@@ -489,7 +480,7 @@ mod tests {
             .chunk_ids_for_file("notes/maya.md")
             .await
             .is_empty());
-        assert!(!walk(&handle).files.contains(&root.join("notes/maya.md")));
+        assert!(!walk_roots(&handle).result.files.contains(&root.join("notes/maya.md")));
         indexer
             .read()
             .await
@@ -504,8 +495,7 @@ mod tests {
             .is_empty());
         crate::service::watch_rescan::reconcile_with_policy(
             &id,
-            &root,
-            &root,
+            std::slice::from_ref(&roots),
             &indexer,
             &files,
             Some(&handle),
@@ -552,12 +542,9 @@ mod tests {
         handle.extensions = vec!["md".into()];
         registry.register(handle);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
 
-        apply_modified(&registry, &id, &target, roots, &indexer, &files, None).await;
+        apply_modified(&registry, &id, &target, &roots, &indexer, &files, None).await;
         assert!(
             !indexer
                 .read()
@@ -592,7 +579,7 @@ mod tests {
             &registry,
             &id,
             &target,
-            roots,
+            &roots,
             &indexer,
             &files,
             Some(&gate),
@@ -664,10 +651,7 @@ mod tests {
         handle.extensions = vec!["md".into()];
         registry.register(handle);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
 
         let targets: Vec<PathBuf> = ["maya.md", "atlas.md", "orion.md"]
             .iter()
@@ -686,7 +670,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
         let gate = RescanGate::new(tx);
         for target in &targets {
-            apply_modified(&registry, &id, target, roots, &indexer, &files, Some(&gate)).await;
+            apply_modified(&registry, &id, target, &roots, &indexer, &files, Some(&gate)).await;
         }
 
         // Sleeping past the base backoff on a paused clock auto-advances to each
@@ -711,7 +695,7 @@ mod tests {
             &registry,
             &id,
             &targets[0],
-            roots,
+            &roots,
             &indexer,
             &files,
             Some(&gate),
