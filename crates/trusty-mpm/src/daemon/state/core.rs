@@ -472,6 +472,16 @@ pub struct DaemonState {
     /// [`Self::dispatch_record`] inside, which is the documented inner lock.
     /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
     pub(super) builder_claim: parking_lot::Mutex<()>,
+    /// The builder capacity formula's one piece of carried state (#8261).
+    ///
+    /// Why: N may drop at once but may rise only after a full quiet window, and
+    /// "was this machine overloaded a moment ago" cannot be derived from a
+    /// single reading. It lives on the daemon rather than in a `static` because
+    /// the daemon is already the one process that counts builders machine-wide,
+    /// and a global would make every test share one window.
+    /// Test: `n_rises_only_after_a_full_quiet_window`.
+    pub(super) builder_quiet_window:
+        parking_lot::Mutex<crate::core::builder_capacity::QuietWindow>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
     ///
     /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
@@ -589,6 +599,7 @@ impl DaemonState {
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             builder_claim: parking_lot::Mutex::new(()),
+            builder_quiet_window: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
@@ -672,6 +683,7 @@ impl DaemonState {
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             builder_claim: parking_lot::Mutex::new(()),
+            builder_quiet_window: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
