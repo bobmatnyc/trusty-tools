@@ -480,8 +480,7 @@ pub struct DaemonState {
     /// the daemon is already the one process that counts builders machine-wide,
     /// and a global would make every test share one window.
     /// Test: `n_rises_only_after_a_full_quiet_window`.
-    pub(super) builder_quiet_window:
-        parking_lot::Mutex<crate::core::builder_capacity::QuietWindow>,
+    pub(super) builder_quiet_window: parking_lot::Mutex<crate::core::builder_capacity::QuietWindow>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
     ///
     /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
