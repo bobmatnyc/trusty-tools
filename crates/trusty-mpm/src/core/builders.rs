@@ -440,7 +440,10 @@ mod tests {
         let err = cfg.validate().expect_err("200x cores is not a multiplier");
         let msg = format!("{err}");
         assert!(msg.contains("builders.load_factor"), "{msg}");
-        assert!(msg.contains("200"), "the message must show the value: {msg}");
+        assert!(
+            msg.contains("200"),
+            "the message must show the value: {msg}"
+        );
     }
 
     #[test]
@@ -464,7 +467,9 @@ mod tests {
             free_memory_floor_mb: Some(8 * 1024 * 1024 * 1024),
             ..BuildersConfig::default()
         };
-        let err = cfg.validate().expect_err("a floor above any real host's RAM");
+        let err = cfg
+            .validate()
+            .expect_err("a floor above any real host's RAM");
         assert!(
             format!("{err}").contains("builders.free_memory_floor_mb"),
             "{err}"
@@ -478,7 +483,10 @@ mod tests {
             ..BuildersConfig::default()
         };
         let err = cfg.validate().expect_err("a blank path is not a pool root");
-        assert!(format!("{err}").contains("builders.slot_pool_root"), "{err}");
+        assert!(
+            format!("{err}").contains("builders.slot_pool_root"),
+            "{err}"
+        );
     }
 
     /// #8261: an unknown key inside `[builders]` is REFUSED with the key named,

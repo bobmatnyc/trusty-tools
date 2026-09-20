@@ -257,8 +257,8 @@ impl DaemonState {
         ceiling: u32,
         exclude_tool_use_id: Option<&str>,
     ) -> crate::core::builder_capacity::Capacity {
-        let held = u32::try_from(self.builder_slot_holders(exclude_tool_use_id).len())
-            .unwrap_or(u32::MAX);
+        let held =
+            u32::try_from(self.builder_slot_holders(exclude_tool_use_id).len()).unwrap_or(u32::MAX);
         let readings = crate::core::builder_capacity::sample_capacity_readings();
         let mut quiet = self.builder_quiet_window.lock();
         crate::core::builder_capacity::resolve_capacity(
@@ -797,7 +797,13 @@ mod tests {
         let mut first = running(session, "rust-engineer", 1);
         first.tool_use_id = Some("toolu_1".to_string());
         let first_id = first.id;
-        state.claim_builder_slot(2, Some("toolu_1"), true, |s| s.upsert_delegation(first.clone()), |_| {});
+        state.claim_builder_slot(
+            2,
+            Some("toolu_1"),
+            true,
+            |s| s.upsert_delegation(first.clone()),
+            |_| {},
+        );
 
         // The holder ends: its lease — and therefore its index — is free again.
         state.terminate_delegation(first_id, DelegationStatus::Completed);

@@ -378,8 +378,16 @@ mod tests {
         );
         assert_eq!(body.cap, 1, "the refusal reports the MEASURED count");
         assert_eq!(body.ceiling, 4, "and the configured ceiling beside it");
-        assert!(body.capacity_reason.contains("40.00"), "{}", body.capacity_reason);
-        assert!(body.capacity_reason.contains("32.00"), "{}", body.capacity_reason);
+        assert!(
+            body.capacity_reason.contains("40.00"),
+            "{}",
+            body.capacity_reason
+        );
+        assert!(
+            body.capacity_reason.contains("32.00"),
+            "{}",
+            body.capacity_reason
+        );
         assert_eq!(
             body.fail_closed_surface, None,
             "an EXCEEDED limit is not an UNREADABLE one"
@@ -394,13 +402,11 @@ mod tests {
         let failed = capacity(
             4,
             4,
-            CapacityReason::FailedClosedToCeiling(
-                crate::core::builder_capacity::ReadFailure {
-                    surface: crate::core::builder_capacity::FailClosedSurface::Load,
-                    detail: "operation not permitted".to_string(),
-                    errno: Some(1),
-                },
-            ),
+            CapacityReason::FailedClosedToCeiling(crate::core::builder_capacity::ReadFailure {
+                surface: crate::core::builder_capacity::FailClosedSurface::Load,
+                detail: "operation not permitted".to_string(),
+                errno: Some(1),
+            }),
         );
 
         let body = builder_slot_op_with_capacity(
@@ -411,13 +417,20 @@ mod tests {
         )
         .expect("route succeeds");
 
-        assert!(body.claimed, "fail CLOSED is the fixed ceiling, not zero slots");
+        assert!(
+            body.claimed,
+            "fail CLOSED is the fixed ceiling, not zero slots"
+        );
         assert_eq!(body.cap, 4);
         assert_eq!(
             body.fail_closed_surface.as_deref(),
             Some("builder-cap-load-read-failure"),
         );
-        assert!(body.capacity_reason.contains("errno 1"), "{}", body.capacity_reason);
+        assert!(
+            body.capacity_reason.contains("errno 1"),
+            "{}",
+            body.capacity_reason
+        );
     }
 
     /// #8261: the daemon derives N itself, against its OWN quiet window, so two

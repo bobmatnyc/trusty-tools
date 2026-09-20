@@ -175,9 +175,7 @@ impl SlotPool {
             },
             None => {
                 create_cold(&path)?;
-                SeedKind::ColdDirectory(
-                    "no warm shared target directory to clone from".to_string(),
-                )
+                SeedKind::ColdDirectory("no warm shared target directory to clone from".to_string())
             }
         };
         // The marker goes down last, so a seed interrupted partway is retried
@@ -327,7 +325,10 @@ mod tests {
             .expect("a slot with no source");
         match seed {
             SeedKind::ColdDirectory(detail) => {
-                assert!(detail.contains("no warm shared target directory"), "{detail}");
+                assert!(
+                    detail.contains("no warm shared target directory"),
+                    "{detail}"
+                );
             }
             other => panic!("expected ColdDirectory, got {other:?}"),
         }
@@ -377,9 +378,9 @@ mod tests {
         let blocked = tmp.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").expect("a blocking file");
 
-        let err = pool(&blocked)
-            .acquire_path(0, None)
-            .expect_err("a slot that cannot be made must be refused, never swapped for the shared dir");
+        let err = pool(&blocked).acquire_path(0, None).expect_err(
+            "a slot that cannot be made must be refused, never swapped for the shared dir",
+        );
         assert!(
             matches!(err, SlotPoolError::Create { .. }),
             "expected Create, got {err:?}"
