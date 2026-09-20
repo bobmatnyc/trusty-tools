@@ -2,7 +2,9 @@
 //! Uses the search socket and existing docstore tool; clients cannot override
 //! destination trees/indexes. Tests inject registries, agent dirs and sockets.
 //! #4289: index creation refuses a root that overlaps an already-registered
-//! index root — see `overlapping_index`.
+//! index root — see `overlapping_index` for the refusal this route makes from
+//! the listing it already has, and `create_index` for trusty-search's own
+//! server-side refusal, which reaches the GUI as a `409` naming the index.
 use super::{agent_patch::resolve_agent_paths, agent_stores::is_valid_agent_name};
 use crate::{
     registry::{ProjectRegistry, RootOverlap, classify_root_overlap},
@@ -207,6 +209,58 @@ async fn search(socket: &Path, method: &str, params: Value) -> Result<Value, Api
         .await
         .map_err(|e| failure(StatusCode::SERVICE_UNAVAILABLE, e))
 }
+/// Create a search index, mapping trusty-search's own overlap refusal to `409`.
+///
+/// Why: trusty-search refuses an overlapping root with a `409` carrying
+/// `overlap`, `existing_index_id`, `existing_root_path` and
+/// `requested_root_path` (#4289, trusty-search PR #8316). This route reaches it
+/// over JSON-RPC, and `trusty_common::search_rpc::call_at` collapses a daemon
+/// error to `{code, message}` — those structured fields never cross the socket.
+/// Reporting the refusal as `503 Service Unavailable` told the GUI the daemon
+/// was down when it had in fact answered deliberately, so the UI could not
+/// offer "attach to that index instead". Threading the JSON-RPC `data` member
+/// through `search_rpc` is a trusty-common follow-up, out of scope here.
+/// What: a `CODE_CONFLICT` reply becomes `409 {error, existing_index_id}`, the
+/// id recovered from the daemon's own sentence; `existing_index_id` is omitted
+/// when the sentence names none. Every other failure keeps its `503`.
+/// Test: `index_maps_the_search_overlap_conflict_to_409_with_the_existing_id`,
+/// `index_conflict_without_a_named_index_still_reports_409`.
+async fn create_index(socket: &Path, id: &str, root: &Path) -> Result<Value, ApiError> {
+    search_rpc::call_at(
+        socket,
+        search_rpc::METHOD_INDEX_CREATE,
+        json!({"id":id,"root_path":root,"follow_links":false}),
+        Duration::from_secs(15),
+    )
+    .await
+    .map_err(|e| {
+        if let Some(rpc) = e.downcast_ref::<search_rpc::SearchRpcError>()
+            && rpc.is_conflict()
+        {
+            let mut body = json!({"error": rpc.message});
+            if let Some(existing) = existing_index_id(&rpc.message) {
+                body["existing_index_id"] = Value::String(existing);
+            }
+            return (StatusCode::CONFLICT, Json(body));
+        }
+        failure(StatusCode::SERVICE_UNAVAILABLE, e)
+    })
+}
+/// Recover the index id trusty-search named in an overlap refusal (#4289).
+///
+/// Why: the structured `existing_index_id` field is lost in transit (see
+/// [`create_index`]), and the id is the one thing the GUI needs to offer an
+/// attach. trusty-search's `root_overlap_response` writes it into the sentence
+/// as `the root of index '<id>'`, so the sentence is the only channel left.
+/// What: returns the text between that marker and the next quote; `None` when
+/// the message is some other conflict, so the caller degrades to the message
+/// alone rather than inventing an id.
+/// Test: `index_conflict_without_a_named_index_still_reports_409`.
+fn existing_index_id(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("the root of index '")?;
+    let (id, _) = rest.split_once('\'')?;
+    (!id.is_empty()).then(|| id.to_owned())
+}
 async fn index_status(socket: &Path, root: &Path) -> Value {
     let list = match search(
         socket,
@@ -287,12 +341,9 @@ async fn start_index(socket: &Path, root: &Path) -> Result<Value, ApiError> {
                     "Choose a project directory below the filesystem root",
                 )
             })?;
-            search(
-                socket,
-                search_rpc::METHOD_INDEX_CREATE,
-                json!({"id":id,"root_path":root,"follow_links":false}),
-            )
-            .await?;
+            // #4289: trusty-search runs the same containment guard server-side;
+            // its refusal reaches the GUI as a 409, not a generic 503.
+            create_index(socket, &id, root).await?;
             // Creation may find an existing id. Re-read the authoritative map
             // and refuse to trigger an unrelated index on a mismatched reply.
             let list = search(

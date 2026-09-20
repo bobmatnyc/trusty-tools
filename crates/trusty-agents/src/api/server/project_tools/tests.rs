@@ -222,6 +222,67 @@ async fn index_creates_for_a_sibling_of_an_existing_index() {
     );
 }
 
+/// Mock daemon whose `indexes.list` is empty and whose `index.create` refuses.
+///
+/// Why: the client-side guard cannot see an index the daemon knows about but
+/// did not list, so trusty-search's own refusal is the only thing standing
+/// between a stale listing and an overlapping root.
+/// Test: `index_maps_the_search_overlap_conflict_to_409_with_the_existing_id`.
+async fn daemon_refusing_create(message: &'static str) -> crate::uds_mock::MockMemoryDaemon {
+    crate::uds_mock::spawn(move |method, _params| {
+        let outcome = if method == search_rpc::METHOD_INDEX_CREATE {
+            Err(crate::uds_mock::RpcError::new(
+                trusty_common::search_rpc::CODE_CONFLICT,
+                message,
+            ))
+        } else {
+            Ok(json!({"indexes":[]}))
+        };
+        Box::pin(async move { outcome })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn index_maps_the_search_overlap_conflict_to_409_with_the_existing_id() {
+    // #4289: `search_rpc::call_at` collapses the daemon's 409 body to
+    // {code, message}, so the route's only route to `existing_index_id` is the
+    // sentence `root_overlap_response` writes. Before this, the refusal
+    // surfaced as a 503 and the GUI reported the daemon as down.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let daemon = daemon_refusing_create(
+        "\"/srv/app/crates\" is inside the root of index 'srv-app' (\"/srv/app\"); \
+         overlapping index roots let one reindex prune the other's corpus. \
+         Attach to 'srv-app' instead, or pick a directory outside it",
+    )
+    .await;
+    let (status, body) = start_index(daemon.socket(), &root).await.unwrap_err();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body.0["existing_index_id"], "srv-app");
+    assert!(
+        body.0["error"].as_str().unwrap().contains("is inside"),
+        "the daemon's own sentence is passed through: {}",
+        body.0["error"]
+    );
+}
+
+#[tokio::test]
+async fn index_conflict_without_a_named_index_still_reports_409() {
+    // A conflict whose message names no index (#6864's id collision, say) must
+    // still be a 409 — just without an `existing_index_id` to attach to.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let daemon = daemon_refusing_create("that id is already registered").await;
+    let (status, body) = start_index(daemon.socket(), &root).await.unwrap_err();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body.0.get("existing_index_id").is_none(),
+        "no id may be invented: {}",
+        body.0
+    );
+}
+
 #[tokio::test]
 async fn import_fixture_is_additive_idempotent_and_explicitly_targets_bound_store() {
     let tmp = tempfile::tempdir().unwrap();
