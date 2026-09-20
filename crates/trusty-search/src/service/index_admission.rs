@@ -480,7 +480,10 @@ mod tests {
             .chunk_ids_for_file("notes/maya.md")
             .await
             .is_empty());
-        assert!(!walk_roots(&handle).result.files.contains(&root.join("notes/maya.md")));
+        assert!(!walk_roots(&handle)
+            .result
+            .files
+            .contains(&root.join("notes/maya.md")));
         indexer
             .read()
             .await
@@ -670,7 +673,16 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
         let gate = RescanGate::new(tx);
         for target in &targets {
-            apply_modified(&registry, &id, target, &roots, &indexer, &files, Some(&gate)).await;
+            apply_modified(
+                &registry,
+                &id,
+                target,
+                &roots,
+                &indexer,
+                &files,
+                Some(&gate),
+            )
+            .await;
         }
 
         // Sleeping past the base backoff on a paused clock auto-advances to each

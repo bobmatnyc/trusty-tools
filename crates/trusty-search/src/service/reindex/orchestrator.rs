@@ -107,7 +107,6 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> CollectedFiles {
     }
 }
 
-
 /// Record this walk's per-root coverage gaps on the handle's diagnostics (#7434).
 ///
 /// Why: `runner.rs` sits at 491 of its 500-SLOC cap, and the per-root

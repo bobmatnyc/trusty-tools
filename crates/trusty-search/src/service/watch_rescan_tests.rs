@@ -680,7 +680,9 @@ async fn rescan_without_a_registered_handle_schedules_a_retry() {
     std::fs::write(root.join("present.rs"), "fn present() {}\n").expect("write");
 
     let registry = crate::core::registry::IndexRegistry::new();
-    let table = [crate::service::watch_roots::WatchedRoot::from_pair(&root, &root)];
+    let table = [crate::service::watch_roots::WatchedRoot::from_pair(
+        &root, &root,
+    )];
     let failure = crate::service::watch_rescan::reconcile_registered(
         &index_id,
         &table,
@@ -711,7 +713,9 @@ async fn rescan_without_a_registered_handle_schedules_a_retry() {
     );
 
     // No registry at all is the pre-#7379 unfiltered mode and still reconciles.
-    let table = [crate::service::watch_roots::WatchedRoot::from_pair(&root, &root)];
+    let table = [crate::service::watch_roots::WatchedRoot::from_pair(
+        &root, &root,
+    )];
     let stats = crate::service::watch_rescan::reconcile_registered(
         &index_id, &table, &indexer, &tracker, None,
     )
