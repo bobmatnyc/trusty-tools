@@ -173,6 +173,265 @@ fn apply_submit_event_is_noop_while_busy() {
     assert!(app.chat.is_empty(), "must not echo while busy");
 }
 
+/// The whole scrollback as one string, for asserting what the operator can and
+/// cannot read (#8207).
+fn scrollback(app: &ReplApp) -> String {
+    app.chat
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Drive a real Ctrl-C on a running turn and enter the cancelling state the way
+/// `crate::run::dispatch_pending` does — reducer first, then the model hook
+/// (#8207).
+fn request_cancel(app: &mut ReplApp) {
+    apply(app, ctrl_key('c'));
+    assert!(app.pending_cancel, "Ctrl-C must stage the cancel");
+    app.take_pending_cancel();
+    app.on_cancel_requested();
+}
+
+/// #8207's first closure condition at the reducer: while a dispatched cancel is
+/// unconfirmed, nothing reaches the engine. Both submission paths are checked —
+/// the synthesized `ReplEvent::Submit` (which `submit_line` guards) and the
+/// Enter key (which must decide BEFORE consuming the buffer, or the typed line
+/// is lost rather than queued). Consistent with #8240: the keystrokes queue in
+/// the composer, they are not refused with a message.
+#[test]
+fn a_prompt_submitted_while_cancelling_is_not_dispatched() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    request_cancel(&mut app);
+    assert!(
+        !app.accepts_submit(),
+        "an unconfirmed cancel must not accept a new turn"
+    );
+
+    apply(&mut app, ReplEvent::Submit("q".to_string()));
+    assert!(
+        app.pending_submit.is_none(),
+        "a synthesized submit must not be staged while cancelling"
+    );
+
+    for c in "q".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Enter));
+    assert!(
+        app.pending_submit.is_none(),
+        "Enter must not stage a turn while cancelling"
+    );
+    assert_eq!(
+        app.input_buf, "q\n",
+        "the typed line must stay queued in the composer, newline included"
+    );
+}
+
+/// #8207, the one window where [`ReplApp::cancelling`] is the DECIDING term of
+/// [`ReplApp::accepts_submit`]. `busy` masks it everywhere else, because a
+/// cancel dispatched on a live turn deliberately leaves `busy` set until the
+/// reply lands. The turn can finish on its own first: Ctrl-C carries no `busy`
+/// guard (`apply_key`'s `'c'` arm), and the turn's own `TurnFinished` safety net
+/// clears `busy` while it is still the live generation — so a Ctrl-C pressed as
+/// the turn ends leaves `busy == false` with `session.cancel` still in flight.
+/// Deleting `&& !self.cancelling` from `accepts_submit` reopens input there and
+/// sends the next prompt into a session whose cancel the daemon is still
+/// processing, which is the `-32003 already has a task running` collision #8207
+/// was filed for.
+#[test]
+fn an_unsettled_cancel_keeps_input_closed_after_the_turn_finished_on_its_own() {
+    let mut app = ReplApp::new("demo", "u");
+    for c in "explain X".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.pending_submit.take().as_deref(), Some("explain X"));
+    assert!(app.busy, "the turn is running");
+    // The generation `crate::run::dispatch_pending` stamps the dispatched turn
+    // with, so the `TurnFinished` below is the live one and not a straggler.
+    app.set_current_generation(1);
+
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 });
+    assert!(
+        !app.busy,
+        "a matching TurnFinished ends the turn on its own"
+    );
+
+    // Only now does the Ctrl-C the operator pressed a moment earlier reach the
+    // reducer. `busy` is already false, so nothing but `cancelling` holds the
+    // gate shut while the cancel RPC is outstanding.
+    request_cancel(&mut app);
+    assert!(
+        app.cancelling && !app.busy,
+        "the deciding state: a cancel outstanding over an already-finished turn"
+    );
+
+    apply(&mut app, ReplEvent::Submit("q".to_string()));
+    assert!(
+        app.pending_submit.is_none(),
+        "an unsettled cancel must not dispatch a prompt, turn finished or not"
+    );
+
+    for c in "next".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    apply(&mut app, key(KeyCode::Enter));
+    assert!(
+        app.pending_submit.is_none(),
+        "Enter must not dispatch a prompt while the cancel is unsettled"
+    );
+    assert_eq!(
+        app.input_buf, "next\n",
+        "the typed line must stay queued in the composer, newline included"
+    );
+
+    // The window is bounded: the reply still arrives and settles the state.
+    apply(&mut app, ReplEvent::CancelSettled(CancelReply::Stopped));
+    assert!(app.accepts_submit(), "the cancel's reply reopens input");
+}
+
+/// #8207: only a CONFIRMED stop says "cancelled" and reopens input.
+#[test]
+fn apply_cancel_settled_stopped_reopens_input() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    request_cancel(&mut app);
+    assert!(
+        scrollback(&app).contains("cancelling"),
+        "the request itself must show a cancelling state"
+    );
+
+    apply(&mut app, ReplEvent::CancelSettled(CancelReply::Stopped));
+    assert!(!app.cancelling);
+    assert!(!app.busy);
+    assert!(app.accepts_submit(), "a confirmed stop reopens input");
+    assert!(
+        scrollback(&app).contains(CANCELLED_STATUS),
+        "a confirmed stop is the one arm that may say cancelled"
+    );
+
+    apply(&mut app, ReplEvent::Submit("q".to_string()));
+    assert_eq!(app.pending_submit.as_deref(), Some("q"));
+}
+
+/// #8207: `-32010 cancel_unconfirmed` reaches here as `StillCancelling`. The run
+/// has not stopped, so input stays closed, the line reads as a plain sentence,
+/// and a second Ctrl-C can still ask again.
+#[test]
+fn apply_cancel_settled_still_cancelling_keeps_input_closed() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    request_cancel(&mut app);
+
+    apply(
+        &mut app,
+        ReplEvent::CancelSettled(CancelReply::StillCancelling {
+            detail: "session s-1: cancellation requested but the task did not stop within 10s"
+                .to_string(),
+        }),
+    );
+
+    assert!(app.cancelling, "the run has not stopped; stay cancelling");
+    assert!(app.busy, "input must not reopen as if the run had stopped");
+    assert!(!app.accepts_submit());
+    let text = scrollback(&app);
+    assert!(text.contains("still cancelling"));
+    assert!(
+        text.contains("did not stop within 10s"),
+        "the backend's own sentence must survive: {text}"
+    );
+    assert!(
+        !text.contains(CANCELLED_STATUS),
+        "an unconfirmed cancel must never read as cancelled: {text}"
+    );
+
+    apply(&mut app, ctrl_key('c'));
+    assert!(
+        app.pending_cancel,
+        "the operator must be able to retry the cancel"
+    );
+}
+
+/// #8207's fail-open check: a cancel that never landed must be shown as a
+/// failure, must never say "cancelled", must leave the cancelling state (so the
+/// pane cannot sit on "cancelling…" behind a dead transport), and must NOT
+/// reopen input — the turn is still presumed to be running.
+#[test]
+fn apply_cancel_settled_failed_leaves_the_cancelling_state_without_claiming_a_stop() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    request_cancel(&mut app);
+
+    apply(
+        &mut app,
+        ReplEvent::CancelSettled(CancelReply::Failed {
+            error: "rpc over /tmp/tcode.sock failed: broken pipe".to_string(),
+        }),
+    );
+
+    assert!(!app.cancelling, "must not stay cancelling forever");
+    assert!(app.busy, "a cancel that never landed did not end the turn");
+    let text = scrollback(&app);
+    assert!(text.contains("cancel failed"));
+    assert!(text.contains("broken pipe"), "{text}");
+    assert!(
+        !text.contains(CANCELLED_STATUS),
+        "no failure arm may report cancelled: {text}"
+    );
+
+    apply(&mut app, ctrl_key('c'));
+    assert!(app.pending_cancel, "Ctrl-C must still retry the cancel");
+}
+
+/// #8207: a reply with no cancel outstanding — a straggler from an
+/// already-settled cancel — must not clear `busy` for a turn the user has since
+/// started, nor add a line to the scrollback.
+#[test]
+fn apply_cancel_settled_is_ignored_when_no_cancel_is_outstanding() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    let chat_len_before = app.chat.len();
+
+    apply(&mut app, ReplEvent::CancelSettled(CancelReply::Stopped));
+
+    assert!(app.busy, "a stale reply must not end a live turn");
+    assert!(!app.cancelling);
+    assert_eq!(app.chat.len(), chat_len_before);
+}
+
+/// #8207's second closure condition, asserted on what is actually rendered: no
+/// cancel path puts a JSON-RPC code or envelope on screen. The payloads here are
+/// the plain sentences `CancelReply` requires of its producer, and the reducer
+/// must not reintroduce a code of its own.
+#[test]
+fn no_cancel_settled_arm_renders_a_protocol_code() {
+    for reply in [
+        CancelReply::Stopped,
+        CancelReply::StillCancelling {
+            detail: "session s-1: cancellation requested but the task did not stop within 10s"
+                .to_string(),
+        },
+        CancelReply::Failed {
+            error: "no tcode daemon is answering on /tmp/tcode.sock".to_string(),
+        },
+    ] {
+        let mut app = ReplApp::new("demo", "u");
+        app.busy = true;
+        request_cancel(&mut app);
+        apply(&mut app, ReplEvent::CancelSettled(reply.clone()));
+
+        let text = scrollback(&app);
+        for forbidden in ["-32003", "-32010", "jsonrpc", "JSON-RPC", "error_type"] {
+            assert!(
+                !text.contains(forbidden),
+                "{reply:?} rendered {forbidden} to the user: {text}"
+            );
+        }
+    }
+}
+
 /// Submit `line` through the real Enter path, clearing the `busy` flag the
 /// forward sets so the next submission is accepted (#8181).
 fn submit(app: &mut ReplApp, line: &str) {

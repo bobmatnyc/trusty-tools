@@ -37,7 +37,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use trusty_code_tui::{
-    CommandDescriptor, CommandRouting, PermissionAnswer, PickerRequest, ReplEvent, TuiEngine,
+    CancelReply, CommandDescriptor, CommandRouting, PermissionAnswer, PickerRequest, ReplEvent,
+    TuiEngine,
 };
 
 use crate::permissions::{PERMISSION_RESPOND_METHOD, PermissionDecision};
@@ -299,6 +300,33 @@ fn classify_cancel_error(err: EngineError) -> Result<CancelOutcome, EngineError>
     }
 }
 
+/// Project a `session.cancel` result onto the TUI's [`CancelReply`] (#8207).
+///
+/// Why: this is where the wire vocabulary has to stop. [`CancelReply`]'s
+/// payloads are rendered to the user verbatim, and [`EngineError::Rpc`]'s own
+/// `Display` embeds the JSON-RPC code — the `daemon returned an error (-32003)`
+/// shape #8207 was filed about. A refusal is therefore reduced to the daemon's
+/// `message` HERE, where the code is still a separate field, rather than
+/// anywhere downstream where only a flattened string survives. Split out of
+/// [`TuiEngine::cancel_session_reply`] so all three arms are testable without a
+/// daemon socket, the same reason [`classify_cancel_error`] is its own function.
+/// What: [`CancelOutcome::NoSession`] reports `Stopped` — `setup` never minted a
+/// session, so nothing is running and input should reopen. A transport failure
+/// carries no code and is reported as written.
+/// Test: `engine_tests::cancel_reply_reports_a_confirmed_stop`,
+/// `engine_tests::cancel_reply_keeps_an_unconfirmed_cancel_distinct`,
+/// `engine_tests::cancel_reply_strips_the_rpc_code_from_a_refusal`.
+fn cancel_reply_from(outcome: Result<CancelOutcome, EngineError>) -> CancelReply {
+    match outcome {
+        Ok(CancelOutcome::Stopped | CancelOutcome::NoSession) => CancelReply::Stopped,
+        Ok(CancelOutcome::StillCancelling { detail }) => CancelReply::StillCancelling { detail },
+        Err(EngineError::Rpc { message, .. }) => CancelReply::Failed { error: message },
+        Err(other) => CancelReply::Failed {
+            error: other.to_string(),
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl TuiEngine for CodeEngine {
     async fn handle_input(
@@ -419,8 +447,10 @@ impl TuiEngine for CodeEngine {
     /// #8207: the trait's `Result<()>` cannot carry the two-way outcome, so this
     /// adapts [`CodeEngine::cancel_session_outcome`] to it. An unconfirmed cancel
     /// stays an error — a cancel that did not land must not read as one that did —
-    /// but with the daemon's plain sentence rather than an opaque `-32010` dump,
-    /// until the TUI renders the typed outcome itself.
+    /// but with the daemon's plain sentence rather than an opaque `-32010` dump.
+    /// The TUI reaches [`Self::cancel_session_reply`] instead, which keeps the
+    /// distinction; this one-state form remains for a caller that only needs to
+    /// know whether the request was delivered.
     async fn cancel_session(&self) -> anyhow::Result<()> {
         match self.cancel_session_outcome().await? {
             CancelOutcome::Stopped | CancelOutcome::NoSession => Ok(()),
@@ -428,6 +458,26 @@ impl TuiEngine for CodeEngine {
                 Err(anyhow::anyhow!("still cancelling: {detail}"))
             }
         }
+    }
+
+    /// #8207: project [`CodeEngine::cancel_session_outcome`] onto the TUI's own
+    /// [`CancelReply`], which is the shape the TUI can render as three distinct
+    /// states instead of "cancelled or not".
+    ///
+    /// Why: this is the crate boundary where the wire vocabulary has to stop.
+    /// [`CancelReply`]'s payloads are shown to the user verbatim, and
+    /// [`EngineError::Rpc`]'s own `Display` embeds the JSON-RPC code — which is
+    /// exactly the `daemon returned an error (-32003)` shape #8207 was filed
+    /// about. So a refusal is reduced to the daemon's `message` here, where the
+    /// code is still a separate field, rather than anywhere downstream where
+    /// only a flattened string survives.
+    /// What: the projection itself is [`cancel_reply_from`], so every arm is
+    /// unit-testable without a daemon socket.
+    /// Test: `engine_tests::cancel_reply_reports_a_confirmed_stop`,
+    /// `engine_tests::cancel_reply_keeps_an_unconfirmed_cancel_distinct`,
+    /// `engine_tests::cancel_reply_strips_the_rpc_code_from_a_refusal`.
+    async fn cancel_session_reply(&self) -> CancelReply {
+        cancel_reply_from(self.cancel_session_outcome().await)
     }
 
     /// Answer one suspended permission request over

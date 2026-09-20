@@ -859,6 +859,82 @@ fn cancel_unconfirmed_is_a_still_cancelling_outcome() {
     );
 }
 
+/// A confirmed stop — and the no-session case — must reach the TUI as
+/// `CancelReply::Stopped`, the one arm that reopens input (#8207).
+///
+/// Why: `NoSession` is not a failure. `setup` never minted a session, so nothing
+/// is running; reporting it as a failure would leave the pane refusing input
+/// with nothing to wait for.
+/// Test: this test.
+#[test]
+fn cancel_reply_reports_a_confirmed_stop() {
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::Stopped)),
+        CancelReply::Stopped
+    );
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::NoSession)),
+        CancelReply::Stopped
+    );
+}
+
+/// An unconfirmed cancel must stay its own arm all the way to the TUI, carrying
+/// the daemon's sentence (#8207).
+///
+/// Why: this is the state the TUI renders as "still cancelling" — collapsing it
+/// into `Stopped` reopens input while the run continues (the original bug), and
+/// collapsing it into `Failed` reads as a cancel that never landed.
+/// Test: this test.
+#[test]
+fn cancel_reply_keeps_an_unconfirmed_cancel_distinct() {
+    let detail = "session s-1: cancellation requested but the task did not stop within 10s";
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::StillCancelling {
+            detail: detail.to_string()
+        })),
+        CancelReply::StillCancelling {
+            detail: detail.to_string()
+        }
+    );
+}
+
+/// A refusal reaches the user as the daemon's sentence WITHOUT its JSON-RPC code
+/// (#8207).
+///
+/// Why: `CancelReply`'s payload is rendered verbatim, and `EngineError`'s own
+/// `Display` writes `daemon returned an error (-32003): …` — exactly the string
+/// the issue was filed about. Naming `message` here is what keeps the code off
+/// the screen; a transport failure has no code to strip and passes through.
+/// Test: this test.
+#[test]
+fn cancel_reply_strips_the_rpc_code_from_a_refusal() {
+    let reply = cancel_reply_from(Err(EngineError::Rpc {
+        code: -32003,
+        message: "session s-1 already has a task running".to_string(),
+        data: None,
+    }));
+    assert_eq!(
+        reply,
+        CancelReply::Failed {
+            error: "session s-1 already has a task running".to_string()
+        }
+    );
+    let CancelReply::Failed { error } = &reply else {
+        panic!("a refusal is a failure: {reply:?}");
+    };
+    assert!(
+        !error.contains("-32003"),
+        "the wire code must not reach the user: {error}"
+    );
+
+    assert_eq!(
+        cancel_reply_from(Err(EngineError::NoSession)),
+        CancelReply::Failed {
+            error: EngineError::NoSession.to_string()
+        }
+    );
+}
+
 /// Every other refusal stays an error (#8207).
 ///
 /// Why: the split has to be exactly one code wide. Reading a `-32603` daemon
