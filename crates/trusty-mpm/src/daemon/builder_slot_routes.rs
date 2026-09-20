@@ -39,7 +39,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::agent::is_subagent_dispatch_tool;
+use crate::core::builder_capacity::Capacity;
 use crate::core::builders::resolve_max_concurrent;
+use crate::core::config::MpmConfig;
 use crate::core::dispatch_isolation::{agent_is_builder, dispatch_agent};
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
@@ -90,6 +92,26 @@ pub struct BuilderSlotResponse {
     /// statement about the machine, and never `true` alongside `claimed`.
     #[serde(default)]
     pub ineligible: bool,
+    /// The operator's hard ceiling, which `cap` may now sit below (#8261).
+    ///
+    /// Why: since #8261 `cap` is the MEASURED slot count, not the configured
+    /// one. A refusal that showed only the measured number would read as a
+    /// config the operator does not recognise. Additive with `serde(default)`
+    /// so a `tm` older than the daemon still parses the answer.
+    #[serde(default)]
+    pub ceiling: u32,
+    /// Why `cap` is what it is, rendered (#8261).
+    ///
+    /// Why: the closure condition — the refusal must name which condition
+    /// failed, show the measured reading AND the configured limit, and
+    /// distinguish a reading that could not be taken from one that was
+    /// exceeded. Rendered daemon-side so one authority words it.
+    #[serde(default)]
+    pub capacity_reason: String,
+    /// The `builder-cap-*-read-failure` surface, when a reading could not be
+    /// taken at all and the count fell back to the fixed ceiling (#8261).
+    #[serde(default)]
+    pub fail_closed_surface: Option<String>,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -125,12 +147,13 @@ pub async fn builder_slot_route(
     Path(id): Path<String>,
     Json(req): Json<BuilderSlotRequest>,
 ) -> Result<Json<BuilderSlotResponse>, DaemonError> {
-    // The cap is resolved HERE, in the counting process — see the module doc.
-    Ok(Json(builder_slot_op(
-        &state,
-        &id,
-        req,
-        resolve_max_concurrent(),
+    // The count is resolved HERE, in the counting process — see the module doc.
+    // #8261: it is now MEASURED per decision rather than read once from the
+    // tier table, with `builders.max_concurrent` as the hard ceiling.
+    let config = MpmConfig::load_default().builders;
+    let capacity = state.builder_capacity(&config, resolve_max_concurrent(), None);
+    Ok(Json(builder_slot_op_with_capacity(
+        &state, &id, req, &capacity,
     )?))
 }
 
@@ -216,7 +239,42 @@ pub fn builder_slot_op(
         cap,
         claimed,
         ineligible: !eligible,
+        ceiling: cap,
+        capacity_reason: String::new(),
+        fail_closed_surface: None,
     })
+}
+
+/// [`builder_slot_op`] against a measured capacity rather than a fixed cap (#8261).
+///
+/// Why: a `_with_capacity` wrapper rather than a fifth parameter on
+/// [`builder_slot_op`], because every existing caller and test supplies a plain
+/// number and the capacity is only ever built by the two production sites.
+/// What: admits against [`Capacity::n_effective`] and carries the ceiling, the
+/// rendered reason and any fail-closed surface into the answer, so the guard's
+/// refusal can name which condition failed with its reading and its limit
+/// without re-deriving any of it.
+///
+/// # Errors
+///
+/// As [`builder_slot_op`].
+///
+/// Test: `the_route_admits_against_the_measured_count_and_reports_the_ceiling`,
+/// `a_fail_closed_reading_is_named_in_the_answer`.
+pub fn builder_slot_op_with_capacity(
+    state: &Arc<DaemonState>,
+    id: &str,
+    req: BuilderSlotRequest,
+    capacity: &Capacity,
+) -> Result<BuilderSlotResponse, DaemonError> {
+    let mut response = builder_slot_op(state, id, req, capacity.n_effective)?;
+    response.ceiling = capacity.ceiling;
+    response.capacity_reason = capacity.reason.to_string();
+    response.fail_closed_surface = capacity
+        .reason
+        .fail_closed_surface()
+        .map(|surface| surface.name().to_string());
+    Ok(response)
 }
 
 /// `GET /api/v1/builder-slots` — the read-only census `tm doctor` renders.

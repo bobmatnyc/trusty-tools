@@ -93,7 +93,12 @@ pub(crate) fn dispatch_claims_a_builder_slot(tool_name: &str, tool_input: Option
 /// `BUILDER_LEASE_TTL_SECS`, and telling the PM to wait for something that may
 /// take 45 minutes is advice to stall the session.
 /// Test: `deny_reason_names_every_holder_the_cap_and_the_config_key`.
-pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> String {
+pub(crate) fn deny_reason(
+    agent: &str,
+    cap: u32,
+    holders: &[HolderLine],
+    note: &CapacityNote,
+) -> String {
     let running = holders
         .iter()
         .map(HolderLine::render)
@@ -101,7 +106,7 @@ pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> Stri
         .join("; ");
     format!(
         "Machine-wide builder cap reached (#6892): this {agent} dispatch would be builder \
-         {next} on a machine capped at {cap}. Already running: {running}. The cap counts \
+         {next} on a machine capped at {cap}.{measured} Already running: {running}. The cap counts \
          BUILDERS across every session on this host, not per session — on 2026-08-08 several \
          sessions each honouring their own limit produced six concurrent `cargo` builds and \
          crashed the machine, which is why no session can see or raise its own share. \
@@ -111,7 +116,89 @@ pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> Stri
          `~/.trusty-mpm/config.toml` — a project's `.trusty-mpm.toml` cannot set it, by \
          design. `tm doctor` lists the current holders.",
         next = holders.len() + 1,
+        measured = note.render(cap),
     )
+}
+
+/// What the daemon measured to arrive at this slot count (#8261).
+///
+/// Why: since #8261 the cap in a refusal is MEASURED, not configured, and a
+/// message showing only the measured number reads as a config the operator does
+/// not recognise. The closure condition is explicit: the refusal names which
+/// condition failed, shows the reading AND the limit, and distinguishes a
+/// reading that could not be TAKEN from one that was EXCEEDED.
+/// What: the daemon's own rendering, carried verbatim so one authority words it.
+/// A daemon too old to send these fields leaves them empty and
+/// [`Self::render`] adds nothing — the pre-#8261 message, unchanged.
+/// Test: `deny_reason_names_the_measured_capacity_and_its_ceiling`,
+/// `deny_reason_names_an_unreadable_metric_as_such`,
+/// `an_old_daemons_answer_renders_the_pre_8261_message`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CapacityNote {
+    /// The operator's configured hard ceiling.
+    pub(crate) ceiling: u32,
+    /// Why the measured count is what it is, as the daemon rendered it.
+    pub(crate) reason: String,
+    /// The `builder-cap-*-read-failure` surface, when a reading could not be
+    /// taken at all.
+    pub(crate) fail_closed_surface: Option<String>,
+}
+
+impl CapacityNote {
+    /// The sentence [`deny_reason`] inserts after the cap, or nothing.
+    ///
+    /// Test: `deny_reason_names_the_measured_capacity_and_its_ceiling`,
+    /// `an_old_daemons_answer_renders_the_pre_8261_message`.
+    fn render(&self, cap: u32) -> String {
+        if self.reason.is_empty() {
+            return String::new();
+        }
+        let ceiling = if self.ceiling > cap {
+            format!(
+                " That {cap} is MEASURED capacity, below the configured ceiling of {} \
+                 (`builders.max_concurrent`).",
+                self.ceiling
+            )
+        } else {
+            String::new()
+        };
+        let unreadable = match &self.fail_closed_surface {
+            Some(surface) => format!(
+                " This is a FAIL-CLOSED fallback to the fixed ceiling, not a measured \
+                 refusal — the {surface} surface fired."
+            ),
+            None => String::new(),
+        };
+        format!("{ceiling} Capacity: {}.{unreadable}", self.reason)
+    }
+}
+
+/// Read the #8261 capacity fields out of the daemon's answer.
+///
+/// Why: same reason [`holders_in`] exists — the guard renders what the daemon
+/// reports rather than re-deriving it, so the number that refused and the number
+/// the message names cannot disagree.
+/// What: every field is optional; a daemon predating #8261 yields
+/// [`CapacityNote::default`], which renders as the pre-#8261 message.
+/// Test: `an_old_daemons_answer_renders_the_pre_8261_message`,
+/// `the_capacity_note_is_read_out_of_the_daemons_answer`.
+fn capacity_note_in(body: &Value) -> CapacityNote {
+    CapacityNote {
+        ceiling: body
+            .get("ceiling")
+            .and_then(Value::as_u64)
+            .and_then(|c| u32::try_from(c).ok())
+            .unwrap_or_default(),
+        reason: body
+            .get("capacity_reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        fail_closed_surface: body
+            .get("fail_closed_surface")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }
 }
 
 /// One current holder, as the deny message renders it.
@@ -214,8 +301,9 @@ fn holders_in(body: &Value) -> Vec<HolderLine> {
 pub(crate) enum BuilderSlotClaim {
     /// A slot was claimed; the dispatch proceeds.
     Admitted,
-    /// The machine is at its cap. Carries the cap and its current holders.
-    Full(u32, Vec<HolderLine>),
+    /// The machine is at its cap. Carries the cap, its current holders, and
+    /// (#8261) what the daemon measured to arrive at that cap.
+    Full(u32, Vec<HolderLine>, CapacityNote),
     /// The daemon answered, reported the machine's state, and declined to count
     /// this dispatch at all — it classified the agent as a non-builder where
     /// this binary classified it as one.
@@ -274,7 +362,7 @@ pub(crate) async fn claim_builder_slot(
                 .and_then(Value::as_u64)
                 .and_then(|c| u32::try_from(c).ok())
                 .unwrap_or_default();
-            BuilderSlotClaim::Full(cap, holders_in(&body))
+            BuilderSlotClaim::Full(cap, holders_in(&body), capacity_note_in(&body))
         }
         // #6892: unlike the #4480 guard, an absent daemon is NOT a degraded mode
         // this path accepts. See the module doc for why the costs are not
@@ -369,7 +457,9 @@ pub(crate) async fn evaluate(
     let agent = dispatch_agent(tool_input).unwrap_or("this");
     match claim_builder_slot(url, session_id, cwd, payload).await {
         BuilderSlotClaim::Admitted => None,
-        BuilderSlotClaim::Full(cap, holders) => Some(deny_reason(agent, cap, &holders)),
+        BuilderSlotClaim::Full(cap, holders, note) => {
+            Some(deny_reason(agent, cap, &holders, &note))
+        }
         // ALLOW, and say so on stderr. The daemon ANSWERED here — the machine's
         // count is known, this dispatch simply was not added to it — so unlike
         // the arm below there is no open question to fail closed on. The usual
@@ -498,7 +588,7 @@ mod tests {
 
     #[test]
     fn deny_reason_names_every_holder_the_cap_and_the_config_key() {
-        let reason = deny_reason("python-engineer", 2, &holders());
+        let reason = deny_reason("python-engineer", 2, &holders(), &CapacityNote::default());
         // Every holder, with agent, session and elapsed time.
         assert!(reason.contains("rust-engineer"), "{reason}");
         assert!(reason.contains("sess-a"), "{reason}");
@@ -512,6 +602,72 @@ mod tests {
         assert!(reason.contains("~/.trusty-mpm/config.toml"), "{reason}");
         // And a remedy that needs nothing from the agents already running.
         assert!(reason.contains("Queue this dispatch"), "{reason}");
+    }
+
+    /// #8261: an old daemon sends no capacity fields, and the message it
+    /// produces must be exactly the pre-#8261 one — no dangling "Capacity:".
+    #[test]
+    fn an_old_daemons_answer_renders_the_pre_8261_message() {
+        let note = capacity_note_in(&serde_json::json!({"cap": 2, "claimed": false}));
+        assert_eq!(note, CapacityNote::default());
+        let reason = deny_reason("python-engineer", 2, &holders(), &note);
+        assert!(!reason.contains("Capacity:"), "{reason}");
+        assert!(!reason.contains("MEASURED"), "{reason}");
+    }
+
+    #[test]
+    fn the_capacity_note_is_read_out_of_the_daemons_answer() {
+        let note = capacity_note_in(&serde_json::json!({
+            "ceiling": 4,
+            "capacity_reason": "1-minute load average 40.00 is above the threshold 32.00",
+            "fail_closed_surface": serde_json::Value::Null,
+        }));
+        assert_eq!(note.ceiling, 4);
+        assert!(note.reason.contains("40.00"));
+        assert_eq!(note.fail_closed_surface, None);
+    }
+
+    /// #8261 closure condition: the refusal shows the MEASURED count against the
+    /// configured ceiling, plus the reading and the limit behind it.
+    #[test]
+    fn deny_reason_names_the_measured_capacity_and_its_ceiling() {
+        let note = CapacityNote {
+            ceiling: 4,
+            reason: "1-minute load average 40.00 is above the threshold 32.00 \
+                     (logical cores x builders.load_factor)"
+                .to_string(),
+            fail_closed_surface: None,
+        };
+        let reason = deny_reason("rust-engineer", 2, &holders(), &note);
+        assert!(reason.contains("MEASURED capacity"), "{reason}");
+        assert!(reason.contains("ceiling of 4"), "{reason}");
+        assert!(
+            reason.contains("40.00") && reason.contains("32.00"),
+            "the reading AND the limit must both appear: {reason}"
+        );
+        assert!(
+            !reason.contains("FAIL-CLOSED"),
+            "an EXCEEDED limit is not an UNREADABLE one: {reason}"
+        );
+    }
+
+    /// #8261 closure condition: an unreadable metric must be distinguishable
+    /// from an exceeded one, by name.
+    #[test]
+    fn deny_reason_names_an_unreadable_metric_as_such() {
+        let note = CapacityNote {
+            ceiling: 4,
+            reason: "builder-cap-load-read-failure — the Load reading could not be taken \
+                     (operation not permitted, errno 1)"
+                .to_string(),
+            fail_closed_surface: Some("builder-cap-load-read-failure".to_string()),
+        };
+        let reason = deny_reason("rust-engineer", 4, &holders(), &note);
+        assert!(reason.contains("FAIL-CLOSED"), "{reason}");
+        assert!(reason.contains("builder-cap-load-read-failure"), "{reason}");
+        assert!(reason.contains("errno 1"), "{reason}");
+        // cap == ceiling here, so there is no "below the configured ceiling".
+        assert!(!reason.contains("MEASURED capacity"), "{reason}");
     }
 
     #[test]
