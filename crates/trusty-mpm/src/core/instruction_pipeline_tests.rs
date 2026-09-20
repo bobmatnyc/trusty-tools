@@ -880,7 +880,7 @@ fn delegation_doctrine_carries_the_precedence_note() {
     // manifest. The doctrine string every composer uses must still be the asset
     // followed by that note, in that order.
     let doctrine = delegation_doctrine();
-    assert!(doctrine.starts_with(AGENT_DELEGATION.trim()));
+    assert!(doctrine.starts_with(agent_delegation().trim()));
     assert!(doctrine.ends_with("do not retry the same agent."));
     assert!(doctrine.contains("trust the harness listing"));
 }
@@ -1245,7 +1245,7 @@ fn a_recording_compiled_write_reaches_the_named_framework_root() {
     let project = TempDir::new().expect("project");
     let dest = compiled_prompt_path(project.path(), "sess-7514");
     // #7616: the source set is no longer the bundled sections alone — it also
-    // carries this machine's undeduped roster, so summing `SECTION_SOURCES` here
+    // carries this machine's undeduped roster, so summing `section_sources()` here
     // would undercount and the fixture would land on the folded branch instead.
     // #7746: the roster count itself is fixed at zero rather than read from the
     // ambient machine-global tiers — see the fn doc above for why.
@@ -1637,4 +1637,153 @@ fn no_seed_test_reads_the_ambient_home_directory() {
         0,
         "pass a fixture home under the test's temp dir, not the ambient one"
     );
+}
+
+// ── #8293: the routing table comes from the shared rows ─────────────────────
+
+/// The delegation section's table and pipeline chain are RENDERED from
+/// `trusty_agents_common::pm_routing` (#8293).
+///
+/// Why: this is #8293's drift check for trusty-mpm. Re-authoring the table in
+/// `sections/agent-delegation.md` would leave every other test green — they read
+/// the composed prompt, which would still say something plausible — while the
+/// two products' routing quietly diverged again. Asserting the template keeps
+/// its placeholders is the other half: without them `fill` is a no-op and the
+/// delivered section loses its table entirely. A placeholder is not enough on
+/// its own — a template that KEPT the marker and re-authored a table beneath it
+/// would satisfy every containment check while shipping two routing tables, so
+/// the authored file is also asserted to contain no Markdown table at all.
+/// What: asserts the authored section carries each placeholder exactly once and
+/// no Markdown table rule (`|---|---|`, keyed on the rule rather than a header,
+/// so a re-authored table under any heading is caught), that the delivered
+/// [`agent_delegation`] carries neither placeholder, and that it contains
+/// exactly what `render_table`/`render_pipeline` produce for [`Consumer::Mpm`]
+/// — end to end, through `assemble_system_prompt`.
+/// Test: this test.
+#[test]
+fn mpm_delegation_section_is_rendered_from_the_shared_rows() {
+    use trusty_agents_common::pm_routing::{
+        Consumer, PIPELINE_PLACEHOLDER, TABLE_PLACEHOLDER, render_pipeline, render_table,
+    };
+
+    let delivered = agent_delegation();
+    for placeholder in [TABLE_PLACEHOLDER, PIPELINE_PLACEHOLDER] {
+        assert_eq!(
+            AGENT_DELEGATION_TEMPLATE.matches(placeholder).count(),
+            1,
+            "agent-delegation.md must carry {placeholder:?} exactly once — absent, the \
+             routing table is authored in this crate again instead of rendered; twice, \
+             the section ships the rendered table twice (#8293)"
+        );
+        assert!(
+            !delivered.contains(placeholder),
+            "the delivered section still carries {placeholder:?}, so `fill` did not run"
+        );
+    }
+
+    // The rule row is the one line every Markdown table must carry and the one
+    // part of it no header rename can move.
+    assert!(
+        !AGENT_DELEGATION_TEMPLATE.contains("|---|---|"),
+        "agent-delegation.md authors a routing table of its own — the placeholder alone \
+         does not stop one being re-authored beneath it. Edit the shared rows in \
+         trusty_agents_common::pm_routing instead (#8293).\n\nauthored:\n{AGENT_DELEGATION_TEMPLATE}"
+    );
+
+    let table = render_table(Consumer::Mpm);
+    assert!(
+        delivered.contains(&table),
+        "the delegation section has drifted from the shared rows.\n\
+         expected to contain:\n{table}\n\ndelivered:\n{delivered}"
+    );
+    let chain = render_pipeline(Consumer::Mpm);
+    assert!(
+        delivered.contains(&chain),
+        "the full-pipeline bullet has drifted from the shared rows: expected {chain:?}"
+    );
+
+    // The section reaches a launched session through the assembler, not through
+    // the constant — a fill that stopped at the constant would still be a defect.
+    let composed = assemble_system_prompt();
+    assert!(
+        composed.contains(&table) && composed.contains(&chain),
+        "the composed PM prompt carries no rendered routing table (#8293)"
+    );
+}
+
+/// The delegation section's byte ceiling, measured on the RENDERED text.
+///
+/// Why: `scripts/check_context_budget.sh` weighs the authored
+/// `sections/agent-delegation.md`, and #8293 moved ~930 bytes of routing table
+/// out of that file into `trusty_agents_common::pm_routing`. Every byte still
+/// reaches turn 1, but no budget gate can see it any more — growth in a cell's
+/// text is now invisible to the script. This cap is the replacement: it is
+/// measured where the bytes are actually assembled.
+/// What: the rendered section's size on 2026-09-20 (2029 B — the same figure
+/// `scripts/check_context_budget.sh` recorded for the authored file before the
+/// lift, since #8293 moved bytes without changing them) plus ~10% headroom,
+/// rounded to 2240. Headroom, not an exact pin, so an ordinary wording fix does
+/// not need a test edit; small enough that a new table row or paragraph does.
+/// Test: `the_rendered_delegation_section_stays_within_its_byte_cap`.
+const AGENT_DELEGATION_RENDERED_CAP_BYTES: usize = 2240;
+
+/// The rendered delegation section stays inside its byte cap (#8293).
+///
+/// Why: see [`AGENT_DELEGATION_RENDERED_CAP_BYTES`] — after #8293 the authored
+/// file under-reports what a session pays for the routing doctrine, so the only
+/// honest measurement is of [`agent_delegation`]'s output.
+/// What: asserts the rendered section is at most the cap, and reports the
+/// authored/rendered pair in the failure so the difference the budget script
+/// cannot see is visible in the message.
+/// Test: this test.
+#[test]
+fn the_rendered_delegation_section_stays_within_its_byte_cap() {
+    let rendered = agent_delegation().len();
+    assert!(
+        rendered <= AGENT_DELEGATION_RENDERED_CAP_BYTES,
+        "the rendered delegation section is {rendered} bytes, over its \
+         {AGENT_DELEGATION_RENDERED_CAP_BYTES}-byte cap (authored template: {} bytes). \
+         Every byte here is paid on turn 1 of every session — cut a row or a \
+         paragraph, or raise the cap deliberately in the same PR (#8293).",
+        AGENT_DELEGATION_TEMPLATE.len()
+    );
+}
+
+/// Every agent the shared rows route trusty-mpm's work to is bundled (#8293).
+///
+/// Why: the rows are edited in a crate that cannot see this roster, so a row
+/// naming an agent trusty-mpm does not deploy would send the PM at a
+/// `subagent_type` that fails to dispatch (#4594). `ops` is the deliberate
+/// counter-case: the section names it to forbid it, the shared rows declare it
+/// a non-agent, and it must NOT appear here.
+/// What: for every name in `pm_routing::agents(Consumer::Mpm)` and every entry
+/// of `MPM_PIPELINE`, asserts `agents/<name>.md` is an artifact in
+/// [`crate::core::bundle::ALL`].
+/// Test: this test.
+#[test]
+fn shared_routing_rows_name_only_bundled_mpm_agents() {
+    use trusty_agents_common::pm_routing::{Consumer, MPM_PIPELINE, agents};
+
+    let bundled: Vec<&str> = crate::core::bundle::ALL
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .rel_path
+                .strip_prefix("agents/")
+                .and_then(|name| name.strip_suffix(".md"))
+        })
+        .collect();
+
+    let named = agents(Consumer::Mpm);
+    assert!(
+        !named.contains(&"ops"),
+        "`ops` is DEPRECATED — the section names it to forbid it, so it must not \
+         be declared a routing target: {named:?}"
+    );
+    for name in named.iter().chain(MPM_PIPELINE.iter()) {
+        assert!(
+            bundled.contains(name),
+            "the shared routing rows name '{name}', which trusty-mpm does not bundle"
+        );
+    }
 }

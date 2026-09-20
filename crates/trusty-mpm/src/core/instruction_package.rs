@@ -68,7 +68,7 @@
 //! rather than a Rust literal, and inlining every section's prose would have
 //! turned `sections/core.md` into a single 23 KB JSON line. A `file` body names a
 //! bundled markdown source instead; resolution goes through the compile-time
-//! [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the build
+//! [`crate::core::instruction_pipeline::section_sources`] table, so the build
 //! stays hermetic and a renamed section is a compile error. The bump is mandatory
 //! under the policy above: a v1 build reading a v2 manifest would reject the
 //! unknown `kind`, which is the correct loud failure.
@@ -315,7 +315,7 @@ impl Join {
 /// validation insist that generated content is actually consumed.
 /// What: `Text` carries markdown authored in the package; `File` names a bundled
 /// markdown source resolved through the compile-time
-/// [`crate::core::instruction_pipeline::SECTION_SOURCES`] table; `Generated`
+/// [`crate::core::instruction_pipeline::section_sources`] table; `Generated`
 /// names the generator that supplies it.
 ///
 /// `File` is the schema-v2 addition (#4318). It exists because the two obvious
@@ -351,7 +351,7 @@ pub enum BlockBody {
     File {
         /// Path relative to `assets/instructions/`, e.g. `sections/core.md`.
         /// Must be a key of
-        /// [`crate::core::instruction_pipeline::SECTION_SOURCES`]; anything else
+        /// [`crate::core::instruction_pipeline::section_sources`]; anything else
         /// is [`ValidationError::UnknownFileSource`]. Trimmed before emission.
         path: String,
     },

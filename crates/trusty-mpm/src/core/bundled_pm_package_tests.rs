@@ -28,9 +28,9 @@ use crate::core::instruction_package::{
     ValidationError,
 };
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS,
-    SECTION_IDENTITY, SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH,
-    SECTION_SOURCES, WORKFLOW, section_source, workflow_section,
+    SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
+    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, WORKFLOW, agent_delegation,
+    section_source, section_sources, workflow_section,
 };
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
@@ -199,7 +199,7 @@ fn manifest_prose_lives_in_markdown_not_in_the_json() {
         PM_PACKAGE_JSON.len(),
         SECTION_CORE.len()
     );
-    for (path, _) in SECTION_SOURCES {
+    for (path, _) in section_sources() {
         assert!(
             PM_PACKAGE_JSON.contains(path),
             "{path} must be referenced by a `file` body"
@@ -223,7 +223,7 @@ fn every_section_source_resolves() {
     // The `file` body table is the only thing standing between a renamed section
     // and an empty block, so assert both directions: every table key resolves, and
     // a path outside the table does not.
-    for (path, body) in SECTION_SOURCES {
+    for (path, body) in section_sources() {
         assert_eq!(section_source(path), Some(body), "{path} must resolve");
         assert!(!body.trim().is_empty(), "{path} must not be blank");
     }
@@ -693,7 +693,7 @@ fn every_authored_block_is_exactly_its_section_source() {
         (SectionId::Memory, SECTION_MEMORY),
         (SectionId::Search, SECTION_SEARCH),
         (SectionId::Workflow, WORKFLOW),
-        (SectionId::AgentDelegation, AGENT_DELEGATION),
+        (SectionId::AgentDelegation, agent_delegation()),
         (SectionId::Identity, SECTION_IDENTITY),
         (SectionId::Enforcement, SECTION_ENFORCEMENT),
         (

@@ -39,7 +39,7 @@ use std::path::Path;
 use crate::core::claude_md_sections::ProjectOverrides;
 use crate::core::instruction_package::SectionId;
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_SEPARATOR, base_pm, pm_instructions,
+    SECTION_SEPARATOR, agent_delegation, base_pm, pm_instructions,
 };
 
 /// Directory under the project root that holds the override files.
@@ -569,7 +569,7 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
             crate::core::instruction_pipeline::delegation_doctrine(),
             roster.trim()
         ),
-        None => AGENT_DELEGATION.trim().to_string(),
+        None => agent_delegation().trim().to_string(),
     }
 }
 

@@ -19,6 +19,14 @@
 #     crates/trusty-mpm/src/assets/instructions/sections/*.md
 #     crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md
 #
+#   #8293: `sections/agent-delegation.md` is AUTHORED with two placeholders that
+#   `trusty_agents_common::pm_routing` renders a routing table and a pipeline
+#   chain into at compose time, so its row here measures the template and not
+#   what a session receives (~930 B less). Rendering needs cargo, which this
+#   script deliberately does not use, so the rendered section's own ceiling is a
+#   Rust test instead: `the_rendered_delegation_section_stays_within_its_byte_cap`
+#   in crates/trusty-mpm/src/core/instruction_pipeline_tests.rs.
+#
 #   The glob is taken literally, `README.md` included: the baseline names every
 #   row explicitly, so what is measured is auditable in the diff rather than
 #   hidden behind an exception list, and a file that legitimately grew is one

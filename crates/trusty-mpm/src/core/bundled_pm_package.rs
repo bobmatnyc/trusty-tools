@@ -19,7 +19,7 @@
 //!   the delivered prompt cannot disagree.
 //! * NEW — `file` bodies (schema v2). The manifest names its prose by path and
 //!   resolves it through the compile-time
-//!   [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the bulk
+//!   [`crate::core::instruction_pipeline::section_sources`] table, so the bulk
 //!   text keeps living in reviewable markdown, the build stays hermetic, and a
 //!   renamed section is a compile error rather than an empty block.
 //! * NEW — inline `text` bodies now carry authored RULES, not just the

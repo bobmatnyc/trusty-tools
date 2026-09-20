@@ -488,7 +488,7 @@ fn stage_embedded_sources() -> Result<tempfile::TempDir, RosterDeployError> {
     for (filename, content) in EMBEDDED_TM_AGENT_SOURCES {
         std::fs::write(dir.path().join(filename), content).map_err(RosterDeployError::Stage)?;
     }
-    for embedded in DEFAULT_AGENTS {
+    for embedded in DEFAULT_AGENTS.iter() {
         if let EmbeddedAgent::Direct { name, md } = embedded {
             std::fs::write(dir.path().join(format!("{name}.md")), md)
                 .map_err(RosterDeployError::Stage)?;

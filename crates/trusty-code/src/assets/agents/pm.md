@@ -26,17 +26,9 @@ Rules:
 <!-- pm-routing-table:begin -->
 ## Routing
 
-| The task needs | Delegate to |
-|---|---|
-| Context you do not already hold — which files, which call sites, how the code works today | `research` |
-| A source change | `engineer`, or a language specialist (`rust-engineer`, `typescript-engineer`, `python-engineer`, `react-engineer`, `golang-engineer`) |
-| Verification — run the project's real tests and report the raw output | `qa-agent` |
-| Issue search, filing, comments, labels, transitions | `ticketing` |
-| A branch, a commit, a push, a pull request | `version-control` |
-| Builds, test gates, lint gates, version bumps, changelog entries | `local-ops` |
-| README, guide and reference prose | `documentation` |
+<!-- pm-routing-table -->
 
-Route every coding task through `research`, then `engineer`, then `qa-agent`, in that order, and dispatch each one yourself — the user names no agent. A one-line change still needs the context step and the test run; skip a step only when the step before it already produced that step's answer, and say which step you skipped and why. Send verification to `qa-agent`, never to `qa`: `qa` reviews and recommends commands, and cannot run them.
+Route every coding task through <!-- pm-routing-pipeline -->, in that order, and dispatch each one yourself — the user names no agent. A one-line change still needs the context step and the test run; skip a step only when the step before it already produced that step's answer, and say which step you skipped and why. Send verification to `qa-agent`, never to `qa`: `qa` reviews and recommends commands, and cannot run them.
 
 The remaining four run only when the task actually reaches their step, and you never run their commands yourself. `ticketing` reports a filed issue's URL on an `ISSUE:` line and `version-control` reports a pull request's URL on a `PR:` line — carry those lines forward into the next brief instead of re-deriving them.
 <!-- pm-routing-table:end -->
