@@ -30,6 +30,9 @@ enum Shell {
     WedgedForever,
     /// tmux cannot read this pane at all.
     Unobservable,
+    /// The pane is perfectly readable, but the EXISTENCE probe errors (#8233
+    /// r7): a transient `list-sessions` failure over a healthy shell.
+    ProbeUnreachable,
 }
 
 /// A fake pane with a programmable relationship to the probe.
@@ -121,7 +124,10 @@ impl ManagedTmuxDriver for ScriptedShell {
     /// a double that models a LIVE pane has to name its own session. An
     /// `Unobservable` driver answers the probe failure it always did.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-        if self.behaviour == Shell::Unobservable {
+        if matches!(
+            self.behaviour,
+            Shell::Unobservable | Shell::ProbeUnreachable
+        ) {
             return Err(ManagedError::TmuxUnavailable("no server".into()));
         }
         Ok(vec!["tmpm-x".to_owned()])
@@ -189,6 +195,32 @@ fn confirm_prompt_never_sends_a_closing_quote_or_a_bare_enter() {
             "only probe lines may be typed at a wedged pane, got {line:?}"
         );
     }
+}
+
+/// #8233 r7: an existence probe that ERRORS is `Unobservable`, not a skipped
+/// handshake over a pane assumed fine.
+///
+/// Why: the gate used `session_exists`, which maps a driver error to `false`
+/// — the same answer as "confirmed absent". Both arms are deliberately
+/// permissive (a probe that cannot answer must never REFUSE a launch), so the
+/// tri-state call exists to make the error visible in the log rather than to
+/// change the verdict; this pins the arm so a later "fail closed on Err" edit
+/// has to face the rule at `PaneState::may_launch` explicitly.
+/// What: a shell that reads its tty perfectly but whose `list-sessions` fails.
+/// Asserts `Unobservable` and that nothing was typed into the pane.
+/// Test: this function IS the test.
+#[test]
+fn confirm_prompt_is_unobservable_when_the_existence_probe_errors() {
+    let shell = ScriptedShell::new(Shell::ProbeUnreachable);
+    assert_eq!(
+        confirm(&shell),
+        PaneState::Unobservable,
+        "a probe error must answer 'cannot tell', never a refusal"
+    );
+    assert!(
+        shell.sent.lock().expect("sent").is_empty(),
+        "an unanswerable existence probe must cost no probe line and no delay"
+    );
 }
 
 #[test]

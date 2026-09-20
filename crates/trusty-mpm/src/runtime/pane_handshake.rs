@@ -319,6 +319,7 @@ fn park(interval: Duration) {
 /// `confirm_prompt_interrupts_a_continuation_prompt_before_probing`,
 /// `confirm_prompt_recovers_a_pane_that_frees_up_after_the_interrupt`,
 /// `confirm_prompt_is_unobservable_when_the_driver_cannot_capture`,
+/// `confirm_prompt_is_unobservable_when_the_existence_probe_errors`,
 /// `confirm_prompt_never_sends_a_closing_quote_or_a_bare_enter`.
 pub(crate) fn confirm_prompt(
     tmux: &dyn ManagedTmuxDriver,
@@ -335,8 +336,26 @@ pub(crate) fn confirm_prompt(
     // shell that read nothing, so the launch was refused as `Unresponsive`
     // after the full blocking budget. "Cannot tell" must never become a
     // refusal; this module's own rule at `PaneState::may_launch`.
-    if !tmux.session_exists(tmux_name) {
-        return PaneState::Unobservable;
+    // #8233 r7: `session_exists` maps a driver ERROR to `false`, which is the
+    // same answer as "confirmed absent". Both arms land on `Unobservable`
+    // anyway, so the tri-state probe is used to keep the error VISIBLE — a
+    // swallowed probe failure that silently skipped this handshake and typed
+    // the launch line into a wedged pane is the defect this module exists to
+    // close, and a warn line is what makes it diagnosable after the fact.
+    match tmux.session_exists_checked(tmux_name) {
+        Ok(true) => {}
+        Ok(false) => return PaneState::Unobservable,
+        Err(e) => {
+            // Deliberately PERMISSIVE: an unobservable probe must never become
+            // a launch refusal (this module's rule at `PaneState::may_launch`),
+            // so the launch proceeds unverified — logged, never silent.
+            tracing::warn!(
+                session = %tmux_name,
+                "pane handshake: tmux could not answer whether this session exists; \
+                 proceeding without the wedged-pane check (#8233): {e}"
+            );
+            return PaneState::Unobservable;
+        }
     }
     let Some(first) = capture_tail(tmux, tmux_name, pane_id) else {
         return PaneState::Unobservable;

@@ -160,6 +160,7 @@ pub fn find_runtime_exited(
 /// tmux driver and no real tmux binary.
 /// Test: `stop_runtime_exited_transitions_active_to_stopped`,
 /// `stop_runtime_exited_keeps_running_session`,
+/// `stop_runtime_exited_skips_a_session_whose_resume_is_in_flight`,
 /// `stop_runtime_exited_does_not_kill_pane`.
 pub async fn stop_runtime_exited(
     manager: &SessionManager,
@@ -480,6 +481,66 @@ mod tests {
             ManagedSessionState::Stopped,
             "runtime-exited Active session must become Stopped (resumable), #1814"
         );
+    }
+
+    /// #8233: a claimed session is skipped, and is NOT counted as stopped.
+    ///
+    /// Why: `stop_runtime_exited`'s `ResumeInFlight` arm logs and moves on, but
+    /// nothing asserted that it neither transitions the record nor inflates the
+    /// returned count — a count the reap loop reports as work done.
+    /// What: two runtime-exited sessions, one claimed; asserts the count is 1,
+    /// the claimed record is still `Active`, and the unclaimed one is `Stopped`,
+    /// so the skip is proven narrow rather than a blanket no-op.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn stop_runtime_exited_skips_a_session_whose_resume_is_in_flight() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mgr, claimed) = seed_active(&tmp, "claimed").await;
+        let claimed_record = mgr.get(&claimed).await.expect("get claimed");
+        let free = {
+            let record = mgr
+                .create(
+                    "free".into(),
+                    Some(std::path::PathBuf::from("/tmp/test-runtime-reap")),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create");
+            mgr.set_workspace(
+                &record.id,
+                std::path::PathBuf::from("/tmp/test-runtime-reap"),
+                ManagedSessionState::Active,
+            )
+            .await
+            .expect("set Active");
+            record.id
+        };
+        let free_record = mgr.get(&free).await.expect("get free");
+        let panes = vec![
+            pane(&claimed_record.tmux_name, "zsh"),
+            pane(&free_record.tmux_name, "zsh"),
+        ];
+
+        let claim = mgr.begin_resume(&claimed).expect("claim granted");
+        let stopped = stop_runtime_exited(&mgr, &panes, &AlwaysIdleProbe).await;
+        assert_eq!(
+            stopped, 1,
+            "the returned count must exclude the session left to its resume (#8233)"
+        );
+        assert_eq!(
+            mgr.get(&claimed).await.expect("get after").state,
+            ManagedSessionState::Active,
+            "a claimed session must be left exactly as the resume wrote it"
+        );
+        assert_eq!(
+            mgr.get(&free).await.expect("get after").state,
+            ManagedSessionState::Stopped,
+            "and the skip must not spill onto an unclaimed session in the same sweep"
+        );
+        drop(claim);
     }
 
     #[tokio::test]
