@@ -115,7 +115,9 @@ impl Drop for HomeGuard {
 /// three tests free of a tempdir they would never write into.
 /// What: an absolute path under the system temp dir; never created.
 fn inert_framework_root() -> std::path::PathBuf {
-    std::env::temp_dir().join("tm-inert-root").join(".trusty-mpm")
+    std::env::temp_dir()
+        .join("tm-inert-root")
+        .join(".trusty-mpm")
 }
 
 #[test]
@@ -1301,7 +1303,8 @@ fn drive_spawn(fake: &std::sync::Arc<FakeTmux>, home: &HomeGuard) -> String {
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn(
             "tm-sess",
@@ -1467,7 +1470,8 @@ fn spawn_resume_with_id_uses_resume_flag() {
     std::fs::write(projects.join("conv-77.jsonl"), b"{}").expect("seed conversation");
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1512,7 +1516,8 @@ fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1561,7 +1566,8 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1599,7 +1605,8 @@ fn spawn_uses_the_launch_resolved_reachability() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(false), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(false), &home.home().join(".trusty-mpm"));
     adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("spawn must succeed");
@@ -1651,7 +1658,8 @@ fn drive_resume(
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1786,7 +1794,8 @@ fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let tmux = std::sync::Arc::new(PaneAware::default());
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let adapter =
+        ClaudeCodeAdapter::new(tmux.clone(), Some(true), &home.home().join(".trusty-mpm"));
     adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("the spawn must reach the pane");

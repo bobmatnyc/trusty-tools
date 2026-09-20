@@ -359,7 +359,9 @@ mod tests {
         let tmux = FakeTmux::new();
         // #8233: a named root; neither adapter touches it while merely
         // identifying itself.
-        let root = std::env::temp_dir().join("tm-inert-root").join(".trusty-mpm");
+        let root = std::env::temp_dir()
+            .join("tm-inert-root")
+            .join(".trusty-mpm");
         let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), None, &root);
         assert_eq!(claude.identify(), "claude-code");
         let tcode = build_adapter(RuntimeKind::Tcode, tmux, None, &root);

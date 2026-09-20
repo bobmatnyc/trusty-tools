@@ -297,11 +297,7 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// the provisioning itself is covered in `core::managed_config`;
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
-fn prepare_managed_config(
-    fw: &FrameworkPaths,
-    tmux_name: &str,
-    cwd: &Path,
-) -> std::path::PathBuf {
+fn prepare_managed_config(fw: &FrameworkPaths, tmux_name: &str, cwd: &Path) -> std::path::PathBuf {
     prepare_managed_config_with_exe(fw, tmux_name, cwd, None)
 }
 
@@ -965,7 +961,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // predating pane-id capture) preserves the prior session-scoped
         // behavior — there is no stronger signal available.
         // #8233: named spec dir, as in `spawn`.
-        managed_launch::deliver_in(self.tmux.as_ref(), tmux_name, pane_id, &spec, &self.spec_dir())?;
+        managed_launch::deliver_in(
+            self.tmux.as_ref(),
+            tmux_name,
+            pane_id,
+            &spec,
+            &self.spec_dir(),
+        )?;
         // #2157 item 1: durable publish for the RESUME path too — a fresh tmux
         // session is created on resume, so it needs the same belt-and-suspenders
         // set-environment call as spawn().

@@ -368,30 +368,13 @@ fn abort_notice(session_id: &str) -> String {
 /// `deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable`,
 /// `deliver_resets_the_pane_before_typing` — the wedged-pane handshake, and
 /// that it precedes the keystrokes.
-pub(super) fn deliver(
-    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
-    tmux_name: &str,
-    pane_id: Option<&str>,
-    spec: &LaunchSpec,
-) -> Result<(), super::RuntimeError> {
-    match LaunchSpec::root() {
-        Some(dir) => deliver_in(tmux, tmux_name, pane_id, spec, &dir),
-        None => {
-            let _ = tmux.send_command_line(tmux_name, pane_id, &abort_notice(&spec.session_id));
-            Err(super::RuntimeError::Spawn(
-                super::launch_spec::LaunchSpecError::NoRoot.to_string(),
-            ))
-        }
-    }
-}
-
-/// [`deliver`] against an explicit spec directory (the hermetic seam).
 ///
-/// Why: tests must not write launch specs — which carry credentials — into the
-/// operator's real config home, and the failure arms need a directory they can
-/// make unwritable.
-/// What: the body [`deliver`] wraps; see its doc.
-/// Test: the three `deliver_*` tests in `managed_launch_tests.rs`.
+/// // #8233: the `spec_dir` is an ARGUMENT. This used to be a `deliver()`
+/// wrapper resolving `LaunchSpec::root()` from the process home, which put a
+/// file carrying `CLAUDE_CODE_OAUTH_TOKEN` and `GH_TOKEN` into the operator's
+/// own config home on every test-driven launch. The caller
+/// (`ClaudeCodeAdapter::spec_dir`) derives it from the framework root the
+/// daemon holds, so the home-unresolvable arm the wrapper carried is gone.
 pub(super) fn deliver_in(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
     tmux_name: &str,
