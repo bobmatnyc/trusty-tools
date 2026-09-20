@@ -256,18 +256,21 @@ async fn the_claim_is_still_held_when_the_route_types_into_the_pane() {
     .expect("resume_managed must finish well inside the budget, never hang");
 
     let seen = seen.lock().expect("observations");
+    let every_call: Vec<&str> = seen.iter().map(|o| o.call).collect();
     let post_transition: Vec<&Observation> = seen.iter().filter(|o| o.persisted_active).collect();
     assert!(
         !post_transition.is_empty(),
         "the route made no driver call after the record read `Active`, so this test \
          can observe nothing about the claim's span — fix the fixture, do not \
-         weaken the assertion. Calls seen: {seen:?}"
+         weaken the assertion. Calls seen: {every_call:?}"
     );
+    let post_calls: Vec<&str> = post_transition.iter().map(|o| o.call).collect();
     assert!(
         post_transition.iter().all(|o| o.claim_held),
         "#8233 P0: `resume_managed` must still hold the resume claim at every \
          driver call it makes after the record reads `Active`. Unclaimed calls \
          let the reaper stop a half-resumed session and the supervisor launch it \
-         a second time. Observations: {post_transition:?}"
+         a second time. Post-transition calls: {post_calls:?}; full observations: \
+         {post_transition:?}"
     );
 }
