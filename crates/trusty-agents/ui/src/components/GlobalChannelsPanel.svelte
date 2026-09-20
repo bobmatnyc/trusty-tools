@@ -43,6 +43,7 @@
     fetchGlobalChannels, saveGlobalChannels, createGlobalChannel, deleteGlobalChannel,
     channelErrorMessage, isChannelConflict, channelReferences, offerableProviders,
     type GlobalChannelConfiguration, type GlobalChannel, type NewGlobalChannel,
+    type GlobalChannelDeletion,
   } from '../lib/channels';
   /** Mirrors the assistant scope's contract so the parent can pin the view while an edit is pending. */
   export let dirty = false;
@@ -229,6 +230,25 @@
     void closeDelete();
   }
   /**
+   * Everything the delete cost, in the order the operator can act on it.
+   *
+   * Why (#8187, critic round HIGH): the response reports TWO consequences the
+   * removed row no longer shows, and reading only `inert_bindings` published a
+   * notice that read as complete while a live poller was still waking
+   * assistants. A receiving channel's poll loop owns a copy of its config and
+   * outlives the record — see `api/server/global_channels/delete.rs` — so
+   * `receiving_until_restart` names the one repair that is not a UI action.
+   * Test: `GlobalChannelsPanel.test.ts::says a deleted receiving channel keeps
+   * waking assistants until the daemon restarts`.
+   */
+  function deletedNotice(label: string, result: GlobalChannelDeletion): string {
+    const inert = result.inert_bindings ?? [];
+    const said = [`${label} deleted.`];
+    if (inert.length) said.push(`${inert.join(', ')} still carry a binding for it; those bindings now address nothing until they are removed.`);
+    if (result.receiving_until_restart) said.push('Its receiver is still running: it keeps polling and waking the assistants it routed to until the daemon restarts.');
+    return said.join(' ');
+  }
+  /**
    * `DELETE /api/channels/{id}`, forced only after the server has named what
    * forcing costs.
    *
@@ -247,10 +267,7 @@
       const result = await deleteGlobalChannel(revision, victim.id, force);
       if (token !== generation) return;
       apply(result); void closeDelete();
-      const inert = result.inert_bindings ?? [];
-      notice = inert.length
-        ? `${label} deleted. ${inert.join(', ')} still carry a binding for it; those bindings now address nothing until they are removed.`
-        : `${label} deleted.`;
+      notice = deletedNotice(label, result);
       onSaved();
     } catch (cause) {
       if (token !== generation) return;

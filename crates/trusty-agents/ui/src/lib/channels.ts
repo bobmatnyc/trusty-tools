@@ -35,7 +35,15 @@ export type ChannelProviderId='slack'|'telegram'|'gworkspace';
 export interface ChannelBinding { id:string; name:string; provider:ChannelProviderId; target:string; enabled:boolean; send_enabled:boolean; receive_enabled:boolean; filter:ChannelFilter; instructions:string; credential_ref?:string; }
 export interface ChannelProvider {id:ChannelProviderId;name:string;configured:boolean;can_send:boolean;can_read:boolean;can_receive?:boolean;receive_reason?:string;}
 export interface ChannelBindingStatus {dispatch_failures:number;last_error:string|null;}
-export interface ChannelConfiguration {agent:string;revision:string;bindings:ChannelBinding[];providers:ChannelProvider[];status?:Record<string,ChannelBindingStatus>;}
+/**
+ * `GET /api/agents/{name}/channels`, mirroring the Rust payload field for field.
+ *
+ * #8187: `inert_overlays` names the stored overlay ids `load_at_with` had to
+ * drop because the global channel they key on is gone — records that are on
+ * disk, address nothing, and appear in no other field. Optional because a
+ * daemon older than #8187 omits the key; an absent key is not an empty list.
+ */
+export interface ChannelConfiguration {agent:string;revision:string;bindings:ChannelBinding[];providers:ChannelProvider[];status?:Record<string,ChannelBindingStatus>;inert_overlays?:string[];}
 export interface ChannelMessages {available:boolean;messages:{id:string;text:string;from?:string;timestamp?:string|number}[];reason?:string;}
 const base=(agent:string)=>`/api/agents/${encodeURIComponent(agent)}/channels`;
 export const fetchChannels=(agent:string)=>tmApi<ChannelConfiguration>(base(agent));
@@ -100,8 +108,17 @@ export const saveGlobalChannels=(revision:string,channels:GlobalChannel[])=>with
  */
 export type NewGlobalChannel=Omit<GlobalChannel,'transport'|'poll_interval_secs'>;
 
-/** What `DELETE /api/channels/{id}` answers with, on top of the stored view. */
-export interface GlobalChannelDeletion extends GlobalChannelConfiguration {deleted:string;inert_bindings:string[];}
+/**
+ * What `DELETE /api/channels/{id}` answers with, on top of the stored view.
+ *
+ * `receiving_until_restart` (#8187) is the one consequence the deleted row does
+ * not show: `listeners::poll::spawn_listeners` hands each poll loop a COPY of
+ * its channel config, so a `receive_enabled` channel keeps polling its provider
+ * and keeps waking the assistants its captured `route_to` named until the
+ * daemon restarts. The server always sends the key, so `false` is proof no
+ * receiver was left running rather than an absent field to interpret.
+ */
+export interface GlobalChannelDeletion extends GlobalChannelConfiguration {deleted:string;inert_bindings:string[];receiving_until_restart:boolean;}
 
 const channelPath=(id:string)=>`/api/channels/${encodeURIComponent(id)}`;
 

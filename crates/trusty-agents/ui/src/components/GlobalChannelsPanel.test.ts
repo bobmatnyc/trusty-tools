@@ -39,6 +39,9 @@ let writeFailures: { status: number; body: Record<string, unknown> }[] = [];
 let providers: { id: string; name: string }[] = [];
 let routable: string[] = [];
 let inertBindings: string[] = [];
+// #8187: the delete's OTHER consequence — a `receive_enabled` channel's poll
+// loop outlives the deleted record, so the server reports it on every delete.
+let receivingUntilRestart = false;
 
 // A refused write runs probe -> PUT -> 401 -> re-probe -> PUT, so the
 // microtask budget has to cover four network round trips, not one.
@@ -58,7 +61,8 @@ beforeEach(() => {
   deletes = [];
   writeFailures = [];
   inertBindings = [];
-  providers = [{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'gworkspace', name: 'Google Workspace' }];
+  receivingUntilRestart = false;
+  providers =[{ id: 'telegram', name: 'Telegram' }, { id: 'stub', name: 'Stub' }, { id: 'gworkspace', name: 'Google Workspace' }];
   routable = ['izzie', 'cto-assistant', 'pm'];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), headers = (init?.headers ?? {}) as Record<string, string>;
@@ -86,7 +90,7 @@ beforeEach(() => {
       const id = decodeURIComponent(url.split('/api/channels/')[1].split('?')[0]);
       channels = channels.filter(channel => channel.id !== id);
       revision = 'r2';
-      return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings }), { status: 200 });
+      return new Response(JSON.stringify({ scope: 'global', revision, channels, providers, routable_assistants: routable, deleted: id, inert_bindings: inertBindings, receiving_until_restart: receivingUntilRestart }), { status: 200 });
     } else {
       reads += 1;
       if (readFails) return new Response(JSON.stringify({ error: 'read refused' }), { status: 503 });
@@ -386,6 +390,31 @@ it('deletes one channel through DELETE at the current revision', async () => {
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(document.body.textContent).toContain('Ops deleted.');
   expect(document.body.textContent).not.toContain('slack · C123');
+});
+
+// #8187 (critic round, HIGH): the panel read `inert_bindings` and nothing else,
+// so a delete that left a poller running announced a clean removal. Pre-fix the
+// first assertion fails — the notice stops at "Personal mail deleted." — and the
+// `false` half guards the opposite error of warning on every delete.
+it('says a deleted receiving channel keeps waking assistants until the daemon restarts', async () => {
+  receivingUntilRestart = true;
+  await render();
+  deleteButton('Personal mail').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(document.body.textContent).toContain('until the daemon restarts');
+  expect(document.body.textContent).toContain('Personal mail deleted.');
+});
+
+it('says nothing about a receiver when the deleted channel had none running', async () => {
+  await render();
+  deleteButton('Ops').click();
+  await settle();
+  button('Delete channel').click();
+  await settle();
+  expect(document.body.textContent).toContain('Ops deleted.');
+  expect(document.body.textContent).not.toContain('until the daemon restarts');
 });
 
 it('names the assistants a refused delete would strand, then forces explicitly', async () => {
