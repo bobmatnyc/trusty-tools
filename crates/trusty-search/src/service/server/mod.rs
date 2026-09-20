@@ -38,6 +38,8 @@ mod indexes_relocate;
 mod quantize_handlers;
 mod reindex_handlers;
 mod residency_sweep;
+// #4289: the create-index-time containment guard over registered index roots.
+mod root_overlap;
 mod router;
 mod routing;
 mod search;
@@ -113,6 +115,9 @@ mod tests_5349;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;
+// #4289: the create-index-time root-containment guard.
+#[cfg(test)]
+mod tests_4289;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]
