@@ -332,6 +332,12 @@ impl DaemonState {
         let claimed = eligible && u32::try_from(holders.len()).unwrap_or(u32::MAX) < cap;
         if claimed {
             record(self);
+            // #8261: the slot index is assigned INSIDE this critical section,
+            // against the same holder set admission was decided from. Assigning
+            // it after the lock releases would let two admitted builders pick
+            // the same index and share a directory — the exact clobbering the
+            // pool exists to end.
+            self.assign_builder_slot(exclude_tool_use_id);
         } else if eligible {
             // #6892: only an ELIGIBLE refusal is a deny. An ineligible payload
             // was never going to be denied by this guard, so nothing it may have
@@ -383,6 +389,60 @@ impl DaemonState {
             return false;
         };
         self.terminate_delegation(id, crate::core::agent::DelegationStatus::Cancelled)
+    }
+
+    /// Give the just-recorded builder the lowest free slot index (#8261).
+    ///
+    /// Why: LOWEST free, not next-highest, so a machine that rarely reaches its
+    /// ceiling keeps reusing the same few directories — which is what makes
+    /// them warm. Growing the pool monotonically would leave every slot cold
+    /// exactly when the ceiling is finally reached.
+    /// What: collects the indices live leases already hold (excluding this
+    /// dispatch's own record), takes the first index not among them, and stamps
+    /// it on the record carrying `tool_use_id`. Caller must hold
+    /// [`builder_claim_guard`](DaemonState::builder_claim_guard) — the whole
+    /// point is that the read and the write are one step.
+    ///
+    /// A record that cannot be found is not an error: the claim's `record`
+    /// closure may legitimately have written nothing (see
+    /// [`Self::release_denied_builder_dispatch`] for the same case), and a
+    /// dispatch with no slot index simply gets no pool directory, which is the
+    /// fail-closed direction.
+    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
+    /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
+    fn assign_builder_slot(&self, tool_use_id: Option<&str>) -> Option<u32> {
+        let Some(tool_use_id) = tool_use_id else {
+            return None;
+        };
+        let now = chrono::Utc::now();
+        let taken: std::collections::BTreeSet<u32> = self
+            .delegations
+            .iter()
+            .filter_map(|entry| {
+                let d = entry.value();
+                if d.tool_use_id.as_deref() == Some(tool_use_id) || !agent_is_builder(&d.agent) {
+                    return None;
+                }
+                builder_lease(d, self.session_owner_alive(d.session), now)
+                    .is_held()
+                    .then_some(d.builder_slot)
+                    .flatten()
+            })
+            .collect();
+        let index = (0u32..).find(|i| !taken.contains(i))?;
+        // The documented lock order: this mutex is taken INSIDE the builder
+        // claim, never the other way round — same order the claim's own
+        // `record` and `release` closures use.
+        let _record = self.dispatch_record_guard();
+        let mut assigned = None;
+        for mut entry in self.delegations.iter_mut() {
+            if entry.value().tool_use_id.as_deref() == Some(tool_use_id) {
+                entry.value_mut().builder_slot = Some(index);
+                assigned = Some(index);
+                break;
+            }
+        }
+        assigned
     }
 
     /// The one scan every builder-slot query runs.
@@ -696,6 +756,72 @@ mod tests {
             "one free slot must admit exactly one of two simultaneous dispatches"
         );
         assert_eq!(state.builder_slot_holders(None).len(), 1);
+    }
+
+    /// #8261: two admitted builders must never be handed the same slot index,
+    /// or they share a directory and clobber each other — the whole failure the
+    /// pool exists to end.
+    #[test]
+    fn an_admitted_builder_is_assigned_the_lowest_free_slot() {
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+
+        for (n, expected) in [("toolu_A", 0), ("toolu_B", 1), ("toolu_C", 2)] {
+            let mut d = running(session, "rust-engineer", 1);
+            d.tool_use_id = Some(n.to_string());
+            let (_, claimed) = state.claim_builder_slot(
+                4,
+                Some(n),
+                true,
+                |s| s.upsert_delegation(d.clone()),
+                |_| {},
+            );
+            assert!(claimed, "{n} must be admitted under a ceiling of 4");
+            let got = state
+                .delegations
+                .iter()
+                .find(|e| e.value().tool_use_id.as_deref() == Some(n))
+                .and_then(|e| e.value().builder_slot);
+            assert_eq!(got, Some(expected), "{n} took the wrong slot");
+        }
+    }
+
+    /// #8261: a released slot's INDEX returns to the pool, so a machine that
+    /// rarely reaches its ceiling keeps reusing the same warm directories
+    /// rather than growing monotonically into cold ones.
+    #[test]
+    fn a_released_slot_index_is_reassigned_to_the_next_builder() {
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+
+        let mut first = running(session, "rust-engineer", 1);
+        first.tool_use_id = Some("toolu_1".to_string());
+        let first_id = first.id;
+        state.claim_builder_slot(2, Some("toolu_1"), true, |s| s.upsert_delegation(first.clone()), |_| {});
+
+        // The holder ends: its lease — and therefore its index — is free again.
+        state.terminate_delegation(first_id, DelegationStatus::Completed);
+
+        let mut second = running(session, "rust-engineer", 1);
+        second.tool_use_id = Some("toolu_2".to_string());
+        let (_, claimed) = state.claim_builder_slot(
+            2,
+            Some("toolu_2"),
+            true,
+            |s| s.upsert_delegation(second.clone()),
+            |_| {},
+        );
+        assert!(claimed);
+        let got = state
+            .delegations
+            .iter()
+            .find(|e| e.value().tool_use_id.as_deref() == Some("toolu_2"))
+            .and_then(|e| e.value().builder_slot);
+        assert_eq!(
+            got,
+            Some(0),
+            "the freed index is reused, not skipped for a cold one"
+        );
     }
 
     #[test]
