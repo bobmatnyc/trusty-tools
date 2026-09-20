@@ -264,11 +264,38 @@ fn allowlist_refusal_response(
 /// genuinely elsewhere) returns `false`.
 /// Test: `file_is_within_root_*` unit tests below; `file_is_within_root_symlinked_root`
 /// covers the symlink-alias case added for #541.
+/// #7434: production now calls the any-of-N form below; this single-root
+/// spelling survives as the convenience the existing tests are written
+/// against. It DELEGATES rather than duplicating, so the two can never drift.
+#[cfg(test)]
 pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
+    file_is_within_any_root(file, root, &[])
+}
+
+/// #7434: the any-of-N form of [`file_is_within_root`].
+///
+/// Why: the post-filter is the guard against cross-index bleed (#64), and it
+/// drops any result whose stored path is not inside the index's root. A
+/// multi-root index whose additional-root hits resolve to absolute paths under
+/// a DIFFERENT tree would have every one of those hits dropped here — the
+/// feature would appear to index nothing. Asking any-of-N is the whole fix, and
+/// it does not weaken the guard: a path under none of the index's roots is
+/// still refused.
+/// What: the single-root logic, with the cheap lexical prefix test and the
+/// `canonicalize` fallback each run over the primary root and every additional
+/// root. `additional` empty reproduces the pre-#7434 behaviour exactly.
+/// Test: `file_is_within_root_*` below (single-root); the any-of-N containment
+/// rule itself is pinned by `containment_is_any_of_n` in
+/// `core::index_roots::tests`.
+pub(super) fn file_is_within_any_root(
+    file: &str,
+    root: &std::path::Path,
+    additional: &[std::path::PathBuf],
+) -> bool {
     let p = std::path::Path::new(file);
     if p.is_absolute() {
         // Fast path: lexical prefix check — no syscalls.
-        if p.starts_with(root) {
+        if crate::core::index_roots::is_within_any(root, additional, p) {
             return true;
         }
         // Slow-path fallback for symlink / alias mismatches (issue #541): only
@@ -288,13 +315,18 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
         // starts with that canonical root. We do NOT canonicalize the file path
         // itself because the file may have been deleted since indexing; we only
         // need the root to resolve correctly.
-        let root_owned = root.to_path_buf();
-        let canonical_root = tokio::task::block_in_place(|| std::fs::canonicalize(root_owned));
-        let canonical_root = match canonical_root {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        return p.starts_with(&canonical_root);
+        //
+        // #7434: the same fallback, once per root, stopping at the first hit.
+        let owned: Vec<std::path::PathBuf> = std::iter::once(root.to_path_buf())
+            .chain(additional.iter().cloned())
+            .collect();
+        return tokio::task::block_in_place(|| {
+            owned.into_iter().any(|r| {
+                std::fs::canonicalize(r)
+                    .map(|c| p.starts_with(&c))
+                    .unwrap_or(false)
+            })
+        });
     }
     // Relative path: must not climb out via `..`. We accept `.` and any
     // forward-only sequence of components. Empty paths are rejected
@@ -396,7 +428,14 @@ pub(crate) fn find_root_path_collision(
 ) -> Option<IndexId> {
     handles
         .iter()
-        .find(|h| exclude_id != Some(&h.id) && identifies_same_root(&h.root_path, candidate))
+        .find(|h| {
+            exclude_id != Some(&h.id)
+                // #7434: any-of-N. An index's additional roots are as claimed
+                // as its primary one — registering a second index over a tree
+                // another index already covers is the same #2305/#2336 shared-
+                // corpus hazard whichever slot that tree occupies.
+                && identifies_any_same_root(&h.root_path, &h.additional_roots, candidate)
+        })
         .map(|h| h.id.clone())
         .or_else(|| {
             cold_entries.iter().find_map(|entry| {
@@ -404,9 +443,30 @@ pub(crate) fn find_root_path_collision(
                 if exclude_id == Some(&id) {
                     return None;
                 }
-                identifies_same_root(&entry.root_path, candidate).then_some(id)
+                identifies_any_same_root(&entry.root_path, &entry.additional_roots, candidate)
+                    .then_some(id)
             })
         })
+}
+
+/// #7434: `true` when `candidate` names the primary root or any additional
+/// root of one index.
+///
+/// Why: the collision guard and the mismatch guard both ask "does this index
+/// already own that tree", and with multi-root indexes that question has N
+/// answers. Writing the `once(primary).chain(additional)` scan once keeps the
+/// live-handle arm and the cold-entry arm from drifting.
+/// What: [`identifies_same_root`] over the whole root table.
+/// Test: `collision_guard_sees_additional_roots` in
+/// `service::reindex::multi_root_tests`.
+pub(crate) fn identifies_any_same_root(
+    primary: &std::path::Path,
+    additional: &[std::path::PathBuf],
+    candidate: &std::path::Path,
+) -> bool {
+    std::iter::once(primary)
+        .chain(additional.iter().map(|p| p.as_path()))
+        .any(|r| identifies_same_root(r, candidate))
 }
 
 /// Decide whether `a` and `b` name the same on-disk root (issue #2519).
@@ -489,8 +549,13 @@ pub(super) fn root_path_collision_response(
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": format!(
-                "root_path {:?} is already registered to index '{}'; two indexes cannot \
-                 share one on-disk corpus (issues #2305, #2336)",
+                // #7434: "a directory tree" rather than "root_path", because
+                // the collision may now be against an ADDITIONAL root of the
+                // named index, not its primary one.
+                "root_path {:?} is already covered by index '{}' — one index \
+                 identifies one directory tree, as its primary root or as one \
+                 of its additional roots, and two indexes cannot share one \
+                 on-disk corpus (issues #2305, #2336, #7434)",
                 root_path.display(),
                 existing_id,
             ),

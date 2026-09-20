@@ -213,6 +213,7 @@ mod tests {
         let mut indexer = CodeIndexer::new("hash-cache-test", root.clone());
         indexer.set_corpus_store(corpus);
         IndexHandle {
+            additional_roots: Vec::new(),
             id: IndexId::new("hash-cache-test"),
             indexer: Arc::new(RwLock::new(indexer)),
             root_path: root,
@@ -412,6 +413,7 @@ mod tests {
         let mut indexer = CodeIndexer::new("840-test", dir.path());
         indexer.set_corpus_store(Arc::new(corpus));
         let handle = IndexHandle {
+            additional_roots: Vec::new(),
             id: IndexId::new("840-test"),
             indexer: Arc::new(RwLock::new(indexer)),
             root_path: dir.path().to_path_buf(),

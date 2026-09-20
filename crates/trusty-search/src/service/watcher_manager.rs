@@ -18,14 +18,28 @@
 //! needed here, and adding one would risk diverging from the registry's own
 //! gate.
 //!
-//! What: a `Mutex<HashMap<IndexId, WatcherTask>>` plus `spawn_for_index`,
+//! What: a `Mutex<HashMap<IndexId, Vec<RootWatch>>>` plus `spawn_for_index`,
 //! `stop_for_index`, and `stop_all`. Each watcher shares the same
 //! `Arc<RwLock<CodeIndexer>>` as the handle so incremental `index_file` /
 //! `remove_chunk` calls land in the live index. A fresh `IndexedFiles` tracker
-//! is created per index so deletions can locate the chunk IDs to evict.
+//! is created per index — SHARED by every root's watch — so deletions can
+//! locate the chunk IDs to evict.
+//!
+//! #7434 — one watch per INDEX ROOT: an index can now cover several directory
+//! trees ([`crate::core::index_roots`]), and the map used to hold exactly one
+//! task and one degraded string per index. That gave a multi-root index
+//! incremental indexing for its primary root only, with `watcher.active: true`
+//! reported regardless — a tree silently going stale behind a healthy status.
+//! Each root now gets its own task and its own
+//! [`crate::service::watch_roots::RootWatchState`], so one root's spawn failure
+//! leaves the others running and is a recorded fact rather than a `warn!` line.
+//! `spawn_for_index` is a RESYNC against the handle's current root table, which
+//! is what lets `POST /indexes/:id/roots` start one more watch and a relocate
+//! swap the primary's watch while keeping the rest.
 //!
 //! Test: unit tests at the bottom of this module cover idempotent spawn, the
-//! `TRUSTY_DISABLE_WATCHER` opt-out, stop-for-index, and stop-all.
+//! `TRUSTY_DISABLE_WATCHER` opt-out, stop-for-index, stop-all, and the #7434
+//! per-root behaviours.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +49,9 @@ use tokio::sync::Mutex;
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::network_fs::{classify_root, MountKind};
-use crate::service::watch_loop::WatcherTask;
+use crate::service::watch_loop::{spawn_watch_loop_for_root, WatcherTask};
+// #7434: one watch per index root, each with its own state.
+use crate::service::watch_roots::{RootWatchReport, RootWatchState, WatchedRoot};
 
 /// Human-readable, actionable message logged (and surfaced via `/health` +
 /// `GET /indexes/:id/status`) when an index root is detected as
@@ -102,21 +118,43 @@ fn watcher_disabled() -> bool {
 /// started on registration, stopped on deletion, and all torn down on shutdown.
 /// Cheap to clone (`Arc` inside `SearchAppState`); the inner `Mutex` is only
 /// taken for the brief insert/remove operations, never across a file event.
-/// What: maps `IndexId` → `WatcherTask`. Dropping or `stop`-ing a `WatcherTask`
-/// aborts its consumer task and releases the OS watch.
+/// What: maps `IndexId` → one [`RootWatch`] per index root (#7434). Dropping or
+/// `stop`-ing a `WatcherTask` aborts its consumer task and releases the OS
+/// watch.
 /// Test: see module tests.
+///
+/// #7434 re-key: the map used to hold ONE `WatcherTask` and one degraded string
+/// per index, which is why a multi-root index got incremental indexing for its
+/// primary root only. Holding a vector means each root's outcome — watching,
+/// network-degraded, or a spawn failure — is recorded independently, so one
+/// root's failure can never take another root's watch down with it, and
+/// `GET /indexes/:id/status` can name which tree stopped updating.
 #[derive(Clone, Default)]
 pub struct WatcherManager {
-    inner: Arc<Mutex<HashMap<IndexId, WatcherTask>>>,
+    inner: Arc<Mutex<HashMap<IndexId, Vec<RootWatch>>>>,
+    /// #7379: live policy lookup handed to each spawned watch loop, so a
+    /// Settings update reaches a running watcher without a respawn.
     registry: Option<crate::core::registry::IndexRegistry>,
-    /// Indexes whose watcher was refused because `root_path` was detected as
-    /// network-mounted (issue #3408), keyed to the actionable message logged
-    /// at spawn time. Surfaced via `/health`
-    /// (`indexes_watcher_network_degraded`) and
-    /// `GET /indexes/:id/status` so the condition is visible without tailing
-    /// logs — the whole point of this feature is that the daemon must NOT
-    /// look silently healthy on a network mount.
-    network_degraded: Arc<Mutex<HashMap<IndexId, String>>>,
+}
+
+/// One index root's watch slot inside the manager (#7434).
+///
+/// Why: the per-root state and the task that produces it have to live together
+/// or a stop can leave a state saying `watching` with nothing behind it.
+/// What: `root` is the CONFIGURED spelling, which is this entry's identity in
+/// the index's root table — a resync compares against it to decide what to
+/// stop and what to start. `task` is `Some` only when `state` is
+/// [`RootWatchState::Watching`].
+/// Test: see module tests.
+struct RootWatch {
+    root: std::path::PathBuf,
+    slot: Option<usize>,
+    state: RootWatchState,
+    task: Option<WatcherTask>,
+    /// The chunk tracker every root of this index shares. Carried on each entry
+    /// so a later resync (an added root) finds it without a live watch to read
+    /// it off — a wholly-degraded index still owns its bookkeeping.
+    tracker: IndexedFiles,
 }
 
 impl WatcherManager {
@@ -133,24 +171,27 @@ impl WatcherManager {
         }
     }
 
-    /// Start watching `handle.root_path`, forwarding changes into the handle's
-    /// indexer. Idempotent and opt-out aware.
+    /// Start watching EVERY root of `handle` — `root_path` plus each of
+    /// `additional_roots` — forwarding changes into the handle's indexer.
+    /// Idempotent and opt-out aware.
     ///
-    /// Why: called from every index-registration path (warm-boot restore and
-    /// `POST /indexes`) so a freshly-registered index becomes self-updating
-    /// without a manual reindex. Returns early when the watcher is globally
-    /// disabled or when this index is already being watched, so callers can fire
-    /// it unconditionally after `registry.register`.
-    /// What: (1) no-op when `TRUSTY_DISABLE_WATCHER=1`; (2) builds the watcher
-    /// task by calling `spawn_watch_loop` **before** acquiring the lock — the
-    /// `Mutex` is then taken only for the brief `contains_key` + `insert`, never
-    /// across the (potentially blocking) OS-watch installation; (3) the spawn is
-    /// idempotent: if a racing `spawn_for_index` won the insert for this `id`
-    /// while we were building our task, we drop the just-built task (`stop()`)
-    /// and keep the existing one. A `spawn_watch_loop` failure (e.g. the root
-    /// path vanished between registration and now) is logged at WARN and
-    /// swallowed so registration never fails because of the watcher.
-    /// Test: `spawn_is_idempotent`, `disable_env_gate_only_matches_one`,
+    /// Why: called from every index-registration path (warm-boot restore,
+    /// `POST /indexes`, `POST /indexes/:id/roots`, relocate) so a freshly
+    /// registered or re-rooted index becomes self-updating without a manual
+    /// reindex. Before #7434 it watched `root_path` alone, so an index that
+    /// covered several trees updated one of them incrementally and reported a
+    /// live watcher regardless.
+    /// What: resyncs this index's watches against the handle's CURRENT root
+    /// table — starts a watch for every root that has none, stops any watch
+    /// whose root has left the table, and leaves a live watch alone. That last
+    /// property is what makes it idempotent and what makes a relocate keep the
+    /// additional roots' watches while the primary's restarts. A
+    /// `spawn_watch_loop` failure for one root is RECORDED against that root
+    /// and leaves the others running; registration never fails because of the
+    /// watcher.
+    /// Test: `spawn_is_idempotent`, `every_index_root_is_watched`,
+    /// `one_root_spawn_failure_leaves_other_roots_watched_and_is_reported`,
+    /// `disable_env_gate_only_matches_one`,
     /// `network_mount_root_is_refused_and_reported`,
     /// `local_root_is_unaffected_by_network_check`.
     pub async fn spawn_for_index(&self, handle: &Arc<IndexHandle>) {
@@ -163,12 +204,15 @@ impl WatcherManager {
         }
 
         // Issue #3408: the mount-kind check is factored into a testable inner
-        // function (`spawn_for_index_with_mount_kind`) so tests can inject
+        // function (`sync_roots_with`) so tests can inject
         // `MountKind::Network` / `MountKind::Local` directly rather than
         // requiring a real NFS/CIFS mount in CI. Production always resolves
         // the real kind here via `classify_root`.
-        self.spawn_for_index_with_mount_kind(handle, classify_root(&handle.root_path))
-            .await;
+        //
+        // #7434: resolved PER ROOT. An index whose primary root is local and
+        // whose second root is an NFS mount must watch the first and refuse the
+        // second, which a single index-wide classification cannot express.
+        self.sync_roots_with(handle, classify_root).await;
     }
 
     /// Same as [`Self::spawn_for_index`], but with the network-mount
@@ -179,93 +223,246 @@ impl WatcherManager {
     /// tests can pin the network-degraded behaviour and the normal-spawn
     /// behaviour deterministically, without needing a real network mount in
     /// CI (issue #3408).
-    /// What: (1) refuses to spawn and records the actionable degraded reason
-    /// when `mount_kind` is `Network`; (2) otherwise proceeds with the
-    /// existing idempotent build-then-insert spawn path unchanged.
+    /// What: applies `mount_kind` to EVERY root of the handle and delegates to
+    /// [`Self::sync_roots_with`].
     /// Test: `network_mount_root_is_refused_and_reported`,
     /// `local_root_is_unaffected_by_network_check`.
     ///
     /// `pub(crate)` rather than private: `server::tests_health` also injects a
     /// `MountKind` directly to cover the `/health` JSON surface end-to-end
     /// without a real network mount. Not part of the public API.
+    ///
+    /// `#[cfg(test)]` since #7434: production now classifies PER ROOT inside
+    /// [`Self::sync_roots_with`] (an index whose primary root is local and whose
+    /// second is an NFS mount must watch one and refuse the other, which one
+    /// index-wide `MountKind` cannot express), so `spawn_for_index` no longer
+    /// routes through this and it has exactly two callers, both tests.
+    #[cfg(test)]
     pub(crate) async fn spawn_for_index_with_mount_kind(
         &self,
         handle: &Arc<IndexHandle>,
         mount_kind: MountKind,
     ) {
-        // Refuse to start a watcher whose root is positively identified as
-        // network-mounted (EFS/NFS/SMB/CIFS). inotify/FSEvents cannot observe
-        // another host's writes to a shared network mount — starting the
-        // watcher anyway would leave the daemon reporting healthy while
-        // silently never reacting to cross-host changes. This check runs
-        // BEFORE `spawn_watch_loop` so we never pay the OS-watch install cost
-        // (recursive inotify walk) for a mount that can't work anyway.
-        // `classify_root` fails open to `Local` on any detection error, so
-        // this can only ever produce a false negative, never a false
-        // positive that blocks a legitimate local watcher.
-        if mount_kind.is_network() {
-            let reason = network_mount_degraded_reason(&handle.id, &handle.root_path);
+        self.sync_roots_with(handle, move |_| mount_kind).await;
+    }
+
+    /// Bring this index's watches into line with `handle`'s root table (#7434).
+    ///
+    /// Why: four callers need this and they need it to mean the same thing —
+    /// registration (nothing watched yet), a repeat registration (leave it
+    /// alone), an added root (start one more), and a relocate (swap the
+    /// primary, keep the rest). Expressing all four as "make reality match the
+    /// table" is what keeps a relocate from tearing down watches it should have
+    /// kept.
+    /// What: (1) stops and drops every entry whose root is no longer in the
+    /// table; (2) for every table root without a LIVE watch, classifies the
+    /// mount, then either records the #3408 refusal or builds a watch with
+    /// `spawn_watch_loop_for_root`; (3) records a build failure as
+    /// [`RootWatchState::Failed`] for that root alone. Every task is built
+    /// BEFORE the lock is taken (issue #1640): the `Mutex` is never held across
+    /// the potentially-blocking OS-watch installation, so `stop_for_index` /
+    /// `stop_all` can never block on a spawn.
+    ///
+    /// A root already in `Failed` or `Degraded` is retried on the next sync.
+    /// That is deliberate: an added root whose tree was briefly unreadable
+    /// should start watching when the next registration event comes round,
+    /// rather than staying dead until the daemon restarts.
+    ///
+    /// The `IndexedFiles` tracker is created once and SHARED by every root's
+    /// watch. Its keys are whole-corpus keys (`@root<n>/…`), so one tracker is
+    /// the only shape in which the dropped-event reconcile can see every root's
+    /// files — see `watch_rescan::reconcile_after_rescan_roots`.
+    /// Test: `every_index_root_is_watched`,
+    /// `one_root_spawn_failure_leaves_other_roots_watched_and_is_reported`,
+    /// `spawn_is_idempotent`, `relocate_restarts_the_primary_and_keeps_the_rest`.
+    async fn sync_roots_with<F>(&self, handle: &Arc<IndexHandle>, classify: F)
+    where
+        F: Fn(&std::path::Path) -> MountKind,
+    {
+        let table = WatchedRoot::table(&handle.root_path, &handle.additional_roots);
+
+        // Drop watches for roots that have left the table (a relocate's old
+        // primary). Done first so the OS watch is released before a new one is
+        // installed on a possibly-overlapping tree.
+        let stale: Vec<RootWatch> = {
+            let mut guard = self.inner.lock().await;
+            let entries = guard.entry(handle.id.clone()).or_default();
+            let keep: Vec<std::path::PathBuf> =
+                table.iter().map(|r| r.raw().to_path_buf()).collect();
+            let mut removed = Vec::new();
+            let mut i = 0;
+            while i < entries.len() {
+                if keep.contains(&entries[i].root) {
+                    i += 1;
+                } else {
+                    removed.push(entries.remove(i));
+                }
+            }
+            removed
+        };
+        for entry in stale {
+            if let Some(task) = entry.task {
+                task.stop().await;
+                tracing::info!(
+                    index_id = %handle.id,
+                    root = %entry.root.display(),
+                    "file watcher stopped — root left this index's table (#7434)",
+                );
+            }
+        }
+
+        // The shared tracker: reused when this index already has watches so a
+        // newly-added root's watch sees the chunks the existing roots recorded.
+        let indexed_files = self.tracker_for(&handle.id).await;
+
+        for root in &table {
+            if self.is_watching_root(&handle.id, root.raw()).await {
+                continue;
+            }
+            let built = self.build_root_watch(handle, root, &indexed_files, &classify);
+            self.install_root_watch(&handle.id, root, built, &indexed_files)
+                .await;
+        }
+    }
+
+    /// Build one root's watch, or the state that says why there is none.
+    ///
+    /// Why: separated from [`Self::sync_roots_with`] so the #3408 refusal, the
+    /// spawn, and the failure record read as one three-armed decision rather
+    /// than as control flow interleaved with lock handling.
+    /// What: `Degraded` for a network mount (checked BEFORE `spawn_watch_loop`
+    /// so the recursive OS-watch install is never paid for a mount that cannot
+    /// work); `Failed` with the rendered error when the spawn errors;
+    /// `Watching` plus the task otherwise. `classify_root` fails open to
+    /// `Local`, so the refusal can only ever be a false negative.
+    /// Test: `network_mount_root_is_refused_and_reported`,
+    /// `one_root_spawn_failure_leaves_other_roots_watched_and_is_reported`.
+    fn build_root_watch<F>(
+        &self,
+        handle: &Arc<IndexHandle>,
+        root: &WatchedRoot,
+        indexed_files: &IndexedFiles,
+        classify: &F,
+    ) -> (RootWatchState, Option<WatcherTask>)
+    where
+        F: Fn(&std::path::Path) -> MountKind,
+    {
+        if classify(root.raw()).is_network() {
+            let reason = network_mount_degraded_reason(&handle.id, root.raw());
             tracing::warn!(
                 index_id = %handle.id,
-                root = %handle.root_path.display(),
+                root = %root.raw().display(),
                 "{reason}"
             );
-            self.network_degraded
-                .lock()
-                .await
-                .insert(handle.id.clone(), reason);
-            return;
+            return (RootWatchState::Degraded { reason }, None);
         }
-        // Clear any stale degraded entry from a previous root-path change for
-        // this id (defensive — ids are not normally re-registered with a
-        // different root, but this keeps the map from lying if they are).
-        self.network_degraded.lock().await.remove(&handle.id);
 
         // Build the watcher task BEFORE acquiring the lock (issue #1640). This
         // (a) closes the deadlock window — the `Mutex` is never held across the
         // potentially-blocking `spawn_watch_loop` (slow filesystem, inotify
         // limit exhaustion) so `stop_for_index`/`stop_all` can never block on a
         // spawn — and (b) keeps the critical section to a bare insert.
-        let indexed_files = IndexedFiles::new();
-        let task = match crate::service::watch_loop::spawn_watch_loop_with_registry(
-            &handle.root_path,
+        match spawn_watch_loop_for_root(
+            root.clone(),
+            // #7434: every root, so a dropped-event rescan on THIS watch
+            // reconciles the whole index rather than sweeping the other roots'
+            // chunks out of the corpus.
+            WatchedRoot::table(&handle.root_path, &handle.additional_roots),
             // #3049: the watcher takes this index's teardown-lock read side.
             handle.id.clone(),
             Arc::clone(&handle.indexer),
-            indexed_files,
+            indexed_files.clone(),
             // #6524: the watcher populates this index's file-change feed.
             Arc::clone(&handle.file_events),
             self.registry.clone(),
         ) {
-            Ok(task) => task,
+            Ok(task) => (RootWatchState::Watching, Some(task)),
             Err(e) => {
+                let reason = format!("{e:#}");
                 tracing::warn!(
                     index_id = %handle.id,
-                    root = %handle.root_path.display(),
-                    "could not start file watcher (incremental indexing disabled for this index): {e:#}",
+                    root = %root.raw().display(),
+                    "could not start file watcher for this root (incremental indexing disabled \
+                     for it; the index's other roots are unaffected): {reason}",
                 );
+                (RootWatchState::Failed { reason }, None)
+            }
+        }
+    }
+
+    /// Record one root's freshly-built watch, resolving a concurrent insert.
+    ///
+    /// Why: two concurrent `spawn_for_index` calls for the same index could
+    /// both find a root unwatched before either inserted — the TOCTOU window
+    /// #1640 closed for the single-root map, re-asked per root.
+    /// What: re-checks under the lock; if a racing sync already installed a
+    /// LIVE watch for this root, the task just built is stopped and discarded.
+    /// Otherwise the entry replaces any non-live record for the same root.
+    /// Test: `spawn_is_idempotent`.
+    async fn install_root_watch(
+        &self,
+        id: &IndexId,
+        root: &WatchedRoot,
+        built: (RootWatchState, Option<WatcherTask>),
+        tracker: &IndexedFiles,
+    ) {
+        let (state, task) = built;
+        let mut guard = self.inner.lock().await;
+        let entries = guard.entry(id.clone()).or_default();
+        if let Some(existing) = entries.iter().position(|e| e.root == root.raw()) {
+            if entries[existing].state.is_watching() {
+                drop(guard);
+                if let Some(task) = task {
+                    task.stop().await;
+                }
                 return;
             }
-        };
-
-        // Lock ONLY to insert. The earlier check-then-insert had a TOCTOU
-        // window: two concurrent `spawn_for_index` calls for the same id could
-        // both pass `contains_key` before either inserted. Re-check under the
-        // lock and, if a racing insert already won, stop the task we just built
-        // so we keep exactly one watcher (idempotent).
-        let mut guard = self.inner.lock().await;
-        if guard.contains_key(&handle.id) {
-            drop(guard);
-            task.stop().await;
-            return;
+            entries.remove(existing);
         }
-        guard.insert(handle.id.clone(), task);
+        let watching = state.is_watching();
+        entries.push(RootWatch {
+            root: root.raw().to_path_buf(),
+            slot: root.slot(),
+            state,
+            task,
+            tracker: tracker.clone(),
+        });
         drop(guard);
-        tracing::info!(
-            index_id = %handle.id,
-            root = %handle.root_path.display(),
-            "file watcher active — saves trigger incremental indexing (issue #1621)",
-        );
+        if watching {
+            tracing::info!(
+                index_id = %id,
+                root = %root.raw().display(),
+                slot = ?root.slot(),
+                "file watcher active — saves trigger incremental indexing (issue #1621)",
+            );
+        }
+    }
+
+    /// The `IndexedFiles` tracker this index's watches share (#7434).
+    ///
+    /// Why: a per-root tracker would split one index's chunk bookkeeping across
+    /// N maps, and the dropped-event reconcile walks exactly one of them to
+    /// decide what has been deleted. One tracker per index keeps that decision
+    /// whole.
+    /// What: clones the tracker off any existing entry — `IndexedFiles` is an
+    /// `Arc` inside, so the clone is the same map — or makes a fresh one for an
+    /// index with no watches yet.
+    /// Test: `add_root_spawns_a_watch_for_the_new_root`.
+    async fn tracker_for(&self, id: &IndexId) -> IndexedFiles {
+        let guard = self.inner.lock().await;
+        guard
+            .get(id)
+            .and_then(|entries| entries.first().map(|e| e.tracker.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Whether one specific root of `id` currently has a live watch.
+    async fn is_watching_root(&self, id: &IndexId, root: &std::path::Path) -> bool {
+        self.inner.lock().await.get(id).is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|e| e.root == root && e.state.is_watching())
+        })
     }
 
     /// Stop watching a single index, aborting its consumer task and releasing
@@ -276,24 +473,30 @@ impl WatcherManager {
     /// still HOLDS that indexer. The watcher's `Arc<RwLock<CodeIndexer>>` keeps
     /// the index's redb corpus open, and redb is single-open, so a recreate
     /// under the same id fails to open the corpus until this returns.
-    /// What: removes the entry and awaits `WatcherTask::stop`, which aborts the
-    /// consumer task and waits for it to terminate. Returns `true` when a
-    /// watcher was actually stopped.
-    /// Test: `stop_for_index_removes_entry`,
-    /// `stop_for_index_releases_the_indexer_before_it_returns`.
+    /// What: removes EVERY root's entry for this index (#7434) and awaits
+    /// `WatcherTask::stop` on each, which aborts the consumer task and waits
+    /// for it to terminate. Returns `true` when at least one live watcher was
+    /// stopped. Removing the whole vector also clears any #3408 degraded or
+    /// #7434 failed record, so `/health` cannot keep reporting a degraded root
+    /// of an index that no longer exists.
+    /// Test: `stop_for_index_removes_entry`, `stop_for_index_stops_every_root_watch`,
+    /// `stop_for_index_releases_the_indexer_before_it_returns`,
+    /// `stop_for_index_clears_network_degraded_entry`.
     pub async fn stop_for_index(&self, id: &IndexId) -> bool {
-        let task = self.inner.lock().await.remove(id);
-        // Issue #3408: `DELETE /indexes/:id` should not leave a stale
-        // network-mount-degraded entry behind for an id that no longer exists.
-        self.network_degraded.lock().await.remove(id);
-        match task {
-            Some(task) => {
+        let entries = self.inner.lock().await.remove(id).unwrap_or_default();
+        let mut stopped = false;
+        for entry in entries {
+            if let Some(task) = entry.task {
                 task.stop().await;
-                tracing::debug!(index_id = %id, "file watcher stopped");
-                true
+                stopped = true;
+                tracing::debug!(
+                    index_id = %id,
+                    root = %entry.root.display(),
+                    "file watcher stopped",
+                );
             }
-            None => false,
         }
+        stopped
     }
 
     /// Stop every watcher, returning the number stopped.
@@ -309,7 +512,11 @@ impl WatcherManager {
     pub async fn stop_all(&self) -> usize {
         let tasks: Vec<WatcherTask> = {
             let mut guard = self.inner.lock().await;
-            guard.drain().map(|(_id, task)| task).collect()
+            // #7434: every ROOT's task, across every index.
+            guard
+                .drain()
+                .flat_map(|(_id, entries)| entries.into_iter().filter_map(|e| e.task))
+                .collect()
         };
         let count = tasks.len();
         for task in tasks {
@@ -321,13 +528,67 @@ impl WatcherManager {
         count
     }
 
-    /// Number of indexes currently being watched.
+    /// Number of INDEXES with at least one live root watch.
     ///
-    /// Why: surfaced for tests and potential `/health` reporting.
-    /// What: returns the map length under the lock.
+    /// Why: surfaced for tests and potential `/health` reporting. Counting
+    /// indexes rather than roots is what keeps this number meaning the same
+    /// thing it did before #7434 — "how many indexes are self-updating" — for
+    /// every single-root index, which is nearly all of them.
+    /// What: counts map entries holding at least one [`RootWatchState::Watching`]
+    /// root. Use [`Self::watched_root_count`] for the per-root figure.
     /// Test: used throughout the module tests.
     pub async fn watched_count(&self) -> usize {
-        self.inner.lock().await.len()
+        self.inner
+            .lock()
+            .await
+            .values()
+            .filter(|entries| entries.iter().any(|e| e.state.is_watching()))
+            .count()
+    }
+
+    /// Number of live ROOT watches across every index (#7434).
+    ///
+    /// Why: `watched_count` cannot distinguish a three-root index watching all
+    /// three from one watching only its primary — the exact condition this
+    /// slice exists to make visible.
+    /// What: counts entries in [`RootWatchState::Watching`].
+    /// Test: `every_index_root_is_watched`,
+    /// `one_root_spawn_failure_leaves_other_roots_watched_and_is_reported`.
+    pub async fn watched_root_count(&self) -> usize {
+        self.inner
+            .lock()
+            .await
+            .values()
+            .map(|entries| entries.iter().filter(|e| e.state.is_watching()).count())
+            .sum()
+    }
+
+    /// Every root's watch state for one index, in root-table order (#7434).
+    ///
+    /// Why: `GET /indexes/:id/status` has to name WHICH tree stopped updating;
+    /// `active` plus one reason string cannot say that for a multi-root index.
+    /// What: one [`RootWatchReport`] per known root, primary first. Empty for
+    /// an index with no watches recorded at all (never registered, stopped, or
+    /// `TRUSTY_DISABLE_WATCHER=1`), which the status endpoint reports as an
+    /// empty array rather than inventing rows.
+    /// Test: `server::tests_7434_watch::status_reports_every_root_watch_state`.
+    pub async fn root_watch_states(&self, id: &IndexId) -> Vec<RootWatchReport> {
+        let guard = self.inner.lock().await;
+        let Some(entries) = guard.get(id) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<&RootWatch> = entries.iter().collect();
+        // Primary (slot `None`) first, then additional slots in table order.
+        rows.sort_by_key(|e| e.slot.map_or(0, |n| n + 1));
+        rows.into_iter()
+            .map(|e| RootWatchReport {
+                root: e.root.display().to_string(),
+                slot: e.slot,
+                primary: e.slot.is_none(),
+                state: e.state.label(),
+                reason: e.state.reason().map(str::to_string),
+            })
+            .collect()
     }
 
     /// Whether a specific index currently has a live watcher.
@@ -335,10 +596,55 @@ impl WatcherManager {
     /// Why: the query path uses this to detect an index being served without a
     /// watcher — either idle-suspended (`server::tickers`) or lazily restored
     /// from the cold store — so it can resume watching and reconcile on wake.
-    /// What: `contains_key` under the lock.
+    /// What: `true` when at least one root has a live watch (#7434). A
+    /// PARTIALLY watched index answers `true` here on purpose — this is the
+    /// any-of-N reading the idle-suspend ticker, `watcher.active` and
+    /// `/health` all want. The query path asks
+    /// [`Self::needs_root_resync`] instead, which is the all-of-N one, so a
+    /// root that failed to spawn is retried on the next query rather than
+    /// waiting for a registration event. Which roots are unwatched is what
+    /// [`Self::root_watch_states`] answers.
     /// Test: `is_watching_reflects_spawn_and_stop`.
     pub async fn is_watching(&self, id: &IndexId) -> bool {
-        self.inner.lock().await.contains_key(id)
+        self.inner
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|entries| entries.iter().any(|e| e.state.is_watching()))
+    }
+
+    /// Does this index have a root whose watch is worth retrying right now?
+    ///
+    /// Why (#7434): [`Self::is_watching`] answers `true` for a PARTIALLY
+    /// watched index, and the query path's wake-up is gated on it. An index
+    /// whose second root failed to spawn at boot therefore never retried:
+    /// nothing re-asked until a registration event arrived, so that tree
+    /// stopped updating until the daemon restarted. Asking "is every root
+    /// watched" instead of "is any root watched" is what makes the next query
+    /// retry it. Kept as a separate predicate rather than changing
+    /// `is_watching`'s meaning, because three other callers depend on the
+    /// any-of-N reading — the idle-suspend ticker (which would stop suspending
+    /// a partially watched index), `/indexes/:id/status`'s `watcher.active`,
+    /// and `/health` — and none of them is asking about a retry.
+    /// What: `true` when a root in `handle`'s CURRENT table has no entry at
+    /// all, or an entry in [`RootWatchState::Failed`]. A
+    /// [`RootWatchState::Degraded`] root is NOT retried here: it is #3408's
+    /// deliberate network-mount refusal, and re-asking it per query would buy
+    /// a `statfs` and a warning log on the hot path for a verdict that cannot
+    /// change without the mount changing. Registration events still retry it,
+    /// exactly as before.
+    /// Test: `failed_root_needs_resync_and_degraded_root_does_not`,
+    /// `server::tests_7434_watch::query_retries_a_root_whose_watch_failed`.
+    pub async fn needs_root_resync(&self, handle: &Arc<IndexHandle>) -> bool {
+        let table = WatchedRoot::table(&handle.root_path, &handle.additional_roots);
+        let guard = self.inner.lock().await;
+        let entries = guard.get(&handle.id);
+        table.iter().any(|root| {
+            match entries.and_then(|e| e.iter().find(|w| w.root == root.raw())) {
+                None => true,
+                Some(entry) => matches!(entry.state, RootWatchState::Failed { .. }),
+            }
+        })
     }
 
     /// Number of indexes whose watcher was refused because their root was
@@ -347,10 +653,18 @@ impl WatcherManager {
     /// Why: surfaced on `GET /health` as `indexes_watcher_network_degraded` so
     /// operators/monitors can detect the condition without tailing logs or
     /// polling every index's status individually.
-    /// What: length of the `network_degraded` map under the lock.
+    /// What: counts INDEXES holding at least one network-degraded ROOT (#7434),
+    /// which is the same number this returned before #7434 for every
+    /// single-root index. The `/health` field it feeds is a count of affected
+    /// indexes, not of affected trees.
     /// Test: `network_mount_root_is_refused_and_reported`.
     pub async fn network_degraded_count(&self) -> usize {
-        self.network_degraded.lock().await.len()
+        self.inner
+            .lock()
+            .await
+            .values()
+            .filter(|entries| entries.iter().any(|e| e.state.is_network_degraded()))
+            .count()
     }
 
     /// The actionable degraded-reason message for a specific index, if its
@@ -358,11 +672,23 @@ impl WatcherManager {
     ///
     /// Why: `GET /indexes/:id/status` surfaces this so an operator looking at
     /// one index gets the full actionable message, not just a boolean.
-    /// What: `Some(reason)` when `id` is in the `network_degraded` map,
-    /// `None` otherwise (including for unknown ids).
+    /// What: the FIRST network-degraded root's reason in root-table order
+    /// (#7434), `None` otherwise — including for unknown ids. For a single-root
+    /// index this is exactly what it returned before #7434; for a multi-root
+    /// one, `watcher.roots` in the status response is the per-tree answer and
+    /// this stays the index-level summary the pre-existing field promised.
     /// Test: `network_mount_root_is_refused_and_reported`.
     pub async fn network_degraded_reason(&self, id: &IndexId) -> Option<String> {
-        self.network_degraded.lock().await.get(id).cloned()
+        let guard = self.inner.lock().await;
+        let entries = guard.get(id)?;
+        let mut degraded: Vec<&RootWatch> = entries
+            .iter()
+            .filter(|e| e.state.is_network_degraded())
+            .collect();
+        degraded.sort_by_key(|e| e.slot.map_or(0, |n| n + 1));
+        degraded
+            .first()
+            .and_then(|e| e.state.reason().map(str::to_string))
     }
 }
 
@@ -381,6 +707,18 @@ mod tests {
             indexer,
             root.to_path_buf(),
         ))
+    }
+
+    /// #7434: the same handle, covering `additional` trees beyond `primary`.
+    fn multi_root_handle(
+        id: &str,
+        primary: &std::path::Path,
+        additional: Vec<std::path::PathBuf>,
+    ) -> Arc<IndexHandle> {
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new(id, primary)));
+        let mut handle = IndexHandle::bare(IndexId::new(id), indexer, primary.to_path_buf());
+        handle.additional_roots = additional;
+        Arc::new(handle)
     }
 
     /// Why: the opt-out gate must match ONLY the exact value "1" so a stray
@@ -709,5 +1047,318 @@ mod tests {
             0,
             "stop_for_index must clear the network-degraded entry"
         );
+    }
+
+    // ── #7434: one watch per index root ────────────────────────────────────
+
+    /// Why: the core acceptance criterion of this slice. Before #7434 the
+    /// manager keyed ONE `WatcherTask` per index and spawned it on
+    /// `handle.root_path` alone, so an index covering three trees watched one
+    /// and reported `watcher.active: true` — the other two went stale between
+    /// reindexes with nothing saying so.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_index_root_is_watched() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let second = tempfile::tempdir().expect("tempdir second");
+        let third = tempfile::tempdir().expect("tempdir third");
+        let handle = multi_root_handle(
+            "multi-watch",
+            primary.path(),
+            vec![second.path().to_path_buf(), third.path().to_path_buf()],
+        );
+        let mgr = WatcherManager::new();
+
+        mgr.spawn_for_index(&handle).await;
+
+        assert_eq!(
+            mgr.watched_root_count().await,
+            3,
+            "every root of a three-root index must have its own live watch"
+        );
+        let rows = mgr.root_watch_states(&handle.id).await;
+        assert_eq!(rows.len(), 3, "one report row per root, got {rows:?}");
+        assert!(
+            rows.iter().all(|r| r.state == "watching"),
+            "every root must report `watching`, got {rows:?}"
+        );
+        assert!(rows[0].primary && rows[0].slot.is_none(), "primary first");
+        assert_eq!(rows[1].slot, Some(0), "additional roots in table order");
+        assert_eq!(rows[2].slot, Some(1));
+
+        mgr.stop_all().await;
+    }
+
+    /// Why: the pre-#7434 spawn answered a `spawn_watch_loop` error with
+    /// `warn!` and a bare `return`, which for a multi-root index would mean one
+    /// unreadable tree silently costing the index every OTHER root's watch —
+    /// and leaving no record of which root failed. Both halves matter: the
+    /// survivors keep watching, and the failure is a readable fact.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_root_spawn_failure_leaves_other_roots_watched_and_is_reported() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let third = tempfile::tempdir().expect("tempdir third");
+        // A path that does not exist: `notify`'s `watch()` refuses it, which is
+        // the real production failure (a root unmounted or deleted between
+        // registration and the spawn).
+        let missing = primary.path().join("gone");
+        let handle = multi_root_handle(
+            "partial-watch",
+            primary.path(),
+            vec![missing.clone(), third.path().to_path_buf()],
+        );
+        let mgr = WatcherManager::new();
+
+        mgr.spawn_for_index(&handle).await;
+
+        assert_eq!(
+            mgr.watched_root_count().await,
+            2,
+            "the two readable roots must still be watched"
+        );
+        assert!(
+            mgr.is_watching(&handle.id).await,
+            "the index is still partially self-updating"
+        );
+
+        let rows = mgr.root_watch_states(&handle.id).await;
+        let failed: Vec<_> = rows.iter().filter(|r| r.state == "failed").collect();
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly the one unspawnable root must be recorded as failed, got {rows:?}"
+        );
+        assert_eq!(failed[0].slot, Some(0), "and it must name WHICH root");
+        let reason = failed[0]
+            .reason
+            .as_deref()
+            .expect("a failed root must carry the reason, not just a log line");
+        assert!(
+            reason.contains(&missing.display().to_string()),
+            "the reason must name the root that could not be watched, got {reason:?}"
+        );
+        assert!(
+            !mgr.network_degraded_reason(&handle.id)
+                .await
+                .is_some_and(|_| true),
+            "a spawn failure is not the #3408 network-mount refusal"
+        );
+
+        mgr.stop_all().await;
+    }
+
+    /// Why: `is_watching` answers `true` for the partially-watched index the
+    /// test above builds, and the query path's watcher wake-up was gated on
+    /// it — so the failed root was never retried until a registration event
+    /// arrived. `needs_root_resync` is the all-of-N reading that makes the
+    /// retry possible, and it must NOT also re-ask the #3408 network-mount
+    /// refusal, which is a settled verdict rather than a transient failure.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_root_needs_resync_and_degraded_root_does_not() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let missing = primary.path().join("gone");
+        let handle = multi_root_handle("resync-retry", primary.path(), vec![missing.clone()]);
+        let mgr = WatcherManager::new();
+
+        mgr.spawn_for_index(&handle).await;
+        assert!(
+            mgr.is_watching(&handle.id).await,
+            "precondition: the any-of-N answer hides the dead root"
+        );
+        assert!(
+            mgr.needs_root_resync(&handle).await,
+            "a root recorded as failed is worth retrying"
+        );
+
+        // The tree comes back; the next resync must pick it up.
+        std::fs::create_dir_all(&missing).expect("recreate the missing root");
+        mgr.spawn_for_index(&handle).await;
+        assert!(
+            !mgr.needs_root_resync(&handle).await,
+            "a fully watched index needs nothing: {:?}",
+            mgr.root_watch_states(&handle.id).await
+        );
+        assert_eq!(mgr.watched_root_count().await, 2);
+        mgr.stop_all().await;
+
+        // #3408's refusal is deliberate, and re-asking it per query would buy a
+        // `statfs` and a warning for a verdict that cannot change here.
+        let network = tempfile::tempdir().expect("tempdir network");
+        let degraded = multi_root_handle("resync-degraded", network.path(), vec![]);
+        let mgr = WatcherManager::new();
+        mgr.spawn_for_index_with_mount_kind(&degraded, MountKind::Network)
+            .await;
+        assert!(
+            !mgr.is_watching(&degraded.id).await,
+            "precondition: a network-degraded root has no live watch"
+        );
+        assert!(
+            !mgr.needs_root_resync(&degraded).await,
+            "a degraded root is not retried on every query"
+        );
+        mgr.stop_all().await;
+    }
+
+    /// Why: a save under an additional root must update THAT root's
+    /// `@root<n>/…` chunks. Keyed against the primary root instead, the edit
+    /// would either create a second set of chunks under a bare name that
+    /// decodes to a file in the wrong tree, or overwrite a same-named primary
+    /// file's chunks outright.
+    /// Test: this test. Drives the real manager, the real OS watcher and the
+    /// real admission path — `await_watch_condition` re-applies the save until
+    /// the index reacts, the same way every other watcher test in this crate
+    /// absorbs a dropped FSEvents batch (#4731).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modified_file_under_additional_root_updates_its_root_relative_chunks() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let extra = tempfile::tempdir().expect("tempdir extra");
+        let handle = multi_root_handle(
+            "root-relative-watch",
+            primary.path(),
+            vec![extra.path().to_path_buf()],
+        );
+        let mgr = WatcherManager::new();
+        mgr.spawn_for_index(&handle).await;
+
+        let file = extra.path().join("extra.rs");
+        let indexed = {
+            let probe = Arc::clone(&handle);
+            crate::service::watch_test_support::await_watch_condition(
+                |generation| {
+                    std::fs::write(&file, format!("fn extra{generation}() {{}}\n"))
+                        .expect("write file");
+                },
+                move || {
+                    let probe = Arc::clone(&probe);
+                    async move {
+                        !probe
+                            .indexer
+                            .read()
+                            .await
+                            .chunk_ids_for_file("@root1/extra.rs")
+                            .await
+                            .is_empty()
+                    }
+                },
+            )
+            .await
+        };
+
+        let stored: Vec<String> = handle
+            .indexer
+            .read()
+            .await
+            .all_chunks()
+            .await
+            .into_iter()
+            .filter_map(|c| c.path)
+            .collect();
+        assert!(
+            indexed,
+            "no chunk was stored under `@root1/extra.rs` — the additional root's \
+             save was either not watched or keyed against the primary root; \
+             stored paths: {stored:?}"
+        );
+        assert!(
+            !stored.iter().any(|p| p == "extra.rs"),
+            "the file must NOT also be stored under a bare primary-root key: {stored:?}"
+        );
+
+        mgr.stop_all().await;
+    }
+
+    /// Why: `DELETE /indexes/:id` must not leave ANY of a multi-root index's
+    /// watchers firing into a dropped indexer. A stop that removed one entry
+    /// would leave N-1 tasks holding the index's `Arc<RwLock<CodeIndexer>>` and
+    /// therefore its open redb corpus, which is exactly the #3049 recreate
+    /// failure, once per surviving root.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_for_index_stops_every_root_watch() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let second = tempfile::tempdir().expect("tempdir second");
+        let third = tempfile::tempdir().expect("tempdir third");
+        let handle = multi_root_handle(
+            "stop-every-root",
+            primary.path(),
+            vec![second.path().to_path_buf(), third.path().to_path_buf()],
+        );
+        let mgr = WatcherManager::new();
+        mgr.spawn_for_index(&handle).await;
+        assert_eq!(mgr.watched_root_count().await, 3);
+
+        assert!(
+            mgr.stop_for_index(&handle.id).await,
+            "stop_for_index must report it stopped watchers"
+        );
+
+        assert_eq!(
+            mgr.watched_root_count().await,
+            0,
+            "every root's watch must be stopped, not just the first"
+        );
+        assert!(!mgr.is_watching(&handle.id).await);
+        assert!(
+            mgr.root_watch_states(&handle.id).await.is_empty(),
+            "and no per-root record may survive the stop"
+        );
+        assert_eq!(
+            mgr.stop_all().await,
+            0,
+            "stop_all must find nothing left to stop"
+        );
+    }
+
+    /// Why: a relocate moves the PRIMARY root only. Restarting every watch
+    /// would drop the additional roots' OS watches for no reason (re-installing
+    /// a recursive watch is the expensive half of the call); not restarting the
+    /// primary's would leave it watching a tree the index no longer covers.
+    /// Test: this test drives the manager's resync directly — the handler-level
+    /// path is `indexes_relocate`'s `spawn_for_index` call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relocate_restarts_the_primary_and_keeps_the_rest() {
+        let old_primary = tempfile::tempdir().expect("tempdir old");
+        let new_primary = tempfile::tempdir().expect("tempdir new");
+        let extra = tempfile::tempdir().expect("tempdir extra");
+        let mgr = WatcherManager::new();
+
+        let before = multi_root_handle(
+            "relocate-watch",
+            old_primary.path(),
+            vec![extra.path().to_path_buf()],
+        );
+        mgr.spawn_for_index(&before).await;
+        assert_eq!(mgr.watched_root_count().await, 2);
+
+        // The replacement handle a relocate registers: same id, new primary,
+        // same additional roots.
+        let after = multi_root_handle(
+            "relocate-watch",
+            new_primary.path(),
+            vec![extra.path().to_path_buf()],
+        );
+        mgr.spawn_for_index(&after).await;
+
+        let rows = mgr.root_watch_states(&after.id).await;
+        assert_eq!(
+            rows.len(),
+            2,
+            "the old primary's entry must be gone, not accumulated: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].root,
+            new_primary.path().display().to_string(),
+            "the primary watch must have moved to the new root"
+        );
+        assert_eq!(
+            rows[1].root,
+            extra.path().display().to_string(),
+            "the additional root's watch must be kept"
+        );
+        assert!(rows.iter().all(|r| r.state == "watching"));
+
+        mgr.stop_all().await;
     }
 }

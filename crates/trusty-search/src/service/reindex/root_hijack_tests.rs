@@ -702,3 +702,83 @@ async fn reindex_moves_a_stale_indexer_onto_the_trusted_new_root() {
         results[0].file
     );
 }
+
+// ── #7434: an additional root is not a second identity ───────────────────
+
+/// A persisted ADDITIONAL root must not make a reindex's `root_path` override
+/// trusted.
+///
+/// Why: the #2178 gate asks whether the candidate root matches the index's
+/// PERSISTED root, and #7434 gave `PersistedIndex` a second list of roots
+/// beside it. Widening the gate to consult that list would hand every
+/// additional root the trust the primary one has — a reindex could then
+/// re-point the index at any tree in its own table, and the prune pass would
+/// relativise the whole corpus against a root it was never built from. Only
+/// `root_path` is the identity anchor, which is exactly what
+/// `IndexHandle::additional_roots` documents.
+/// What: a persisted entry whose `additional_roots` CONTAINS the candidate,
+/// asked the same question the runner asks. The refusal is the assertion.
+/// Test: this test.
+#[test]
+fn reindex_naming_an_additional_root_as_root_path_is_refused() {
+    let primary = std::path::PathBuf::from("/a/primary");
+    let extra = std::path::PathBuf::from("/b/extra");
+    let entry = PersistedIndex {
+        id: "multi".to_string(),
+        root_path: primary.clone(),
+        additional_roots: vec![extra.clone()],
+        colocated: true,
+        ..Default::default()
+    };
+
+    let decision =
+        root_gate::evaluate_root_move("multi", Ok(Some(primary.clone())), &extra, move || {
+            Ok(vec![entry.clone()])
+        });
+
+    let Err(refusal) = decision else {
+        panic!(
+            "#7434: a reindex naming this index's ADDITIONAL root as its \
+             root_path must be refused like any other untrusted move — only \
+             root_path is the identity anchor"
+        );
+    };
+    assert_eq!(refusal.persisted_root.as_deref(), Some(primary.as_path()));
+    assert!(
+        refusal.reason.contains("root-hijack"),
+        "the refusal must be the #2178 one, not a read failure; got {}",
+        refusal.reason
+    );
+}
+
+/// The mirror: the PRIMARY root of a multi-root index is still trusted.
+///
+/// Why: the test above must fail for the right reason. An index that has
+/// additional roots is otherwise an ordinary index, and a legitimate,
+/// persisted relocation of its primary root has to keep working.
+/// What: the same entry, with the candidate equal to the persisted
+/// `root_path` and a stale `indexed_root` — the accepted-move arm.
+/// Test: this test.
+#[test]
+fn a_multi_root_indexs_primary_root_move_is_still_trusted() {
+    let old = std::path::PathBuf::from("/a/old");
+    let new = std::path::PathBuf::from("/a/new");
+    let entry = PersistedIndex {
+        id: "multi".to_string(),
+        root_path: new.clone(),
+        additional_roots: vec![std::path::PathBuf::from("/b/extra")],
+        colocated: true,
+        ..Default::default()
+    };
+
+    let trusted = root_gate::evaluate_root_move("multi", Ok(Some(old)), &new, move || {
+        Ok(vec![entry.clone()])
+    })
+    .unwrap_or_else(|r| {
+        panic!(
+            "a persisted primary-root move must be trusted: {}",
+            r.reason
+        )
+    });
+    assert!(trusted.moved, "the gate must report the move it accepted");
+}

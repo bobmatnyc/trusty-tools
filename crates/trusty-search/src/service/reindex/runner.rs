@@ -201,7 +201,9 @@ pub(super) async fn run_reindex(
     let walk_task = {
         let handle = Arc::clone(&handle);
         tokio::task::spawn_blocking(move || {
-            let walk = super::orchestrator::collect_files_to_index(&handle);
+            let collected = super::orchestrator::collect_files_to_index(&handle);
+            let walk = collected.walk;
+            let missing_roots = collected.missing_roots;
             // #4356: refuse a tree too large to index completely, rather than
             // letting `TRUSTY_MAX_CHUNKS` truncate it into a corpus that
             // reports success. Checked on the POST-FILTER list, so narrowing
@@ -209,10 +211,10 @@ pub(super) async fn run_reindex(
             // `extensions`) is what clears it; the env ceilings are the blunt
             // override.
             let budget = crate::service::index_budget::IndexBudget::from_env().check(&walk.files);
-            (walk, budget)
+            (walk, budget, missing_roots)
         })
     };
-    let (walk, budget) = match walk_task.await {
+    let (walk, budget, missing_roots) = match walk_task.await {
         Ok(pair) => pair,
         Err(join_err) => {
             // Before the walk moved onto the blocking pool a panic in it unwound
@@ -228,6 +230,8 @@ pub(super) async fn run_reindex(
     };
     let walk_ms = started.elapsed().as_millis() as u64;
     let total = walk.files.len();
+    // #7434: per-root coverage gaps, recorded beside the walk that found them.
+    super::orchestrator::record_root_diagnostics(&handle, &index_id, &missing_roots).await;
     {
         let mut diag = handle.walk_diagnostics.write().await;
         diag.last_walk_files_seen = total as u64;
@@ -530,7 +534,12 @@ pub(super) async fn run_reindex(
     let ctx = BatchCtx {
         handle: handle.clone(),
         progress: progress.clone(),
-        root: canonical_root.clone(),
+        // #7434: the canonical PRIMARY root plus every additional root, so the
+        // corpus path of a file under any of them is relative to its own root.
+        roots: crate::core::index_roots::IndexRoots::new(
+            canonical_root.clone(),
+            handle.additional_roots.clone(),
+        ),
         index_id: index_id.clone(),
         hashes: hashes.clone(),
         mem_limit,
@@ -706,6 +715,8 @@ pub(super) async fn run_reindex(
         progress,
         index_id,
         canonical_root,
+        // #7434: the prune pass must relativise exactly as the batch loop did.
+        roots: ctx.roots.clone(),
         walked_files: walk.files,
         hashes,
         total,

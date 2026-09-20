@@ -67,6 +67,7 @@ fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
     // Never walk our own storage dir — a redb file is not source.
     skip_dirs.push(".trusty-search".to_string());
     Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new(id),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: root.to_path_buf(),

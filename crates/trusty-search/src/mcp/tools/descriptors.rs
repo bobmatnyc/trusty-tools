@@ -1,10 +1,13 @@
 //! Static tool descriptors returned by `tools/list`.
 //!
-//! Why: the JSON schemas for all 18 MCP tools are long but mechanical; keeping
+//! Why: the JSON schemas for every MCP tool are long but mechanical; keeping
 //! them in a dedicated file makes it easy to update a single tool's description
 //! or input schema without touching any dispatch logic.
 //! What: exports `tool_descriptors()` which returns the full `serde_json::Value`
-//! array consumed by the `tools/list` handler in `dispatch`.
+//! array consumed by the `tools/list` handler in `dispatch`. The index-lifecycle
+//! tools (`create_index`, `add_root`, `delete_index`, `reindex`) live in
+//! [`super::descriptors_lifecycle`] since #7434 — this file was at 467 of its
+//! 500 SLOC — and are appended to the array here.
 //! Test: `tools_list_returns_all_tools`, `test_tools_list_response`,
 //! `tools_list_returns_five_search_tools`, and
 //! `per_lane_tool_descriptions_carry_when_to_use_hooks` in `tests.rs`.
@@ -215,27 +218,6 @@ pub fn tool_descriptors() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "create_index",
-            "description": "Register a new (empty) index. The reindex that populates it refuses any tree over the daemon's file-count / total-byte budget (TRUSTY_MAX_INDEX_FILES, default 50000; TRUSTY_MAX_INDEX_BYTES, default 2 GiB) rather than silently truncating it — narrow a large tree with exclude_globs.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["id", "root_path"],
-                "properties": {
-                    "id":        { "type": "string" },
-                    "root_path": { "type": "string" },
-                    "follow_links": {
-                        "type": "boolean",
-                        "description": "Dereference symlinks during the index walk. Default false (do not follow) — the safe choice for roots containing symlinks that escape the tree. Set true to index vendored / monorepo-aliased subtrees reached via a symlink."
-                    },
-                    "exclude_globs": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Glob patterns to exclude from the walk, on top of the built-in ignores (.gitignore, node_modules, .git, target, dist, build, ...). Use this to bring an oversized tree under the index budget, e.g. [\"**/fixtures/**\", \"**/*.generated.ts\"]."
-                    }
-                }
-            }
-        },
-        {
             "name": "search_similar",
             "description": "Find chunks semantically similar to a given file/function via HNSW (issue #31)",
             "inputSchema": {
@@ -262,34 +244,6 @@ pub fn tool_descriptors() -> Value {
                 "type": "object",
                 "properties": {
                     "index_id": { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "delete_index",
-            // #6422: the destructive default, and the opt-out beside it.
-            "description": "Delete a registered index and all its on-disk data. \
-                            Pass delete_data: false to deregister the index only \
-                            and leave its corpus on disk for a later \
-                            re-registration.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["index_id"],
-                "properties": {
-                    "index_id":    { "type": "string" },
-                    "delete_data": { "type": "boolean", "default": true }
-                }
-            }
-        },
-        {
-            "name": "reindex",
-            "description": "Trigger a full reindex of a collection (async, returns immediately)",
-            "inputSchema": {
-                "type": "object",
-                "required": ["index_id"],
-                "properties": {
-                    "index_id":  { "type": "string" },
-                    "root_path": { "type": "string" }
                 }
             }
         },
@@ -462,6 +416,13 @@ pub fn tool_descriptors() -> Value {
             }
         }
     ]);
+    // #7434: the index-LIFECYCLE descriptors live in their own file — this one
+    // had reached 467 of its 500 SLOC and the new `add_root` tool would not
+    // fit. Appended rather than spliced in place: `tools/list` order is
+    // advisory, and both post-processors below address tools by name.
+    if let Some(tools) = defs.as_array_mut() {
+        tools.extend(super::descriptors_lifecycle::lifecycle_tool_descriptors());
+    }
     // #6317: an unpinned read tool answers an omitted index_id with a directory,
     // so the schema must let a client send the call without one.
     super::index_directory::annotate_directory_tools(&mut defs);

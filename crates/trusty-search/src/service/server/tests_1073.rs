@@ -101,6 +101,7 @@ async fn relocate_index_updates_root_path() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            roots: None,
             allow_sensitive_path: false,
         }),
     )
@@ -147,6 +148,84 @@ async fn relocate_index_updates_root_path() {
     assert_ne!(
         handle.root_path, old_root,
         "handle.root_path must not retain the old directory"
+    );
+}
+
+/// #7434: relocating the PRIMARY root must carry the additional roots across.
+///
+/// Why: relocation answers "this tree moved on disk", and an additional root
+/// is a DIFFERENT tree that did not. Dropping the list would silently narrow
+/// a multi-root index to its primary root, and the next reindex's prune pass
+/// would then delete every additional-root chunk from the corpus as unseen —
+/// the #848 set-difference working exactly as designed against a table that
+/// lost half its entries. Same rule the `colocated` flag (#1088/#1089) and the
+/// LRU timestamps (#993) follow, for the same reason: `PATCH /indexes/:id`
+/// overwrites the whole record, so anything it does not carry is lost.
+/// What: creates a multi-root index through `POST /indexes {roots}`, relocates
+/// its primary root, and asserts the table survived on the handle.
+/// Test: this test.
+#[tokio::test]
+async fn relocate_preserves_additional_roots() {
+    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use super::router::CreateIndexRequest;
+    use axum::extract::Path;
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let (_old_dir, old_root) = super::test_support::allowlisted_index_root("ts-7434-reloc-old-");
+    let (_new_dir, new_root) = super::test_support::allowlisted_index_root("ts-7434-reloc-new-");
+    let (_x_dir, extra) = super::test_support::allowlisted_index_root("ts-7434-reloc-extra-");
+
+    let create_resp = super::indexes::create_index_handler(
+        State(Arc::clone(&state_arc)),
+        Json(CreateIndexRequest {
+            id: "ts-7434-reloc".into(),
+            root_path: old_root.clone(),
+            roots: Some(vec![extra.display().to_string()]),
+            include_paths: None,
+            exclude_globs: None,
+            extensions: None,
+            domain_terms: None,
+            path_filter: None,
+            include_docs: None,
+            respect_gitignore: None,
+            follow_links: None,
+            lexical_only: None,
+            skip_kg: None,
+            skip_vector: None,
+            defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
+            allow_sensitive_path: false,
+        }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK, "create must succeed");
+
+    let patch_resp = relocate_index_handler(
+        State(Arc::clone(&state_arc)),
+        Path("ts-7434-reloc".to_string()),
+        Json(RelocateIndexRequest {
+            root_path: new_root.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK, "relocate must succeed");
+
+    let handle = state_arc
+        .registry
+        .get(&crate::core::registry::IndexId::new("ts-7434-reloc"))
+        .expect("handle must still be registered after relocate");
+    assert_eq!(handle.root_path, new_root, "the primary root moved");
+    assert_eq!(
+        handle.additional_roots,
+        vec![extra],
+        "#7434: the additional roots are independent trees that did not move — \
+         relocation must carry them across, or the next prune deletes their \
+         chunks as unseen"
     );
 }
 

@@ -277,6 +277,9 @@ pub(crate) async fn reindex_report(
                 // Preserve the filter set / domain vocabulary recorded on the
                 // existing handle — only the root_path is being overridden.
                 let new_handle = IndexHandle {
+                    // #7434: only the PRIMARY root is being overridden here;
+                    // the additional roots are preserved untouched.
+                    additional_roots: handle.additional_roots.clone(),
                     id: index_id.clone(),
                     indexer,
                     root_path: new_root,

@@ -500,6 +500,80 @@ root_path = "/tmp/legacy"
     assert!(entries[0].skip_vector, "skip_vector preserved");
 }
 
+/// #7434: `additional_roots` defaults to empty, survives a save/load
+/// round-trip in order, and stays out of the TOML when empty.
+///
+/// Why: the list's ORDER is the ordinal space the corpus-path encoding
+/// (`@root<n>/…`) indexes into, so a round-trip that reorders or drops it
+/// silently re-points every stored path for an additional root. And the
+/// no-migration claim rests on two facts pinned here: a legacy file with no
+/// such key still loads, and a single-root index still writes no such key.
+/// What: default, missing-field deserialisation, ordered round-trip, and the
+/// empty-list serialisation guard.
+/// Test: this test.
+#[test]
+fn additional_roots_round_trip() {
+    // #7434: default is single-root.
+    assert!(PersistedIndex::default().additional_roots.is_empty());
+
+    // Every existing `indexes.toml` predates the field and must still load.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::fs::write(
+        &path,
+        r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy_roots"
+"#,
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].additional_roots.is_empty(),
+        "#7434: a missing field must deserialise as an empty list — no migration"
+    );
+
+    // A configured list survives the round-trip, in order.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    let root_dir = tempfile::tempdir().unwrap();
+    let extra_a = root_dir.path().join("a");
+    let extra_b = root_dir.path().join("b");
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex {
+            id: "multi".into(),
+            root_path: root_dir.path().to_path_buf(),
+            additional_roots: vec![extra_a.clone(), extra_b.clone()],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].additional_roots,
+        vec![extra_a, extra_b],
+        "#7434: order is the corpus-path ordinal space — it must round-trip exactly"
+    );
+
+    // An empty list stays out of the file, so single-root TOML is unchanged.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex::new("single", root_dir.path().to_path_buf())],
+    )
+    .unwrap();
+    let s = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !s.contains("additional_roots"),
+        "#7434: an empty list must not be written — TOML was: {s}"
+    );
+}
+
 /// Issue #403: `colocated` defaults to `false` so existing `indexes.toml`
 /// files load as legacy global storage. An explicit `true` survives a
 /// save/load round-trip, and is written to TOML only when set.

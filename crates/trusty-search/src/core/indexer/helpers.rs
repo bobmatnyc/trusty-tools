@@ -322,16 +322,25 @@ pub(crate) fn build_compact_snippet(content: &str) -> String {
 /// Why (issue #402): newly indexed chunks store `file` relative to
 /// `root_path`. Older indexes still carry absolute paths. This helper
 /// normalises both forms.
-/// What: if `raw_file` starts with the OS path separator it is returned
-/// as-is; otherwise `root_path.join(raw_file)` is returned.
-/// Test: `tests::resolve_chunk_file_relative_becomes_absolute` and
-///       `tests::resolve_chunk_file_absolute_passthrough`.
-pub(crate) fn resolve_chunk_file(raw_file: &str, root_path: &std::path::Path) -> String {
-    if std::path::Path::new(raw_file).is_absolute() {
-        raw_file.to_string()
-    } else {
-        root_path.join(raw_file).to_string_lossy().into_owned()
-    }
+/// Why (#7434): a multi-root index stores a file under an ADDITIONAL root as
+/// `@root<n>/<rel>`, so joining it against the primary root produces a path
+/// that does not exist and the caller cannot open the hit it was just given.
+/// What: delegates to [`crate::core::index_roots::resolve_absolute`], which
+/// passes an absolute `raw_file` through unchanged, decodes a leading
+/// `@root<n>/` against `additional_roots`, and otherwise joins `root_path` —
+/// the last branch being exactly the pre-#7434 behaviour, so every single-root
+/// index resolves identically.
+/// Test: `tests::resolve_chunk_file_relative_becomes_absolute`,
+///       `tests::resolve_chunk_file_absolute_passthrough`, and
+///       `core::index_roots::tests::round_trips_every_root`.
+pub(crate) fn resolve_chunk_file(
+    raw_file: &str,
+    root_path: &std::path::Path,
+    additional_roots: &[std::path::PathBuf],
+) -> String {
+    crate::core::index_roots::resolve_absolute(root_path, additional_roots, raw_file)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Materialize a `RawChunk` into a `CodeChunk` with the given score, match
@@ -348,6 +357,8 @@ pub(crate) fn raw_to_code_chunk(
     match_reason: &str,
     compact_snippet: Option<String>,
     root_path: &std::path::Path,
+    // #7434: needed to decode an `@root<n>/…` path back to its own root.
+    additional_roots: &[std::path::PathBuf],
 ) -> CodeChunk {
     let chunk_depth: u8 = raw.chunk_depth.min(u8::MAX as usize) as u8;
     let path = if !std::path::Path::new(&raw.file).is_absolute() {
@@ -355,7 +366,7 @@ pub(crate) fn raw_to_code_chunk(
     } else {
         None
     };
-    let file = resolve_chunk_file(&raw.file, root_path);
+    let file = resolve_chunk_file(&raw.file, root_path, additional_roots);
     CodeChunk {
         id: raw.id.clone(),
         file,

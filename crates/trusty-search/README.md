@@ -577,14 +577,15 @@ trusty-search reindex [path]                         # alias for index --force
 ## MCP tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
 |---|---|---|
+| `add_root` | `index_id`, `roots` | Add one or more directory trees to an EXISTING index, so a single index spans several checkouts (a monorepo plus its vendored sibling, a… |
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
-| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
+| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?`, `roots?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |

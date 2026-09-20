@@ -57,6 +57,7 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
         defer_embed: None,
         extra_skip_dirs: None,
         data_file_max_bytes: None,
+        roots: None,
         allow_sensitive_path: false,
     }
 }
@@ -271,4 +272,56 @@ async fn create_index_same_id_different_root_still_reaps_a_cold_entry() {
         handle.root_path, root_b,
         "and it must be registered at the tree that was actually requested"
     );
+}
+
+/// #7434: a multi-root index is identified by its PRIMARY root alone.
+///
+/// Why: the mismatch guard compares the requested tree against the tree the id
+/// is registered at. With `additional_roots` on the handle there is a tempting
+/// second reading — "the id covers this tree, so the request is satisfied" —
+/// and it is wrong twice over: the caller asked for an index OF that tree, and
+/// it would get one whose corpus, colocated storage and index-id derivation
+/// all belong to a different one. `root_path` stays the identity anchor, so a
+/// request naming an ADDITIONAL root under a registered id is the same
+/// mismatch as a request naming any other tree.
+/// What: registers a multi-root index, then re-registers its id at its own
+/// additional root. The `409` — naming the PRIMARY root as the registered one
+/// — is the assertion.
+/// Test: this test.
+#[tokio::test]
+async fn create_index_same_id_at_its_own_additional_root_is_refused() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::IndexHandle;
+
+    let state = mock_state_async().await;
+    let (_dir_p, primary) = super::test_support::allowlisted_index_root("ts-7434-ident-p-");
+    let (_dir_x, extra) = super::test_support::allowlisted_index_root("ts-7434-ident-x-");
+
+    let mut handle = IndexHandle::bare(
+        IndexId::new("api"),
+        Arc::new(tokio::sync::RwLock::new(CodeIndexer::new("api", &primary))),
+        primary.clone(),
+    );
+    handle.additional_roots = vec![extra.clone()];
+    state.registry.register(handle);
+
+    let resp = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("api", extra.clone())),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "#7434: an additional root is coverage, not identity — re-registering \
+         the id there must be refused, not answered 'already exists'"
+    );
+
+    let body = json_body(resp).await;
+    assert_eq!(
+        body["registered_root_path"],
+        serde_json::json!(primary),
+        "the refusal must name the PRIMARY root as the tree that owns the id"
+    );
+    assert_eq!(body["requested_root_path"], serde_json::json!(extra));
 }

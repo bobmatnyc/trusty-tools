@@ -31,7 +31,10 @@ fn to_corpus_relative_path_agrees_with_batch_loop() {
         .unwrap_or(path)
         .display()
         .to_string();
-    assert_eq!(to_corpus_relative_path(root, path), expected);
+    // #7434: the single-root table must reproduce the pre-multi-root string
+    // exactly — that equality is what makes the change a no-migration one.
+    let roots = crate::core::index_roots::IndexRoots::new(root.to_path_buf(), Vec::new());
+    assert_eq!(to_corpus_relative_path(&roots, path), expected);
 }
 
 /// Disk-existence guard: a file that IS present on disk but whose relative

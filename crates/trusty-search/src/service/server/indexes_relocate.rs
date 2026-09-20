@@ -224,6 +224,10 @@ pub(crate) async fn relocate_index_report(
     // the new root path. We preserve all other settings (filters, extensions,
     // lexical_only, etc.) so the handle stays consistent.
     let existing_entry = crate::service::persistence::PersistedIndex {
+        // #7434: relocation moves the PRIMARY root only. The additional roots
+        // are independent trees that did not move, so they carry forward
+        // unchanged — the same rule `colocated` and the LRU timestamps follow.
+        additional_roots: existing.additional_roots.clone(),
         id: id.to_string(),
         root_path: new_root.clone(),
         include_paths: existing
@@ -343,6 +347,8 @@ pub(crate) async fn relocate_index_report(
     // Build the replacement handle, preserving all in-memory fields from
     // the existing handle (stage states, context embedding, …).
     let new_handle = IndexHandle {
+        // #7434: see the persisted entry above — relocation preserves them.
+        additional_roots: existing.additional_roots.clone(),
         id: index_id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(new_indexer)),
         root_path: new_root.clone(),
@@ -421,6 +427,15 @@ pub(crate) async fn relocate_index_report(
                  (next reindex may re-detect root move): {e}"
             );
         }
+        // #7434: the primary root moved, so its watch is now installed on a
+        // tree this index no longer covers — it would feed edits from the OLD
+        // location into the corpus and see nothing from the new one. The resync
+        // stops exactly that watch and starts one on the new primary. The
+        // ADDITIONAL roots did not move, so their watches are left running:
+        // tearing the index's watches down and rebuilding them all would drop
+        // every additional root's OS watch for no reason, and re-installing a
+        // recursive watch is the expensive half of this call.
+        state.watcher_manager.spawn_for_index(&h).await;
     }
 
     state.emit(DaemonEvent::IndexRegistered { id: id.to_string() });

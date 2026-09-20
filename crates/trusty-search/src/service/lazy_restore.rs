@@ -265,6 +265,9 @@ pub(crate) async fn restore_index_on_demand(
     );
 
     let handle = IndexHandle {
+        // #7434: a multi-root index must come back multi-root, or the next
+        // reindex prunes every additional-root file out of the corpus.
+        additional_roots: entry.additional_roots.clone(),
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: entry.root_path,
