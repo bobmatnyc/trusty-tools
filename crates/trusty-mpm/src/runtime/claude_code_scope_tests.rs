@@ -69,6 +69,28 @@ fn expected_path() -> String {
     SCOPE_MCP_CONFIG.to_owned()
 }
 
+/// The `--mcp-config` path the IN-PLACE relaunch must name (#8233).
+///
+/// Why: [`expected_path`] became a literal because `spawn_spec` and
+/// `resume_spec` are handed the path the launch provisioned. `compose_inplace_args`
+/// took no such argument — the bare-`tm` relaunch runs inside the managed pane,
+/// so the ambient home IS its own correct layout and it still derives the path
+/// itself. Comparing that derivation against the literal asserted a contract
+/// this builder never had.
+/// What: [`crate::core::session_mcp_scope::scoped_for`] against the same cwd and
+/// config dir the builder is given, resolved at assertion time so a
+/// [`PoisonedStateRoot`] sibling cannot desynchronise the two.
+/// Test: `compose_inplace_args_carries_the_mcp_config_flag_unquoted`.
+fn inplace_expected_path() -> String {
+    crate::core::session_mcp_scope::scoped_for(
+        Path::new(SCOPE_CWD),
+        Some(Path::new(SCOPE_CONFIG_DIR)),
+    )
+    .expect("HOME resolves in a test environment")
+    .display()
+    .to_string()
+}
+
 #[test]
 #[serial_test::serial]
 fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
@@ -140,7 +162,7 @@ fn compose_inplace_args_carries_the_mcp_config_flag_unquoted() {
     assert!(!args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
     assert_eq!(
         args[pos + 1],
-        expected_path(),
+        inplace_expected_path(),
         "exec takes the token verbatim — a quoted path names a file claude cannot open"
     );
 }

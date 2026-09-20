@@ -605,6 +605,11 @@ impl ClaudeCodeAdapter {
     /// checks the live `PATH` first then the well-known daemon dirs (Homebrew +
     /// `~/.local/bin` + `~/.cargo/bin`); returns the resolved path as a `String`.
     /// Test: `claude_code_adapter_binary_check_returns_option`.
+    fn resolve_claude() -> Option<String> {
+        trusty_common::bin_resolve::resolve_binary("claude")
+            .and_then(|p| p.to_str().map(str::to_owned))
+    }
+
     /// Where this adapter's launch specs are written (#8233).
     ///
     /// Why: `LaunchSpec::root()` reads the process home, and a spec carries the
@@ -616,11 +621,6 @@ impl ClaudeCodeAdapter {
     /// Test: `spawn_writes_its_launch_spec_under_the_named_framework_root`.
     fn spec_dir(&self) -> std::path::PathBuf {
         super::launch_spec::LaunchSpec::root_at(&self.fw.crate_config_root())
-    }
-
-    fn resolve_claude() -> Option<String> {
-        trusty_common::bin_resolve::resolve_binary("claude")
-            .and_then(|p| p.to_str().map(str::to_owned))
     }
 
     /// Durably publish `TM_MANAGED_SESSION_ID` (and `CLAUDE_CONFIG_DIR` when
