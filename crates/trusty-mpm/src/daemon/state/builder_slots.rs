@@ -232,6 +232,45 @@ impl DaemonState {
         }
     }
 
+    /// How many builders this machine has room for right now (#8261).
+    ///
+    /// Why: the daemon is the process that counts, so it is the process that
+    /// must derive N — a `tm` older or newer than the daemon would otherwise
+    /// argue for a number the live leases were not admitted under. Same
+    /// reasoning that put [`resolve_max_concurrent`] here in #6892, extended
+    /// from a static cap to a measured one.
+    /// What: samples this host's readings, reads the operator's `[builders]`
+    /// section for the ceiling and the two limits, counts the current holders,
+    /// and runs the pure formula against the daemon's own quiet window. `held`
+    /// is passed so a drop in N can never revoke a granted lease.
+    ///
+    /// `ceiling` is supplied by the caller rather than read here, for the same
+    /// testability reason [`builder_slot_op`](crate::daemon::builder_slot_routes::builder_slot_op)
+    /// takes its cap: [`resolve_max_concurrent`] reads the operator's real
+    /// `~/.trusty-mpm`, and a test driving this would otherwise depend on the
+    /// machine it runs on.
+    /// Test: `the_daemon_resolves_capacity_against_its_own_quiet_window`.
+    #[must_use]
+    pub fn builder_capacity(
+        &self,
+        config: &crate::core::builders::BuildersConfig,
+        ceiling: u32,
+        exclude_tool_use_id: Option<&str>,
+    ) -> crate::core::builder_capacity::Capacity {
+        let held = u32::try_from(self.builder_slot_holders(exclude_tool_use_id).len())
+            .unwrap_or(u32::MAX);
+        let readings = crate::core::builder_capacity::sample_capacity_readings();
+        let mut quiet = self.builder_quiet_window.lock();
+        crate::core::builder_capacity::resolve_capacity(
+            &readings,
+            config,
+            ceiling,
+            held,
+            &mut quiet,
+            chrono::Utc::now(),
+        )
+    }
+
     /// Answer "who holds a builder slot" and claim one, in one step (#6892).
     ///
     /// Why: asking and acting are two steps, and two dispatches issued in ONE PM
