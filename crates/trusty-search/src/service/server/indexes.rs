@@ -443,6 +443,41 @@ pub(crate) async fn create_index_report(
         );
         return Err(root_path_collision_response(&existing_id, &req.root_path));
     }
+    // #4289: the guard above is EXACT-match only. A candidate that sits inside
+    // an existing index's root, or that encloses one, was accepted — and an
+    // overlapping root is how #402 / #2178 let a reindex prune another index's
+    // corpus. An unrunnable check is an error, never an implicit "no overlap".
+    match super::root_overlap::find_root_overlap(
+        &handles,
+        &cold_entries,
+        &req.root_path,
+        Some(&id),
+    ) {
+        Ok(None) => {}
+        Ok(Some(conflict)) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' at {} — that root overlaps \
+                 index '{}' at {} (#4289)",
+                req.id,
+                req.root_path.display(),
+                conflict.index_id,
+                conflict.root_path.display(),
+            );
+            return Err(super::root_overlap::root_overlap_response(
+                &conflict,
+                &req.root_path,
+            ));
+        }
+        Err(failure) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' — its root could not be \
+                 checked against the registered roots: {} (#4289)",
+                req.id,
+                failure.reason,
+            );
+            return Err(super::root_overlap::overlap_check_failed_response(&failure));
+        }
+    }
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
