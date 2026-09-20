@@ -741,7 +741,11 @@ export async function tmApi<T = unknown>(
     // on it — `channel-auth`'s 401 retry — cannot read it out of the message:
     // the server's own `error` string is what becomes the message, and a
     // refusal is free to word itself however it likes.
-    throw Object.assign(new Error(errMsg), { status: r.status });
+    // #8187: the parsed body travels too. A refusal can carry more than a
+    // sentence — `DELETE /api/channels/{id}` names the assistants whose
+    // bindings the delete would leave inert in a `referenced_by` array — and
+    // re-parsing that out of the message text is not possible.
+    throw Object.assign(new Error(errMsg), { status: r.status, body });
   }
   return body as T;
 }
