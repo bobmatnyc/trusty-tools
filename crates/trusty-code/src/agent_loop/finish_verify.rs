@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use crate::finish_report::{EvidenceOutcome, FinishChange, FinishReport, TestEvidence};
 use crate::perf::PerfCollector;
-use crate::tools::{AgentOutput, FinishTaskArgs};
+use crate::tools::{AgentOutput, FinishTaskArgs, ToolResult};
 use crate::verify_gate::evidence::collect_test_evidence;
 
 use super::{Transcript, build_output};
@@ -85,13 +85,37 @@ fn unverified_note(command: &str) -> String {
 /// `tests::a_failed_status_over_a_red_suite_is_accepted`,
 /// `tests::unverified_evidence_does_not_refuse`,
 /// `tests::a_green_suite_does_not_refuse`.
-pub(super) fn contradicted_by_evidence(args: &Value, transcript: &Transcript) -> Option<String> {
+fn contradicted_by_evidence(args: &Value, transcript: &Transcript) -> Option<String> {
     let parsed: FinishTaskArgs = serde_json::from_value(args.clone()).ok()?;
     if !matches!(parsed.status, crate::tools::FinishStatus::Completed) {
         return None;
     }
     let evidence = collect_test_evidence(&transcript.messages())?;
     (evidence.outcome == EvidenceOutcome::Failed).then(|| contradiction_reason(&evidence))
+}
+
+/// Downgrade a `finish_task` result the captured test output contradicts
+/// (#8289).
+///
+/// Why: the decision and its log line live here rather than inline in
+/// `dispatch_all`, which sits against the crate's 500-SLOC production cap.
+/// What: a no-op unless `result` is currently a SUCCESS and
+/// [`contradicted_by_evidence`] objects; then `result` becomes the same
+/// recoverable `ToolResult::err` the verify gate's own reject arm produces,
+/// so the model gets another turn instead of the run reporting a pass.
+/// Test: `tests::a_failed_suite_refuses_a_completed_finish` (the decision),
+/// `agent_loop::tests::gate_intercept::*` (the surrounding retry path).
+pub(super) fn enforce_evidence(args: &Value, transcript: &Transcript, result: &mut ToolResult) {
+    if result.is_error() {
+        return;
+    }
+    if let Some(reason) = contradicted_by_evidence(args, transcript) {
+        tracing::warn!(
+            reason = %reason,
+            "agent_loop: captured test output contradicts finish_task (#8289)"
+        );
+        *result = ToolResult::err(reason);
+    }
 }
 
 /// Build the structured completion report for an accepted `finish_task`

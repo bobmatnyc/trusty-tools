@@ -908,15 +908,8 @@ impl AgentLoop {
             // #8289: the gate above proves a test command was INVOKED. This
             // reads what it PRINTED, and refuses a "completed" claim the
             // captured output contradicts — same recoverable-error shape.
-            if tool == FINISH_TASK_TOOL_NAME
-                && !result.is_error()
-                && let Some(reason) = finish_verify::contradicted_by_evidence(&args, transcript)
-            {
-                tracing::warn!(
-                    reason = %reason,
-                    "agent_loop: captured test output contradicts finish_task (#8289)"
-                );
-                result = ToolResult::err(reason);
+            if tool == FINISH_TASK_TOOL_NAME {
+                finish_verify::enforce_evidence(&args, transcript, &mut result);
             }
 
             if let Some(sink) = &self.sink {

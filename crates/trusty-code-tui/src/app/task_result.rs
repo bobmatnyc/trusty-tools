@@ -14,6 +14,10 @@
 //! [`ReplApp::finished_tasks`], which is the standing, keyed state #8182's
 //! subagent panel reads.
 //! Test: `crate::app::reduce::tests::task_result_*`.
+//!
+//! [`slot_lines`]: crate::app::task_result::slot_lines
+//! [`apply_task_result`]: crate::app::task_result::apply_task_result
+//! [`ReplApp::finished_tasks`]: crate::app::ReplApp::finished_tasks
 
 use super::{ChatLine, ChatRole, ReplApp};
 use crate::event::TaskReport;

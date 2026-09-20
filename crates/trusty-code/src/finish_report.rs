@@ -20,6 +20,10 @@
 //! `tui_client::session_events` turns into the TUI's
 //! `trusty_code_tui::ReplEvent::TaskResult`.
 //! Test: `tests::*`, `events_tests::task_finished_round_trips_through_json`.
+//!
+//! [`FinishReport`]: crate::finish_report::FinishReport
+//! [`FinishReport::verified`]: crate::finish_report::FinishReport::verified
+//! [`TestEvidence`]: crate::finish_report::TestEvidence
 
 use serde::{Deserialize, Serialize};
 
