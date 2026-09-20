@@ -321,7 +321,10 @@ while IFS= read -r f; do
           FAIL=1
         fi
       done
-      if grep -qF '| The task needs |' "$f"; then
+      # Keyed on the table RULE row, not on a header: the headers live in
+      # Consumer::headers() and a rename there would silently disarm a
+      # header-matching detector, while every Markdown table has a rule.
+      if grep -qE '^\|[-: ]+\|' "$f"; then
         echo "FAIL: PM ROUTING SOURCE — $f authors a routing table of its own." >&2
         echo "      Edit the shared rows in trusty-agents-common instead (#8293)." >&2
         FAIL=1
