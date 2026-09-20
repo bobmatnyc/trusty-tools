@@ -335,6 +335,8 @@ pub(crate) async fn patch_index_config_report(
     // Rebuild the handle, preserving the live indexer + all Arc-shared state
     // (stages, context, SHA, …). Mirrors the reindex/relocate rebuild pattern.
     let new_handle = IndexHandle {
+        // #7434: a config PATCH does not touch the root table.
+        additional_roots: existing.additional_roots.clone(),
         id: index_id.clone(),
         indexer: Arc::clone(&existing.indexer),
         root_path: existing.root_path.clone(),

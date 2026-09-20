@@ -443,6 +443,24 @@ pub(crate) async fn create_index_report(
         );
         return Err(root_path_collision_response(&existing_id, &req.root_path));
     }
+    // #7434: create-time additional roots run the SAME gate the add-roots
+    // endpoint uses — canonicalise, skip the primary root, dedupe, refuse a
+    // tree another index already covers. Empty/absent costs nothing.
+    let requested_roots: Vec<std::path::PathBuf> = req
+        .roots
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let additional_roots = super::indexes_roots::resolve_added_roots(
+        state,
+        &id,
+        &req.root_path,
+        &[],
+        &requested_roots,
+    )
+    .await?;
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -598,6 +616,9 @@ pub(crate) async fn create_index_report(
         .filter(|p| !p.trim().is_empty())
         .collect();
     indexer.set_domain_terms(domain_terms.clone());
+    // #7434: the indexer decodes `@root<n>/…` chunk paths against its own
+    // mirror of the table, so it must carry the same one the handle does.
+    indexer.set_additional_roots(additional_roots.clone());
 
     // Persist the registration so a daemon restart can re-register
     // automatically. Best-effort: a write failure is logged but doesn't fail
@@ -663,6 +684,9 @@ pub(crate) async fn create_index_report(
         trusty_common::repo_identity::RepoIdentity::derive(&req.root_path).map(|r| r.canonical());
     if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
         crate::service::persistence::PersistedIndex {
+            // #7434: the validated `roots` list, persisted so the table
+            // survives a restart.
+            additional_roots: additional_roots.clone(),
             id: req.id.clone(),
             root_path: req.root_path.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
@@ -786,6 +810,8 @@ pub(crate) async fn create_index_report(
         stages.graph.status,
     );
     let handle = IndexHandle {
+        // #7434: see the persisted entry above.
+        additional_roots,
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: req.root_path,

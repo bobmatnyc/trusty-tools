@@ -391,6 +391,13 @@ pub(crate) async fn index_status_report(
         .watcher_manager
         .network_degraded_reason(&index_id)
         .await;
+    // #7434: an index can cover several trees, and the three fields above
+    // collapse them into one answer — an index whose second root's watch failed
+    // still reports `active: true` with no reason. This array names each root
+    // and what its watch is doing. The existing fields keep their meaning
+    // (`active` = at least one live watch; `degraded_reason` = the first
+    // network-degraded root), so no consumer has to change to keep working.
+    let watcher_roots = state.watcher_manager.root_watch_states(&index_id).await;
     // #4787: `stages.semantic.embedded` counts embeddings computed during THIS
     // boot's pass, so a fully-working index whose HNSW snapshot was already
     // current at boot reports `0` — indistinguishable from a dead semantic
@@ -457,6 +464,9 @@ pub(crate) async fn index_status_report(
             "active": watcher_active,
             "network_mount_degraded": watcher_degraded_reason.is_some(),
             "degraded_reason": watcher_degraded_reason,
+            // #7434: per-root watch state — `watching` / `degraded` / `failed`,
+            // each with the root it belongs to and the reason when there is one.
+            "roots": watcher_roots,
         },
     }))
 }

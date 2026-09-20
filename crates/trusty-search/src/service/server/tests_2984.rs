@@ -62,6 +62,7 @@ fn create_req_with_skip_kg(
         defer_embed: None,
         extra_skip_dirs: None,
         data_file_max_bytes: None,
+        roots: None,
         allow_sensitive_path: false,
     }
 }

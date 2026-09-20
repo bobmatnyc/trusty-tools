@@ -105,7 +105,11 @@ pub(crate) fn inprocess_embedder_ever_ready_for_tests() -> bool {
 pub(super) struct BatchCtx {
     pub handle: Arc<IndexHandle>,
     pub progress: Arc<ReindexProgress>,
-    pub root: PathBuf,
+    /// #7434: the index's whole root table, primary first. Replaces the single
+    /// `root: PathBuf` this struct used to carry — every file the batch loop
+    /// stores is relativised against the root that owns it, so a multi-root
+    /// index cannot write an additional-root file as an absolute path.
+    pub roots: crate::core::index_roots::IndexRoots,
     pub index_id: IndexId,
     pub hashes: Arc<DashMap<PathBuf, String>>,
     pub mem_limit: Option<u64>,
@@ -525,7 +529,7 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
     // file).
     let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
     for (path, content_res) in read_results {
-        let rel = to_corpus_relative_path(&ctx.root, &path);
+        let rel = to_corpus_relative_path(&ctx.roots, &path);
         let content = match content_res {
             Ok(c) => c,
             Err(e) => {
@@ -620,7 +624,7 @@ pub(super) async fn emit_batch_error(
     use std::sync::atomic::Ordering;
     let files_in_batch: Vec<String> = to_index_paths
         .iter()
-        .map(|p| to_corpus_relative_path(&ctx.root, p))
+        .map(|p| to_corpus_relative_path(&ctx.roots, p))
         .collect();
     // Issue #1428: a batch parse/embed/commit failure was previously surfaced
     // ONLY as an SSE `error` frame — nothing reached the daemon log, which is

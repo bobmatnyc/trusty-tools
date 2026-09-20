@@ -15,6 +15,7 @@
 
 use crate::core::registry::{IndexHandle, IndexId};
 use dashmap::DashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
@@ -64,18 +65,79 @@ pub(crate) fn spawn_reindex_awaitable(
     ))
 }
 
-/// Walk every configured subtree under `handle.root_path`, apply repo-config
-/// filters (`exclude_globs`, `extensions`), and de-duplicate.
+/// The outcome of one multi-root walk (#7434).
+///
+/// Why: `collect_files_to_index` used to return a bare `WalkResult` because
+/// there was exactly one root and "does it exist" was a question `runner.rs`
+/// could ask afterwards. With N roots the walk is the only place that knows
+/// WHICH root was missing, and a missing additional root must degrade that
+/// root's coverage loudly rather than silently contributing zero files.
+/// What: the merged walk plus the roots that were absent or not directories.
+/// Only a missing PRIMARY root keeps the existing hard-failure path in
+/// `runner.rs` — this list carries the additional ones.
+/// Test: `walk_records_a_missing_additional_root` in `multi_root_tests.rs`.
+pub(super) struct CollectedFiles {
+    pub walk: crate::service::walker::WalkResult,
+    /// Absolute paths of index roots that did not exist (or were not
+    /// directories) at walk time, in table order.
+    pub missing_roots: Vec<PathBuf>,
+}
+
+/// Walk every index root of `handle`, apply repo-config filters
+/// (`exclude_globs`, `extensions`, `path_filter`), and de-duplicate.
 ///
 /// Why: extracted from `spawn_reindex_with_cleanup` (issue #98) so the
 /// orchestrator body is dominated by control flow rather than walker plumbing.
-/// `include_paths` empty → walk the whole `root_path`; otherwise walk each
-/// configured subtree and concatenate (this is how `trusty-search.yaml` slices
-/// a polyrepo into independent indexes).
-/// What: returns the merged `WalkResult` whose `files` are sorted and unique.
-/// Test: covered by `reindex_honours_include_paths_filter` below.
-pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::walker::WalkResult {
-    crate::service::index_admission::walk(handle)
+/// #7434 widened it from one root to the index's whole root table so an index
+/// can span an OKG tree plus one tree per project (#7429).
+/// What: adapts [`crate::service::index_admission::walk_roots`], which is where
+/// the walk itself lives since #7379 so that the reindex walk, the live watcher
+/// admission and the dropped-event rescan cannot disagree about which files an
+/// index holds. A missing additional root arrives here in
+/// [`CollectedFiles::missing_roots`]; a missing primary root arrives as the
+/// empty walk `runner.rs` already turns into a failure.
+/// Test: `reindex_honours_include_paths_filter` below;
+/// `walk_covers_every_index_root` and `walk_records_a_missing_additional_root`
+/// in `multi_root_tests.rs`.
+pub(super) fn collect_files_to_index(handle: &IndexHandle) -> CollectedFiles {
+    let walked = crate::service::index_admission::walk_roots(handle);
+    CollectedFiles {
+        walk: walked.result,
+        missing_roots: walked.missing_roots,
+    }
+}
+
+
+/// Record this walk's per-root coverage gaps on the handle's diagnostics (#7434).
+///
+/// Why: `runner.rs` sits at 491 of its 500-SLOC cap, and the per-root
+/// bookkeeping belongs beside the walk that produced it. Keeping the write here
+/// costs `runner.rs` one call instead of a block.
+/// What: stores the missing roots as display strings and, when any are missing,
+/// logs one `warn!` naming them — a reindex that quietly covers fewer trees
+/// than the operator configured is the failure this makes visible. A missing
+/// PRIMARY root is deliberately NOT special-cased here: it produces a zero-file
+/// walk, and `runner.rs`'s existing `last_walk_error` path already reports it.
+/// Test: `walk_records_a_missing_additional_root` in `multi_root_tests.rs`.
+pub(super) async fn record_root_diagnostics(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    missing_roots: &[PathBuf],
+) {
+    let missing: Vec<String> = missing_roots
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            "reindex[{}]: {} index root(s) absent at walk time — coverage is \
+             degraded for: {}",
+            index_id.0,
+            missing.len(),
+            missing.join(", "),
+        );
+    }
+    handle.walk_diagnostics.write().await.missing_index_roots = missing;
 }
 
 /// Variant of `spawn_reindex` that GC's the progress map after completion

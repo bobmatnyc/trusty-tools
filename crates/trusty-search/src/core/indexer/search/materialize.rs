@@ -79,7 +79,15 @@ impl CodeIndexer {
             } else {
                 None
             };
-            let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet, &self.root_path);
+            // #7434: a hit from an additional root resolves against that root.
+            let mut chunk = raw_to_code_chunk(
+                raw,
+                score,
+                match_reason,
+                snippet,
+                &self.root_path,
+                &self.additional_roots,
+            );
             if let Some(set) = branch_files {
                 chunk.on_branch = set.contains(normalize_path(&raw.file));
             }

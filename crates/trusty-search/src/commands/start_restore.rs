@@ -508,6 +508,8 @@ pub(crate) async fn restore_one_index(
         stages.graph.status,
     );
     let handle = IndexHandle {
+        // #7434: warm boot restores the whole root table, not just the primary.
+        additional_roots: entry.additional_roots.clone(),
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: entry.root_path,

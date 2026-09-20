@@ -249,6 +249,28 @@ pub struct IndexHandle {
     pub indexer: Arc<RwLock<CodeIndexer>>,
     pub root_path: std::path::PathBuf,
 
+    /// #7434: additional INDEX ROOTS this index also covers, beyond
+    /// [`Self::root_path`]. Empty for every index created before #7434 and for
+    /// every ordinary single-tree index.
+    ///
+    /// Why: trusty-agents 1.0 needs one index per assistant spanning an OKG
+    /// tree plus one tree per project (#7429, epic #7425). One index per tree
+    /// with query-time fan-out costs a search per tree and gives the agent no
+    /// single corpus to reason over.
+    /// What: absolute, canonicalised directory paths. `root_path` stays the
+    /// PRIMARY root and the index's identity anchor — index-id derivation, the
+    /// colocated storage location (`<root_path>/.trusty-search/`) and the
+    /// #402/#2178 root-hijack gate are all defined against it alone and must
+    /// never read an additional root. Additional roots widen only the reindex
+    /// walk, the corpus-path encoding
+    /// ([`crate::core::index_roots`]), the search containment post-filter, the
+    /// collision guard, and the file watcher. This is UNRELATED to
+    /// [`crate::service::roots_registry`] ("tracked roots"), which is the
+    /// startup scanner's discovery list.
+    /// Test: `multi_root_tests` in `service::reindex`, and
+    /// `core::index_roots::tests`.
+    pub additional_roots: Vec<std::path::PathBuf>,
+
     /// Subtrees (absolute paths) to restrict indexing to. Empty = walk the
     /// entire `root_path`. Sourced from `trusty-search.yaml`'s `paths:` field.
     ///
@@ -557,6 +579,23 @@ pub struct WalkDiagnostics {
     /// error.  `None` on a clean walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_walk_error: Option<String>,
+    /// #7434: index roots that did not exist (or were not directories) at the
+    /// most recent walk, as display strings. Empty on a clean walk.
+    ///
+    /// Why: a multi-root index whose second root has been unmounted or deleted
+    /// still walks its other roots and still reports a successful reindex — the
+    /// index is simply missing that root's coverage, with nothing in the
+    /// success path saying so. Naming the absent roots is what makes a
+    /// half-covered index diagnosable from `GET /indexes/:id/status` rather
+    /// than from a file count an operator has no baseline for. Only an absent
+    /// ADDITIONAL root lands here; an absent PRIMARY root keeps taking the
+    /// existing zero-file failure path.
+    /// What: `#[serde(default)]` so every persisted record predating the field
+    /// loads with an empty list.
+    /// Test: `walk_records_a_missing_additional_root` in
+    /// `service::reindex::multi_root_tests`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_index_roots: Vec<String>,
 }
 
 impl IndexHandle {
@@ -576,6 +615,8 @@ impl IndexHandle {
             id,
             indexer,
             root_path,
+            // #7434: a bare handle is single-root; multi-root is opt-in.
+            additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
             extensions: Vec::new(),
@@ -604,6 +645,26 @@ impl IndexHandle {
             embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
             file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
         }
+    }
+
+    /// #7434: this index's root table — the primary root plus its additional
+    /// roots, in the order the corpus-path encoding numbers them.
+    ///
+    /// Why: the reindex pipeline, the search post-filter, and the collision
+    /// guard all need "every root this index covers" as one value, and
+    /// rebuilding it inline at each site is how the primary/additional
+    /// ordering drifts.
+    /// What: clones both fields into a
+    /// [`crate::core::index_roots::IndexRoots`]. Cheap enough for once-per-
+    /// reindex or once-per-request use; the per-chunk hot path uses the free
+    /// functions in that module against borrowed slices instead.
+    /// Test: `core::index_roots::tests::all_lists_primary_first` pins the
+    /// ordering contract this method relies on.
+    pub fn roots(&self) -> crate::core::index_roots::IndexRoots {
+        crate::core::index_roots::IndexRoots::new(
+            self.root_path.clone(),
+            self.additional_roots.clone(),
+        )
     }
 }
 

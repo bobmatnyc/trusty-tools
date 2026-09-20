@@ -28,6 +28,7 @@ async fn reindex_honours_include_paths_filter() {
 
     let indexer = CodeIndexer::new("filter-test", root.clone());
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("filter-test"),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: root.clone(),
@@ -112,6 +113,7 @@ async fn reindex_honours_path_filter() {
 
     let indexer = CodeIndexer::new("pf-test", root.clone());
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("pf-test"),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: root.clone(),
@@ -865,6 +867,7 @@ fn make_handle_with_flags(
         IndexStages::default()
     };
     Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new(id),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: root,
@@ -921,6 +924,7 @@ fn make_handle_with_skip_vector(
         IndexStages::default()
     };
     Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new(id),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: root,
