@@ -1222,7 +1222,12 @@ pub async fn resume_managed(
     // `ensure_deployment_complete` itself no-ops for an unresolved (`/unknown`)
     // workspace — an adopted session with no known cwd is handled separately by
     // the reconcile-on-boot fix, not here.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    // #8233: the root THIS daemon runs on, never `$HOME` — `for_managed_workspace`
+    // resolves the base through `default()`, so the deployment repair below wrote
+    // its agent and skill manifests into the operator's own
+    // `~/.trusty-tools/trusty-mpm/claude-config/` on every test run of this route.
+    let fw =
+        crate::core::paths::FrameworkPaths::for_managed_project(state.framework_root(), &workspace);
     // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
     // `None` keeps the single probe the repair pipeline makes for itself.
     let url = record.repo_url.as_deref();
