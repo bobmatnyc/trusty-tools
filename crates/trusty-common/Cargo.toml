@@ -95,7 +95,10 @@ name = "trusty-common"
 # to the existing `host_metrics` module, and `HostSampler`'s new fields are
 # private. No public item was removed or changed shape, so this is not a 0.x
 # break.
-version = "0.51.1"
+# 0.51.2 (#8267): patch — the UDS RPC client gets a bounded retry with a
+# named-socket failure message, and a failed half-close is no longer retried.
+# No public item was removed or changed shape.
+version = "0.51.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
