@@ -598,6 +598,10 @@ pub(crate) async fn run_doctor_with_claims(
     // Read-only and key-only — it never prints a credential value.
     // `tm doctor --fix` removes the entries.
     checks.push(crate::daemon::doctor_launchd_secrets::check_launchd_plist_secrets(&home));
+    // #8236 item 8: and now the other half — once the value is OUT of the
+    // plist, can the daemon's own resolver still get it? Bounded, so this row
+    // cannot hang on a Keychain approval dialog either.
+    checks.push(crate::daemon::doctor_credential_reach::check_credential_reach());
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
     // #7490: the fourth is the inverse of the first — a lifecycle event a

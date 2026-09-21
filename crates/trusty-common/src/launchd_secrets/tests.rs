@@ -350,3 +350,105 @@ fn scrub_accepts_a_plist_with_no_environment_dict() {
     assert!(scrubbed.keys.is_empty());
     assert_eq!(scrubbed.xml, xml);
 }
+
+/// Why (#8236 item 3): detection is registry-driven FIRST. A name the resolver
+/// can route must never depend on the suffix heuristic agreeing with it.
+/// Test: this test.
+#[test]
+fn every_registry_name_is_detected_as_a_credential() {
+    for (provider, var) in crate::credential_registry::REGISTRY {
+        assert!(
+            is_credential_env_key(var),
+            "registered credential {var} (provider {provider}) is not detected"
+        );
+    }
+}
+
+/// Why (#8236 item 4): a binary plist read as text finds no `<key>` and the
+/// scanner would call the host CLEAN. The magic is what stops that.
+/// Test: this test.
+#[test]
+fn a_binary_plist_is_detected_by_magic() {
+    let mut bytes = b"bplist00".to_vec();
+    bytes.extend_from_slice(&[0xd1, 0x01, 0x02, 0x5f]);
+    assert!(is_binary_plist(&bytes));
+}
+
+/// Why: the XML path must not be diverted into the binary arm.
+/// Test: this test.
+#[test]
+fn an_xml_plist_is_not_mistaken_for_a_binary_one() {
+    assert!(!is_binary_plist(plist_with_credential().as_bytes()));
+    assert!(!is_binary_plist(b""));
+}
+
+/// Why (#8236 item 2): `--fix` migrates the value, so the parser now hands one
+/// back. Item 9 requires that value be unprintable everywhere it travels.
+/// Test: this test.
+#[test]
+fn entries_carry_the_value_only_inside_the_wrapper() {
+    let xml = plist_with_credential();
+    let entries = credential_entries(&xml).expect("parses");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "OPENROUTER_API_KEY");
+    assert_eq!(entries[0].value.expose(), FAKE_API_KEY);
+    assert_value_never_echoed(&format!("{:?}", entries[0]));
+}
+
+/// Why (#8236 item 9): a `{:?}` of anything holding a value is a log line away
+/// from disclosure.
+/// Test: this test.
+#[test]
+fn plist_secret_never_renders_its_value() {
+    let secret = PlistSecret::new(FAKE_API_KEY);
+    assert_value_never_echoed(&format!("{secret:?} {secret}"));
+    assert_eq!(format!("{secret}"), "<redacted>");
+    assert!(!secret.is_empty());
+}
+
+/// Why: a clean unit must produce no entries at all, so `--fix` plans nothing.
+/// Test: this test.
+#[test]
+fn entries_are_empty_for_a_clean_plist() {
+    let xml = "<plist version=\"1.0\">\n<dict>\n  <key>EnvironmentVariables</key>\n  \
+               <dict>\n    <key>PATH</key>\n    <string>/usr/bin</string>\n  \
+               </dict>\n</dict>\n</plist>\n";
+    assert!(credential_entries(xml).expect("parses").is_empty());
+}
+
+/// Why (#8236 item 2): a key whose value was NOT confirmed into the store must
+/// survive the rewrite — stripping it would disable the feature it configures.
+/// Test: this test.
+#[test]
+fn scrub_plist_keys_removes_only_the_named_key() {
+    let xml = format!(
+        "<plist version=\"1.0\">\n<dict>\n  \
+         <key>EnvironmentVariables</key>\n  <dict>\n    \
+         <key>OPENROUTER_API_KEY</key>\n    <string>{FAKE_API_KEY}</string>\n    \
+         <key>AWS_SECRET_ACCESS_KEY</key>\n    <string>unmapped-fake</string>\n  \
+         </dict>\n</dict>\n</plist>\n"
+    );
+
+    let scrubbed = scrub_plist_keys(&xml, &["OPENROUTER_API_KEY".to_string()]).expect("parses");
+
+    assert_eq!(scrubbed.keys, vec!["OPENROUTER_API_KEY".to_string()]);
+    assert!(!scrubbed.xml.contains("OPENROUTER_API_KEY"));
+    assert!(
+        scrubbed.xml.contains("AWS_SECRET_ACCESS_KEY"),
+        "an unmigrated key was stripped: {}",
+        scrubbed.xml
+    );
+    assert_value_never_echoed(&scrubbed.xml);
+}
+
+/// Why: the no-op case must not rewrite a single byte, so a failed migration
+/// leaves the file provably untouched.
+/// Test: this test.
+#[test]
+fn scrub_plist_keys_with_no_names_is_byte_identical() {
+    let xml = plist_with_credential();
+    let scrubbed = scrub_plist_keys(&xml, &[]).expect("parses");
+    assert!(scrubbed.keys.is_empty());
+    assert_eq!(scrubbed.xml, xml);
+}

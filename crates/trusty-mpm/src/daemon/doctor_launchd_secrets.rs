@@ -1,35 +1,36 @@
-//! `tm doctor` row and `--fix` repair for credentials in a LaunchAgent (#8236).
+//! `tm doctor` row for credentials in a LaunchAgent plist (#8236).
 //!
 //! Why: `trusty_common::launchd::LaunchdConfig::render_plist` now refuses to
 //! write a credential into a plist, which protects every FUTURE install. It
 //! does nothing for the plaintext already sitting in
 //! `~/Library/LaunchAgents/com.trusty.*.plist` on a host that installed before
 //! the guard, or whose unit was hand-edited and is never regenerated — which is
-//! the whole of the #8236 report. This is the detection and the in-place
-//! remediation for those.
+//! the whole of the #8236 report. This is the detection half; the in-place
+//! remediation is [`super::doctor_launchd_secrets_repair`].
 //!
-//! What: [`check_launchd_plist_secrets`] is the read-only row, and
-//! [`repair_launchd_plist_secrets`] is the rewrite `tm doctor --fix --yes`
-//! applies. Both name KEYS only; neither ever reads a credential into a message
-//! or a log line.
+//! What: [`scan_launch_agents`] is the shared scan and
+//! [`check_launchd_plist_secrets`] the read-only row. Every finding names KEYS
+//! and the file's permission MODE; neither ever reads a credential into a
+//! message or a log line.
 //!
-//! **No backup is taken**, unlike every other `--fix` repair. A backup of a
-//! plist holding a credential is a second user-readable copy of that
-//! credential, which is the defect, not a safety net. The repair removes only
-//! the credential-keyed entries and leaves every other byte in place, so there
-//! is nothing else to restore.
+//! The scan classifies each credential key two ways, because `--fix` treats
+//! them differently: a key the credential REGISTRY maps to a provider can be
+//! migrated into the store and then removed, while one it does not map has
+//! nowhere to go — removing it would disable the feature it configures while
+//! protecting nothing a rotation would not. Both are reported; only the first
+//! is ever stripped.
 //!
 //! Test: `doctor_launchd_secrets_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
-use trusty_common::launchd_secrets::{ScrubbedPlist, scrub_plist_credential_env};
+use trusty_common::credential_registry::provider_for_env_var;
+use trusty_common::launchd_secrets::{credential_entries, is_binary_plist};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
-use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 
 /// The `tm doctor` row name, shared by the check and every repair step.
-const CHECK_NAME: &str = "launchd_secrets";
+pub(crate) const CHECK_NAME: &str = "launchd_secrets";
 
 /// Filename prefix of the LaunchAgents this row judges.
 ///
@@ -38,27 +39,60 @@ const CHECK_NAME: &str = "launchd_secrets";
 /// is neither reported nor touched.
 const TRUSTY_PLIST_PREFIX: &str = "com.trusty.";
 
+/// Widest permission bits a plist that ever held a credential may carry.
+///
+/// Why: the #8236 host's `com.trusty.mpm.plist` was `0644` — readable by every
+/// process running as the user and by every backup. `0600` is the only mode
+/// that is not. Reported even after the credential is removed, because the
+/// mode is what decided the blast radius of the next mistake.
+/// Test: `row_flags_a_world_readable_plist`.
+const EXPECTED_MODE: u32 = 0o600;
+
 /// What one installed plist was found to hold.
 ///
 /// Why: the check and the repair share one scan shape so they cannot disagree
 /// about which files are implicated.
-/// What: the path plus either the credential keys found, or the reason the file
-/// could not be judged. Never the value.
-/// Test: `scan_names_the_key_not_the_value`.
+/// What: the path, its permission mode, the credential keys split by whether
+/// the registry can route them, and — when the file could not be judged at all
+/// — the reason. Never a value.
+/// Test: `scan_names_the_key_not_the_value`,
+/// `scan_splits_registry_mapped_keys_from_unmapped_ones`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlistFinding {
     /// The plist scanned.
     pub path: PathBuf,
-    /// Credential-bearing `EnvironmentVariables` keys, in document order.
-    pub keys: Vec<String>,
+    /// Unix permission bits, when they could be read.
+    pub mode: Option<u32>,
+    /// Credential keys the registry maps to a provider — `--fix` migrates these.
+    pub migratable: Vec<String>,
+    /// Credential-shaped keys with no registry mapping — reported, never stripped.
+    pub unmapped: Vec<String>,
     /// Why the file could not be judged, when it could not be.
     pub unreadable: Option<String>,
 }
 
 impl PlistFinding {
     /// Does this finding require operator action?
-    fn actionable(&self) -> bool {
-        !self.keys.is_empty() || self.unreadable.is_some()
+    pub(crate) fn actionable(&self) -> bool {
+        !self.migratable.is_empty() || !self.unmapped.is_empty() || self.unreadable.is_some()
+    }
+
+    /// Every credential key found, migratable or not, in document order.
+    pub(crate) fn keys(&self) -> Vec<String> {
+        let mut all = self.migratable.clone();
+        all.extend(self.unmapped.iter().cloned());
+        all
+    }
+
+    /// `0644`-style rendering of the mode, or `unknown`.
+    pub(crate) fn mode_text(&self) -> String {
+        self.mode
+            .map_or_else(|| "unknown".to_string(), |m| format!("{m:04o}"))
+    }
+
+    /// Is the file readable by anyone other than its owner?
+    fn too_wide(&self) -> bool {
+        self.mode.is_some_and(|m| m & 0o777 & !EXPECTED_MODE != 0)
     }
 }
 
@@ -66,19 +100,28 @@ impl PlistFinding {
 ///
 /// Why: one scan, used by the row and by the repair, so `tm doctor` and
 /// `tm doctor --fix` can never report different files.
-/// What: reads every `com.trusty.*.plist` in the directory and runs
-/// [`scrub_plist_credential_env`] over it, discarding the rewrite. A file that
-/// cannot be read or parsed yields a finding with `unreadable` set — never a
-/// silent skip, because "could not read" is the one answer that must not
-/// render as clean. `Err` when the directory cannot be listed, or when any
-/// single entry in it cannot be resolved — an entry dropped from the walk is
-/// a file the scan did not judge, and the caller has to hear that as UNKNOWN
-/// rather than as one fewer clean plist. An ABSENT directory is `Ok(vec![])`
-/// (a host with no LaunchAgents has no exposure).
+/// What: reads every `com.trusty.*.plist` in the directory AS BYTES, refuses a
+/// binary plist with an actionable reason before any text parsing (#8236 item
+/// 4 — a `bplist00` file decoded as text has no `<key>` in it and would read as
+/// CLEAN), and otherwise runs [`credential_entries`] over it, keeping only the
+/// key names. A file that cannot be read or parsed yields a finding with
+/// `unreadable` set — never a silent skip, because "could not read" is the one
+/// answer that must not render as clean.
+///
+/// # Errors
+///
+/// When the directory cannot be listed, or when any single entry in it cannot
+/// be resolved — an entry dropped from the walk is a file the scan did not
+/// judge, and the caller has to hear that as UNKNOWN rather than as one fewer
+/// clean plist. An ABSENT directory is `Ok(vec![])` (a host with no
+/// LaunchAgents has no exposure).
+///
 /// Test: `scan_names_the_key_not_the_value`, `scan_reports_an_unparseable_plist`,
 /// `scan_reports_an_unreadable_plist`, `scan_ignores_foreign_plists`,
 /// `scan_is_empty_without_a_launch_agents_dir`,
-/// `scan_errors_when_the_directory_cannot_be_listed`.
+/// `scan_errors_when_the_directory_cannot_be_listed`,
+/// `scan_reports_a_binary_plist_as_unknown`,
+/// `scan_splits_registry_mapped_keys_from_unmapped_ones`.
 pub fn scan_launch_agents(home: &Path) -> std::io::Result<Vec<PlistFinding>> {
     let dir = home.join("Library/LaunchAgents");
     let entries = match std::fs::read_dir(&dir) {
@@ -101,36 +144,87 @@ pub fn scan_launch_agents(home: &Path) -> std::io::Result<Vec<PlistFinding>> {
         if !name.starts_with(TRUSTY_PLIST_PREFIX) || !name.ends_with(".plist") {
             continue;
         }
-        out.push(match std::fs::read_to_string(&path) {
-            Ok(xml) => finding_for(path, &xml),
-            Err(e) => PlistFinding {
-                path,
-                keys: Vec::new(),
-                unreadable: Some(format!("could not read it: {}", e.kind())),
-            },
-        });
+        out.push(judge(path));
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// Read and judge one plist.
+fn judge(path: PathBuf) -> PlistFinding {
+    let mode = read_mode(&path);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return unreadable(path, mode, format!("could not read it: {}", e.kind()));
+        }
+    };
+    if is_binary_plist(&bytes) {
+        return unreadable(
+            path,
+            mode,
+            "it is a BINARY plist, which this scan cannot read — convert it with \
+             `plutil -convert xml1 <path>` and re-run `tm doctor`"
+                .to_string(),
+        );
+    }
+    let Ok(xml) = String::from_utf8(bytes) else {
+        return unreadable(path, mode, "it is not valid UTF-8".to_string());
+    };
+    finding_for(path, mode, &xml)
+}
+
+/// A finding that names why the file could not be judged.
+fn unreadable(path: PathBuf, mode: Option<u32>, why: String) -> PlistFinding {
+    PlistFinding {
+        path,
+        mode,
+        migratable: Vec::new(),
+        unmapped: Vec::new(),
+        unreadable: Some(why),
+    }
+}
+
+/// Unix permission bits of `path`, when they can be read.
+fn read_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Judge one plist's text.
 ///
 /// Why: separated from the directory walk so the parse-failure arm is testable
 /// without a filesystem that can produce one.
-/// Test: `scan_reports_an_unparseable_plist`.
-fn finding_for(path: PathBuf, xml: &str) -> PlistFinding {
-    match scrub_plist_credential_env(xml) {
-        Ok(ScrubbedPlist { keys, .. }) => PlistFinding {
-            path,
-            keys,
-            unreadable: None,
-        },
-        Err(e) => PlistFinding {
-            path,
-            keys: Vec::new(),
-            unreadable: Some(e.reason),
-        },
+/// What: splits the credential keys on [`provider_for_env_var`] — see the module
+/// docs for why the two halves are treated differently.
+/// Test: `scan_reports_an_unparseable_plist`,
+/// `scan_splits_registry_mapped_keys_from_unmapped_ones`.
+fn finding_for(path: PathBuf, mode: Option<u32>, xml: &str) -> PlistFinding {
+    match credential_entries(xml) {
+        Ok(entries) => {
+            let (migratable, unmapped) = entries
+                .into_iter()
+                .map(|e| e.key)
+                .partition(|key| provider_for_env_var(key).is_some());
+            PlistFinding {
+                path,
+                mode,
+                migratable,
+                unmapped,
+                unreadable: None,
+            }
+        }
+        Err(e) => unreadable(path, mode, e.reason),
     }
 }
 
@@ -140,13 +234,15 @@ fn finding_for(path: PathBuf, xml: &str) -> PlistFinding {
 /// for a log path. Nothing in the diagnostic looked, so the exposure had no
 /// expiry date.
 /// What: `Fail` when any trusty LaunchAgent carries a credential-keyed
-/// `EnvironmentVariables` entry, naming the file and the KEY and pointing at
-/// `tm doctor --fix --yes`. `Unknown` — never `Ok` — when the directory or a
-/// plist could not be read or parsed, because a scan that did not run has not
-/// shown the host clean. `Ok` otherwise.
+/// `EnvironmentVariables` entry, naming the file, the KEY, and the file's MODE.
+/// `Unknown` — never `Ok` — when the directory or a plist could not be read or
+/// parsed, because a scan that did not run has not shown the host clean. `Ok`
+/// otherwise, still flagging any plist wider than `0600`.
 /// Test: `row_fails_and_names_the_key_not_the_value`, `row_is_ok_when_clean`,
 /// `row_is_unknown_when_a_plist_cannot_be_parsed`,
-/// `row_is_unknown_when_the_directory_cannot_be_listed`.
+/// `row_is_unknown_when_the_directory_cannot_be_listed`,
+/// `row_flags_a_world_readable_plist`,
+/// `row_says_an_unmapped_key_is_not_stripped`.
 pub(crate) fn check_launchd_plist_secrets(home: &Path) -> DoctorCheck {
     match scan_launch_agents(home) {
         Ok(findings) => build_row(&findings),
@@ -164,7 +260,7 @@ pub(crate) fn check_launchd_plist_secrets(home: &Path) -> DoctorCheck {
 
 /// The pure verdict behind [`check_launchd_plist_secrets`].
 ///
-/// Why: keeps the three arms unit-testable without a real home directory.
+/// Why: keeps the arms unit-testable without a real home directory.
 /// What: see [`check_launchd_plist_secrets`]. A credential found outranks an
 /// unreadable file — a confirmed exposure is worse news than an unknown one —
 /// but the Fail message still NAMES the files it could not judge, so ranking
@@ -182,35 +278,12 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
         })
         .collect();
 
-    let exposed: Vec<&PlistFinding> = findings.iter().filter(|f| !f.keys.is_empty()).collect();
+    let exposed: Vec<&PlistFinding> = findings
+        .iter()
+        .filter(|f| !f.migratable.is_empty() || !f.unmapped.is_empty())
+        .collect();
     if !exposed.is_empty() {
-        let detail = exposed
-            .iter()
-            .map(|f| format!("{} ({})", f.path.display(), f.keys.join(", ")))
-            .collect::<Vec<_>>()
-            .join("; ");
-        // #8236: a confirmed exposure outranks an unknown one, but it never
-        // hides it — the unjudged files ride along in the same message.
-        let unjudged = if unreadable.is_empty() {
-            String::new()
-        } else {
-            format!(
-                ". {} further plist(s) could not be judged at all: {}",
-                unreadable.len(),
-                unreadable.join("; ")
-            )
-        };
-        return DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Fail,
-            format!(
-                "a LaunchAgent plist holds a plaintext credential — the file is \
-                 user-readable and lands in every backup: {detail}. Run \
-                 `tm doctor --fix --yes` to remove the entries, then ROTATE those \
-                 credentials and supply them at runtime (process env, `.env.local`, \
-                 or the 0600 credential store){unjudged}"
-            ),
-        );
+        return DoctorCheck::new(CHECK_NAME, CheckStatus::Fail, fail_message(&exposed, &unreadable));
     }
 
     if !unreadable.is_empty() {
@@ -226,118 +299,86 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
         );
     }
 
-    DoctorCheck::new(
-        CHECK_NAME,
-        CheckStatus::Ok,
-        format!(
-            "no plaintext credential in {} trusty LaunchAgent plist(s)",
-            findings.len()
-        ),
-    )
-}
-
-/// Rewrite every trusty LaunchAgent that holds a credential, in place.
-///
-/// Why: the renderer guard only covers a unit that gets regenerated. A host
-/// whose plist is hand-maintained — which is how #8236's `com.trusty.mpm.plist`
-/// came to hold two credentials, since no code in this workspace writes that
-/// file — is never reached by an install. This is.
-/// What: one [`RepairStep`] per implicated file.
-/// [`StepStatus::Planned`] under [`RepairMode::DryRun`];
-/// [`StepStatus::Applied`] with NO backup (see the module header) once written;
-/// [`StepStatus::Failed`] when the plist cannot be parsed or the rewrite cannot
-/// be written — never a warning followed by a pass. A clean host produces no
-/// steps at all.
-///
-/// Rotation is NOT part of this and cannot be: the value was readable by
-/// everything on the host for as long as it sat there, so removing it makes the
-/// file safe and the credential still compromised. The step text says so.
-/// Test: `repair_plans_without_writing`, `repair_removes_the_entry`,
-/// `repair_fails_loudly_on_an_unparseable_plist`,
-/// `repair_fails_loudly_when_the_plist_is_unwritable`,
-/// `repair_fails_loudly_when_the_directory_cannot_be_listed`,
-/// `repair_produces_no_steps_for_a_clean_host`.
-pub fn repair_launchd_plist_secrets(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
-    let findings = match scan_launch_agents(home) {
-        Ok(findings) => findings,
-        Err(e) => {
-            return vec![RepairStep {
-                check: CHECK_NAME,
-                path: home.join("Library/LaunchAgents"),
-                what: "remove plaintext credentials from the trusty LaunchAgent plists".to_string(),
-                status: StepStatus::Failed(format!("could not list the directory: {}", e.kind())),
-            }];
-        }
-    };
-
-    findings
+    let wide: Vec<String> = findings
         .iter()
-        .filter(|f| f.actionable())
-        .map(|f| repair_one(f, mode))
-        .collect()
+        .filter(|f| f.too_wide())
+        .map(|f| format!("{} is mode {}", f.path.display(), f.mode_text()))
+        .collect();
+    if wide.is_empty() {
+        DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            format!(
+                "no plaintext credential in {} trusty LaunchAgent plist(s)",
+                findings.len()
+            ),
+        )
+    } else {
+        DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!(
+                "no plaintext credential found, but {} plist(s) are readable beyond their \
+                 owner ({}); `chmod 600` them so the next mistake is not a disclosure",
+                wide.len(),
+                wide.join("; ")
+            ),
+        )
+    }
 }
 
-/// One file's repair.
+/// The Fail message: what was found, in which file, at which mode.
 ///
-/// Why: the unreadable arm and the rewrite arm both have to produce a step, so
-/// an operator running `--fix` sees the file that could NOT be fixed beside the
-/// ones that were.
-/// Test: as [`repair_launchd_plist_secrets`].
-fn repair_one(finding: &PlistFinding, mode: RepairMode) -> RepairStep {
-    let what = format!(
-        "remove {} plaintext credential entr{} ({}) from EnvironmentVariables — \
-         no backup is taken (a backup would be a second readable copy); ROTATE \
-         the credential, removing it here does not un-expose it",
-        finding.keys.len().max(1),
-        if finding.keys.len() == 1 { "y" } else { "ies" },
-        if finding.keys.is_empty() {
-            "unknown".to_string()
-        } else {
-            finding.keys.join(", ")
-        },
-    );
-    let step = |status| RepairStep {
-        check: CHECK_NAME,
-        path: finding.path.clone(),
-        what: what.clone(),
-        status,
+/// Why: split out so the message stays readable and `build_row` stays short.
+/// What: one clause per implicated file, then the unmapped-key caveat, then the
+/// rotation instruction — which applies whether or not `--fix` can strip
+/// anything, because the value was readable for as long as it sat there.
+/// Test: `row_fails_and_names_the_key_not_the_value`,
+/// `row_says_an_unmapped_key_is_not_stripped`.
+fn fail_message(exposed: &[&PlistFinding], unreadable: &[String]) -> String {
+    let detail = exposed
+        .iter()
+        .map(|f| {
+            format!(
+                "{} (mode {}; {})",
+                f.path.display(),
+                f.mode_text(),
+                f.keys().join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let unmapped: Vec<String> = exposed
+        .iter()
+        .flat_map(|f| f.unmapped.iter().cloned())
+        .collect();
+    let caveat = if unmapped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ". `tm doctor --fix` will NOT remove {} — no credential provider is registered \
+             for it, so there is nowhere to migrate the value and stripping it would break \
+             the feature it configures; move it out by hand",
+            unmapped.join(", ")
+        )
+    };
+    let unjudged = if unreadable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ". {} further plist(s) could not be judged at all: {}",
+            unreadable.len(),
+            unreadable.join("; ")
+        )
     };
 
-    if let Some(why) = &finding.unreadable {
-        return step(StepStatus::Failed(why.clone()));
-    }
-    if mode == RepairMode::DryRun {
-        return step(StepStatus::Planned);
-    }
-
-    // Re-read rather than trusting the scan's copy: `--fix` runs after the
-    // report, and a reinstall in between would have changed the file.
-    let xml = match std::fs::read_to_string(&finding.path) {
-        Ok(xml) => xml,
-        Err(e) => {
-            return step(StepStatus::Failed(format!(
-                "could not read it: {}",
-                e.kind()
-            )));
-        }
-    };
-    let scrubbed = match scrub_plist_credential_env(&xml) {
-        Ok(scrubbed) => scrubbed,
-        Err(e) => return step(StepStatus::Failed(e.reason)),
-    };
-    if scrubbed.keys.is_empty() {
-        return step(StepStatus::Refused(
-            "the plist no longer holds a credential — nothing to remove".to_string(),
-        ));
-    }
-    match std::fs::write(&finding.path, &scrubbed.xml) {
-        // No backup, deliberately — see the module header.
-        Ok(()) => step(StepStatus::Applied { backup: None }),
-        Err(e) => step(StepStatus::Failed(format!(
-            "could not write the scrubbed plist: {}",
-            e.kind()
-        ))),
-    }
+    format!(
+        "a LaunchAgent plist holds a plaintext credential — the file is user-readable and \
+         lands in every backup: {detail}. Run `tm doctor --fix --yes` to migrate each \
+         registered credential into the credential store and remove it from the plist, then \
+         ROTATE those credentials: removing a value does not un-expose it{caveat}{unjudged}"
+    )
 }
 
 #[cfg(test)]

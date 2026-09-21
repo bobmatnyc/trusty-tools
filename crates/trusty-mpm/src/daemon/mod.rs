@@ -34,6 +34,12 @@ pub mod doctor_auto_memory;
 // LaunchAgent plist. `pub` because `tm doctor --fix` calls
 // `repair_launchd_plist_secrets` from the `tm` binary.
 pub mod doctor_launchd_secrets;
+// #8236: the repair half, split from the row so neither file approaches the
+// 500-SLOC cap. `pub` for the same reason.
+pub mod doctor_launchd_secrets_repair;
+// #8236 item 8: can the DAEMON's own resolver reach each credential it needs?
+// Read-only, key-only, and bounded so it can never hang on a Keychain dialog.
+pub mod doctor_credential_reach;
 // #7424: declared here rather than inside `doctor.rs` — that file sits AT the
 // 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
 // is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.

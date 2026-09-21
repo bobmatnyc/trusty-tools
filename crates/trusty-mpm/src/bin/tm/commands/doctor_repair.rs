@@ -247,7 +247,9 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // plist holding a credential is a second readable copy of it. Removing
         // the entry does not un-expose the value, so each step says to rotate.
         steps.extend(
-            trusty_mpm::daemon::doctor_launchd_secrets::repair_launchd_plist_secrets(&home, mode),
+            trusty_mpm::daemon::doctor_launchd_secrets_repair::repair_launchd_plist_secrets(
+                &home, mode,
+            ),
         );
     }
 
