@@ -511,6 +511,32 @@ fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
     }
 }
 
+/// Write ONE info line per surveyed worktree, naming what this pass decided
+/// (#7885).
+///
+/// Why: #7885's first closure condition is that a reclaim path leave a record
+/// for every worktree it inspected, not only for the ones it deleted. Two
+/// merged worktrees lost their `crates/` subtree on 2026-09-14 and no daemon
+/// log named either path, because a refusal — and a candidate merely surveyed —
+/// wrote nothing at all. The line is emitted BEFORE the delete loop, so a pass
+/// that dies part-way still leaves its inventory behind.
+/// What: path, branch, mode and
+/// [`ReclaimVerdict::decision`](super::worktree_reclaim_verdict::ReclaimVerdict::decision)
+/// for each candidate, at INFO, through the sink prune already logs to. It
+/// decides nothing and can refuse nothing.
+/// Test: `worktree_7885_every_surveyed_worktree_gets_a_decision_line`.
+fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
+    for candidate in &survey.candidates {
+        tracing::info!(
+            path = %candidate.path.display(),
+            branch = candidate.branch.as_deref().unwrap_or("(detached)"),
+            mode = ?mode,
+            "worktree-reclaim: {} (#7885)",
+            candidate.verdict.decision()
+        );
+    }
+}
+
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
 ///
 /// Why: see this module's staleness rule. The survey establishes candidates;
@@ -566,6 +592,9 @@ pub(crate) fn reclaim_with_probes(
         &(probes.keep_list)(),
         adopted,
     );
+    // #7885: what this pass decided about EVERY worktree it looked at, before it
+    // acts on any of them.
+    log_decisions(&survey, mode);
     let mut out = ReclaimOutcome {
         removed: Vec::new(),
         removed_bytes: 0,

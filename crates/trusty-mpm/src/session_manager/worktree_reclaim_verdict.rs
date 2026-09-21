@@ -141,4 +141,33 @@ impl ReclaimVerdict {
     pub(crate) fn is_reclaimable(&self) -> bool {
         matches!(self, Self::Reclaimable { .. })
     }
+
+    /// This verdict as ONE operator-facing decision sentence (#7885).
+    ///
+    /// Why: no reclaim, cleanup or prune path logged what it decided about a
+    /// worktree it did NOT touch, so the pass that removed the `crates/`
+    /// subtree of `agent-a9826013bc7683c2b` and `agent-a1afc1489a1adbf97` on
+    /// 2026-09-14 could not be identified afterwards even in principle — the
+    /// only lines written were about deletions that succeeded. A per-worktree
+    /// decision line makes a refusal as auditable as a removal, which is what
+    /// the issue's second closure condition needs on the NEXT occurrence.
+    /// #8109: it is also the reason a reclaim entry carries, which blocked
+    /// entries already had and reclaimed ones did not.
+    /// What: a rendered string rather than a `tracing` call, so the wording is
+    /// asserted by a unit test instead of by a subscriber — the shape
+    /// [`RemovalAudit::line`](super::worktree_removal_audit::RemovalAudit::line)
+    /// already uses. Every refusal names its gate; the grant names its pull
+    /// request.
+    /// Test: `a_decision_line_names_the_gate_and_the_reason`,
+    /// `a_decision_line_for_a_grant_names_the_pull_request`.
+    pub(crate) fn decision(&self) -> String {
+        match self {
+            Self::Reclaimable { pr } => {
+                format!("reclaimable — landing evidence is PR #{pr}")
+            }
+            Self::Blocked { gate, reason } | Self::BlockedByAgent { gate, reason } => {
+                format!("refused at {} — {reason}", gate.label())
+            }
+        }
+    }
 }

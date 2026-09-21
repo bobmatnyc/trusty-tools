@@ -740,6 +740,12 @@ fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
             // squash of TWO OR MORE commits matches none of them. Ask the
             // whole-divergence question too.
             landed.extend(squashed_divergence(path, &base, tip));
+            // #7889: both questions above compare DIFFS, and a branch continued
+            // on `-r2`…`-r9` lands in slices that match neither. Ask whether the
+            // base already holds this divergence's content.
+            landed.extend(super::worktree_landed_content::content_superseded_commits(
+                path, &base, tip,
+            ));
         }
     }
     landed
@@ -882,7 +888,10 @@ fn patch_ids(path: &Path, args: &[&str]) -> Vec<(String, String)> {
 /// ref for each distinct object and at most [`LANDING_BASE_LIMIT`] of them. An
 /// empty vector when git cannot be asked, which discounts nothing.
 /// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
-fn landing_bases(path: &Path) -> Vec<String> {
+///
+/// `pub(crate)` since #7889 so the ADR-0057 removal guard judges a divergence
+/// against the same refs this checker does, rather than growing a second list.
+pub(crate) fn landing_bases(path: &Path) -> Vec<String> {
     let mut args = vec!["for-each-ref", "--format=%(objectname) %(refname)"];
     args.extend_from_slice(LANDING_BASE_PATTERNS);
     let Ok(out) = git_stdout(path, &args) else {

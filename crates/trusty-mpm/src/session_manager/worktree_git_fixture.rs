@@ -317,6 +317,45 @@ impl GitWorktreeFixture {
         git_ok(&self.repo, &["fetch", "--prune", "origin"]);
     }
 
+    /// Commit `files` one at a time in `wt`, then reach the SAME content on
+    /// `origin/main` by a route whose commits match none of them (#7889).
+    ///
+    /// Why: every other squash helper here lands the branch's own patch, so
+    /// either `git cherry`'s per-commit id (#6528) or the aggregate-divergence
+    /// id (#6507) clears it. The continuation shape #7889 is about clears
+    /// neither: the work reached `main` through `-r2`…`-r9` branches that
+    /// committed it in different slices, so no single commit on `main` carries
+    /// the parked branch's diff. The end state is nonetheless identical, which
+    /// is the only thing a deletion can destroy.
+    /// What: one commit per entry in `files` on the branch, never pushed; then,
+    /// on `main` in the owning checkout, one commit writing every file with
+    /// DRAFT content and a second rewriting them to the branch's content, then
+    /// a push and a pruning fetch. No commit on `main` shares a patch with any
+    /// commit on the branch, and none shares the branch's aggregate diff.
+    /// Test: `two_commits_whose_content_landed_by_another_route_are_superseded`,
+    /// `worktree_7889_content_that_landed_in_different_slices_is_not_unpushed`.
+    pub(crate) fn land_content_by_a_different_route(&self, wt: &Path, files: &[&str]) {
+        for file in files {
+            std::fs::write(wt.join(file), format!("landed content of {file}\n"))
+                .expect("fixture: write file");
+            git_ok(wt, &["add", file]);
+            git_ok(wt, &["commit", "-m", &format!("feat: {file} (#7889)")]);
+        }
+        for (message, body) in [("draft", "draft of"), ("final", "landed content of")] {
+            for file in files {
+                std::fs::write(self.repo.join(file), format!("{body} {file}\n"))
+                    .expect("fixture: write landed file");
+                git_ok(&self.repo, &["add", file]);
+            }
+            git_ok(
+                &self.repo,
+                &["commit", "-m", &format!("feat: {message} slice (#7889)")],
+            );
+        }
+        git_ok(&self.repo, &["push", "origin", "main"]);
+        git_ok(&self.repo, &["fetch", "--prune", "origin"]);
+    }
+
     /// Commit `file` in `wt`, PUSH that commit under `remote_branch`, and ALSO
     /// squash-merge its patch onto `origin/main` (#6507).
     ///

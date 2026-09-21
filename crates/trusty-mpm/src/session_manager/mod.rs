@@ -107,6 +107,9 @@ pub(crate) mod worktree_reclaim_sweep;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;
+// #7889: whether a divergence's CONTENT is already on a landing branch, for the
+// continuation shape no per-commit or aggregate patch id can match.
+pub(crate) mod worktree_landed_content;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
 // #7885: the one audit line every removal route writes before it deletes.

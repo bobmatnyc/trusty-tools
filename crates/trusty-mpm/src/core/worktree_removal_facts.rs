@@ -140,6 +140,7 @@ use crate::session_manager::worktree_reclaim_gh::{
 use crate::session_manager::worktree_repo_slug::{
     DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
 };
+use crate::session_manager::worktree_landed_content::divergence_is_superseded;
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.
@@ -408,7 +409,19 @@ pub trait WorktreeRemovalProbe {
     /// naming a commit the remote no longer has — the implementation therefore
     /// runs a bounded `git fetch --prune origin` first, and a refresh that
     /// fails makes the count unanswerable rather than trusted.
+    ///
+    /// **A superseded commit is not a surviving one (#7889).** A branch
+    /// continued on `-r2` and squash-merged under that name leaves commits no
+    /// `origin` ref reaches and no content `origin` lacks. The count is
+    /// therefore reported as zero when
+    /// [`divergence_is_superseded`](crate::session_manager::worktree_landed_content::divergence_is_superseded)
+    /// proves every path the divergence wrote is byte-identical on a landing
+    /// branch — the guarantee is unchanged, because the removal still destroys
+    /// nothing the remote does not hold, and every failure arm of that check
+    /// leaves the raw count standing.
     /// Test: `local_only_commits_counts_only_what_no_origin_ref_has`,
+    /// `worktree_7889_the_guard_counts_no_local_commits_for_a_superseded_tree`,
+    /// `worktree_7889_the_guard_still_counts_a_commit_the_remote_lacks`,
     /// `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`,
     /// `local_only_commits_cannot_be_answered_when_origin_is_unreachable` in
     /// `crate::session_manager::worktree_safety_tests`;
@@ -576,13 +589,23 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // An unparsable count is an `Err` rather than a zero, because zero is
         // the only answer that admits.
         let out = git_stdout(dir, LOCAL_ONLY_COMMITS_ARGS)?;
-        out.trim().parse::<usize>().map_err(|e| {
+        let counted = out.trim().parse::<usize>().map_err(|e| {
             format!(
                 "`git {}` printed {:?}: {e}",
                 LOCAL_ONLY_COMMITS_ARGS.join(" "),
                 out.trim()
             )
-        })
+        })?;
+        // #7889: a commit no `origin` ref REACHES can still hold no content
+        // `origin` lacks — the superseded-tree shape, where the work landed
+        // through a sibling `-r2` branch's squash. The same equivalence the
+        // reclaim sweep's gate 6 applies decides it, so the two paths cannot
+        // give one worktree opposite answers. It only ever LOWERS the count to
+        // zero, and every failure arm inside it leaves `counted` standing.
+        if counted > 0 && divergence_is_superseded(dir, "HEAD") {
+            return Ok(0);
+        }
+        Ok(counted)
     }
 
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
