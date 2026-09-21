@@ -124,13 +124,13 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 - **A revert/bisect experiment's throwaway checkout is a disposable clone,
   never a worktree, against the main checkout.** Recipe: Read
   `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7628).
-- **Never remove a worktree — the PM runs the removal (#5791).** `tm hook
-  --pm-guard` denies an agent's `git worktree remove`, and `rm -rf` is never
-  the workaround. Report the merged PR, the worktree path, and the branch, then
-  stop. Cleanup covers task-owned paths only; a global prune requires separate
-  scope and ownership checks. #7723: `version-control` is the sole, guard-verified
-  exception (ADR-0056, ADR-0057), carrying the mechanics in its own body; every
-  other agent's refusal is unconditional.
+- **Never remove a worktree — the PM runs the removal (#5791).** Agents cannot
+  bypass `tm hook --pm-guard` with `rm -rf`. Report the merged PR, path and
+  branch; stop. Verify ownership, clean state, merged status and no other live
+  holder; then the PM removes the task-owned path:
+  `git worktree remove /absolute/repo/.claude/worktrees/task-name`. Global
+  prune needs separate scope and ownership checks. #7723: only `version-control`
+  has a guard-verified exception (ADR-0056, ADR-0057); its body carries the mechanics.
 - The commit and PR footer comes from the `attribution` key tm writes into the
   provisioned Claude Code settings; never restate it in prose.
 
