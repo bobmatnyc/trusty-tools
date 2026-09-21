@@ -28,6 +28,8 @@
 //! `retry_stops_after_exactly_the_policys_attempt_count`,
 //! `retry_returns_the_first_success_without_further_attempts`,
 //! `a_non_transient_failure_is_not_retried`,
+//! `a_late_non_transient_failure_is_reported_verbatim`,
+//! `a_failed_half_close_is_never_retried`,
 //! `a_single_attempt_policy_returns_the_underlying_error_unwrapped`,
 //! plus the client-level `uds_client_*` tests in [`super::rpc`].
 
@@ -184,17 +186,43 @@ where
 {
     let total = policy.attempts.max(1);
     let mut n: u32 = 1;
+    // Kept only so the recovery line can name what the earlier attempts hit —
+    // #8267's whole complaint is that the failure left no trace an operator
+    // could read afterwards.
+    let mut last_failure: Option<String> = None;
     loop {
         let err = match attempt(n).await {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                if let Some(last) = last_failure {
+                    // WARN, not DEBUG: default verbosity is warn, so a DEBUG
+                    // line records the recovery nowhere an operator will see.
+                    tracing::warn!(
+                        socket = %path.display(),
+                        attempts = n,
+                        last_error = %last,
+                        "unix socket dial succeeded after a bounded retry"
+                    );
+                }
+                return Ok(value);
+            }
             Err(err) => err,
         };
 
-        if n >= total || !is_transient(&err) {
+        // A failure that is not transient is the caller's answer as it stands.
+        // Wrapping it would report an attempt count below the bound and imply a
+        // retry that never happened.
+        if !is_transient(&err) {
+            return Err(err);
+        }
+
+        if n >= total {
             if n == 1 {
                 return Err(err);
             }
-            tracing::warn!(
+            // ERROR, not WARN: only ERROR reaches `errors.jsonl`, and a stdio
+            // bridge's stderr is swallowed by its MCP client. This line is the
+            // after-the-fact trace #8267 exists to produce.
+            tracing::error!(
                 socket = %path.display(),
                 attempts = n,
                 error = %err,
@@ -216,6 +244,7 @@ where
             error = %err,
             "unix socket dial failed; retrying after backoff"
         );
+        last_failure = Some(err.to_string());
         sleep(delay).await;
         n += 1;
     }
@@ -224,15 +253,23 @@ where
 /// Whether this failure means "try again", as opposed to "stop".
 ///
 /// Why the set is this narrow: a retry is only safe while the request bytes
-/// have provably not reached the peer. A dial that never completed qualifies,
-/// and so does `ENOTCONN` on the first write — macOS returns it precisely
-/// because the connection was never established, so zero bytes landed. Every
-/// other write errno can follow a partial or complete frame, and every read
-/// failure follows a frame the peer may already have acted on; re-sending
-/// either would turn one request into two.
+/// have provably not reached the peer.
+///
+/// A dial that never completed qualifies. So does `ENOTCONN` from
+/// [`UdsRpcError::Write`], which since #8267 covers the `write_all` + `flush`
+/// phase ONLY — a failure there leaves the peer without a newline-terminated
+/// frame, and the server frames on `read_until(b'\n')`, so it never dispatches.
+///
+/// [`UdsRpcError::HalfClose`] is deliberately absent even at the same errno.
+/// That phase runs after the frame is on the wire, and macOS answers ENOTCONN
+/// there once the peer has closed — which is what a server that read the frame,
+/// replied and dropped looks like. Retrying it would deliver a second copy of a
+/// request the daemon had already executed. Every read failure is out for the
+/// same reason.
 ///
 /// Test: `a_non_transient_failure_is_not_retried`,
-/// `transient_classification_covers_the_three_dial_errnos`.
+/// `transient_classification_covers_the_three_dial_errnos`,
+/// `a_failed_half_close_is_never_retried`.
 fn is_transient(err: &UdsRpcError) -> bool {
     match err {
         UdsRpcError::Dial { source, .. } => dial_is_transient(source),
@@ -322,6 +359,7 @@ mod tests {
             ErrorKind::ConnectionRefused,
             ErrorKind::NotConnected,
             ErrorKind::WouldBlock,
+            ErrorKind::Interrupted,
         ] {
             let err = UdsRpcError::Dial {
                 path: sock(),
@@ -351,6 +389,58 @@ mod tests {
             path: sock(),
             source: std::io::Error::from(ErrorKind::NotConnected),
         }));
+    }
+
+    /// The duplicate-delivery guard: the same errno means opposite things in
+    /// the send phase and the half-close phase, and only the send phase may be
+    /// repeated.
+    #[test]
+    fn a_failed_half_close_is_never_retried() {
+        for kind in [
+            ErrorKind::NotConnected,
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+        ] {
+            let err = UdsRpcError::HalfClose {
+                path: sock(),
+                source: std::io::Error::from(kind),
+            };
+            assert!(
+                !is_transient(&err),
+                "the frame is already on the wire; {kind:?} must not be retried"
+            );
+        }
+    }
+
+    /// A non-transient failure on attempt 2 reports itself, not an exhausted
+    /// retry — the bound was never spent, and saying "2 attempts failed" would
+    /// claim a count below the policy's own.
+    #[tokio::test]
+    async fn a_late_non_transient_failure_is_reported_verbatim() {
+        let seen: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        let err = with_connect_retry::<(), _, _, _, _>(
+            &sock(),
+            ConnectRetry::per_request(),
+            |_d| async {},
+            |n| {
+                seen.borrow_mut().push(n);
+                async move {
+                    if n == 1 {
+                        Err(transient())
+                    } else {
+                        Err(permanent())
+                    }
+                }
+            },
+        )
+        .await
+        .expect_err("the second attempt fails permanently");
+
+        assert_eq!(seen.into_inner(), vec![1, 2]);
+        assert!(
+            matches!(err, UdsRpcError::Dial { .. }),
+            "expected the permanent error verbatim, got {err:?}"
+        );
     }
 
     #[tokio::test]

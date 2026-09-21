@@ -194,7 +194,12 @@ impl Daemon {
     /// Retrying is sound rather than papering over, and the reason is narrow:
     /// [`UdsRpcError::Dial`] and [`UdsRpcError::Write`] both prove NOTHING
     /// reached the peer, so a fresh dial repeats no request and can duplicate
-    /// no side effect. Every other variant — `NoResponse` above all — means the
+    /// no side effect. `Write` earns that claim only because #8267 narrowed it
+    /// to the `write_all` + `flush` phase — a failure there leaves the peer
+    /// without a newline-terminated frame, so it never dispatches. The
+    /// half-close phase moved to [`UdsRpcError::HalfClose`], which is EXCLUDED
+    /// here: the frame is already on the wire by then and the daemon may have
+    /// executed it. Every other variant — `NoResponse` above all — means the
     /// frame was sent, and those still fail the test on the first occurrence.
     async fn call(&self, method: &str, params: Value) -> RpcResponse {
         /// Whether this failure proves the request frame never reached the peer.

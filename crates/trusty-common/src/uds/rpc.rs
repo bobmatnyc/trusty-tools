@@ -205,6 +205,29 @@ pub enum UdsRpcError {
         #[source]
         source: Box<UdsRpcError>,
     },
+
+    /// The request frame was written, but half-closing the write side failed
+    /// (#8267).
+    ///
+    /// Why it is not [`UdsRpcError::Write`]: `write_all` + `flush` failing
+    /// leaves the peer without a newline-terminated frame, so it never
+    /// dispatches and a redial repeats nothing. A `shutdown` failure is the
+    /// opposite — the frame is already on the wire. On macOS `soshutdown`
+    /// answers ENOTCONN once the peer has closed, which is exactly what a
+    /// server that framed on `read_until(b'\n')`, replied and dropped looks
+    /// like. Retrying that would deliver a second copy of a request the daemon
+    /// had already executed, so this variant is never transient.
+    ///
+    /// The request's fate is unknown: it may have been dispatched, and the
+    /// caller must not read this as "nothing was sent".
+    #[error("half-close {path} after writing the request frame: {source}")]
+    HalfClose {
+        /// Socket whose write side could not be shut down.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl UdsRpcError {
@@ -530,17 +553,31 @@ where
             source,
         })?;
 
-    let write = async {
+    // #8267: the send and the half-close are two error variants, not one.
+    // `write_all` + `flush` failing leaves the peer without a newline-terminated
+    // frame, so it never dispatches and a redial is safe. `shutdown` failing is
+    // the opposite: the frame is already on the wire, and on macOS ENOTCONN here
+    // means the peer closed AFTER reading it — the server frames on
+    // `read_until(b'\n')` and replies without waiting for our half-close. Folding
+    // both into `Write` made a retry re-send a request the daemon had executed.
+    let send = async {
         stream.write_all(&frame).await?;
-        stream.flush().await?;
-        // Half-close: the peer's `read_to_end`/`read_until` sees EOF and knows
-        // the request is complete. The read half stays open for the response.
-        stream.shutdown().await
+        stream.flush().await
     };
-    write.await.map_err(|source| UdsRpcError::Write {
+    send.await.map_err(|source| UdsRpcError::Write {
         path: path.to_path_buf(),
         source,
     })?;
+
+    // Half-close: the peer's `read_to_end`/`read_until` sees EOF and knows the
+    // request is complete. The read half stays open for the response.
+    stream
+        .shutdown()
+        .await
+        .map_err(|source| UdsRpcError::HalfClose {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     Ok(stream)
 }
@@ -1203,6 +1240,65 @@ mod tests {
         assert!(
             matches!(err, UdsRpcError::Dial { .. }),
             "a single attempt reports its own error unwrapped, got {err:?}"
+        );
+    }
+
+    /// The duplicate-delivery guard, end to end.
+    ///
+    /// Why: a peer that reads one frame and closes without replying is what a
+    /// daemon that dispatched the request and dropped looks like from here. The
+    /// client must count that as delivered — whatever error arm it lands on —
+    /// and never put a second copy on a fresh connection.
+    ///
+    /// The half-close error is timing-dependent at the OS level, so this
+    /// asserts the invariant that holds on every arm: exactly one dispatch, and
+    /// no retry wrapper. `a_failed_half_close_is_never_retried` pins the
+    /// classification that makes it hold when the shutdown does fail.
+    #[tokio::test]
+    async fn a_peer_that_reads_one_frame_and_closes_is_never_sent_a_second_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("once.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind");
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let counter = std::sync::Arc::clone(&dispatched);
+        tokio::spawn(async move {
+            // Two accepts on offer, so a second copy would be counted rather
+            // than refused by a listener that had already stopped.
+            for _ in 0..2 {
+                let Ok((conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut reader = BufReader::new(conn);
+                let mut line = Vec::new();
+                if reader.read_until(b'\n', &mut line).await.is_ok() && !line.is_empty() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                // Drop without replying and without draining to EOF — the
+                // dispatch-then-hang-up shape.
+                drop(reader);
+            }
+        });
+
+        let err = send_framed_request::<_, Pong>(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("the peer never replies");
+
+        assert!(
+            !matches!(err, UdsRpcError::ConnectRetriesExhausted { .. }),
+            "a frame that reached the peer must never be redialled, got {err:?}"
+        );
+        assert_eq!(
+            dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the peer must see exactly one copy of the request"
         );
     }
 

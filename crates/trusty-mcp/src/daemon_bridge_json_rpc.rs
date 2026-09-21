@@ -284,19 +284,30 @@ impl DaemonBridgeJsonRpc {
     /// what left a whole session with a dead memory server. Every later request
     /// uses the ordinary bound, so a genuinely absent daemon still fails fast.
     async fn forward(&self, envelope: &Value) -> Result<Value, trusty_common::uds::UdsRpcError> {
-        let retry = if self.first_dial.swap(false, Ordering::Relaxed) {
-            ConnectRetry::startup()
-        } else {
-            ConnectRetry::per_request()
-        };
         trusty_common::uds::send_framed_request_retrying(
             &self.config.socket,
             envelope,
             self.config.request_timeout,
             self.config.max_frame_bytes,
-            retry,
+            self.next_retry_policy(),
         )
         .await
+    }
+
+    /// Take the connect-retry bound for the next dial, consuming the
+    /// first-dial flag.
+    ///
+    /// Split out of [`Self::forward`] so the selection is testable without a
+    /// socket: asserting it through `forward` would mean spending a real
+    /// startup floor on a dead path.
+    ///
+    /// Test: `the_first_dial_spends_the_startup_bound_and_later_dials_do_not`.
+    fn next_retry_policy(&self) -> ConnectRetry {
+        if self.first_dial.swap(false, Ordering::Relaxed) {
+            ConnectRetry::startup()
+        } else {
+            ConnectRetry::per_request()
+        }
     }
 
     /// Map the daemon's reply onto the response this bridge emits.
@@ -463,6 +474,30 @@ mod tests {
         assert_eq!(c.request_timeout, DEFAULT_REQUEST_TIMEOUT);
         assert_eq!(c.max_frame_bytes, trusty_common::uds::MAX_FRAME_BYTES);
         assert!(c.streaming_methods.is_empty());
+    }
+
+    /// Why (#8267): the bridge's first dial may legitimately precede its
+    /// daemon's own bind, and its hundredth may not. If the selection ever
+    /// collapsed to one policy, a cold start would fail as fast as a dead
+    /// daemon — or every later request would pay a multi-second floor.
+    /// What: the first call returns the startup bound, every later call the
+    /// per-request bound. Asserted on the selection rather than through
+    /// `forward`, which would spend a real 2.7-second floor on a dead socket.
+    /// Test: this test.
+    #[test]
+    fn the_first_dial_spends_the_startup_bound_and_later_dials_do_not() {
+        let bridge = DaemonBridgeJsonRpc::new(config());
+
+        assert_eq!(bridge.next_retry_policy(), ConnectRetry::startup());
+        assert_eq!(bridge.next_retry_policy(), ConnectRetry::per_request());
+        assert_eq!(bridge.next_retry_policy(), ConnectRetry::per_request());
+
+        // The two bounds must actually differ, or the assertions above pass
+        // for the wrong reason.
+        assert!(
+            ConnectRetry::startup().backoff_floor() > ConnectRetry::per_request().backoff_floor(),
+            "the startup bound must be the longer one"
+        );
     }
 
     /// Why: the #6286 trap — an omitted `jsonrpc` serialises as `null` and the
