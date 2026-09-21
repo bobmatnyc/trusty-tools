@@ -127,6 +127,37 @@ pub struct BuilderSlotResponse {
     /// How [`Self::slot_path`] came to exist, rendered (#8261).
     #[serde(default)]
     pub slot_seed: Option<String>,
+    /// Why an ADMITTED builder got no [`Self::slot_path`] (#8261 critic round).
+    ///
+    /// Why: three arms admit without a private directory — no repo identity, no
+    /// assignable index, and a slot whose seed has still to run — and an
+    /// admission that carries no directory and no explanation is
+    /// indistinguishable to the engineer from one that was never given a slot.
+    #[serde(default)]
+    pub slot_notice: Option<String>,
+    /// Why the pool REFUSED this claim, when it did (#8261 critic round).
+    ///
+    /// Why: a pool refusal answers `claimed: false, ineligible: false`, which
+    /// the guard read as a full machine and denied with "raise
+    /// `builders.max_concurrent`" — the wrong repair for an unwritable pool
+    /// root. This field is what tells the two apart.
+    #[serde(default)]
+    pub slot_refused: Option<String>,
+}
+
+/// One claim, plus the seeding the daemon still owes it (#8261 critic round).
+///
+/// Why: the answer must leave the daemon before the slot is seeded — a 207 GB
+/// `cp -c` cannot run inside the hook's 2-second claim budget — so the claim
+/// cannot simply return a response. It returns the response AND the work.
+/// What: `seed_index` is `Some` only when a slot was reserved but not yet
+/// seeded; the route runs [`SlotPool::seed`] for it on a blocking task.
+/// Test: `an_unseeded_slot_admits_without_copying_anything_on_the_claim_path`.
+pub struct SlotClaimOutcome {
+    /// What the caller is answered.
+    pub response: BuilderSlotResponse,
+    /// The slot index still needing a seed, off the answering path.
+    pub seed_index: Option<u32>,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -166,21 +197,65 @@ pub async fn builder_slot_route(
     // #8261: it is now MEASURED per decision rather than read once from the
     // tier table, with `builders.max_concurrent` as the hard ceiling.
     let config = MpmConfig::load_default().builders;
-    let capacity = state.builder_capacity(&config, resolve_max_concurrent(), None);
+    let capacity = capacity_for(&state, &config, resolve_max_concurrent(), &req.payload);
     // #8261: the pool is resolved HERE, in the daemon, for the same reason the
     // cap is — `builders.slot_pool_root` and the repo identity are the daemon's
     // to read, and a hook deriving them itself would be a second authority.
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let project_dir = str_field(&req.payload, "cwd").map(std::path::PathBuf::from);
-    let (pool, clone_from) = resolve_slot_pool(&config, &home, project_dir.as_deref());
-    Ok(Json(builder_slot_op_with_pool(
+    let resolved = resolve_slot_pool(&config, dirs::home_dir(), project_dir.as_deref());
+    let outcome = builder_slot_op_with_pool(
         &state,
         &id,
         req,
         &capacity,
-        pool.as_ref(),
-        clone_from.as_deref(),
-    )?))
+        resolved.pool.as_ref(),
+        resolved.notice.as_deref(),
+    )?;
+    // #8261 critic round: the seed is the unbounded half of the pool and runs
+    // AFTER the answer, never under the claim mutex the hook is waiting on.
+    if let (Some(index), Some(pool)) = (outcome.seed_index, resolved.pool) {
+        let clone_from = resolved.clone_from;
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = pool.seed(index, clone_from.as_deref()) {
+                tracing::warn!("builder slot {index} could not be seeded: {err}");
+            }
+        });
+    }
+    Ok(Json(outcome.response))
+}
+
+/// The pool for this dispatch's repo, or why there is none.
+///
+/// Why: [`resolve_slot_pool`] has three ways to answer "no pool", and #8261's
+/// critic round found all three admitting silently. Carrying the reason beside
+/// the pool is what lets the answer explain itself.
+/// What: `pool`/`clone_from` are `Some` together; `notice` is `Some` exactly
+/// when `pool` is `None`.
+/// Test: `a_dispatch_with_no_repo_identity_admits_with_a_notice`.
+struct ResolvedPool {
+    pool: Option<SlotPool>,
+    clone_from: Option<std::path::PathBuf>,
+    notice: Option<String>,
+}
+
+/// The capacity THIS dispatch is measured against (#8261 critic round).
+///
+/// Why: the throttle floors N at the current holder count, so counting the
+/// caller's own in-flight record raises that floor by one and the machine always
+/// looks as though it has room for exactly one more — the dispatch asking. The
+/// route passed `None` here, which made the load and memory throttle admit every
+/// builder it was supposed to refuse. The exclusion is the same
+/// `tool_use_id` the claim itself excludes, read from the same payload, so the
+/// number that admits and the number that counts cannot disagree.
+/// What: [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
+/// Test: `the_throttle_excludes_the_claimants_own_record`.
+fn capacity_for(
+    state: &DaemonState,
+    config: &crate::core::builders::BuildersConfig,
+    ceiling: u32,
+    payload: &Value,
+) -> Capacity {
+    state.builder_capacity(config, ceiling, str_field(payload, "tool_use_id"))
 }
 
 /// The slot pool for this dispatch's repo, and the directory to seed from.
@@ -188,39 +263,61 @@ pub async fn builder_slot_route(
 /// Why: identity and clone source resolve exactly as `doctor_rust_build_env`'s
 /// `gather` does, so the pool a builder is given and the row `tm doctor` prints
 /// can never disagree about which repo this is or where its warm cache lives.
-/// What: `None` when the payload named no `cwd`, or the checkout has no git
-/// identity — both leave the claim on the pre-#8261 index-only path rather than
-/// guessing a pool location.
-/// Test: `the_route_grants_a_private_target_dir_from_the_pool`.
+/// What: no home directory, no `cwd`, or no git identity each yield no pool and
+/// a notice naming which — rather than guessing a pool location, and rather than
+/// the `"."` home fallback that would have rooted every operator's pool in the
+/// daemon's working directory (#8261 critic round).
+/// Test: `the_route_grants_a_private_target_dir_from_the_pool`,
+/// `a_dispatch_with_no_repo_identity_admits_with_a_notice`.
 fn resolve_slot_pool(
     config: &crate::core::builders::BuildersConfig,
-    home: &std::path::Path,
+    home: Option<std::path::PathBuf>,
     project_dir: Option<&std::path::Path>,
-) -> (Option<SlotPool>, Option<std::path::PathBuf>) {
+) -> ResolvedPool {
+    let no_pool = |why: &str| {
+        tracing::warn!("no builder slot pool for this dispatch: {why}");
+        ResolvedPool {
+            pool: None,
+            clone_from: None,
+            notice: Some(format!(
+                "no private cargo target directory was reserved for this dispatch: {why}. It \
+                 builds in the shared target directory and contends on its lock."
+            )),
+        }
+    };
+    let Some(home) = home else {
+        return no_pool("this daemon cannot resolve a home directory, so the pool root is unknown");
+    };
     let Some(project_dir) = project_dir else {
-        return (None, None);
+        return no_pool("the dispatch payload named no `cwd`");
     };
     let Some(identity) = trusty_common::github_path::derive_github_path(project_dir) else {
-        return (None, None);
+        return no_pool("the checkout has no git origin identity to key a pool by");
     };
     let build = trusty_common::crate_config::load_at::<
         crate::core::trusty_tools_config::TrustyToolsConfig,
     >(&trusty_common::crate_config::crate_config_path_at(
-        home,
+        &home,
         crate::core::trusty_tools_config::CRATE_NAME,
     ))
     .ok()
     .flatten();
     let clone_from = crate::core::build_env::resolve_build_env(
         build.as_ref().and_then(|c| c.build.as_ref()),
-        home,
+        &home,
         Some(&identity),
         crate::core::build_env::host_cores(),
     )
     .ok()
     .map(|env| env.cargo_target_dir);
-    let pool = SlotPool::new(config.effective_slot_pool_root(home), identity);
-    (Some(pool), clone_from)
+    ResolvedPool {
+        pool: Some(SlotPool::new(
+            config.effective_slot_pool_root(&home),
+            identity,
+        )),
+        clone_from,
+        notice: None,
+    }
 }
 
 /// [`builder_slot_route`]'s body, with the cap supplied and no transport in it.
@@ -310,6 +407,8 @@ pub fn builder_slot_op(
         fail_closed_surface: None,
         slot_path: None,
         slot_seed: None,
+        slot_notice: None,
+        slot_refused: None,
     })
 }
 
@@ -322,23 +421,31 @@ pub fn builder_slot_op(
 /// eight tests driving it, stay on the index-only contract.
 /// What: as [`builder_slot_op_with_capacity`], but the claim runs through
 /// [`DaemonState::claim_builder_slot_with_pool`], so a directory the pool cannot
-/// provide refuses the claim rather than admitting a builder that would fall
-/// back to the shared directory.
+/// RESERVE refuses the claim rather than admitting a builder that would fall
+/// back to the shared directory. A slot that reserves but has not been seeded
+/// admits with a notice and hands the seed back through
+/// [`SlotClaimOutcome::seed_index`] — nothing that can outrun the hook's
+/// 2-second claim budget runs on this path (#8261 critic round).
+///
+/// `no_pool_notice` is what [`resolve_slot_pool`] says when there is no pool at
+/// all, carried through so one field explains every directory-less admission.
 ///
 /// # Errors
 ///
 /// As [`builder_slot_op`].
 ///
 /// Test: `the_route_grants_a_private_target_dir_from_the_pool`,
-/// `a_pool_that_cannot_provide_a_directory_refuses_the_claim`.
+/// `a_pool_that_cannot_provide_a_directory_refuses_the_claim`,
+/// `an_unseeded_slot_admits_without_copying_anything_on_the_claim_path`,
+/// `a_dispatch_with_no_repo_identity_admits_with_a_notice`.
 pub fn builder_slot_op_with_pool(
     state: &Arc<DaemonState>,
     id: &str,
     req: BuilderSlotRequest,
     capacity: &Capacity,
     pool: Option<&SlotPool>,
-    clone_from: Option<&std::path::Path>,
-) -> Result<BuilderSlotResponse, DaemonError> {
+    no_pool_notice: Option<&str>,
+) -> Result<SlotClaimOutcome, DaemonError> {
     let session = uuid::Uuid::parse_str(id)
         .map(SessionId)
         .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
@@ -355,7 +462,6 @@ pub fn builder_slot_op_with_pool(
         exclude,
         eligible,
         pool,
-        clone_from,
         |s| {
             crate::daemon::services::delegation_tracker::observe(
                 s,
@@ -371,19 +477,33 @@ pub fn builder_slot_op_with_pool(
         },
     );
 
-    Ok(BuilderSlotResponse {
-        holders: grant.holders,
-        cap: capacity.n_effective,
-        claimed: grant.claimed,
-        ineligible: !eligible,
-        ceiling: capacity.ceiling,
-        capacity_reason: capacity.reason.to_string(),
-        fail_closed_surface: capacity
-            .reason
-            .fail_closed_surface()
-            .map(|surface| surface.name().to_string()),
-        slot_path: grant.slot_dir.map(|dir| dir.to_string_lossy().into_owned()),
-        slot_seed: grant.slot_seed,
+    // The pool's own notice wins over the "there is no pool" one: when a pool
+    // exists, only it knows why the slot was withheld. A REFUSAL carries no
+    // notice at all — `slot_refused` is that answer's explanation.
+    let claimed = grant.claimed;
+    let slot_notice = grant.slot_notice.or_else(|| {
+        claimed
+            .then(|| no_pool_notice.map(str::to_string))
+            .flatten()
+    });
+    Ok(SlotClaimOutcome {
+        response: BuilderSlotResponse {
+            holders: grant.holders,
+            cap: capacity.n_effective,
+            claimed: grant.claimed,
+            ineligible: !eligible,
+            ceiling: capacity.ceiling,
+            capacity_reason: capacity.reason.to_string(),
+            fail_closed_surface: capacity
+                .reason
+                .fail_closed_surface()
+                .map(|surface| surface.name().to_string()),
+            slot_path: grant.slot_dir.map(|dir| dir.to_string_lossy().into_owned()),
+            slot_seed: grant.slot_seed,
+            slot_notice,
+            slot_refused: grant.slot_refused,
+        },
+        seed_index: grant.seed_index,
     })
 }
 
@@ -496,6 +616,9 @@ mod tests {
     fn the_route_grants_a_private_target_dir_from_the_pool() {
         let (state, dir, session) = hermetic();
         let pool = test_pool(dir.path().join("pool"));
+        // Seeding never runs on the claim path since #8261's critic round, so a
+        // GRANTED directory is by definition one already seeded.
+        pool.seed(0, None).expect("a seeded slot 0");
         let body = builder_slot_op_with_pool(
             &state,
             &session.0.to_string(),
@@ -508,7 +631,8 @@ mod tests {
             Some(&pool),
             None,
         )
-        .expect("a well-formed session id");
+        .expect("a well-formed session id")
+        .response;
 
         assert!(body.claimed, "a quiet machine admits the first builder");
         let path = body
@@ -546,7 +670,8 @@ mod tests {
             Some(&test_pool(blocker)),
             None,
         )
-        .expect("a well-formed session id");
+        .expect("a well-formed session id")
+        .response;
 
         assert!(
             !body.claimed,
@@ -556,6 +681,142 @@ mod tests {
         assert!(
             !body.ineligible,
             "this payload WAS eligible; the pool is what failed"
+        );
+        // #8261 critic round: without this field the guard reads the answer as a
+        // full machine and tells the reader to raise `builders.max_concurrent`.
+        assert!(
+            body.slot_refused
+                .as_deref()
+                .is_some_and(|d| d.contains("not-a-directory")),
+            "a pool refusal must name itself: {:?}",
+            body.slot_refused
+        );
+    }
+
+    /// #8261 critic round, CRITICAL: the claim path clones nothing.
+    ///
+    /// `SlotPool::acquire_path` ran inside the claim mutex, and `cp -c -R` of a
+    /// 207 GB shared directory cannot finish inside the hook's 2-second claim
+    /// budget. The sentinel below is what a real clone would have copied.
+    #[test]
+    fn an_unseeded_slot_admits_without_copying_anything_on_the_claim_path() {
+        let (state, dir, session) = hermetic();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("a warm shared dir");
+        std::fs::write(shared.join("sentinel.rlib"), b"warm").expect("an artifact");
+        let pool = test_pool(dir.path().join("pool"));
+
+        let outcome = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+
+        assert!(
+            outcome.response.claimed,
+            "an unseeded slot admits: it is the SEED that is deferred"
+        );
+        assert!(
+            outcome.response.slot_path.is_none(),
+            "an unseeded slot is not handed out: {:?}",
+            outcome.response.slot_path
+        );
+        assert_eq!(
+            outcome.seed_index,
+            Some(0),
+            "the seed is handed back for the route to run after answering"
+        );
+        assert!(
+            !pool.slot_path(0).join("sentinel.rlib").exists(),
+            "nothing may be cloned while the hook waits on the claim"
+        );
+        assert!(
+            outcome.response.slot_notice.is_some(),
+            "admitting with no private directory must say so"
+        );
+    }
+
+    /// #8261 critic round: a checkout with no git identity admits, and the
+    /// silence that used to accompany it is what made the engineer build in the
+    /// shared directory believing it held a slot.
+    #[test]
+    fn a_dispatch_with_no_repo_identity_admits_with_a_notice() {
+        let (state, _dir, session) = hermetic();
+        let body = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            None,
+            Some("the checkout has no git origin identity to key a pool by"),
+        )
+        .expect("a well-formed session id")
+        .response;
+
+        assert!(body.claimed, "no pool is not a refusal");
+        assert!(body.slot_path.is_none());
+        assert!(
+            body.slot_notice
+                .as_deref()
+                .is_some_and(|n| n.contains("no git origin identity")),
+            "the admission must say why it carries no directory: {:?}",
+            body.slot_notice
+        );
+    }
+
+    /// #8261 critic round, HIGH: the load/memory throttle must exclude THIS
+    /// dispatch's own record.
+    ///
+    /// The route passed `None`, so a throttled machine holding two builders
+    /// counted three — the two holders plus the claimant's own in-flight record
+    /// — floored N at three, and admitted the very dispatch it was refusing.
+    /// Fails before `capacity_for` existed.
+    #[test]
+    fn the_throttle_excludes_the_claimants_own_record() {
+        let (state, _dir, session) = hermetic();
+        insert_builder(&state, session, "rust-engineer");
+        insert_builder(&state, session, "python-engineer");
+        // What the guard's preceding shared-tree claim already recorded for THIS
+        // dispatch, and what the daemon's own `matcher: "*"` hook races to write.
+        let mut mine = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "build");
+        mine.status = DelegationStatus::Running;
+        mine.started_at = Some(chrono::Utc::now());
+        mine.tool_use_id = Some("toolu_SELF".to_string());
+        state.upsert_delegation(mine);
+
+        // A 1 TiB free-memory floor is the highest `validate` accepts and no
+        // host in this fleet can meet it, so the memory throttle fires
+        // regardless of what the machine running this test is doing.
+        let config = crate::core::builders::BuildersConfig {
+            free_memory_floor_mb: Some(1024 * 1024),
+            ..crate::core::builders::BuildersConfig::default()
+        };
+        let request = dispatch("rust-engineer", Some("toolu_SELF"));
+        let measured = capacity_for(&state, &config, 4, &request.payload);
+
+        assert_eq!(
+            measured.n_effective, 2,
+            "a throttled machine floors N at its REAL holders, not at three: {:?}",
+            measured.reason
+        );
+        let body =
+            builder_slot_op_with_capacity(&state, &session.0.to_string(), request, &measured)
+                .expect("a well-formed session id");
+        assert!(
+            !body.claimed,
+            "the third builder on a throttled two-holder machine must be refused"
         );
     }
 
