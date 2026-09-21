@@ -2,7 +2,7 @@
 name: rust-build-performance
 description: "Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks."
 user-invocable: false
-version: "1.0.0"
+version: "1.1.0"
 category: agent-reference
 effort: low
 ---
@@ -97,6 +97,24 @@ cargo tree --edges features   # which features are pulled in, and by what
 this repo's convention (see project `CLAUDE.md`) — never pin a dependency
 locally if it's already in the workspace table; a locally-pinned duplicate
 defeats both dependency-graph hygiene and cargo's version unification.
+
+**Dev-dependency edges are compile-graph edges, not favors.** The entire
+point of separate crates is a more efficient compilation process; a
+test-only edge that welds two crates' compile graphs together defeats it.
+
+- Never add a workspace crate as a `[dev-dependencies]` or
+  `[build-dependencies]` entry when it is absent from the consumer's normal
+  dependency tree.
+- A test that needs two crates lives in its own `publish = false` test crate
+  that depends on both, or in the crate that already depends on the other.
+- Re-declaring a normal dependency under `[dev-dependencies]` with extra
+  features compiles that crate a second time, under a different feature set.
+  Do this only when the feature must never leak into production, and say why
+  in a manifest comment.
+- Check it without a build: `cargo tree -p <crate> -e dev --prefix none` must
+  add no workspace crate that `-e normal` lacks.
+
+See #8341.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/features.html>,
 <https://doc.rust-lang.org/cargo/commands/cargo-tree.html>
