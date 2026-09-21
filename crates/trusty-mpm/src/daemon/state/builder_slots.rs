@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent::Delegation;
-use crate::core::builder_slot_pool::SlotPool;
+use crate::core::builder_slot_pool::{SeedKind, SlotPool, SlotReservation};
 use crate::core::dispatch_isolation::agent_is_builder;
 use crate::core::session::SessionId;
 
@@ -199,11 +199,14 @@ pub struct BuilderSlotCensus {
 /// Why: the claim now answers three things, not two — who holds slots, whether
 /// this dispatch took one, and WHICH DIRECTORY it took. A third tuple element
 /// would be unreadable at the call site and trips `clippy::type_complexity`.
-/// What: `slot_dir`/`slot_seed` are `Some` only when `claimed` is true AND a
-/// pool was supplied; a failed acquire leaves both `None` and `claimed` false.
+/// What: `slot_dir`/`slot_seed` are `Some` only when `claimed` is true AND the
+/// pool reserved a SEEDED slot; a refused reservation leaves both `None` and
+/// `claimed` false, and an unseeded one admits with `seed_index` set and
+/// `slot_notice` saying why no directory came with the admission.
 /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`,
-/// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
-#[derive(Debug)]
+/// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`,
+/// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`.
+#[derive(Debug, Default)]
 pub struct BuilderSlotGrant {
     /// Builders already holding a slot, excluding this dispatch's own record.
     pub holders: Vec<BuilderHolder>,
@@ -213,6 +216,23 @@ pub struct BuilderSlotGrant {
     pub slot_dir: Option<PathBuf>,
     /// How that directory came to exist, rendered.
     pub slot_seed: Option<String>,
+    /// Why an admitted builder got NO private directory (#8261 critic round).
+    ///
+    /// Why: admitting with no directory and no signal leaves the engineer
+    /// building in the shared directory believing it was given a slot, which is
+    /// indistinguishable from the contention this issue exists to end.
+    pub slot_notice: Option<String>,
+    /// Why the pool refused this claim outright, when it did.
+    ///
+    /// Why: a pool refusal is NOT a full machine, and a deny that says "raise
+    /// `max_concurrent`" for an unwritable directory sends the reader to the
+    /// wrong repair.
+    pub slot_refused: Option<String>,
+    /// The slot index whose directory still needs [`SlotPool::seed`].
+    ///
+    /// Why: the seed clones a target directory measured at 207 GB, which cannot
+    /// run under the claim mutex — the caller runs it after answering.
+    pub seed_index: Option<u32>,
 }
 
 impl DaemonState {
@@ -356,7 +376,6 @@ impl DaemonState {
             exclude_tool_use_id,
             eligible,
             None,
-            None,
             record,
             release,
         );
@@ -375,21 +394,32 @@ impl DaemonState {
     ///
     /// What: as [`Self::claim_builder_slot`], then — still inside the claim
     /// mutex, against the same holder set admission was decided from —
-    /// [`SlotPool::acquire_path`] provides the directory and it is recorded on
-    /// the delegation.
+    /// [`SlotPool::reserve_path`] says whether the slot is usable NOW, and a
+    /// usable one is recorded on the delegation.
     ///
-    /// **A slot the pool cannot provide is NO slot.** `acquire_path` failing
-    /// clears the index, runs `release`, and returns `claimed: false`; it never
-    /// admits a builder that would then fall back to the shared target directory,
-    /// which is the clobbering [`crate::core::builder_slot_pool`] exists to end
-    /// (see [`SlotPoolError`](crate::core::builder_slot_pool::SlotPoolError), and
-    /// the design's §F "fail closed to no slot"). A `pool` of `None` keeps the
+    /// **Only the BOUNDED half of the pool runs here (#8261 critic round).**
+    /// `reserve_path` is a stat and one `create_dir_all`; the clone that used to
+    /// run on this line took minutes against a 207 GB target directory, under
+    /// the claim mutex, while the hook's 2-second claim budget expired — so the
+    /// dispatch was denied while the daemon went on holding a `Running` lease
+    /// for the 45-minute TTL and every other admission blocked behind the mutex.
+    /// An unseeded slot therefore admits with NO directory, a notice, and
+    /// [`BuilderSlotGrant::seed_index`] set for the caller to seed afterwards.
+    ///
+    /// **A slot the pool cannot RESERVE is NO slot.** `reserve_path` failing
+    /// clears the index, runs `release`, and returns `claimed: false` with
+    /// [`BuilderSlotGrant::slot_refused`] set; it never admits a builder that
+    /// would then fall back to the shared target directory, which is the
+    /// clobbering [`crate::core::builder_slot_pool`] exists to end (see
+    /// [`SlotPoolError`](crate::core::builder_slot_pool::SlotPoolError), and the
+    /// design's §F "fail closed to no slot"). A `pool` of `None` keeps the
     /// pre-#8261 behaviour exactly.
     ///
     /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`,
-    /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
-    // The five claim inputs plus the two pool inputs plus `self`. Splitting them
-    // into a struct would hide which of them the claim mutex protects.
+    /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`,
+    /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`.
+    // The five claim inputs plus the pool plus `self`. Splitting them into a
+    // struct would hide which of them the claim mutex protects.
     #[allow(clippy::too_many_arguments)]
     pub fn claim_builder_slot_with_pool<C: FnOnce(&Self), R: FnOnce(&Self)>(
         &self,
@@ -397,7 +427,6 @@ impl DaemonState {
         exclude_tool_use_id: Option<&str>,
         eligible: bool,
         pool: Option<&SlotPool>,
-        clone_from: Option<&Path>,
         record: C,
         release: R,
     ) -> BuilderSlotGrant {
@@ -407,8 +436,7 @@ impl DaemonState {
         let mut grant = BuilderSlotGrant {
             holders,
             claimed: admitted,
-            slot_dir: None,
-            slot_seed: None,
+            ..BuilderSlotGrant::default()
         };
         if admitted {
             record(self);
@@ -418,21 +446,25 @@ impl DaemonState {
             // the same index and share a directory — the exact clobbering the
             // pool exists to end.
             let index = self.assign_builder_slot(exclude_tool_use_id);
-            if let (Some(pool), Some(index)) = (pool, index) {
-                match pool.acquire_path(index, clone_from) {
-                    Ok((path, seed)) => {
-                        let rendered = format!("{seed:?}");
-                        self.record_builder_slot_dir(exclude_tool_use_id, &path, &rendered);
-                        grant.slot_dir = Some(path);
-                        grant.slot_seed = Some(rendered);
+            if let Some(pool) = pool {
+                match index {
+                    Some(index) => {
+                        self.reserve_slot_dir(pool, index, exclude_tool_use_id, &mut grant);
                     }
-                    Err(err) => {
+                    // #8261 critic round: this arm admits with no private
+                    // directory, so it must SAY so rather than look like a
+                    // granted slot that carried no path.
+                    None => {
                         tracing::warn!(
-                            "builder slot {index} could not be provided, so no slot is granted: \
-                             {err}"
+                            "an admitted builder could not be assigned a slot index, so it \
+                             builds in the shared target directory"
                         );
-                        self.clear_builder_slot(exclude_tool_use_id);
-                        grant.claimed = false;
+                        grant.slot_notice = Some(
+                            "no builder slot index could be assigned to this dispatch — its \
+                             delegation record was not found, so no private cargo target \
+                             directory was reserved."
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -448,7 +480,61 @@ impl DaemonState {
         grant
     }
 
-    /// Record the directory [`SlotPool::acquire_path`] provided onto the lease.
+    /// Resolve one admitted builder's slot directory, bounded (#8261 critic round).
+    ///
+    /// Why: extracted so the claim body stays readable and so the one rule this
+    /// enforces — nothing unbounded under the claim mutex — has a single place
+    /// to be read. Every branch here is a stat, a `create_dir_all`, or a map
+    /// write.
+    /// What: a [`SlotReservation::Ready`] slot is recorded on the lease and
+    /// granted; a [`SlotReservation::Seeding`] slot grants nothing, sets
+    /// [`BuilderSlotGrant::seed_index`] for the caller to seed off this path,
+    /// and carries the notice; a refusal clears the index and marks the grant
+    /// refused, which the caller turns into a release.
+    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`,
+    /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`,
+    /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
+    fn reserve_slot_dir(
+        &self,
+        pool: &SlotPool,
+        index: u32,
+        exclude_tool_use_id: Option<&str>,
+        grant: &mut BuilderSlotGrant,
+    ) {
+        match pool.reserve_path(index) {
+            Ok(SlotReservation::Ready(path)) => {
+                let rendered = format!("{:?}", SeedKind::AlreadySeeded);
+                self.record_builder_slot_dir(exclude_tool_use_id, &path, &rendered);
+                grant.slot_dir = Some(path);
+                grant.slot_seed = Some(rendered);
+            }
+            Ok(SlotReservation::Seeding(path)) => {
+                tracing::warn!(
+                    "builder slot {} is not seeded yet, so this dispatch builds in the shared \
+                     target directory while the seed runs",
+                    path.display()
+                );
+                grant.seed_index = Some(index);
+                grant.slot_notice = Some(format!(
+                    "builder slot {} had not been seeded yet, so this dispatch was admitted \
+                     WITHOUT a private cargo target directory — seeding it inline would have \
+                     outrun the dispatch guard's claim budget. The seed is running now; the \
+                     next builder on this slot gets the private directory.",
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "builder slot {index} could not be reserved, so no slot is granted: {err}"
+                );
+                self.clear_builder_slot(exclude_tool_use_id);
+                grant.claimed = false;
+                grant.slot_refused = Some(err.to_string());
+            }
+        }
+    }
+
+    /// Record the directory [`SlotPool::reserve_path`] provided onto the lease.
     ///
     /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
     fn record_builder_slot_dir(&self, tool_use_id: Option<&str>, path: &Path, seed: &str) {
@@ -939,6 +1025,9 @@ mod tests {
         let state = DaemonState::new();
         let session = session_with_pid(&state, Some(std::process::id()));
         let pool = test_pool(root.path().join("pool"));
+        // A slot the pool has already seeded — the only state a claim may hand
+        // out, since seeding cannot run on the claim path (#8261 critic round).
+        pool.seed(0, None).expect("a seeded slot 0");
 
         let mut d = running(session, "rust-engineer", 1);
         d.tool_use_id = Some("toolu_A".to_string());
@@ -947,7 +1036,6 @@ mod tests {
             Some("toolu_A"),
             true,
             Some(&pool),
-            None,
             |s| s.upsert_delegation(d.clone()),
             |_| {},
         );
@@ -973,12 +1061,62 @@ mod tests {
         );
     }
 
+    /// #8261 critic round, CRITICAL: the claim path may not seed.
+    ///
+    /// `SlotPool::acquire_path` used to run here, inside the claim mutex, and
+    /// `cp -c -R` of a 207 GB shared target directory cannot finish inside the
+    /// hook's 2-second claim budget — so the first dispatch per slot was denied
+    /// on a timeout while the daemon held a `Running` lease for the 45-minute
+    /// TTL and every other admission blocked on the mutex. An unseeded slot must
+    /// therefore admit WITHOUT a directory and leave the seed to the caller.
+    #[test]
+    fn an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+        let pool = test_pool(root.path().join("pool"));
+
+        let mut d = running(session, "rust-engineer", 1);
+        d.tool_use_id = Some("toolu_A".to_string());
+        let grant = state.claim_builder_slot_with_pool(
+            4,
+            Some("toolu_A"),
+            true,
+            Some(&pool),
+            |s| s.upsert_delegation(d.clone()),
+            |_| {},
+        );
+
+        assert!(
+            grant.claimed,
+            "an unseeded slot admits — it is the SEED that is deferred, not the dispatch"
+        );
+        assert!(
+            grant.slot_dir.is_none(),
+            "a slot whose seed has not run is not handed out: {:?}",
+            grant.slot_dir
+        );
+        assert_eq!(
+            grant.seed_index,
+            Some(0),
+            "the caller is told which slot to seed off the claim path"
+        );
+        assert!(
+            grant.slot_notice.is_some(),
+            "admitting with no private directory must say so"
+        );
+        assert!(
+            !pool.slot_path(0).exists(),
+            "the reservation creates the parent only, never the slot itself"
+        );
+    }
+
     /// #8261 Fail-Open Check: a slot the pool cannot provide is NO slot.
     ///
     /// Falling back to the shared target directory is the clobbering
     /// `core::builder_slot_pool` exists to end (`SlotPoolError`'s own contract:
     /// "the caller must then grant NO slot"), and the design's §F says an
-    /// unprovidable slot fails CLOSED. So a failed `acquire_path` must refuse the
+    /// unprovidable slot fails CLOSED. So a failed `reserve_path` must refuse the
     /// claim, not admit an unthrottled builder pointed at the shared directory.
     /// This FAILS before `claim_builder_slot_with_pool` existed, because the
     /// claim then ignored the pool entirely and always answered `claimed: true`.
@@ -1002,7 +1140,6 @@ mod tests {
             Some("toolu_A"),
             true,
             Some(&pool),
-            None,
             |s| s.upsert_delegation(d.clone()),
             |_| released = true,
         );
@@ -1018,6 +1155,14 @@ mod tests {
         assert!(
             released,
             "the refusal must release the record the guard already wrote"
+        );
+        assert!(
+            grant
+                .slot_refused
+                .as_deref()
+                .is_some_and(|d| d.contains("not-a-directory")),
+            "a pool refusal names the path it could not make: {:?}",
+            grant.slot_refused
         );
         let index = state
             .delegations

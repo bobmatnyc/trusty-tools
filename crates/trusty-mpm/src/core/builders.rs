@@ -136,16 +136,18 @@ pub enum BuildersConfigError {
 /// CEILING that the capacity formula may never exceed (#8261), rather than the
 /// fixed count it was under #6892.
 ///
-/// `deny_unknown_fields`: an unknown key inside `[builders]` is refused at load
-/// with the key named in the `toml` error, rather than silently dropped by the
-/// enclosing lenient parse. These four keys decide whether the machine builds at
-/// all, and a typo that reads as "default" is the failure mode this section can
-/// least afford.
+/// **No `deny_unknown_fields` here (#8261 critic round).** It made a typo under
+/// `[builders]` fail the whole `MpmConfig` parse, and `MpmConfig::load` turns a
+/// parse failure into `MpmConfig::default()` behind one warn — so a single
+/// misspelled key silently discarded every other section of the operator's
+/// config, `max_concurrent` included. `config_keys::diff_into` already reports
+/// unknown nested keys on the Ok arm, which is the surface that survives the
+/// lenient parse (#5207) instead of destroying it.
 /// Test: `absent_section_uses_the_tier_default`, `an_explicit_cap_wins`,
 /// `an_explicit_zero_admits_no_builder`, `capacity_defaults_match_the_owner_ruling`,
-/// `an_unknown_builders_key_is_refused_naming_the_key`.
+/// `a_typo_under_builders_does_not_discard_the_rest_of_the_config`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BuildersConfig {
     /// The hard ceiling on concurrent builders for this machine (#8261).
     ///
@@ -489,16 +491,32 @@ mod tests {
         );
     }
 
-    /// #8261: an unknown key inside `[builders]` is REFUSED with the key named,
-    /// not dropped. The enclosing `MpmConfig` parse is deliberately lenient
-    /// (#5207), which is why this section carries `deny_unknown_fields` itself.
+    /// #8261 critic round: `deny_unknown_fields` on this section made ONE typo
+    /// fail the whole `MpmConfig` parse, and `load` answers a parse failure with
+    /// `MpmConfig::default()` — so a misspelled `load_factorr` discarded every
+    /// other section the operator had written, and `max_concurrent` with it.
+    /// Fails with `deny_unknown_fields` restored.
     #[test]
-    fn an_unknown_builders_key_is_refused_naming_the_key() {
-        let err = toml::from_str::<BuildersConfig>("max_concurrent = 4\nload_factorr = 2.0\n")
-            .expect_err("a typo'd key must not read as the default");
-        assert!(
-            format!("{err}").contains("load_factorr"),
-            "the parse error must name the key: {err}"
+    fn a_typo_under_builders_does_not_discard_the_rest_of_the_config() {
+        let root = tempfile::tempdir().expect("temp root");
+        std::fs::write(
+            root.path().join("config.toml"),
+            "[agents]\nsources = [\"bundled\"]\n\n\
+             [builders]\nmax_concurrent = 6\nload_factorr = 2.0\n",
+        )
+        .expect("write config");
+
+        let cfg = crate::core::config::MpmConfig::load(root.path());
+
+        assert_eq!(
+            cfg.agents.sources,
+            vec!["bundled".to_string()],
+            "an unrelated section must survive a typo under [builders]"
+        );
+        assert_eq!(
+            cfg.builders.max_concurrent,
+            Some(6),
+            "the keys spelled correctly beside the typo must survive it too"
         );
     }
 

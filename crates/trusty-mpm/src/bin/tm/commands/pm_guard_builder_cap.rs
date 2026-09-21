@@ -300,12 +300,20 @@ fn holders_in(body: &Value) -> Vec<HolderLine> {
 /// `claim_is_unverifiable_when_the_daemon_answers_500`.
 pub(crate) enum BuilderSlotClaim {
     /// A slot was claimed; the dispatch proceeds. Carries the private
-    /// `CARGO_TARGET_DIR` the daemon granted it, when the pool provided one
-    /// (#8261).
-    Admitted(Option<String>),
+    /// `CARGO_TARGET_DIR` the daemon granted it (#8261), or — when it was
+    /// admitted without one — the daemon's own notice saying why.
+    Admitted {
+        /// The granted private `CARGO_TARGET_DIR`, when the pool had one ready.
+        slot_path: Option<String>,
+        /// Why this admission carries no directory (#8261 critic round).
+        notice: Option<String>,
+    },
     /// The machine is at its cap. Carries the cap, its current holders, and
     /// (#8261) what the daemon measured to arrive at that cap.
     Full(u32, Vec<HolderLine>, CapacityNote),
+    /// The slot POOL refused, which is not a full machine (#8261 critic round).
+    /// Carries the daemon's detail, which names the path and the errno.
+    PoolRefused(String),
     /// The daemon answered, reported the machine's state, and declined to count
     /// this dispatch at all — it classified the agent as a non-builder where
     /// this binary classified it as one.
@@ -350,12 +358,18 @@ pub(crate) async fn claim_builder_slot(
                 );
             };
             if claimed {
-                return BuilderSlotClaim::Admitted(
-                    body.get("slot_path")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                );
+                return BuilderSlotClaim::Admitted {
+                    slot_path: str_body_field(&body, "slot_path"),
+                    notice: str_body_field(&body, "slot_notice"),
+                };
+            }
+            // #8261 critic round: a pool refusal answers `claimed: false,
+            // ineligible: false`, exactly as a full machine does. Read as a full
+            // machine it produced a deny telling the operator to raise
+            // `builders.max_concurrent`, which does nothing for an unwritable
+            // pool root. This field is checked BEFORE the cap for that reason.
+            if let Some(detail) = str_body_field(&body, "slot_refused") {
+                return BuilderSlotClaim::PoolRefused(detail);
             }
             // #6892 critic round: `claimed: false` had two meanings and this is
             // the second — the daemon answered with the machine's real state and
@@ -378,6 +392,39 @@ pub(crate) async fn claim_builder_slot(
             BuilderSlotClaim::Unverifiable(detail)
         }
     }
+}
+
+/// Read a non-empty string field out of the daemon's answer.
+///
+/// Test: `a_pool_refusal_denies_naming_the_path_rather_than_the_cap`.
+fn str_body_field(body: &Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Build the deny message for a slot the POOL refused (#8261 critic round).
+///
+/// Why: this refusal has nothing to do with the cap, and [`deny_reason`] was
+/// rendering it as one — "cap reached … raise `builders.max_concurrent`" for a
+/// pool root that is a file, or a disk with no space. The reader followed that
+/// advice and the next dispatch was refused identically.
+/// What: names the daemon's own detail, which carries the path and the errno,
+/// and gives the two repairs that actually apply.
+/// Test: `a_pool_refusal_denies_naming_the_path_rather_than_the_cap`.
+pub(crate) fn pool_refused_deny_reason(agent: &str, detail: &str) -> String {
+    format!(
+        "Builder slot directory refused (#8261): the daemon admitted this {agent} dispatch \
+         against the machine's builder capacity, then could not give it a private cargo target \
+         directory — {detail}. This is NOT a full machine and raising \
+         `builders.max_concurrent` will not clear it. A builder with no private directory would \
+         build in the shared `CARGO_TARGET_DIR` and contend on its lock with every other builder \
+         on this host, which is the failure #8261 exists to end, so the dispatch is refused \
+         instead. Fix the path named above — check that `builders.slot_pool_root` in \
+         `~/.trusty-mpm/config.toml` names a writable directory and that its volume has space — \
+         then re-issue. `tm doctor` reports the pool root in its build-environment row."
+    )
 }
 
 /// The field this payload is missing that makes the claim impossible, if any.
@@ -463,11 +510,17 @@ pub(crate) async fn evaluate(
     }
     let agent = dispatch_agent(tool_input).unwrap_or("this");
     match claim_builder_slot(url, session_id, cwd, payload).await {
-        BuilderSlotClaim::Admitted(slot_path) => {
-            BuilderCapVerdict::Allow(slot_path.map(|dir| slot_notice(&dir)))
+        // #8261 critic round: an admission with no directory carries the
+        // daemon's notice instead, so the engineer is never left to infer from
+        // silence that it holds a private target directory.
+        BuilderSlotClaim::Admitted { slot_path, notice } => {
+            BuilderCapVerdict::Allow(slot_path.map(|dir| slot_notice(&dir)).or(notice))
         }
         BuilderSlotClaim::Full(cap, holders, note) => {
             BuilderCapVerdict::Deny(deny_reason(agent, cap, &holders, &note))
+        }
+        BuilderSlotClaim::PoolRefused(detail) => {
+            BuilderCapVerdict::Deny(pool_refused_deny_reason(agent, &detail))
         }
         // ALLOW, and say so on stderr. The daemon ANSWERED here — the machine's
         // count is known, this dispatch simply was not added to it — so unlike
@@ -866,6 +919,76 @@ mod tests {
             }
             BuilderCapVerdict::Allow(None) => {
                 panic!("an admitted builder with a slot path must carry a notice")
+            }
+            BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
+        }
+    }
+
+    /// #8261 critic round: a POOL refusal answers `claimed: false,
+    /// ineligible: false`, the same shape a full machine answers with. Read as
+    /// a full machine it denied with "cap reached … raise `max_concurrent`",
+    /// which does nothing for a pool root that is a file. Fails before
+    /// `BuilderSlotClaim::PoolRefused` existed.
+    #[tokio::test]
+    async fn a_pool_refusal_denies_naming_the_path_rather_than_the_cap() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":false,"ineligible":false,"cap":4,"ceiling":4,"holders":[],
+                "slot_refused":"could not create builder slot directory /pool/acme/widgets: Not a directory (os error 20)"}"#,
+        );
+        let reason = deny(
+            evaluate(
+                &url,
+                &serde_json::json!({"tool_use_id": "toolu_X"}),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                "11111111-1111-1111-1111-111111111111",
+                Path::new("/repo"),
+            )
+            .await,
+        )
+        .expect("a pool refusal denies");
+
+        assert!(
+            reason.contains("/pool/acme/widgets") && reason.contains("os error 20"),
+            "the deny must name the path and the errno: {reason}"
+        );
+        assert!(
+            !reason.contains("cap reached"),
+            "a pool refusal is not a full machine: {reason}"
+        );
+        assert!(
+            reason.contains("slot_pool_root"),
+            "the deny must name the repair that applies: {reason}"
+        );
+    }
+
+    /// #8261 critic round: an admission that carries no directory must say why,
+    /// or the engineer cannot tell it from one that was given a slot.
+    #[tokio::test]
+    async fn an_admission_without_a_directory_carries_the_daemons_notice() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":true,"cap":4,"holders":[],
+                "slot_notice":"builder slot /pool/acme/widgets/slot-0 had not been seeded yet"}"#,
+        );
+        let verdict = evaluate(
+            &url,
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+        )
+        .await;
+
+        match verdict {
+            BuilderCapVerdict::Allow(Some(notice)) => assert!(
+                notice.contains("had not been seeded yet"),
+                "the daemon's notice must reach the engineer: {notice}"
+            ),
+            BuilderCapVerdict::Allow(None) => {
+                panic!("an admission with no directory must still explain itself")
             }
             BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
         }

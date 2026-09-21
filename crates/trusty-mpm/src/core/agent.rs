@@ -222,8 +222,14 @@ pub enum DelegationSource {
 /// `parent` lets the TUI reconstruct that tree from a flat list.
 /// What: pairs the delegating relationship with the target agent, its model
 /// tier, current status, and the circuit-breaker state for that agent.
+///
+/// `#[non_exhaustive]` since #8261: the record has gained fields in three
+/// consecutive issues, and every one of them would be a breaking change for an
+/// out-of-crate struct literal. Nothing outside `trusty-mpm` builds one today,
+/// so the attribute costs nothing and stops the next field from being one.
 /// Test: `delegation_round_trips`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Delegation {
     /// Unique id for this delegation.
     pub id: DelegationId,
@@ -288,11 +294,12 @@ pub struct Delegation {
     /// `builders.slot_pool_root` and on the repo identity, both of which the
     /// daemon resolves and the hook does not. Recording the resolved path is what
     /// lets the guard put it in the dispatch brief without re-deriving it.
-    /// What: `Some(dir)` once [`SlotPool::acquire_path`] has provided the
-    /// directory; `None` for a non-builder, and for a builder admitted by a
-    /// daemon predating this field.
+    /// What: `Some(dir)` once [`SlotPool::reserve_path`] has found the slot
+    /// seeded; `None` for a non-builder, for a builder admitted by a daemon
+    /// predating this field, and for one admitted onto a slot whose seed had not
+    /// run yet (#8261 critic round).
     ///
-    /// [`SlotPool::acquire_path`]: crate::core::builder_slot_pool::SlotPool::acquire_path
+    /// [`SlotPool::reserve_path`]: crate::core::builder_slot_pool::SlotPool::reserve_path
     /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
     #[serde(default)]
     pub builder_slot_dir: Option<std::path::PathBuf>,

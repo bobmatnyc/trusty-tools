@@ -692,10 +692,13 @@ mod tests {
             available_bytes: Ok(1024 * MB),
             logical_cores: 16,
         };
+        // Ceiling 6, held 4: a 4 here can only be the HOLDER floor, never the
+        // ceiling. With ceiling 4 the assertion passed either way (#8261 critic
+        // round).
         let capacity = resolve_capacity(
             &loaded,
             &BuildersConfig::default(),
-            4,
+            6,
             4,
             &mut QuietWindow::default(),
             at(0),
