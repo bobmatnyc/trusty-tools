@@ -487,12 +487,21 @@ impl DaemonState {
     /// to be read. Every branch here is a stat, a `create_dir_all`, or a map
     /// write.
     /// What: a [`SlotReservation::Ready`] slot is recorded on the lease and
-    /// granted; a [`SlotReservation::Seeding`] slot grants nothing, sets
-    /// [`BuilderSlotGrant::seed_index`] for the caller to seed off this path,
-    /// and carries the notice; a refusal clears the index and marks the grant
-    /// refused, which the caller turns into a release.
+    /// granted; a [`SlotReservation::Seeding`] slot grants nothing, carries the
+    /// notice, and sets [`BuilderSlotGrant::seed_index`] ONLY when this call
+    /// wins the claim on that index's seed; a refusal clears the index and marks
+    /// the grant refused, which the caller turns into a release.
+    ///
+    /// **The `seed_index` handout is a claim, taken under this same mutex.** The
+    /// index is registered in `DaemonState::builder_seeding` here, so a second
+    /// reservation arriving while the first seed is still cloning is admitted
+    /// with a notice and spawns nothing — two seeds of one index share one
+    /// staging directory name, so the later one deletes the earlier one's tree
+    /// mid-copy and the surviving marker then advertises a directory assembled
+    /// from two interleaved runs as warm (#8261 critic round 2).
     /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`,
     /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`,
+    /// `a_second_reservation_does_not_spawn_a_second_seed`,
     /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
     fn reserve_slot_dir(
         &self,
@@ -514,12 +523,16 @@ impl DaemonState {
                      target directory while the seed runs",
                     path.display()
                 );
-                grant.seed_index = Some(index);
+                // Still under the claim mutex, so the check and the claim on
+                // this index's seed cannot race each other.
+                if self.builder_seeding.lock().insert(index) {
+                    grant.seed_index = Some(index);
+                }
                 grant.slot_notice = Some(format!(
                     "builder slot {} had not been seeded yet, so this dispatch was admitted \
                      WITHOUT a private cargo target directory — seeding it inline would have \
-                     outrun the dispatch guard's claim budget. The seed is running now; the \
-                     next builder on this slot gets the private directory.",
+                     outrun the dispatch guard's claim budget. The seed is running; the next \
+                     builder on this slot gets the private directory.",
                     path.display()
                 ));
             }
@@ -532,6 +545,18 @@ impl DaemonState {
                 grant.slot_refused = Some(err.to_string());
             }
         }
+    }
+
+    /// Release this index's seed claim, whatever the seed's outcome (#8261).
+    ///
+    /// Why: the claim taken in [`Self::reserve_slot_dir`] suppresses every later
+    /// spawn for that index, so a seed that ended without releasing would leave
+    /// the slot permanently unseedable — an index nobody can warm, admitting
+    /// every future builder into the shared directory. The blocking task calls
+    /// this on BOTH exits for that reason.
+    /// Test: `a_second_reservation_does_not_spawn_a_second_seed`.
+    pub fn finish_builder_seed(&self, index: u32) {
+        self.builder_seeding.lock().remove(&index);
     }
 
     /// Record the directory [`SlotPool::reserve_path`] provided onto the lease.
