@@ -54,6 +54,9 @@ pub mod budget;
 // row reports and its `--fix` arm seeds.
 pub mod build_env;
 pub mod build_env_repair;
+// #8297: what is actually compiling on this host — the process-table sample the
+// machine-wide builder cap counts, replacing #6892's agent-type classifier.
+pub mod build_probe;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is
 // still stale, and semver alone cannot say so.
