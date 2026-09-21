@@ -282,6 +282,27 @@ pub struct Delegation {
     /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
     #[serde(default)]
     pub builder_slot: Option<u32>,
+    /// The private `CARGO_TARGET_DIR` this builder's slot resolved to (#8261).
+    ///
+    /// Why: the INDEX alone cannot be handed to an engineer — the path depends on
+    /// `builders.slot_pool_root` and on the repo identity, both of which the
+    /// daemon resolves and the hook does not. Recording the resolved path is what
+    /// lets the guard put it in the dispatch brief without re-deriving it.
+    /// What: `Some(dir)` once [`SlotPool::acquire_path`] has provided the
+    /// directory; `None` for a non-builder, and for a builder admitted by a
+    /// daemon predating this field.
+    ///
+    /// [`SlotPool::acquire_path`]: crate::core::builder_slot_pool::SlotPool::acquire_path
+    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    #[serde(default)]
+    pub builder_slot_dir: Option<std::path::PathBuf>,
+    /// How [`Self::builder_slot_dir`] came to exist, rendered (#8261).
+    ///
+    /// Why: a cold slot and a clone-seeded one build at very different speeds, so
+    /// the operator surface has to be able to say which happened.
+    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    #[serde(default)]
+    pub builder_slot_seed: Option<String>,
     /// The working tree the subagent is actually running in, when it differs
     /// from [`Self::cwd`] (#4311).
     ///
@@ -397,6 +418,8 @@ impl Delegation {
             stale_by_agent_type: false,
             isolation: None,
             builder_slot: None,
+            builder_slot_dir: None,
+            builder_slot_seed: None,
             started_at: None,
             ended_at: None,
         }
@@ -440,6 +463,8 @@ impl Delegation {
             stale_by_agent_type: false,
             isolation: None,
             builder_slot: None,
+            builder_slot_dir: None,
+            builder_slot_seed: None,
             started_at: Some(now),
             ended_at: None,
         }
