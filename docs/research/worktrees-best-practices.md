@@ -60,7 +60,7 @@ The following is a point-in-time investigation on September 21, approximately
 
 | Observation | Interpretation and limit |
 | --- | --- |
-| Mac Studio, M4 Max, 16 CPU cores, 128 GB RAM | Already substantial Rust build hardware; replacement value is unproven. |
+| Apple Silicon workstation, 16 CPU cores, 128 GB RAM | Already substantial Rust build hardware; replacement value is unproven. |
 | `~/.cargo/config.toml` sets `build.jobs = 4` | Builds inherit four jobs unless overridden. This is conservative for one build, but may be reasonable for several simultaneous builds. Jobs are not a strict CPU-core utilization limit. |
 | Three sampled agent worktrees had no checkout-level Cargo configuration; recent successful command dispatches used separate explicit target directories | The main checkout's shared target configuration was not automatically providing those worktrees with warm artifacts. |
 | Recent check logs contained extensive dependency compilation/checking; two commands exceeded the tool's 600-second foreground timeout | There is meaningful build work and delay, but these logs alone do not attribute elapsed time between compilation, contention, or resource pressure. |
@@ -74,9 +74,7 @@ Follow-up, 2026-09-21 afternoon (PM session tm-dogfood): a later sccache reading
 
 Evidence was read from system process/resource snapshots, local Cargo settings,
 the daemon's `/health` and `/api/v1/builder-slots` endpoints, and recent agent
-transcripts/build logs. Relevant sessions were
-`8ccd3824-e93c-43ee-a94e-3c9148ec0433` and
-`60975f66-3e73-4817-befd-9c9a4ccf2d18`.
+transcripts/build logs. Two Claude Code sessions on 2026-09-21 were inspected.
 No builds were launched, settings changed, or sessions interrupted.
 
 ## Follow-up findings, 2026-09-21 afternoon (PM session tm-dogfood)
@@ -292,10 +290,8 @@ changed except where a finding says otherwise.
    sessions, replaces the default worktree logic, and returns the
    directory to adopt; a `WorktreeRemove` hook pairs with it. ADR-0036
    (2026-08-09) says the harness exposes no way to relocate worktrees; that
-   was true of settings and is now stale with respect to hooks. Unverified:
-   whether the hook's input JSON carries the requesting agent type or
-   branch, or only a generated name. An instrumented dry run is needed
-   before design.
+   was true of settings and is now stale with respect to hooks. Verified by
+   dry run; see finding 12.
 
    Ownership: the tm daemon extends the #8261 slot lease to pair a
    target-directory slot with a stable-path worktree slot under one
@@ -360,6 +356,40 @@ changed except where a finding says otherwise.
     merged PR, and nothing reconciles on a schedule. This matches the
     original document's Abandon lifecycle stage and its "Explain every
     skipped cleanup" bullet, both of which describe this missing step.
+
+12. **[Framework] `WorktreeCreate` hook dry run.** Acceptance item 1 of
+    [#8343](https://github.com/bobmatnyc/trusty-tools/issues/8343). Run on
+    Claude Code 2.1.278 in a throwaway repository, three non-interactive
+    runs: two with `--worktree`, one subagent with `isolation: worktree`.
+    Nothing in this repository's or the user's Claude settings was changed.
+    - The hook replaces worktree creation. It printed a fixed pool path;
+      the session's working directory and branch matched it; nothing fell
+      back to `.claude/worktrees/`. A second run and the subagent run were
+      handed the same existing tree and adopted it.
+    - Input observed for `--worktree`: `session_id`, `transcript_path`,
+      `cwd`, `hook_event_name`, `name`. For a subagent: the same plus
+      `prompt_id`, with `name` an opaque `agent-<id>`. No agent type,
+      branch, or base ref appeared. The published example JSON shows
+      `base_ref` and `isolation` fields; neither was observed, so the run
+      is the authority. Neither event supports a matcher; a non-zero exit
+      aborts creation.
+    - The lease therefore needs a side channel. The daemon already sees
+      the dispatch at PreToolUse, where
+      [#8261](https://github.com/bobmatnyc/trusty-tools/issues/8261)
+      injects `CARGO_TARGET_DIR`, and can record a pending lease per
+      `session_id` for the hook to claim. Ordering of several isolated
+      dispatches sent in one message is unverified.
+    - Claude Code trusts the returned path without checking it. The
+      second run adopted a tree still on the first run's leftover branch.
+      The pool must guarantee a handed-out tree is clean, unoccupied, and
+      reset to `origin/main`; when none is free it must refuse the lease
+      and fall back to default creation, never share a tree.
+    - `WorktreeRemove` fired in none of the three runs. Returning a tree
+      to the pool cannot depend on it; key the return off subagent
+      completion and pull-request merge. Behaviour in an interactive
+      session is unverified.
+    - The hook cannot know the branch. Hand out the tree detached at
+      `origin/main` and let the dispatched agent create its branch.
 
 ## Language adapters
 
