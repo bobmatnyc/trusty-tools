@@ -290,24 +290,17 @@ report      = []
 # context-orchestrator timeout fail-open test (#550).
 tokio        = { workspace = true, features = ["test-util"] }
 tempfile     = { workspace = true }
-# #6277: the combined-PR obligation from the design review —
-# `tests/uds_consumer_contract.rs` stands this daemon up on a temp socket and
-# asserts BOTH consumers see it healthy. A gap between the daemon and either
-# consumer leaves `tctl` kickstarting a live daemon (#4246), which is why they
-# ship together and why the proof lives here rather than in three separate
-# crates that each mock the other side.
-#
-# PATH-ONLY, deliberately no `version`: `cargo package` strips a dev-dependency
-# that carries no version requirement, so this does NOT make trusty-review's
-# publish wait for trusty-console's and trusty-installer's. A `workspace = true`
-# entry would carry the version and create exactly that ordering constraint.
-#
-# One developer-visible cost: trusty-console has a `build.rs` that builds its
-# Svelte UI, so `cargo test -p trusty-review` now needs pnpm on PATH. Without it,
-# set `SKIP_UI_BUILD=1` — the build script's documented escape hatch, and what CI
-# uses.
-trusty-console   = { path = "../trusty-console" }
-trusty-installer = { path = "../trusty-installer" }
+# #8341: the `trusty-console` and `trusty-installer` dev-dependencies were
+# REMOVED as DEAD. They were added on #6277 for
+# `tests/uds_consumer_contract.rs`, and #6354 deleted that file with the serve
+# daemon it tested — leaving two path edges no `use` site in this crate had
+# referenced since. They still cost every `cargo test -p trusty-review` and
+# `cargo clippy -p trusty-review --all-targets` both crates' compile time, and
+# made this crate's test build need pnpm on PATH (or `SKIP_UI_BUILD=1`) for
+# trusty-console's Svelte `build.rs`. The prose references left in `src/` name
+# the console and the installer as consumers of THIS crate's output; none of
+# them is an import. `scripts/check_dev_dep_edges.sh` refuses a new edge of
+# this shape.
 # Why (#5466): `git2` was REMOVED. Its only use was the profile diff-sampler
 # tests, which went with `src/profile/`.
 # serial_test: run env-mutating tests serially to prevent env-var races across
