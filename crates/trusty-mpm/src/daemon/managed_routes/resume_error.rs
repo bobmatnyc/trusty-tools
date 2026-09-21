@@ -84,6 +84,17 @@ pub enum ResumeManagedError {
     #[error("{0}")]
     PaneGone(String),
 
+    /// Another path is already resuming this session → HTTP 409.
+    ///
+    /// Why (#8233 item 4): distinct from [`Self::Other`], which is a 500 and
+    /// reads as "the launch failed". Nothing failed here — the operator asked
+    /// twice, or asked while the supervisor's own resume was mid-flight, and
+    /// the honest answer is "one is already running", not an internal error.
+    /// What: carries the session id.
+    /// Test: `a_second_operator_resume_is_refused_while_one_is_in_flight`.
+    #[error("a resume is already in flight for session {0}; not starting a second one")]
+    AlreadyResuming(String),
+
     /// Any other genuinely-internal failure (store/I-O) → HTTP 500.
     #[error("{0}")]
     Other(String),
@@ -104,6 +115,8 @@ impl From<ManagedError> for ResumeManagedError {
         match e {
             ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
             ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
+            // #8233 item 4: a refused claim is a conflict, never a 500.
+            ManagedError::ResumeInFlight(id) => ResumeManagedError::AlreadyResuming(id),
             // The Display impls of these two variants already carry the vanished
             // path/pane and the concrete remedy — preserve them verbatim so the
             // 422 body is fully actionable at the CLI.
@@ -163,6 +176,9 @@ impl IntoResponse for ResumeManagedError {
             }
             ResumeManagedError::InvalidState(reason) => {
                 (StatusCode::CONFLICT, reason).into_response()
+            }
+            e @ ResumeManagedError::AlreadyResuming(_) => {
+                (StatusCode::CONFLICT, e.to_string()).into_response()
             }
             ResumeManagedError::WorkspaceGone(msg) => {
                 unresumable_response(msg, "workspace_missing")

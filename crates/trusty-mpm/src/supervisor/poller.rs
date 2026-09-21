@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
+use crate::session_manager::manager::ManagedError;
 use crate::session_manager::{ManagedSessionState, SessionManager};
 
 use super::config::SupervisorConfig;
@@ -71,6 +72,12 @@ pub async fn run_tick<C: LlmClassifier>(
     cfg: &SupervisorConfig,
     monitor: Option<&ActivityMonitor<C>>,
 ) -> TickReport {
+    // #8233 review round 2 (finding 4): a spec abandoned by a launch nobody was
+    // around to finish holds `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
+    // cleartext, and `LaunchSpec::write_in`'s own sweep only runs when a NEXT
+    // launch arrives. Tying it to the heartbeat makes reaping depend on the
+    // daemon being alive rather than on a launch happening.
+    crate::runtime::launch_spec::reap_orphans();
     let records = mgr.list().await;
     let mut report = TickReport {
         observed: records.len(),
@@ -94,6 +101,30 @@ pub async fn run_tick<C: LlmClassifier>(
                             "supervisor: auto-resumed stopped session"
                         );
                         report.resumed.push(record.id.to_string());
+                    }
+                    // #8233 item 4: another path is mid-resume on this session.
+                    // Nothing failed, so the tick neither errors the record nor
+                    // counts a failure — it leaves the session to the writer
+                    // that holds it and looks again next tick.
+                    Err(ManagedError::ResumeInFlight(_)) => {
+                        info!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: another path is resuming this session; skipping this tick"
+                        );
+                    }
+                    // #8233 round 3, finding 3: `resume_auto` already marked the
+                    // record errored with this very message. Counting the
+                    // failure is right; appending a SECOND `[error: …]` note to
+                    // the task is not — `auto_relaunch` hands that task to the
+                    // next relaunch.
+                    Err(ManagedError::AutoResumeRecorded(msg)) => {
+                        error!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: auto-resume failed (already recorded on the record): {msg}"
+                        );
+                        report.resume_failures += 1;
                     }
                     Err(e) => {
                         error!(

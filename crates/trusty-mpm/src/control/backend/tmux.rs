@@ -145,8 +145,13 @@ impl TmuxBackend {
         let cmd_str = build_claude_command(&claude_cmd, prompt_file.as_deref())
             .with_context(|| format!("building claude command for session {session_id}"))?;
         let target = TmuxTarget::session(&tmux_name);
+        // #8233 review round 2 (finding 5): `send_line` types straight into the
+        // pane's canonical-mode tty with no length guard, so a long `claude_cmd`
+        // or prompt-file path silently lost its tail here exactly as it did on
+        // the managed path. `send_command_line` refuses an over-length line
+        // instead of letting the kernel truncate it.
         driver
-            .send_line(&target, &cmd_str)
+            .send_command_line(&target, &cmd_str)
             .with_context(|| format!("failed to start claude in tmux session {tmux_name}"))?;
 
         debug!(

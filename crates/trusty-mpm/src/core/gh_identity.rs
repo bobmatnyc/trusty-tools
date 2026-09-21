@@ -390,7 +390,7 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
 /// Test: `binding_removes_the_inherited_identity_vars`,
 /// `absent_config_and_host_only_binding_remove_nothing`,
 /// `inherited_identity_to_clear_ignores_an_informational_only_binding`,
-/// and `gh_env_file_unsets_an_inherited_token` in
+/// and `env_unset_clears_an_inherited_gh_token` in
 /// `runtime::claude_code_gh_env_tests`.
 pub fn inherited_identity_to_clear(set_vars: &[(String, String)]) -> Vec<String> {
     let selects_identity = set_vars

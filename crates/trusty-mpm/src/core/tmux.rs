@@ -843,6 +843,73 @@ pub(crate) fn probe_alternate_screen(bin: &str) -> Result<bool, String> {
     }
 }
 
+/// Ceiling on a SHELL COMMAND LINE typed into a pane, in bytes (#8233).
+///
+/// Why: a pane's tty is in CANONICAL mode until the shell's line editor takes
+/// over, and a canonical-mode line discipline buffers at most `MAX_CANON` bytes
+/// — 1024 on macOS (`sys/syslimits.h:89`; `fpathconf(pty, _PC_MAX_CANON)`
+/// returns 1024 on a live pty). `tmux send-keys` types into that buffer, so a
+/// longer command loses its tail with no error anywhere: session `dd0e2fb8-…`
+/// died with a 1054-byte launch line cut off mid-path at
+/// `internal-spawn-disclaimed /Use`. The bytes are dropped by the KERNEL, so
+/// nothing downstream can detect it — refusing to type the line is the only
+/// place the failure can be made visible.
+/// What: 960, leaving 64 bytes of headroom under `MAX_CANON` for the terminating
+/// newline and any line-discipline overhead. It is NOT the target size: every
+/// migrated builder emits a fixed-shape line well under 512 bytes (#8233). This
+/// is the backstop that makes a builder still composing an unbounded line fail
+/// LOUDLY instead of silently truncating.
+/// Test: `pane_command_limit_sits_below_max_canon`,
+/// `oversized_pane_command_is_refused`.
+pub const MAX_PANE_COMMAND_BYTES: usize = 960;
+
+/// Refuse a pane COMMAND line that the tty's canonical buffer would truncate.
+///
+/// Why: see [`MAX_PANE_COMMAND_BYTES`]. This is deliberately scoped to command
+/// lines — text typed at a SHELL — and is NOT applied to
+/// [`send_keys_literal`](crate::daemon::tmux::TmuxDriver::send_keys_literal) or
+/// to task injection. Once Claude Code's TUI owns the pane the tty is in RAW
+/// mode, where `MAX_CANON` does not apply and a multi-kilobyte task prompt is
+/// both legitimate and routine; refusing those would break task delivery to fix
+/// a limit that is not in force.
+/// What: `None` when `text` fits; otherwise a one-line operator-facing message
+/// naming the actual size, the limit, and the issue.
+/// Test: `oversized_pane_command_is_refused`, `pane_command_at_the_limit_is_allowed`.
+pub fn refuse_oversized_pane_command(text: &str) -> Option<String> {
+    if text.len() <= MAX_PANE_COMMAND_BYTES {
+        return None;
+    }
+    Some(format!(
+        "refusing to type a {}-byte command into a tmux pane: the tty's canonical-mode \
+         input buffer holds at most MAX_CANON (1024) bytes, so anything over \
+         {MAX_PANE_COMMAND_BYTES} would be silently truncated mid-command (#8233). The \
+         builder that produced this line must carry its parameters in a launch spec \
+         instead of in the typed line.",
+        text.len()
+    ))
+}
+
+/// [`send_line`] for a SHELL COMMAND, refusing an oversized line (#8233).
+///
+/// Why: the CLI/TUI launch paths type a composed `claude` invocation at the
+/// pane's shell prompt, which is exactly the canonical-mode case
+/// [`MAX_PANE_COMMAND_BYTES`] exists for. Routing them through this wrapper
+/// rather than [`send_line`] keeps the guard off the injection paths, which
+/// share the same primitive but type into a raw-mode TUI.
+/// What: [`refuse_oversized_pane_command`] first — on refusal NOTHING is typed
+/// and an `InvalidInput` error carries the message — else [`send_line`].
+/// Test: `send_command_line_refuses_an_oversized_line`.
+pub fn send_command_line(
+    tmux_bin: Option<&str>,
+    target: &TmuxTarget,
+    text: &str,
+) -> std::io::Result<std::process::Output> {
+    if let Some(msg) = refuse_oversized_pane_command(text) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    send_line(tmux_bin, target, text)
+}
+
 /// Type `text` into a tmux pane, then press Enter (#2398 consolidation).
 ///
 /// Why: every call site that starts `claude` in a freshly-created pane needs

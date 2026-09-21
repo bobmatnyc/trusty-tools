@@ -90,9 +90,22 @@ impl TcodeAdapter {
     /// that depends on the environment), closing the silent-skip gap in #1213.
     /// What: constructs the command via [`build_spawn_command`] (which carries
     /// the `TM_MANAGED_SESSION_ID` export, #2023 component B), logs it, and
-    /// forwards it to `send_line`, mapping any tmux failure to
-    /// [`RuntimeError::TmuxUnavailable`]. It does NOT check binary availability.
-    /// Test: `tcode_adapter_spawn_sends_run_task` (always runs in CI).
+    /// forwards it to
+    /// [`send_command_line`](crate::session_manager::ManagedTmuxDriver::send_command_line),
+    /// mapping any tmux failure to [`RuntimeError::TmuxUnavailable`]. It does
+    /// NOT check binary availability.
+    ///
+    /// #8233 review (HIGH): this used the UNGUARDED `send_line`, and the line's
+    /// length is dominated by the free-form `task`, so a task over ~960 bytes
+    /// reproduced the original defect here — the tty's canonical-mode buffer
+    /// dropped the tail in the kernel and `tcode` ran a silently TRUNCATED task.
+    /// The guard turns that into a refusal the caller marks the record errored
+    /// on. `tcode run-task` takes its task as an argv token with no file form to
+    /// redirect it through, so refusing is the whole remedy available inside this
+    /// crate; the alternative — running a task nobody wrote — is worse than not
+    /// running one.
+    /// Test: `tcode_adapter_spawn_sends_run_task` (always runs in CI),
+    /// `tcode_spawn_refuses_a_task_that_would_truncate`.
     fn send_spawn_command(
         &self,
         tmux_name: &str,
@@ -108,7 +121,7 @@ impl TcodeAdapter {
             "spawning tcode in tmux pane"
         );
         self.tmux
-            .send_line(tmux_name, &command)
+            .send_command_line(tmux_name, None, &command)
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
         // #2157 item 1: durable publish, belt-and-suspenders alongside the
         // pane-shell export baked into build_spawn_command above — see
@@ -328,6 +341,29 @@ mod tests {
                 && key == "TM_MANAGED_SESSION_ID"
                 && value == TEST_SESSION_ID),
             "send_spawn_command must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
+        );
+    }
+
+    /// #8233 review (HIGH): this adapter's line length is dominated by the
+    /// free-form `task`, so before the guard a task over ~960 bytes reproduced
+    /// the original defect here — the tty dropped the tail in the kernel and
+    /// `tcode` ran a SILENTLY truncated task. Refusing is the remedy: `tcode
+    /// run-task` takes the task as an argv token with no file form, and running
+    /// a task nobody wrote is worse than running none.
+    #[test]
+    fn tcode_spawn_refuses_a_task_that_would_truncate() {
+        let fake = FakeTmux::new();
+        let adapter = TcodeAdapter::new(fake.clone());
+        let task = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES + 1);
+
+        let err = adapter
+            .send_spawn_command("tmpm-test", Path::new("/tmp"), &task, TEST_SESSION_ID)
+            .expect_err("an over-length task must be refused, never truncated");
+
+        assert!(err.to_string().contains("#8233"), "{err}");
+        assert!(
+            fake.sends.lock().expect("send log mutex").is_empty(),
+            "nothing may be typed when the line is refused"
         );
     }
 

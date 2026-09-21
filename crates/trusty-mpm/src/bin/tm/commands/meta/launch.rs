@@ -161,7 +161,8 @@ pub(crate) async fn new_session_manager(state_dir: &Path) -> Result<SessionManag
 /// prompt/MCP into `project_dir` (a prep failure is non-fatal: logged, the launch
 /// proceeds); (2) creates a tmux session rooted at `project_dir` via
 /// `create_with_id` (cwd = project, so NO git clone happens — the `--no-provision`
-/// behaviour); (3) builds the Claude Code adapter and `spawn`s `claude` in the
+/// behaviour); (3) builds the Claude Code adapter over the caller's
+/// `framework_root` (#8233) and `spawn`s `claude` in the
 /// pane; (4) when `task` is `Some`, sends it into the pane (after a short settle
 /// so `claude` is ready to receive it) — this is how the demo task reaches the
 /// session, mirroring `SessionManager::send_input`; (5) polls `session_exists`
@@ -174,6 +175,7 @@ pub(crate) async fn new_session_manager(state_dir: &Path) -> Result<SessionManag
 pub(crate) async fn launch_and_wait(
     mgr: &SessionManager,
     project_dir: &Path,
+    framework_root: &Path,
     task: Option<&str>,
     timeout: Duration,
 ) -> Result<LaunchReport> {
@@ -239,7 +241,15 @@ pub(crate) async fn launch_and_wait(
     // the existing scope boundary around the bare-`tm` in-place relaunch
     // path (`build_inplace_resume_command`).
     // #7685: `None` only when preparation failed before resolving one.
-    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), memory_reachable);
+    // #8233: `framework_root` arrives from the command entry point, which plays
+    // `DaemonState`'s role on this daemon-free path. Resolving a layout here
+    // instead is the #4203 defect.
+    let adapter = build_adapter(
+        RuntimeKind::ClaudeCode,
+        mgr.tmux_driver(),
+        memory_reachable,
+        framework_root,
+    );
     adapter
         .spawn(
             &record.tmux_name,
@@ -371,8 +381,9 @@ mod tests {
     /// `#[ignore]`d and cannot count probes. Discarding the prepared value and
     /// passing `None` made the adapter probe trusty-memory a second time.
     /// What: reads this file's production half and asserts the prepared value is
-    /// bound and is what `build_adapter` receives, with no `None` left in its
-    /// place.
+    /// bound and appears in `build_adapter`'s argument list, with no `None` left
+    /// in its place. The argument list is read as a whole so a later argument or
+    /// a rustfmt rewrap cannot fail the guard for a reason it does not name.
     /// Test: itself.
     #[test]
     fn meta_run_hands_the_adapter_the_prepared_reachability() {
@@ -382,15 +393,21 @@ mod tests {
             production.contains("Some(report.memory_reachable)"),
             "the prepared reachability must be kept"
         );
+        // #8233 gave `build_adapter` a fourth argument and rustfmt wrapped the
+        // call across lines, so read its ARGUMENT LIST rather than pinning one
+        // line's exact spelling — which is what broke this guard.
+        let args = production
+            .split_once("build_adapter(")
+            .and_then(|(_, rest)| rest.split_once(");"))
+            .map(|(args, _)| args)
+            .expect("the production half must call build_adapter");
         assert!(
-            production.contains(
-                "build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), memory_reachable)"
-            ),
-            "build_adapter must receive the prepared reachability"
+            args.contains("memory_reachable"),
+            "build_adapter must receive the prepared reachability, got: {args}"
         );
         assert!(
-            !production.contains("mgr.tmux_driver(), None)"),
-            "a `None` here makes the adapter probe trusty-memory again"
+            !args.contains("None"),
+            "a `None` here makes the adapter probe trusty-memory again, got: {args}"
         );
     }
 

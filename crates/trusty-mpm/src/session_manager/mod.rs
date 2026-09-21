@@ -29,11 +29,14 @@ pub mod prune;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
+pub mod relaunch;
 pub mod rename;
 pub mod residency_state;
 pub mod restart_ops;
 /// #6568: the auto-resume circuit breaker's policy and its persisted counters.
 pub mod resume_breaker;
+/// #8233 item 4: the per-session in-flight resume guard.
+pub(crate) mod resume_in_flight;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;

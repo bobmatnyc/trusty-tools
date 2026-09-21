@@ -21,7 +21,7 @@
 //! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
 //! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -75,6 +75,34 @@ pub enum ManagedError {
     /// The operation is not valid for the current session state.
     #[error("invalid state transition for session {0}: {1}")]
     InvalidState(String, String),
+
+    /// Another path is already resuming this session (#8233 item 4).
+    ///
+    /// Why: distinct from [`InvalidState`](Self::InvalidState), which says the
+    /// RECORD forbids a resume. This says the record permits one and someone
+    /// else got there first, so the caller's correct response is to leave the
+    /// session alone — the supervisor must not append an error to a record the
+    /// operator's resume is still working on, and a second launch line must
+    /// never reach the pane. Typed so the supervisor can tell this apart from
+    /// a real failure instead of matching on message text.
+    /// What: carries the session id. Raised only by
+    /// [`SessionManager::begin_resume`](super::SessionManager::begin_resume).
+    /// Test: `a_second_concurrent_resume_of_one_session_is_refused`.
+    #[error("a resume is already in flight for session {0}; not starting a second one")]
+    ResumeInFlight(String),
+
+    /// An auto-resume failed AND has already recorded the failure (#8233).
+    ///
+    /// Why: `resume_auto` marks the record errored itself, which APPENDS
+    /// `[error: …]` to `record.task`. The supervisor's generic failure arm then
+    /// marked it errored a second time, so one failed auto-resume left TWO
+    /// notes on the task the next relaunch hands to the runtime. Typed rather
+    /// than string-matched: the poller must be able to tell "already recorded"
+    /// from "failed before anything was written" without reading the message.
+    /// What: carries the failure text, which is also what the record now holds.
+    /// Test: `one_failed_auto_resume_appends_exactly_one_error_note`.
+    #[error("{0}")]
+    AutoResumeRecorded(String),
 
     /// Adoption was requested for a tmux session that does not exist on the host.
     ///
@@ -268,6 +296,16 @@ pub struct SessionManager {
     /// touching) for a session whose root has not changed. In-memory only,
     /// like `slots` and `residency_generation` above. See `residency_state.rs`.
     pub(crate) residency_cache: RwLock<HashMap<ManagedSessionId, ResidencyCacheEntry>>,
+    /// #8233: the runtime relaunch the AUTOMATIC resume paths use. Installed
+    /// once by the daemon; `None` everywhere else, which keeps `resume_auto`
+    /// behaving exactly as it did. See `relaunch.rs`.
+    pub(crate) relauncher:
+        std::sync::OnceLock<std::sync::Arc<dyn super::relaunch::RuntimeRelauncher>>,
+    /// #8233 item 4: session ids with a resume in flight. In-memory only, like
+    /// `slots` — it guards two callers inside ONE daemon process (the operator
+    /// path and the supervisor tick), and a fresh process has no resume in
+    /// flight to remember. See `resume_in_flight.rs`.
+    pub(crate) resume_in_flight: super::resume_in_flight::InFlightSet,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -309,6 +347,10 @@ impl SessionManager {
             resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
             residency_generation: AtomicU64::new(0),
             residency_cache: RwLock::new(HashMap::new()),
+            relauncher: std::sync::OnceLock::new(),
+            // #8233 item 4: empty at construction; every entry is added and
+            // removed by a `ResumeInFlightGuard` within one resume call.
+            resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         })
     }
 
@@ -714,7 +756,9 @@ impl SessionManager {
     /// (this module's tests) asserts the CAS guard below;
     /// `generation_increments_across_mark_runtime_exited_stopped` in
     /// `daemon::managed_routes::residency`'s route tests asserts the #7087
-    /// residency bump.
+    /// residency bump;
+    /// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` asserts the
+    /// #8233 in-flight refusal below.
     ///
     /// CAS guard (#2453 review finding 3): the pre-fix implementation read
     /// the record via [`Self::get`] (which acquires and releases the store's
@@ -738,6 +782,15 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
     ) -> Result<SessionRecord, ManagedError> {
+        // #8233: a resume writes `Active` before the runtime exists, so for the
+        // whole rest of that resume this reconcile would see "Active, no
+        // runtime" and stop the record under the path that is still working on
+        // it — handing the next supervisor tick a `Stopped` record to launch a
+        // SECOND time. The claim is not a lock this caller can take (it must
+        // not queue behind the resume, it must decline), so it reads it.
+        if self.is_resume_in_flight(id) {
+            return Err(ManagedError::ResumeInFlight(id.to_string()));
+        }
         let mut guard = self.store.write().await;
         if let Err(e) = guard.reload_if_changed().await {
             // Reload failed (transient I/O): do NOT surface as "not found" —
@@ -893,6 +946,10 @@ impl SessionManager {
     /// [`Self::resume_auto`] instead (in the sibling `resume_breaker` module),
     /// which stamps the attempt without forgiving anything.
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        // #8233 item 4: held across the whole resume, so the supervisor tick
+        // cannot enter this session's `resume_auto` mid-flight. Dropped on
+        // every exit path below, including the `?`.
+        let _in_flight = self.begin_resume(id)?;
         let record = self.resume_inner(id).await?;
         self.note_operator_resume(id).await;
         Ok(record)

@@ -107,12 +107,14 @@ const PROBE_TOKEN: &str = "probe-token-not-a-credential";
 fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
 
-    // Shell-string builders: parse the `-u` operands out of the `env` prefix.
-    // #7685: `memory_reachable: true` — this probe is about the `-u` scrub list,
-    // and the reachable branch is the one that carries every assignment, so it is
-    // the strictly wider line to check.
-    let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[], true);
+    // #8233: the daemon's spawn/resume/attach paths no longer build a shell
+    // string, so there is no `env -u` prefix to parse for them — they carry a
+    // STRUCTURED unset list in the launch spec. Reading that list directly is
+    // the same guarantee with one parse step removed: drop the scrub from
+    // `managed_env_unset` and this check fails.
+    // A `gh_env` of `&[]` matches the common unconfigured project; the #6668
+    // identity clears it adds are orthogonal to the marker scrub this probes.
+    let managed_unset = crate::runtime::managed_env_unset(&[]);
     // #4181: probe the RELOCATED shape — `tm launch` / `tm connect` now emit
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
@@ -150,8 +152,8 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
 
     vec![
         (
-            "runtime::claude_code::env_bin_prefix (daemon spawn + resume)",
-            owned(parse_env_unset_vars(&prefix)),
+            "runtime::managed_launch::managed_env_unset (daemon spawn + resume + attach)",
+            managed_unset,
         ),
         (
             "core::model_inject::build_claude_command (tm launch / tm connect)",

@@ -43,6 +43,15 @@ pub(crate) struct FakeTmux {
     /// item 1) so adapter tests can assert `TM_MANAGED_SESSION_ID` is durably
     /// published at spawn/resume, not just exported into the pane shell line.
     pub(crate) env_sets: Mutex<Vec<(String, String, String)>>,
+    /// What this fake "shell" has PRINTED, which `capture` returns.
+    ///
+    /// #8233: the launcher now confirms the pane executes what it is typed
+    /// before it types a launch. A double that never prints anything is an
+    /// unresponsive shell, and every adapter test would start failing for a
+    /// reason invented by the double. Answering the probe — and ONLY the probe,
+    /// via `pane_handshake::probe_reply` — makes this fake a shell that works,
+    /// which is what these tests have always assumed.
+    pane_text: Mutex<String>,
 }
 
 impl FakeTmux {
@@ -58,7 +67,23 @@ impl FakeTmux {
             sends: Mutex::new(Vec::new()),
             pane_sends: Mutex::new(Vec::new()),
             env_sets: Mutex::new(Vec::new()),
+            pane_text: Mutex::new(String::new()),
         })
+    }
+
+    /// Answer a probe line as a working shell would, without recording it.
+    ///
+    /// What: `true` when `text` was a probe and has been answered — the caller
+    /// then returns without logging, so every existing `sends`/`pane_sends`
+    /// assertion still sees exactly the launch lines it always did.
+    fn answer_probe(&self, text: &str) -> bool {
+        let Some(out) = crate::runtime::pane_handshake::probe_reply(text) else {
+            return false;
+        };
+        let mut pane = self.pane_text.lock().expect("FakeTmux pane text poisoned");
+        pane.push_str(&out);
+        pane.push('\n');
+        true
     }
 }
 
@@ -72,6 +97,9 @@ impl ManagedTmuxDriver for FakeTmux {
     }
 
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.answer_probe(text) {
+            return Ok(());
+        }
         self.sends
             .lock()
             .expect("FakeTmux send log mutex poisoned")
@@ -84,6 +112,9 @@ impl ManagedTmuxDriver for FakeTmux {
     /// `sends` stayed empty is exactly what proves the adapter chose the
     /// pane-scoped path over the session-scoped one.
     fn send_line_to_pane(&self, name: &str, pane_id: &str, text: &str) -> Result<(), ManagedError> {
+        if self.answer_probe(text) {
+            return Ok(());
+        }
         self.pane_sends
             .lock()
             .expect("FakeTmux pane-send log mutex poisoned")
@@ -92,7 +123,22 @@ impl ManagedTmuxDriver for FakeTmux {
     }
 
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-        Ok(String::new())
+        Ok(self
+            .pane_text
+            .lock()
+            .expect("FakeTmux pane text poisoned")
+            .clone())
+    }
+
+    /// #8233: the pane-scoped read the handshake uses when a `pane_id` is
+    /// known. Same text as [`Self::capture`] — this fake has one pane.
+    fn capture_pane(
+        &self,
+        name: &str,
+        _pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.capture(name, lines)
     }
 
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {

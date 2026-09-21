@@ -338,6 +338,9 @@ pub(crate) async fn resume_core(state: &Arc<DaemonState>, id_str: &str) -> Route
             RouteOutcome::text(404, format!("session {id} not found"))
         }
         Err(ResumeManagedError::InvalidState(reason)) => RouteOutcome::text(409, reason),
+        // #8233 item 1: nothing failed — another path holds this session's
+        // resume. A conflict, never a 500.
+        Err(e @ ResumeManagedError::AlreadyResuming(_)) => RouteOutcome::text(409, e.to_string()),
         Err(ResumeManagedError::WorkspaceGone(msg)) => {
             RouteOutcome::text(422, msg).with_rpc_code(CODE_WORKSPACE_GONE)
         }

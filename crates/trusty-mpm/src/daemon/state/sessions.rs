@@ -1256,9 +1256,15 @@ impl DaemonState {
     /// the fleet, the more recoverable of the two mistakes (`tm session stop`
     /// still records Deliberate on that host and still sticks).
     ///
+    /// #8233 — a session whose resume is IN FLIGHT is skipped entirely. See the
+    /// guard's own comment in the body for why a missing `tmux_name` proves
+    /// nothing while a resume is recreating that very session.
+    ///
     /// Test: `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
-    /// `reap_leaves_a_whole_server_loss_auto_resumable` in `super::tests`.
+    /// `reap_leaves_a_whole_server_loss_auto_resumable`,
+    /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
+    /// `super::tests`.
     pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
         let mgr = self.session_manager().await;
         let records = mgr.list().await;
@@ -1272,6 +1278,22 @@ impl DaemonState {
             if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
                 && !live.contains(&r.tmux_name)
             {
+                // #8233 acceptance item 4: `resume_inner`'s recreate branch
+                // KILLS and rebuilds this tmux session, so a `live` set snapshot
+                // taken before that kill reports the name missing while the
+                // resume is still mid-flight. Stopping here kills the pane the
+                // resume just made and stamps `Deliberate`, which no automatic
+                // path ever revives. The claim is not a lock this sweep can
+                // take (it must decline, not queue), so it reads it — the same
+                // rule `mark_runtime_exited_stopped` follows.
+                if mgr.is_resume_in_flight(&r.id) {
+                    tracing::info!(
+                        id = %r.id,
+                        name = %r.tmux_name,
+                        "reaper: a resume is in flight for this session; leaving it alone (#8233)"
+                    );
+                    continue;
+                }
                 match mgr.stop_with_cause(&r.id, cause).await {
                     Ok(_) => tracing::info!(
                         id = %r.id,

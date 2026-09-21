@@ -228,6 +228,18 @@ pub async fn serve_with_shutdown(
     let fw = watcher::FileWatcher::new(Arc::clone(&state));
     tokio::spawn(fw.spawn(cancel.child_token()));
 
+    // #8233 (owner ruling 2026-09-18): give the session manager the runtime
+    // relaunch its AUTOMATIC resume paths need, before anything can sweep. Until
+    // this is installed `resume_auto` prepares a pane and marks the record
+    // `Active` with nothing in it — the fleet state a daemon restart produced.
+    // The boot reconcile inside `session_manager()` defers its own auto-resume
+    // to the supervisor for exactly that reason; see `session_manager::reconcile`.
+    managed_routes::auto_relaunch::install_auto_relauncher(&state).await;
+    // #8233 review round 2 (finding 4): sweep launch specs abandoned by an
+    // earlier process. Each carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
+    // cleartext, and the per-launch sweep only runs when a NEXT launch happens.
+    crate::runtime::launch_spec::reap_orphans();
+
     // Spawn the periodic dead-session reaper with a cancel token.
     tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));
 

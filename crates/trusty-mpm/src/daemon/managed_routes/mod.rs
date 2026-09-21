@@ -25,6 +25,7 @@ use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
+pub(crate) mod auto_relaunch;
 pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;
@@ -62,6 +63,9 @@ pub(crate) mod residency;
 pub mod adopt_worktree;
 pub mod rename;
 mod resume_error;
+// #8233 item 1: the resume claim's span across `resume_managed`.
+#[cfg(test)]
+mod resume_claim_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;

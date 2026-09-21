@@ -131,10 +131,35 @@ fn cli_parses_internal_spawn_disclaimed() {
     // var-arg, including hyphen-led flags — exactly the pane-command shape.
     let cli =
         Cli::try_parse_from(["trusty-mpm", "internal-spawn-disclaimed", "claude", "-p"]).unwrap();
-    let Some(Command::InternalSpawnDisclaimed { argv }) = cli.command else {
+    let Some(Command::InternalSpawnDisclaimed { launch_spec, argv }) = cli.command else {
         panic!("expected internal-spawn-disclaimed");
     };
     assert_eq!(argv, ["claude", "-p"]);
+    assert!(launch_spec.is_none(), "the argv form carries no spec");
+}
+
+/// #8233: the managed form names a launch spec and carries no trailing argv —
+/// that is what keeps the typed pane line a fixed size.
+#[test]
+fn cli_parses_internal_spawn_disclaimed_launch_spec() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "internal-spawn-disclaimed",
+        "--launch-spec",
+        "/specs/abc.json",
+    ])
+    .unwrap();
+    let Some(Command::InternalSpawnDisclaimed { launch_spec, argv }) = cli.command else {
+        panic!("expected internal-spawn-disclaimed");
+    };
+    assert_eq!(
+        launch_spec.as_deref(),
+        Some(std::path::Path::new("/specs/abc.json"))
+    );
+    assert!(
+        argv.is_empty(),
+        "the spec form takes no trailing argv: {argv:?}"
+    );
 }
 
 #[test]
