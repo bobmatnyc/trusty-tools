@@ -69,6 +69,15 @@ pub struct PlistFinding {
     pub unmapped: Vec<String>,
     /// Why the file could not be judged, when it could not be.
     pub unreadable: Option<String>,
+    /// The file is a binary (`bplist00`) property list.
+    ///
+    /// Why (#8236 item 4, owner ruling 2026-09-21): this round neither reads
+    /// nor rewrites a binary plist, so the exposure can be neither confirmed
+    /// nor removed, and the remedy is one command the operator must run. That
+    /// is a FAILING row, not an unknown one — an unknown invites "probably
+    /// fine", and a plist that once held a credential most likely still does.
+    /// Test: `row_fails_on_a_binary_plist`.
+    pub binary_plist: bool,
 }
 
 impl PlistFinding {
@@ -156,32 +165,36 @@ fn judge(path: PathBuf) -> PlistFinding {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return unreadable(path, mode, format!("could not read it: {}", e.kind()));
+            return unreadable(path, mode, format!("could not read it: {}", e.kind()), false);
         }
     };
     if is_binary_plist(&bytes) {
         return unreadable(
             path,
             mode,
-            "it is a BINARY plist, which this scan cannot read — convert it with \
-             `plutil -convert xml1 <path>` and re-run `tm doctor`"
-                .to_string(),
+            format!(
+                "it is a BINARY plist, which this scan cannot read — convert it with \
+                 `plutil -convert xml1 {}` and re-run `tm doctor`",
+                path.display()
+            ),
+            true,
         );
     }
     let Ok(xml) = String::from_utf8(bytes) else {
-        return unreadable(path, mode, "it is not valid UTF-8".to_string());
+        return unreadable(path, mode, "it is not valid UTF-8".to_string(), false);
     };
     finding_for(path, mode, &xml)
 }
 
 /// A finding that names why the file could not be judged.
-fn unreadable(path: PathBuf, mode: Option<u32>, why: String) -> PlistFinding {
+fn unreadable(path: PathBuf, mode: Option<u32>, why: String, binary_plist: bool) -> PlistFinding {
     PlistFinding {
         path,
         mode,
         migratable: Vec::new(),
         unmapped: Vec::new(),
         unreadable: Some(why),
+        binary_plist,
     }
 }
 
@@ -222,9 +235,10 @@ fn finding_for(path: PathBuf, mode: Option<u32>, xml: &str) -> PlistFinding {
                 migratable,
                 unmapped,
                 unreadable: None,
+                binary_plist: false,
             }
         }
-        Err(e) => unreadable(path, mode, e.reason),
+        Err(e) => unreadable(path, mode, e.reason, false),
     }
 }
 
@@ -267,6 +281,7 @@ pub(crate) fn check_launchd_plist_secrets(home: &Path) -> DoctorCheck {
 /// the statuses never drops the unjudged file from the report.
 /// Test: `row_fails_and_names_the_key_not_the_value`, `row_is_ok_when_clean`,
 /// `row_is_unknown_when_a_plist_cannot_be_parsed`,
+/// `row_fails_on_a_binary_plist`,
 /// `row_fail_still_names_the_plists_it_could_not_judge`.
 fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
     let unreadable: Vec<String> = findings
@@ -284,6 +299,30 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
         .collect();
     if !exposed.is_empty() {
         return DoctorCheck::new(CHECK_NAME, CheckStatus::Fail, fail_message(&exposed, &unreadable));
+    }
+
+    // #8236 item 4 (owner ruling 2026-09-21): a binary plist is the one
+    // unreadable cause this round can neither judge nor repair, and its remedy
+    // is a single command. It fails the row rather than leaving an unknown,
+    // because an unknown on a file that once held a credential gets ignored.
+    let binary: Vec<String> = findings
+        .iter()
+        .filter(|f| f.binary_plist)
+        .map(|f| f.path.display().to_string())
+        .collect();
+    if !binary.is_empty() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Fail,
+            format!(
+                "{} LaunchAgent plist(s) are BINARY and cannot be read or repaired here: {} — \
+                 whether they hold a plaintext credential is UNKNOWN, and `tm doctor --fix` \
+                 refuses them. Convert each with `plutil -convert xml1 <path>`, then re-run \
+                 `tm doctor`",
+                binary.len(),
+                binary.join("; ")
+            ),
+        );
     }
 
     if !unreadable.is_empty() {

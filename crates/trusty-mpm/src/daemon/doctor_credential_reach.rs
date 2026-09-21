@@ -61,7 +61,8 @@ pub struct ReachVerdict {
 /// Test: `a_timeout_is_reported_as_a_waiting_dialog`,
 /// `an_absent_credential_is_not_an_error`,
 /// `a_store_error_names_its_kind`,
-/// `a_present_credential_is_never_printed`.
+/// `a_present_credential_is_never_printed`,
+/// `an_unregistered_name_is_reported_as_unresolvable`.
 #[must_use]
 pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> ReachVerdict {
     let (verdict, degraded, needs_approval) = match outcome {

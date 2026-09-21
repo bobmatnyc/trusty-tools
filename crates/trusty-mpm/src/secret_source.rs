@@ -30,10 +30,17 @@
 //!
 //! Test: `secret_source_tests.rs`.
 
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
+
 use trusty_common::credential_registry::is_registered_credential_env_var;
-use trusty_common::credentials::{
-    SecretResolveError, load_env_local_once, resolve_env_var_bounded,
-};
+#[cfg(test)]
+use trusty_common::credential_registry::provider_for_env_var;
+#[cfg(test)]
+use trusty_common::credentials::{KeyStore, resolve_provider_bounded_with};
+use trusty_common::credentials::{SecretResolveError, load_env_local_once, resolve_env_var_bounded};
 
 /// Resolve `var` through the shipped resolver, logging any failure by kind.
 ///
@@ -56,17 +63,55 @@ use trusty_common::credentials::{
 pub fn resolve_secret(var: &str) -> Option<String> {
     if !is_registered_credential_env_var(var) {
         load_env_local_once();
-        return match std::env::var(var) {
-            Ok(value) if !value.is_empty() => Some(value),
-            _ => {
-                log_failure(&SecretResolveError::Absent {
-                    var: var.to_string(),
-                });
-                None
-            }
-        };
+        return process_env_only(var);
     }
-    match resolve_env_var_bounded(var) {
+    report(resolve_env_var_bounded(var))
+}
+
+/// Hermetic core of [`resolve_secret`]: the same arms against an injected store.
+///
+/// Why: every failure arm of [`resolve_secret`] runs through the credential
+/// store, and a test that reached the real one would need an OS keychain, a
+/// real `$HOME`, and — for the timeout arm — a human at a dialog. Injecting the
+/// store is the only way to prove each arm returns `None` rather than a default.
+/// What: identical to [`resolve_secret`] except that the store tier and its
+/// bound are the caller's, and `.env.local` is not loaded (a test must not have
+/// the host's own dotenv decide its outcome).
+/// Test: `an_absent_secret_is_none_and_logs_absent`,
+/// `a_store_timeout_is_none_and_logs_timeout`,
+/// `a_store_error_is_none_and_logs_the_kind`,
+/// `an_unregistered_variable_reads_only_the_process_environment`.
+#[cfg(test)]
+#[must_use]
+fn resolve_secret_with(var: &str, store: Arc<dyn KeyStore>, timeout: Duration) -> Option<String> {
+    let Some(provider) = provider_for_env_var(var) else {
+        return process_env_only(var);
+    };
+    report(resolve_provider_bounded_with(provider, store, timeout))
+}
+
+/// The process-environment tier, on its own.
+///
+/// Why: an UNREGISTERED name has no provider and therefore no store tier, so
+/// this IS its whole resolution — never a `.env` read, never a default.
+fn process_env_only(var: &str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => {
+            log_failure(&SecretResolveError::Absent {
+                var: var.to_string(),
+            });
+            None
+        }
+    }
+}
+
+/// Turn a resolution outcome into the fail-closed `Option` callers see.
+///
+/// Why: one place where a failure becomes `None`, so no arm can grow a fallback
+/// without this function changing.
+fn report(outcome: Result<String, SecretResolveError>) -> Option<String> {
+    match outcome {
         Ok(value) => Some(value),
         Err(e) => {
             log_failure(&e);

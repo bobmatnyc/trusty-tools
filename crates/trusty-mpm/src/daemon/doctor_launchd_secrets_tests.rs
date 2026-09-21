@@ -138,6 +138,7 @@ fn scan_reports_a_binary_plist_as_unknown() {
 
     assert!(why.contains("BINARY"), "{why}");
     assert!(why.contains("plutil -convert xml1"), "{why}");
+    assert!(findings[0].binary_plist, "the binary flag drives the row");
     assert!(findings[0].migratable.is_empty());
 }
 
@@ -277,6 +278,32 @@ fn row_is_unknown_when_a_plist_cannot_be_parsed() {
     );
 }
 
+/// Why (#8236 item 4, owner ruling 2026-09-21): a binary plist is the one file
+/// this round can neither judge nor repair. The row must FAIL — never pass,
+/// never merely warn — and must name the one command that makes the file
+/// readable, or the operator has a red row with no way out of it. A downgrade
+/// of this arm to `Unknown`, `Warn` or `Ok`, or a message that drops the
+/// remedy, fails here.
+/// Test: this test.
+#[test]
+fn row_fails_on_a_binary_plist() {
+    let home = home_with_agents();
+    let path = home.path().join("Library/LaunchAgents/com.trusty.mpm.plist");
+    let mut bytes = b"bplist00".to_vec();
+    bytes.extend_from_slice(&[0xd1, 0x01, 0x02]);
+    std::fs::write(&path, bytes).expect("write");
+
+    let row = check_launchd_plist_secrets(home.path());
+
+    assert_eq!(row.status, CheckStatus::Fail, "{row:?}");
+    assert!(row.message.contains("BINARY"), "{}", row.message);
+    assert!(
+        row.message.contains("plutil -convert xml1"),
+        "the row must name the remedy: {}",
+        row.message
+    );
+}
+
 /// Why: same, for the directory-level failure.
 /// Test: this test.
 #[test]
@@ -413,11 +440,16 @@ fn repair_refuses_a_binary_plist() {
         Arc::new(MemoryKeyStore::new()),
     );
 
-    assert!(
-        matches!(steps[0].status, StepStatus::Failed(_)),
-        "{:?}",
-        steps[0].status
-    );
+    let StepStatus::Failed(why) = &steps[0].status else {
+        panic!("a binary plist must be refused loudly: {:?}", steps[0].status);
+    };
+    // Owner ruling 2026-09-21: a refusal is acceptable this round only if it
+    // names the way out. A refusal that just said "cannot" would leave the
+    // operator with a red row and no next step.
+    assert!(why.contains("BINARY"), "{why}");
+    assert!(why.contains("plutil -convert xml1"), "{why}");
+    assert!(why.contains(&path.display().to_string()), "{why}");
+    assert!(why.contains("re-run `tm doctor`"), "{why}");
     assert_eq!(std::fs::read(&path).expect("read"), bytes);
 }
 

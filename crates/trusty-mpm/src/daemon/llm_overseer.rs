@@ -403,8 +403,7 @@ fn parse_verdict(reply: &str) -> OverseerDecision {
 /// then `.env.local`, then the bounded store — and returns `""` on EVERY
 /// failure, which is the existing "overseer disabled" signal. The failure is
 /// logged at ERROR by name and kind there; nothing here retries or falls back.
-/// Test: `resolve_api_key_reads_env_var`, `resolve_api_key_missing_is_empty`,
-/// `overseer_stays_disabled_when_the_credential_is_unresolvable`.
+/// Test: `overseer_stays_disabled_when_the_credential_is_unresolvable`.
 fn resolve_api_key(var_name: &str) -> String {
     crate::secret_source::resolve_secret(var_name).unwrap_or_default()
 }
