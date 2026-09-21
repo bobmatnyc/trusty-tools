@@ -23,6 +23,13 @@
 //! Pointing each at a socket by hand would prove the wire format and silently
 //! skip the thing most likely to drift.
 //!
+//! #8341: this file used to be `crates/trusty-analyze/tests/uds_consumer_contract.rs`,
+//! and the four consumers were `[dev-dependencies]` of trusty-analyze — about
+//! 135 crates added to every `cargo test -p trusty-analyze` and every
+//! `cargo clippy -p trusty-analyze --all-targets`, in every worktree. Here all
+//! five crates are NORMAL dependencies, so the contract is proven at the same
+//! cost to whoever runs it and at none to anyone else.
+//!
 //! Test: `every_consumer_sees_a_live_uds_daemon_as_healthy`,
 //! `every_consumer_sees_an_absent_daemon_as_not_running`,
 //! `the_deadline_code_trusty_review_copies_is_the_one_this_daemon_sends`.
@@ -166,6 +173,34 @@ fn state_over(dir: &Path, search_base: &str) -> AnalyzerAppState {
     AnalyzerAppState::new(TrustySearchClient::new(search_base), facts, overlays)
 }
 
+/// The version the daemon itself puts on the wire.
+///
+/// Why (#8341): this expectation used to be spelled `env!("CARGO_PKG_VERSION")`,
+/// which named trusty-analyze's version only while the test lived inside
+/// trusty-analyze. From here that macro reads THIS crate's version instead, so
+/// the expectation has to come off the socket — which is the stronger claim
+/// anyway: what the console renders on its service card must be what the daemon
+/// sent, not what some build-time constant in the test says.
+/// What: calls `analyze.health` through the shared framed client and returns the
+/// `version` field of the result envelope.
+/// Test: `every_consumer_sees_a_live_uds_daemon_as_healthy`.
+async fn daemon_reported_version(socket: &Path) -> String {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": trusty_analyze::service::METHOD_HEALTH,
+        "params": {},
+    });
+    let response: serde_json::Value =
+        trusty_common::uds::send_framed_request(socket, &request, Duration::from_secs(20))
+            .await
+            .expect("the daemon must answer analyze.health");
+    response["result"]["version"]
+        .as_str()
+        .unwrap_or_else(|| panic!("analyze.health carried no version: {response}"))
+        .to_string()
+}
+
 /// Poll until something is serving `socket`, or panic after a bounded wait.
 async fn wait_until_serving(socket: &Path) {
     for _ in 0..200 {
@@ -215,6 +250,10 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
 
     wait_until_serving(&socket).await;
 
+    // What the daemon itself says its version is — the value every consumer
+    // below must be shown to be reading off the live envelope (#8341).
+    let daemon_version = daemon_reported_version(&socket).await;
+
     // ── Consumer 1: trusty-console's dashboard connector ─────────────────────
     let info = tokio::task::spawn_blocking(|| AnalyzeConnector::new().detect())
         .await
@@ -227,7 +266,7 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
     );
     assert_eq!(
         info.version.as_deref(),
-        Some(env!("CARGO_PKG_VERSION")),
+        Some(daemon_version.as_str()),
         "the console renders this on the service card, so it must come off the \
          live envelope rather than a placeholder"
     );
@@ -238,7 +277,7 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
     match &outcome {
         ProbeOutcome::Serving { status, version } => {
             assert_eq!(status, "ok");
-            assert_eq!(version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+            assert_eq!(version.as_deref(), Some(daemon_version.as_str()));
         }
         other => panic!("tctl must see a live UDS daemon as Serving, got {other:?}"),
     }
