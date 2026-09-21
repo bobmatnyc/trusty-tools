@@ -481,6 +481,19 @@ pub struct DaemonState {
     /// and a global would make every test share one window.
     /// Test: `n_rises_only_after_a_full_quiet_window`.
     pub(super) builder_quiet_window: parking_lot::Mutex<crate::core::builder_capacity::QuietWindow>,
+    /// Slot indices whose one-time seed is running right now (#8261).
+    ///
+    /// Why: a `Seeding` admission holds its index while it builds, but the
+    /// admission can end inside the multi-minute clone — and the index is then
+    /// free for the next claim, which finds the slot still unmarked and would
+    /// spawn a SECOND seed of the same index. The two share one staging
+    /// directory name, so the later one deletes the earlier one's tree mid-copy
+    /// and the surviving marker is written over a directory assembled from two
+    /// interleaved runs. This set is what makes at most one seed per index be
+    /// in flight; it is in-memory because a daemon restart kills the tasks it
+    /// would be tracking.
+    /// Test: `a_second_reservation_does_not_spawn_a_second_seed`.
+    pub(super) builder_seeding: parking_lot::Mutex<std::collections::HashSet<u32>>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
     ///
     /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
@@ -599,6 +612,7 @@ impl DaemonState {
             dispatch_record: parking_lot::Mutex::new(()),
             builder_claim: parking_lot::Mutex::new(()),
             builder_quiet_window: parking_lot::Mutex::default(),
+            builder_seeding: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
@@ -683,6 +697,7 @@ impl DaemonState {
             dispatch_record: parking_lot::Mutex::new(()),
             builder_claim: parking_lot::Mutex::new(()),
             builder_quiet_window: parking_lot::Mutex::default(),
+            builder_seeding: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }

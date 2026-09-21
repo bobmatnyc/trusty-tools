@@ -214,14 +214,34 @@ pub async fn builder_slot_route(
     // #8261 critic round: the seed is the unbounded half of the pool and runs
     // AFTER the answer, never under the claim mutex the hook is waiting on.
     if let (Some(index), Some(pool)) = (outcome.seed_index, resolved.pool) {
-        let clone_from = resolved.clone_from;
-        tokio::task::spawn_blocking(move || {
-            if let Err(err) = pool.seed(index, clone_from.as_deref()) {
-                tracing::warn!("builder slot {index} could not be seeded: {err}");
-            }
-        });
+        spawn_seed(Arc::clone(&state), pool, resolved.clone_from, index);
     }
     Ok(Json(outcome.response))
+}
+
+/// Run one slot's seed off the answering path, then release its claim (#8261).
+///
+/// Why: named rather than inlined so the release is impossible to lose. The
+/// claim that `DaemonState::reserve_slot_dir` took on this index suppresses
+/// every later spawn for it, so a task that returned without releasing would
+/// strand the slot unseedable forever — and the error arm is the one most
+/// likely to be written without it.
+/// What: `spawn_blocking`, because `SlotPool::seed` shells `cp -c -R` over a
+/// directory measured at 207 GB and would otherwise block a runtime worker.
+/// Both exits call [`DaemonState::finish_builder_seed`].
+/// Test: `the_route_sequence_seeds_once_then_grants_the_slot_ready`.
+fn spawn_seed(
+    state: Arc<DaemonState>,
+    pool: SlotPool,
+    clone_from: Option<std::path::PathBuf>,
+    index: u32,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = pool.seed(index, clone_from.as_deref()) {
+            tracing::warn!("builder slot {index} could not be seeded: {err}");
+        }
+        state.finish_builder_seed(index);
+    })
 }
 
 /// The pool for this dispatch's repo, or why there is none.
@@ -741,6 +761,174 @@ mod tests {
         assert!(
             outcome.response.slot_notice.is_some(),
             "admitting with no private directory must say so"
+        );
+    }
+
+    /// #8261 critic round 2, HIGH: at most one seed per index is ever in flight.
+    ///
+    /// A `Seeding` admission holds its index with no directory, so the dispatch
+    /// can END inside the multi-minute clone; `assign_builder_slot` then frees
+    /// the index, and the next claim's `reserve_path` still finds no marker.
+    /// Without a registry that second claim spawned a second `seed(N)`, whose
+    /// first act is `remove_dir_all` of the ONE staging name — deleting the
+    /// first run's tree mid-copy, after which whichever survived renamed over
+    /// `dst` and wrote `SEED_MARKER` over a directory assembled from two
+    /// interleaved runs. Fails without `DaemonState::builder_seeding`.
+    #[test]
+    fn a_second_reservation_does_not_spawn_a_second_seed() {
+        let (state, dir, session) = hermetic();
+        let pool = test_pool(dir.path().join("pool"));
+
+        let first = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+        assert_eq!(
+            first.seed_index,
+            Some(0),
+            "the first reservation wins the seed"
+        );
+
+        // The first dispatch ends while its seed is still cloning — its lease
+        // stops being live, which is what frees slot 0 for the next claim.
+        assert!(
+            state.release_denied_builder_dispatch(session, Some("toolu_A")),
+            "the first dispatch's record must exist to be ended"
+        );
+
+        let second = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_B")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+
+        assert!(
+            second.response.claimed,
+            "the second dispatch is still admitted — only the SEED is suppressed"
+        );
+        assert_eq!(
+            second.seed_index, None,
+            "a seed already in flight for this index must not be spawned twice"
+        );
+        assert!(
+            second.response.slot_notice.is_some(),
+            "and the admission still says it carries no private directory"
+        );
+
+        // The seed task's own release is what makes the index seedable again —
+        // without it slot 0 could never be warmed by anyone.
+        state.release_denied_builder_dispatch(session, Some("toolu_B"));
+        state.finish_builder_seed(0);
+        let third = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_C")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+        assert_eq!(
+            third.seed_index,
+            Some(0),
+            "a released index is seedable again by the next claim to hold it"
+        );
+    }
+
+    /// #8261 critic round 2: the spawn arm itself, in the route's own order.
+    ///
+    /// `builder_slot_route` cannot be driven here — it reads the operator's real
+    /// `~/.trusty-mpm` and home directory, and a test that let it resolve the
+    /// pool root would write under the real `~/.trusty-tools` (#8311's 42,000
+    /// leaked directories). This drives the same two calls the route makes, in
+    /// the same order, against a temp pool root.
+    #[tokio::test]
+    async fn the_route_sequence_seeds_once_then_grants_the_slot_ready() {
+        let (state, dir, session) = hermetic();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("a warm shared dir");
+        std::fs::write(shared.join("sentinel.rlib"), b"warm").expect("an artifact");
+        let pool = test_pool(dir.path().join("pool"));
+
+        let first = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+        assert!(
+            first.response.slot_path.is_none(),
+            "the first claim is cold"
+        );
+
+        let index = first.seed_index.expect("the first claim owes a seed");
+        spawn_seed(
+            Arc::clone(&state),
+            pool.clone(),
+            Some(shared.clone()),
+            index,
+        )
+        .await
+        .expect("the seed task runs to completion");
+        // The cold dispatch finishes, freeing slot 0 for the next builder.
+        state.release_denied_builder_dispatch(session, Some("toolu_A"));
+
+        let second = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_B")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id")
+        .response;
+
+        let path = second
+            .slot_path
+            .expect("the seeded slot is granted to the next builder");
+        assert!(path.ends_with("slot-0"), "{path}");
+        assert_eq!(
+            second.slot_seed.as_deref(),
+            Some("AlreadySeeded"),
+            "a seeded slot is granted as warm, not re-seeded"
+        );
+        assert!(
+            second.slot_notice.is_none(),
+            "a granted slot owes no explanation: {:?}",
+            second.slot_notice
         );
     }
 
