@@ -42,6 +42,7 @@ use crate::core::agent::is_subagent_dispatch_tool;
 use crate::core::builder_capacity::Capacity;
 #[cfg(test)]
 use crate::core::builder_capacity::CapacityReason;
+use crate::core::builder_slot_pool::SlotPool;
 use crate::core::builders::resolve_max_concurrent;
 use crate::core::config::MpmConfig;
 use crate::core::dispatch_isolation::{agent_is_builder, dispatch_agent};
@@ -114,6 +115,18 @@ pub struct BuilderSlotResponse {
     /// taken at all and the count fell back to the fixed ceiling (#8261).
     #[serde(default)]
     pub fail_closed_surface: Option<String>,
+    /// The private `CARGO_TARGET_DIR` this claim was granted (#8261).
+    ///
+    /// Why: the whole point of the slot pool is that the admitted builder builds
+    /// somewhere of its own. The guard cannot derive this path — it depends on
+    /// `builders.slot_pool_root` and the repo identity, both resolved daemon-side
+    /// — so the answer carries it and the guard puts it in the dispatch brief.
+    /// `serde(default)` keeps a `tm` older than the daemon parsing the answer.
+    #[serde(default)]
+    pub slot_path: Option<String>,
+    /// How [`Self::slot_path`] came to exist, rendered (#8261).
+    #[serde(default)]
+    pub slot_seed: Option<String>,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -154,9 +167,60 @@ pub async fn builder_slot_route(
     // tier table, with `builders.max_concurrent` as the hard ceiling.
     let config = MpmConfig::load_default().builders;
     let capacity = state.builder_capacity(&config, resolve_max_concurrent(), None);
-    Ok(Json(builder_slot_op_with_capacity(
-        &state, &id, req, &capacity,
+    // #8261: the pool is resolved HERE, in the daemon, for the same reason the
+    // cap is — `builders.slot_pool_root` and the repo identity are the daemon's
+    // to read, and a hook deriving them itself would be a second authority.
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let project_dir = str_field(&req.payload, "cwd").map(std::path::PathBuf::from);
+    let (pool, clone_from) = resolve_slot_pool(&config, &home, project_dir.as_deref());
+    Ok(Json(builder_slot_op_with_pool(
+        &state,
+        &id,
+        req,
+        &capacity,
+        pool.as_ref(),
+        clone_from.as_deref(),
     )?))
+}
+
+/// The slot pool for this dispatch's repo, and the directory to seed from.
+///
+/// Why: identity and clone source resolve exactly as `doctor_rust_build_env`'s
+/// `gather` does, so the pool a builder is given and the row `tm doctor` prints
+/// can never disagree about which repo this is or where its warm cache lives.
+/// What: `None` when the payload named no `cwd`, or the checkout has no git
+/// identity — both leave the claim on the pre-#8261 index-only path rather than
+/// guessing a pool location.
+/// Test: `the_route_grants_a_private_target_dir_from_the_pool`.
+fn resolve_slot_pool(
+    config: &crate::core::builders::BuildersConfig,
+    home: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+) -> (Option<SlotPool>, Option<std::path::PathBuf>) {
+    let Some(project_dir) = project_dir else {
+        return (None, None);
+    };
+    let Some(identity) = trusty_common::github_path::derive_github_path(project_dir) else {
+        return (None, None);
+    };
+    let build = trusty_common::crate_config::load_at::<
+        crate::core::trusty_tools_config::TrustyToolsConfig,
+    >(&trusty_common::crate_config::crate_config_path_at(
+        home,
+        crate::core::trusty_tools_config::CRATE_NAME,
+    ))
+    .ok()
+    .flatten();
+    let clone_from = crate::core::build_env::resolve_build_env(
+        build.as_ref().and_then(|c| c.build.as_ref()),
+        home,
+        Some(&identity),
+        crate::core::build_env::host_cores(),
+    )
+    .ok()
+    .map(|env| env.cargo_target_dir);
+    let pool = SlotPool::new(config.effective_slot_pool_root(home), identity);
+    (Some(pool), clone_from)
 }
 
 /// [`builder_slot_route`]'s body, with the cap supplied and no transport in it.
@@ -244,6 +308,82 @@ pub fn builder_slot_op(
         ceiling: cap,
         capacity_reason: String::new(),
         fail_closed_surface: None,
+        slot_path: None,
+        slot_seed: None,
+    })
+}
+
+/// [`builder_slot_op_with_capacity`], granting the slot's directory too (#8261).
+///
+/// Why: the production route's entry point since #8261 — admission alone leaves
+/// every admitted builder pointed at the one shared target directory, which is
+/// the lock contention this issue exists to end. Kept as a `_with_pool` sibling
+/// rather than a parameter on [`builder_slot_op`] so that function, and the
+/// eight tests driving it, stay on the index-only contract.
+/// What: as [`builder_slot_op_with_capacity`], but the claim runs through
+/// [`DaemonState::claim_builder_slot_with_pool`], so a directory the pool cannot
+/// provide refuses the claim rather than admitting a builder that would fall
+/// back to the shared directory.
+///
+/// # Errors
+///
+/// As [`builder_slot_op`].
+///
+/// Test: `the_route_grants_a_private_target_dir_from_the_pool`,
+/// `a_pool_that_cannot_provide_a_directory_refuses_the_claim`.
+pub fn builder_slot_op_with_pool(
+    state: &Arc<DaemonState>,
+    id: &str,
+    req: BuilderSlotRequest,
+    capacity: &Capacity,
+    pool: Option<&SlotPool>,
+    clone_from: Option<&std::path::Path>,
+) -> Result<BuilderSlotResponse, DaemonError> {
+    let session = uuid::Uuid::parse_str(id)
+        .map(SessionId)
+        .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
+
+    let payload = &req.payload;
+    let exclude = str_field(payload, "tool_use_id");
+    let input = payload.get("input");
+    let eligible = exclude.is_some()
+        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
+        && dispatch_agent(input).is_some_and(agent_is_builder);
+
+    let grant = state.claim_builder_slot_with_pool(
+        capacity.n_effective,
+        exclude,
+        eligible,
+        pool,
+        clone_from,
+        |s| {
+            crate::daemon::services::delegation_tracker::observe(
+                s,
+                session,
+                HookEvent::PreToolUse,
+                payload,
+            );
+        },
+        |s| {
+            crate::daemon::services::delegation_tracker::release_denied_dispatch(
+                s, session, payload,
+            );
+        },
+    );
+
+    Ok(BuilderSlotResponse {
+        holders: grant.holders,
+        cap: capacity.n_effective,
+        claimed: grant.claimed,
+        ineligible: !eligible,
+        ceiling: capacity.ceiling,
+        capacity_reason: capacity.reason.to_string(),
+        fail_closed_surface: capacity
+            .reason
+            .fail_closed_surface()
+            .map(|surface| surface.name().to_string()),
+        slot_path: grant.slot_dir.map(|dir| dir.to_string_lossy().into_owned()),
+        slot_seed: grant.slot_seed,
     })
 }
 
@@ -336,6 +476,87 @@ mod tests {
         d.status = DelegationStatus::Running;
         d.started_at = Some(chrono::Utc::now());
         state.upsert_delegation(d);
+    }
+
+    /// A pool rooted at `root`, for a fixed test identity.
+    fn test_pool(root: std::path::PathBuf) -> SlotPool {
+        SlotPool::new(
+            root,
+            trusty_common::github_path::GithubPath {
+                owner: "acme".to_string(),
+                repo: "widgets".to_string(),
+            },
+        )
+    }
+
+    /// #8261: the answer must carry the DIRECTORY, not only the verdict — the
+    /// guard cannot derive it, so a claim that omits it leaves the engineer
+    /// building in the shared target directory.
+    #[test]
+    fn the_route_grants_a_private_target_dir_from_the_pool() {
+        let (state, dir, session) = hermetic();
+        let pool = test_pool(dir.path().join("pool"));
+        let body = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+
+        assert!(body.claimed, "a quiet machine admits the first builder");
+        let path = body
+            .slot_path
+            .expect("an admitted builder gets a directory");
+        assert!(path.ends_with("slot-0"), "{path}");
+        assert!(
+            std::path::Path::new(&path).is_dir(),
+            "the directory must exist: {path}"
+        );
+        assert!(
+            body.slot_seed.is_some(),
+            "the answer says how it was seeded"
+        );
+    }
+
+    /// #8261 Fail-Open Check, at the route: a pool that cannot provide a
+    /// directory must REFUSE, never admit a builder that would then fall back to
+    /// the shared directory. Fails before `builder_slot_op_with_pool` existed —
+    /// the route ignored the pool and always answered `claimed: true`.
+    #[test]
+    fn a_pool_that_cannot_provide_a_directory_refuses_the_claim() {
+        let (state, dir, session) = hermetic();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"#8261").expect("write blocker");
+        let body = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&test_pool(blocker)),
+            None,
+        )
+        .expect("a well-formed session id");
+
+        assert!(
+            !body.claimed,
+            "an unprovidable slot must refuse, not admit unthrottled"
+        );
+        assert!(body.slot_path.is_none(), "a refusal carries no directory");
+        assert!(
+            !body.ineligible,
+            "this payload WAS eligible; the pool is what failed"
+        );
     }
 
     /// #8261: a `Capacity` the test scripts outright, so no reading of the real

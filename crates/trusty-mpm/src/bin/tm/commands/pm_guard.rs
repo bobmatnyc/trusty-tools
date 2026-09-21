@@ -727,7 +727,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                     // grant prints and returns — a check after this block would
                     // never see a granted dispatch at all.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -764,7 +764,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                     // separate question from where the agent writes, and this is
                     // the only place a rewritten dispatch can still be stopped.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -818,11 +818,18 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // classifies locally and returns before any network call for a non-builder
     // dispatch, so a daemon outage costs builder dispatches only. See its module
     // doc.
+    // #8261: this exit has no worktree rewrite to merge a slot notice into, so
+    // it matches only the DENY arm. An admitted builder reaching here keeps its
+    // slot (the daemon recorded it) but is not yet TOLD the directory — the
+    // notice rides `emit_builder_cap_or`'s grant object, which this path does
+    // not reach. Threading it to the deferred `cost_notice` exit below is the
+    // follow-up; see this file's `emit_cost_notice`.
     if !caller_is_subagent
-        && let Some(reason) = pm_guard_builder_cap::evaluate(
-            url, &payload, tool_name, tool_input, session_id, &hook_cwd,
-        )
-        .await
+        && let pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) =
+            pm_guard_builder_cap::evaluate(
+                url, &payload, tool_name, tool_input, session_id, &hook_cwd,
+            )
+            .await
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
         println!("{}", build_pretooluse_deny_response(&reason));
@@ -1230,42 +1237,6 @@ async fn audit_agent_cost_warning(
         return;
     };
     let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
-}
-
-/// Print the builder-cap deny, or `allowed` when the machine has room (#6892).
-///
-/// Why: the worktree grant has two ALLOW exits and both print a rewrite and
-/// return, so the machine cap has to be asked at each of them or a granted
-/// dispatch escapes it entirely. Folded into one helper rather than written
-/// twice because the two arms differ only in which rewrite they emit, and a
-/// `PreToolUse` hook's stdout may carry exactly one object — duplicating the
-/// print/deny pair is how a second one gets emitted.
-/// What: runs [`pm_guard_builder_cap::evaluate`]; on a deny it audits and prints
-/// the deny, on an allow it prints `allowed` verbatim. Exactly one line reaches
-/// stdout either way.
-/// Test: `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and
-/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` in
-/// `tests/tm_hook_pm_guard.rs` cover the allow exits; the cap's own verdicts are
-/// covered in `commands::pm_guard_builder_cap`.
-#[allow(clippy::too_many_arguments)]
-async fn emit_builder_cap_or(
-    url: &str,
-    payload: &serde_json::Value,
-    tool_name: &str,
-    tool_input: Option<&serde_json::Value>,
-    session_id: &str,
-    hook_cwd: &std::path::Path,
-    allowed: &str,
-) {
-    match pm_guard_builder_cap::evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd)
-        .await
-    {
-        Some(reason) => {
-            audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
-        }
-        None => println!("{allowed}"),
-    }
 }
 
 /// The ceiling [`audit_denied_tool`] can spend before a deny reaches stdout.
