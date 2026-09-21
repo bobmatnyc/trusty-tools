@@ -173,6 +173,7 @@ pub async fn disk_survey(
             agent_state: &agent_state,
             dirt: &inspect_dirt,
             measure: &measure,
+            now: &survey_run::SYSTEM_CLOCK,
         };
         let survey = run(
             &repos_root,

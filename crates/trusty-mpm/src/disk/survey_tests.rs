@@ -9,15 +9,17 @@
 //! HERMETIC: no test here reads the operator's workspace, config, or GitHub.
 //! Every worktree is a scratch git repository in a tempdir; the pull-request
 //! state, the live-session set, and the agent-liveness answer are injected.
+//! The survey's CLOCK is injected too (#8277), so no deadline assertion here
+//! depends on how fast the host happens to be — see [`StepClock`].
 //! Test target: `super::survey`, `super::survey_run`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{GroupBy, ReasonCode, WorktreeFacts, WorktreeTier, classify_tier};
 use crate::disk::size_index::{DirSizeIndex, IndexPolicy};
-use crate::disk::survey_run::{self, DiskProbes, run};
+use crate::disk::survey_run::{self, DiskProbes, SYSTEM_CLOCK, run};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_keep_list::KeepList;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
@@ -29,6 +31,43 @@ use crate::session_manager::worktree_registry::{Admission, ScannedWorktree};
 use crate::session_manager::worktree_safety::{DirtyWorktree, inspect_dirt};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// A clock the test moves by hand, so a deadline crossing is a step (#8277).
+///
+/// Why: the survey's deadline gates are what these tests pin, and reading them
+/// off the wall clock made the tests race the host instead. A `git status` that
+/// costs 40 ms idle costs seconds under a parallel cargo build, so a budget
+/// sized for an idle machine expired at the wrong gate — or before the pass
+/// reached the gate at all — and three tests here failed for that and nothing
+/// else. Advancing the clock from a probe makes the crossing happen at exactly
+/// one point in the pass, on any host and under any load.
+/// What: one `Instant` in a `Cell`. `Instant` has no constructor, so the epoch
+/// comes from the real clock once, at construction, and never again.
+/// Test: `a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row`,
+/// `the_survey_hands_each_measurement_only_the_time_left`,
+/// `a_budgeted_survey_answers_within_its_budget`.
+struct StepClock {
+    at: Cell<Instant>,
+}
+
+impl StepClock {
+    /// A clock stopped at the moment it is built.
+    fn new() -> Self {
+        Self {
+            at: Cell::new(Instant::now()),
+        }
+    }
+
+    /// The instant this clock is stopped at.
+    fn now(&self) -> Instant {
+        self.at.get()
+    }
+
+    /// Spend `by` — what a probe that took that long would do to the clock.
+    fn advance(&self, by: Duration) {
+        self.at.set(self.at.get() + by);
+    }
+}
 
 /// An empty keep-list — the default, and a no-op gate.
 fn no_keeps() -> KeepList {
@@ -521,6 +560,9 @@ fn survey_fixture_grouped(
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        // Every caller of this fixture passes no deadline or a spent one, so
+        // no assertion downstream of it can race the clock (#8277).
+        now: &SYSTEM_CLOCK,
     };
     // #7357: no adopted anchors — the fixture's repos-root walk is the whole
     // surface under test, and injecting `&[]` is what keeps this test off the
@@ -760,16 +802,25 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
 
     // Live when the loop checks THIS worktree, spent by the time `inspect`
     // reaches the measurement: the injected pull-request probe stands in for
-    // the `gh` call the daemon makes, and sleeps past the deadline. The sleep
-    // is scoped to this one worktree so the fixture's other registration — the
-    // `<repos_root>/owner/repo` checkout itself — cannot burn the deadline
-    // first and send this row down the LOOP's not-inspected path instead.
-    let deadline = Instant::now() + Duration::from_millis(1_500);
+    // the `gh` call the daemon makes, and steps the clock past the deadline.
+    // The step is scoped to this one worktree so the fixture's other
+    // registration — the `<repos_root>/owner/repo` checkout itself — cannot
+    // burn the deadline first and send this row down the LOOP's not-inspected
+    // path instead.
+    //
+    // #8277: the probe used to SLEEP, which made that scoping a lie — the real
+    // `git` probes in the other registration's inspection spend wall-clock
+    // time too, and under load they spent all 1.5 s of it before this worktree
+    // was ever reached. Nothing but this probe moves this clock.
+    let clock = StepClock::new();
+    let window = Duration::from_millis(1_500);
+    let deadline = clock.now() + window;
+    let now = || clock.now();
     let inspected: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
     let pr_state = |scanned: &ScannedWorktree, _: Option<Duration>| {
         if scanned.path == wt {
             inspected.borrow_mut().push(scanned.path.clone());
-            std::thread::sleep(Duration::from_millis(2_000));
+            clock.advance(window + Duration::from_millis(500));
         }
         BranchPrState::Merged { pr: 7 }
     };
@@ -789,6 +840,7 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &now,
     };
     let survey = run(
         &fx.repos_root,
@@ -841,8 +893,16 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
     let wt = fx.add_worktree("budgeted");
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
 
+    // #8277: each measurement costs the survey's clock one STEP, so the
+    // budgets are a known, strictly shrinking sequence instead of whatever the
+    // host's load left of a 5-second wall-clock window. The step is deliberately
+    // tiny — the window must outlast however many measurements `run` makes.
+    const STEP: Duration = Duration::from_millis(1);
+
+    let clock = StepClock::new();
+    let now = || clock.now();
     let window = Duration::from_secs(5);
-    let deadline = Instant::now() + window;
+    let deadline = clock.now() + window;
     let seen: RefCell<Vec<Option<Duration>>> = RefCell::new(Vec::new());
     let pr = BranchPrState::Merged { pr: 1 };
     let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
@@ -855,6 +915,7 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         seen.borrow_mut().push(budget);
+        clock.advance(STEP);
         survey_run::measure(&mut index.borrow_mut(), path, budget)
     };
     let probes = DiskProbes {
@@ -863,6 +924,7 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &now,
     };
 
     run(
@@ -890,6 +952,18 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
             "a spent deadline skips the walk entirely"
         );
     }
+    // The time LEFT, not the window: each measurement spends one `STEP`, so a
+    // budget computed from the deadline shrinks by exactly that much and one
+    // handed a constant — the index's own 30-second ceiling, say — does not.
+    assert!(
+        budgets.windows(2).all(|pair| pair[0] > pair[1]),
+        "every measurement is handed less than the one before it: {budgets:?}"
+    );
+    assert_eq!(
+        budgets[0].zip(budgets[1]).map(|(a, b)| a - b),
+        Some(STEP),
+        "the budget shrinks by exactly what the pass has spent: {budgets:?}"
+    );
 
     seen.borrow_mut().clear();
     run(
@@ -982,6 +1056,7 @@ fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &SYSTEM_CLOCK,
     };
     let survey = run(
         &fx.repos_root,
@@ -1038,6 +1113,7 @@ fn a_project_filter_selects_only_that_project() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &SYSTEM_CLOCK,
     };
     let miss = run(
         &fx.repos_root,
@@ -1075,22 +1151,26 @@ fn a_project_filter_selects_only_that_project() {
 /// `budget_seconds: 5` answered in 57.23 s, and `budget_seconds: 20` never
 /// answered inside the bridge's 60-second forwarding timeout at all.
 ///
-/// What it pins: `run` returns inside `BUDGET + GRACE` when the probe honours
-/// the budget it is handed. The probe here stands in for the daemon's `gh`
-/// call exactly as `mcp_disk::pr_for` now behaves — it spends what it was
-/// given, never its own fixed ceiling. Reverting `inspect`'s `left` argument
-/// makes the probe fall back to `SLOW`, and the run then lands at ~3 s.
+/// What it pins: the survey spends at most `BUDGET` when the probe honours the
+/// budget it is handed. The probe here stands in for the daemon's `gh` call
+/// exactly as `mcp_disk::pr_for` now behaves — it spends what it was given,
+/// never its own fixed ceiling. Reverting `inspect`'s `left` argument makes the
+/// probe fall back to `SLOW`, and the pass then spends six times the budget.
+///
+/// #8277: spent on the survey's OWN clock, which this test advances from the
+/// probe. The probe used to `sleep` and the assertion used to read the wall
+/// clock, which measured the host as much as the code — the fixture's four
+/// `git` worktrees and their `git status` probes cost about a second idle and
+/// close to four under a parallel cargo build, so the ceiling had to carry a
+/// `GRACE` that a loaded machine ate anyway.
 #[test]
 fn a_budgeted_survey_answers_within_its_budget() {
     /// What an unbudgeted probe costs — the stand-in for `GH_TIMEOUT`, which
-    /// is ten seconds and can be paid twice. Comfortably past `BUDGET + GRACE`
-    /// so the pre-fix failure is a verdict rather than a race: reverting the
-    /// fix lands this run at ~6 s against a 3 s ceiling.
+    /// is ten seconds and can be paid twice. Six times `BUDGET`, so the pre-fix
+    /// failure is a verdict and not a near miss.
     const SLOW: Duration = Duration::from_millis(6_000);
     /// The whole survey's classification budget.
     const BUDGET: Duration = Duration::from_millis(1_000);
-    /// Room for the registry scan and one in-flight `git` probe.
-    const GRACE: Duration = Duration::from_millis(2_000);
 
     let fx = GitWorktreeFixture::new();
     for name in ["slow-a", "slow-b", "slow-c"] {
@@ -1100,8 +1180,10 @@ fn a_budgeted_survey_answers_within_its_budget() {
 
     // The probe spends its budget and no more. A `None` budget is the pre-fix
     // shape: no ceiling from the survey, so the probe's own one stands.
+    let clock = StepClock::new();
+    let now = || clock.now();
     let pr_state = |_: &ScannedWorktree, left: Option<Duration>| {
-        std::thread::sleep(left.map_or(SLOW, |l| l.min(SLOW)));
+        clock.advance(left.map_or(SLOW, |l| l.min(SLOW)));
         BranchPrState::Merged { pr: 1 }
     };
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
@@ -1120,9 +1202,10 @@ fn a_budgeted_survey_answers_within_its_budget() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &now,
     };
 
-    let started = Instant::now();
+    let started = clock.now();
     let survey = run(
         &fx.repos_root,
         &keep_list,
@@ -1132,10 +1215,10 @@ fn a_budgeted_survey_answers_within_its_budget() {
         GroupBy::None,
         &[],
     );
-    let elapsed = started.elapsed();
+    let spent = clock.now() - started;
     assert!(
-        elapsed < BUDGET + GRACE,
-        "a {BUDGET:?} survey took {elapsed:?} — the budget bounds ENTRY to a \
+        spent <= BUDGET,
+        "a {BUDGET:?} survey spent {spent:?} — the budget bounds ENTRY to a \
          probe but not the probe itself, which is exactly what returned the \
          console a 502 with no survey (#6929)"
     );
@@ -1159,10 +1242,18 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
     let wt = fx.add_worktree("budgeted-lookup");
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
 
+    // #8277: the same injected clock its sibling above uses, for the same
+    // reason — a lookup the loop never reached records no budget at all, and a
+    // wall-clock window is reached or not reached by the host's load.
+    const STEP: Duration = Duration::from_millis(1);
+
+    let clock = StepClock::new();
+    let now = || clock.now();
     let window = Duration::from_secs(5);
     let seen: RefCell<Vec<Option<Duration>>> = RefCell::new(Vec::new());
     let pr_state = |_: &ScannedWorktree, left: Option<Duration>| {
         seen.borrow_mut().push(left);
+        clock.advance(STEP);
         BranchPrState::Merged { pr: 1 }
     };
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
@@ -1181,13 +1272,14 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        now: &now,
     };
 
     run(
         &fx.repos_root,
         &keep_list,
         &probes,
-        Some(Instant::now() + window),
+        Some(clock.now() + window),
         None,
         GroupBy::None,
         &[],
@@ -1250,6 +1342,8 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
         agent_state: &agent_state,
         dirt: &inspect_dirt,
         measure: &measure,
+        // A spent deadline is spent on any clock, so this one stays real.
+        now: &SYSTEM_CLOCK,
     };
 
     let whole = run(
