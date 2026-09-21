@@ -388,6 +388,9 @@ impl DaemonState {
     ///
     /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`,
     /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
+    // The five claim inputs plus the two pool inputs plus `self`. Splitting them
+    // into a struct would hide which of them the claim mutex protects.
+    #[allow(clippy::too_many_arguments)]
     pub fn claim_builder_slot_with_pool<C: FnOnce(&Self), R: FnOnce(&Self)>(
         &self,
         cap: u32,
@@ -544,9 +547,7 @@ impl DaemonState {
     /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
     /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
     fn assign_builder_slot(&self, tool_use_id: Option<&str>) -> Option<u32> {
-        let Some(tool_use_id) = tool_use_id else {
-            return None;
-        };
+        let tool_use_id = tool_use_id?;
         let now = chrono::Utc::now();
         let taken: std::collections::BTreeSet<u32> = self
             .delegations
