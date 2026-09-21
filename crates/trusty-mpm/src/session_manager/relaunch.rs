@@ -4,7 +4,7 @@
 //! Why: `resume_managed` — the interactive path — recreates or reuses the pane
 //! and then calls `RuntimeAdapter::spawn_resume` to put a runtime in it. The two
 //! automatic paths never did. `supervisor::poller::run_tick` and the boot
-//! reconcile tail both call [`SessionManager::resume_auto`], which reached
+//! reconcile tail both call [`crate::session_manager::SessionManager::resume_auto`], which reached
 //! `resume_inner`, got a pane, marked the record `Active`, and stopped. A
 //! session whose pane had died was therefore auto-resumed into a BARE SHELL
 //! with an `Active` record, which is exactly the fleet state the owner observed

@@ -371,7 +371,7 @@ fn prepare_managed_config_with_exe(
 /// Owned pieces of an in-place `claude` relaunch command, built for direct
 /// process `exec` rather than a tmux `send_line` (#2023 component C).
 ///
-/// Why: [`spawn_command`]/[`resume_command`] build single shell STRINGS meant
+/// Why: the pre-#8233 `spawn_command`/`resume_command` built single shell STRINGS meant
 /// for `tmux send-keys` into a pane whose shell does the quoting/splitting.
 /// The bare-`tm` in-pane relaunch instead replaces the CURRENT process image
 /// via `std::os::unix::process::CommandExt::exec` — no shell involved, so
@@ -379,13 +379,13 @@ fn prepare_managed_config_with_exe(
 /// exactly what the caller (the `tm` CLI binary) needs to construct that
 /// [`std::process::Command`] itself.
 /// What: `claude_bin` (resolved absolute path), `args` (the isolation flags
-/// plus `--resume <id>` or neither, mirroring [`resume_command`]'s
+/// plus `--resume <id>` or neither, mirroring `resume_command`'s
 /// selection — see [`compose_inplace_args`]), `config_dir` (the tm-owned
 /// `CLAUDE_CONFIG_DIR`, when resolved), and `oauth_token` (issue #2246 — the
 /// resolved [`crate::core::oauth_token::resolve_oauth_token`] value, when
 /// available). The caller is expected to `env_remove("ANTHROPIC_API_KEY")`
 /// and, when each field is `Some`, set the matching env var (`CLAUDE_CONFIG_DIR`
-/// / `CLAUDE_CODE_OAUTH_TOKEN`) — the same invariants [`env_bin_prefix`]
+/// / `CLAUDE_CODE_OAUTH_TOKEN`) — the same invariants `env_bin_prefix`
 /// encodes into the shell-string commands.
 /// Test: exercised via [`build_inplace_resume_command`]'s tests.
 #[derive(Debug)]
@@ -677,7 +677,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (issue #2246), then
     /// sends a FIXED-SHAPE launch line naming a [`super::launch_spec::LaunchSpec`] the shim reads
-    /// ([`managed_launch::deliver`]); the task is
+    /// ([`super::managed_launch::deliver_in`]); the task is
     /// logged for observability but not passed to the command. `gh_env`
     /// (#3025) is caller-RESOLVED (the daemon's spawn handler consults the
     /// `ProjectRegistry` — the actual write target for a pinned `gh_account`
@@ -814,7 +814,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// alone cannot tell a FINISHED conversation from one Claude Code is still
     /// running as a background job — the `.jsonl` exists either way, and the
     /// live one refuses `--resume` — so the choice now runs through
-    /// [`claude_code_agents::relaunch_command`], which attaches instead.
+    /// [`claude_code_agents::relaunch_spec`], which attaches instead.
     /// What: resolves the claude binary, provisions + trust-seeds the tm-owned
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
     /// `claude_session_id` against the resolved config dir, falls back to a
@@ -823,7 +823,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// same carrier `spawn` uses, previously missing from every resume path),
     /// resolves an optional `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (#2246 — same carrier
-    /// `spawn` uses), then sends the appropriate [`resume_command`] to the
+    /// `spawn` uses), then sends the appropriate resume launch line to the
     /// tmux pane — targeting the SPECIFIC `pane_id` (via
     /// [`ManagedTmuxDriver::send_line_to_pane`]) when the caller supplies one,
     /// rather than the session-scoped [`ManagedTmuxDriver::send_line`], which
