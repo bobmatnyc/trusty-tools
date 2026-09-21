@@ -1,0 +1,2 @@
+Added
+- `tm memory recall|remember|note` reach the trusty-memory palace over the daemon's Unix socket, so a session whose `mcp__trusty-memory__*` connection is dead keeps memory access. They honour `TRUSTY_MEMORY_PALACE` and the committed pin with a `--palace` override, mirror the MCP tools' arguments (`--top-k`, `--room`, `--wing`, `--min-score`, `--tag`), print a stable envelope under `--json`, and exit non-zero naming the socket when nothing answers.

@@ -87,6 +87,9 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
+// #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
+// own file so the dispatcher stays a translation layer and stays under cap.
+pub(crate) mod memory_verbs;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only

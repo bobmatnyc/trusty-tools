@@ -589,15 +589,26 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DivertAction,
     },
-    /// Deterministic trusty-memory palace maintenance (issue #4837).
+    /// Palace access and maintenance without MCP (#4837, #8352).
+    ///
+    /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the
+    /// `mcp__trusty-memory__*` tools are unavailable — a dead MCP connection
+    /// does not cut this session off from memory. They call the same daemon
+    /// methods the MCP tools do (`memory_recall`, `memory_remember`,
+    /// `memory_note`) over its Unix socket, honour the session's own palace
+    /// (`TRUSTY_MEMORY_PALACE`, then the committed pin, then the repo slug)
+    /// with a `--palace` override, and print a stable envelope under `--json`.
+    /// With the daemon down each exits non-zero naming the socket it dialled.
     ///
     /// Why: bulk-loading a directory of memory files into a palace is ETL —
     /// read file, map frontmatter onto drawer fields, write. Routing it
     /// through an agent cost 622k tokens for 120 files, because every tool
     /// round re-sends the agent's accumulated context. This group is the
     /// zero-inference path, and the prerequisite for issue #4834.
-    /// What: the `tm memory <action>` command group (currently `import`).
-    /// Test: `cli_parses_memory_import*` in `tests.rs`.
+    /// What: the `tm memory <action>` command group — `recall`, `remember`,
+    /// `note`, `import` and `import-auto-memory`.
+    /// Test: `cli_parses_memory_import*`, `cli_parses_memory_recall` in
+    /// `tests.rs`.
     Memory {
         /// Action to run.
         #[command(subcommand)]

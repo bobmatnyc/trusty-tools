@@ -187,6 +187,9 @@ pub mod auto_memory_import;
 // #7685: auto memory is a FALLBACK — every write site that turns it off asks
 // this module whether trusty-memory is available first.
 pub mod memory_reachable;
+// #8352: `tm memory recall|remember|note` — palace access over the daemon
+// socket, so a dead MCP connection does not cut the session off from memory.
+pub mod memory_verbs;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
