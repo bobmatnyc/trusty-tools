@@ -17,10 +17,12 @@
 //! What: binds a daemon on a temp socket, then drives it through the SHARED
 //! client — never through this crate's own — and pins the three literals.
 //!
-//! #6555 adds one arm that does NOT go through the shared client: `tctl`'s
-//! `probe_daemon_http` builds its own frame, and hand-supplying `json!({})` is
-//! exactly what hid a probe that sent no `params` at all. That arm binds on the
-//! DERIVED path rather than a temp one, because `tctl` takes no socket argument.
+//! #6555's arm — the one that does NOT go through the shared client, because
+//! `tctl`'s `probe_daemon_http` builds its own frame — moved out on #8341 to
+//! `crates/trusty-crate-contracts/tests/memory_uds_consumer.rs`. It was the
+//! only reason this crate dev-depended on trusty-installer, which added
+//! thirteen crates to every `cargo test -p trusty-memory`; everything left here
+//! drives trusty-common, which this crate already depends on normally.
 //!
 //! Test: this file.
 
@@ -32,7 +34,6 @@ use tokio::sync::oneshot;
 use trusty_common::memory_rpc::{
     call_memory_tool_at, call_memory_tool_at_with_timeout, MemoryRpcError,
 };
-use trusty_installer::commands::probe_http::{probe_daemon_http, ProbeOutcome};
 use trusty_memory::AppState;
 
 /// Generous enough for a loaded machine; a local socket answers in microseconds.
@@ -431,88 +432,4 @@ fn bridge_streaming_methods_match_the_daemon() {
          only the daemon knows is one the bridge forwards as a unary call, and \
          the client waits forever"
     );
-}
-
-/// Points `resolve_data_dir` at a temp root, and clears the override on `Drop`.
-///
-/// Why (#6555): `probe_daemon_http` takes no socket path — it derives one
-/// through `trusty_common::daemon_socket_path`, the entry point the daemon
-/// binds through. The [`Daemon`] harness above binds an arbitrary tempdir
-/// socket, which `tctl` therefore cannot find, so the tctl arm below binds
-/// where `tctl` actually looks. `Drop` rather than cleanup at the end of the
-/// body, because a panicking assertion would otherwise strand the override
-/// pointing at a deleted directory for the next `#[serial]` sibling.
-/// What: sets and removes `TRUSTY_DATA_DIR_OVERRIDE`.
-/// Test: `tctl_probe_sees_a_live_uds_daemon_as_serving`.
-struct DataDirGuard;
-
-impl DataDirGuard {
-    fn point_at(root: &std::path::Path) -> Self {
-        // SAFETY: process-global, and the only caller is `#[serial]`.
-        unsafe { std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, root) };
-        Self
-    }
-}
-
-impl Drop for DataDirGuard {
-    fn drop(&mut self) {
-        // SAFETY: process-global, and the only caller is `#[serial]`.
-        unsafe { std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV) };
-    }
-}
-
-/// REGRESSION (#6555): `tctl`'s own probe must read a live daemon as `Serving`.
-///
-/// Why: every other test here hands the daemon `json!({})` by hand, so none of
-/// them builds the frame `tctl` sends. `probe_socket` sent no `params` at all,
-/// which decodes to `Value::Null`, which `memory.health`'s `HealthQuery`
-/// refuses with `-32602`. `tctl status` then rendered a healthy daemon as
-/// `down`, exited 2, and failed `tctl install`'s verify tail. This is the arm
-/// that fails on that frame, mirroring trusty-analyze's Consumer 2.
-/// What: binds the real router on the derived path and calls `tctl`'s public
-/// entry point, which builds its own request end to end.
-/// Test: this is the test.
-#[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
-async fn tctl_probe_sees_a_live_uds_daemon_as_serving() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
-
-    let data = tempfile::tempdir().expect("tempdir");
-    let root = data.path().to_path_buf();
-    std::mem::forget(data);
-    let _data_dir = DataDirGuard::point_at(&root);
-    // #88: bypass the project-slug gate, as `Daemon::start` does.
-    // SAFETY: every test in this process wants the same idempotent "1".
-    unsafe {
-        std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-    }
-
-    let state = AppState::new(root);
-    // #911: flip past the warming preflight so the health handler runs.
-    state.set_ready();
-
-    // The daemon binds, and `tctl` resolves, the SAME path from the SAME entry
-    // point — which is what makes this a consumer contract rather than a wire
-    // format test.
-    let socket = trusty_common::daemon_socket_path("trusty-memory").expect("derive socket path");
-
-    let (stop, shutdown) = oneshot::channel::<()>();
-    let serve_socket = socket.clone();
-    let serving = tokio::spawn(async move {
-        trusty_memory::transport::uds::serve_with_shutdown(state, &serve_socket, async {
-            let _ = shutdown.await;
-        })
-        .await
-    });
-
-    wait_until_answering(&socket).await;
-
-    let outcome = probe_daemon_http("trusty-memory", "trusty-memory").await;
-    assert!(
-        matches!(outcome, ProbeOutcome::Serving { .. }),
-        "got {outcome:?}"
-    );
-
-    let _ = stop.send(());
-    let _ = serving.await;
 }

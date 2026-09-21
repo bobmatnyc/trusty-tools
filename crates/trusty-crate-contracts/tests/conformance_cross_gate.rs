@@ -12,9 +12,10 @@
 //! the BACK renderer starts surfacing a method for a gap) breaks this equivalence
 //! and fails here — which is exactly the cross-gate contract the epic promised.
 //!
-//! What: this is a genuine cross-crate test. It lives in trusty-mpm (which
-//! dev-depends on trusty-review, see Cargo.toml) so it can call BOTH real gate
-//! entry points against ONE shared intent value — the FRONT entry point
+//! What: this is a genuine cross-crate test. It lives in trusty-crate-contracts,
+//! which depends on trusty-mpm and trusty-review as NORMAL dependencies, so it
+//! can call BOTH real gate entry points against ONE shared intent value — the
+//! FRONT entry point
 //! `trusty_mpm::daemon::managed_routes::front_gate::front_gate_disposition` (the
 //! pure matrix→`Disposition` mapping, spec §4.1 / §5.1), and the BACK entry point
 //! `trusty_review::integrations::context::ConformanceSource::would_flag` (derived
@@ -25,8 +26,13 @@
 //! the actual resolution + precedence path, not a hand-built struct, and never
 //! touches the network.
 //!
+//! #8341: it used to live in trusty-mpm, over a `trusty-review`
+//! `[dev-dependencies]` edge that added eight crates (four AWS SDK crates,
+//! redb, hmac, arc-swap, trusty-review) to every trusty-mpm test and clippy
+//! build in every worktree — a cost paid by everyone who never runs this test.
+//!
 //! Test: this file IS the AC-18 golden test. Run with
-//! `cargo test -p trusty-mpm --test conformance_cross_gate`.
+//! `cargo test -p trusty-crate-contracts --test conformance_cross_gate`.
 
 use async_trait::async_trait;
 
