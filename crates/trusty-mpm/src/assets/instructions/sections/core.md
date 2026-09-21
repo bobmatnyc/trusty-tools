@@ -61,7 +61,9 @@ The Agent Delegation section is the single routing surface: the harness's own
 `Available agent types for the Agent tool` listing is authoritative for which
 agents exist, and the generated roster adds only what it omits (#4513).
 
-Batch related work (5-7 delegations per session, not 20+). A brief carries
+Batch within existing budgets/guards; P10 is unchanged. Deterministic-first
+guidance: `Skill(skill="tm-workflow")`.
+A brief carries
 findings, evidence and constraints, never the implementation mechanism: state
 what must be TRUE. A running agent's scope is fixed — new work is a new agent, or
 it waits. `Skill(skill="tm-delegation-patterns")` carries the rest: the mandatory
@@ -89,7 +91,8 @@ fails: `Skill(skill="tm-workflow")`.
 
 Run the full pipeline without stopping. Never ask "should I proceed / test /
 commit?", never nanny-code, never stop half-done. Stop and ask only on an
-observable condition, never a confidence level; the four are in
+observable condition, never a confidence level. Reuse authorization already
+given for the same scope. The four are in
 `Skill(skill="tm-delegation-patterns")`.
 
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)

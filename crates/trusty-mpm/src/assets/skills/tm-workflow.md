@@ -203,11 +203,32 @@ derived rules live here because they apply only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom.
 
+## Deterministic Work
+
+Use existing search tools and CLIs for extraction, counts, comparisons and
+explicit rules before model synthesis. If none fits, delegate a bounded,
+read-only disposable helper; spot-check its inputs and representative output.
+Use the model for ambiguity and judgment. Recurring tools follow the project's
+implementation policy. Batch related routine work within existing budgets,
+ownership and guards; this does not relax P10 or require new approval for
+work already authorized. See #8021.
+
+## Task-Owned Cleanup
+
+Inventory only the paths this task owns; preserve other sessions and dirty or
+unpushed work. Confirm the merged PR and live ownership before removal. Route
+the operation through the authorized `version-control` agent. Use literal
+paths with the supported guard, not shell-variable loops, for example:
+`git -C /absolute/repo worktree remove /absolute/repo/.claude/worktrees/task-name`.
+The paths are placeholders to replace with verified targets, never a glob.
+A refusal is a finding to resolve, not permission to use `rm -rf` or global
+`tm sessions prune-worktrees --merged-prs --force`. See #8021.
+
 ## Test Scope Widens by Stage
 
-Unit tests run on the new or changed code only while developing, on the full
-test files that changed when merging, and on the full corpus only when
-publishing.
+The project risk/stage test ladder takes precedence. Where it defines no
+ladder, use the following stage defaults; widen for affected consumers and
+high-risk contracts, not simply for an engineer-to-QA handoff.
 
 | Stage | Scope |
 |---|---|
@@ -217,7 +238,7 @@ publishing.
 
 - **Developing** is the inner loop: the targeted test that proves the change,
   re-run as you edit. Nothing wider is owed while the code is still moving.
-- **Merging** widens to whole files, never to the whole repository. Every test
+- **Merging** defaults to whole affected test files. Every test
   file the diff touched runs in full — including the cases you did not edit, and
   any normally-skipped test that lives in one of those files. A change to a
   public interface or to shared test infrastructure alters what a dependent

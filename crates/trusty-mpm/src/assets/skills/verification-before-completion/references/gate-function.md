@@ -8,7 +8,7 @@ The gate function is the mandatory checkpoint before ANY completion claim.
 BEFORE claiming any status or expressing satisfaction:
 
 1. IDENTIFY: What command proves this claim?
-2. RUN: Execute the FULL command (fresh, complete)
+2. RUN OR REUSE: Execute the project-required gate, or inspect matching raw evidence
 3. READ: Full output, check exit code, count failures
 4. VERIFY: Does output confirm the claim?
    - If NO: State actual status with evidence
@@ -41,16 +41,16 @@ Skip any step = lying, not verifying
 **Common Mistakes:**
 - ❌ Identifying related but insufficient command
 - ❌ Identifying partial verification
-- ❌ Identifying old verification results
+- ❌ Reusing evidence without matching its inputs
 - ❌ Can't identify verification → Claim invalid
 
-### Step 2: RUN
+### Step 2: RUN OR REUSE
 
 **How to run:**
 - Execute the COMPLETE command
-- Fresh execution (not cached results)
-- Full scope (not subset)
-- Right here, right now (not "I ran it earlier")
+- Match the project ladder's required scope
+- Reuse raw evidence only for matching source, command, features and environment
+- Rerun changed or unproven inputs and required independent gates
 
 **Requirements:**
 - Use exact command identified in Step 1
@@ -60,7 +60,7 @@ Skip any step = lying, not verifying
 
 **Common Mistakes:**
 - ❌ Running partial command
-- ❌ Using cached/previous results
+- ❌ Using cached/previous results with missing or changed inputs
 - ❌ Running related but different command
 - ❌ Assuming results without running
 
@@ -287,7 +287,7 @@ GATE CHECK:
 ## The Iron Law Explained
 
 ```
-NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+NO COMPLETION CLAIMS WITHOUT CURRENT VERIFICATION EVIDENCE
 ```
 
 **"No completion claims"** = ANY variation:
@@ -296,9 +296,11 @@ NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
 - "Ready", "Good to go", "All set"
 - ANY paraphrase or synonym
 
-**"Without fresh verification"** = Must have:
+**"Without current verification evidence"** = Match relevant source, command,
+features and environment. Reuse a matching recorded run; the following apply
+to each new execution:
 - Run command in this session
-- Read complete output
+- Read the terminal status and relevant raw summary
 - Verified results match claim
 - Evidence is current (not stale)
 

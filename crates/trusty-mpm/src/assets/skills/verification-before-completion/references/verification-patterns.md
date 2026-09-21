@@ -165,7 +165,7 @@ trusting the RED result (#7440).
 - **Can't reproduce**: Document steps, environment
 - **Intermittent bug**: Increase test iterations
 - **Different in production**: Test in production-like environment
-- **Fix causes regression**: Test full suite, not just bug test
+- **Fix causes regression**: Run the project ladder's affected regression coverage
 
 ## Requirements Verification
 
