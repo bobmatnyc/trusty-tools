@@ -49,11 +49,13 @@ use trusty_common::github_path::GithubPath;
 /// on every N-shrink-then-grow cycle — a re-clone over a directory holding a
 /// live build's artifacts would corrupt it. A marker file survives both, which
 /// an in-memory flag does not.
-/// What: written inside the slot directory after a successful seed; its
-/// presence is the whole test, and it is also what
-/// [`SlotPool::reserve_path`] reads to decide whether a slot can be granted now.
+/// What: written inside the slot directory after a successful seed, with
+/// `create_new` so exactly ONE run ever writes it; its presence is the whole
+/// test, and it is also what [`SlotPool::reserve_path`] reads to decide whether
+/// a slot can be granted now.
 /// Test: `a_second_seed_does_not_reseed`,
-/// `a_reservation_on_a_seeded_slot_is_ready`.
+/// `a_reservation_on_a_seeded_slot_is_ready`,
+/// `two_staging_trees_for_one_index_publish_exactly_one_slot`.
 pub const SEED_MARKER: &str = ".trusty-slot-seeded";
 
 /// How a slot directory came to exist.
@@ -124,8 +126,9 @@ pub enum SlotPoolError {
 /// different repos never contend on one cargo lock. A slot index means nothing
 /// across repos, so the repo is part of the pool's identity rather than a
 /// parameter on every call.
-/// What: holds only paths; creates nothing until [`Self::acquire_path`] is
-/// called for a slot index the daemon has actually granted.
+/// What: holds only paths; creates nothing until [`Self::reserve_path`] is
+/// called for a slot index the daemon has actually granted, and nothing beyond
+/// that slot's parent until [`Self::seed`] runs off the claim path.
 /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
 #[derive(Debug, Clone)]
 pub struct SlotPool {
@@ -232,10 +235,17 @@ impl SlotPool {
         if path.join(SEED_MARKER).is_file() {
             return Ok((path, SeedKind::AlreadySeeded));
         }
+        sweep_abandoned_staging(&path);
         let seed = match clone_from.filter(|src| src.is_dir()) {
             Some(src) => match clone_directory(src, &path) {
                 Ok(()) => SeedKind::ClonedFromShared,
                 Err(detail) => {
+                    // A clone that lost the publish race to another run leaves
+                    // the marker here; treat that as the warm case rather than
+                    // stamping ColdDirectory over its tree.
+                    if path.join(SEED_MARKER).is_file() {
+                        return Ok((path, SeedKind::AlreadySeeded));
+                    }
                     create_cold(&path)?;
                     SeedKind::ColdDirectory(detail)
                 }
@@ -246,21 +256,101 @@ impl SlotPool {
             }
         };
         // The marker goes down last, so a seed interrupted partway is retried
-        // rather than inherited as a half-cloned directory.
+        // rather than inherited as a half-cloned directory. `create_new` makes
+        // the write itself the election: exactly one run ever marks a slot, so
+        // two runs that survived a daemon restart together cannot both claim to
+        // have seeded it (#8261 critic round 3).
         let marker = path.join(SEED_MARKER);
-        std::fs::write(&marker, seed_marker_body(&seed)).map_err(|source| {
-            SlotPoolError::Create {
+        match std::fs::File::create_new(&marker) {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(seed_marker_body(&seed).as_bytes())
+                    .map_err(|source| SlotPoolError::Create {
+                        path: marker,
+                        source,
+                    })?;
+                Ok((path, seed))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                Ok((path, SeedKind::AlreadySeeded))
+            }
+            Err(source) => Err(SlotPoolError::Create {
                 path: marker,
                 source,
-            }
-        })?;
-        Ok((path, seed))
+            }),
+        }
     }
 }
 
 /// What the marker file records, for a human reading the pool directory.
 fn seed_marker_body(seed: &SeedKind) -> String {
     format!("#8261 builder slot pool\nseed: {seed:?}\n")
+}
+
+/// This run's private staging directory for `dst`.
+///
+/// Why: a fixed staging name is a shared mutable directory between any two seed
+/// runs, and the first act of a seed is to clear it — so the later run deletes
+/// the earlier one's tree mid-copy. The in-daemon registry cannot prevent that
+/// pairing across a restart: `std::process::Command` sets no death signal (macOS
+/// has none), so a `cp -c -R` outlives the daemon that spawned it while the new
+/// daemon's registry starts empty (#8261 critic round 3). PID plus nanoseconds
+/// is unique across both processes and repeated seeds within one.
+/// What: `<parent>/.<slot>.seeding.<pid>.<nanos>`.
+/// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
+fn staging_path(parent: &Path, slot: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    parent.join(format!(
+        "{STAGING_PREFIX_DOT}{slot}.seeding.{}.{nanos}",
+        std::process::id()
+    ))
+}
+
+/// The leading character every staging directory's name carries.
+const STAGING_PREFIX_DOT: &str = ".";
+
+/// Delete staging trees left by seed runs whose process is gone (#8261).
+///
+/// Why: a staging tree is a full clone of the shared target directory, so an
+/// abandoned one is real disk — and abandoning one is now possible, because a
+/// `cp` that outlives its daemon can be killed before it publishes. Liveness is
+/// the only safe test: deleting a LIVE run's staging tree would restore exactly
+/// the two-writer corruption the unique name removes.
+/// What: scans the slot's parent for `.<slot>.seeding.<pid>.<nanos>` entries and
+/// removes only those whose `<pid>` is confirmed dead. An unparseable name, or a
+/// pid that is alive or undeterminable, is left alone (ADR-0045).
+/// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
+fn sweep_abandoned_staging(dst: &Path) {
+    let (Some(parent), Some(slot)) = (
+        dst.parent(),
+        dst.file_name().and_then(std::ffi::OsStr::to_str),
+    ) else {
+        return;
+    };
+    let prefix = format!("{STAGING_PREFIX_DOT}{slot}.seeding.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let Ok(pid) = rest.split('.').next().unwrap_or_default().parse::<u32>() else {
+            continue;
+        };
+        if crate::core::process::is_process_alive(pid) {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(
+                "could not sweep abandoned builder-slot staging {}: {err}",
+                entry.path().display()
+            );
+        }
+    }
 }
 
 /// Create an empty slot directory, parents included.
@@ -285,17 +375,21 @@ fn create_cold(path: &Path) -> Result<(), SlotPoolError> {
 /// **Never `cp -c -R <src> <dst>` onto an existing `dst`.** BSD `cp` then writes
 /// `dst/<basename(src)>` and still exits 0, so the slot would be reported
 /// [`SeedKind::ClonedFromShared`] with an empty top level and a nested copy
-/// underneath — a cold build that claims to be warm (#8261 critic round). A
-/// staging name that cannot already exist has no such case, and the rename is
-/// atomic. Replacing an existing `dst` is safe because it cannot carry
-/// [`SEED_MARKER`] — [`SlotPool::seed`] returns early when it does — and an
-/// unmarked directory was never granted to a builder.
+/// underneath — a cold build that claims to be warm (#8261 critic round). The
+/// staging tree has no such case, and the rename is atomic.
+///
+/// **The staging tree is private to this run** ([`staging_path`]), and `dst` is
+/// replaced only while it carries no [`SEED_MARKER`]. Together those two make a
+/// second run — one that survived a daemon restart, which the in-memory registry
+/// cannot see — unable to delete this run's tree or to overwrite a slot a
+/// builder was granted (#8261 critic round 3).
 ///
 /// # Errors
 ///
 /// A human-readable reason the clone did not happen, for [`SeedKind::ColdDirectory`].
 ///
-/// Test: `a_missing_clone_source_still_yields_a_usable_cold_slot`, and
+/// Test: `a_missing_clone_source_still_yields_a_usable_cold_slot`,
+/// `two_staging_trees_for_one_index_publish_exactly_one_slot`, and
 /// `a_fresh_slot_is_cloned_from_the_shared_directory`,
 /// `an_unmarked_directory_is_reseeded_without_nesting` on macOS.
 fn clone_directory(src: &Path, dst: &Path) -> Result<(), String> {
@@ -315,8 +409,7 @@ fn clone_directory(src: &Path, dst: &Path) -> Result<(), String> {
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("slot");
-    let staging = parent.join(format!(".{slot}.seeding"));
-    drop(std::fs::remove_dir_all(&staging));
+    let staging = staging_path(parent, slot);
     // `cp -c` fails outright rather than falling back to a full byte copy when
     // the volume cannot clone, which is the behaviour wanted here: a silent
     // 207 GB real copy would fill the disk this design is trying to conserve.
@@ -334,6 +427,13 @@ fn clone_directory(src: &Path, dst: &Path) -> Result<(), String> {
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
+    }
+    // Re-read the marker here, not only at `seed`'s entry: a run that survived
+    // a daemon restart can have published this slot while `cp` was running, and
+    // replacing a MARKED directory would destroy a tree a builder holds.
+    if dst.join(SEED_MARKER).is_file() {
+        drop(std::fs::remove_dir_all(&staging));
+        return Err(format!("another seed published {} first", dst.display()));
     }
     if dst.exists()
         && let Err(err) = std::fs::remove_dir_all(dst)
@@ -566,6 +666,79 @@ mod tests {
         assert!(
             matches!(err, SlotPoolError::Create { .. }),
             "expected Create, got {err:?}"
+        );
+    }
+
+    /// #8261 critic round 3, MEDIUM: two seed runs never share a staging tree.
+    ///
+    /// The in-daemon registry cannot pair with a `cp -c -R` that outlived the
+    /// daemon that spawned it — `std::process::Command` sets no death signal,
+    /// and macOS has none — so the new daemon's empty registry would spawn a
+    /// second seed whose first act, under the old fixed `.slot-N.seeding` name,
+    /// was `remove_dir_all` of the survivor's tree. Staging names are now
+    /// per-run, only a dead run's tree is swept, and `create_new` makes the
+    /// marker write the single election.
+    #[test]
+    fn two_staging_trees_for_one_index_publish_exactly_one_slot() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("a shared dir");
+        std::fs::write(shared.join("sentinel"), b"warm").expect("an artifact");
+        let pool = pool(&tmp.path().join("pool"));
+        let slot = pool.slot_path(0);
+        let parent = slot.parent().expect("a slot has a parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("the pool parent");
+
+        // A tree left by a run whose process is gone — pid 1 is `launchd` and
+        // never dies, so the LIVE case is the one held by a real pid here.
+        let abandoned = parent.join(".slot-0.seeding.4294967294.1");
+        std::fs::create_dir_all(&abandoned).expect("an abandoned staging tree");
+        let live = parent.join(format!(".slot-0.seeding.{}.1", std::process::id()));
+        std::fs::create_dir_all(&live).expect("a live run's staging tree");
+
+        let (path, _) = pool.seed(0, Some(&shared)).expect("the seed publishes");
+
+        assert!(
+            !abandoned.exists(),
+            "a dead run's staging tree is swept: {abandoned:?}"
+        );
+        assert!(
+            live.exists(),
+            "a LIVE run's staging tree must never be deleted — that is the \
+             two-writer corruption this fix removes"
+        );
+        assert!(
+            path.join(SEED_MARKER).is_file(),
+            "the winner marks the slot"
+        );
+        let staging_left: Vec<_> = std::fs::read_dir(&parent)
+            .expect("read the pool parent")
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(".slot-0.seeding.") && !e.path().eq(&live))
+            })
+            .collect();
+        assert!(
+            staging_left.is_empty(),
+            "the published run leaves no staging tree behind: {staging_left:?}"
+        );
+
+        // A second run over the published slot writes no second marker and
+        // reports the warm case rather than re-cloning.
+        let marked_at = std::fs::metadata(path.join(SEED_MARKER))
+            .and_then(|m| m.modified())
+            .expect("marker mtime");
+        let (again, seed) = pool.seed(0, Some(&shared)).expect("the second run");
+        assert_eq!(again, path);
+        assert_eq!(seed, SeedKind::AlreadySeeded);
+        assert_eq!(
+            std::fs::metadata(path.join(SEED_MARKER))
+                .and_then(|m| m.modified())
+                .expect("marker mtime"),
+            marked_at,
+            "the marker is written exactly once"
         );
     }
 

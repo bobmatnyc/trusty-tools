@@ -281,8 +281,9 @@ impl DaemonState {
     /// Why: the daemon is the process that counts, so it is the process that
     /// must derive N — a `tm` older or newer than the daemon would otherwise
     /// argue for a number the live leases were not admitted under. Same
-    /// reasoning that put [`resolve_max_concurrent`] here in #6892, extended
-    /// from a static cap to a measured one.
+    /// reasoning that put
+    /// [`resolve_max_concurrent`](crate::core::builders::resolve_max_concurrent)
+    /// here in #6892, extended from a static cap to a measured one.
     /// What: samples this host's readings, reads the operator's `[builders]`
     /// section for the ceiling and the two limits, counts the current holders,
     /// and runs the pure formula against the daemon's own quiet window. `held`
@@ -290,7 +291,7 @@ impl DaemonState {
     ///
     /// `ceiling` is supplied by the caller rather than read here, for the same
     /// testability reason [`builder_slot_op`](crate::daemon::builder_slot_routes::builder_slot_op)
-    /// takes its cap: [`resolve_max_concurrent`] reads the operator's real
+    /// takes its cap: that same resolver reads the operator's real
     /// `~/.trusty-mpm`, and a test driving this would otherwise depend on the
     /// machine it runs on.
     /// Test: `the_daemon_resolves_capacity_against_its_own_quiet_window`.

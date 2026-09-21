@@ -227,9 +227,13 @@ pub async fn builder_slot_route(
 /// strand the slot unseedable forever — and the error arm is the one most
 /// likely to be written without it.
 /// What: `spawn_blocking`, because `SlotPool::seed` shells `cp -c -R` over a
-/// directory measured at 207 GB and would otherwise block a runtime worker.
-/// Both exits call [`DaemonState::finish_builder_seed`].
-/// Test: `the_route_sequence_seeds_once_then_grants_the_slot_ready`.
+/// directory measured at 207 GB and would otherwise block a runtime worker. The
+/// release runs from [`SeedGuard`]'s `Drop` rather than as the closure's last
+/// statement, so a panic inside `seed` releases the index too — a trailing call
+/// is skipped by an unwind, and the index would then be unseedable for the
+/// daemon's whole life (#8261 critic round 3).
+/// Test: `the_route_sequence_seeds_once_then_grants_the_slot_ready`,
+/// `a_panicking_seed_still_releases_its_index`.
 fn spawn_seed(
     state: Arc<DaemonState>,
     pool: SlotPool,
@@ -237,11 +241,27 @@ fn spawn_seed(
     index: u32,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
+        let _guard = SeedGuard { state, index };
         if let Err(err) = pool.seed(index, clone_from.as_deref()) {
             tracing::warn!("builder slot {index} could not be seeded: {err}");
         }
-        state.finish_builder_seed(index);
     })
+}
+
+/// Holds one slot index's seed claim for as long as the seed runs (#8261).
+///
+/// Why: see [`spawn_seed`] — the release must survive a panic, and only `Drop`
+/// runs during an unwind.
+/// Test: `a_panicking_seed_still_releases_its_index`.
+struct SeedGuard {
+    state: Arc<DaemonState>,
+    index: u32,
+}
+
+impl Drop for SeedGuard {
+    fn drop(&mut self) {
+        self.state.finish_builder_seed(self.index);
+    }
 }
 
 /// The pool for this dispatch's repo, or why there is none.
@@ -929,6 +949,67 @@ mod tests {
             second.slot_notice.is_none(),
             "a granted slot owes no explanation: {:?}",
             second.slot_notice
+        );
+    }
+
+    /// #8261 critic round 3, LOW: the seed's release must survive a panic.
+    ///
+    /// A trailing `finish_builder_seed(index)` is skipped by an unwind, so a
+    /// `cp` that panicked would strand the index in `builder_seeding` for the
+    /// daemon's whole life — nobody could ever seed that slot again, and every
+    /// builder on it would build in the shared directory. Fails with
+    /// `SeedGuard`'s `Drop` body emptied.
+    #[test]
+    fn a_panicking_seed_still_releases_its_index() {
+        let (state, dir, session) = hermetic();
+        let pool = test_pool(dir.path().join("pool"));
+
+        let first = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_A")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+        assert_eq!(first.seed_index, Some(0), "the claim holds index 0's seed");
+
+        // What the blocking task does when `seed` panics partway.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SeedGuard {
+                state: Arc::clone(&state),
+                index: 0,
+            };
+            panic!("the clone died mid-copy");
+        }));
+        std::panic::set_hook(hook);
+        assert!(outcome.is_err(), "the seed panicked, as this test intends");
+
+        state.release_denied_builder_dispatch(session, Some("toolu_A"));
+        let second = builder_slot_op_with_pool(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_B")),
+            &capacity(
+                4,
+                4,
+                CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
+            ),
+            Some(&pool),
+            None,
+        )
+        .expect("a well-formed session id");
+        assert_eq!(
+            second.seed_index,
+            Some(0),
+            "a panicked seed must leave the index seedable, not held forever"
         );
     }
 
