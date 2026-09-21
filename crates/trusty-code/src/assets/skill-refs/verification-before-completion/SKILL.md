@@ -35,16 +35,18 @@ Activate ALWAYS before claiming:
 ## The Iron Law
 
 ```
-NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+NO COMPLETION CLAIMS WITHOUT CURRENT VERIFICATION EVIDENCE
 ```
 
-Without running the verification command in this message, claiming success is not allowed.
+Evidence must cover the current relevant source, exact command, features and
+environment. Reuse a recorded matching run; rerun when any relevant input
+changes, provenance is missing, or the project requires an independent gate.
 
 ## Core Principles
 
 1. **Evidence Required**: Every claim needs supporting evidence
-2. **Fresh Verification**: Must verify now, not rely on previous runs
-3. **Complete Verification**: Full command, not partial checks
+2. **Current Evidence**: Match source, command, features and environment
+3. **Scoped Verification**: Follow the project risk/stage test ladder
 4. **Honest Reporting**: Report actual state, not hoped-for state
 
 ## Quick Start
@@ -52,8 +54,8 @@ Without running the verification command in this message, claiming success is no
 The five-step gate function:
 
 1. **IDENTIFY**: What command proves this claim?
-2. **RUN**: Execute the FULL command (fresh, complete)
-3. **READ**: Full output, check exit code, count failures
+2. **RUN OR REUSE**: Execute the required gate unless matching evidence exists
+3. **READ**: Check terminal exit status and the relevant raw summary
 4. **VERIFY**: Does output confirm the claim?
    - If NO: State actual status with evidence
    - If YES: State claim WITH evidence
@@ -109,10 +111,10 @@ STOP when:
 - Using "should", "probably", "seems to"
 - Expressing satisfaction before verification
 - About to commit/push/PR without verification
-- Trusting agent success reports
+- Trusting agent success claims without matching raw evidence
 - Relying on partial verification
 
-**ALL of these mean: STOP. Run verification first.**
+**Resolve the evidence gap before claiming completion.**
 
 ## Why This Matters
 
@@ -133,19 +135,21 @@ For detailed information:
 
 ## Direct Observation of Success (trusty-mpm, issue #7723)
 
-Run the code and observe it succeed:
+Use the project's risk/stage test ladder (see #8021):
 
-1. Run the FULL test suite — the project's standard command. Not a subset.
-2. Verify in the target environment where the code will actually run.
-3. Confirm the build is clean before declaring any module complete.
-4. Catch silent skips. "0 tests ran" or "7 ignored" is NOT passing —
-   investigate before declaring done. In a monorepo with a shared
-   Turborepo/Nx-style task cache, a test summary showing cache hits
-   (`Cached: N cached`, N>0) re-ran nothing against the changed code (#7117).
-   Trust the counts only when the raw output shows `Cached: 0 cached`, or the
-   run was forced (`--force`).
-5. Test the entry point — the binary starts, the CLI runs — not just isolated
-   functions.
+1. Run the required scoped gates. Documentation changes do not automatically
+   owe builds or application tests; cross-package and release changes widen
+   coverage according to the project policy.
+2. Reuse exact matching raw evidence across engineer/QA handoffs. Record the
+   relevant source revision or diff, command, features, environment, exit status
+   and log path. QA independently checks coverage and provenance; required
+   independent high-risk gates and live deployment checks still run.
+3. Preserve build caches. Rebuild cleanly only for a specific invalidation,
+   reproducibility or project requirement. A task-cache hit is reused evidence,
+   not a fresh test run; require matching inputs and trustworthy provenance,
+   otherwise force that affected task rather than clearing every cache.
+4. Account for zero tests and skipped tests against the required coverage.
+   Verify binary startup, UI or service health when the claim requires it.
 
 ```
 WRONG:   "All 68 tests pass."
@@ -196,7 +200,8 @@ because `cargo test` prints a line per test; a sibling spent 546k on
    `tm wait --for file --contains "EXIT="` on that file never matches. Either
    append the sentinel into the file too, or wait on the process itself with
    `tm wait --for run --pid <pid>` instead.
-2. **`EXIT=0` → stop. Do NOT read the file.** Nothing in it is information.
+2. **`EXIT=0` → capture the required summary, then stop.** Do not stream
+   passing-test detail or rerun merely for another agent to see the same result.
 3. **Non-zero → trim the file, then read it.** Trim reads FROM the file,
    never from the live command: `--quiet` on the command, `grep`/`tail` over
    the file, or this repo's Unix filter:
@@ -261,9 +266,9 @@ the process itself (above).
 
 ## Stack-Specific Gate Traps
 
-- `pnpm test -- --force` silently drops `--force` before turbo sees it,
-  replaying the cache. Use `pnpm exec turbo run test --force` and confirm
-  `Cached: 0 cached` in the output (#7560).
+- When a fresh execution is required, `pnpm test -- --force` can silently
+  drop `--force`. Use `pnpm exec turbo run test --force` and confirm
+  `Cached: 0 cached`; otherwise retain valid cached evidence (#7560).
 - Stop a dev server with `lsof -ti tcp:<port> | xargs kill` FIRST — `pkill -f
   <path>` misses a bundled server whose argv does not carry the path (#7562).
 
