@@ -490,8 +490,11 @@ pub struct DaemonState {
     /// directory name, so the later one deletes the earlier one's tree mid-copy
     /// and the surviving marker is written over a directory assembled from two
     /// interleaved runs. This set is what makes at most one seed per index be
-    /// in flight; it is in-memory because a daemon restart kills the tasks it
-    /// would be tracking.
+    /// in flight WITHIN one daemon. It cannot reach across a restart — a `cp`
+    /// child outlives the daemon that spawned it, since `std::process::Command`
+    /// sets no death signal and macOS has none — so the pool defends that case
+    /// separately, with a per-run staging name and a `create_new` marker write
+    /// (#8261 critic round 3).
     /// Test: `a_second_reservation_does_not_spawn_a_second_seed`.
     pub(super) builder_seeding: parking_lot::Mutex<std::collections::HashSet<u32>>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
