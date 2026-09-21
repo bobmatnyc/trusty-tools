@@ -207,8 +207,15 @@ impl ManagedTmuxDriver for ClaimRecordingDriver {
 /// (b) every such call saw the claim held. Bounded by `tokio::time::timeout`
 /// so a route that stalls FAILS rather than hanging the suite.
 /// Test: this function IS the test.
+#[cfg(unix)]
+#[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_claim_is_still_held_when_the_route_types_into_the_pane() {
+    // #7862: the route's last step before it types is the adapter's `claude`
+    // lookup, and a machine without Claude Code fails it — leaving the driver
+    // with the three calls `resume_inner` made and nothing after the record
+    // read `Active`. That is the fixture gap this test's own message names.
+    let _claude = crate::test_support::fake_claude_on_path();
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("framework");
     let seen: Arc<Mutex<Vec<Observation>>> = Arc::new(Mutex::new(Vec::new()));

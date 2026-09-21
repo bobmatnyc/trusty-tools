@@ -946,21 +946,24 @@ impl Drop for PathGuard {
     }
 }
 
-/// Create a fake, executable `tm` binary at `<dir>/tm` so
-/// `trusty_common::bin_resolve::resolve_binary("tm")` resolves it.
+/// Create a fake, executable `name` binary at `<dir>/<name>` so
+/// `trusty_common::bin_resolve::resolve_binary(name)` resolves it.
 ///
 /// Why: `candidate()` (the leaf of `resolve_binary`) requires the file to
 /// exist AND carry an execute bit on Unix — an empty regular file is rejected.
+/// #7862: `claude` needs the identical stub, so the helper takes the name
+/// rather than growing a second copy of itself.
 /// What: writes a trivial shell script and chmods it `0o755`.
-/// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`.
-fn write_fake_tm_binary(dir: &std::path::Path) -> PathBuf {
-    let bin = dir.join("tm");
-    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake tm binary");
+/// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`
+/// and `resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears`.
+fn write_fake_binary(dir: &std::path::Path, name: &str) -> PathBuf {
+    let bin = dir.join(name);
+    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake binary");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake tm binary executable");
+            .expect("chmod fake binary executable");
     }
     bin
 }
@@ -1134,9 +1137,25 @@ async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
 /// line is typed) and whose `runtime_ready` never becomes true, then asserts the
 /// returned error is the post-send wording, not the adapter's.
 /// Test: this function IS the test.
+#[serial_test::serial]
 #[tokio::test]
 async fn resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears() {
     use trusty_mpm::session_manager::ManagedSessionState;
+    // #7862: `ClaudeCodeAdapter::spawn_resume` resolves the `claude` binary
+    // BEFORE it types anything, so with no Claude Code install the route ends
+    // at the adapter refusal — the arm the sibling test above already pins —
+    // and this one read green only on a developer machine. Same stub-on-PATH
+    // fixture as `tests/pane_launch_line_8233.rs`; `#[serial]` guards the
+    // process-global `PATH` (see `PathGuard`).
+    let bin_dir = tempfile::tempdir().expect("bin tempdir");
+    write_fake_binary(bin_dir.path(), "claude");
+    let _path_guard = PathGuard::prepend(bin_dir.path());
+    assert!(
+        trusty_common::bin_resolve::resolve_binary("claude")
+            .is_some_and(|found| found.starts_with(bin_dir.path())),
+        "the planted stub must WIN the lookup — otherwise this test runs the \
+         host's own Claude Code, or none at all, and proves nothing"
+    );
     let root = tempfile::tempdir().expect("tempdir");
     let ws = root.path().join("ws");
     std::fs::create_dir_all(&ws).expect("create workspace dir");
@@ -1303,7 +1322,7 @@ async fn resume_managed_launches_despite_incomplete_deployment() {
 /// What: seeds a workspace whose `.claude/settings.json` already has the exact
 /// pre-#1914 bare `statusLine.command`, resumes it, and asserts the on-disk
 /// command is upgraded to the fake, PATH-resolved `tm` binary this test seeds
-/// (see `PathGuard`/`write_fake_tm_binary`) rather than merely checking for a
+/// (see `PathGuard`/`write_fake_binary`) rather than merely checking for a
 /// `/` — #2229 made `current_exe()` always ineligible inside a `cargo test`
 /// binary (ephemeral `target/debug/deps/...`), so without a seeded PATH hit
 /// the outcome depends on whether the ambient environment happens to have
@@ -1321,9 +1340,9 @@ async fn resume_managed_heals_stale_bare_status_line_command() {
     // a dev machine with `~/.cargo/bin` on PATH, absent in CI, which is
     // exactly why this test flaked green-locally/red-in-CI) — prepend a fake,
     // executable `tm` onto `PATH` so the upgrade is deterministic in both
-    // environments. See `PathGuard`/`write_fake_tm_binary` above.
+    // environments. See `PathGuard`/`write_fake_binary` above.
     let fake_bin_dir = TempDir::new().unwrap();
-    let fake_tm = write_fake_tm_binary(fake_bin_dir.path());
+    let fake_tm = write_fake_binary(fake_bin_dir.path(), "tm");
     let _path_guard = PathGuard::prepend(fake_bin_dir.path());
 
     let root = TempDir::new().unwrap();
