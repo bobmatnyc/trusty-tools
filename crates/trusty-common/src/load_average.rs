@@ -9,13 +9,21 @@
 //! asks. It is a different primitive from anything `host_metrics` samples, so
 //! it lives beside that module rather than inside it.
 //!
-//! What: [`read_load_average`] returns [`LoadAverage`] — the 1/5/15-minute
+//! What: [`read_load_average`](crate::load_average::read_load_average) returns
+//! [`LoadAverage`](crate::load_average::LoadAverage) — the 1/5/15-minute
 //! triple — from `getloadavg(3)` on macOS and the other BSD-shaped unixes, and
 //! from `/proc/loadavg` on Linux, which is the authoritative source there.
-//! Every failure is a [`LoadAverageError`] carrying the OS errno where one
-//! exists; nothing here panics, and nothing here substitutes a guessed number
-//! for a reading it could not take. Admission's fail-closed rule needs to tell
-//! "unreadable" apart from "high", which a sentinel value would destroy.
+//! Every failure is a [`LoadAverageError`](crate::load_average::LoadAverageError)
+//! carrying the OS errno where one exists; nothing here panics, and nothing
+//! here substitutes a guessed number for a reading it could not take.
+//! Admission's fail-closed rule needs to tell "unreadable" apart from "high",
+//! which a sentinel value would destroy.
+//!
+//! #8261: every link above is written as a full `crate::` path, including the
+//! ones naming this module's own items. `lib.rs` carries an outer doc block on
+//! `pub mod load_average;` as well, and rustdoc resolves the merged fragments
+//! in the CRATE-ROOT scope, where a bare `LoadAverage` link names nothing and
+//! the intra-doc-link gate denies it.
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
