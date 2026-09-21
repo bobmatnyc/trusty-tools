@@ -31,6 +31,11 @@ exact shape. `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on a
 `fn`/`impl`/`use`, and `all(test, …)` / `any(test, …)` predicates are all still
 counted.
 
+<!-- #8309 --> This cap is code-only. It applies to tracked `.rs` and `.swift`
+source files; Markdown and other documentation carry no line or word cap —
+the `documentation-style` skill's Write Plainly / `tm-prose-style` rules
+bound prose length instead.
+
 ## Enforcement
 
 As of issue #610 the production cap is no longer advice: it is gated by

@@ -112,6 +112,14 @@ that matches what you're writing, not the whole set.
 | Method/Function | [method-function.md](references/method-function.md) | Callable contracts — pre/postconditions, `Test:` pointers |
 | Block/Inline | [block-inline.md](references/block-inline.md) | Trailing/preceding line comments |
 
+## Prose Documents Carry No Size Cap
+
+<!-- #8309 --> A research report, spec, ADR, or other prose document carries
+no line or word cap. The Write Plainly / `tm-prose-style` verbosity rules
+bound its length instead, never a hard count borrowed from the 500-SLOC code
+cap. Owner ruling, 2026-09-20: "Non-coding docs shouldn't have a strict size
+cap, they should apply a writing style limiting verbosity."
+
 ## Context-Economy Principles
 
 Documentation competes for the same context window an agent uses to reason
