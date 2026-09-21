@@ -42,7 +42,7 @@ use trusty_analyze::service::events::AnalyzerAppState;
 use trusty_analyze::service::rpc;
 use trusty_console::connector::{ServiceConnector as _, ServiceStatus};
 use trusty_console::detect::AnalyzeConnector;
-use trusty_installer::commands::probe_http::{probe_daemon_http, ProbeOutcome};
+use trusty_installer::commands::probe_http::{ProbeOutcome, probe_daemon_http};
 
 // Every test here mutates `TRUSTY_DATA_DIR_OVERRIDE` and `PATH` — process-global
 // state a parallel sibling in this binary would see — so each carries

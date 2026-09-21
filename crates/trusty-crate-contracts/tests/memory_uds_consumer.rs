@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::oneshot;
 use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
-use trusty_installer::commands::probe_http::{probe_daemon_http, ProbeOutcome};
+use trusty_installer::commands::probe_http::{ProbeOutcome, probe_daemon_http};
 use trusty_memory::AppState;
 
 /// Block until `socket` ANSWERS a real request, not merely until it accepts one.
