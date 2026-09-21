@@ -43,9 +43,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+use trusty_common::uds::ConnectRetry;
 
 use crate::{Request, Response, error_codes};
 
@@ -64,7 +66,7 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// What: `socket` is the daemon's Unix socket; `daemon_label` names the daemon
 /// in error text a human reads; `streaming_methods` is the refusal list (see
 /// [`DaemonBridgeJsonRpc::answer`]); `request_timeout` and `max_frame_bytes` are
-/// passed through to [`trusty_common::uds::send_framed_request_capped`].
+/// passed through to [`trusty_common::uds::send_framed_request_retrying`].
 /// Test: `config_defaults_are_the_documented_ones`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -139,6 +141,8 @@ type RequestRewriter = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 pub struct DaemonBridgeJsonRpc {
     config: UdsBridgeConfig,
     rewriter: Option<RequestRewriter>,
+    /// #8267: true until the first request is forwarded. See [`Self::forward`].
+    first_dial: AtomicBool,
 }
 
 impl std::fmt::Debug for DaemonBridgeJsonRpc {
@@ -156,6 +160,7 @@ impl DaemonBridgeJsonRpc {
         Self {
             config,
             rewriter: None,
+            first_dial: AtomicBool::new(true),
         }
     }
 
@@ -270,12 +275,26 @@ impl DaemonBridgeJsonRpc {
     /// response struct: the bridge forwards envelopes it does not interpret, and
     /// [`Self::map_reply`] is where the shape is checked. A reply that is not
     /// JSON at all fails here, as `UdsRpcError::Decode`.
+    ///
+    /// #8267: the FIRST forwarded request — the MCP `initialize`, in practice —
+    /// dials under [`ConnectRetry::startup`] rather than the per-request bound.
+    /// An MCP client launches this bridge and the daemon it forwards to in the
+    /// same instant, so the bridge's first dial can legitimately precede the
+    /// daemon's own bind; giving up on it the way a hundredth dial gives up is
+    /// what left a whole session with a dead memory server. Every later request
+    /// uses the ordinary bound, so a genuinely absent daemon still fails fast.
     async fn forward(&self, envelope: &Value) -> Result<Value, trusty_common::uds::UdsRpcError> {
-        trusty_common::uds::send_framed_request_capped(
+        let retry = if self.first_dial.swap(false, Ordering::Relaxed) {
+            ConnectRetry::startup()
+        } else {
+            ConnectRetry::per_request()
+        };
+        trusty_common::uds::send_framed_request_retrying(
             &self.config.socket,
             envelope,
             self.config.request_timeout,
             self.config.max_frame_bytes,
+            retry,
         )
         .await
     }

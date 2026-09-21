@@ -300,9 +300,11 @@ mod tests {
             .await
             .expect_err("nothing is listening");
 
+        // #8267: a refused dial is retried under a bounded policy, so the
+        // terminal error may be the retry wrapper around the same `Dial`.
         assert!(
-            matches!(err, UdsRpcError::Dial { .. }),
-            "a refused dial is a Dial error, not something else: {err:?}"
+            err.is_dial_failure(),
+            "a refused dial is a dial failure, not something else: {err:?}"
         );
         assert!(
             started.elapsed() < Duration::from_secs(5),

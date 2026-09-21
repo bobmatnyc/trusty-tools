@@ -197,6 +197,15 @@ impl Daemon {
     /// no side effect. Every other variant — `NoResponse` above all — means the
     /// frame was sent, and those still fail the test on the first occurrence.
     async fn call(&self, method: &str, params: Value) -> RpcResponse {
+        /// Whether this failure proves the request frame never reached the peer.
+        fn nothing_was_written(e: &UdsRpcError) -> bool {
+            match e {
+                UdsRpcError::Dial { .. } | UdsRpcError::Write { .. } => true,
+                UdsRpcError::ConnectRetriesExhausted { source, .. } => nothing_was_written(source),
+                _ => false,
+            }
+        }
+
         let deadline = tokio::time::Instant::now() + CALL_TIMEOUT;
         loop {
             let sent = send_framed_request_capped(
@@ -208,9 +217,12 @@ impl Daemon {
             .await;
             match sent {
                 Ok(response) => return response,
-                Err(e @ (UdsRpcError::Dial { .. } | UdsRpcError::Write { .. }))
-                    if tokio::time::Instant::now() < deadline =>
-                {
+                // #8267: the shared client now retries a transient dial itself,
+                // and reports exhaustion as `ConnectRetriesExhausted` wrapping
+                // the last attempt. `nothing_was_written` sees through that
+                // wrapper; matching the bare variants would panic on the very
+                // failure this loop exists to absorb.
+                Err(ref e) if nothing_was_written(e) && tokio::time::Instant::now() < deadline => {
                     tracing::warn!(
                         method,
                         error = %e,
