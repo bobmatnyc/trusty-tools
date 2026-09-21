@@ -1,15 +1,22 @@
 //! Concurrent `serve --stdio` bridge isolation test for `trusty-memory`
 //! (updated for issue #1152 — no_spawn contract).
 //!
-//! Why: with the daemon-bridge design (`no_spawn: true`), multiple `serve --stdio`
-//! processes all proxy to the single HTTP daemon.  The bridge NEVER auto-starts a
-//! daemon; if none is running it exits with a clear error.  This test validates:
+//! Why: with the daemon-bridge design, multiple `serve --stdio` processes all
+//! proxy to the single daemon. No bridge ever spawns its own unmanaged daemon
+//! (#1152). This test validates:
 //!   1. Two concurrent bridge clients that share one pre-provisioned daemon can
 //!      both perform reads with no lock contention at the bridge layer.
 //!   2. Both clients see the same tool set (no stale snapshot divergence).
 //!   3. Neither client hangs — all responses arrive within `RESPONSE_DEADLINE`.
-//!   4. (Regression for #1152) When NO daemon is running, the bridge exits
-//!      immediately with a human-readable error rather than spawning an orphan.
+//!   4. (Regression for #1152) The bridge never spawns an orphan daemon, and it
+//!      exits promptly when its client closes stdin.
+//!
+//! #8351 replaced the other half of #1152's contract. "If no daemon is running
+//! it exits with a clear error" was the designed behaviour until #8351, and it
+//! is what made one pane lose memory for a session: an MCP client does not
+//! re-spawn a server that exited, so a daemon that was briefly unreachable
+//! ended the bridge permanently. The bridge now stays up and answers, and the
+//! unit tests in `commands::serve_stdio_bridge` own that half.
 //!
 //! Test strategy: provision a single HTTP daemon in an isolated temp data dir on
 //! an OS-assigned port, wait for it to signal readiness via its socket,
@@ -21,9 +28,10 @@
 //!   - `stdio_serve_concurrent_two_bridges_both_work`: provisions a daemon, spawns
 //!     two bridges, sends `initialize`, `tools/list`, and `palace_list` through
 //!     both concurrently, asserts all succeed within `RESPONSE_DEADLINE`.
-//!   - `stdio_bridge_exits_when_no_daemon`: asserts that with no daemon running the
-//!     bridge exits (EOF) rather than hanging, and that NO additional child process
-//!     matching the exe name is spawned (no orphan squatter).
+//!   - `stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon`: asserts the
+//!     bridge exits promptly when stdin closes rather than hanging, and that NO
+//!     additional child process matching the exe name is spawned (no orphan
+//!     squatter).
 //!
 //! Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e`.
 //! Requires Cargo to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
@@ -339,23 +347,23 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
     drop(daemon);
 }
 
-/// Why (regression for issue #1152): with `no_spawn: true`, the bridge must
-/// exit immediately with a human-readable error when no daemon is reachable.
-/// It must NOT spawn a background `serve --foreground --http :0` squatter.
+/// Why (regression for issue #1152, narrowed by #8351): the bridge must never
+/// spawn a background `serve --foreground --http :0` squatter of its own, and
+/// must never hang. #1152's other assertion — that an unreachable daemon makes
+/// the bridge exit — is deliberately gone: #8351 showed that exit is what cost
+/// a client session its memory tools, because nothing re-spawns an MCP server
+/// that exited. The bridge now serves the handshake locally instead, which
+/// `the_handshake_is_answered_with_no_daemon_listening` covers.
 ///
-/// What: creates an empty temp data dir (no daemon, no socket),
-/// spawns a bridge, closes its stdin immediately, then reads stdout until
-/// EOF.  The bridge must exit within `EXIT_DEADLINE` and produce no JSON-RPC
-/// response (it exits before entering the loop).
+/// What: creates an empty temp data dir, spawns a bridge, closes its stdin
+/// immediately, and asserts the process exits within `EXIT_DEADLINE`. Prompt
+/// exit is only possible if the bridge did NOT block on a daemon it spawned —
+/// a spawned-orphan path would hold it for the orphan's 30-second startup
+/// budget.
 ///
-/// The no-orphan assertion is pragmatic: we verify the bridge exits promptly
-/// (within EXIT_DEADLINE), which is only possible if it did NOT block waiting
-/// for a daemon it spawned.  A spawned-orphan path would keep the bridge
-/// alive until the orphan's 30-second startup budget expires.
-///
-/// Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e -- stdio_bridge_exits_when_no_daemon`.
+/// Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e -- stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon`.
 #[tokio::test]
-async fn stdio_bridge_exits_when_no_daemon() {
+async fn stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon() {
     // Empty temp dir — no daemon, no socket.
     let data_dir = tempfile::tempdir().expect("tempdir");
 
@@ -372,12 +380,13 @@ async fn stdio_bridge_exits_when_no_daemon() {
     trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
 
     let mut child = cmd.spawn().expect("spawn bridge");
-    // Close stdin immediately — the bridge should fail before entering the loop.
+    // Close stdin immediately — EOF on stdin is how an MCP server is told to
+    // exit (#457), and #8351 made it the ONLY thing that ends this process.
     drop(child.stdin.take());
 
     let exit_result = timeout(EXIT_DEADLINE, child.wait())
         .await
-        .expect("bridge must exit within EXIT_DEADLINE when no daemon is reachable");
+        .expect("bridge must exit within EXIT_DEADLINE once stdin closes");
 
     // The bridge may exit with a non-zero code (error) or zero — the
     // important thing is that it DID exit rather than hanging.
