@@ -819,21 +819,24 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // dispatch, so a daemon outage costs builder dispatches only. See its module
     // doc.
     // #8261: this exit has no worktree rewrite to merge a slot notice into, so
-    // it matches only the DENY arm. An admitted builder reaching here keeps its
-    // slot (the daemon recorded it) but is not yet TOLD the directory — the
-    // notice rides `emit_builder_cap_or`'s grant object, which this path does
-    // not reach. Threading it to the deferred `cost_notice` exit below is the
-    // follow-up; see this file's `emit_cost_notice`.
-    if !caller_is_subagent
-        && let pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) =
-            pm_guard_builder_cap::evaluate(
-                url, &payload, tool_name, tool_input, session_id, &hook_cwd,
-            )
-            .await
-    {
-        audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
-        return Ok(());
+    // the notice `emit_builder_cap_or` merges into the grant object has nowhere
+    // to ride here. It is held instead and emitted at the plain ALLOW exit
+    // below, because a `PreToolUse` hook's stdout may carry exactly one object
+    // and the gates between here and there each print their own.
+    let mut slot_notice: Option<String> = None;
+    if !caller_is_subagent {
+        match pm_guard_builder_cap::evaluate(
+            url, &payload, tool_name, tool_input, session_id, &hook_cwd,
+        )
+        .await
+        {
+            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
+        }
     }
 
     // Text of a pending agent-cost notice, emitted at whichever subagent ALLOW
@@ -930,7 +933,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     }
 
     let Some(reason) = evaluate_tool(tool_name, tool_input) else {
-        // ALLOW: exit 0 with no output so the normal permission flow applies.
+        // ALLOW: exit 0 with no output so the normal permission flow applies —
+        // unless #8261 admitted this dispatch to a builder slot, which is the
+        // one thing an allowed dispatch still has to be TOLD. This is the exit
+        // a PM's own `Agent` dispatch reaches: the two subagent exits above are
+        // unreachable with a slot notice in hand, because the claim runs only
+        // when `caller_is_subagent` is false and both of them require it true.
+        emit_slot_notice(slot_notice);
         return Ok(());
     };
 
@@ -1170,6 +1179,31 @@ fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
         return;
     };
     if pm_guard_cost::claim_warn_notice(payload) {
+        println!("{}", build_pretooluse_context_response(&text));
+    }
+}
+
+/// Emit an admitted builder's slot-directory notice at the plain ALLOW exit.
+///
+/// Why (#8261): the grant arms hand their notice to
+/// [`pm_guard_builder_cap::emit_builder_cap_or`], which merges it into the
+/// rewrite object they were already printing. The plain-dispatch exit prints no
+/// object at all, so without this the daemon recorded a slot the engineer was
+/// never told about and it built in the shared directory anyway — the exact
+/// contention #8261 exists to end.
+///
+/// It does NOT go through [`emit_cost_notice`]'s once-per-agent claim. That
+/// claim keys on `agent_id`, which a PM's own dispatch payload does not carry,
+/// so every slot notice in a session would fall back to the same `session_id`
+/// key and only the first builder would ever be told its directory.
+/// What: no-op on `None`; otherwise prints the single
+/// [`build_pretooluse_context_response`] object, carrying no
+/// `permissionDecision` so the normal permission flow still applies.
+/// Test: `pm_guard_tells_an_admitted_builder_its_slot_directory` in
+/// `tests/tm_hook_pm_guard.rs`; the JSON shape by
+/// `build_pretooluse_context_response_carries_no_decision`.
+fn emit_slot_notice(notice: Option<String>) {
+    if let Some(text) = notice {
         println!("{}", build_pretooluse_context_response(&text));
     }
 }

@@ -5058,6 +5058,49 @@ fn pm_guard_denies_a_builder_when_the_machine_is_full() {
     assert!(verdict.contains("builders.max_concurrent"), "{verdict}");
 }
 
+/// #8261, through the real binary: an ADMITTED builder must be told the slot
+/// directory the daemon just granted it.
+///
+/// Why this dispatch and this cwd: a tempdir is no main checkout, so the
+/// ADR-0048 worktree grant does not fire and the call reaches the plain
+/// builder-cap exit — the one with no rewrite object for the notice to ride.
+/// That exit matched only the DENY arm and dropped `Allow(Some(notice))` on the
+/// floor, so the daemon recorded a private `CARGO_TARGET_DIR` that the engineer
+/// never heard about and built in the shared one regardless. Before the fix this
+/// FAILS at the parse: stdout was empty.
+///
+/// The absent `permissionDecision` is the second half of the contract — with
+/// one, the object would approve the dispatch and bypass the permission flow.
+#[test]
+fn pm_guard_tells_an_admitted_builder_its_slot_directory() {
+    let (url, _captured) = spawn_routed_mock_with_builder(
+        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
+        r#"{"claimed":true,"cap":4,"holders":[],"slot_path":"/tmp/trusty-build-slots/slot-3"}"#,
+    );
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let stdout = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("an admitted builder must be told its slot on stdout: {e}: {stdout:?}")
+    });
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the notice rides `additionalContext`, got: {stdout}"));
+    assert!(
+        context.contains("/tmp/trusty-build-slots/slot-3"),
+        "the notice must name the directory itself, got: {context}"
+    );
+    assert!(
+        context.contains("CARGO_TARGET_DIR"),
+        "the notice must name the variable to prefix, got: {context}"
+    );
+    assert!(
+        parsed["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none(),
+        "an explicit decision here would bypass the permission flow: {stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `EnterWorktree` from a worktree-pinned agent (issue #7172) —
 // `commands::pm_guard_enter_worktree`.
