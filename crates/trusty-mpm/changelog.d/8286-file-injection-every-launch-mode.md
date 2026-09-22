@@ -1,0 +1,2 @@
+Fixed
+- `tm session start` in a git repository with no GitHub remote now starts Claude Code with the compiled PM instructions through `--append-system-prompt-file`, like every other PM launch mode. Before, its launch line carried no prompt flag and the session ran on the project `CLAUDE.md` alone. If the prompt file cannot be written, the launch is refused before the session is registered, instead of starting without instructions (#8286).

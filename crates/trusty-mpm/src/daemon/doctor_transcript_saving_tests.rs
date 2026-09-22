@@ -67,6 +67,38 @@ fn launch_lines_covers_every_builder() {
     }
 }
 
+/// The PM launch builders this check reads must also carry the PM prompt file.
+///
+/// Why (#8286): `launch_lines()` proves every builder scrubs the session
+/// markers, but a builder could scrub correctly and still launch with no PM
+/// instructions — `build_inplace_session_command` did exactly that. The owner
+/// rule is that every PM launch mode delivers its prompt through
+/// `--append-system-prompt-file`, so the two shell-string PM builders listed in
+/// `launch_lines()` are pinned to that flag here, next to the scrub coverage.
+/// What: builds each with a probe path and asserts the flag and the path are on
+/// the line. The daemon spawn/resume spec is pinned by
+/// `spawn_argv_matches_the_shell_line_it_replaces`; `build_claude_command` by
+/// `claude_command_with_prompt`.
+#[test]
+fn pm_launch_builders_carry_the_prompt_file() {
+    let probe = std::path::Path::new("/probe/prompt.txt");
+    for (label, line) in [
+        (
+            "core::model_inject::build_inplace_session_command",
+            crate::core::model_inject::build_inplace_session_command(probe),
+        ),
+        (
+            "core::model_inject::build_client_session_command",
+            crate::core::model_inject::build_client_session_command(Some(probe)),
+        ),
+    ] {
+        assert!(
+            line.contains("--append-system-prompt-file") && line.contains("/probe/prompt.txt"),
+            "{label} must hand the PM prompt file to claude: {line}"
+        );
+    }
+}
+
 /// Every source site that names `claude` as a command word, with the number of
 /// non-comment occurrences expected in that file and why they are acceptable.
 ///

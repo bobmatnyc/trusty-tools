@@ -552,3 +552,51 @@ async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
         "an isolation request must send worktree: true: {body}"
     );
 }
+
+// ── #8286: the in-place launch line carries the PM prompt file ─────────────
+
+/// The in-place pane line names the file the composed PM prompt was written to.
+///
+/// Why: before #8286 this launch mode's line carried no prompt flag, so the
+/// session ran on the project `CLAUDE.md` alone.
+/// What: drives [`super::inplace_launch_line`] with a writer that records the
+/// prompt and returns a fixed path, then asserts the prompt was composed and
+/// the line hands that exact path to `--append-system-prompt-file`.
+#[test]
+fn inplace_launch_line_carries_the_written_prompt_file() {
+    let project = tempfile::TempDir::new().expect("tmp project");
+    let mut written = String::new();
+    let line = super::inplace_launch_line(project.path(), false, |prompt| {
+        written = prompt.to_owned();
+        Some(std::path::PathBuf::from("/probe/pm-prompt.txt"))
+    })
+    .expect("a written prompt file yields a launch line");
+
+    assert!(
+        !written.trim().is_empty(),
+        "the composed PM prompt must reach the writer"
+    );
+    assert!(
+        line.contains("--append-system-prompt-file '/probe/pm-prompt.txt'"),
+        "the in-place line must carry the written prompt file: {line}"
+    );
+}
+
+/// A prompt file that cannot be written refuses the launch.
+///
+/// Why: the fail-open alternative — launching without the flag — is the #8286
+/// defect itself, and #4752 already refuses a launch whose compiled
+/// instructions could not be written.
+/// What: a writer returning `None` must make [`super::inplace_launch_line`]
+/// return an error that names the refusal.
+#[test]
+fn inplace_launch_line_refuses_when_the_prompt_file_cannot_be_written() {
+    let project = tempfile::TempDir::new().expect("tmp project");
+    let err = super::inplace_launch_line(project.path(), false, |_| None)
+        .expect_err("a failed prompt write must refuse the launch");
+    assert!(
+        err.to_string()
+            .contains("refusing to start a session without its instructions"),
+        "the error must name the refusal: {err}"
+    );
+}

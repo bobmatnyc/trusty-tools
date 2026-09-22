@@ -426,19 +426,28 @@ pub fn build_claude_command_with(
 /// Neither disturbs the settings-tier reasoning above: both are environment
 /// defaults, not `--setting-sources` flags, so this path still loads the
 /// operator's own `user` tier.
+///
+/// #8286: the line carries `--append-system-prompt-file <prompt_file>`. It
+/// used to carry no prompt flag, so an in-place session ran on the project
+/// `CLAUDE.md` alone. `prompt_file` is required, not optional, so a line
+/// without the prompt cannot be built; the caller refuses the launch when the
+/// file cannot be written. The path is single-quoted because a pane shell
+/// re-splits this line.
 /// Test: `inplace_session_command_scrubs_inherited_session_markers`,
-/// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`,
+/// `inplace_session_command_carries_the_prompt_file_and_the_permission_flag`,
+/// `inplace_session_command_quotes_the_prompt_file`,
 /// `inplace_session_command_defaults_the_alternate_screen_off`,
 /// `inplace_session_command_defaults_the_mouse_capture_off`.
-pub fn build_inplace_session_command() -> String {
+pub fn build_inplace_session_command(prompt_file: &Path) -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
     format!(
-        "env{} {} claude {}",
+        "env{} {} claude --append-system-prompt-file {} {}",
         crate::core::claude_env_scrub::env_unset_flags(),
         // #6495/#7160: classic renderer + mouse capture off by default, each
         // yielding independently to the pane's own value.
         crate::core::alt_screen::managed_shell_assignments(),
+        crate::core::spawn_disclaim::pane::shell_single_quote(&prompt_file.display().to_string()),
         PERMISSION_MODE_FLAG
     )
 }
@@ -791,7 +800,7 @@ mod tests {
     /// line that silently saved no transcript.
     #[test]
     fn inplace_session_command_scrubs_inherited_session_markers() {
-        assert_scrubbed_launch_line(&build_inplace_session_command());
+        assert_scrubbed_launch_line(&build_inplace_session_command(Path::new("/tmp/p.txt")));
     }
 
     /// This pin guards the FLAG list: adding `--setting-sources project,local`
@@ -802,22 +811,37 @@ mod tests {
     /// #6495/#7160 changed the expected string by adding `env` operands
     /// (`managed_shell_assignments()`) ahead of `claude`. That is deliberate and
     /// does not weaken what this test asserts: the guard is about which SETTINGS
-    /// TIERS the line loads, an environment default changes none of them, and
-    /// `--dangerously-skip-permissions` is still the only flag. The
+    /// TIERS the line loads, an environment default changes none of them. The
     /// `SETTING_SOURCES_FLAG` assertion below remains the sharp edge.
+    ///
+    /// #8286: this pinned the ABSENCE of a prompt flag. It now pins
+    /// `--append-system-prompt-file`, the one carrier every PM launch mode
+    /// uses, ahead of the permission flag.
     #[test]
-    fn inplace_session_command_keeps_the_permission_flag_and_nothing_else() {
+    fn inplace_session_command_carries_the_prompt_file_and_the_permission_flag() {
+        let cmd = build_inplace_session_command(Path::new("/tmp/p.txt"));
         assert_eq!(
-            build_inplace_session_command(),
+            cmd,
             format!(
-                "env{} {} claude {PERMISSION_MODE_FLAG}",
+                "env{} {} claude --append-system-prompt-file '/tmp/p.txt' {PERMISSION_MODE_FLAG}",
                 crate::core::claude_env_scrub::env_unset_flags(),
                 crate::core::alt_screen::managed_shell_assignments()
             )
         );
         assert!(
-            !build_inplace_session_command().contains(SETTING_SOURCES_FLAG),
+            !cmd.contains(SETTING_SOURCES_FLAG),
             "must not add --setting-sources: that would drop the user settings tier"
+        );
+    }
+
+    /// #8286: the in-place line is typed into a pane shell, so a prompt path
+    /// holding a space must stay one shell word.
+    #[test]
+    fn inplace_session_command_quotes_the_prompt_file() {
+        let cmd = build_inplace_session_command(Path::new("/tmp/with space/p.txt"));
+        assert!(
+            cmd.contains("--append-system-prompt-file '/tmp/with space/p.txt' "),
+            "the prompt path must be one shell word: {cmd}"
         );
     }
 
@@ -910,7 +934,7 @@ mod tests {
     /// separate from the pins above so a regression names the path it broke.
     #[test]
     fn inplace_session_command_defaults_the_alternate_screen_off() {
-        let cmd = build_inplace_session_command();
+        let cmd = build_inplace_session_command(Path::new("/tmp/p.txt"));
         assert!(
             cmd.contains(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT),
             "the in-place session line must default the alternate screen off: {cmd}"
@@ -921,7 +945,7 @@ mod tests {
     /// `inplace_session_command_defaults_the_alternate_screen_off`.
     #[test]
     fn inplace_session_command_defaults_the_mouse_capture_off() {
-        let cmd = build_inplace_session_command();
+        let cmd = build_inplace_session_command(Path::new("/tmp/p.txt"));
         assert!(
             cmd.contains(crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT),
             "the in-place session line must default mouse capture off: {cmd}"

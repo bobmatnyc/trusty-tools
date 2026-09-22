@@ -131,7 +131,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     );
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command();
+    // #8286: the in-place line now requires the prompt file it names.
+    let inplace_line = crate::core::model_inject::build_inplace_session_command(
+        std::path::Path::new("/probe/prompt.txt"),
+    );
     let client_line = crate::core::model_inject::build_client_session_command(Some(
         std::path::Path::new("/probe/prompt.txt"),
     ));

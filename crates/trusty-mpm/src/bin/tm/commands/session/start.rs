@@ -139,8 +139,10 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// production behavior is unchanged.
 /// What: runs `prepare_session` (deploys agents AND skills — printing both
 /// `deploy_summary_line` counts, #1917 — merges CLAUDE.md, prints the
-/// catch-up digest), registers via `POST /sessions`, then creates a detached
-/// tmux session rooted at `path` and starts `claude` in it.
+/// catch-up digest), writes the PM prompt file and builds the launch line
+/// ([`inplace_launch_line`], #8286 — a write failure refuses the launch before
+/// anything is registered), registers via `POST /sessions`, then creates a
+/// detached tmux session rooted at `path` and starts `claude` in it.
 /// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
 /// in `start_tests.rs` covers the routing decision hermetically; the tmux/daemon
 /// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
@@ -231,6 +233,15 @@ async fn start_session_in_place(
         Err(err) => eprintln!("warning: session preparation failed: {err}"),
     }
 
+    // #8286: the PM prompt goes to `claude` as `--append-system-prompt-file`,
+    // like every other PM launch mode. Built before `POST /sessions`, so a
+    // prompt that cannot be written refuses the launch with nothing registered.
+    let claude_cmd = inplace_launch_line(
+        path,
+        native,
+        trusty_mpm::core::model_inject::write_prompt_file,
+    )?;
+
     #[derive(Deserialize)]
     struct Body {
         #[serde(default)]
@@ -270,18 +281,7 @@ async fn start_session_in_place(
                     body.name
                 );
             }
-            // #2997: disclaim the pane's `claude` off the shared tmux server
-            // (same wrapper the daemon + `tm launch`/`connect` paths use).
-            // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
-            // #4467: the launch line itself is built in the LIBRARY
-            // (`model_inject::build_inplace_session_command`) so it carries the
-            // shared inherited-marker scrub and is readable by the
-            // `transcript_saving` doctor check. It used to be hand-built here as
-            // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
-            // launch line that silently saved no transcript.
-            let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-                &trusty_mpm::core::model_inject::build_inplace_session_command(),
-            );
+            // `claude_cmd` was built by `inplace_launch_line` above (#8286).
             let send = trusty_mpm::core::tmux::send_line(
                 None,
                 &trusty_mpm::core::tmux::TmuxTarget::session(&body.name),
@@ -310,6 +310,48 @@ async fn start_session_in_place(
         }
     }
     Ok(())
+}
+
+/// The in-place pane's `claude` line, carrying this project's PM prompt as
+/// `--append-system-prompt-file` (#8286).
+///
+/// Why: this was the one PM launch mode with no prompt carrier — its line had
+/// no prompt flag, so the session ran on the project `CLAUDE.md` alone. It now
+/// composes the prompt through the same seam the managed spawn and the guided
+/// relaunch use, so the in-place session receives the same instructions. A
+/// prompt that cannot be written refuses the launch, matching #4752's rule that
+/// a session never starts without its compiled instructions; launching without
+/// the flag would silently repeat the defect.
+/// What: composes the prompt with
+/// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
+/// for `path` (no explicit style, the caller's `native` probe), hands it to
+/// `write` (production: [`trusty_mpm::core::model_inject::write_prompt_file`]),
+/// and returns [`trusty_mpm::core::model_inject::build_inplace_session_command`]
+/// for the written path wrapped by
+/// [`trusty_mpm::core::spawn_disclaim::disclaim_pane_command`] (#2997). `Err`
+/// when `write` returns `None`.
+/// Test: `inplace_launch_line_carries_the_written_prompt_file`,
+/// `inplace_launch_line_refuses_when_the_prompt_file_cannot_be_written` in
+/// `start_tests.rs`.
+fn inplace_launch_line(
+    path: &std::path::Path,
+    native: bool,
+    write: impl FnOnce(&str) -> Option<std::path::PathBuf>,
+) -> anyhow::Result<String> {
+    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
+        path, None, native,
+    );
+    let Some(prompt_file) = write(&prompt) else {
+        anyhow::bail!(
+            "could not write the PM system-prompt file for {}; refusing to start a \
+             session without its instructions (#8286). Check that the temp directory \
+             is writable and retry.",
+            path.display()
+        );
+    };
+    Ok(trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
+        &trusty_mpm::core::model_inject::build_inplace_session_command(&prompt_file),
+    ))
 }
 
 // Unit tests live in session/start_tests.rs (test-file budget: 1500 SLOC).
