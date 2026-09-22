@@ -25,6 +25,8 @@ README must not present draft behavior as implemented.
 ## Current entry points
 
 - `README.md`: workspace orientation; links to the live package map.
+- `TICKETING.md`: root ticketing standard of record — taxonomy, lifecycle,
+  comment conventions, and the `ticketing` agent's behaviour settings.
 - `crates/<directory>/README.md`: required package entry point for top-level
   workspace members; installation/usage or library quick start belongs here.
 - Rustdoc in `crates/<directory>/src/`: public API contract.
