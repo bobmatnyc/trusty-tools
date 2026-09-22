@@ -370,10 +370,13 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// could not be re-read at all — that REFUSES, because an unanswerable liveness
 /// question must never resolve to "nothing claims it". Then git's current
 /// verdict ([`git_still_permits`], which honours a lock applied since the
-/// survey), the ownership marker, the current pull-request state, and finally
-/// [`inspect_dirt`], which fails toward dirty. `Some(reason)` refuses;
-/// `None` permits.
-/// Test: one test per branch —
+/// survey), the ownership marker, and finally [`landing_recheck`]: a merged
+/// pull request re-runs [`inspect_dirt`], which fails toward dirty, and #7889's
+/// `landed_content` probe, when offered, re-asks the admission for a branch no
+/// pull request carries. `Some(reason)` refuses; `None` permits.
+/// Test: `worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_the_recheck_refuses_a_tree_no_longer_landed`; and one test
+/// per branch —
 /// `recheck_refuses_a_worktree_keep_listed_after_the_survey`,
 /// `recheck_refuses_when_the_live_set_cannot_be_read`,
 /// `recheck_refuses_a_worktree_a_session_claims_now`,
@@ -386,33 +389,6 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// `recheck_refuses_a_worktree_dirtied_after_the_survey`,
 /// `recheck_permits_a_clean_merged_owned_worktree`.
 pub(crate) fn recheck_before_delete(
-    path: &Path,
-    keep_list_now: &KeepList,
-    in_use_now: Option<&LiveClaims>,
-    pr_now: &BranchPrState,
-    agent_state: AgentStateProbe<'_>,
-) -> Option<String> {
-    recheck_before_delete_with_landed_content(
-        path,
-        keep_list_now,
-        in_use_now,
-        pr_now,
-        agent_state,
-        None,
-    )
-}
-
-/// [`recheck_before_delete`], re-asking gate 5's landed-content admission when
-/// no pull request carries the branch (#7889).
-///
-/// Why: the delete loop re-checks every candidate the survey approved, and a
-/// candidate approved on content has no merged pull request to re-check. A
-/// second entry point, so the twenty-odd existing callers keep their shape.
-/// What: as [`recheck_before_delete`], with the final landing-and-dirt step
-/// delegated to [`landing_recheck`].
-/// Test: `worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request`,
-/// `worktree_7889_the_recheck_refuses_a_tree_no_longer_landed`.
-pub(crate) fn recheck_before_delete_with_landed_content(
     path: &Path,
     keep_list_now: &KeepList,
     in_use_now: Option<&LiveClaims>,
@@ -700,7 +676,7 @@ pub(crate) fn reclaim_with_probes(
         let keep_list_now = (probes.keep_list)();
         // #7889: the survey offered gate 5's landed-content admission, so the
         // re-check re-asks it for a candidate no pull request carries.
-        if let Some(reason) = recheck_before_delete_with_landed_content(
+        if let Some(reason) = recheck_before_delete(
             &path,
             &keep_list_now,
             in_use_now.as_ref(),

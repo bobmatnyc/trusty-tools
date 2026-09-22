@@ -19,7 +19,7 @@ use crate::session_manager::worktree_reclaim::{
     BranchPrState, KeepList, LiveClaims, PrIndex, ReclaimVerdict,
 };
 use crate::session_manager::worktree_reclaim_sweep::{
-    SurveyBudget, recheck_before_delete_with_landed_content, survey_with_landed_content,
+    SurveyBudget, recheck_before_delete, survey_with_landed_content,
 };
 
 /// The strictest agent probe, as `worktree_reclaim_sweep_tests` uses it.
@@ -109,7 +109,7 @@ fn worktree_7889_the_sweep_probe_refuses_an_uncommitted_file() {
 fn worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request() {
     let (_fx, wt) = donor("donor-recheck-7889");
     assert_eq!(
-        recheck_before_delete_with_landed_content(
+        recheck_before_delete(
             &wt,
             &KeepList::default(),
             Some(&LiveClaims::default()),
@@ -128,7 +128,7 @@ fn worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request() {
 fn worktree_7889_the_recheck_refuses_a_tree_no_longer_landed() {
     let (_fx, wt) = donor("donor-residue-7889");
     GitWorktreeFixture::commit_unpushed(&wt);
-    let reason = recheck_before_delete_with_landed_content(
+    let reason = recheck_before_delete(
         &wt,
         &KeepList::default(),
         Some(&LiveClaims::default()),
@@ -140,7 +140,7 @@ fn worktree_7889_the_recheck_refuses_a_tree_no_longer_landed() {
     assert!(reason.contains("landed-content"), "{reason}");
     assert!(reason.contains("unpushed.txt"), "{reason}");
 
-    let unoffered = recheck_before_delete_with_landed_content(
+    let unoffered = recheck_before_delete(
         &wt,
         &KeepList::default(),
         Some(&LiveClaims::default()),
