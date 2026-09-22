@@ -244,7 +244,7 @@ pub struct MemoryVerbOutcome {
 /// nothing could be derived and the verb is a READ, which the daemon answers
 /// with a palace index rather than an error (#6318); `Err` when nothing could be
 /// derived and the verb WRITES, because a write has nowhere to land.
-/// Test: `explicit_palace_outranks_the_environment`,
+/// Test: `explicit_palace_outranks_the_derived_levels`,
 /// `a_write_without_a_resolvable_palace_is_refused`.
 pub fn resolve_verb_palace(
     verb: &MemoryVerb,
@@ -287,7 +287,7 @@ pub fn resolve_verb_palace(
 /// `trusty_common::memory_rpc::DEFAULT_TIMEOUT`, so a dead daemon fails fast
 /// rather than hanging.
 ///
-/// Test: `recall_sends_the_resolved_palace`, `a_write_sends_a_write_method`,
+/// Test: `recall_sends_the_resolved_palace`, `a_write_sends_a_write_method_over_the_socket`,
 /// `a_dead_socket_is_an_error_naming_it`.
 pub async fn run_verb(
     verb: &MemoryVerb,
