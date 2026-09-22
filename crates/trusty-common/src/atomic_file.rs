@@ -19,6 +19,8 @@
 //! replaces the link rather than writing through it.
 //!
 //! Test: `tests` below.
+//!
+//! [`write_atomic`]: crate::atomic_file::write_atomic
 
 use std::io;
 use std::io::Write;

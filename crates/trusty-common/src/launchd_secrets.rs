@@ -15,7 +15,7 @@
 //! first, then a `_`-delimited suffix heuristic as a second net — and
 //! [`looks_like_credential_value`] (a value carrying a well-known vendor
 //! prefix, for `ProgramArguments`, where there is no key to read). The acting
-//! half is [`strip_credential_env`], which [`crate::launchd::LaunchdConfig::render_plist`]
+//! half is [`strip_credential_env`], which `crate::launchd::LaunchdConfig::render_plist`
 //! applies to every unit it renders, and the [`plist`] submodule, which reads
 //! and rewrites an ALREADY-INSTALLED plist so `tm doctor --fix` can remediate a
 //! host without reinstalling anything.
@@ -31,6 +31,12 @@
 //! the equally unconditional [`crate::credential_registry`] for that reason.
 //!
 //! Test: `launchd_secrets/tests.rs`.
+//!
+//! [`is_credential_env_key`]: crate::launchd_secrets::is_credential_env_key
+//! [`looks_like_credential_value`]: crate::launchd_secrets::looks_like_credential_value
+//! [`strip_credential_env`]: crate::launchd_secrets::strip_credential_env
+//! [`plist`]: crate::launchd_secrets::plist
+//! [`PlistSecret`]: crate::launchd_secrets::PlistSecret
 
 mod plist;
 
@@ -215,7 +221,7 @@ fn is_telegram_bot_token_shape(value: &str) -> bool {
 /// Remove every credential-keyed pair from `pairs`, returning the keys removed.
 ///
 /// Why: this is the acting half of the guard at the single choke point
-/// [`crate::launchd::LaunchdConfig::render_plist`]. Dropping the pair rather
+/// `crate::launchd::LaunchdConfig::render_plist`. Dropping the pair rather
 /// than failing the render is deliberate: a render that failed would abort
 /// `service install` on exactly the hosts that most need the plist rewritten,
 /// and the rewritten plist IS the remediation.
