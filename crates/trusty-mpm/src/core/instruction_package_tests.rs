@@ -10,7 +10,7 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// Build the canonical nine-section taxonomy with correct tiers.
+/// Build the canonical ten-section taxonomy with correct tiers.
 fn sections() -> Vec<InstructionSection> {
     SectionId::CANONICAL
         .iter()
@@ -493,7 +493,7 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 9, "nine distinct sections");
+    assert_eq!(unique.len(), 10, "ten distinct sections");
 }
 
 #[test]

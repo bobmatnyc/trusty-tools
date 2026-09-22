@@ -417,9 +417,9 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     // Roster-absent degradation (no agent deployed in any tier) and the
     // compose-error last resort. The string assembly can address `WORKFLOW`,
     // `MEMORY` and `AGENT-DELEGATION` independently, so named overrides for
-    // those three still land here; `IDENTITY`/`CORE`/`SEARCH` live inside the
-    // opaque `pm_instructions()` blob and are reported unapplied rather than
-    // dropped in silence.
+    // those three still land here; `IDENTITY`/`CORE`/`SEARCH`/
+    // `AUTONOMOUS-EXECUTION` (#8361) live inside the opaque `pm_instructions()`
+    // blob and are reported unapplied rather than dropped in silence.
     let named_section = |id: SectionId| {
         named
             .overrides

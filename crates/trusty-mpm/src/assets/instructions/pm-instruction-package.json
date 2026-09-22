@@ -17,6 +17,12 @@
       "description": "Core operating instructions, including response format and prose rules."
     },
     {
+      "id": "autonomous-execution",
+      "title": "Autonomous Execution",
+      "customization_tier": "project",
+      "description": "When the PM runs the pipeline without stopping, and the conditions on which it may stop and ask. Was prose inside `core` until #8361: `core` is tier `fixed`, so no project could set its own comfort level — on a session resume the PM had one rule telling it to continue and a skill telling it to confirm, with no override surface to settle the two."
+    },
+    {
       "id": "memory",
       "title": "Memory Protocol",
       "customization_tier": "project"
@@ -72,6 +78,14 @@
       "body": {
         "kind": "text",
         "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. \"Fixed in #4318\" with no link is a defect. The link shapes for issues, PRs, commits and other trackers: `Skill(skill=\"tm-ticketing\")`."
+      }
+    },
+    {
+      "section": "autonomous-execution",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/autonomous-execution.md"
       }
     },
     {

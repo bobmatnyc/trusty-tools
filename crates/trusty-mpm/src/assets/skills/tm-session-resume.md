@@ -29,7 +29,8 @@ When invoked, this skill:
 4. Reconciles against live git state (`git log --oneline -5`, `git status`) to
    compute what changed since pause.
 5. Presents the digest — summary, completed work, in-progress items, next
-   steps — restores the todo list, and confirms before continuing.
+   steps — restores the todo list, and continues under the Autonomous Execution
+   rule (#8361), which is what decides whether anything is asked here.
 
 ## Usage
 
@@ -39,7 +40,8 @@ When invoked, this skill:
 ```
 
 With no argument and more than one paused session present, list them
-newest-first (session id, time elapsed, topic) and confirm which to resume.
+newest-first (session id, time elapsed, topic) and ask which to resume — that
+ambiguity is an observable condition, not a comfort check.
 
 ## Implementation: `mcp__trusty-mpm__session_context_catchup`
 
@@ -119,10 +121,14 @@ The tool returns:
 ```
 
 Present the digest from these fields directly — summary, completed/in-progress
-work, next steps, git context — confirm which session to resume from if more
-than one is listed, restore the todo state from it, and confirm with the user
-before continuing work. Cross-check `recent_commits` against your own
-knowledge of the repo state if anything looks stale.
+work, next steps, repo context — restore the todo state from it, then continue
+under the Autonomous Execution rule: a resume is not itself a reason to stop and
+ask (#8361). Ask exactly one question, and only this one: when `sessions[]`
+lists more than one candidate and `resolved_snapshot` is `null`, ask which to
+resume from. A project that wants a resume to pause anyway sets that in the
+`AUTONOMOUS-EXECUTION` marker section of its root `CLAUDE.md`. Cross-check
+`recent_commits` against your own knowledge of the repo state if anything looks
+stale.
 
 > **Omit `session_id`; the tool resolves your own pause automatically** — it
 > derives the id your pause was filed under, tries that first, then
