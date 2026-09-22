@@ -29,6 +29,8 @@
 //! `secret_source_tests.rs`, which pins one test per arm per reader.
 //!
 //! Test: `secret_source_tests.rs`.
+//!
+//! [`resolve_secret`]: crate::secret_source::resolve_secret
 
 #[cfg(test)]
 use std::sync::Arc;

@@ -18,6 +18,11 @@
 //! with the module that owns the spec reference), plus
 //! `provider_for_env_var_round_trips` and
 //! `is_registered_credential_env_var_is_case_insensitive` here.
+//!
+//! [`REGISTRY`]: crate::credential_registry::REGISTRY
+//! [`env_var_for`]: crate::credential_registry::env_var_for
+//! [`provider_for_env_var`]: crate::credential_registry::provider_for_env_var
+//! [`is_registered_credential_env_var`]: crate::credential_registry::is_registered_credential_env_var
 
 /// Every credential this workspace knows how to name, as
 /// `(provider key, canonical environment-variable name)`.
