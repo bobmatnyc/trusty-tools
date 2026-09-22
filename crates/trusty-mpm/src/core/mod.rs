@@ -148,6 +148,10 @@ pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+// #5850: the ProjectRegistry half of `gh_account`, read synchronously for a
+// daemon-side checkout. `pub(crate)` throughout — nothing outside this crate
+// resolves a pin from a bare directory.
+pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).

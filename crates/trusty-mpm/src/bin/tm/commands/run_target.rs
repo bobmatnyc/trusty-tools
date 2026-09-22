@@ -272,6 +272,13 @@ pub(crate) async fn run_external(
     help: &trusty_common::help::HelpConfig,
     account: Option<String>,
 ) -> anyhow::Result<()> {
+    // #5850: clap stops applying global flags once it starts COLLECTING an
+    // external subcommand's argv, so `tm <url> --user <login>` reaches here as
+    // three raw tokens and would die on the "takes no further arguments" bail
+    // below. Lifting the flag back out is what makes the two orderings
+    // equivalent; everything else still bails.
+    let (tokens, trailing) = split_trailing_account(tokens)?;
+    let account = reconcile_bare_account(account, trailing)?;
     let token = tokens.first().map(String::as_str).unwrap_or_default();
     let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
         reject_unknown_subcommand(argv, help);
@@ -478,6 +485,98 @@ async fn run_managed(
         super::managed_workspace::LaunchDir::CallerResolved,
     )
     .await
+}
+
+/// Lift an `--account`/`--user <login>` out of an external subcommand's raw
+/// tokens (#5850).
+///
+/// Why: the bare form `tm <url>` reaches clap's `External` catch-all, and clap
+/// applies no global flag to the argv it collects there — so the owner's
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto` was
+/// refused with "takes no further arguments" while the identical invocation
+/// with the flag FIRST worked. The flag has no other meaning in this position,
+/// so lifting it is a rewrite of nothing.
+/// What: returns the tokens with the flag and its value removed, plus the
+/// login. Both spellings are accepted in both `--user <login>` and
+/// `--user=<login>` forms; a flag with no value is an error rather than a
+/// silent drop, and two occurrences naming DIFFERENT logins are refused rather
+/// than resolved by position. The login is not validated here —
+/// [`super::register_args::resolve_account`] owns that and runs on this value
+/// downstream, so the two spellings cannot diverge.
+/// Test: `bare_form_lifts_a_trailing_user_flag`,
+/// `bare_form_lifts_an_inline_account_value`,
+/// `bare_form_rejects_a_trailing_flag_with_no_value`,
+/// `bare_form_leaves_unrelated_tokens_alone`.
+pub(crate) fn split_trailing_account(
+    tokens: &[String],
+) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    let mut rest = Vec::new();
+    let mut account: Option<String> = None;
+    let mut it = tokens.iter();
+    while let Some(token) = it.next() {
+        let Some(inline) = account_flag_value(token) else {
+            rest.push(token.clone());
+            continue;
+        };
+        let login = match inline {
+            Some(value) => value.to_string(),
+            None => it.next().cloned().ok_or_else(|| {
+                anyhow::anyhow!("'{token}' needs a gh login — e.g. `{token} bob-duetto`.")
+            })?,
+        };
+        if let Some(existing) = account.as_deref()
+            && existing != login
+        {
+            anyhow::bail!(
+                "conflicting account selection: '{existing}' and '{login}'. Pass just one."
+            );
+        }
+        account = Some(login);
+    }
+    Ok((rest, account))
+}
+
+/// Is `token` the account flag, and does it carry its value inline?
+///
+/// Why: four spellings (`--account`, `--user`, each with or without `=value`)
+/// decided in one place, so [`split_trailing_account`] stays a loop rather than
+/// a nest of string tests.
+/// What: `None` when `token` is not the flag; `Some(None)` for the bare flag
+/// (its value is the next token); `Some(Some(v))` for the `=` form.
+/// Test: `bare_form_lifts_an_inline_account_value`.
+fn account_flag_value(token: &str) -> Option<Option<&str>> {
+    ["--account", "--user"].into_iter().find_map(|flag| {
+        if token == flag {
+            return Some(None);
+        }
+        token
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(Some)
+    })
+}
+
+/// Reconcile an account named BEFORE the repository with one named after it.
+///
+/// Why: `tm --user a <url> --user b` reaches [`run_external`] with both, and
+/// picking one by position would silently clone as an account the operator did
+/// not mean — the same posture
+/// [`super::register_args::resolve_account`] takes for the flag versus the
+/// embedded `<login>@owner/repo` selector.
+/// What: agreeing values collapse; disagreeing ones are refused.
+/// Test: `bare_form_refuses_two_different_accounts_around_the_repository`.
+fn reconcile_bare_account(
+    before: Option<String>,
+    after: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match (before, after) {
+        (Some(before), Some(after)) if before != after => anyhow::bail!(
+            "conflicting account selection: '{before}' before the repository and \
+             '{after}' after it. Pass just one."
+        ),
+        (Some(value), _) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
 }
 
 #[cfg(test)]
