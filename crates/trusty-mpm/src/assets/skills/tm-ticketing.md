@@ -86,7 +86,7 @@ and where this skill specifies it in full.
 | Axis | Default | Detail |
 |---|---|---|
 | Type label | exactly one of `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` | "Labels" |
-| Component label | one or more, read off the file paths the finding cites; none when no crate owns the path, plus a `no-component-label: <reason>` comment | "Labels" |
+| Component label | one or more, read off the file paths the finding cites, naming the project's own stack unit; none when no unit owns the path, plus a `no-component-label: <reason>` comment | "Labels" |
 | Priority label | `P0`–`P3`, applied **only** when the issue text itself asserts severity | "Labels" |
 | Workstream label | `ws/<session>`, the filing session's | "The Labels, Project, Milestone Standard" |
 | Milestone | parent's milestone → owning crate's `Backlog · <crate>` → the one `tm issue standard` names; else a `no-milestone: <reason>` comment | "Choosing the Milestone and the Project" |
@@ -94,8 +94,9 @@ and where this skill specifies it in full.
 | Relationships | native sub-issue and blocked-by only; `Refs #N` is fix linkage, never an issue-to-issue link | "Relationships (native, never prose)" |
 | Lifecycle states | `open → status:in-progress → status:coded → status:merged → status:tested → closed`, mutually exclusive | "Lifecycle" |
 | Dedupe disposition | `COMMENT` / `REOPEN` / `NEW REGRESSION` / `NO TICKET`, one per finding, reported by name | "Search first, then choose a disposition" |
-| Epic title | `[EPIC N] <description>`, where N is the epic issue's own number | "Epics, phases, and the Tracker section" |
-| Phase title | `[EPIC N · Phase M] <description>`, linked as a native sub-issue of the epic | "Epics, phases, and the Tracker section" |
+| Epic title | `[EPIC] <the outcome, in plain words>` | "Trackers and phase issues" |
+| Phase title | `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, a native sub-issue of the tracker | "Trackers and phase issues" |
+| Research | a committed doc under `research_docs_path`, linked from the tracker — never pasted into an issue | "Trackers and phase issues" |
 | Title | `<type>: <what is wrong or wanted>`, under ~70 characters | "What a Ticket Says" |
 | Body | problem, decisive evidence, 1–4 observable closure conditions; no structured headings | "What a Ticket Says" |
 | Attribution | one `🤖🤖🤖 Generated with trusty-mpm — …` line ending every issue body and comment | "Attribution on Issues and Comments" |
@@ -123,7 +124,10 @@ each one as an explicit value so a user edits it rather than discovering it.
 | `rollup_issue` | none by default — a project names one for sub-HIGH review and self-improvement findings, which then never become their own issue |
 | `pr_issue_link` | `Refs #N` (fixed — see above) |
 | `status_on_creation` | plain `open`. Filing is not a dispatch; `status:in-progress` waits for a brief that says work starts now (#7803) |
-| `epics.tracker_autoupdate` | `true` — on every phase-issue or follow-up transition the agent rewrites ONLY the epic's Tracker section, between the two HTML markers it owns |
+| `epics.title_format` | `[EPIC] <outcome>` for the tracker; `[EPIC_<epic#> PHASE_<n>] <what>` for a phase issue |
+| `epics.tracker_autoupdate` | `true` — the agent regenerates the `<!-- phases:start -->` block wholesale from child state, amends `<!-- deferred:start -->`, and changes nothing outside the markers |
+| `epics.update_triggers` | exactly four: a phase opens, a phase closes, a phase blocks or unblocks, an item is deferred or a deferred item lands |
+| `research_docs_path` | `docs/research/<effort>/` — research lives there, committed, and the tracker links to it; no issue body carries findings |
 | `followups.budget_per_phase` | `2` standalone follow-up issues per phase issue |
 | `followups.severity_floor_for_standalone` | `HIGH` — below it, or past the budget, the follow-up is a checklist line, not an issue |
 | `followups.tracker` | the epic's Follow-ups checklist when the work has an epic; otherwise the project's `rollup_issue` |
@@ -135,29 +139,85 @@ each one as an explicit value so a user edits it rather than discovering it.
 | `staleness.decision_request` | digest — recommendations grouped per epic in ONE comment on the epic tracker, never a question per issue |
 | `coverage` | every open issue belongs to an epic or to a `Backlog · <area>` milestone; neither is a standard violation the audit reports |
 
-### Epics, phases, and the Tracker section
+### Trackers and phase issues
 
-An epic is a GitHub issue titled `[EPIC N] <description>`, N being its own
-number. Its phase issues are `[EPIC N · Phase M] <description>` and are native
-sub-issues of it — never a prose task list.
+🔴 **The full pattern lives in the project, at
+`docs/reference/tracker-phases-pattern.md`** (a project that has not adopted it
+yet copies it there), committed verbatim as the owner authored it: when the pattern earns its place,
+both body templates, how to write acceptance criteria, and the anti-pattern
+table. Read it before creating a tracker. This section states only the defaults.
 
-The epic body carries a **Tracker** section with two checklists: the phase
-issues with their current status label, and **Follow-ups**. The agent owns that
-section and nothing else in the body. It sits between two HTML markers the agent
-writes on creation, and every autoupdate is a rewrite BETWEEN them:
+**Use it when the work has a gate between stages** — one stage must be verified,
+soaked, or deployed before the next starts. A tracker whose Ordering section is
+empty is work that did not need the pattern; a task list inside one issue costs
+less and does not drift.
+
+**Naming.**
 
 ```
-<!-- ticketing:tracker:start -->
-… checklists …
-<!-- ticketing:tracker:end -->
+[EPIC] <the outcome, in plain words>
+[EPIC_<epic#> PHASE_<n>] <what this phase does>
 ```
 
-🔴 **An autoupdate that touches a byte outside the markers is a defect.** The
-rest of the body is the author's. Reference shapes:
-[duettoresearch/mcp-services#1979](https://github.com/duettoresearch/mcp-services/issues/1979)
-(auto-updating phase tracker) and
-[#1966](https://github.com/duettoresearch/mcp-services/issues/1966) (follow-up
-tracker).
+`<epic#>` is the tracker's issue number, so the tracker is created FIRST and its
+number read back; phase issues cannot go in the same batch. They are native
+GitHub sub-issues of it, never a markdown task list — the link survives body
+regeneration and stays queryable.
+
+**Three zones, three maintenance rules.** Everything above the markers is
+authored once. The `<!-- phases:start -->` block is regenerated wholesale from
+child-issue state. The `<!-- deferred:start -->` block is amended deliberately.
+
+```
+<!-- phases:start -->
+| # | Phase | Issue | State | Gate |
+|---|-------|-------|-------|------|
+| 1 | <name> | #<n> | <state> | <what blocks it> |
+<!-- phases:end -->
+
+<!-- deferred:start -->
+| Item | Why deferred | Where it went |
+|------|--------------|---------------|
+| <gap this work creates or scope removed> | <reason> | <issue or "unscheduled"> |
+<!-- deferred:end -->
+```
+
+🔴 **The `Gate` column is the justification for the whole pattern.** Without it
+the table restates the sub-issue list, and the work should have been one issue.
+
+**Four update triggers, and only these:** a phase issue opens, a phase issue
+closes, a phase blocks or unblocks (the Gate column), or an item is deferred or
+a deferred item lands. Not on PR open, merge, commit, or review — those are
+phase-issue events, and a per-PR comment on the tracker buries the plan changes
+that matter.
+
+**Phase numbers are assigned once, never renumbered, never reused.** The number
+sits in a title. A phase inserted later between 2 and 3 is `PHASE_6`; the
+tracker's table says where it runs. Order is data; the number is an identifier.
+
+**Split a phase when it can be scheduled, reviewed and reverted on its own;
+fuse when one stage is meaningless without its neighbour.** Applied strictly
+this yields fewer phases than the plan first suggests.
+
+**Closing.** The tracker closes when every phase issue is closed and each
+outcome is verified, with a closing comment mapping O1..On to evidence, one line
+each.
+
+### Research goes in committed docs, never in issues
+
+🔴 **An epic is created from prior research, and the research document is what
+the tracker LINKS to.** How the research happens stays flexible; what it
+produces is a committed document under `research_docs_path` —
+`docs/research/<effort>/<doc>.md` by default.
+
+An issue body never carries findings, evidence dumps, or analysis. It carries
+the outcome, the decisions already ratified, the ordering, and a link. That is
+what makes "Epic #12345, work on phase 5" a complete instruction to any
+contributor: the context is in the repository, at a path everyone can read, and
+it survives the issue tracker.
+
+Creating a tracker without that link is incomplete work — ask for the document
+rather than pasting the findings in.
 
 ### Follow-ups — the sprawl control
 
@@ -241,7 +301,8 @@ It overrides the `tm-ticketing` skill defaults and the per-machine
 ## Labels
 
 - Type — exactly one: <list>
-- Component — one or more: <list>
+- Component — one or more, naming this project's stack unit
+  (<Cargo crate / npm package / Python distribution / Go module / service dir>): <list>
 - Priority — optional: <list>
 - Workstream — `ws/<session>`: <convention>
 - Other in use: <list>
@@ -294,14 +355,22 @@ It overrides the `tm-ticketing` skill defaults and the per-machine
 | pr_issue_link | `Refs #N` (fixed) |
 | status_on_creation | <state> |
 
-## Epics
+## Epics — trackers and phase issues
 
-- Epic title: `[EPIC N] <description>`
-- Phase title: `[EPIC N · Phase M] <description>`
+- Pattern reference: <path to the committed tracker+phase pattern doc>
+- Epic title: `[EPIC] <the outcome, in plain words>`
+- Phase title: `[EPIC_<epic#> PHASE_<n>] <what this phase does>`
 - Phase linkage: <native sub-issue>
-- Tracker markers: `<!-- ticketing:tracker:start -->` / `<!-- ticketing:tracker:end -->`
+- Tracker markers: `<!-- phases:start -->` / `<!-- phases:end -->`, and
+  `<!-- deferred:start -->` / `<!-- deferred:end -->`
 - tracker_autoupdate: <true or false>
-- Tracker section holds: <phase checklist with status labels, Follow-ups checklist>
+- update_triggers: <phase opens, phase closes, phase blocks/unblocks, item deferred or landed>
+- Phase numbering: <assigned once, never renumbered, never reused>
+
+## Research
+
+- research_docs_path: <docs/research/<effort>/>
+- Issue bodies carry: <a link to the committed research doc, never the findings>
 
 ## Follow-ups
 
@@ -335,6 +404,7 @@ It overrides the `tm-ticketing` skill defaults and the per-machine
 
 - Search keys: <list>
 - Dispositions: `COMMENT` / `REOPEN` / `NEW REGRESSION` / `NO TICKET`
+- Component waiver reason shape: `no-component-label: no <stack unit> owns <path>`
 - What never becomes an issue here: <list>
 
 ## Title and body
@@ -549,7 +619,7 @@ spell either out.
 | Family | Cardinality | Content |
 |---|---|---|
 | Type | exactly one | `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` |
-| Owning component | one or more | The crate or subsystem the defect actually lives in |
+| Owning component | one or more | The project's own unit of ownership that the defect lives in — a Cargo crate, an npm/pnpm workspace package, a `pyproject.toml` distribution, a Go module, a deployable service directory |
 | Priority | optional | `P0`–`P3`, **only** when the issue text itself asserts severity. A guessed priority is noise |
 
 🔴 **There is no fourth family for where a finding came from.** Which session,
@@ -565,8 +635,19 @@ Then post a `no-component-label: <reason>` comment on the issue in the same
 dispatch, exactly as an unset milestone takes a `no-milestone: <reason>` one.
 That comment is the only thing that makes an absent component label legitimate:
 `tm issue audit` reads it and prints `component label  SKIP  <reason>` instead
-of FAIL (#7198). The `website/` and CI-only shape — no Cargo crate owns the
-changed path — is what it is for.
+of FAIL (#7198). 🔴 **The prefix is parsed literally — keep
+`no-component-label:` byte-for-byte** — while the reason is written in the
+project's own vocabulary: "no <stack unit> owns the path". The `website/`,
+`scripts/` and CI-only shape is what it is for.
+
+🔴 **The component axis is stack-neutral.** The unit is whatever the project
+builds and owns in: a Cargo crate here, an npm/pnpm workspace package in a
+TypeScript monorepo, a `pyproject.toml` distribution, a Go module, a Gradle
+subproject, a deployable service directory. Take it from the project's
+`TICKETING.md` when it names one, else from the manifests actually present in
+the tree. A generated `TICKETING.md` states the taxonomy its generator derived
+for THAT repository, and a waiver reading "no Cargo crate owns this" in a
+project with no Cargo is a defect.
 
 🔴 **Seed the harness's own labels on first use in a repository.** `tm issue
 seed-labels` creates the four `status:*` lifecycle labels, `trusty-mpm`, and
