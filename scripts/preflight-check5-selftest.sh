@@ -312,9 +312,11 @@ else
   pass_case "a computed break is not override-able"
 fi
 
-# --- 12. The recorded-skip arm needs no override. trusty-mpm is excluded and
-#         publishes routinely; if that arm demanded a reason string, the variable
-#         would be set on every one of its publishes and stop being deliberate.
+# --- 12. The recorded-skip arm needs no override. The fixture is a trusty-mpm
+#         run from when that crate was excluded (the row went in #8341); a crate
+#         with no baseline or no library target still reaches the same arm, and
+#         if it demanded a reason string the variable would be set on every one
+#         of those publishes and stop being deliberate.
 raw="$(run_decision recorded-skip.out 0)"
 status="$(printf '%s\n' "$raw" | sed -n 1p)"
 body="$(printf '%s\n' "$raw" | sed '1d')"

@@ -119,9 +119,10 @@ It runs **only when the gate actually compared the crate that run**. Every SKIP
 branch in `check_semver.sh` returns before `cargo-semver-checks` is invoked, so a
 skipped crate gets no fresh rustdoc — and a `target/semver-checks/` directory
 left by an earlier out-of-band run at the same version string would otherwise be
-diffed against source that is not HEAD. `trusty-mpm` is the live case: excluded
-by `semver-checks-crate-exclusions.tsv` and published through this path. A run
-that compared nothing prints `[WARN] semver-types: NOT RUN` and reads no cache.
+diffed against source that is not HEAD. `trusty-mpm` was the live case until
+#8341 deleted its exclusion row; the file carries no rows now, so the exclusion
+branch reaches this only if a new one is added. A run that compared nothing
+prints `[WARN] semver-types: NOT RUN` and reads no cache.
 For a permanently-excluded crate the only route is two hand-built documents
 passed to `--baseline-json` / `--current-json`.
 
@@ -318,21 +319,23 @@ checked versus skipped, so a run that verified nothing says so.
 compare, one per row, each carrying a written reason. It is keyed by package
 name (`tga`), not the `crates/` directory name.
 
-| Crate | Reason |
-|---|---|
-| `trusty-mpm` | binary-only consumer surface — installed as the `tm` executable via `cargo install trusty-mpm` |
+**The file carries no rows today.** `tga` lost its row in #6300 and `trusty-mpm`
+in #8341, both for the same reason: the claim each rested on stopped being true.
+Every crate in the workspace is gated.
 
 The gate protects **library** consumers: a dependent that re-resolves a version
 floor on a lockfile-free `cargo install` and stops compiling. That is #4088, and
 it mattered because `trusty-common` has 17 in-repo consumers. A binary user gets
-a whole new executable on every install, so the library API `trusty-mpm` happens
-to expose is not part of what they consume, and comparing it protects nobody.
+a whole new executable on every install, so the library API a binary-only crate
+happens to expose is not part of what they consume, and comparing it protects
+nobody. That was `trusty-mpm`'s row, and it held until
+`crates/trusty-crate-contracts` declared a normal `trusty-mpm` dependency to host
+a cross-crate test (#8341).
 
-The row is therefore a claim about consumption, not about the API: **no crate
-depends on `trusty-mpm` as a library.** Verified from the manifests via
-`cargo metadata --no-deps` — zero of the 29 workspace packages declare it as a
-dependency, in any dependency table — and crates.io reported 0 reverse
-dependencies on 2026-08-12.
+A row is therefore a claim about consumption, not about the API — **no crate
+depends on this one as a library** — and it is checkable two ways: from the
+manifests via `cargo metadata --no-deps`, which the gate itself re-runs, and
+against crates.io for out-of-repo consumers, which it cannot see.
 
 Every row is a coverage hole, so a reason has to be a fact about how the crate is
 consumed. "It is slow", "it always fails", and "we are mid-refactor" are not
@@ -348,8 +351,11 @@ gating and is the intended fix.
 ```
 FAIL: EXCLUSION NO LONGER HOLDS — trusty-mpm is excluded from the SemVer gate
       because nothing depends on its library, but these workspace crates now do:
-        - trusty-code
+        - trusty-crate-contracts
 ```
+
+That is the verbatim #8341 run: the guard fired the day the dependency landed,
+and the fix was to delete the row, not to re-word it.
 
 What that guard cannot see is an **out-of-repo consumer**: a crate on crates.io
 depending on `trusty-mpm` as a library is invisible to a workspace-local check,
@@ -755,11 +761,15 @@ and reports an empty inventory on the second. Their fixture, `all-skipped.out`,
 is the former `clean.out` — the case that was supposed to prove the gate can pass
 a crate was itself being satisfied by a run that checked nothing.
 
-Cases 23-24 pin the crate-exclusion arm: `trusty-mpm` must be skipped with its
-reason on the line and no comparison attempted, and an exclusion listing a crate
-that a workspace package actually depends on must refuse the skip and exit 3.
-Case 24 uses `trusty-agents-common` — which three crates do depend on — against a
-fixture exclusions file, so it fails the moment the dependent check is removed.
+Cases 23-24 pin the crate-exclusion arm: an excluded crate must be skipped with
+its reason on the line and no comparison attempted, and an exclusion listing a
+crate that a workspace package actually depends on must refuse the skip and exit
+3. Both drive a fixture exclusions file rather than the real one. Case 23 picks
+its crate from `cargo metadata` — any publishable lib crate with no workspace
+dependent, so the premise check grants the skip; case 24 names
+`trusty-agents-common`, which three crates do depend on, so it fails the moment
+the dependent check is removed. Case 23 named `trusty-mpm` until #8341 and broke
+when that crate gained a dependent, which is why it picks now.
 Case 8 is what keeps the exclusion from leaking: it runs a non-excluded crate
 through a full clean comparison against the real exclusions file.
 
