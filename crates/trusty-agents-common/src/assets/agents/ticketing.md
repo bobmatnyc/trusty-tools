@@ -69,13 +69,32 @@ These are file settings like any other, and they are the ones a dispatch skips.
 `{{TM_SKILLS}}/tm-ticketing.md` carries the defaults and the reasoning; this is
 what you do with them.
 
-**Epic trackers.** An epic is `[EPIC N] <description>`; its phases are
-`[EPIC N · Phase M] <description>`, linked as native sub-issues. The epic body
-holds a Tracker section — the phase checklist and a Follow-ups checklist —
-between two HTML markers you own. When `epics.tracker_autoupdate` is on, every
-phase or follow-up transition means you rewrite what is BETWEEN those markers,
-in the same dispatch. 🔴 **A byte changed outside them is a defect**: the rest of
-the body belongs to whoever wrote it.
+**Epic trackers.** An epic is a tracker issue titled `[EPIC] <the outcome, in
+plain words>`; its phase issues are `[EPIC_<epic#> PHASE_<n>] <what this phase
+does>`, where `<epic#>` is the tracker's own number. Create the tracker FIRST,
+read its number back, then file the phase issues — they cannot go in the same
+batch. Link them as native GitHub sub-issues, never a markdown task list.
+
+The tracker body has three zones and three maintenance rules: everything above
+the markers is authored once, the `<!-- phases:start -->` block is REGENERATED
+WHOLESALE from child-issue state, and the `<!-- deferred:start -->` block is
+amended deliberately. 🔴 **Never patch the phases block by hand, and never change
+a byte outside the two marker blocks.**
+
+You touch the tracker body on exactly four triggers — a phase issue opens, a
+phase issue closes, a phase blocks or unblocks, or an item is deferred or a
+deferred item lands. Not on PR open, merge, commit, or review; those are
+phase-issue events. Phase numbers are assigned once, never renumbered, never
+reused: a phase inserted later between 2 and 3 is `PHASE_6`, and the table says
+where it runs. The full pattern, both body templates and the anti-pattern table
+are in `docs/reference/tracker-phases-pattern.md`; the epic defaults are in
+`{{TM_SKILLS}}/tm-ticketing.md`.
+
+🔴 **Research findings never go in an issue body.** They live in a committed
+research document under the project's research path (`docs/research/<effort>/`
+by default), and the tracker LINKS to it. An epic you create without that link,
+or with findings pasted into it, is incomplete — ask for the doc. Issues stay
+simple so a contributor can act on "Epic #12345, work on phase 5" alone.
 
 **Follow-up budget.** A follow-up becomes a standalone issue only when it is
 above the file's severity floor AND within the per-phase budget. When it is, it
@@ -186,23 +205,30 @@ incomplete filing, not something to tidy up afterwards.
 **1. Type — exactly one** of `bug`, `enhancement`, `refactor`, `chore`,
 `documentation`, `epic`.
 
-**2. Component/crate — determined from the file path in the finding, not
-from the harness you happen to be running under.** A crate label names the
-crate whose code the defect actually lives in — read the file path(s) the
-finding cites (`crates/trusty-review/src/report/...` → `trusty-review`;
-`scripts/bump-version.sh` → release tooling, not a crate label at all) and
-label the crate that path belongs to: `trusty-memory`, `trusty-search`,
-`trusty-mpm`, `trusty-installer`, `trusty-embedderd`, `daemon`, and so on.
-Resolve an abbreviation against the project's own table rather than
-guessing — in trusty-tools that is the root `CLAUDE.md` section
-"Abbreviations & Aliases". **When no crate label fits the file path, apply
-none** — an unlabeled component field is correct more often than a guessed
-one. Then post `no-component-label: <reason>` as a comment on the issue in the
-same dispatch, exactly as an unset milestone takes a `no-milestone: <reason>`
-one. Without that comment an absent component label is a defect; with it,
-`tm issue audit` prints `component label  SKIP  <reason>` instead of FAIL
-(#7198). A `website/` or CI-only path — no Cargo crate owns it — is the shape
-this is for.
+**2. Component — determined from the file path in the finding, not from the
+harness you happen to be running under.** A component label names the project's
+own unit of ownership, whatever the stack builds in: a Cargo crate, an
+npm/pnpm/yarn workspace package, a `pyproject.toml` distribution, a Go module,
+a Gradle subproject, or a deployable service directory. Take the unit from the
+project's `TICKETING.md` when it names one, else from the manifests actually
+present in the tree — never assume Cargo.
+
+Read the file path(s) the finding cites and label the unit that path belongs to
+(`crates/trusty-review/src/report/…` → `trusty-review` in a Cargo workspace;
+`packages/api/src/…` → `api` in a pnpm one). Resolve an abbreviation against the
+project's own table rather than guessing — in trusty-tools that is the root
+`CLAUDE.md` section "Abbreviations & Aliases".
+
+**When no component unit owns the file path, apply none** — an unlabeled
+component field is correct more often than a guessed one. Then post
+`no-component-label: <reason>` as a comment on the issue in the same dispatch,
+exactly as an unset milestone takes a `no-milestone: <reason>` one. 🔴 **The
+prefix is literal and parsed** (`tm issue audit`), so keep it byte-for-byte; the
+reason reads "no <stack unit> owns the path" in the project's own vocabulary —
+"no package owns `tools/eval/`", "no crate owns `website/`". Without that comment
+an absent component label is a defect; with it, `tm issue audit` prints
+`component label  SKIP  <reason>` instead of FAIL (#7198). A `website/`,
+`scripts/`, or CI-only path is the shape this is for.
 
 🔴 **There is no second, unnamed label axis for "which session found this."
 `trusty-mpm` never fills one, because none exists.** `trusty-mpm` is a crate
@@ -216,7 +242,7 @@ and it is not license to attach `trusty-mpm` as a "provenance" or
 decision is final, not a fallback trigger. A defect in
 `crates/trusty-review/...`, or in `.github/workflows/ci.yml`, gets
 `trusty-review` or no crate label at all — never `trusty-mpm` — regardless of
-which session found it or why no crate label applies.
+which session found it or why no component label applies.
 
 **3. Priority — `P0`–`P3`, only when the issue text itself asserts severity**:
 an explicit "P1" in the title, or language like "data loss", "unrecoverable",

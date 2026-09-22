@@ -24,8 +24,10 @@ any value; nothing regenerates or reformats this file.
 `documentation`, `epic`.
 
 **Component — one or more**, chosen from the file paths the finding cites, never
-from the harness the session runs under. Resolve abbreviations against
-`CLAUDE.md`'s "Abbreviations & Aliases" table first.
+from the harness the session runs under. **This repository's stack unit is the
+Cargo crate** (`crates/<name>/`), so a component label names a crate or one of
+the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
+"Abbreviations & Aliases" table first.
 
 Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
 `trusty-agents-ui`, `trusty-analyze`, `trusty-audit`, `trusty-audit-ui`,
@@ -41,8 +43,10 @@ Subsystem labels for paths no crate owns: `ci`, `daemon`, `deps`, `dx`,
 `launchd`, `mcp`, `monitor`, `ops`, `performance`, `spec`, `test`, `ui`.
 
 **When no component label fits the path, apply none** and post
-`no-component-label: <reason>` as a comment in the same dispatch. That comment
-is what makes the absence legitimate; `tm issue audit` reads it and prints
+`no-component-label: <reason>` as a comment in the same dispatch — the prefix is
+parsed literally, so keep it byte-for-byte, and write the reason as "no crate
+owns `<path>`" since crates are this repository's unit. That comment is what
+makes the absence legitimate; `tm issue audit` reads it and prints
 `component label  SKIP  <reason>` instead of FAIL.
 
 **Priority — optional:** `P0` (drop everything), `P1` (high), `P2` (medium),
@@ -208,7 +212,11 @@ Every issue body and every comment ends with the attribution line below.
 | `pr_issue_link` | `Refs #N` (fixed) |
 | `status_on_creation` | plain `open` — filing is not a dispatch; `status:in-progress` waits for a brief that says work starts now |
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
-| `epics.tracker_autoupdate` | `true` |
+| `epics.title_format` | `[EPIC] <outcome>`; phases `[EPIC_<epic#> PHASE_<n>] <what>` |
+| `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |
+| `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed |
+| `research_docs_path` | `docs/research/<effort>/` — trackers link to the doc; no issue body carries findings |
+| `component_unit` | Cargo crate (`crates/<name>/`) |
 | `followups.budget_per_phase` | `2` |
 | `followups.severity_floor_for_standalone` | `HIGH` |
 | `followups.tracker` | the epic's Follow-ups checklist; `rollup:#8021` when there is no epic |
@@ -225,37 +233,47 @@ provably stale: the named session is gone AND nothing referencing the issue —
 branch push, PR, comment — has moved since the claim. Either alone is not
 enough.
 
-## Epics and phases
+## Epics — trackers and phase issues
 
-- Epic title: `[EPIC N] <description>`, where N is the epic issue's own number.
-  Label `epic`.
-- Phase title: `[EPIC N · Phase M] <description>`, linked as a **native
-  sub-issue** of the epic. Never a prose task list.
-- The epic body carries a **Tracker** section holding two checklists: the phase
-  issues with their current `status:*` label, and **Follow-ups**.
-- The `ticketing` agent owns that section and nothing else in the body. It sits
-  between two markers the agent writes when it creates the epic:
+The pattern is [`docs/reference/tracker-phases-pattern.md`](docs/reference/tracker-phases-pattern.md),
+committed verbatim. Read it before creating a tracker. Use it only when the work
+has a **gate** between stages — one stage verified, soaked, or deployed before
+the next starts. No gate means no tracker; one issue with a task list costs less.
 
-```
-<!-- ticketing:tracker:start -->
-<!-- ticketing:tracker:end -->
-```
+- Tracker title: `[EPIC] <the outcome, in plain words>`. Label `epic`.
+- Phase title: `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, where
+  `<epic#>` is the tracker's own issue number.
+- Create the tracker FIRST and read its number back; phase issues cannot go in
+  the same batch. Link them as **native sub-issues**, never a markdown task list.
+- Tracker body, three zones and three maintenance rules: everything above the
+  markers is authored once; the `<!-- phases:start -->` block is regenerated
+  wholesale from child-issue state; the `<!-- deferred:start -->` block is
+  amended deliberately. **Nothing outside the markers is ever touched.**
+- The `Gate` column is what justifies using the pattern at all. An empty
+  Ordering section means the work did not need it.
+- Four update triggers, and only these: a phase opens, a phase closes, a phase
+  blocks or unblocks, an item is deferred or a deferred item lands. Not on PR
+  open, merge, commit, or review.
+- Phase numbers are assigned once, never renumbered, never reused. A phase
+  inserted later between 2 and 3 is `PHASE_6`; the table says where it runs.
+- The tracker closes when every phase is closed and each outcome is verified,
+  with a closing comment mapping O1..On to evidence, one line each.
 
-- `epics.tracker_autoupdate` is on: every phase-issue or follow-up transition
-  means the agent rewrites what is between those markers in the same dispatch.
-  **A byte changed outside them is a defect.**
-- Live reference shapes in this repository:
-  [#8380](https://github.com/bobmatnyc/trusty-tools/issues/8380) `[EPIC 8380] Issue management: standard, epics,
-  follow-ups, staleness` — milestone "Issue management" (#94), sub-issues
-  [#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376) and [#8379](https://github.com/bobmatnyc/trusty-tools/issues/8379), tracker checklist in the
-  body; and [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378) `[EPIC 8378] Instructional content tracked
-  and deployed independently of code` — milestone "Instructional content"
-  (#95).
-- The shape originated in
-  [duettoresearch/mcp-services#1979](https://github.com/duettoresearch/mcp-services/issues/1979)
-  (auto-updating phase tracker) and
-  [#1966](https://github.com/duettoresearch/mcp-services/issues/1966)
-  (follow-up tracker).
+Live trackers in this repository: [#8380](https://github.com/bobmatnyc/trusty-tools/issues/8380) — milestone
+"Issue management" (#94), sub-issues [#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376) and
+[#8379](https://github.com/bobmatnyc/trusty-tools/issues/8379); and [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378) — milestone "Instructional
+content" (#95). Both predate this naming and keep their existing titles; new
+trackers use the form above.
+
+## Research
+
+- `research_docs_path`: `docs/research/<effort>/`.
+- An epic is created from prior research. **How** the research happens stays
+  flexible; **what** it produces is a committed document at that path, and the
+  tracker links to it.
+- No issue body carries findings, evidence dumps, or analysis. That is what
+  makes "Epic #8380, work on phase 5" a complete instruction: the context is in
+  the repository, readable by any contributor, and it outlives the tracker.
 
 ## Follow-ups
 
