@@ -2306,12 +2306,37 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
         .collect();
     let elapsed = started.elapsed();
 
-    let allowed = verdicts.iter().filter(|v| v.is_empty()).count();
-    let denied: Vec<&String> = verdicts.iter().filter(|v| !v.is_empty()).collect();
+    // #8261: an admitted builder may carry an additionalContext notice; admission is
+    // the absence of a deny, not empty stdout.
+    let decision = |v: &str| -> Option<String> {
+        if v.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(v)
+            .ok()
+            .and_then(|parsed| {
+                parsed["hookSpecificOutput"]["permissionDecision"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    };
+    let decisions: Vec<Option<String>> = verdicts.iter().map(|v| decision(v)).collect();
+    let allowed = decisions
+        .iter()
+        .filter(|d| d.as_deref() != Some("deny"))
+        .count();
+    let denied: Vec<&String> = verdicts
+        .iter()
+        .zip(decisions.iter())
+        .filter(|(_, d)| d.as_deref() == Some("deny"))
+        .map(|(v, _)| v)
+        .collect();
     assert_eq!(
         allowed, 1,
-        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?} \
-         (both children ran in {elapsed:?}; at or past the guard's 2 s client budget in \
+        "exactly one of two simultaneous dispatches may be admitted (a `deny` \
+         permissionDecision marks the other, not merely non-empty stdout), got \
+         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
+         {elapsed:?}; at or past the guard's 2 s client budget in \
          `post_shared_tree` the held request timed out and failed open — that is the \
          machine, not this rule regressing, see #5914)"
     );
