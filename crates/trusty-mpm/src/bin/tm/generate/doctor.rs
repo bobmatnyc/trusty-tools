@@ -198,6 +198,14 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246).",
     ),
     (
+        "launchd_secrets",
+        "Fails when a `com.trusty.*` LaunchAgent plist holds a plaintext credential, naming the file, the KEY and the file's mode and never the value. UNKNOWN rather than OK when a plist cannot be read, parsed, is a BINARY `bplist00` file, or is a symlink — a scan that did not run has not shown the host clean. `tm doctor --fix --yes` migrates each registered credential into the credential store, confirms a byte-equal read-back and only then strips the key; the credential still has to be rotated (issue #8236).",
+    ),
+    (
+        "credential_reach",
+        "Reports, for each credential the daemon consumes, whether it resolves: present, absent, the store's error kind, or timed out — never the value. A timeout means a macOS Keychain approval dialog may be on screen, which is the expected state after a `cargo install` rebuild; approve it once. Runs on the blocking pool and is bounded, so it can hang neither `tm doctor` nor the runtime (issue #8236).",
+    ),
+    (
         "hooks_contamination",
         "Warns when a project's `.claude/settings*.json` still carries tm hook entries from a pre-fix `tm install` — suggests `tm hooks clean` (issue #2940).",
     ),

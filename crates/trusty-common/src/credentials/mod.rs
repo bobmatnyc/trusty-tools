@@ -84,7 +84,7 @@ mod secret;
 pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
 // #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.
 pub use bounded_store::{
-    STORE_ERROR_CACHE_TTL, STORE_READ_TIMEOUT, SecretResolveError, StoreErrorKind,
+    STORE_ERROR_CACHE_TTL, STORE_READ_TIMEOUT, SecretResolveError, StoreErrorKind, StoreFailure,
     resolve_env_var_bounded, resolve_provider_bounded_with, store_get_bounded,
 };
 pub use dotenv::{

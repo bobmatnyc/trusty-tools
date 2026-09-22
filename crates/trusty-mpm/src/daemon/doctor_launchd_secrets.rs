@@ -125,8 +125,11 @@ impl PlistFinding {
 /// clean plist. An ABSENT directory is `Ok(vec![])` (a host with no
 /// LaunchAgents has no exposure).
 ///
+/// A SYMLINKED plist is refused the same way — see [`symlink_finding`].
+///
 /// Test: `scan_names_the_key_not_the_value`, `scan_reports_an_unparseable_plist`,
 /// `scan_reports_an_unreadable_plist`, `scan_ignores_foreign_plists`,
+/// `scan_reports_a_symlinked_plist_as_unreadable`,
 /// `scan_is_empty_without_a_launch_agents_dir`,
 /// `scan_errors_when_the_directory_cannot_be_listed`,
 /// `scan_reports_a_binary_plist_as_unknown`,
@@ -161,6 +164,9 @@ pub fn scan_launch_agents(home: &Path) -> std::io::Result<Vec<PlistFinding>> {
 
 /// Read and judge one plist.
 fn judge(path: PathBuf) -> PlistFinding {
+    if let Some(finding) = symlink_finding(&path) {
+        return finding;
+    }
     let mode = read_mode(&path);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -174,21 +180,54 @@ fn judge(path: PathBuf) -> PlistFinding {
         }
     };
     if is_binary_plist(&bytes) {
-        return unreadable(
-            path,
-            mode,
-            format!(
-                "it is a BINARY plist, which this scan cannot read — convert it with \
-                 `plutil -convert xml1 {}` and re-run `tm doctor`",
-                path.display()
-            ),
-            true,
+        // Built before the call: `unreadable` takes `path` by value, so the
+        // message cannot borrow it from inside the argument list.
+        let why = format!(
+            "it is a BINARY plist, which this scan cannot read — convert it with \
+             `plutil -convert xml1 {}` and re-run `tm doctor`",
+            path.display()
         );
+        return unreadable(path, mode, why, true);
     }
     let Ok(xml) = String::from_utf8(bytes) else {
         return unreadable(path, mode, "it is not valid UTF-8".to_string(), false);
     };
     finding_for(path, mode, &xml)
+}
+
+/// The finding for a plist that is a SYMLINK, when it is one.
+///
+/// Why (#8236): `read` and `metadata` both follow a link, so the scan would
+/// judge — and `--fix` would rewrite — a file outside `~/Library/LaunchAgents`
+/// while reporting the link's path. Worse, the repair publishes with
+/// `rename(2)`, which replaces the LINK with a plain file and severs it
+/// silently, so a "successful" repair would leave the operator's real file
+/// untouched and stale. Neither judged nor repaired is the only safe answer,
+/// and it is reported as unreadable so the row goes UNKNOWN rather than clean.
+/// What: `symlink_metadata` — the one stat that does not follow — then a reason
+/// naming the link's target, which is a path and never a credential.
+/// Test: `scan_reports_a_symlinked_plist_as_unreadable`,
+/// `repair_refuses_a_symlinked_plist`.
+fn symlink_finding(path: &Path) -> Option<PlistFinding> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(path).map_or_else(
+        |_| "a target that could not be read".to_string(),
+        |t| t.display().to_string(),
+    );
+    Some(unreadable(
+        path.to_path_buf(),
+        None,
+        format!(
+            "it is a SYMLINK to {target}, which this scan neither reads through nor rewrites \
+             — an atomic rewrite would replace the link with a plain file and leave the \
+             target stale. Judge and repair {target} directly, or replace the link with the \
+             real plist"
+        ),
+        false,
+    ))
 }
 
 /// A finding that names why the file could not be judged.
@@ -203,12 +242,16 @@ fn unreadable(path: PathBuf, mode: Option<u32>, why: String, binary_plist: bool)
     }
 }
 
-/// Unix permission bits of `path`, when they can be read.
+/// Unix permission bits of `path` itself, when they can be read.
+///
+/// `symlink_metadata`, never `metadata`: a followed link would report the
+/// TARGET's mode against the link's path (#8236). [`judge`] rejects a symlink
+/// before reaching here, so this is the second of two guards, not the only one.
 fn read_mode(path: &Path) -> Option<u32> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
+        std::fs::symlink_metadata(path)
             .ok()
             .map(|m| m.permissions().mode() & 0o7777)
     }

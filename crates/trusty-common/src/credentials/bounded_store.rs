@@ -15,7 +15,9 @@
 //!    answers immediately from [`ERROR_CACHE`] without touching the store, so a
 //!    wedged dialog is not re-raised on every supervisor tick. It holds an error
 //!    KIND, never a value, and it EXPIRES — an operator who approves the dialog
-//!    is picked up on the next resolve, with no daemon restart.
+//!    is picked up on the next resolve, with no daemon restart. A read that
+//!    SUCCEEDS retires the entry immediately, so the approval the detached
+//!    reader waited for is not thrown away by the window it opened.
 //! 2. **Single flight** ([`INFLIGHT`]). At most one store read per provider key
 //!    is ever outstanding. Concurrent callers subscribe to the same flight, so N
 //!    callers raise ONE dialog and park ONE thread, not N of each.
@@ -52,9 +54,11 @@ pub const STORE_READ_TIMEOUT: Duration = Duration::from_secs(3);
 /// Why: without it, a wedged Keychain dialog is re-raised on every supervisor
 /// tick. Why it expires: an operator who approves the dialog a minute later must
 /// be picked up without restarting the daemon. While it is live the feature
-/// stays OFF — this suppresses the READ, never the failure.
+/// stays OFF — this suppresses the READ, never the failure. It is also the
+/// CEILING, not the rule: a successful read retires the entry early.
 /// Test: `a_cached_error_is_returned_without_a_second_read`,
-/// `the_error_cache_expires_and_the_next_read_is_issued`.
+/// `the_error_cache_expires_and_the_next_read_is_issued`,
+/// `a_late_success_retires_the_cached_timeout`.
 pub const STORE_ERROR_CACHE_TTL: Duration = Duration::from_secs(45);
 
 /// What went wrong in the store, as a kind a log line may carry.
@@ -104,6 +108,35 @@ impl From<&KeyStoreError> for StoreErrorKind {
             KeyStoreError::Toml { .. } => Self::Toml,
             KeyStoreError::HomeUnavailable => Self::HomeUnavailable,
             KeyStoreError::Keyring(_) => Self::Keyring,
+        }
+    }
+}
+
+/// A bounded store read that failed, and where the answer came from.
+///
+/// Why (#8236): the kind alone cannot tell a caller whether the store was just
+/// asked or whether the answer is [`STORE_ERROR_CACHE_TTL`]'s suppression
+/// window talking. Those are different remediations — "approve the dialog" vs.
+/// "wait for the window to expire, the read may already be outstanding" — and
+/// [`SecretResolveError`] has a `cached` field precisely to carry the
+/// difference, which it could not do while this was a bare [`StoreErrorKind`].
+/// Test: `a_store_failure_is_fresh_first_and_cached_second`,
+/// `a_cached_error_is_returned_without_a_second_read`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreFailure {
+    /// What class of failure it was. Never a value, never a backend message.
+    pub kind: StoreErrorKind,
+    /// True when the negative cache answered instead of the store.
+    pub cached: bool,
+}
+
+impl StoreFailure {
+    /// A failure the store itself just reported.
+    #[must_use]
+    fn fresh(kind: StoreErrorKind) -> Self {
+        Self {
+            kind,
+            cached: false,
         }
     }
 }
@@ -229,8 +262,9 @@ fn map<V: 'static>(
 /// See the module docs for the three mechanisms and why the reading thread is
 /// never cancelled.
 /// What: returns `Ok(None)` when the store answered and holds nothing, `Ok(Some)`
-/// with the value, or the failing [`StoreErrorKind`]. A failure is recorded in
-/// the negative cache; a success is not cached at all.
+/// with the value, or a [`StoreFailure`] naming the kind and whether the
+/// negative cache answered. A failure is recorded in that cache; a success
+/// CLEARS it.
 ///
 /// # Errors
 ///
@@ -240,14 +274,15 @@ fn map<V: 'static>(
 /// Test: `a_store_that_never_returns_times_out_within_the_bound`,
 /// `concurrent_resolves_issue_exactly_one_store_read`,
 /// `a_cached_error_is_returned_without_a_second_read`,
-/// `the_error_cache_expires_and_the_next_read_is_issued`.
+/// `the_error_cache_expires_and_the_next_read_is_issued`,
+/// `a_late_success_retires_the_cached_timeout`.
 pub fn store_get_bounded(
     store: Arc<dyn KeyStore>,
     provider: &str,
     timeout: Duration,
-) -> Result<Option<String>, StoreErrorKind> {
+) -> Result<Option<String>, StoreFailure> {
     if let Some(kind) = cached_error(provider) {
-        return Err(kind);
+        return Err(StoreFailure { kind, cached: true });
     }
 
     let (flight, is_leader) = join_or_start(provider);
@@ -267,7 +302,7 @@ pub fn store_get_bounded(
             // approval that lands late still grants the ACL for the NEXT read.
             drop(guard);
             record_error(provider, StoreErrorKind::Timeout);
-            return Err(StoreErrorKind::Timeout);
+            return Err(StoreFailure::fresh(StoreErrorKind::Timeout));
         }
         let (next, _) = flight
             .done
@@ -278,9 +313,9 @@ pub fn store_get_bounded(
 
     match guard.clone() {
         Some(Ok(value)) => Ok(value),
-        Some(Err(kind)) => Err(kind),
+        Some(Err(kind)) => Err(StoreFailure::fresh(kind)),
         // Unreachable: the loop above exits only once the outcome is present.
-        None => Err(StoreErrorKind::Timeout),
+        None => Err(StoreFailure::fresh(StoreErrorKind::Timeout)),
     }
 }
 
@@ -307,6 +342,19 @@ fn record_error(provider: &str, kind: StoreErrorKind) {
         .insert(provider.to_string(), (Instant::now(), kind));
 }
 
+/// Retire `provider`'s cached failure, because a read just succeeded.
+///
+/// Why: see the `Ok` arm of [`finish`] — the suppression window exists to stop
+/// a wedged dialog being re-raised, never to outlive the approval that cleared
+/// it.
+/// Test: `a_late_success_retires_the_cached_timeout`.
+fn clear_error(provider: &str) {
+    map(&ERROR_CACHE)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(provider);
+}
+
 /// Join the outstanding flight for `provider`, or become its leader.
 fn join_or_start(provider: &str) -> (Arc<Flight>, bool) {
     let mut inflight = map(&INFLIGHT)
@@ -329,13 +377,17 @@ fn join_or_start(provider: &str) -> (Arc<Flight>, bool) {
 /// SecurityAgent dialog. Detached, never joined, never cancelled — see the
 /// module docs.
 fn spawn_reader(store: Arc<dyn KeyStore>, provider: String, flight: Arc<Flight>) {
+    // The reader owns its own handles: the fallback arm below still has to be
+    // able to publish an outcome when the spawn itself failed.
+    let read_provider = provider.clone();
+    let read_flight = Arc::clone(&flight);
     let spawned = std::thread::Builder::new()
         .name("cred-store-read".to_string())
         .spawn(move || {
             let outcome = store
-                .try_get(&provider)
+                .try_get(&read_provider)
                 .map_err(|e| StoreErrorKind::from(&e));
-            finish(&provider, &flight, outcome);
+            finish(&read_provider, &read_flight, outcome);
         });
     if spawned.is_err() {
         // #8236: a thread we could not spawn is a failure, never a fallthrough
@@ -346,8 +398,13 @@ fn spawn_reader(store: Arc<dyn KeyStore>, provider: String, flight: Arc<Flight>)
 
 /// Publish an outcome, wake every waiter, and clear the flight.
 fn finish(provider: &str, flight: &Flight, outcome: Result<Option<String>, StoreErrorKind>) {
-    if let Err(kind) = &outcome {
-        record_error(provider, *kind);
+    match &outcome {
+        Err(kind) => record_error(provider, *kind),
+        // #8236: a read that landed LATE must retire whatever the caller cached
+        // when it gave up. Without this, every caller inside the 45 s window is
+        // answered from the stale error and throws this value away — which is
+        // precisely the approval the detached reader exists to preserve.
+        Ok(_) => clear_error(provider),
     }
     map(&INFLIGHT)
         .lock()
@@ -407,7 +464,8 @@ pub fn resolve_env_var_bounded(var: &str) -> Result<String, SecretResolveError> 
 ///
 /// Test: `the_env_tier_answers_without_touching_the_store`,
 /// `a_store_that_never_returns_times_out_within_the_bound`,
-/// `an_absent_value_is_absent_not_an_error`.
+/// `an_absent_value_is_absent_not_an_error`,
+/// `a_store_failure_is_fresh_first_and_cached_second`.
 pub fn resolve_provider_bounded_with(
     provider: &str,
     store: Arc<dyn KeyStore>,
@@ -424,16 +482,17 @@ pub fn resolve_provider_bounded_with(
     match store_get_bounded(store, provider, timeout) {
         Ok(Some(value)) if !value.is_empty() => Ok(value),
         Ok(_) => Err(SecretResolveError::Absent { var }),
-        Err(StoreErrorKind::Timeout) => Err(SecretResolveError::Timeout {
+        // #8236: `cached` comes from the read, never from a constant — an
+        // operator's next step differs by whether the store was just asked.
+        Err(StoreFailure {
+            kind: StoreErrorKind::Timeout,
+            cached,
+        }) => Err(SecretResolveError::Timeout {
             var,
             waited_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            cached: false,
+            cached,
         }),
-        Err(kind) => Err(SecretResolveError::Store {
-            var,
-            kind,
-            cached: false,
-        }),
+        Err(StoreFailure { kind, cached }) => Err(SecretResolveError::Store { var, kind, cached }),
     }
 }
 

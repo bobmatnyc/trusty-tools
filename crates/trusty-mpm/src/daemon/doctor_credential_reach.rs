@@ -93,6 +93,11 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
             true,
             matches!(kind, trusty_common::credentials::StoreErrorKind::Keyring),
         ),
+        // `SecretResolveError` is `#[non_exhaustive]`. A variant added in
+        // trusty-common later has to land here DEGRADED — a row that read a new
+        // failure as reachable would be the fail-open this check exists to
+        // close. Its `kind()` is a value-free label, so this cannot leak one.
+        Err(other) => (format!("unreachable ({})", other.kind()), true, false),
     };
     ReachVerdict {
         var: var.to_string(),
@@ -112,14 +117,54 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
 /// Test: `row_reports_one_line_per_daemon_credential`,
 /// `row_is_unknown_when_a_credential_times_out`.
 pub(crate) fn check_credential_reach() -> DoctorCheck {
+    // Runs on the blocking pool — see `check_credential_reach_async`, the only
+    // caller on an async path. Nothing here may be awaited.
     let verdicts: Vec<ReachVerdict> = DAEMON_PROVIDERS
         .iter()
         .map(|provider| {
             let var = env_var_for(provider).unwrap_or(provider);
-            verdict_for(&var.to_string(), &resolve_env_var_bounded(var))
+            verdict_for(var, &resolve_env_var_bounded(var))
         })
         .collect();
     build_row(&verdicts)
+}
+
+/// [`check_credential_reach`], off the async runtime.
+///
+/// Why (#8236): the row is reached by `GET /api/v1/doctor`, and each of the
+/// four providers can park on a `Condvar::wait_timeout` for
+/// `STORE_READ_TIMEOUT` — up to ~12 s of a tokio worker thread held by a
+/// SecurityAgent dialog, which is the failure this row exists to diagnose.
+/// What: `spawn_blocking`, with a join failure (the probe panicked, or the
+/// runtime is shutting down) reported as `Unknown` — a row that did not run has
+/// not shown the daemon healthy.
+/// Test: `the_row_is_produced_off_the_runtime_thread`,
+/// `a_probe_that_panics_is_unknown_not_a_lost_row`.
+pub(crate) async fn check_credential_reach_async() -> DoctorCheck {
+    off_runtime(check_credential_reach).await
+}
+
+/// Run a blocking doctor probe on the blocking pool.
+///
+/// Why: separated from the probe so a test can pass one that REPORTS the thread
+/// it ran on, which is the only way to prove the move actually happened.
+/// Test: `the_row_is_produced_off_the_runtime_thread`,
+/// `a_probe_that_panics_is_unknown_not_a_lost_row`.
+async fn off_runtime<F>(probe: F) -> DoctorCheck
+where
+    F: FnOnce() -> DoctorCheck + Send + 'static,
+{
+    match tokio::task::spawn_blocking(probe).await {
+        Ok(check) => check,
+        Err(e) => DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            format!(
+                "the credential-reach probe did not run ({e}) — whether the daemon can \
+                 reach its credentials is UNKNOWN"
+            ),
+        ),
+    }
 }
 
 /// The pure verdict behind [`check_credential_reach`].

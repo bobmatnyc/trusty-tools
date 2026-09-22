@@ -414,7 +414,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_six_checks`,
+/// Test: `run_doctor_produces_fifty_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -601,7 +601,9 @@ pub(crate) async fn run_doctor_with_claims(
     // #8236 item 8: and now the other half — once the value is OUT of the
     // plist, can the daemon's own resolver still get it? Bounded, so this row
     // cannot hang on a Keychain approval dialog either.
-    checks.push(crate::daemon::doctor_credential_reach::check_credential_reach());
+    // #8236: `spawn_blocking`, because each provider can park on the store's
+    // 3 s bound and this runs on a tokio worker serving `GET /api/v1/doctor`.
+    checks.push(crate::daemon::doctor_credential_reach::check_credential_reach_async().await);
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
     // #7490: the fourth is the inverse of the first — a lifecycle event a
@@ -778,7 +780,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_six_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_eight_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

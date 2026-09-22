@@ -245,9 +245,13 @@ fn row_fails_and_names_the_key_not_the_value() {
     let row = check_launchd_plist_secrets(home.path());
 
     assert_eq!(row.status, CheckStatus::Fail);
-    assert!(row.detail.contains("OPENROUTER_API_KEY"), "{}", row.detail);
-    assert!(row.detail.contains("ROTATE"), "{}", row.detail);
-    assert_value_never_echoed(&row.detail);
+    assert!(
+        row.message.contains("OPENROUTER_API_KEY"),
+        "{}",
+        row.message
+    );
+    assert!(row.message.contains("ROTATE"), "{}", row.message);
+    assert_value_never_echoed(&row.message);
 }
 
 /// Why (#8236 item 3): the row reports each plist's MODE, and flags anything
@@ -267,7 +271,7 @@ fn row_flags_a_world_readable_plist() {
 
     let row = check_launchd_plist_secrets(home.path());
 
-    assert!(row.detail.contains("0644"), "{}", row.detail);
+    assert!(row.message.contains("0644"), "{}", row.message);
 }
 
 /// Why (#8236 item 2): the row has to SAY that an unmapped key will not be
@@ -286,7 +290,7 @@ fn row_says_an_unmapped_key_is_not_stripped() {
     let row = check_launchd_plist_secrets(home.path());
 
     assert_eq!(row.status, CheckStatus::Fail);
-    assert!(row.detail.contains("will NOT remove"), "{}", row.detail);
+    assert!(row.message.contains("will NOT remove"), "{}", row.message);
 }
 
 /// Why: a clean host must report clean, or the row is noise.
@@ -392,9 +396,9 @@ fn row_fail_still_names_the_plists_it_could_not_judge() {
 
     assert_eq!(row.status, CheckStatus::Fail);
     assert!(
-        row.detail.contains("com.trusty.zebra.plist"),
+        row.message.contains("com.trusty.zebra.plist"),
         "{}",
-        row.detail
+        row.message
     );
 }
 
@@ -644,4 +648,97 @@ fn repair_is_idempotent() {
     assert_eq!(first[0].status, StepStatus::Applied { backup: None });
     assert!(second.is_empty(), "{second:?}");
     assert_eq!(std::fs::read_to_string(&path).expect("read"), after_first);
+}
+
+/// Why (#8236): `read` and `metadata` follow a symlink, so a linked plist would
+/// be judged — and rewritten — through its target while the report named the
+/// link. The scan has to see the link itself and refuse it.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn scan_reports_a_symlinked_plist_as_unreadable() {
+    let home = home_with_agents();
+    let outside = home.path().join("dotfiles-com.trusty.mpm.plist");
+    std::fs::write(&outside, plist_with_credential()).expect("write target");
+    let link = home
+        .path()
+        .join("Library/LaunchAgents/com.trusty.mpm.plist");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+    let findings = scan_launch_agents(home.path()).expect("scan");
+    let why = findings[0].unreadable.clone().expect("unreadable");
+
+    assert!(why.contains("SYMLINK"), "{why}");
+    assert!(why.contains(&outside.display().to_string()), "{why}");
+    assert!(
+        findings[0].migratable.is_empty() && findings[0].unmapped.is_empty(),
+        "the scan judged the link's target: {:?}",
+        findings[0]
+    );
+    assert!(!findings[0].binary_plist, "a link is not a binary plist");
+    assert_value_never_echoed(&why);
+}
+
+/// Why (#8236): the row must not go green on a plist it could not judge, and a
+/// symlink is exactly that case.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn row_is_unknown_for_a_symlinked_plist() {
+    let home = home_with_agents();
+    let outside = home.path().join("elsewhere.plist");
+    std::fs::write(&outside, plist_with_credential()).expect("write target");
+    std::os::unix::fs::symlink(
+        &outside,
+        home.path()
+            .join("Library/LaunchAgents/com.trusty.mpm.plist"),
+    )
+    .expect("symlink");
+
+    let check = check_launchd_plist_secrets(home.path());
+
+    assert_eq!(check.status, CheckStatus::Unknown, "{check:?}");
+    assert!(check.message.contains("SYMLINK"), "{}", check.message);
+    assert_value_never_echoed(&check.message);
+}
+
+/// Why (#8236): the repair publishes with `rename(2)`, which replaces the LINK
+/// with a plain file and severs it silently — the operator's real plist would
+/// go stale while `--fix` reported success. It has to refuse, loudly, and leave
+/// both the link and its target exactly as they were.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn repair_refuses_a_symlinked_plist() {
+    let home = home_with_agents();
+    let outside = home.path().join("dotfiles.plist");
+    let body = plist_with_credential();
+    std::fs::write(&outside, &body).expect("write target");
+    let link = home
+        .path()
+        .join("Library/LaunchAgents/com.trusty.mpm.plist");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+    let steps = repair_with_store(
+        home.path(),
+        RepairMode::Apply,
+        Arc::new(MemoryKeyStore::new()),
+    );
+
+    let StepStatus::Failed(why) = &steps[0].status else {
+        panic!(
+            "a symlinked plist must be refused loudly: {:?}",
+            steps[0].status
+        );
+    };
+    assert!(why.contains("SYMLINK"), "{why}");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat")
+            .file_type()
+            .is_symlink(),
+        "the repair replaced the link with a plain file"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).expect("read"), body);
+    assert_value_never_echoed(why);
 }

@@ -212,3 +212,41 @@ fn row_is_ok_when_every_credential_resolves() {
 
     assert_eq!(row.status, CheckStatus::Ok, "{row:?}");
 }
+
+/// Why (#8236): the row is reached by `GET /api/v1/doctor` on a tokio worker,
+/// and every provider it reads can park for the store's full 3 s bound — up to
+/// ~12 s of a runtime thread held by a Keychain dialog. The probe therefore has
+/// to run on the BLOCKING pool, and the only way to prove that is a probe that
+/// reports the thread it ran on.
+/// Test: this test.
+#[tokio::test(flavor = "current_thread")]
+async fn the_row_is_produced_off_the_runtime_thread() {
+    let runtime_thread = format!("{:?}", std::thread::current().id());
+
+    let check = off_runtime(|| {
+        DoctorCheck::new(
+            "credential_reach",
+            CheckStatus::Ok,
+            format!("{:?}", std::thread::current().id()),
+        )
+    })
+    .await;
+
+    assert_ne!(
+        check.message, runtime_thread,
+        "the probe ran on the runtime thread it was supposed to leave"
+    );
+}
+
+/// Why: a probe that panics must not take the whole doctor report with it, and
+/// must not be silently dropped either — a row that did not run has not shown
+/// the daemon healthy.
+/// Test: this test.
+#[tokio::test]
+async fn a_probe_that_panics_is_unknown_not_a_lost_row() {
+    let check = off_runtime(|| panic!("a deliberate probe panic, not a real failure")).await;
+
+    assert_eq!(check.status, CheckStatus::Unknown, "{check:?}");
+    assert_eq!(check.name, "credential_reach");
+    assert!(check.message.contains("UNKNOWN"), "{}", check.message);
+}

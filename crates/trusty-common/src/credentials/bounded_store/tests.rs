@@ -97,7 +97,8 @@ fn a_store_that_never_returns_times_out_within_the_bound() {
     let err = store_get_bounded(store, "test-never-returns-a", bound).expect_err("must time out");
     let elapsed = started.elapsed();
 
-    assert_eq!(err, StoreErrorKind::Timeout);
+    assert_eq!(err.kind, StoreErrorKind::Timeout);
+    assert!(!err.cached, "a fresh read must not report itself cached");
     assert!(
         elapsed < bound * 5,
         "the caller waited {elapsed:?}, well past the {bound:?} bound"
@@ -128,7 +129,7 @@ fn concurrent_resolves_issue_exactly_one_store_read() {
 
     for handle in handles {
         let got = handle.join().expect("thread");
-        assert_eq!(got, Err(StoreErrorKind::Timeout));
+        assert_eq!(got, Err(StoreFailure::fresh(StoreErrorKind::Timeout)));
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -151,7 +152,8 @@ fn a_cached_error_is_returned_without_a_second_read() {
 
     let err = store_get_bounded(store, provider, Duration::from_secs(1)).expect_err("cached");
 
-    assert_eq!(err, StoreErrorKind::Keyring);
+    assert_eq!(err.kind, StoreErrorKind::Keyring);
+    assert!(err.cached, "the cache answered but did not say so");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -194,7 +196,8 @@ fn a_failing_store_reports_its_kind() {
     let store: Arc<dyn KeyStore> = Arc::new(AlwaysFails);
     let err = store_get_bounded(store, "test-failing-e", Duration::from_secs(1))
         .expect_err("backend failure");
-    assert_eq!(err, StoreErrorKind::Keyring);
+    assert_eq!(err.kind, StoreErrorKind::Keyring);
+    assert!(!err.cached);
 }
 
 /// Why (#8236 item 7): a genuine miss is `Absent`, which is a DIFFERENT
@@ -203,6 +206,11 @@ fn a_failing_store_reports_its_kind() {
 #[test]
 #[serial(dotenv_credential_env)]
 fn an_absent_value_is_absent_not_an_error() {
+    // #7253: `#[serial]` and `ENV_LOCK` exclude nothing of each other, so an
+    // env-mutating test takes BOTH. Locked first, dropped last.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The ambient shell environment is not a fixture this test controls (#4407).
     let _guard = EnvVarGuard::remove("LINEAR_API_KEY");
     let store: Arc<dyn KeyStore> = Arc::new(CountingAbsent {
@@ -222,6 +230,10 @@ fn an_absent_value_is_absent_not_an_error() {
 #[test]
 #[serial(dotenv_credential_env)]
 fn the_env_tier_answers_without_touching_the_store() {
+    // #7253: see the sibling test above — both locks, in this order.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = EnvVarGuard::set("BRAVE_API_KEY", "synthetic-env-value");
     let calls = Arc::new(AtomicUsize::new(0));
     let store: Arc<dyn KeyStore> = Arc::new(CountingAbsent {
@@ -274,4 +286,134 @@ fn error_kinds_render_without_any_value() {
         assert!(rendered.contains("OPENROUTER_API_KEY"), "{rendered}");
     }
     assert_eq!(StoreErrorKind::Timeout.to_string(), "timeout");
+}
+
+/// A store that answers with a value only after `delay`, standing in for a
+/// dialog a human approves seconds after the caller gave up.
+struct SlowValue {
+    delay: Duration,
+    value: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl KeyStore for SlowValue {
+    fn get(&self, _provider: &str) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        Some(self.value.clone())
+    }
+    fn set(&self, _provider: &str, _value: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn unset(&self, _provider: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Block until `provider` has no outstanding flight, or the bound elapses.
+///
+/// Why: the reader is DETACHED, so there is no handle to join. Polling the
+/// flight map is the only way to observe it landing, and a fixed sleep would
+/// either be flaky or slow.
+fn await_reader_done(provider: &str, bound: Duration) {
+    let deadline = Instant::now() + bound;
+    while Instant::now() < deadline {
+        let outstanding = map(&INFLIGHT)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(provider);
+        if !outstanding {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the detached reader never finished within {bound:?}");
+}
+
+/// Why (#8236): the caller-side timeout caches a `Timeout` for 45 seconds, and
+/// the whole point of detaching the reader is that a LATE approval still
+/// counts. If a successful read does not retire that entry, every caller in the
+/// window is answered from the stale error and the obtained value is discarded
+/// — the module's "an operator who approves the dialog is picked up on the next
+/// resolve" promise, broken.
+/// Test: itself.
+#[test]
+fn a_late_success_retires_the_cached_timeout() {
+    let provider = "test-late-approval-f";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store: Arc<dyn KeyStore> = Arc::new(SlowValue {
+        delay: Duration::from_millis(250),
+        value: "synthetic-late-approved-value".to_string(),
+        calls: Arc::clone(&calls),
+    });
+
+    // The caller gives up while the read is still parked, exactly as it does
+    // when a SecurityAgent dialog is on screen.
+    let err = store_get_bounded(Arc::clone(&store), provider, Duration::from_millis(30))
+        .expect_err("the caller must give up first");
+    assert_eq!(err.kind, StoreErrorKind::Timeout);
+
+    // ...and the detached read lands afterwards, with the value.
+    await_reader_done(provider, Duration::from_secs(5));
+
+    let got = store_get_bounded(store, provider, Duration::from_secs(5));
+
+    assert_eq!(
+        got,
+        Ok(Some("synthetic-late-approved-value".to_string())),
+        "the stale Timeout entry outlived the successful read that cleared it"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the second read was suppressed"
+    );
+}
+
+/// Why (#8236): `cached` told every caller `false`, because the flag was a
+/// literal at the construction site rather than something the read reported.
+/// The two states need different remediations — "approve the dialog now" for a
+/// fresh failure, "the suppression window is still open" for a cached one — so
+/// a flag that is structurally always `false` is worse than none.
+/// Test: itself.
+#[test]
+fn a_store_failure_is_fresh_first_and_cached_second() {
+    // Unregistered on purpose: the provider key doubles as the variable name,
+    // so this reads nothing an operator's environment could be holding.
+    let provider = "test-cached-flag-g";
+    let store: Arc<dyn KeyStore> = Arc::new(AlwaysFails);
+
+    let fresh = resolve_provider_bounded_with(provider, Arc::clone(&store), Duration::from_secs(1))
+        .expect_err("the backend refuses");
+    let repeat = resolve_provider_bounded_with(provider, store, Duration::from_secs(1))
+        .expect_err("the negative cache answers");
+
+    assert!(
+        matches!(
+            fresh,
+            SecretResolveError::Store {
+                kind: StoreErrorKind::Keyring,
+                cached: false,
+                ..
+            }
+        ),
+        "a freshly-read failure claimed to be cached: {fresh:?}"
+    );
+    assert!(
+        matches!(cached_flag(&repeat), Some(true)),
+        "a cache-served failure did not report itself cached: {repeat:?}"
+    );
+}
+
+/// The `cached` flag of a `Store`/`Timeout` error, when it has one.
+fn cached_flag(err: &SecretResolveError) -> Option<bool> {
+    match err {
+        SecretResolveError::Store { cached, .. } | SecretResolveError::Timeout { cached, .. } => {
+            Some(*cached)
+        }
+        _ => None,
+    }
 }

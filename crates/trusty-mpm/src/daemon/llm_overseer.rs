@@ -590,8 +590,9 @@ mod tests {
             "an unresolvable credential left the overseer enabled"
         );
         assert_eq!(
-            overseer.pre_tool_use(&HookContext::new(
-                "PreToolUse".into(),
+            overseer.pre_tool_use(&OverseerContext::new(
+                crate::core::session::SessionId::new(),
+                "tmpm-credential-test",
                 Some("Bash".into()),
                 Some("ls".into()),
             )),

@@ -53,6 +53,7 @@ use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 /// `repair_leaves_the_plist_untouched_when_the_import_fails`,
 /// `repair_keeps_an_unmapped_key_and_says_so`,
 /// `repair_refuses_a_binary_plist`,
+/// `repair_refuses_a_symlinked_plist`,
 /// `repair_fails_loudly_on_an_unparseable_plist`,
 /// `repair_fails_loudly_when_the_plist_is_unwritable`,
 /// `repair_fails_loudly_when_the_directory_cannot_be_listed`,
