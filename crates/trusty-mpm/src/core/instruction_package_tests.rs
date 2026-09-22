@@ -70,6 +70,10 @@ fn fixture() -> InstructionPackage {
             generated(SectionId::AgentDelegation, Generator::AgentRoster, false),
             generated(SectionId::Core, Generator::ProjectAddendum, true),
             text(SectionId::Identity, "IDENTITY"),
+            // #8361: placed after `IDENTITY` deliberately — several tests
+            // address `blocks[8]` by index, and appending past the floor would
+            // break the "ends with CONVENTIONS" assertion instead.
+            text(SectionId::AutonomousExecution, "AUTONOMY"),
             text(SectionId::Enforcement, "ENFORCEMENT"),
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
@@ -863,6 +867,7 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ROSTER",
             "ADDENDUM",
             "IDENTITY",
+            "AUTONOMY",
             "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",
