@@ -34,6 +34,8 @@ pub mod prompt_context;
 pub mod rooms;
 pub mod send_message;
 pub mod serve_stdio_bridge;
+// #8351: the two MCP methods the bridge answers without the daemon.
+pub mod serve_stdio_local;
 pub mod service;
 pub mod setup;
 pub mod single_instance;

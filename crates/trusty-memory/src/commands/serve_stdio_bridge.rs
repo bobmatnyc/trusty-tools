@@ -34,6 +34,28 @@
 //! same lock file `trusty-memory start` uses, so the two paths cannot race
 //! (#5267).
 //!
+//! ## Recoverable inside one client session (#8351)
+//!
+//! An MCP client launches this process once and never re-spawns it, so every
+//! way this bridge can fail permanently costs the session its memory tools —
+//! which is what #8351 reported, after ten seconds of daemon downtime during a
+//! `cargo install`. Three changes make the failure temporary instead:
+//!
+//! 1. A guard that cannot bring the daemon up is no longer fatal. It used to
+//!    return `Err` from [`run_stdio_bridge`], which exits before stdin is ever
+//!    read; now it is reported to stderr and the loop runs anyway.
+//! 2. `initialize` and `tools/list` are answered in this process, by
+//!    [`crate::commands::serve_stdio_local::local_answer`], so a daemon that is
+//!    down for the handshake window does not make the client mark the server
+//!    failed.
+//! 3. The socket is re-resolved per request rather than taken from startup, so
+//!    a bridge that resolved a stale path heals on the next call.
+//!
+//! None of it starts a daemon that [`ensure_daemon_up_for_stdio`] did not:
+//! #1152's herd of orphan daemons racing for redb's write lock is exactly what
+//! a self-healing bridge must not reintroduce. Recovering means answering what
+//! it can and reporting what it cannot.
+//!
 //! STDOUT hygiene: never write to stdout — it is the JSON-RPC channel. All
 //! diagnostic output goes to stderr.
 //!
@@ -120,9 +142,15 @@ pub(crate) async fn ensure_daemon_up_for_stdio() -> Result<PathBuf> {
 /// sees the normalised envelope and the bridge re-stamps `jsonrpc` after it, so
 /// neither injection can invalidate the frame.
 ///
+/// #8351: also attaches the local handshake answer and this crate's version.
+/// It does NOT attach the socket resolver — a test builds its bridge through
+/// this function against a temp path, and a resolver here would have every one
+/// of them dial the developer's real daemon instead. [`run_stdio_bridge`]
+/// attaches it.
 /// Test: `streaming_method_is_refused_rather_than_half_answered`,
 /// `a_transport_failure_answers_the_request_that_caused_it`,
-/// `the_rewriter_reaches_the_forwarded_envelope`.
+/// `the_rewriter_reaches_the_forwarded_envelope`,
+/// `the_handshake_is_answered_with_no_daemon_listening`.
 pub(crate) fn build_bridge(
     socket: PathBuf,
     default_palace: Option<String>,
@@ -134,16 +162,27 @@ pub(crate) fn build_bridge(
     let config = UdsBridgeConfig::new(socket, "trusty-memory")
         .with_streaming_methods(STREAMING_METHODS.iter().copied())
         .with_request_timeout(REQUEST_TIMEOUT)
-        .with_max_frame_bytes(crate::transport::uds::MAX_FRAME_BYTES);
+        .with_max_frame_bytes(crate::transport::uds::MAX_FRAME_BYTES)
+        // #8351: so the next report of an unreachable daemon names the build
+        // that produced it — the reported one could not be attributed.
+        .with_bridge_version(env!("CARGO_PKG_VERSION"));
 
-    DaemonBridgeJsonRpc::new(config).with_request_rewriter(move |envelope| {
-        let envelope = inject_default_palace(envelope, default_palace.as_deref());
-        inject_caller_context(
-            envelope,
-            caller_workstream.as_deref(),
-            caller_cwd.as_deref(),
-        )
-    })
+    // #8351: the handshake is answered here, so a daemon that is down for the
+    // handshake window no longer costs the client its whole session.
+    let handshake_palace = default_palace.clone();
+
+    DaemonBridgeJsonRpc::new(config)
+        .with_local_handler(move |req| {
+            crate::commands::serve_stdio_local::local_answer(req, handshake_palace.as_deref())
+        })
+        .with_request_rewriter(move |envelope| {
+            let envelope = inject_default_palace(envelope, default_palace.as_deref());
+            inject_caller_context(
+                envelope,
+                caller_workstream.as_deref(),
+                caller_cwd.as_deref(),
+            )
+        })
 }
 
 /// Run the MCP stdio bridge.
@@ -153,21 +192,48 @@ pub(crate) fn build_bridge(
 /// path opened redb in the stdio process and hit the write-lock exclusion
 /// problem; this path never touches the store at all.
 ///
-/// What: (1) ensures the daemon is running under an exclusive lock (#5267);
-/// (2) resolves this process' own caller identity once, because neither the cwd
-/// nor `TM_WORKSTREAM_NAME` changes for the lifetime of a `serve --stdio`
-/// process; (3) hands both, plus the `--palace` default, to the shared bridge
-/// and runs its stdio loop. Hard-errors if the daemon cannot start.
+/// What: (1) tries to ensure the daemon is running under an exclusive lock
+/// (#5267); (2) resolves this process' own caller identity once, because
+/// neither the cwd nor `TM_WORKSTREAM_NAME` changes for the lifetime of a
+/// `serve --stdio` process; (3) hands both, plus the `--palace` default, to the
+/// shared bridge and runs its stdio loop.
+///
+/// #8351: step (1) failing is no longer fatal. It used to return `Err`, which
+/// exits the process before stdin is read — and an MCP client does not re-spawn
+/// a server that exited, so a daemon that was briefly unstartable (a launchd
+/// restart, a mid-`cargo install` window) ended memory for the whole session.
+/// The failure is now reported on stderr and the loop runs: the handshake is
+/// answered locally, a tool call while the daemon is down is answered with an
+/// error naming the socket, and the call after it returns succeeds.
 ///
 /// # Errors
 ///
-/// The daemon could not be started or did not become ready, or the stdio loop
-/// failed on an I/O error.
+/// Only an I/O failure in the stdio loop. A daemon that will not start is
+/// reported, not returned.
 ///
-/// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
-/// responses. Bridge-specific unit tests live in this module.
+/// Test: `the_handshake_answers_after_the_daemon_guard_fails` in
+/// `tests/serve_stdio_concurrent_e2e.rs` drives THIS function through a real
+/// guard failure and asserts the handshake still answers on stdout;
+/// `tests/serve_stdio_e2e.rs` spawns a real child against a working guard.
+/// Bridge-specific unit tests live in this module.
 pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
-    let socket = ensure_daemon_up_for_stdio().await?;
+    // #8351: the guard's failure is reported, never fatal — see the doc above.
+    let socket = match ensure_daemon_up_for_stdio().await {
+        Ok(socket) => socket,
+        Err(cause) => {
+            // Stderr only: stdout is the JSON-RPC channel.
+            eprintln!(
+                "trusty-memory: the daemon is not up ({cause:#}). Serving the MCP \
+                 handshake from this process; tool calls answer with an error \
+                 until the daemon returns, then succeed with no restart (#8351)."
+            );
+            // The seed is display-only: the resolver attached below answers
+            // every dial, and reports its own failure rather than falling back
+            // to this. It is the same resolution the guard just tried.
+            crate::transport::uds::socket_path()
+                .unwrap_or_else(|_| PathBuf::from("trusty-memory.sock"))
+        }
+    };
 
     // DOC-53 §4.3: resolved HERE, once — see the module doc for why this
     // process rather than the shared daemon is the correct place to read it.
@@ -177,6 +243,11 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
     let caller_workstream = crate::attribution::resolve_own_workstream_name(caller_cwd.as_deref());
 
     build_bridge(socket, palace, caller_workstream, caller_cwd)
+        // #8351: re-resolved per request, so a bridge that resolved a stale or
+        // wrong path at startup heals on the next call instead of staying
+        // broken for the life of the process. This is the same resolver the
+        // daemon binds from, so the two cannot disagree about the path.
+        .with_socket_resolver(crate::transport::uds::socket_path)
         .run_stdio()
         .await
 }
@@ -650,6 +721,70 @@ mod tests {
             assert!(
                 message.contains("stream"),
                 "the refusal must say why: {message}"
+            );
+        }
+    }
+
+    /// Why (#8351): an MCP client that cannot complete `initialize` marks the
+    /// server failed for the whole session and never re-spawns the bridge, so
+    /// ten seconds of daemon downtime at handshake cost a pane its memory for
+    /// hours. The handshake therefore has to be answerable with nothing
+    /// listening at all. Both methods are asserted because a client calls
+    /// `tools/list` immediately after `initialize`, and a `tools/list` that
+    /// failed would leave the session with a server that has no tools.
+    /// What: builds the real bridge against a socket path nothing serves, and
+    /// asserts `initialize` and `tools/list` each answer with a result.
+    /// Test: itself.
+    #[tokio::test]
+    async fn the_handshake_is_answered_with_no_daemon_listening() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bridge = dead_bridge(tmp.path().join("nothing-here.sock"));
+
+        for (id, method) in [(1, "initialize"), (2, "tools/list")] {
+            let resp = bridge
+                .answer(Request {
+                    jsonrpc: Some("2.0".to_string()),
+                    id: Some(json!(id)),
+                    method: method.to_string(),
+                    params: None,
+                })
+                .await;
+            assert!(
+                resp.error.is_none(),
+                "{method} must not depend on the daemon: {:?}",
+                resp.error
+            );
+            assert!(resp.result.is_some(), "{method} must answer with a result");
+            assert_eq!(resp.id, Some(json!(id)), "{method} must be matchable");
+        }
+    }
+
+    /// Why (#8351): the tool list a client caches at handshake is the contract
+    /// it calls against for the session, so a list the bridge invents would
+    /// drift from the daemon's and every call against the difference would
+    /// fail at dispatch. The guard is that there is ONE table: the bridge and
+    /// the daemon's `tools/list` branch call the same `tool_definitions_with`.
+    /// What: the bridge's local answer equals that function's output for the
+    /// same `--palace` state, for both states.
+    /// Test: itself.
+    #[tokio::test]
+    async fn the_local_tool_list_is_the_daemon_table() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for palace in [None, Some("owner-profile".to_string())] {
+            let has_default = palace.is_some();
+            let bridge = build_bridge(tmp.path().join("nothing-here.sock"), palace, None, None);
+            let resp = bridge
+                .answer(Request {
+                    jsonrpc: Some("2.0".to_string()),
+                    id: Some(json!(1)),
+                    method: "tools/list".to_string(),
+                    params: None,
+                })
+                .await;
+            assert_eq!(
+                resp.result,
+                Some(crate::tools::tool_definitions_with(has_default)),
+                "the bridge must answer from the daemon's own table"
             );
         }
     }
