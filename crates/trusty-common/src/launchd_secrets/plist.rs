@@ -236,7 +236,10 @@ pub fn scrub_plist_keys(xml: &str, keys: &[String]) -> Result<ScrubbedPlist, Pli
     for (from, to) in drops.iter().rev() {
         out.replace_range(*from..*to, "");
     }
-    Ok(ScrubbedPlist { keys: removed, xml: out })
+    Ok(ScrubbedPlist {
+        keys: removed,
+        xml: out,
+    })
 }
 
 /// One `<key>`/value pair found inside the `EnvironmentVariables` dict.

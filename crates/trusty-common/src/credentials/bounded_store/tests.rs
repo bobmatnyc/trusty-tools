@@ -152,7 +152,11 @@ fn a_cached_error_is_returned_without_a_second_read() {
     let err = store_get_bounded(store, provider, Duration::from_secs(1)).expect_err("cached");
 
     assert_eq!(err, StoreErrorKind::Keyring);
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "the cache did not suppress");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the cache did not suppress"
+    );
 }
 
 /// Why (#8236 item 6c): the cache must EXPIRE, or an operator who approves the

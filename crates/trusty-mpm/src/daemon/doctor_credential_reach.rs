@@ -91,10 +91,7 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
         Err(SecretResolveError::Store { kind, .. }) => (
             format!("the credential store could not supply it ({kind})"),
             true,
-            matches!(
-                kind,
-                trusty_common::credentials::StoreErrorKind::Keyring
-            ),
+            matches!(kind, trusty_common::credentials::StoreErrorKind::Keyring),
         ),
     };
     ReachVerdict {

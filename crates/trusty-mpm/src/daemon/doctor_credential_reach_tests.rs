@@ -78,7 +78,10 @@ fn an_absent_credential_is_not_an_error() {
 #[test]
 fn a_store_error_names_its_kind() {
     for (kind, label) in [
-        (trusty_common::credentials::StoreErrorKind::Keyring, "keyring-backend"),
+        (
+            trusty_common::credentials::StoreErrorKind::Keyring,
+            "keyring-backend",
+        ),
         (trusty_common::credentials::StoreErrorKind::Io, "io"),
         (trusty_common::credentials::StoreErrorKind::Toml, "toml"),
         (
@@ -118,7 +121,10 @@ fn a_present_credential_is_never_printed() {
     );
 
     let row = build_row(&[verdict]);
-    assert!(!row.message.contains(FAKE_VALUE), "the row disclosed the value");
+    assert!(
+        !row.message.contains(FAKE_VALUE),
+        "the row disclosed the value"
+    );
 }
 
 /// Why: an operator can point `[llm] api_key_env` at any variable. One that is
@@ -164,7 +170,12 @@ fn row_reports_one_line_per_daemon_credential() {
     for provider in DAEMON_PROVIDERS {
         let var = trusty_common::credential_registry::env_var_for(provider)
             .expect("every daemon provider is registered");
-        assert!(row.message.contains(var), "{} missing: {}", var, row.message);
+        assert!(
+            row.message.contains(var),
+            "{} missing: {}",
+            var,
+            row.message
+        );
     }
 }
 

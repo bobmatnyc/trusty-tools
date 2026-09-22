@@ -136,7 +136,9 @@ pub enum SecretResolveError {
 
     /// Nothing holds a value for this key: not the process env, not
     /// `.env.local`, not the store.
-    #[error("no value configured for `{var}` in the environment, `.env.local`, or the credential store")]
+    #[error(
+        "no value configured for `{var}` in the environment, `.env.local`, or the credential store"
+    )]
     Absent {
         /// The canonical environment-variable name.
         var: String,
@@ -215,7 +217,9 @@ static ERROR_CACHE: OnceLock<Mutex<HashMap<String, (Instant, StoreErrorKind)>>> 
 /// Why: a panic in one caller must not permanently disable credential
 /// resolution for the process. The maps hold no invariant a panic can corrupt —
 /// an entry is either present or not — so the poisoned guard is safe to take.
-fn map<V: 'static>(cell: &'static OnceLock<Mutex<HashMap<String, V>>>) -> &'static Mutex<HashMap<String, V>> {
+fn map<V: 'static>(
+    cell: &'static OnceLock<Mutex<HashMap<String, V>>>,
+) -> &'static Mutex<HashMap<String, V>> {
     cell.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

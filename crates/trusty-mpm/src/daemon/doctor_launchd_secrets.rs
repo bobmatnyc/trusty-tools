@@ -165,7 +165,12 @@ fn judge(path: PathBuf) -> PlistFinding {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return unreadable(path, mode, format!("could not read it: {}", e.kind()), false);
+            return unreadable(
+                path,
+                mode,
+                format!("could not read it: {}", e.kind()),
+                false,
+            );
         }
     };
     if is_binary_plist(&bytes) {
@@ -298,7 +303,11 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
         .filter(|f| !f.migratable.is_empty() || !f.unmapped.is_empty())
         .collect();
     if !exposed.is_empty() {
-        return DoctorCheck::new(CHECK_NAME, CheckStatus::Fail, fail_message(&exposed, &unreadable));
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Fail,
+            fail_message(&exposed, &unreadable),
+        );
     }
 
     // #8236 item 4 (owner ruling 2026-09-21): a binary plist is the one

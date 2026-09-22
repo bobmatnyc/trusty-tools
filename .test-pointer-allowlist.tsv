@@ -514,8 +514,6 @@ crates/trusty-mpm/src/daemon/error.rs	invalid_transition_body_lists_allowed
 crates/trusty-mpm/src/daemon/idle_reaper.rs	counter_removed_after_action
 crates/trusty-mpm/src/daemon/idle_reaper.rs	new_state_is_empty
 crates/trusty-mpm/src/daemon/llm_overseer.rs	chat_history_is_capped
-crates/trusty-mpm/src/daemon/llm_overseer.rs	resolve_api_key_missing_is_empty
-crates/trusty-mpm/src/daemon/llm_overseer.rs	resolve_api_key_reads_env_var
 crates/trusty-mpm/src/daemon/managed_routes/activity.rs	activity_no_key_returns_raw_pane
 crates/trusty-mpm/src/daemon/managed_routes/fleet.rs	fleet_route_groups_by_project
 crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	isr_failure_auto_accepts

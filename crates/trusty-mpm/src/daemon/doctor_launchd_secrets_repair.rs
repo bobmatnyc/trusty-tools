@@ -180,7 +180,10 @@ fn repair_one(finding: &PlistFinding, mode: RepairMode, store: &dyn KeyStore) ->
 /// Test: `repair_migrates_then_removes`,
 /// `repair_leaves_the_plist_untouched_when_the_import_fails`,
 /// `repair_keeps_an_unmapped_key_and_says_so`.
-fn import_all(entries: &[PlistCredentialEntry], store: &dyn KeyStore) -> (Vec<String>, Vec<String>) {
+fn import_all(
+    entries: &[PlistCredentialEntry],
+    store: &dyn KeyStore,
+) -> (Vec<String>, Vec<String>) {
     let mut imported = Vec::new();
     let mut blocked = Vec::new();
     for entry in entries {
@@ -196,7 +199,11 @@ fn import_all(entries: &[PlistCredentialEntry], store: &dyn KeyStore) -> (Vec<St
             continue;
         }
         if let Err(e) = store.set(provider, entry.value.expose()) {
-            blocked.push(format!("{}: the store refused the write ({})", entry.key, kind_of(&e)));
+            blocked.push(format!(
+                "{}: the store refused the write ({})",
+                entry.key,
+                kind_of(&e)
+            ));
             continue;
         }
         match store.try_get(provider) {

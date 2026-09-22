@@ -40,7 +40,9 @@ use trusty_common::credential_registry::is_registered_credential_env_var;
 use trusty_common::credential_registry::provider_for_env_var;
 #[cfg(test)]
 use trusty_common::credentials::{KeyStore, resolve_provider_bounded_with};
-use trusty_common::credentials::{SecretResolveError, load_env_local_once, resolve_env_var_bounded};
+use trusty_common::credentials::{
+    SecretResolveError, load_env_local_once, resolve_env_var_bounded,
+};
 
 /// Resolve `var` through the shipped resolver, logging any failure by kind.
 ///

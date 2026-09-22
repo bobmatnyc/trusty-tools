@@ -8,8 +8,8 @@
 //! variable name and the error kind. A downgrade of any arm — to a default
 //! value, to a silent `None`, or to a different kind — fails here.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serial_test::serial;
 use tracing::field::{Field, Visit};
@@ -218,15 +218,15 @@ fn an_absent_secret_is_none_and_logs_absent() {
     });
 
     let (resolved, lines) = capture(|| {
-        resolve_secret_with(
-            "BITBUCKET_APP_PASSWORD",
-            store,
-            Duration::from_millis(500),
-        )
+        resolve_secret_with("BITBUCKET_APP_PASSWORD", store, Duration::from_millis(500))
     });
 
     assert!(resolved.is_none(), "an absent credential must not resolve");
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "the store was consulted once");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the store was consulted once"
+    );
     assert_logged(&lines, "BITBUCKET_APP_PASSWORD", "absent");
 }
 
@@ -243,13 +243,15 @@ fn a_store_timeout_is_none_and_logs_timeout() {
     let bound = Duration::from_millis(200);
 
     let started = std::time::Instant::now();
-    let (resolved, lines) = capture(|| {
-        resolve_secret_with("JIRA_API_TOKEN", Arc::new(NeverReturns), bound)
-    });
+    let (resolved, lines) =
+        capture(|| resolve_secret_with("JIRA_API_TOKEN", Arc::new(NeverReturns), bound));
     let waited = started.elapsed();
 
     assert!(resolved.is_none(), "a timed-out read must not resolve");
-    assert!(waited < Duration::from_secs(2), "the caller waited {waited:?}");
+    assert!(
+        waited < Duration::from_secs(2),
+        "the caller waited {waited:?}"
+    );
     assert_logged(&lines, "JIRA_API_TOKEN", "timeout");
 }
 

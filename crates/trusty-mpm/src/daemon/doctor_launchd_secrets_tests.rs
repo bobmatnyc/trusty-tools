@@ -85,12 +85,19 @@ impl KeyStore for WriteOnlyStore {
 #[test]
 fn scan_names_the_key_not_the_value() {
     let home = home_with_agents();
-    install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
 
     let findings = scan_launch_agents(home.path()).expect("scan");
 
     assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].migratable, vec!["OPENROUTER_API_KEY".to_string()]);
+    assert_eq!(
+        findings[0].migratable,
+        vec!["OPENROUTER_API_KEY".to_string()]
+    );
     assert_value_never_echoed(&format!("{:?}", findings[0]));
 }
 
@@ -128,7 +135,9 @@ fn scan_splits_registry_mapped_keys_from_unmapped_ones() {
 #[test]
 fn scan_reports_a_binary_plist_as_unknown() {
     let home = home_with_agents();
-    let path = home.path().join("Library/LaunchAgents/com.trusty.mpm.plist");
+    let path = home
+        .path()
+        .join("Library/LaunchAgents/com.trusty.mpm.plist");
     let mut bytes = b"bplist00".to_vec();
     bytes.extend_from_slice(&[0xd1, 0x01, 0x02]);
     std::fs::write(&path, bytes).expect("write");
@@ -160,12 +169,44 @@ fn scan_reports_an_unparseable_plist() {
     assert_value_never_echoed(&format!("{:?}", findings[0]));
 }
 
+/// Why: a file the scan cannot open at all is the same hazard as one it cannot
+/// parse — it may hold the credential, and the one answer it must never get is
+/// "clean". The scan reports it as unreadable with the I/O reason, and it is NOT
+/// a binary plist, so the row treats it as unknown rather than as a failure with
+/// a `plutil` remedy that would not help.
+/// Test: this test.
+#[test]
+fn scan_reports_an_unreadable_plist() {
+    let home = home_with_agents();
+    // A directory under the plist's name: `std::fs::read` fails deterministically
+    // on every platform, with no permission games.
+    std::fs::create_dir(
+        home.path()
+            .join("Library/LaunchAgents/com.trusty.mpm.plist"),
+    )
+    .expect("mkdir");
+
+    let findings = scan_launch_agents(home.path()).expect("scan");
+    let why = findings[0].unreadable.clone().expect("unreadable");
+
+    assert!(why.contains("could not read it"), "{why}");
+    assert!(!findings[0].binary_plist, "not a binary plist: {why}");
+    assert_eq!(
+        check_launchd_plist_secrets(home.path()).status,
+        CheckStatus::Unknown
+    );
+}
+
 /// Why: a plist tm did not generate belongs to the operator.
 /// Test: this test.
 #[test]
 fn scan_ignores_foreign_plists() {
     let home = home_with_agents();
-    install(home.path(), "com.example.other.plist", &plist_with_credential());
+    install(
+        home.path(),
+        "com.example.other.plist",
+        &plist_with_credential(),
+    );
 
     assert!(scan_launch_agents(home.path()).expect("scan").is_empty());
 }
@@ -195,7 +236,11 @@ fn scan_errors_when_the_directory_cannot_be_listed() {
 #[test]
 fn row_fails_and_names_the_key_not_the_value() {
     let home = home_with_agents();
-    install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
 
     let row = check_launchd_plist_secrets(home.path());
 
@@ -213,7 +258,11 @@ fn row_fails_and_names_the_key_not_the_value() {
 fn row_flags_a_world_readable_plist() {
     use std::os::unix::fs::PermissionsExt;
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
     let row = check_launchd_plist_secrets(home.path());
@@ -258,7 +307,10 @@ fn row_is_ok_when_clean() {
     }
     let _ = &path;
 
-    assert_eq!(check_launchd_plist_secrets(home.path()).status, CheckStatus::Ok);
+    assert_eq!(
+        check_launchd_plist_secrets(home.path()).status,
+        CheckStatus::Ok
+    );
 }
 
 /// Why: "could not tell" must never render as healthy.
@@ -288,7 +340,9 @@ fn row_is_unknown_when_a_plist_cannot_be_parsed() {
 #[test]
 fn row_fails_on_a_binary_plist() {
     let home = home_with_agents();
-    let path = home.path().join("Library/LaunchAgents/com.trusty.mpm.plist");
+    let path = home
+        .path()
+        .join("Library/LaunchAgents/com.trusty.mpm.plist");
     let mut bytes = b"bplist00".to_vec();
     bytes.extend_from_slice(&[0xd1, 0x01, 0x02]);
     std::fs::write(&path, bytes).expect("write");
@@ -323,7 +377,11 @@ fn row_is_unknown_when_the_directory_cannot_be_listed() {
 #[test]
 fn row_fail_still_names_the_plists_it_could_not_judge() {
     let home = home_with_agents();
-    install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     install(
         home.path(),
         "com.trusty.zebra.plist",
@@ -333,7 +391,11 @@ fn row_fail_still_names_the_plists_it_could_not_judge() {
     let row = check_launchd_plist_secrets(home.path());
 
     assert_eq!(row.status, CheckStatus::Fail);
-    assert!(row.detail.contains("com.trusty.zebra.plist"), "{}", row.detail);
+    assert!(
+        row.detail.contains("com.trusty.zebra.plist"),
+        "{}",
+        row.detail
+    );
 }
 
 /// Why: a dry run must plan and write nothing.
@@ -341,7 +403,11 @@ fn row_fail_still_names_the_plists_it_could_not_judge() {
 #[test]
 fn repair_plans_without_writing() {
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     let before = std::fs::read_to_string(&path).expect("read");
 
     let steps = repair_with_store(
@@ -361,7 +427,11 @@ fn repair_plans_without_writing() {
 #[test]
 fn repair_migrates_then_removes() {
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     let store = Arc::new(MemoryKeyStore::new());
 
     let steps = repair_with_store(home.path(), RepairMode::Apply, store.clone());
@@ -381,7 +451,11 @@ fn repair_migrates_then_removes() {
 #[test]
 fn repair_leaves_the_plist_untouched_when_the_import_fails() {
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     let before = std::fs::read_to_string(&path).expect("read");
 
     let steps = repair_with_store(home.path(), RepairMode::Apply, Arc::new(WriteOnlyStore));
@@ -429,7 +503,9 @@ fn repair_keeps_an_unmapped_key_and_says_so() {
 #[test]
 fn repair_refuses_a_binary_plist() {
     let home = home_with_agents();
-    let path = home.path().join("Library/LaunchAgents/com.trusty.mpm.plist");
+    let path = home
+        .path()
+        .join("Library/LaunchAgents/com.trusty.mpm.plist");
     let mut bytes = b"bplist00".to_vec();
     bytes.extend_from_slice(&[0xd1, 0x01]);
     std::fs::write(&path, &bytes).expect("write");
@@ -441,7 +517,10 @@ fn repair_refuses_a_binary_plist() {
     );
 
     let StepStatus::Failed(why) = &steps[0].status else {
-        panic!("a binary plist must be refused loudly: {:?}", steps[0].status);
+        panic!(
+            "a binary plist must be refused loudly: {:?}",
+            steps[0].status
+        );
     };
     // Owner ruling 2026-09-21: a refusal is acceptable this round only if it
     // names the way out. A refusal that just said "cannot" would leave the
@@ -481,7 +560,11 @@ fn repair_fails_loudly_on_an_unparseable_plist() {
 fn repair_fails_loudly_when_the_plist_is_unwritable() {
     use std::os::unix::fs::PermissionsExt;
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     let before = std::fs::read_to_string(&path).expect("read");
     let dir = home.path().join("Library/LaunchAgents");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
@@ -547,7 +630,11 @@ fn repair_produces_no_steps_for_a_clean_host() {
 #[test]
 fn repair_is_idempotent() {
     let home = home_with_agents();
-    let path = install(home.path(), "com.trusty.mpm.plist", &plist_with_credential());
+    let path = install(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &plist_with_credential(),
+    );
     let store = Arc::new(MemoryKeyStore::new());
 
     let first = repair_with_store(home.path(), RepairMode::Apply, store.clone());
