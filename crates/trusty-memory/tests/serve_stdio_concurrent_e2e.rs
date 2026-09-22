@@ -32,6 +32,9 @@
 //!     bridge exits promptly when stdin closes rather than hanging, and that NO
 //!     additional child process matching the exe name is spawned (no orphan
 //!     squatter).
+//!   - `the_handshake_answers_after_the_daemon_guard_fails`: the #8351 fail-open
+//!     arm — a data directory that cannot resolve makes the guard fail, and the
+//!     bridge still answers a real `initialize` on stdout.
 //!
 //! Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e`.
 //! Requires Cargo to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
@@ -356,10 +359,16 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
 /// `the_handshake_is_answered_with_no_daemon_listening` covers.
 ///
 /// What: creates an empty temp data dir, spawns a bridge, closes its stdin
-/// immediately, and asserts the process exits within `EXIT_DEADLINE`. Prompt
-/// exit is only possible if the bridge did NOT block on a daemon it spawned —
-/// a spawned-orphan path would hold it for the orphan's 30-second startup
-/// budget.
+/// immediately, and asserts the process exits within `EXIT_DEADLINE`.
+///
+/// What this does NOT cover, and why: an empty temp data dir RESOLVES, so
+/// `ensure_daemon_up_for_stdio` takes #5267's start-if-not-running path and
+/// brings a daemon up in that dir — the guard's `Ok` arm, not the fail-open
+/// arm #8351 added. The guard-failure half needs a data directory that cannot
+/// resolve at all, which is
+/// `the_handshake_answers_after_the_daemon_guard_fails` below. What is left
+/// here is the exit contract: one bridge, one guard, and EOF on stdin as the
+/// only thing that ends the process, inside `EXIT_DEADLINE`.
 ///
 /// Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e -- stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon`.
 #[tokio::test]
@@ -391,4 +400,73 @@ async fn stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon() {
     // The bridge may exit with a non-zero code (error) or zero — the
     // important thing is that it DID exit rather than hanging.
     let _ = exit_result; // we only care it exited, not the exact status
+}
+
+/// Why (#8351, critic round on PR #8359): the fail-open arm in
+/// `run_stdio_bridge` — the one that reports a failed
+/// `ensure_daemon_up_for_stdio` to stderr instead of returning `Err` — was the
+/// whole point of the fix and no test reached it. The unit tests drive
+/// `build_bridge` / `answer` directly, and
+/// `stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon` hands the guard
+/// an empty temp dir, which under #5267's start-if-not-running guard STARTS a
+/// daemon and takes the `Ok` arm. This test is the guard-failure half: without
+/// it, restoring `ensure_daemon_up_for_stdio().await?` would keep every test
+/// green while costing a live client its session again.
+///
+/// What: points `TRUSTY_DATA_DIR_OVERRIDE` at a regular FILE, so
+/// `trusty_common::resolve_data_dir`'s `create_dir_all` fails with `ENOTDIR`,
+/// `start_lock_path()` yields `None`, and the guard returns `Err` before it can
+/// probe, lock or spawn anything. Then sends a real `initialize` over the real
+/// stdin pipe and asserts a real JSON-RPC result comes back on stdout —
+/// matching id, no `error`, and the handshake fields a client actually reads.
+/// Under the pre-#8351 shape the process exits before reading stdin at all, so
+/// `recv_raw` panics on EOF.
+///
+/// Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e -- the_handshake_answers_after_the_daemon_guard_fails`.
+#[tokio::test]
+async fn the_handshake_answers_after_the_daemon_guard_fails() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // A regular file standing where the data directory must be. Nothing can
+    // make this resolve, so the guard's failure is the test's own fixture
+    // rather than a timing window.
+    let blocked = tmp.path().join("data-dir-is-a-regular-file");
+    std::fs::write(&blocked, b"not a directory").expect("write the blocking file");
+
+    let mut bridge = spawn_raw_bridge(&blocked).await;
+
+    send_raw(
+        &mut bridge.stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 8351,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "guard-failure-e2e", "version": "0"}
+            }
+        }),
+    )
+    .await;
+
+    let response = recv_raw(&mut bridge.reader).await;
+
+    assert_eq!(
+        response["id"], 8351,
+        "the handshake must answer the id it was asked with; got: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "a failed daemon guard must not turn the handshake into an error; got: {response}"
+    );
+    assert_eq!(
+        response["result"]["protocolVersion"], "2024-11-05",
+        "the local answer must carry the protocol version a client reads; got: {response}"
+    );
+    assert_eq!(
+        response["result"]["serverInfo"]["name"], "trusty-memory",
+        "the local answer must name this server; got: {response}"
+    );
+
+    bridge.close().await;
 }

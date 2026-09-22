@@ -211,8 +211,11 @@ pub(crate) fn build_bridge(
 /// Only an I/O failure in the stdio loop. A daemon that will not start is
 /// reported, not returned.
 ///
-/// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
-/// responses. Bridge-specific unit tests live in this module.
+/// Test: `the_handshake_answers_after_the_daemon_guard_fails` in
+/// `tests/serve_stdio_concurrent_e2e.rs` drives THIS function through a real
+/// guard failure and asserts the handshake still answers on stdout;
+/// `tests/serve_stdio_e2e.rs` spawns a real child against a working guard.
+/// Bridge-specific unit tests live in this module.
 pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
     // #8351: the guard's failure is reported, never fatal — see the doc above.
     let socket = match ensure_daemon_up_for_stdio().await {
