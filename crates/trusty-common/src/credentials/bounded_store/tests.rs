@@ -417,3 +417,128 @@ fn cached_flag(err: &SecretResolveError) -> Option<bool> {
         _ => None,
     }
 }
+
+/// A one-shot handshake between the test thread and a parked reader.
+///
+/// Why: the race the last test forces is a two-party ordering, and a sleep on
+/// either side would make it a coin flip rather than a proof.
+struct Gate {
+    /// False until the other party opens it. Never closes again.
+    open: Mutex<bool>,
+    /// Signalled once, when `open` flips.
+    changed: Condvar,
+}
+
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            open: Mutex::new(false),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn open(&self) {
+        *self
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut open = self
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*open {
+            open = self
+                .changed
+                .wait(open)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+/// Installs [`PARK_BEFORE_PUBLISH`] for one provider; removes it on drop.
+///
+/// Why: the hook is process-global while the suite is multi-threaded, so it
+/// fires for exactly one provider key and must not survive a panicking test.
+struct InstalledParkHook;
+
+impl InstalledParkHook {
+    fn install(provider: &'static str, parked: Arc<Gate>, release: Arc<Gate>) -> Self {
+        let hook: ParkHook = Arc::new(move |p: &str| {
+            if p != provider {
+                return;
+            }
+            parked.open();
+            release.wait();
+        });
+        *PARK_BEFORE_PUBLISH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        Self
+    }
+}
+
+impl Drop for InstalledParkHook {
+    fn drop(&mut self) {
+        *PARK_BEFORE_PUBLISH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// Why (#8236): `finish` wrote [`ERROR_CACHE`] and published the outcome in two
+/// separate critical sections, and the caller's give-up path dropped
+/// `flight.outcome` before recording its `Timeout`. A reader preempted between
+/// those two steps let the caller write a `Timeout` AFTER the reader's
+/// `clear_error`, so the negative cache suppressed every read for the full 45 s
+/// TTL although the value had already landed — the exact defect the
+/// late-approval fix was meant to close.
+/// `a_late_success_retires_the_cached_timeout` cannot see it: `await_reader_done`
+/// sequences the two strictly.
+/// Test: itself.
+#[test]
+fn a_timed_out_caller_cannot_cache_behind_a_publishing_reader() {
+    let provider = "test-publish-race-h";
+    let value = "synthetic-race-approved-value";
+    clear_error(provider);
+
+    // The reader signals `parked` once it has produced its value and made its
+    // cache decision, then blocks until the test opens `release`.
+    let parked = Gate::new();
+    let release = Gate::new();
+    let _hook = InstalledParkHook::install(provider, Arc::clone(&parked), Arc::clone(&release));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store: Arc<dyn KeyStore> = Arc::new(SlowValue {
+        delay: Duration::ZERO,
+        value: value.to_string(),
+        calls: Arc::clone(&calls),
+    });
+    let bound = Duration::from_millis(120);
+    let caller = std::thread::spawn(move || store_get_bounded(store, provider, bound));
+
+    parked.wait();
+    // The caller's whole bound elapses with the reader stopped mid-publish.
+    std::thread::sleep(bound * 2);
+    release.open();
+
+    await_reader_done(provider, Duration::from_secs(5));
+    let got = caller.join().expect("caller thread");
+
+    assert_eq!(
+        cached_error(provider),
+        None,
+        "the timed-out caller cached a Timeout behind the reader's clear_error, \
+         suppressing reads for the full TTL although the value was published"
+    );
+    assert_eq!(
+        got,
+        Ok(Some(value.to_string())),
+        "the caller must observe the outcome the reader published under the \
+         same lock, not its own Timeout"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

@@ -275,7 +275,8 @@ fn map<V: 'static>(
 /// `concurrent_resolves_issue_exactly_one_store_read`,
 /// `a_cached_error_is_returned_without_a_second_read`,
 /// `the_error_cache_expires_and_the_next_read_is_issued`,
-/// `a_late_success_retires_the_cached_timeout`.
+/// `a_late_success_retires_the_cached_timeout`,
+/// `a_timed_out_caller_cannot_cache_behind_a_publishing_reader`.
 pub fn store_get_bounded(
     store: Arc<dyn KeyStore>,
     provider: &str,
@@ -300,8 +301,12 @@ pub fn store_get_bounded(
         if remaining.is_zero() {
             // #8236: the caller stops waiting; the reader keeps going, so an
             // approval that lands late still grants the ACL for the NEXT read.
-            drop(guard);
+            // #8236: the cache write happens BEFORE `guard` is dropped, inside
+            // the same critical section `finish` takes first, so this Timeout
+            // can never land after a reader's `clear_error` and outlive the
+            // value that reader is about to publish.
             record_error(provider, StoreErrorKind::Timeout);
+            drop(guard);
             return Err(StoreFailure::fresh(StoreErrorKind::Timeout));
         }
         let (next, _) = flight
@@ -397,7 +402,23 @@ fn spawn_reader(store: Arc<dyn KeyStore>, provider: String, flight: Arc<Flight>)
 }
 
 /// Publish an outcome, wake every waiter, and clear the flight.
+///
+/// Why: the [`ERROR_CACHE`] write and the outcome publish are ONE decision, so
+/// they are one critical section. Split apart, a caller whose bound elapsed
+/// could write its `Timeout` between this reader's `clear_error` and the value
+/// landing in the slot, leaving a stale entry that suppressed every read for
+/// the full [`STORE_ERROR_CACHE_TTL`] although the value was already published.
+/// Test: `a_timed_out_caller_cannot_cache_behind_a_publishing_reader`,
+/// `a_late_success_retires_the_cached_timeout`.
 fn finish(provider: &str, flight: &Flight, outcome: Result<Option<String>, StoreErrorKind>) {
+    // #8236: `flight.outcome` is taken FIRST and held across the cache write,
+    // so a caller giving up cannot interleave its own `record_error` here. The
+    // module's one lock order is outcome → ERROR_CACHE → INFLIGHT; no site
+    // takes any of them the other way round.
+    let mut slot = flight
+        .outcome
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match &outcome {
         Err(kind) => record_error(provider, *kind),
         // #8236: a read that landed LATE must retire whatever the caller cached
@@ -406,18 +427,47 @@ fn finish(provider: &str, flight: &Flight, outcome: Result<Option<String>, Store
         // precisely the approval the detached reader exists to preserve.
         Ok(_) => clear_error(provider),
     }
+    park_before_publish(provider);
     map(&INFLIGHT)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(provider);
-    let mut slot = flight
-        .outcome
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *slot = Some(outcome);
     drop(slot);
     flight.done.notify_all();
 }
+
+/// A test's park closure, keyed on the provider it wants to stop.
+#[cfg(test)]
+type ParkHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Test-only park point inside [`finish`]'s critical section.
+///
+/// Why (#8236): the write-order invariant is unobservable without stopping a
+/// reader mid-publish. A test installs a closure here, lets a caller's bound
+/// elapse while the reader is parked holding `flight.outcome`, and asserts the
+/// caller could not slip a `Timeout` into [`ERROR_CACHE`] behind it.
+/// Test: `a_timed_out_caller_cannot_cache_behind_a_publishing_reader`.
+#[cfg(test)]
+static PARK_BEFORE_PUBLISH: Mutex<Option<ParkHook>> = Mutex::new(None);
+
+/// Run the installed park hook, if any. The hook lock is released before the
+/// closure runs, so a parked reader never holds it.
+#[cfg(test)]
+fn park_before_publish(provider: &str) {
+    let hook = PARK_BEFORE_PUBLISH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(provider);
+    }
+}
+
+/// Compiled out entirely off the test path — see the `cfg(test)` twin above.
+#[cfg(not(test))]
+#[inline]
+fn park_before_publish(_provider: &str) {}
 
 /// Resolve `var`'s credential: process env, `.env.local`, then the bounded store.
 ///
