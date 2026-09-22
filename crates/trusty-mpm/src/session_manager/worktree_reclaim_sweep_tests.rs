@@ -19,6 +19,10 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use super::*;
+// #7889: the sweep itself now calls `classify_with_landed_content`; these tests
+// exercise the eight-argument entry point, which is the pre-#7889 behaviour.
+use crate::session_manager::worktree_reclaim::classify;
+
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_reclaim_claim::{ClaimLiveness, WorkspaceClaim};

@@ -87,6 +87,19 @@ pub(crate) enum ReclaimVerdict {
         /// The merged pull request that proves the branch's work landed.
         pr: u64,
     },
+    /// Every gate passed with NO pull request: the tree's content is already
+    /// on `base`, byte for byte (#7889).
+    ///
+    /// Why a separate variant rather than a `Reclaimable` with no number: the
+    /// operator surfaces print "landing evidence is PR #N", and a zero there
+    /// would read as a pull request. The evidence here is of a different kind,
+    /// so it is a different variant — and a reader matching on
+    /// `Reclaimable { pr }` cannot silently treat it as one.
+    /// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`.
+    ReclaimableLandedContent {
+        /// The ref the content was judged against, e.g. `origin/main`.
+        base: String,
+    },
     /// Refused — `reason` names the FIRST gate that said no.
     Blocked {
         /// Which gate refused (#6507).
@@ -138,7 +151,14 @@ impl ReclaimVerdict {
     }
 
     /// True when this verdict permits deletion.
+    ///
+    /// #7889: two kinds of landing evidence admit — a merged pull request, and
+    /// content that is already on the landing base. Both still require every
+    /// gate ahead of gate 5 to have passed.
     pub(crate) fn is_reclaimable(&self) -> bool {
-        matches!(self, Self::Reclaimable { .. })
+        matches!(
+            self,
+            Self::Reclaimable { .. } | Self::ReclaimableLandedContent { .. }
+        )
     }
 }

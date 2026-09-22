@@ -301,9 +301,11 @@ fn removal_target_path(tail: &[String], base: &Path) -> Option<(String, PathBuf)
 mod tests {
     use super::*;
     use crate::commands::pm_guard_bash::worktree_remove_rechecks::{
-        CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
-        CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks,
+        CHECK_CLEAN_TREE, CHECK_LANDED_CONTENT, CHECK_LOCAL_ONLY_COMMITS,
+        CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
+        evaluate_removal_rechecks,
     };
+    use trusty_mpm::core::worktree_landed_content::LandedContent;
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
     };
@@ -374,6 +376,10 @@ mod tests {
         /// #7275 round 2: the base ref the merge-tree question was asked
         /// against, so a test can prove it came from the pull request.
         asked_base: std::cell::RefCell<Option<String>>,
+        /// #7889: the landed-content admission's answer. Undeterminable by
+        /// default, so every pre-#7889 expectation stands and a test that
+        /// wants the admission has to say so.
+        landed: LandedContent,
     }
 
     /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
@@ -436,6 +442,9 @@ mod tests {
                 // same reason.
                 commit_pr: Ok(commit_lookup(0)),
                 asked_base: std::cell::RefCell::new(None),
+                // #7889: the admission establishes nothing unless a test asks
+                // it to, so no pre-#7889 fixture can grant through it.
+                landed: LandedContent::unavailable("no landed-content answer was fabricated"),
             }
         }
 
@@ -502,6 +511,132 @@ mod tests {
             *self.asked_base.borrow_mut() = Some(base_ref.to_string());
             self.noop_merge.clone()
         }
+        fn landed_content(&self, _dir: &Path) -> LandedContent {
+            self.landed.clone()
+        }
+    }
+
+    /// The #7889 shape: a clean, sole-owned tree holding commits no `origin`
+    /// ref reaches, on a branch GitHub has no pull request for — because the
+    /// work landed through a sibling's squash — whose content IS on the base.
+    fn donor_branch_landed() -> FakeProbe {
+        FakeProbe {
+            branch: Ok("fix/8351-bridge-session-recovery-critic-r1".to_string()),
+            merged: Ok(lookup(0)),
+            merged_related: None,
+            // The #7914 admission cannot fire: these commits exist only here.
+            local_only: Ok(3),
+            landed: LandedContent::Landed {
+                base: "origin/main".to_string(),
+                base_sha: "7df1c383f0a1b2c3d4e5f60718293a4b5c6d7e8f".to_string(),
+            },
+            ..FakeProbe::upstream_deleted()
+        }
+    }
+
+    /// 🔴 REGRESSION (#7889): the admission itself. A clean, unowned worktree
+    /// whose every file is already on `origin/main` is removable even though
+    /// no MERGED pull request carries its branch name — and none ever will,
+    /// because the branch was fast-forwarded onto a sibling's head and
+    /// squash-merged under that name.
+    ///
+    /// Owner ruling 2026-09-22. Fails against the pre-#7889 guard, which
+    /// returns the `merged-pull-request` deny here and never asks a third
+    /// question: nineteen such trees were stuck across 2026-09-21/22.
+    #[test]
+    fn worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable() {
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &donor_branch_landed()),
+            None,
+            "a clean tree holding no content the remote lacks must be reclaimable"
+        );
+    }
+
+    /// 🔴 #7889, the refusing direction: one path the merge would still change
+    /// is work on no remote, and the deny names that path and the admission.
+    #[test]
+    fn worktree_7889_a_residual_path_denies_and_names_it() {
+        let probe = FakeProbe {
+            landed: LandedContent::Residual {
+                base: "origin/main".to_string(),
+                first_path: "crates/trusty-mpm/src/daemon/mod.rs".to_string(),
+            },
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("work the base does not hold must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains(CHECK_LANDED_CONTENT), "{reason}");
+        assert!(
+            reason.contains("crates/trusty-mpm/src/daemon/mod.rs"),
+            "the deny must name the first residual path: {reason}"
+        );
+    }
+
+    /// 🔴 #7889, ADR-0045: the admission is a RELAXATION, so only a positive
+    /// answer grants. A refresh that failed, a base that would not resolve and
+    /// a `merge-tree` that errored all arrive here as `Unavailable`.
+    #[test]
+    fn worktree_7889_an_unestablished_landed_content_answer_never_grants() {
+        let probe = FakeProbe {
+            landed: LandedContent::unavailable(
+                "`origin` could not be refreshed, so the remote-tracking refs cannot be \
+                 trusted: `git fetch --prune origin` did not finish within 3s",
+            ),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unestablished admission must never grant");
+        assert!(reason.contains(CHECK_LANDED_CONTENT), "{reason}");
+        assert!(
+            reason.contains("could not be refreshed"),
+            "the deny must quote what failed: {reason}"
+        );
+    }
+
+    /// 🔴 #7889: the admission did not become a bypass — `clean-tree` still
+    /// runs first, so unsaved work denies however landed the history is.
+    #[test]
+    fn worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed() {
+        let probe = FakeProbe {
+            dirty: Ok(3),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("unsaved work must deny removal");
+        assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
+        assert!(reason.contains('3'), "{reason}");
+    }
+
+    /// 🔴 #7889: `sole-owner` still runs first too — a tree a live agent is
+    /// working in is refused whatever its content looks like.
+    #[test]
+    fn worktree_7889_a_live_owner_denies_even_when_its_content_is_landed() {
+        let owners = ["agent-acb948e25b1025822".to_string()];
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&owners), &donor_branch_landed())
+            .expect("a live owner must deny removal");
+        assert!(reason.contains(CHECK_SOLE_OWNER), "{reason}");
+        assert!(reason.contains("agent-acb948e25b1025822"), "{reason}");
+    }
+
+    /// 🔴 #7889, the distinction the admission rests on: "GitHub has no such
+    /// pull request" is a FACT the admission may be asked after; "the lookup
+    /// did not answer" establishes nothing, so the evaluation stops there even
+    /// when the content IS landed.
+    #[test]
+    fn worktree_7889_an_unanswerable_lookup_never_reaches_the_admission() {
+        let probe = FakeProbe {
+            merged: Err(format!("gh timed out after 20s (repository searched: {FAKE_REPO})")),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unanswerable lookup must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("timed out"), "{reason}");
+        assert!(
+            !reason.contains(CHECK_LANDED_CONTENT),
+            "the admission must not be reached from an unestablished fact: {reason}"
+        );
     }
 
     /// REGRESSION (#7275, round 2): a round-N sibling is reclaimable when its

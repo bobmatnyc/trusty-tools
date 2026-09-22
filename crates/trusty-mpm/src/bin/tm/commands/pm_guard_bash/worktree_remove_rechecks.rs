@@ -89,6 +89,26 @@
 //! whose HEAD IS the commit the pull request merged holds nothing that merge did
 //! not carry, whatever a tracking ref says.
 //!
+//! **Landed content admits where no pull request ever can (#7889).** A donor
+//! branch fast-forwarded onto a sibling's head and squash-merged under that
+//! name never acquires a MERGED row of its own — not now, not later — so
+//! [`landing_evidence`]'s refusal was permanent for nineteen clean trees across
+//! 2026-09-21 and 2026-09-22, every file of which was byte-identical on
+//! `origin/main`. Owner ruling 2026-09-22: admit them.
+//! [`landed_content_admission`] runs after that refusal, refreshes `origin` and
+//! asks whether merging HEAD into the landing base would change any file.
+//!
+//! That supersedes half of #7275 round 2. The never-pushed branch holding one
+//! empty or self-reverting commit IS now admitted — not because the guard
+//! stopped requiring evidence, but because the ruling makes the evidence
+//! CONTENT rather than a pull request, and such a tree demonstrably holds none
+//! the remote lacks. What round 2 established still stands everywhere else: the
+//! admission is reached only after `clean-tree` and both ownership gates, only
+//! when the lookup ANSWERED (an unanswerable `gh` call is
+//! [`LandingFailure::Undeterminable`] and stops there), and only on a positive,
+//! post-refresh comparison — a failed refresh, an unresolvable base, a
+//! `merge-tree` conflict and a residual path all refuse.
+//!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
 //! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
@@ -118,7 +138,13 @@
 //! `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
 //! `a_detached_head_matched_to_a_pull_request_with_no_head_denies`,
 //! `an_unanswerable_commit_search_denies_a_detached_head`,
-//! `an_unresolvable_head_sha_denies_a_detached_head`
+//! `an_unresolvable_head_sha_denies_a_detached_head`,
+//! `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+//! `worktree_7889_a_residual_path_denies_and_names_it`,
+//! `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
+//! `worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed`,
+//! `worktree_7889_a_live_owner_denies_even_when_its_content_is_landed`,
+//! `worktree_7889_an_unanswerable_lookup_never_reaches_the_admission`
 //! in `super::worktree_remove`.
 
 use std::path::Path;
@@ -147,6 +173,11 @@ pub(crate) const CHECK_MERGED_PULL_REQUEST: &str = "merged-pull-request";
 /// apply, so a refusal says which of the two routes to landing evidence failed.
 /// It is never a `check` slug in its own right: it can only grant.
 pub(crate) const CHECK_LOCAL_ONLY_COMMITS: &str = "local-only-commits";
+/// The #7889 admission's name, spelled ONCE in
+/// [`trusty_mpm::core::worktree_landed_content`] because the reclaim sweep
+/// quotes the same slug. Like [`CHECK_LOCAL_ONLY_COMMITS`] it can only grant.
+pub(crate) const CHECK_LANDED_CONTENT: &str =
+    trusty_mpm::core::worktree_landed_content::LANDED_CONTENT_CHECK;
 /// See [`CHECK_WORKTREE_SCOPE`] — the identity half, checked in
 /// [`super::worktree_remove`] before any of these run.
 pub(crate) const CHECK_DISPATCH_IDENTITY: &str = "dispatch-identity";
@@ -311,7 +342,16 @@ pub(crate) fn evaluate_removal_rechecks(
         &format!("{no_upstream_note}{local_only_note}"),
     ) {
         Ok(l) => l,
-        Err(deny) => return Some(deny),
+        // #7889: GitHub ANSWERED, and has no merged pull request for this
+        // branch or its stem. That is the donor-branch shape — the content
+        // landed under a sibling's name — so the third route to landing
+        // evidence is asked before the refusal stands.
+        Err(LandingFailure::NoMergedPr(deny)) => {
+            return landed_content_admission(target, probe, deny);
+        }
+        // A lookup that did not answer establishes nothing, and an admission
+        // is never reached from an unestablished fact (ADR-0045).
+        Err(LandingFailure::Undeterminable(deny)) => return Some(deny),
     };
     // #7232, unchanged: a branch whose OWN pull request merged has DIRECT
     // evidence its commits reached GitHub, so a clean tree grants whether or
@@ -492,6 +532,55 @@ fn local_only_note(local_only: &Result<usize, String>) -> String {
     }
 }
 
+/// Why [`landing_evidence`] could not produce a pull request (#7889).
+///
+/// Why: the two reasons lead to different next steps. GitHub answering "there
+/// is no such pull request" is a FACT, and the #7889 admission is allowed to
+/// ask a further question after it. A lookup that did not answer at all
+/// establishes nothing, so nothing may be built on top of it (ADR-0045).
+/// Collapsing both into one `String`, as this did before #7889, would have let
+/// an unanswerable `gh` call reach the admission.
+/// What: each variant carries the deny text, ready to hand back.
+/// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+/// `no_upstream_and_an_unanswerable_merged_pr_lookup_denies`.
+enum LandingFailure {
+    /// GitHub answered: no MERGED pull request for the branch or its stem.
+    NoMergedPr(String),
+    /// The lookup failed, or the merged row carried no base branch.
+    Undeterminable(String),
+}
+
+/// The #7889 admission: is this tree's content already on its landing base?
+///
+/// Why: a donor branch fast-forwarded onto a sibling's head and squash-merged
+/// under that name can never acquire a pull request of its own, so the
+/// merged-PR refusal is permanent for a tree that holds nothing. Owner ruling
+/// 2026-09-22 admits it. Reached ONLY after `clean-tree`, `sole-owner` and the
+/// branch lookup have passed, and only for a genuine `version-control`
+/// dispatch — [`super::worktree_remove`] settles the identity and scope halves
+/// before this module runs at all.
+/// What: `None` grants when
+/// [`WorktreeRemovalProbe::landed_content`] reports the merge would change no
+/// file. Everything else appends that verdict's own sentence — the first
+/// residual path, or what could not be established — to the merged-PR deny and
+/// refuses, so the refusal names both routes that failed.
+/// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+/// `worktree_7889_a_residual_path_denies_and_names_it`,
+/// `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
+/// `worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed`,
+/// `worktree_7889_a_live_owner_denies_even_when_its_content_is_landed`.
+fn landed_content_admission(
+    target: &Path,
+    probe: &dyn WorktreeRemovalProbe,
+    no_pr_deny: String,
+) -> Option<String> {
+    let verdict = probe.landed_content(target);
+    if verdict.is_landed() {
+        return None;
+    }
+    Some(format!("{no_pr_deny} {}", verdict.note()))
+}
+
 /// A MERGED pull request that vouches for this worktree, and the base it merged
 /// into (#7275 round 2).
 ///
@@ -516,13 +605,13 @@ fn landing_evidence(
     // #7914: no longer the #7232 upstream sentence alone — the caller appends
     // why the local-only-commits admission did not apply too.
     notes: &str,
-) -> Result<Landed, String> {
+) -> Result<Landed, LandingFailure> {
     // #7232: the branch is named in every failure here. A failed lookup used to
     // quote only the probe's error, so a deny an operator had to act on did not
     // say which branch had been asked about.
     let own = probe
         .merged_pull_requests(target, branch)
-        .map_err(|e| lookup_failed(target, branch, &e))?;
+        .map_err(|e| LandingFailure::Undeterminable(lookup_failed(target, branch, &e)))?;
     if own.count > 0 {
         return base_of(target, branch, &own, true);
     }
@@ -534,22 +623,21 @@ fn landing_evidence(
     if stem != branch {
         let related = probe
             .merged_pull_requests(target, stem)
-            .map_err(|e| lookup_failed(target, stem, &e))?;
+            .map_err(|e| LandingFailure::Undeterminable(lookup_failed(target, stem, &e)))?;
         if related.count > 0 {
             return base_of(target, stem, &related, false);
         }
     }
-    Err(recheck_deny(
+    Err(LandingFailure::NoMergedPr(recheck_deny(
         CHECK_MERGED_PULL_REQUEST,
         target,
         &format!(
             "GitHub has no MERGED pull request for `{branch}` in `{repo}` (resolved from this \
-             worktree's `origin` remote){also}. Neither ancestry nor content-equivalence is an \
-             acceptable substitute: a squash merge leaves the branch tip no ancestry \
-             relationship to the squash commit, and a branch that was never pushed merges into \
-             its base as a no-op exactly the way a landed one does. Open a pull request for \
-             this branch, or reclaim the tree with `tm session prune-worktrees --merged-prs \
-             --force`.{notes}",
+             worktree's `origin` remote){also}. Ancestry is not an acceptable substitute: a \
+             squash merge leaves the branch tip no ancestry relationship to the squash commit, \
+             so `git merge-base --is-ancestor` and `git cherry` both answer \"not merged\" for \
+             a tree that is safe to reclaim. Open a pull request for this branch, or reclaim \
+             the tree with `tm session prune-worktrees --merged-prs --force`.{notes}",
             repo = own.repo,
             also = if stem == branch {
                 String::new()
@@ -557,7 +645,7 @@ fn landing_evidence(
                 format!(", nor for its round sibling `{stem}`")
             }
         ),
-    ))
+    )))
 }
 
 /// A confirmed MERGED pull request and the base it landed on.
@@ -585,10 +673,13 @@ fn base_of(
     head: &str,
     lookup: &MergedPrLookup,
     is_own: bool,
-) -> Result<Landed, String> {
+) -> Result<Landed, LandingFailure> {
     let base = lookup.base_ref.trim();
     if base.is_empty() {
-        return Err(recheck_deny(
+        // #7889: UNDETERMINABLE, not "no pull request" — GitHub found one and
+        // could not say where it landed, so no further admission may be built
+        // on the answer.
+        return Err(LandingFailure::Undeterminable(recheck_deny(
             CHECK_MERGED_PULL_REQUEST,
             target,
             &format!(
@@ -597,7 +688,7 @@ fn base_of(
                  against could not be established.",
                 repo = lookup.repo
             ),
-        ));
+        )));
     }
     Ok(Landed {
         base_ref: format!("origin/{base}"),

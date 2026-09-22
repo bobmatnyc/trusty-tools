@@ -38,14 +38,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // #7889: the bounded per-repository fetch that makes gate 6's landing refs
-// current before anything is classified against them.
-use super::worktree_landing_refresh::refresh_landing_refs;
+// current before anything is classified against them, and the landed-content
+// admission gate 5 asks when no pull request carries the branch's name.
+use super::worktree_landing_refresh::{FETCH_TIMEOUT, refresh_landing_refs};
+use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
-    ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
-    agent_ownership_blocks, classify, measure_bytes_until, session_ownership_blocks,
-    tm_provisioned, unattributed_nested_blocks,
+    AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims,
+    NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome,
+    ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify_with_landed_content,
+    measure_bytes_until, session_ownership_blocks, tm_provisioned, unattributed_nested_blocks,
 };
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
@@ -156,6 +158,44 @@ pub(crate) fn survey_with_index(
     // whatever real worktrees it names. `&[]` is the pre-#7357 behaviour.
     adopted: &[PathBuf],
 ) -> ReclaimSurvey {
+    // #7889: gate 5's landed-content admission is opt-in — see
+    // [`survey_with_landed_content`]. A caller that does not ask for it keeps
+    // the pre-#7889 refusal and performs no fetch.
+    survey_with_landed_content(
+        repos_root,
+        in_use,
+        index_for,
+        agent_state,
+        budget,
+        per_branch_fallback,
+        keep_list,
+        adopted,
+        None,
+    )
+}
+
+/// [`survey_with_index`], offering gate 5's landed-content admission (#7889).
+///
+/// Why: the predicate fetches, so it is offered by the operator-invoked reclaim
+/// path and withheld from the doctor's unattended survey. A second entry point
+/// rather than a ninth argument, so the twenty-odd existing call sites keep
+/// their exact shape.
+/// What: as [`survey_with_index`], plus the probe handed down to
+/// [`classify_with_landed_content`].
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `survey_reports_a_merged_worktree_as_reclaimable`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn survey_with_landed_content(
+    repos_root: &Path,
+    in_use: &LiveClaims,
+    index_for: &dyn Fn(&Path) -> PrIndex,
+    agent_state: AgentStateProbe<'_>,
+    budget: SurveyBudget,
+    per_branch_fallback: bool,
+    keep_list: &KeepList,
+    adopted: &[PathBuf],
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
     for scanned in scan_registered_worktrees(repos_root, adopted) {
@@ -196,7 +236,7 @@ pub(crate) fn survey_with_index(
         if let Some(note) = claim.note() {
             tracing::info!(path = %scanned.path.display(), "{note}");
         }
-        let verdict = classify(
+        let verdict = classify_with_landed_content(
             &scanned.path,
             scanned.admission,
             &claim,
@@ -206,6 +246,7 @@ pub(crate) fn survey_with_index(
             // #7652: gate 4b's owner map rides in the claim snapshot.
             &in_use.owners,
             keep_list,
+            landed_content,
         );
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
@@ -511,6 +552,19 @@ fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
     }
 }
 
+/// Gate 5's landed-content admission, as the reclaim sweep runs it (#7889).
+///
+/// Why: a free function rather than a closure so both the reclaim path and its
+/// tests name the same predicate, and so the bound it runs under is stated in
+/// one place.
+/// What: [`landed_content_verdict`] under [`FETCH_TIMEOUT`] — the sweep's own
+/// 30 s, not the removal guard's 3 s, because nothing here runs inside the
+/// `PreToolUse` hook's budget.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`.
+fn reclaim_landed_content(path: &Path) -> LandedContent {
+    landed_content_verdict(path, FETCH_TIMEOUT)
+}
+
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
 ///
 /// Why: see this module's staleness rule. The survey establishes candidates;
@@ -556,7 +610,7 @@ pub(crate) fn reclaim_with_probes(
     if mode == ReclaimMode::Remove {
         refresh_repositories(repos_root, adopted);
     }
-    let survey = survey_with_index(
+    let survey = survey_with_landed_content(
         repos_root,
         &initial,
         probes.index_for,
@@ -565,6 +619,12 @@ pub(crate) fn reclaim_with_probes(
         true,
         &(probes.keep_list)(),
         adopted,
+        // #7889: the operator typed `prune-worktrees --merged-prs`, so the
+        // admission is offered in BOTH modes — a report that hid a candidate
+        // `--force` would then reclaim is a report of the wrong thing. It is
+        // the only fetch a report performs, it is bounded, and it runs only for
+        // a candidate that reached gate 5 with no pull request.
+        Some(&reclaim_landed_content),
     );
     let mut out = ReclaimOutcome {
         removed: Vec::new(),

@@ -35,6 +35,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+// #7889: gate 5's landed-content admission, shared with the ADR-0057 guard.
+use crate::core::worktree_landed_content::LandedContent;
+
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
 use super::worktree_reclaim_gh::{
@@ -717,6 +720,40 @@ pub(crate) fn classify(
     owners: &SessionOwners,
     keep_list: &KeepList,
 ) -> ReclaimVerdict {
+    // #7889: gate 5's landed-content admission is OPT-IN, because the predicate
+    // behind it fetches. Every caller that does not offer one keeps the
+    // pre-#7889 refusal verbatim.
+    classify_with_landed_content(
+        path, admission, claim, pr, probe_dirt, agent_state, owners, keep_list, None,
+    )
+}
+
+/// [`classify`], with gate 5's landed-content admission supplied (#7889).
+///
+/// Why: the admission runs `git fetch` and `git merge-tree`, so it cannot be
+/// reached implicitly by every surveyor — the doctor's unattended, read-only
+/// pass must not fetch. Parameterised rather than made unconditional, and
+/// spelled as a second entry point rather than a ninth argument on the first,
+/// so the forty existing call sites keep their exact behaviour and their exact
+/// shape.
+/// What: as [`classify`], plus `landed_content`. See [`no_pr_verdict`] for what
+/// gate 5 does with it.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_classify_refuses_a_tree_holding_residue`,
+/// `worktree_7889_classify_refuses_when_the_admission_is_unavailable`,
+/// `worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_with_landed_content(
+    path: &Path,
+    admission: Admission,
+    claim: &ClaimState,
+    pr: &BranchPrState,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    agent_state: AgentStateProbe<'_>,
+    owners: &SessionOwners,
+    keep_list: &KeepList,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimVerdict {
     // Gate 0 (#6927): the operator's own standing veto outranks every answer
     // the gates below could compute, so it is asked first — see DOC-73 §16.4.
     if let Some(kept) = keep_list.keeps(path) {
@@ -798,11 +835,13 @@ pub(crate) fn classify(
                 format!("PR #{pr} was closed without merging"),
             );
         }
+        // #7889: the one refusal that is permanent for a tree holding nothing.
+        // A donor branch fast-forwarded onto a sibling's head and squash-merged
+        // under that name can never acquire a pull request of its own, so this
+        // arm asks the landed-content question before it refuses. Owner ruling
+        // 2026-09-22; the same predicate the ADR-0057 guard runs.
         BranchPrState::NoPr => {
-            return ReclaimVerdict::blocked(
-                ReclaimGate::PrState,
-                "no pull request found for this branch",
-            );
+            return no_pr_verdict(path, probe_dirt, landed_content);
         }
         BranchPrState::Unknown => {
             return ReclaimVerdict::blocked(
@@ -831,6 +870,67 @@ pub(crate) fn classify(
         );
     }
     ReclaimVerdict::Reclaimable { pr: merged_pr }
+}
+
+/// How gate 5 answers "is this branch's content already landed?" (#7889).
+///
+/// Why: injected rather than called directly for the reason `probe_dirt` is —
+/// the real predicate runs `git fetch` and `git merge-tree`, and a unit test
+/// of the gate ladder must be able to state the answer instead of building a
+/// remote. `None` means the caller does not offer the admission at all, which
+/// is the pre-#7889 refusal.
+/// What: a borrowed closure from the worktree path to a verdict.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `classify_blocks_no_pr`.
+pub(crate) type LandedContentProbe<'a> = Option<&'a dyn Fn(&Path) -> LandedContent>;
+
+/// Gate 5's verdict for a branch GitHub has no pull request for (#7889).
+///
+/// Why: nineteen clean worktrees across 2026-09-21 and 2026-09-22 were spared
+/// here while holding no content `origin/main` lacked — their work had landed
+/// through a sibling `-r2` branch's squash, so no pull request carries their
+/// own name and none ever will. Owner ruling 2026-09-22 admits exactly that
+/// shape, through the same predicate the ADR-0057 removal guard runs, so the
+/// two paths cannot give one worktree opposite answers.
+/// What: gate 6's unsaved-work check runs FIRST, because a dirty tree is
+/// refused however landed its history is; then the admission. Every arm but
+/// [`LandedContent::Landed`] refuses, naming the predicate and — for a residual
+/// tree — the first path the merge would still change. A caller offering no
+/// probe gets the pre-#7889 refusal verbatim.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_classify_refuses_a_tree_holding_residue`,
+/// `worktree_7889_classify_refuses_when_the_admission_is_unavailable`,
+/// `worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed`,
+/// `classify_blocks_no_pr`.
+fn no_pr_verdict(
+    path: &Path,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimVerdict {
+    let Some(ask) = landed_content else {
+        return ReclaimVerdict::blocked(
+            ReclaimGate::PrState,
+            "no pull request found for this branch",
+        );
+    };
+    // Gate 6, brought forward: unsaved work outranks landing evidence of any
+    // kind, and running it before the fetch also spares a dirty tree the cost.
+    if let Some(dirt) = probe_dirt(path) {
+        return ReclaimVerdict::blocked(
+            ReclaimGate::UnsavedWork,
+            format!("holds unsaved work: {}", dirt.reason),
+        );
+    }
+    let verdict = ask(path);
+    match &verdict {
+        LandedContent::Landed { base, .. } => ReclaimVerdict::ReclaimableLandedContent {
+            base: base.clone(),
+        },
+        _ => ReclaimVerdict::blocked(
+            ReclaimGate::PrState,
+            format!("no pull request found for this branch, and {}", verdict.note()),
+        ),
+    }
 }
 
 /// One surveyed worktree and everything the survey learned about it (#2919).

@@ -115,6 +115,16 @@
 //! a stale `@{upstream}` reporting `Ahead(4)` pushed the decision onto a
 //! merge-tree comparison that reported residue for a tree holding none.
 //!
+//! **Landed content is landing evidence of its own (#7889).** A donor branch
+//! fast-forwarded onto a sibling's head and squash-merged under THAT name
+//! leaves GitHub with no pull request carrying the donor's own name, forever.
+//! [`WorktreeRemovalProbe::landed_content`] answers the question that ruling
+//! (owner, 2026-09-22) turns on instead — would merging this HEAD into the
+//! landing base change any file — through
+//! [`crate::core::worktree_landed_content`], which the reclaim sweep's gate 5
+//! also calls. It is a RELAXATION, so only an affirmative, refreshed answer
+//! admits; ancestry is still never consulted.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`,
 //! `local_only_commits_counts_only_what_no_origin_ref_has`,
@@ -140,6 +150,7 @@ use crate::session_manager::worktree_reclaim_gh::{
 use crate::session_manager::worktree_repo_slug::{
     DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
 };
+use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict, merge_residue};
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.
@@ -444,6 +455,26 @@ pub trait WorktreeRemovalProbe {
     /// would change files or conflict, `Err` when git could not be asked —
     /// which denies, like every other undeterminable answer here.
     fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
+
+    /// Is this tree's content already standing on its landing base (#7889)?
+    ///
+    /// Why: the admission for the one shape no pull request can ever vouch
+    /// for — a parked branch fast-forwarded onto a sibling `-r2` head that
+    /// squash-merged under THAT name. Nineteen such trees were refused across
+    /// 2026-09-21 and 2026-09-22 while holding nothing `origin/main` lacked.
+    /// What: delegates to
+    /// [`landed_content_verdict`](crate::core::worktree_landed_content::landed_content_verdict)
+    /// under [`ADMISSION_FETCH_TIMEOUT`], so this ladder and the reclaim
+    /// sweep's gate 5 run one predicate rather than two. The default
+    /// implementation establishes nothing, which never grants.
+    /// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+    /// `worktree_7889_a_residual_path_denies_and_names_it`,
+    /// `worktree_7889_an_unestablished_landed_content_answer_never_grants` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    fn landed_content(&self, _dir: &Path) -> LandedContent {
+        LandedContent::unavailable(NOT_IMPLEMENTED)
+    }
 }
 
 /// The row, if any, whose pull request was opened from exactly `sha` (#7832).
@@ -656,22 +687,16 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // #7275 round 2: the base is the merged pull request's own, passed in.
         // Resolving `origin/HEAD` here judged every branch against the default
         // branch, which is wrong for anything that merged elsewhere.
-        let base = base_ref.trim();
-        if base.is_empty() {
-            return Err("no base ref was supplied to judge this worktree's content against".into());
-        }
-        let tree = git_stdout(dir, &["merge-tree", "--write-tree", base, "HEAD"])
-            .map_err(|e| format!("`git merge-tree --write-tree {base} HEAD` failed: {e}"))?;
-        let Some(tree) = tree.lines().next().map(str::trim).filter(|t| !t.is_empty()) else {
-            return Err(format!(
-                "`git merge-tree --write-tree {base} HEAD` named no tree"
-            ));
-        };
-        // `git diff --name-only` rather than `--quiet`: an empty answer is the
-        // no-op, and a non-empty one names the residue for the deny message.
-        let residue = git_stdout(dir, &["diff", "--name-only", base, tree])
-            .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
-        Ok(residue.trim().is_empty())
+        // #7889: the two commands now live in `core::worktree_landed_content`,
+        // so this check and the landed-content admission cannot drift apart.
+        Ok(merge_residue(dir, base_ref)?.is_empty())
+    }
+
+    fn landed_content(&self, dir: &Path) -> LandedContent {
+        // #7889: the same 3 s bound the #7914 admission's fetch runs under —
+        // this also executes inside the `PreToolUse` hook, whose own 5 s
+        // timeout kills a decision that has not been printed yet.
+        landed_content_verdict(dir, ADMISSION_FETCH_TIMEOUT)
     }
 }
 
@@ -852,6 +877,9 @@ mod tests {
                 .merged_pull_request_for_commit(dir, "deadbeef")
                 .is_err()
         );
+        // #7889: the admission's default is the same — establishing nothing,
+        // which never grants.
+        assert!(!UnoverriddenProbe.landed_content(dir).is_landed());
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.

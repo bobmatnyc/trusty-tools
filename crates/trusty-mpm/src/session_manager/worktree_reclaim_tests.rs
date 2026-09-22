@@ -140,6 +140,45 @@ fn reason(v: &ReclaimVerdict) -> String {
             reason.clone()
         }
         ReclaimVerdict::Reclaimable { pr } => panic!("expected a refusal, got Reclaimable {pr}"),
+        // #7889: the second grant kind. Same contract — a refusal test that
+        // reached it has found a gate that stopped refusing.
+        ReclaimVerdict::ReclaimableLandedContent { base } => {
+            panic!("expected a refusal, got landed content on {base}")
+        }
+    }
+}
+
+/// [`classify_with_landed_content`] with the refusing agent probe, for the
+/// #7889 gate-5 tests.
+///
+/// Why: the admission's whole point is that gate 5 stops being the end of the
+/// road, so its tests need the ninth argument `classify_no_agent` does not
+/// take. Everything else is that helper's fixture verbatim, so a difference in
+/// verdict is attributable to the admission alone.
+fn classify_landed(
+    path: &Path,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    landed: LandedContent,
+) -> ReclaimVerdict {
+    let ask = |_: &Path| landed.clone();
+    classify_with_landed_content(
+        path,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::NoPr,
+        probe_dirt,
+        &no_agents,
+        &SessionOwners::default(),
+        &KeepList::default(),
+        Some(&ask),
+    )
+}
+
+/// The landed-content answer the #7889 shape produces.
+fn landed_on_main() -> LandedContent {
+    LandedContent::Landed {
+        base: "origin/main".to_string(),
+        base_sha: "7df1c383f0a1b2c3d4e5f60718293a4b5c6d7e8f".to_string(),
     }
 }
 
@@ -312,6 +351,69 @@ fn classify_blocks_no_pr() {
     );
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("no pull request"), "{}", reason(&v));
+}
+
+/// 🔴 REGRESSION (#7889): gate 5's admission. A clean worktree whose every file
+/// is already on `origin/main` is reclaimable even though GitHub has no pull
+/// request for its branch — the donor-branch shape, where the work landed
+/// through a sibling's squash and no pull request will ever carry this name.
+///
+/// Owner ruling 2026-09-22. Fails against the pre-#7889 gate, which refuses
+/// here unconditionally: nineteen such trees were spared across 2026-09-21/22,
+/// each holding 10–25 GB.
+#[test]
+fn worktree_7889_classify_admits_a_landed_tree_with_no_pull_request() {
+    let v = classify_landed(&wt(), &clean, landed_on_main());
+    assert_eq!(
+        v,
+        ReclaimVerdict::ReclaimableLandedContent {
+            base: "origin/main".to_string()
+        },
+        "a tree holding no content the remote lacks must be reclaimable"
+    );
+}
+
+/// 🔴 #7889, the refusing direction: one path the merge would still change is
+/// work on no remote. The refusal names the admission and that path.
+#[test]
+fn worktree_7889_classify_refuses_a_tree_holding_residue() {
+    let v = classify_landed(
+        &wt(),
+        &clean,
+        LandedContent::Residual {
+            base: "origin/main".to_string(),
+            first_path: "crates/trusty-mpm/src/daemon/mod.rs".to_string(),
+        },
+    );
+    assert!(!v.is_reclaimable());
+    let r = reason(&v);
+    assert!(r.contains("landed-content"), "{r}");
+    assert!(r.contains("crates/trusty-mpm/src/daemon/mod.rs"), "{r}");
+}
+
+/// 🔴 #7889, ADR-0045: a failed refresh, an unresolvable base and a
+/// `merge-tree` error all arrive as `Unavailable`, and none of them grants.
+#[test]
+fn worktree_7889_classify_refuses_when_the_admission_is_unavailable() {
+    let v = classify_landed(
+        &wt(),
+        &clean,
+        LandedContent::unavailable("`origin` could not be refreshed: host unreachable"),
+    );
+    assert!(!v.is_reclaimable());
+    let r = reason(&v);
+    assert!(r.contains("landed-content"), "{r}");
+    assert!(r.contains("could not be refreshed"), "{r}");
+}
+
+/// 🔴 #7889: the admission did not become a bypass — gate 6's unsaved-work
+/// check still decides first, so a dirty tree is refused however landed its
+/// history is.
+#[test]
+fn worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed() {
+    let v = classify_landed(&wt(), &dirty, landed_on_main());
+    assert!(!v.is_reclaimable());
+    assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
 }
 
 #[test]

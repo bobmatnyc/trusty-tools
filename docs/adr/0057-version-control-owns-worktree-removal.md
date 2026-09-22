@@ -189,6 +189,44 @@ the guard will establish every precondition itself.
      one direction available: a pull request GitHub named no `headRefOid` for, a
      HEAD git could not resolve, and any mismatch all leave the pre-#7958
      decision standing.
+
+     Amended by #7889 — landed CONTENT is landing evidence of its own, on both
+     reclaim paths. A donor branch fast-forwarded onto a sibling's head and
+     squash-merged under THAT name never acquires a pull request carrying its
+     own name, so this check's refusal is permanent for a tree that holds
+     nothing: nineteen clean worktrees were stuck that way across 2026-09-21 and
+     2026-09-22 — `fix/8351-bridge-session-recovery-critic-r1`,
+     `fix/8261-pm-guard-oracle`, `fix/8236-cache-race`, `fix/8361-context-budget`
+     among them — each holding a 10–25 GB `target-*/` directory, and each
+     byte-identical to `origin/main`. Owner ruling 2026-09-22: admit them.
+     A new `landed-content` admission runs after this check has ANSWERED with no
+     merged pull request. It refreshes `origin` under the same 3 s bound, then
+     asks whether merging HEAD into the landing base would change any file
+     (`git merge-tree --write-tree <base> HEAD`, then `git diff --name-only
+     <base> <tree>`). An empty answer grants and names the base commit; a
+     non-empty one refuses and names the first residual path. The base is
+     `origin/HEAD`, or `origin/main`/`origin/master` when the repository
+     declares none. The same predicate — one implementation, in
+     `core::worktree_landed_content` — decides gate 5 of `tm session
+     prune-worktrees --merged-prs`, so the two paths cannot give one worktree
+     opposite answers.
+
+     Ancestry is still never evidence: `git merge-base --is-ancestor` and `git
+     cherry` both answer "not merged" for a squash-merged branch, and neither is
+     consulted. Being a relaxation, it inherits decision 6 in the one direction
+     available — a failed or expired refresh, a base that will not resolve, a
+     `merge-tree` that errored or conflicted, and a residual path all refuse,
+     and so does an unanswerable `gh` lookup, which never reaches the admission
+     at all. An open pull request, a dirty tree and a live owner are decided
+     before it, exactly as before.
+
+     This SUPERSEDES half of the #7275 round-2 finding. The never-pushed branch
+     holding one empty or self-reverting commit is now admitted — not because
+     evidence stopped being required, but because the ruling makes the evidence
+     CONTENT, and such a tree demonstrably holds none the remote lacks. What
+     round 2 established stands everywhere else: the merge-tree comparison is
+     still never asked before a landing question has been answered, and it still
+     grants nothing on its own.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from
