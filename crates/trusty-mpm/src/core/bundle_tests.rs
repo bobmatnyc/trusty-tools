@@ -132,6 +132,12 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
         "skills/tm-secrets.md",
+        // #8376: entry file plus its four reference files.
+        "skills/tm-epic.md",
+        "skills/tm-epic/references/tracker-template.md",
+        "skills/tm-epic/references/phase-template.md",
+        "skills/tm-epic/references/manual-procedure.md",
+        "skills/tm-epic/references/anti-patterns.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -294,6 +300,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
         ("tm-secrets", TM_SECRETS),
+        ("tm-epic", TM_EPIC),
     ];
     for (name, content) in skills {
         assert!(
@@ -527,11 +534,14 @@ fn bundle_table_is_complete() {
     // Issue #8192 (+1): `skills/rust-delivery-workflow.md` is NEW — the Rust
     //   DELIVERY-PROCESS half split out from `rust-build-performance`'s
     //   build-speed scope, declared by `rust-engineer`. 184 + 1 = 185.
-    assert_eq!(ALL.len(), 185);
+    // Issue #8376 (+5): `skills/tm-epic.md` is NEW — tracker + phase-issue
+    //   authoring — plus four `references/*.md` files (tracker-template,
+    //   phase-template, manual-procedure, anti-patterns). 185 + 5 = 190.
+    assert_eq!(ALL.len(), 190);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 185, "artifact paths must be unique");
+    assert_eq!(paths.len(), 190, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

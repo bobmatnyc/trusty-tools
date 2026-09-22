@@ -203,7 +203,7 @@ gh issue create --title "…" --body "…" \
 gh issue edit 7070 --milestone "mpm 1.4" --add-project "trusty-mpm"
 ```
 
-Installed `gh` is 2.98 — `--milestone` and `--parent` work unchanged on both
+Installed `gh` is 2.96 — `--milestone` and `--parent` work unchanged on both
 `issue create` and `issue edit`; the project flag does not — `issue create`
 takes `--project`, `issue edit` takes `--add-project` — and the token carries
 the `project` scope. `issue create` also takes `--blocked-by <numbers>`
@@ -289,6 +289,50 @@ On **mcp-ticketer / aitrackdown**:
 - **EP-XXXX**: Epics — major initiatives
 - **ISS-XXXX**: Issues — bugs, features, user requests
 - **TSK-XXXX**: Tasks — individual work items
+
+## Epics and Phases — the Tracker Shape
+
+<!-- #8376: the mechanics; the judgement (gate test, four rules, criteria
+     writing, update triggers) is the `tm-epic` skill. -->
+
+A GitHub epic is one **tracker** issue plus one **phase** issue per phase, and
+you file it only when the brief says so or the `tm-epic` skill's gate test
+holds — one stage must be verified, soaked or deployed before the next starts.
+
+**Titles.** `[EPIC <epic#>] <outcome>` for the tracker, `[EPIC_<epic#>
+PHASE_<n>] <what>` for each phase. `<epic#>` is the tracker's own number, so
+creation is two-step: file the tracker under a placeholder `[EPIC] <outcome>`
+title, read its number back from the URL `gh issue create` prints, then
+`gh issue edit <epic#> --title "[EPIC <epic#>] <outcome>"`. Phases cannot go in
+the same batch as the tracker.
+
+**Linking.** Every phase is a native sub-issue — `gh issue create --parent
+<epic#>` in the filing call, or `gh issue edit <epic#> --add-sub-issue <n>` to
+adopt an existing issue. Never a task list. Read children back with
+`gh issue view <epic#> --json subIssues --jq '.subIssues.nodes[] | …'` (an
+object with `nodes`, not a bare array, on the installed gh).
+
+**Labels and milestone.** The tracker's type label is `epic`; each phase takes
+a type from the same six-value set for the work it does — no `phase` type
+exists. Every one of them carries `ws/<session>`, its component label(s), the
+project (by `gh project item-add`, as above) and a milestone; a phase takes its
+parent's.
+
+**The tracker body carries three marker blocks**, each with its own rule:
+
+| Block | Holds | Rule |
+|---|---|---|
+| `<!-- phases:start -->` … `<!-- phases:end -->` | one row per phase: number, name, issue, state, gate | regenerated wholesale from live child state |
+| `<!-- deferred:start -->` … `<!-- deferred:end -->` | scope removed from the plan | amended deliberately, only when scope leaves or a deferred item lands |
+| `<!-- followups:start -->` … `<!-- followups:end -->` | findings surfaced during execution | appended as found; at most two become standalone issues per phase, severity HIGH or above |
+
+🔴 **You never hand-patch a line inside `phases:start`/`phases:end`.** When a
+phase opens, closes, blocks or unblocks, you rebuild the whole block from
+`gh issue view <epic#> --json subIssues` and replace everything between the
+markers, leaving the other two blocks and the authored sections untouched.
+Not on PR open, merge, commit or review — those are phase-issue events. The
+ordered `gh` sequence, including the regeneration command, is
+`tm-epic`, `references/manual-procedure.md`.
 
 ## Scope Boundary — Ticketing vs. Version Control
 

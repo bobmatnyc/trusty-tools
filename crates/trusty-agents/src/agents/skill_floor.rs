@@ -99,6 +99,8 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-cli-operations",
     "tm-delegation-patterns",
     "tm-doctor",
+    // #8376: PM ticket-authoring skill, non-coding like `tm-issues-prune`.
+    "tm-epic",
     "tm-git-file-tracking",
     "tm-init",
     "tm-issues-prune",

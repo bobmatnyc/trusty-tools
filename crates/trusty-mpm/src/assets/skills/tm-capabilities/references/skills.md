@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-55 bundled skills.
+56 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -41,6 +41,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-cli-operations` | pm-reference | yes | Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics |
 | `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it |
 | `tm-doctor` |  | no | Run a full trusty-mpm system diagnostic checking instructions, agents, skills, memory, and search services |
+| `tm-epic` | pm-workflow | yes | Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the four tracker-update triggers, and the manual gh procedure until the CLI ships. |
 | `tm-git-file-tracking` | pm-workflow | no | Protocol for tracking files immediately after agent creation, before marking work complete |
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |

@@ -295,6 +295,7 @@ universal = [
   "tm-cli-operations",
   "tm-delegation-patterns",
   "tm-doctor",
+  "tm-epic",
   "tm-git-file-tracking",
   "tm-init",
   "tm-issues-prune",
