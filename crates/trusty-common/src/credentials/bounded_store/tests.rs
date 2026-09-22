@@ -445,16 +445,34 @@ impl Gate {
         self.changed.notify_all();
     }
 
-    fn wait(&self) {
+    /// Blocks until `open()` is called, or `bound` elapses.
+    ///
+    /// Why: an unbounded `Condvar::wait` hangs the whole suite if the other
+    /// party never opens the gate — e.g. `park_before_publish` removed or
+    /// reordered in `finish`. Matches `await_reader_done`'s deadline-loop
+    /// shape (above) so a broken invariant fails fast with a named cause
+    /// instead of a silent hang.
+    /// What: loops `Condvar::wait_timeout` against a deadline; panics naming
+    /// `what` — the invariant this gate stands in for — on expiry.
+    fn wait(&self, bound: Duration, what: &str) {
+        let deadline = Instant::now() + bound;
         let mut open = self
             .open
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         while !*open {
-            open = self
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                panic!("gate never opened within {bound:?}: {what}");
+            }
+            let (guard, timeout) = self
                 .changed
-                .wait(open)
+                .wait_timeout(open, remaining)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            open = guard;
+            if timeout.timed_out() && !*open {
+                panic!("gate never opened within {bound:?}: {what}");
+            }
         }
     }
 }
@@ -472,7 +490,10 @@ impl InstalledParkHook {
                 return;
             }
             parked.open();
-            release.wait();
+            release.wait(
+                Duration::from_secs(5),
+                "the test never opened release after forcing the caller's timeout to elapse",
+            );
         });
         *PARK_BEFORE_PUBLISH
             .lock()
@@ -520,7 +541,10 @@ fn a_timed_out_caller_cannot_cache_behind_a_publishing_reader() {
     let bound = Duration::from_millis(120);
     let caller = std::thread::spawn(move || store_get_bounded(store, provider, bound));
 
-    parked.wait();
+    parked.wait(
+        Duration::from_secs(5),
+        "the reader never reached park_before_publish inside finish",
+    );
     // The caller's whole bound elapses with the reader stopped mid-publish.
     std::thread::sleep(bound * 2);
     release.open();
