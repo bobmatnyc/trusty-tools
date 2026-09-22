@@ -2651,6 +2651,184 @@ fn cli_parses_memory_import_dry_run_json() {
     }
 }
 
+/// Why (#8352): `tm memory recall` is the fallback a PM reaches for when the
+/// `mcp__trusty-memory__*` tools are dead, so the verb, its bare form, and every
+/// flag that mirrors the `memory_recall` schema must parse. Before #8352 this
+/// argv was `error: unrecognized subcommand 'recall'` (exit 2).
+#[test]
+fn cli_parses_memory_recall() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "memory", "recall", "who owns the ledger"])
+        .expect("`tm memory recall <query>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Recall {
+                    query,
+                    palace,
+                    top_k,
+                    room,
+                    wing,
+                    min_score,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(query, "who owns the ledger");
+            assert!(palace.is_none(), "the palace defaults to the session's own");
+            assert!(top_k.is_none(), "top_k defaults to trusty-memory's own");
+            assert!(room.is_none());
+            assert!(wing.is_none());
+            assert!(min_score.is_none());
+            assert!(!json);
+            assert!(memory_socket.is_none());
+        }
+        other => panic!("expected Memory/Recall, got {other:?}"),
+    }
+}
+
+/// Why (#8352): the overrides are what make the verb usable from a script — the
+/// palace override, the machine-readable envelope, and the socket a test rig or
+/// a second daemon is reached on.
+#[test]
+fn cli_parses_memory_recall_with_overrides() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "recall",
+        "q",
+        "--palace",
+        "other-palace",
+        "--top-k",
+        "3",
+        "--room",
+        "Planning",
+        "--min-score",
+        "0.4",
+        "--json",
+        "--memory-socket",
+        "/tmp/trusty-memory.sock",
+    ])
+    .expect("every recall flag must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Recall {
+                    palace,
+                    top_k,
+                    room,
+                    min_score,
+                    json,
+                    memory_socket,
+                    ..
+                },
+        } => {
+            assert_eq!(palace.as_deref(), Some("other-palace"));
+            assert_eq!(top_k, Some(3));
+            assert_eq!(room.as_deref(), Some("Planning"));
+            assert_eq!(min_score, Some(0.4));
+            assert!(json);
+            assert_eq!(
+                memory_socket.as_deref(),
+                Some(std::path::Path::new("/tmp/trusty-memory.sock"))
+            );
+        }
+        other => panic!("expected Memory/Recall, got {other:?}"),
+    }
+}
+
+/// Why (#8352): `--wing` and `--room` scope the same search two ways, and
+/// trusty-memory refuses them together — so the CLI refuses them at parse time
+/// rather than spending a round trip to be told.
+#[test]
+fn cli_refuses_memory_recall_wing_with_room() {
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "recall",
+        "q",
+        "--room",
+        "Planning",
+        "--wing",
+        "engineer",
+    ])
+    .expect_err("wing and room together must be refused at parse time");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+/// Why (#8352): the write verbs are the other half of the fallback. `--tag`
+/// repeats, because a drawer carries several.
+#[test]
+fn cli_parses_memory_remember_with_tags() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "remember",
+        "the ledger is owned by ops",
+        "--tag",
+        "ownership",
+        "--tag",
+        "ledger",
+        "--room",
+        "Planning",
+    ])
+    .expect("`tm memory remember <text>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Remember {
+                    text,
+                    palace,
+                    room,
+                    tags,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(text, "the ledger is owned by ops");
+            assert!(palace.is_none());
+            assert_eq!(room.as_deref(), Some("Planning"));
+            assert_eq!(tags, vec!["ownership".to_string(), "ledger".to_string()]);
+            assert!(!json);
+            assert!(memory_socket.is_none());
+        }
+        other => panic!("expected Memory/Remember, got {other:?}"),
+    }
+}
+
+/// Why (#8352): `note` takes `content`, not `text` — the same split the MCP
+/// schema draws, so a caller who knows one surface knows the other.
+#[test]
+fn cli_parses_memory_note() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "note",
+        "deploy target is prod-east",
+        "--palace",
+        "p",
+        "--json",
+    ])
+    .expect("`tm memory note <content>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Note {
+                    content,
+                    palace,
+                    tags,
+                    json,
+                    ..
+                },
+        } => {
+            assert_eq!(content, "deploy target is prod-east");
+            assert_eq!(palace.as_deref(), Some("p"));
+            assert!(tags.is_empty());
+            assert!(json);
+        }
+        other => panic!("expected Memory/Note, got {other:?}"),
+    }
+}
+
 #[test]
 fn cli_parses_shell_init() {
     // The dialect is a closed set: a typo must be refused at parse time rather

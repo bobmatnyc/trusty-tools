@@ -70,9 +70,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `share` — Retired by #7892; prints why and does nothing
   - `test` — Verify MCP servers by running a real handshake against each
   - `unshare` — Retired by #7892; prints why and does nothing
-- `memory` — Deterministic trusty-memory palace maintenance (issue #4837)
+- `memory` — Palace access and maintenance without MCP (#4837, #8352)
   - `import` — Bulk-import a directory of memory `.md` files into a palace
   - `import-auto-memory` — Migrate Claude Code's own auto-memory store into the project's palace
+  - `note` — Store a short curated fact — the no-MCP `memory_note` (#8352)
+  - `recall` — Recall memories from the palace — the no-MCP `memory_recall` (#8352)
+  - `remember` — Store a memory in the palace — the no-MCP `memory_remember` (#8352)
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer
