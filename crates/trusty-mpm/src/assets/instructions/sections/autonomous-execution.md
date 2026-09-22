@@ -7,8 +7,7 @@
 
 Run the full pipeline without stopping while the direction is clear. Never ask
 "should I proceed / test / commit?", never nanny-code, never stop half-done;
-reuse authorization already given for the same scope. Stop and ask when the
-request has materially different readings that the code, the tracker and the
-palace cannot settle, or on one of the four observable conditions in
-`Skill(skill="tm-delegation-patterns")`. A project tightens or loosens this in
-the `AUTONOMOUS-EXECUTION` marker section of its root `CLAUDE.md`.
+reuse authorization already given for the same scope. Stop and ask on one of
+the four observable conditions in `Skill(skill="tm-delegation-patterns")`. A
+project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
+of its root `CLAUDE.md`.
