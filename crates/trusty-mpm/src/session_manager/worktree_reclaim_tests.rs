@@ -24,6 +24,8 @@ use crate::session_manager::worktree_reclaim_gh::{
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_safety::inspect_dirt;
+// #7889: gate 5's admission verdict, now defined outside `worktree_reclaim`.
+use crate::core::worktree_landed_content::LandedContent;
 
 /// A dirt probe that always reports CLEAN — used only where the test's subject
 /// is a gate ABOVE the dirt gate, so a real probe would add nothing.
@@ -412,6 +414,30 @@ fn worktree_7889_classify_refuses_when_the_admission_is_unavailable() {
 #[test]
 fn worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed() {
     let v = classify_landed(&wt(), &dirty, landed_on_main());
+    assert!(!v.is_reclaimable());
+    assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
+}
+
+/// 🔴 REGRESSION (#7889): gate 6 counts a donor branch's commits as unpushed.
+/// They reach no `origin` ref, and the squash that landed them also carried
+/// the continuing agent's work, so no patch id matches. Those commits are what
+/// the content comparison judges, so commits-only dirt must reach it.
+///
+/// Fails before the fix: gate 6 refused ANY dirt ahead of the admission, so
+/// the sweep could never admit the shape #7889 is about.
+#[test]
+fn worktree_7889_classify_admits_commits_only_dirt_when_landed() {
+    let commits_only = |p: &Path| Some(DirtyWorktree::new(p, "0 files, 3 unpushed", 0, 3));
+    let v = classify_landed(&wt(), &commits_only, landed_on_main());
+    assert!(v.is_reclaimable(), "commits the base already holds: {v:?}");
+}
+
+/// 🔴 #7889: an uncommitted file beside those commits is outside HEAD, so the
+/// comparison cannot vouch for it and gate 6 still refuses.
+#[test]
+fn worktree_7889_classify_refuses_files_beside_unpushed_commits() {
+    let both = |p: &Path| Some(DirtyWorktree::new(p, "1 file, 3 unpushed", 1, 3));
+    let v = classify_landed(&wt(), &both, landed_on_main());
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
 }

@@ -301,11 +301,13 @@ fn removal_target_path(tail: &[String], base: &Path) -> Option<(String, PathBuf)
 mod tests {
     use super::*;
     use crate::commands::pm_guard_bash::worktree_remove_rechecks::{
-        CHECK_CLEAN_TREE, CHECK_LANDED_CONTENT, CHECK_LOCAL_ONLY_COMMITS,
-        CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
-        evaluate_removal_rechecks,
+        CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
+        CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks,
     };
-    use trusty_mpm::core::worktree_landed_content::LandedContent;
+    // #7889: the admission's slug is spelled once, in the shared predicate.
+    use trusty_mpm::core::worktree_landed_content::{
+        LANDED_CONTENT_CHECK as CHECK_LANDED_CONTENT, LandedContent,
+    };
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
     };
@@ -626,7 +628,9 @@ mod tests {
     #[test]
     fn worktree_7889_an_unanswerable_lookup_never_reaches_the_admission() {
         let probe = FakeProbe {
-            merged: Err(format!("gh timed out after 20s (repository searched: {FAKE_REPO})")),
+            merged: Err(format!(
+                "gh timed out after 20s (repository searched: {FAKE_REPO})"
+            )),
             ..donor_branch_landed()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)

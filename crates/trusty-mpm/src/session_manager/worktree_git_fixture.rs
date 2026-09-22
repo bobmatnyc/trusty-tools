@@ -288,6 +288,35 @@ impl GitWorktreeFixture {
         git_ok(&scratch, &["push", "origin", "main"]);
     }
 
+    /// The real donor-branch shape (#7889): `wt` commits `file`, and the remote
+    /// lands that content in ONE squash together with a sibling's `extra`.
+    ///
+    /// Why: [`Self::land_on_the_remote_only`] lands the donor's patch alone, so
+    /// `git cherry` matches it and gate 6 reads the tree as clean. A real `-r2`
+    /// squash also carries the continuing agent's work, so no patch id matches
+    /// and gate 6 counts the donor's commit as unpushed. Only this shape shows
+    /// whether the sweep's admission can fire at all.
+    /// What: as [`Self::land_on_the_remote_only`], with `extra` added to the
+    /// landing commit. The worktree's `origin/main` is stale afterwards.
+    /// Test: `worktree_7889_the_sweep_admits_a_real_donor_branch`.
+    pub(crate) fn land_with_sibling_work(&self, wt: &Path, file: &str, extra: &str) {
+        self.land_on_the_remote_only(wt, file);
+        let scratch = self
+            .repos_root
+            .parent()
+            .expect("fixture: repos root has a parent")
+            .join(format!("landing-{file}"));
+        git_ok(&scratch, &["reset", "--soft", "HEAD~1"]);
+        std::fs::write(scratch.join(extra), "the sibling's own work\n")
+            .expect("fixture: write sibling file");
+        git_ok(&scratch, &["add", extra]);
+        git_ok(
+            &scratch,
+            &["commit", "-m", "feat: donor + -r2 work, squashed"],
+        );
+        git_ok(&scratch, &["push", "--force", "origin", "main"]);
+    }
+
     /// Commit `files` as SEPARATE commits in `wt`, then squash-merge the branch
     /// to `origin/main` and prune the refs that made them reachable (#6507).
     ///

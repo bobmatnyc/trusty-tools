@@ -143,6 +143,7 @@
 
 use std::path::Path;
 
+use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict, merge_residue};
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
@@ -150,7 +151,6 @@ use crate::session_manager::worktree_reclaim_gh::{
 use crate::session_manager::worktree_repo_slug::{
     DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
 };
-use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict, merge_residue};
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
 /// The `gh pr list` argv the merged-PR re-check runs, without the branch.

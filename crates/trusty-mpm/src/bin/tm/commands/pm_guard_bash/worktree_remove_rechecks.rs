@@ -173,11 +173,6 @@ pub(crate) const CHECK_MERGED_PULL_REQUEST: &str = "merged-pull-request";
 /// apply, so a refusal says which of the two routes to landing evidence failed.
 /// It is never a `check` slug in its own right: it can only grant.
 pub(crate) const CHECK_LOCAL_ONLY_COMMITS: &str = "local-only-commits";
-/// The #7889 admission's name, spelled ONCE in
-/// [`trusty_mpm::core::worktree_landed_content`] because the reclaim sweep
-/// quotes the same slug. Like [`CHECK_LOCAL_ONLY_COMMITS`] it can only grant.
-pub(crate) const CHECK_LANDED_CONTENT: &str =
-    trusty_mpm::core::worktree_landed_content::LANDED_CONTENT_CHECK;
 /// See [`CHECK_WORKTREE_SCOPE`] — the identity half, checked in
 /// [`super::worktree_remove`] before any of these run.
 pub(crate) const CHECK_DISPATCH_IDENTITY: &str = "dispatch-identity";

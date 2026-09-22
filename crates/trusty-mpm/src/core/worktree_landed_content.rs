@@ -195,8 +195,10 @@ pub fn landed_content_verdict(dir: &Path, refresh_timeout: Duration) -> LandedCo
 /// Test: `a_worktree_with_no_resolvable_landing_base_is_unavailable`.
 fn landing_base(dir: &Path) -> Option<(String, String)> {
     for candidate in BASE_CANDIDATES {
-        let Ok(sha) = git_stdout(dir, &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")])
-        else {
+        let Ok(sha) = git_stdout(
+            dir,
+            &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")],
+        ) else {
             continue;
         };
         let sha = sha.trim().to_string();

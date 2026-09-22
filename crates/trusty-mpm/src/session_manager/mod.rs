@@ -104,6 +104,8 @@ mod worktree_reclaim_owner_liveness_tests;
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: gate 5's landed-content admission and its pre-delete re-check.
+pub(crate) mod worktree_reclaim_landed;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;

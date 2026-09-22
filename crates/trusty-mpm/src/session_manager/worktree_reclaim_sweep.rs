@@ -40,14 +40,14 @@ use std::time::{Duration, Instant};
 // #7889: the bounded per-repository fetch that makes gate 6's landing refs
 // current before anything is classified against them, and the landed-content
 // admission gate 5 asks when no pull request carries the branch's name.
-use super::worktree_landing_refresh::{FETCH_TIMEOUT, refresh_landing_refs};
-use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict};
+use super::worktree_landing_refresh::refresh_landing_refs;
+use super::worktree_reclaim_landed::{landing_recheck, reclaim_landed_content};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims,
-    NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome,
-    ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify_with_landed_content,
-    measure_bytes_until, session_ownership_blocks, tm_provisioned, unattributed_nested_blocks,
+    AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims, NOT_INSPECTED_REASON,
+    PrIndex, ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey,
+    ReclaimVerdict, agent_ownership_blocks, classify_with_landed_content, measure_bytes_until,
+    session_ownership_blocks, tm_provisioned, unattributed_nested_blocks,
 };
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
@@ -392,6 +392,34 @@ pub(crate) fn recheck_before_delete(
     pr_now: &BranchPrState,
     agent_state: AgentStateProbe<'_>,
 ) -> Option<String> {
+    recheck_before_delete_with_landed_content(
+        path,
+        keep_list_now,
+        in_use_now,
+        pr_now,
+        agent_state,
+        None,
+    )
+}
+
+/// [`recheck_before_delete`], re-asking gate 5's landed-content admission when
+/// no pull request carries the branch (#7889).
+///
+/// Why: the delete loop re-checks every candidate the survey approved, and a
+/// candidate approved on content has no merged pull request to re-check. A
+/// second entry point, so the twenty-odd existing callers keep their shape.
+/// What: as [`recheck_before_delete`], with the final landing-and-dirt step
+/// delegated to [`landing_recheck`].
+/// Test: `worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_the_recheck_refuses_a_tree_no_longer_landed`.
+pub(crate) fn recheck_before_delete_with_landed_content(
+    path: &Path,
+    keep_list_now: &KeepList,
+    in_use_now: Option<&LiveClaims>,
+    pr_now: &BranchPrState,
+    agent_state: AgentStateProbe<'_>,
+    landed_content: LandedContentProbe<'_>,
+) -> Option<String> {
     // #6927: gate 0, re-asked. The survey read the keep-list once, minutes ago;
     // this reads what the operator has written since — including the
     // fail-closed state a config that stopped parsing produces.
@@ -431,15 +459,9 @@ pub(crate) fn recheck_before_delete(
     if let Some(reason) = unattributed_nested_blocks(path, &claim_now) {
         return Some(reason);
     }
-    if !matches!(pr_now, BranchPrState::Merged { .. }) {
-        return Some(format!(
-            "pull-request state is no longer a merge ({pr_now:?})"
-        ));
-    }
-    if let Some(dirt) = inspect_dirt(path) {
-        return Some(format!("holds unsaved work: {}", dirt.reason));
-    }
-    None
+    // #7889: a merge still re-runs `inspect_dirt`; no pull request re-asks the
+    // landed-content admission when the caller offered it.
+    landing_recheck(path, pr_now, landed_content)
 }
 
 /// Probes the reclaim loop uses to re-read state per candidate (#2919).
@@ -550,19 +572,6 @@ fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
             );
         }
     }
-}
-
-/// Gate 5's landed-content admission, as the reclaim sweep runs it (#7889).
-///
-/// Why: a free function rather than a closure so both the reclaim path and its
-/// tests name the same predicate, and so the bound it runs under is stated in
-/// one place.
-/// What: [`landed_content_verdict`] under [`FETCH_TIMEOUT`] — the sweep's own
-/// 30 s, not the removal guard's 3 s, because nothing here runs inside the
-/// `PreToolUse` hook's budget.
-/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`.
-fn reclaim_landed_content(path: &Path) -> LandedContent {
-    landed_content_verdict(path, FETCH_TIMEOUT)
 }
 
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
@@ -689,12 +698,15 @@ pub(crate) fn reclaim_with_probes(
         let in_use_now = (probes.in_use_now)();
         // #6927: re-read, not reused — see `FreshProbes::keep_list`.
         let keep_list_now = (probes.keep_list)();
-        if let Some(reason) = recheck_before_delete(
+        // #7889: the survey offered gate 5's landed-content admission, so the
+        // re-check re-asks it for a candidate no pull request carries.
+        if let Some(reason) = recheck_before_delete_with_landed_content(
             &path,
             &keep_list_now,
             in_use_now.as_ref(),
             &pr_now,
             probes.agent_state,
+            Some(&reclaim_landed_content),
         ) {
             tracing::warn!(
                 path = %path.display(),
@@ -745,11 +757,12 @@ pub(crate) fn reclaim_with_probes(
                 branch = candidate.branch.as_deref().unwrap_or("(detached)"),
                 pr = match &pr_now {
                     BranchPrState::Merged { pr } => Some(*pr),
-                    // Unreachable past `recheck_before_delete`, which refuses
-                    // every other state. Rendered as absent rather than as a
-                    // fabricated number if that ever stops being true.
+                    // #7889: `NoPr` reaches here on landed content, recorded
+                    // by `evidence` below. Rendered as absent rather than as a
+                    // fabricated number.
                     _ => None,
                 },
+                evidence = ?candidate.verdict,
                 bytes_freed = candidate.bytes,
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
             );

@@ -209,7 +209,12 @@ the guard will establish every precondition itself.
      declares none. The same predicate — one implementation, in
      `core::worktree_landed_content` — decides gate 5 of `tm session
      prune-worktrees --merged-prs`, so the two paths cannot give one worktree
-     opposite answers.
+     opposite answers. On that sweep, gate 6 counts a donor branch's commits as
+     unpushed, because the squash also carried a sibling's work and no patch id
+     matches. Those commits are in HEAD, so the content comparison judges them
+     and they alone do not refuse. An uncommitted file or a dirty nested
+     repository is outside HEAD and still refuses, and the pre-delete re-check
+     asks the admission again rather than demanding a merged pull request.
 
      Ancestry is still never evidence: `git merge-base --is-ancestor` and `git
      cherry` both answer "not merged" for a squash-merged branch, and neither is
