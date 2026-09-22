@@ -2,7 +2,7 @@
 name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
-version: "2.0.0"
+version: "2.1.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium

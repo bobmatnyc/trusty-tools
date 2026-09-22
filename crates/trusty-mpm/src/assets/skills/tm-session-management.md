@@ -2,7 +2,7 @@
 name: tm-session-management
 description: PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration
 user-invocable: true
-version: "1.0.0"
+version: "1.1.0"
 category: pm-workflow
 tags: [session, context, pause, resume, worktree, pm-recommended]
 effort: medium
