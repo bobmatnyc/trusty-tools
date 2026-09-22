@@ -209,7 +209,7 @@ pub enum TmuxCommand {
     SetGlobalOption {
         /// tmux option name (e.g. `history-limit`, `mouse`).
         name: String,
-        /// Option value (e.g. `"100000"`, `"on"`).
+        /// Option value (e.g. `"10000"`, `"on"`).
         value: String,
     },
     /// `start-server` — ensure the tmux SERVER exists, creating it if
@@ -320,14 +320,18 @@ pub const MOUSE_OPTION: &str = "mouse";
 pub const ALTERNATE_SCREEN_OPTION: &str = "alternate-screen";
 
 /// Built-in default tmux `history-limit` (scrollback lines) applied to every
-/// managed session (#2398, moved to this shared layer by #3004).
+/// managed session (#2398, moved to this shared layer by #3004, lowered by
+/// #8404).
 ///
 /// Why: tmux's own default is 2000 lines, which a long-running session
-/// exhausts almost immediately. 100,000 lines comfortably covers a full
-/// working session without materially growing tmux's per-pane memory
-/// footprint (each line is only retained while it exists in the pane).
-/// What: `100_000`.
-pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 100_000;
+/// exhausts almost immediately. #2398 shipped 100,000; on 2026-09-22 that
+/// value, with a 33k-line pane history, gave every tmux pane on the host
+/// seconds of lag per keystroke, cured by dropping to 10,000 (#8404). An
+/// operator who wants more sets `tmux.history_limit` in
+/// `~/.trusty-tools/trusty-mpm/config.yaml`.
+/// What: `10_000`.
+/// Test: `default_history_limit_is_10_000`.
+pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 10_000;
 
 /// Built-in default for whether mouse-wheel scrolling (and click-to-select
 /// copy mode) is enabled on the tmux server (#2398, moved by #3004).

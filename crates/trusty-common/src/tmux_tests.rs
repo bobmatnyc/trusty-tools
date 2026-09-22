@@ -333,7 +333,14 @@ fn managed_session_commands_with_initial_command() {
     );
 }
 
+/// #8404: 100,000 lines of scrollback per pane lagged every keystroke on
+/// the host; the default applied at server bring-up is 10,000.
 #[test]
-fn default_history_limit_is_100_000() {
-    assert_eq!(DEFAULT_TMUX_HISTORY_LIMIT, 100_000);
+fn default_history_limit_is_10_000() {
+    assert_eq!(DEFAULT_TMUX_HISTORY_LIMIT, 10_000);
+    let cmds = scrollback_option_commands(DEFAULT_TMUX_HISTORY_LIMIT, true, true);
+    assert_eq!(
+        tmux_argv(&cmds[0]),
+        ["set-option", "-g", "history-limit", "10000"]
+    );
 }
