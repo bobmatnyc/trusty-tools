@@ -1,0 +1,294 @@
+//! The ProjectRegistry's pinned `gh` identity, read synchronously for a
+//! daemon-side checkout (#5850).
+//!
+//! Why: `tm --account <login> <url>` (#7166) persists the selected account onto
+//! the project's REGISTRY record — `Project::gh_account` plus
+//! `Project::github.config_dir` — and the session-spawn path reads it back
+//! through [`crate::core::gh_account::resolve_gh_account_env_for_registry`].
+//! The daemon's housekeeping path never did: `worktree_reclaim_gh::
+//! resolve_daemon_gh_env` resolved only the STATIC `TrustyToolsConfig`
+//! `projects[].github` list, which none of the operator-facing pinning paths
+//! writes. A repository only the pinned account can see was therefore probed
+//! by `gh pr list` as whichever account the machine's global config names, the
+//! call came back "Could not resolve to a Repository", and every branch under
+//! that worktree blocked. This module is the missing read.
+//!
+//! What: [`pinned_gh_env_in`] reads `<registry_dir>/projects.json`, finds the
+//! record whose `repo_url` matches the checkout's `origin` under
+//! [`repo_url_matches`], and turns that record's `github:` binding into a
+//! [`GhEnv`] through the ONE existing precedence engine
+//! ([`gh_identity::resolve_gh_env`]) — no second copy of `config_dir >
+//! token_env > account`. `Ok(None)` means "no pin recorded", the only outcome
+//! that may fall through to the static config.
+//!
+//! ## Fail-CLOSED, not fail-open
+//!
+//! Every other outcome is an `Err`. A registry that cannot be read, a matching
+//! record that cannot be parsed, and a pin whose credential is unusable all
+//! leave "which account may see this repository?" UNANSWERED, and answering it
+//! with the machine's global account is exactly the wrong-identity probe #5850
+//! reports. The caller turns the `Err` into the `BranchPrState::LookupFailed`
+//! the survey already surfaces, so the operator reads the pinned account's name
+//! instead of a bare "no pull request found".
+//!
+//! An account pinned WITHOUT a `config_dir` fails closed for the #5851 reason:
+//! `gh auth token -u <account>` does not discriminate between logged-in
+//! accounts on a keyring-backed host, so minting a token from it here would
+//! return the globally-active account's credential — the very substitution this
+//! module exists to prevent.
+//!
+//! ## Cost
+//!
+//! One `std::fs::read_to_string` of a local JSON file. `ProjectStore` publishes
+//! by atomic rename and documents that readers take NO file lock (see its
+//! module `Concurrency` note), so this cannot block on a writer and needs no
+//! bound of its own; the `gh` child it precedes stays bounded by
+//! [`crate::session_manager::worktree_reclaim_gh::GH_TIMEOUT`], and the
+//! `worktree_reclaim_gh_gate` single-flight guard means at most one read per
+//! registry root is ever in flight.
+//!
+//! Test: `gh_account_registry_tests`.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+use crate::core::gh_identity::{self, GhEnv, GhIdentityError};
+use crate::core::trusty_tools_config::GithubConfig;
+use crate::project::record::{Project, repo_url_matches};
+
+/// The file [`crate::project::store::ProjectStore`] publishes under the
+/// registry data directory.
+///
+/// Why: named once here rather than re-spelled inline, so a rename of the
+/// store's own file is a single-line fix on this side too.
+const REGISTRY_FILE: &str = "projects.json";
+
+/// The one shape this module needs out of `projects.json`.
+///
+/// Why: deserialising straight into `HashMap<String, Project>` would make ONE
+/// malformed record poison every other project's lookup. Holding the records as
+/// raw values defers the strict parse to the record that actually matches, so a
+/// broken record blocks only its own repository — and blocks it loudly.
+/// What: the store's `projects` map, values left unparsed.
+/// Test: `a_malformed_matching_record_fails_closed`,
+/// `a_malformed_unrelated_record_does_not_block_a_match`.
+#[derive(Debug, Deserialize)]
+struct RegistrySnapshot {
+    /// Every registered project, keyed by registry name, still unparsed.
+    #[serde(default)]
+    projects: BTreeMap<String, serde_json::Value>,
+}
+
+/// Resolve the registry's pinned `gh` identity for `origin`, reading the
+/// registry at `registry_dir` (#5850).
+///
+/// Why: the daemon's `gh` spawn sites are SYNCHRONOUS and hold only a working
+/// directory, so they cannot await [`crate::project::ProjectRegistry::list`].
+/// Taking the directory as a parameter is also what makes every arm below
+/// testable against a registry a fixture wrote, with no daemon and no `$HOME`.
+/// What: `Ok(Some(env))` when a matching record pins a usable identity,
+/// `Ok(None)` when nothing is pinned (an absent registry, no matching record,
+/// or a record that binds nothing) — the ONLY fallthrough — and `Err(reason)`
+/// for every unanswerable case, with `reason` naming the pinned account.
+/// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
+/// `registry_pin_is_absent_for_an_unregistered_origin`,
+/// `an_absent_registry_file_is_not_a_pin`,
+/// `an_unreadable_registry_fails_closed`,
+/// `a_malformed_matching_record_fails_closed`,
+/// `a_pinned_config_dir_without_a_credential_fails_closed`,
+/// `an_account_only_pin_fails_closed_naming_the_account`.
+pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Option<GhEnv>, String> {
+    match read_pin(registry_dir, origin)? {
+        None => Ok(None),
+        Some(pin) => resolve_pin(&pin),
+    }
+}
+
+/// Resolve the registry's pinned `gh` identity for `origin` against THIS
+/// host's registry directory.
+///
+/// Why: the production wiring, kept a one-liner so [`pinned_gh_env_in`] stays
+/// the whole testable surface. `registry_data_dir` is the same `$HOME`-derived
+/// helper the out-of-process CLI readers use (#4300), so this can never point
+/// at a different file than the daemon writes.
+/// Test: covered through [`pinned_gh_env_in`]; the directory itself is pinned
+/// by `registry_dir_name_is_frozen`.
+pub(crate) fn pinned_gh_env_for_origin(origin: &str) -> Result<Option<GhEnv>, String> {
+    pinned_gh_env_in(&crate::project::registry_data_dir(), origin)
+}
+
+/// What a registered project pins, or `None` when nothing matches.
+///
+/// Why: separating "what does the registry say" from "what env does that mean"
+/// keeps the file-shaped failures (unreadable, unparsable) apart from the
+/// credential-shaped ones, which need different wording for the operator.
+/// What: the matched record's `gh_account` (blank treated as unset) and its own
+/// `github:` binding, both exactly as persisted.
+/// Test: the arms listed on [`pinned_gh_env_in`].
+#[derive(Debug, Default)]
+struct RegistryPin {
+    /// `Project::gh_account` — the login this project's sessions run as.
+    account: Option<String>,
+    /// `Project::github` — the per-project binding, `config_dir` included.
+    github: Option<GithubConfig>,
+}
+
+impl RegistryPin {
+    /// Does this record pin anything at all?
+    fn is_empty(&self) -> bool {
+        self.account.is_none() && self.github.is_none()
+    }
+
+    /// The account name to NAME in a failure, when one is known.
+    fn who(&self) -> String {
+        match self
+            .account
+            .as_deref()
+            .or_else(|| self.github.as_ref()?.account.as_deref())
+        {
+            Some(account) => format!("gh account '{account}'"),
+            None => "the pinned gh identity".to_string(),
+        }
+    }
+}
+
+/// Read `origin`'s record out of `<registry_dir>/projects.json`.
+///
+/// Why: the three file-shaped outcomes are decided here and nowhere else — an
+/// ABSENT registry is a legitimate "nothing is pinned" (a host that has never
+/// registered a project), while an unreadable or unparsable one is a refusal.
+/// Folding the two together is how a pinned project would silently fall back.
+/// What: `Ok(None)` for an absent file, no matching record, or a record pinning
+/// nothing; `Err` for an I/O failure, a document that does not parse, or a
+/// MATCHING record that does not parse as a [`Project`].
+/// Test: `an_absent_registry_file_is_not_a_pin`,
+/// `an_unreadable_registry_fails_closed`,
+/// `a_malformed_matching_record_fails_closed`,
+/// `a_malformed_unrelated_record_does_not_block_a_match`.
+fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
+    let path = registry_dir.join(REGISTRY_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        // A host that has registered nothing pins nothing — the pre-#5850
+        // behaviour, unchanged.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unanswerable(&path, &format!("could not be read ({e})"))),
+    };
+    let snapshot: RegistrySnapshot = serde_json::from_str(&text)
+        .map_err(|e| unanswerable(&path, &format!("did not parse ({e})")))?;
+    let Some((name, raw)) = snapshot.projects.iter().find(|(_, raw)| {
+        raw.get("repo_url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|url| repo_url_matches(url, origin))
+    }) else {
+        return Ok(None);
+    };
+    let project: Project = serde_json::from_value(raw.clone()).map_err(|e| {
+        format!(
+            "the project registry record '{name}' names this repository but did not parse \
+             ({e}), so whether it pins a gh account is unknown — refusing to probe the \
+             repository as this machine's global gh account (#5850)"
+        )
+    })?;
+    let pin = RegistryPin {
+        account: project
+            .gh_account
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty()),
+        github: project.github,
+    };
+    Ok((!pin.is_empty()).then_some(pin))
+}
+
+/// Turn a pinned record into the `gh` overrides the session-spawn path injects.
+///
+/// Why: the precedence that turns a `github:` binding into env vars is written
+/// ONCE, in [`gh_identity::resolve_gh_env`]; this adds only the two refusals a
+/// housekeeping probe needs on top of it. A `config_dir` that holds no
+/// credential and an account with no `config_dir` both mean "no credential for
+/// the pinned account is available", and both must block rather than let `gh`
+/// answer as somebody else.
+/// What: `Ok(Some(env))` for a usable binding, `Ok(None)` when the record binds
+/// nothing gh reads and pins no account either, `Err` otherwise.
+/// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
+/// `a_pinned_config_dir_without_a_credential_fails_closed`,
+/// `an_account_only_pin_fails_closed_naming_the_account`.
+fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
+    // The record's own binding, with `gh_account` supplying `account` when the
+    // binding does not name one itself — the same two keys
+    // `gh_account::find_pinned_gh_identity` reads for a session spawn.
+    let mut cfg = pin.github.clone().unwrap_or_default();
+    if cfg.account.is_none() {
+        cfg.account = pin.account.clone();
+    }
+    let env = match gh_identity::resolve_gh_env(Some(&cfg)) {
+        Ok(env) => env,
+        // #5851: `gh auth token -u <account>` does not select an account on a
+        // keyring-backed host, so there is no safe way to honour this pin.
+        Err(GhIdentityError::AccountStrategyUnsupported(account)) => {
+            return Err(format!(
+                "this repository is pinned to gh account '{account}' with no \
+                 `github.config_dir`, and `gh auth token -u {account}` does not \
+                 discriminate between logged-in accounts on a keyring-backed host \
+                 (#5851) — refusing to probe it as whichever account is globally \
+                 active. Re-run `tm --user {account} <url>` once to build this \
+                 project's scoped gh config dir, or set `github.config_dir` for it."
+            ));
+        }
+    };
+    if env.is_empty() {
+        // Nothing gh reads, and no account either: not a pin at all.
+        return Ok(None);
+    }
+    if let Some(dir) = selected_config_dir(&cfg)
+        && !crate::core::gh_account::config_dir_has_credential(&dir)
+    {
+        let who = pin.who();
+        let dir = dir.display();
+        return Err(format!(
+            "this repository is pinned to {who} via gh config dir {dir}, which holds no \
+             github.com credential ({dir}/hosts.yml is missing or names no account) — \
+             refusing to fall back to this machine's global gh account (#5850). Run \
+             `GH_CONFIG_DIR={dir} gh auth login` to authenticate inside it."
+        ));
+    }
+    Ok(Some(env))
+}
+
+/// The `config_dir` [`gh_identity::resolve_gh_env`] would select, if any.
+///
+/// Why: the credential check must apply to the directory that ACTUALLY won the
+/// precedence race, not to a `config_dir` key a higher-precedence strategy
+/// overrode. Today `config_dir` IS the top of that chain, so this is a trim —
+/// but reading it back through one helper keeps the check honest if the chain
+/// ever changes.
+/// What: the trimmed, non-empty `config_dir`.
+/// Test: `a_pinned_config_dir_without_a_credential_fails_closed`.
+fn selected_config_dir(cfg: &GithubConfig) -> Option<PathBuf> {
+    cfg.config_dir
+        .as_deref()
+        .map(|p| p.to_string_lossy().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The refusal for a registry this process could not interrogate.
+///
+/// Why: both file-shaped failures need the same three facts — which file, what
+/// went wrong, and that the consequence is a REFUSAL rather than a fallback.
+/// Writing the sentence once keeps the two arms from drifting.
+/// Test: `an_unreadable_registry_fails_closed`,
+/// `a_malformed_registry_document_fails_closed`.
+fn unanswerable(path: &Path, what: &str) -> String {
+    format!(
+        "the project registry at {} {what}, so whether this repository pins a gh account \
+         is unknown — refusing to probe it as this machine's global gh account (#5850)",
+        path.display()
+    )
+}
+
+#[cfg(test)]
+#[path = "gh_account_registry_tests.rs"]
+mod gh_account_registry_tests;

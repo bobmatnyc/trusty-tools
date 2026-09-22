@@ -612,7 +612,9 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // same answer for the same branch name.
         let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
             .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
-                let mut cmd = gh_pr_list_command(dir, &resolve_daemon_gh_env(dir), &repo);
+                // #5850: a registry pin this process cannot honour is a REFUSAL,
+                // not a licence to ask GitHub as the machine's global account.
+                let mut cmd = gh_pr_list_command(dir, &resolve_daemon_gh_env(dir)?, &repo);
                 cmd.arg("--head").arg(branch);
                 cmd.args(MERGED_PR_ARGS);
                 crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)

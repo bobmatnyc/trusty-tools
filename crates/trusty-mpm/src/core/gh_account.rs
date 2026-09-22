@@ -521,9 +521,12 @@ pub struct GhSpawnEnv {
 /// unparseable file or one naming no github.com account. This proves the dir
 /// NAMES an account, not that the credential resolves to it — that stronger
 /// assertion is #5849's.
+/// #5850: `pub(crate)` so `core::gh_account_registry` applies the SAME
+/// predicate to a registry pin the daemon resolves; a second copy would drift.
 /// Test: `config_dir_without_credential_still_pins_and_warns`,
-/// `config_dir_with_credential_has_no_warning`.
-fn config_dir_has_credential(dir: &Path) -> bool {
+/// `config_dir_with_credential_has_no_warning`,
+/// `a_pinned_config_dir_without_a_credential_fails_closed`.
+pub(crate) fn config_dir_has_credential(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("hosts.yml"))
         .ok()
         .and_then(|text| parse_gh_account_status_from_hosts_yml(&text))

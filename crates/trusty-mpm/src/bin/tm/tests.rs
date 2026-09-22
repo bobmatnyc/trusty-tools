@@ -1181,6 +1181,37 @@ fn cli_account_flag_after_subcommand() {
     assert!(matches!(cli.command, Some(Command::Run { .. })));
 }
 
+/// 🔴 #5850 REGRESSION: `--user <login>` must bind the same field as
+/// `--account <login>`.
+///
+/// Why this is the assertion: the owner's report was
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto`
+/// failing at clap parsing. `--user` is the spelling `gh` itself uses for the
+/// same concept (`gh auth token -u`), so it has to be accepted, and it has to
+/// land on `cli.account` — an alias that parsed into a SECOND field would give
+/// the two spellings different behaviour downstream.
+#[test]
+fn cli_parses_user_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// The alias inherits `global = true`, so it also parses AFTER the positional
+/// — the exact shape the owner typed (`tm <url> --user <login>`).
+#[test]
+fn cli_user_alias_after_subcommand() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "run",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ])
+    .unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert!(matches!(cli.command, Some(Command::Run { .. })));
+}
+
 #[test]
 fn cli_bare_invocation_uses_guided_default() {
     // Since #1708, a bare `tm` invocation is valid: clap parses it with
