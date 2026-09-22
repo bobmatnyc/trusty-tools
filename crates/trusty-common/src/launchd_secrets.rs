@@ -16,9 +16,10 @@
 //! [`looks_like_credential_value`] (a value carrying a well-known vendor
 //! prefix, for `ProgramArguments`, where there is no key to read). The acting
 //! half is [`strip_credential_env`], which `crate::launchd::LaunchdConfig::render_plist`
-//! applies to every unit it renders, and the [`plist`] submodule, which reads
-//! and rewrites an ALREADY-INSTALLED plist so `tm doctor --fix` can remediate a
-//! host without reinstalling anything.
+//! applies to every unit it renders, and the `plist` submodule (private; its
+//! items are re-exported below), which reads and rewrites an
+//! ALREADY-INSTALLED plist so `tm doctor --fix` can remediate a host without
+//! reinstalling anything.
 //!
 //! Nothing here ever returns, logs, or formats a credential value: findings
 //! are reported as KEY NAMES, and the one type that carries a value —
@@ -35,7 +36,6 @@
 //! [`is_credential_env_key`]: crate::launchd_secrets::is_credential_env_key
 //! [`looks_like_credential_value`]: crate::launchd_secrets::looks_like_credential_value
 //! [`strip_credential_env`]: crate::launchd_secrets::strip_credential_env
-//! [`plist`]: crate::launchd_secrets::plist
 //! [`PlistSecret`]: crate::launchd_secrets::PlistSecret
 
 mod plist;
