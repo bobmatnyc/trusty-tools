@@ -2306,12 +2306,37 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
         .collect();
     let elapsed = started.elapsed();
 
-    let allowed = verdicts.iter().filter(|v| v.is_empty()).count();
-    let denied: Vec<&String> = verdicts.iter().filter(|v| !v.is_empty()).collect();
+    // #8261: an admitted builder may carry an additionalContext notice; admission is
+    // the absence of a deny, not empty stdout.
+    let decision = |v: &str| -> Option<String> {
+        if v.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(v)
+            .ok()
+            .and_then(|parsed| {
+                parsed["hookSpecificOutput"]["permissionDecision"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    };
+    let decisions: Vec<Option<String>> = verdicts.iter().map(|v| decision(v)).collect();
+    let allowed = decisions
+        .iter()
+        .filter(|d| d.as_deref() != Some("deny"))
+        .count();
+    let denied: Vec<&String> = verdicts
+        .iter()
+        .zip(decisions.iter())
+        .filter(|(_, d)| d.as_deref() == Some("deny"))
+        .map(|(v, _)| v)
+        .collect();
     assert_eq!(
         allowed, 1,
-        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?} \
-         (both children ran in {elapsed:?}; at or past the guard's 2 s client budget in \
+        "exactly one of two simultaneous dispatches may be admitted (a `deny` \
+         permissionDecision marks the other, not merely non-empty stdout), got \
+         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
+         {elapsed:?}; at or past the guard's 2 s client budget in \
          `post_shared_tree` the held request timed out and failed open — that is the \
          machine, not this rule regressing, see #5914)"
     );
@@ -5056,6 +5081,49 @@ fn pm_guard_denies_a_builder_when_the_machine_is_full() {
     assert!(verdict.contains("local-ops"), "{verdict}");
     assert!(verdict.contains("capped at 2"), "{verdict}");
     assert!(verdict.contains("builders.max_concurrent"), "{verdict}");
+}
+
+/// #8261, through the real binary: an ADMITTED builder must be told the slot
+/// directory the daemon just granted it.
+///
+/// Why this dispatch and this cwd: a tempdir is no main checkout, so the
+/// ADR-0048 worktree grant does not fire and the call reaches the plain
+/// builder-cap exit — the one with no rewrite object for the notice to ride.
+/// That exit matched only the DENY arm and dropped `Allow(Some(notice))` on the
+/// floor, so the daemon recorded a private `CARGO_TARGET_DIR` that the engineer
+/// never heard about and built in the shared one regardless. Before the fix this
+/// FAILS at the parse: stdout was empty.
+///
+/// The absent `permissionDecision` is the second half of the contract — with
+/// one, the object would approve the dispatch and bypass the permission flow.
+#[test]
+fn pm_guard_tells_an_admitted_builder_its_slot_directory() {
+    let (url, _captured) = spawn_routed_mock_with_builder(
+        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
+        r#"{"claimed":true,"cap":4,"holders":[],"slot_path":"/tmp/trusty-build-slots/slot-3"}"#,
+    );
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let stdout = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("an admitted builder must be told its slot on stdout: {e}: {stdout:?}")
+    });
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the notice rides `additionalContext`, got: {stdout}"));
+    assert!(
+        context.contains("/tmp/trusty-build-slots/slot-3"),
+        "the notice must name the directory itself, got: {context}"
+    );
+    assert!(
+        context.contains("CARGO_TARGET_DIR"),
+        "the notice must name the variable to prefix, got: {context}"
+    );
+    assert!(
+        parsed["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none(),
+        "an explicit decision here would bypass the permission flow: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------

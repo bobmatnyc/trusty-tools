@@ -93,7 +93,12 @@ pub(crate) fn dispatch_claims_a_builder_slot(tool_name: &str, tool_input: Option
 /// `BUILDER_LEASE_TTL_SECS`, and telling the PM to wait for something that may
 /// take 45 minutes is advice to stall the session.
 /// Test: `deny_reason_names_every_holder_the_cap_and_the_config_key`.
-pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> String {
+pub(crate) fn deny_reason(
+    agent: &str,
+    cap: u32,
+    holders: &[HolderLine],
+    note: &CapacityNote,
+) -> String {
     let running = holders
         .iter()
         .map(HolderLine::render)
@@ -101,7 +106,7 @@ pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> Stri
         .join("; ");
     format!(
         "Machine-wide builder cap reached (#6892): this {agent} dispatch would be builder \
-         {next} on a machine capped at {cap}. Already running: {running}. The cap counts \
+         {next} on a machine capped at {cap}.{measured} Already running: {running}. The cap counts \
          BUILDERS across every session on this host, not per session — on 2026-08-08 several \
          sessions each honouring their own limit produced six concurrent `cargo` builds and \
          crashed the machine, which is why no session can see or raise its own share. \
@@ -111,7 +116,89 @@ pub(crate) fn deny_reason(agent: &str, cap: u32, holders: &[HolderLine]) -> Stri
          `~/.trusty-mpm/config.toml` — a project's `.trusty-mpm.toml` cannot set it, by \
          design. `tm doctor` lists the current holders.",
         next = holders.len() + 1,
+        measured = note.render(cap),
     )
+}
+
+/// What the daemon measured to arrive at this slot count (#8261).
+///
+/// Why: since #8261 the cap in a refusal is MEASURED, not configured, and a
+/// message showing only the measured number reads as a config the operator does
+/// not recognise. The closure condition is explicit: the refusal names which
+/// condition failed, shows the reading AND the limit, and distinguishes a
+/// reading that could not be TAKEN from one that was EXCEEDED.
+/// What: the daemon's own rendering, carried verbatim so one authority words it.
+/// A daemon too old to send these fields leaves them empty and
+/// [`Self::render`] adds nothing — the pre-#8261 message, unchanged.
+/// Test: `deny_reason_names_the_measured_capacity_and_its_ceiling`,
+/// `deny_reason_names_an_unreadable_metric_as_such`,
+/// `an_old_daemons_answer_renders_the_pre_8261_message`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CapacityNote {
+    /// The operator's configured hard ceiling.
+    pub(crate) ceiling: u32,
+    /// Why the measured count is what it is, as the daemon rendered it.
+    pub(crate) reason: String,
+    /// The `builder-cap-*-read-failure` surface, when a reading could not be
+    /// taken at all.
+    pub(crate) fail_closed_surface: Option<String>,
+}
+
+impl CapacityNote {
+    /// The sentence [`deny_reason`] inserts after the cap, or nothing.
+    ///
+    /// Test: `deny_reason_names_the_measured_capacity_and_its_ceiling`,
+    /// `an_old_daemons_answer_renders_the_pre_8261_message`.
+    fn render(&self, cap: u32) -> String {
+        if self.reason.is_empty() {
+            return String::new();
+        }
+        let ceiling = if self.ceiling > cap {
+            format!(
+                " That {cap} is MEASURED capacity, below the configured ceiling of {} \
+                 (`builders.max_concurrent`).",
+                self.ceiling
+            )
+        } else {
+            String::new()
+        };
+        let unreadable = match &self.fail_closed_surface {
+            Some(surface) => format!(
+                " This is a FAIL-CLOSED fallback to the fixed ceiling, not a measured \
+                 refusal — the {surface} surface fired."
+            ),
+            None => String::new(),
+        };
+        format!("{ceiling} Capacity: {}.{unreadable}", self.reason)
+    }
+}
+
+/// Read the #8261 capacity fields out of the daemon's answer.
+///
+/// Why: same reason [`holders_in`] exists — the guard renders what the daemon
+/// reports rather than re-deriving it, so the number that refused and the number
+/// the message names cannot disagree.
+/// What: every field is optional; a daemon predating #8261 yields
+/// [`CapacityNote::default`], which renders as the pre-#8261 message.
+/// Test: `an_old_daemons_answer_renders_the_pre_8261_message`,
+/// `the_capacity_note_is_read_out_of_the_daemons_answer`.
+fn capacity_note_in(body: &Value) -> CapacityNote {
+    CapacityNote {
+        ceiling: body
+            .get("ceiling")
+            .and_then(Value::as_u64)
+            .and_then(|c| u32::try_from(c).ok())
+            .unwrap_or_default(),
+        reason: body
+            .get("capacity_reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        fail_closed_surface: body
+            .get("fail_closed_surface")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }
 }
 
 /// One current holder, as the deny message renders it.
@@ -212,10 +299,21 @@ fn holders_in(body: &Value) -> Vec<HolderLine> {
 /// Test: `claim_is_unverifiable_when_the_daemon_is_unreachable`,
 /// `claim_is_unverifiable_when_the_daemon_answers_500`.
 pub(crate) enum BuilderSlotClaim {
-    /// A slot was claimed; the dispatch proceeds.
-    Admitted,
-    /// The machine is at its cap. Carries the cap and its current holders.
-    Full(u32, Vec<HolderLine>),
+    /// A slot was claimed; the dispatch proceeds. Carries the private
+    /// `CARGO_TARGET_DIR` the daemon granted it (#8261), or — when it was
+    /// admitted without one — the daemon's own notice saying why.
+    Admitted {
+        /// The granted private `CARGO_TARGET_DIR`, when the pool had one ready.
+        slot_path: Option<String>,
+        /// Why this admission carries no directory (#8261 critic round).
+        notice: Option<String>,
+    },
+    /// The machine is at its cap. Carries the cap, its current holders, and
+    /// (#8261) what the daemon measured to arrive at that cap.
+    Full(u32, Vec<HolderLine>, CapacityNote),
+    /// The slot POOL refused, which is not a full machine (#8261 critic round).
+    /// Carries the daemon's detail, which names the path and the errno.
+    PoolRefused(String),
     /// The daemon answered, reported the machine's state, and declined to count
     /// this dispatch at all — it classified the agent as a non-builder where
     /// this binary classified it as one.
@@ -260,7 +358,18 @@ pub(crate) async fn claim_builder_slot(
                 );
             };
             if claimed {
-                return BuilderSlotClaim::Admitted;
+                return BuilderSlotClaim::Admitted {
+                    slot_path: str_body_field(&body, "slot_path"),
+                    notice: str_body_field(&body, "slot_notice"),
+                };
+            }
+            // #8261 critic round: a pool refusal answers `claimed: false,
+            // ineligible: false`, exactly as a full machine does. Read as a full
+            // machine it produced a deny telling the operator to raise
+            // `builders.max_concurrent`, which does nothing for an unwritable
+            // pool root. This field is checked BEFORE the cap for that reason.
+            if let Some(detail) = str_body_field(&body, "slot_refused") {
+                return BuilderSlotClaim::PoolRefused(detail);
             }
             // #6892 critic round: `claimed: false` had two meanings and this is
             // the second — the daemon answered with the machine's real state and
@@ -274,7 +383,7 @@ pub(crate) async fn claim_builder_slot(
                 .and_then(Value::as_u64)
                 .and_then(|c| u32::try_from(c).ok())
                 .unwrap_or_default();
-            BuilderSlotClaim::Full(cap, holders_in(&body))
+            BuilderSlotClaim::Full(cap, holders_in(&body), capacity_note_in(&body))
         }
         // #6892: unlike the #4480 guard, an absent daemon is NOT a degraded mode
         // this path accepts. See the module doc for why the costs are not
@@ -283,6 +392,39 @@ pub(crate) async fn claim_builder_slot(
             BuilderSlotClaim::Unverifiable(detail)
         }
     }
+}
+
+/// Read a non-empty string field out of the daemon's answer.
+///
+/// Test: `a_pool_refusal_denies_naming_the_path_rather_than_the_cap`.
+fn str_body_field(body: &Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Build the deny message for a slot the POOL refused (#8261 critic round).
+///
+/// Why: this refusal has nothing to do with the cap, and [`deny_reason`] was
+/// rendering it as one — "cap reached … raise `builders.max_concurrent`" for a
+/// pool root that is a file, or a disk with no space. The reader followed that
+/// advice and the next dispatch was refused identically.
+/// What: names the daemon's own detail, which carries the path and the errno,
+/// and gives the two repairs that actually apply.
+/// Test: `a_pool_refusal_denies_naming_the_path_rather_than_the_cap`.
+pub(crate) fn pool_refused_deny_reason(agent: &str, detail: &str) -> String {
+    format!(
+        "Builder slot directory refused (#8261): the daemon admitted this {agent} dispatch \
+         against the machine's builder capacity, then could not give it a private cargo target \
+         directory — {detail}. This is NOT a full machine and raising \
+         `builders.max_concurrent` will not clear it. A builder with no private directory would \
+         build in the shared `CARGO_TARGET_DIR` and contend on its lock with every other builder \
+         on this host, which is the failure #8261 exists to end, so the dispatch is refused \
+         instead. Fix the path named above — check that `builders.slot_pool_root` in \
+         `~/.trusty-mpm/config.toml` names a writable directory and that its volume has space — \
+         then re-issue. `tm doctor` reports the pool root in its build-environment row."
+    )
 }
 
 /// The field this payload is missing that makes the claim impossible, if any.
@@ -358,18 +500,28 @@ pub(crate) async fn evaluate(
     tool_input: Option<&Value>,
     session_id: &str,
     cwd: &Path,
-) -> Option<String> {
+) -> BuilderCapVerdict {
     if !dispatch_claims_a_builder_slot(tool_name, tool_input) {
-        return None;
+        return BuilderCapVerdict::Allow(None);
     }
     if let Some(missing) = unclaimable_field(payload, session_id) {
         warn_unaddressable(missing);
-        return None;
+        return BuilderCapVerdict::Allow(None);
     }
     let agent = dispatch_agent(tool_input).unwrap_or("this");
     match claim_builder_slot(url, session_id, cwd, payload).await {
-        BuilderSlotClaim::Admitted => None,
-        BuilderSlotClaim::Full(cap, holders) => Some(deny_reason(agent, cap, &holders)),
+        // #8261 critic round: an admission with no directory carries the
+        // daemon's notice instead, so the engineer is never left to infer from
+        // silence that it holds a private target directory.
+        BuilderSlotClaim::Admitted { slot_path, notice } => {
+            BuilderCapVerdict::Allow(slot_path.map(|dir| slot_notice(&dir)).or(notice))
+        }
+        BuilderSlotClaim::Full(cap, holders, note) => {
+            BuilderCapVerdict::Deny(deny_reason(agent, cap, &holders, &note))
+        }
+        BuilderSlotClaim::PoolRefused(detail) => {
+            BuilderCapVerdict::Deny(pool_refused_deny_reason(agent, &detail))
+        }
         // ALLOW, and say so on stderr. The daemon ANSWERED here — the machine's
         // count is known, this dispatch simply was not added to it — so unlike
         // the arm below there is no open question to fail closed on. The usual
@@ -378,10 +530,90 @@ pub(crate) async fn evaluate(
         // already settled the same way for the shared-tree guard.
         BuilderSlotClaim::NotCounted => {
             warn_not_counted(agent);
-            None
+            BuilderCapVerdict::Allow(None)
         }
-        BuilderSlotClaim::Unverifiable(detail) => Some(unverifiable_deny_reason(agent, &detail)),
+        BuilderSlotClaim::Unverifiable(detail) => {
+            BuilderCapVerdict::Deny(unverifiable_deny_reason(agent, &detail))
+        }
     }
+}
+
+/// What the builder cap decided, and what the engineer must be told (#8261).
+///
+/// Why: an allow now carries information — the private `CARGO_TARGET_DIR` the
+/// daemon granted — so `Option<String>` could no longer express the answer: its
+/// `Some` already meant "deny". Two named arms make the allow-with-a-notice case
+/// unmissable at the one call site.
+/// What: [`Self::Deny`] carries the refusal; [`Self::Allow`] carries an optional
+/// notice to merge into the hook's single output object.
+/// Test: `an_admitted_builder_allows_with_its_target_dir_notice`.
+pub(crate) enum BuilderCapVerdict {
+    /// The dispatch is refused, for this reason.
+    Deny(String),
+    /// The dispatch proceeds, optionally carrying a notice for the engineer.
+    Allow(Option<String>),
+}
+
+/// Print the builder-cap deny, or `allowed` when the machine has room (#6892).
+///
+/// Why: the worktree grant has two ALLOW exits and both print a rewrite and
+/// return, so the machine cap has to be asked at each of them or a granted
+/// dispatch escapes it entirely. Folded into one helper rather than written
+/// twice because the two arms differ only in which rewrite they emit, and a
+/// `PreToolUse` hook's stdout may carry exactly one object — duplicating the
+/// print/deny pair is how a second one gets emitted.
+///
+/// It lives HERE rather than in `pm_guard.rs` because that file sits at the
+/// 500-SLOC cap, and because every line of it is about this module's verdict.
+/// What: runs [`evaluate`]; on a deny it audits and prints the deny, on an allow
+/// it prints `allowed` with any slot notice merged into that same single
+/// `hookSpecificOutput`. Exactly one object reaches stdout either way.
+/// Test: `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and
+/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` in
+/// `tests/tm_hook_pm_guard.rs` cover the allow exits;
+/// `a_slot_notice_is_merged_into_the_one_hook_output_object` covers the merge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn emit_builder_cap_or(
+    url: &str,
+    payload: &Value,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+    session_id: &str,
+    hook_cwd: &Path,
+    allowed: &str,
+) {
+    match evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd).await {
+        BuilderCapVerdict::Deny(reason) => {
+            super::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!(
+                "{}",
+                super::pm_guard_response::build_pretooluse_deny_response(&reason)
+            );
+        }
+        // #8261: the slot notice merges INTO the grant's own object — a second
+        // printed object would be a second `hookSpecificOutput`.
+        BuilderCapVerdict::Allow(notice) => println!(
+            "{}",
+            super::pm_guard_worktree_grant::with_additional_context(allowed, notice.as_deref())
+        ),
+    }
+}
+
+/// The line an admitted builder is told to prefix on every cargo invocation.
+///
+/// Why (#6868 closure condition 3): an agent's shell environment does not
+/// persist between tool calls, so a slot directory it is not told to prefix
+/// INLINE is a slot directory it will not use — and it would then build in the
+/// shared one, which is the contention #8261 exists to end.
+/// Test: `an_admitted_builder_allows_with_its_target_dir_notice`.
+fn slot_notice(dir: &str) -> String {
+    format!(
+        "Builder slot (#8261): this dispatch holds a private cargo target \
+         directory. Prefix `CARGO_TARGET_DIR={dir}` INLINE on every cargo \
+         command — an exported variable does not survive between tool calls, and \
+         building in the shared directory contends on its lock with every other \
+         builder on this machine."
+    )
 }
 
 /// Warn that the daemon declined to count a dispatch this binary calls a builder.
@@ -498,7 +730,7 @@ mod tests {
 
     #[test]
     fn deny_reason_names_every_holder_the_cap_and_the_config_key() {
-        let reason = deny_reason("python-engineer", 2, &holders());
+        let reason = deny_reason("python-engineer", 2, &holders(), &CapacityNote::default());
         // Every holder, with agent, session and elapsed time.
         assert!(reason.contains("rust-engineer"), "{reason}");
         assert!(reason.contains("sess-a"), "{reason}");
@@ -512,6 +744,72 @@ mod tests {
         assert!(reason.contains("~/.trusty-mpm/config.toml"), "{reason}");
         // And a remedy that needs nothing from the agents already running.
         assert!(reason.contains("Queue this dispatch"), "{reason}");
+    }
+
+    /// #8261: an old daemon sends no capacity fields, and the message it
+    /// produces must be exactly the pre-#8261 one — no dangling "Capacity:".
+    #[test]
+    fn an_old_daemons_answer_renders_the_pre_8261_message() {
+        let note = capacity_note_in(&serde_json::json!({"cap": 2, "claimed": false}));
+        assert_eq!(note, CapacityNote::default());
+        let reason = deny_reason("python-engineer", 2, &holders(), &note);
+        assert!(!reason.contains("Capacity:"), "{reason}");
+        assert!(!reason.contains("MEASURED"), "{reason}");
+    }
+
+    #[test]
+    fn the_capacity_note_is_read_out_of_the_daemons_answer() {
+        let note = capacity_note_in(&serde_json::json!({
+            "ceiling": 4,
+            "capacity_reason": "1-minute load average 40.00 is above the threshold 32.00",
+            "fail_closed_surface": serde_json::Value::Null,
+        }));
+        assert_eq!(note.ceiling, 4);
+        assert!(note.reason.contains("40.00"));
+        assert_eq!(note.fail_closed_surface, None);
+    }
+
+    /// #8261 closure condition: the refusal shows the MEASURED count against the
+    /// configured ceiling, plus the reading and the limit behind it.
+    #[test]
+    fn deny_reason_names_the_measured_capacity_and_its_ceiling() {
+        let note = CapacityNote {
+            ceiling: 4,
+            reason: "1-minute load average 40.00 is above the threshold 32.00 \
+                     (logical cores x builders.load_factor)"
+                .to_string(),
+            fail_closed_surface: None,
+        };
+        let reason = deny_reason("rust-engineer", 2, &holders(), &note);
+        assert!(reason.contains("MEASURED capacity"), "{reason}");
+        assert!(reason.contains("ceiling of 4"), "{reason}");
+        assert!(
+            reason.contains("40.00") && reason.contains("32.00"),
+            "the reading AND the limit must both appear: {reason}"
+        );
+        assert!(
+            !reason.contains("FAIL-CLOSED"),
+            "an EXCEEDED limit is not an UNREADABLE one: {reason}"
+        );
+    }
+
+    /// #8261 closure condition: an unreadable metric must be distinguishable
+    /// from an exceeded one, by name.
+    #[test]
+    fn deny_reason_names_an_unreadable_metric_as_such() {
+        let note = CapacityNote {
+            ceiling: 4,
+            reason: "builder-cap-load-read-failure — the Load reading could not be taken \
+                     (operation not permitted, errno 1)"
+                .to_string(),
+            fail_closed_surface: Some("builder-cap-load-read-failure".to_string()),
+        };
+        let reason = deny_reason("rust-engineer", 4, &holders(), &note);
+        assert!(reason.contains("FAIL-CLOSED"), "{reason}");
+        assert!(reason.contains("builder-cap-load-read-failure"), "{reason}");
+        assert!(reason.contains("errno 1"), "{reason}");
+        // cap == ceiling here, so there is no "below the configured ceiling".
+        assert!(!reason.contains("MEASURED capacity"), "{reason}");
     }
 
     #[test]
@@ -564,17 +862,136 @@ mod tests {
         url
     }
 
+    /// The refusal a verdict carries, or `None` when it allows.
+    ///
+    /// #8261: `evaluate` returns a two-armed verdict rather than
+    /// `Option<String>`, because an ALLOW now carries a notice too. These tests
+    /// ask only "was it denied, and why", so they fold the allow arm away here.
+    fn deny(verdict: BuilderCapVerdict) -> Option<String> {
+        match verdict {
+            BuilderCapVerdict::Deny(reason) => Some(reason),
+            BuilderCapVerdict::Allow(_) => None,
+        }
+    }
+
     /// Evaluate a `rust-engineer` dispatch against `url`.
     async fn evaluate_builder_against(url: &str) -> Option<String> {
-        evaluate(
-            url,
+        deny(
+            evaluate(
+                url,
+                &serde_json::json!({"tool_use_id": "toolu_X"}),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                "11111111-1111-1111-1111-111111111111",
+                Path::new("/repo"),
+            )
+            .await,
+        )
+    }
+
+    /// #8261: an admitted builder is ALLOWED and told where to build. The notice
+    /// must name the directory, or the engineer builds in the shared one.
+    #[tokio::test]
+    async fn an_admitted_builder_allows_with_its_target_dir_notice() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":true,"cap":4,"holders":[],"slot_path":"/pool/acme/widgets/slot-0"}"#,
+        );
+        let verdict = evaluate(
+            &url,
             &serde_json::json!({"tool_use_id": "toolu_X"}),
             "Agent",
             Some(&input("rust-engineer", None)),
             "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
         )
-        .await
+        .await;
+        match verdict {
+            BuilderCapVerdict::Allow(Some(notice)) => {
+                assert!(
+                    notice.contains("/pool/acme/widgets/slot-0"),
+                    "the notice must name the directory: {notice}"
+                );
+                assert!(
+                    notice.contains("CARGO_TARGET_DIR"),
+                    "the notice must name the variable: {notice}"
+                );
+            }
+            BuilderCapVerdict::Allow(None) => {
+                panic!("an admitted builder with a slot path must carry a notice")
+            }
+            BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
+        }
+    }
+
+    /// #8261 critic round: a POOL refusal answers `claimed: false,
+    /// ineligible: false`, the same shape a full machine answers with. Read as
+    /// a full machine it denied with "cap reached … raise `max_concurrent`",
+    /// which does nothing for a pool root that is a file. Fails before
+    /// `BuilderSlotClaim::PoolRefused` existed.
+    #[tokio::test]
+    async fn a_pool_refusal_denies_naming_the_path_rather_than_the_cap() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":false,"ineligible":false,"cap":4,"ceiling":4,"holders":[],
+                "slot_refused":"could not create builder slot directory /pool/acme/widgets: Not a directory (os error 20)"}"#,
+        );
+        let reason = deny(
+            evaluate(
+                &url,
+                &serde_json::json!({"tool_use_id": "toolu_X"}),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                "11111111-1111-1111-1111-111111111111",
+                Path::new("/repo"),
+            )
+            .await,
+        )
+        .expect("a pool refusal denies");
+
+        assert!(
+            reason.contains("/pool/acme/widgets") && reason.contains("os error 20"),
+            "the deny must name the path and the errno: {reason}"
+        );
+        assert!(
+            !reason.contains("cap reached"),
+            "a pool refusal is not a full machine: {reason}"
+        );
+        assert!(
+            reason.contains("slot_pool_root"),
+            "the deny must name the repair that applies: {reason}"
+        );
+    }
+
+    /// #8261 critic round: an admission that carries no directory must say why,
+    /// or the engineer cannot tell it from one that was given a slot.
+    #[tokio::test]
+    async fn an_admission_without_a_directory_carries_the_daemons_notice() {
+        let url = spawn_mock_answering(
+            "200 OK",
+            r#"{"claimed":true,"cap":4,"holders":[],
+                "slot_notice":"builder slot /pool/acme/widgets/slot-0 had not been seeded yet"}"#,
+        );
+        let verdict = evaluate(
+            &url,
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+        )
+        .await;
+
+        match verdict {
+            BuilderCapVerdict::Allow(Some(notice)) => assert!(
+                notice.contains("had not been seeded yet"),
+                "the daemon's notice must reach the engineer: {notice}"
+            ),
+            BuilderCapVerdict::Allow(None) => {
+                panic!("an admission with no directory must still explain itself")
+            }
+            BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
+        }
     }
 
     /// Criterion 5. Nothing is listening — the count is unknowable, so the
@@ -593,15 +1010,17 @@ mod tests {
     #[tokio::test]
     async fn allows_a_research_dispatch_when_the_daemon_is_down() {
         for agent in ["research", "ticketing", "documentation", "version-control"] {
-            let verdict = evaluate(
-                "http://127.0.0.1:1",
-                &serde_json::json!({"tool_use_id": "toolu_X"}),
-                "Agent",
-                Some(&input(agent, None)),
-                "11111111-1111-1111-1111-111111111111",
-                Path::new("/repo"),
-            )
-            .await;
+            let verdict = deny(
+                evaluate(
+                    "http://127.0.0.1:1",
+                    &serde_json::json!({"tool_use_id": "toolu_X"}),
+                    "Agent",
+                    Some(&input(agent, None)),
+                    "11111111-1111-1111-1111-111111111111",
+                    Path::new("/repo"),
+                )
+                .await,
+            );
             assert!(verdict.is_none(), "{agent} must not be denied: {verdict:?}");
         }
     }
@@ -611,15 +1030,17 @@ mod tests {
     /// `warn_unaddressable` for why the two are not the same failure.
     #[tokio::test]
     async fn a_payload_with_no_session_id_allows_and_warns() {
-        let verdict = evaluate(
-            "http://127.0.0.1:1",
-            &serde_json::json!({"tool_use_id": "toolu_X"}),
-            "Agent",
-            Some(&input("rust-engineer", None)),
-            "",
-            Path::new("/repo"),
-        )
-        .await;
+        let verdict = deny(
+            evaluate(
+                "http://127.0.0.1:1",
+                &serde_json::json!({"tool_use_id": "toolu_X"}),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                "",
+                Path::new("/repo"),
+            )
+            .await,
+        );
         assert!(verdict.is_none(), "{verdict:?}");
     }
 
@@ -635,15 +1056,17 @@ mod tests {
     #[tokio::test]
     async fn a_payload_with_no_tool_use_id_allows_and_warns() {
         let url = spawn_mock_answering("200 OK", r#"{"claimed":false,"cap":4,"holders":[]}"#);
-        let verdict = evaluate(
-            &url,
-            &serde_json::json!({"cwd": "/repo"}),
-            "Agent",
-            Some(&input("rust-engineer", None)),
-            "11111111-1111-1111-1111-111111111111",
-            Path::new("/repo"),
-        )
-        .await;
+        let verdict = deny(
+            evaluate(
+                &url,
+                &serde_json::json!({"cwd": "/repo"}),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                "11111111-1111-1111-1111-111111111111",
+                Path::new("/repo"),
+            )
+            .await,
+        );
         assert!(
             verdict.is_none(),
             "an unclaimable payload must not read as a full machine: {verdict:?}"

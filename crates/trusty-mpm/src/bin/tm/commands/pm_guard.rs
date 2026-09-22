@@ -727,7 +727,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                     // grant prints and returns — a check after this block would
                     // never see a granted dispatch at all.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -764,7 +764,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                     // separate question from where the agent writes, and this is
                     // the only place a rewritten dispatch can still be stopped.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -818,15 +818,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // classifies locally and returns before any network call for a non-builder
     // dispatch, so a daemon outage costs builder dispatches only. See its module
     // doc.
-    if !caller_is_subagent
-        && let Some(reason) = pm_guard_builder_cap::evaluate(
+    // #8261: this exit has no worktree rewrite to merge a slot notice into, so
+    // the notice `emit_builder_cap_or` merges into the grant object has nowhere
+    // to ride here. It is held instead and emitted at the plain ALLOW exit
+    // below, because a `PreToolUse` hook's stdout may carry exactly one object
+    // and the gates between here and there each print their own.
+    let mut slot_notice: Option<String> = None;
+    if !caller_is_subagent {
+        match pm_guard_builder_cap::evaluate(
             url, &payload, tool_name, tool_input, session_id, &hook_cwd,
         )
         .await
-    {
-        audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
-        return Ok(());
+        {
+            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
+        }
     }
 
     // Text of a pending agent-cost notice, emitted at whichever subagent ALLOW
@@ -923,7 +933,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     }
 
     let Some(reason) = evaluate_tool(tool_name, tool_input) else {
-        // ALLOW: exit 0 with no output so the normal permission flow applies.
+        // ALLOW: exit 0 with no output so the normal permission flow applies —
+        // unless #8261 admitted this dispatch to a builder slot, which is the
+        // one thing an allowed dispatch still has to be TOLD. This is the exit
+        // a PM's own `Agent` dispatch reaches: the two subagent exits above are
+        // unreachable with a slot notice in hand, because the claim runs only
+        // when `caller_is_subagent` is false and both of them require it true.
+        emit_slot_notice(slot_notice);
         return Ok(());
     };
 
@@ -1167,6 +1183,31 @@ fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
     }
 }
 
+/// Emit an admitted builder's slot-directory notice at the plain ALLOW exit.
+///
+/// Why (#8261): the grant arms hand their notice to
+/// [`pm_guard_builder_cap::emit_builder_cap_or`], which merges it into the
+/// rewrite object they were already printing. The plain-dispatch exit prints no
+/// object at all, so without this the daemon recorded a slot the engineer was
+/// never told about and it built in the shared directory anyway — the exact
+/// contention #8261 exists to end.
+///
+/// It does NOT go through [`emit_cost_notice`]'s once-per-agent claim. That
+/// claim keys on `agent_id`, which a PM's own dispatch payload does not carry,
+/// so every slot notice in a session would fall back to the same `session_id`
+/// key and only the first builder would ever be told its directory.
+/// What: no-op on `None`; otherwise prints the single
+/// [`build_pretooluse_context_response`] object, carrying no
+/// `permissionDecision` so the normal permission flow still applies.
+/// Test: `pm_guard_tells_an_admitted_builder_its_slot_directory` in
+/// `tests/tm_hook_pm_guard.rs`; the JSON shape by
+/// `build_pretooluse_context_response_carries_no_decision`.
+fn emit_slot_notice(notice: Option<String>) {
+    if let Some(text) = notice {
+        println!("{}", build_pretooluse_context_response(&text));
+    }
+}
+
 /// Best-effort audit POST recording a PM-guard denial to the daemon.
 ///
 /// Why: enforcement actions should be observable (dashboard / audit log), but
@@ -1230,42 +1271,6 @@ async fn audit_agent_cost_warning(
         return;
     };
     let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
-}
-
-/// Print the builder-cap deny, or `allowed` when the machine has room (#6892).
-///
-/// Why: the worktree grant has two ALLOW exits and both print a rewrite and
-/// return, so the machine cap has to be asked at each of them or a granted
-/// dispatch escapes it entirely. Folded into one helper rather than written
-/// twice because the two arms differ only in which rewrite they emit, and a
-/// `PreToolUse` hook's stdout may carry exactly one object — duplicating the
-/// print/deny pair is how a second one gets emitted.
-/// What: runs [`pm_guard_builder_cap::evaluate`]; on a deny it audits and prints
-/// the deny, on an allow it prints `allowed` verbatim. Exactly one line reaches
-/// stdout either way.
-/// Test: `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and
-/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` in
-/// `tests/tm_hook_pm_guard.rs` cover the allow exits; the cap's own verdicts are
-/// covered in `commands::pm_guard_builder_cap`.
-#[allow(clippy::too_many_arguments)]
-async fn emit_builder_cap_or(
-    url: &str,
-    payload: &serde_json::Value,
-    tool_name: &str,
-    tool_input: Option<&serde_json::Value>,
-    session_id: &str,
-    hook_cwd: &std::path::Path,
-    allowed: &str,
-) {
-    match pm_guard_builder_cap::evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd)
-        .await
-    {
-        Some(reason) => {
-            audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
-        }
-        None => println!("{allowed}"),
-    }
 }
 
 /// The ceiling [`audit_denied_tool`] can spend before a deny reaches stdout.

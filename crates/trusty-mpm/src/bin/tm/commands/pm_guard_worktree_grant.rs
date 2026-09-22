@@ -261,6 +261,39 @@ pub(crate) fn build_worktree_grant_response(updated_input: &Value) -> String {
     .to_string()
 }
 
+/// Add `additionalContext` to an already-rendered allow response (#8261).
+///
+/// Why: a `PreToolUse` hook's stdout may carry exactly ONE object, so the
+/// builder slot's `CARGO_TARGET_DIR` notice cannot be a second `println!`
+/// beside the grant's own — it has to be merged into the same
+/// `hookSpecificOutput` that already carries `updatedInput`. It lives here
+/// rather than in `pm_guard.rs` because that file sits at its 500-SLOC cap.
+/// What: parses `response`, inserts `additionalContext` into its
+/// `hookSpecificOutput`, and re-renders. `None` — or a response this does not
+/// recognise — returns the input unchanged, so a parse failure degrades to
+/// today's answer instead of emitting something malformed.
+/// Test: `a_slot_notice_is_merged_into_the_one_hook_output_object`,
+/// `an_absent_notice_leaves_the_response_byte_identical`.
+pub(crate) fn with_additional_context(response: &str, context: Option<&str>) -> String {
+    let Some(context) = context else {
+        return response.to_string();
+    };
+    let Ok(mut parsed) = serde_json::from_str::<Value>(response) else {
+        return response.to_string();
+    };
+    let Some(output) = parsed
+        .get_mut("hookSpecificOutput")
+        .and_then(Value::as_object_mut)
+    else {
+        return response.to_string();
+    };
+    output.insert(
+        "additionalContext".to_string(),
+        Value::String(context.to_string()),
+    );
+    parsed.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,5 +603,38 @@ mod tests {
                 .get("permissionDecision")
                 .is_none()
         );
+    }
+
+    /// #8261: the builder slot's notice must land INSIDE the grant's own
+    /// `hookSpecificOutput`. A `PreToolUse` hook's stdout may carry exactly one
+    /// object, so a second printed object would be dropped or misread — and the
+    /// `updatedInput` the grant already carries must survive the merge.
+    #[test]
+    fn a_slot_notice_is_merged_into_the_one_hook_output_object() {
+        let grant = build_worktree_grant_response(&serde_json::json!({"isolation": "worktree"}));
+        let merged = with_additional_context(&grant, Some("CARGO_TARGET_DIR=/pool/slot-0"));
+
+        let parsed: Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "CARGO_TARGET_DIR=/pool/slot-0"
+        );
+        assert_eq!(
+            parsed["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+            "the merge must not drop the rewrite the grant already carried"
+        );
+        assert_eq!(
+            parsed.as_object().map(serde_json::Map::len),
+            Some(1),
+            "exactly one top-level key: one object reaches stdout, never two"
+        );
+    }
+
+    /// No notice must leave the answer exactly as it was, so a dispatch with no
+    /// slot is byte-identical to its pre-#8261 output.
+    #[test]
+    fn an_absent_notice_leaves_the_response_byte_identical() {
+        let grant = build_worktree_grant_response(&serde_json::json!({"isolation": "worktree"}));
+        assert_eq!(with_additional_context(&grant, None), grant);
     }
 }
