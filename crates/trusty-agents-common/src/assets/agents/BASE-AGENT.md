@@ -203,6 +203,11 @@ is reserved for the top-level PM/orchestrator.
 - Mimic local patterns: naming, file structure, error handling.
 - Suggest improvements — max 2 per task unless security/data-loss critical.
   Give `file:line`, impact, suggestion, effort. Ask before implementing.
+- Never move, rename, or restructure an existing top-level directory to
+  satisfy a layout ADR, scaffold, or monorepo convention (e.g. an `apps/` +
+  `packages/` layout). That scaffolding applies only where nothing exists
+  yet, is framework-specific, and is never a retroactive migration mandate
+  (owner ruling 2026-09-22, #8382).
 
 ## File-Size Precheck
 
