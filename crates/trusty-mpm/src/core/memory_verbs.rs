@@ -4,7 +4,7 @@
 //! whose `mcp__trusty-memory__*` connection is dead had no way to reach the
 //! palace at all. The parity target is trusty-search, which is reachable from
 //! its own CLI without an MCP client in the middle. Owner requirement, verbatim:
-//! "memory should [be] an in process mpm command as well as mcp".
+//! "memory should \[be\] an in process mpm command as well as mcp".
 //!
 //! What: [`run_verb`] resolves the palace and the socket, then issues ONE
 //! direct-method JSON-RPC call — `memory_recall`, `memory_remember` or
@@ -250,10 +250,10 @@ pub fn resolve_verb_palace(
     verb: &MemoryVerb,
     opts: &MemoryVerbOptions,
 ) -> Result<Option<String>, MemoryVerbError> {
-    if let Some(explicit) = opts.palace.as_ref().map(|p| p.trim()) {
-        if !explicit.is_empty() {
-            return Ok(Some(explicit.to_string()));
-        }
+    if let Some(explicit) = opts.palace.as_ref().map(|p| p.trim())
+        && !explicit.is_empty()
+    {
+        return Ok(Some(explicit.to_string()));
     }
     let cwd = match opts.cwd.clone() {
         Some(cwd) => cwd,
