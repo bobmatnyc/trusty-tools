@@ -294,8 +294,8 @@ On **mcp-ticketer / aitrackdown**:
 
 Titles `[EPIC <n>] <outcome>` / `[EPIC_<n> PHASE_<m>] <what>`; a phase is a
 native sub-issue (`--parent`). 🔴 Never hand-patch inside
-`phases:start`/`phases:end` — regenerate it from live child state.
-Two-step create, marker blocks, `gh` steps: `tm-epic` (#8376).
+`phases:start`/`phases:end` — regenerate it from live child state. The rest:
+Read `{{TM_SKILLS}}/tm-epic/SKILL.md` (#8376).
 
 ## Scope Boundary — Ticketing vs. Version Control
 
