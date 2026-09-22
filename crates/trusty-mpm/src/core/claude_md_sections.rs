@@ -124,12 +124,15 @@ pub const REASON_SHADOWED: &str = "section already overridden by a higher-preced
 /// the enum. Deriving it from the serde name by hand here — and pinning that
 /// correspondence in a test — keeps a renamed section from silently orphaning
 /// every project's marker.
-/// What: the nine tokens, matched case-insensitively by [`section_for_token`].
+/// What: the ten tokens, matched case-insensitively by [`section_for_token`].
 /// Test: `every_section_token_is_the_kebab_case_id_uppercased`.
 pub const fn section_token(id: SectionId) -> &'static str {
     match id {
         SectionId::Identity => "IDENTITY",
         SectionId::Core => "CORE",
+        // #8361: autonomy is its own token so a project can retune it; `CORE` is
+        // tier `fixed` and declines every override.
+        SectionId::AutonomousExecution => "AUTONOMOUS-EXECUTION",
         SectionId::Memory => "MEMORY",
         SectionId::Search => "SEARCH",
         SectionId::Workflow => "WORKFLOW",

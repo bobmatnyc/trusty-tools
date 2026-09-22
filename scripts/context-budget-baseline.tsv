@@ -2,17 +2,18 @@
 # Regenerate with: bash scripts/check_context_budget.sh --update
 # Growing TOTAL past 5%, or one file past 10%, fails the gate until
 # the growth is recorded here in the same PR.
-CLAUDE.md	11106
-crates/trusty-mpm/src/assets/instructions/sections/README.md	11635
+CLAUDE.md	11329
+crates/trusty-mpm/src/assets/instructions/sections/README.md	12049
 crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md	2029
-crates/trusty-mpm/src/assets/instructions/sections/core.md	7534
-crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	3916
+crates/trusty-mpm/src/assets/instructions/sections/autonomous-execution.md	712
+crates/trusty-mpm/src/assets/instructions/sections/core.md	8080
+crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	4305
 crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md	829
 crates/trusty-mpm/src/assets/instructions/sections/identity.md	466
 crates/trusty-mpm/src/assets/instructions/sections/memory.md	1052
 crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3614
 crates/trusty-mpm/src/assets/instructions/sections/prompt-self-improvement.md	264
 crates/trusty-mpm/src/assets/instructions/sections/search.md	202
-crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4341
+crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4383
 crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7988
-TOTAL	54976
+TOTAL	57302

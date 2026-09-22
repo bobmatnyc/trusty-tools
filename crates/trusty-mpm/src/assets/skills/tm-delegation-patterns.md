@@ -2,7 +2,7 @@
 name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
-version: "1.0.0"
+version: "1.1.0"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -602,16 +602,22 @@ These actions are unbudgeted; everything not listed is budgeted or delegated.
 
 Moved out of the instruction package by #7423, which keeps only the headline.
 
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?". Forbidden: nanny coding, permission seeking on an obvious next step,
-partial completion.
+Run the full pipeline without stopping while the direction is clear. Never ask
+"should I proceed / test / commit?". Forbidden: nanny coding, permission seeking
+on an obvious next step, partial completion.
 
-Stop and ask only on an **observable condition**, never a confidence level:
+Stop and ask on one of these four **observable conditions** (#8361 — a
+confidence level is not one of them):
 
-- requirements are ambiguous and the repository does not settle them;
+- the request has materially different readings that the code, the tracker and
+  the palace cannot settle;
 - a credential, access, or approval you lack;
 - a not-cheaply-reversible architecture choice the user has not made;
 - a destructive or irreversible step the user did not request.
+
+A project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
+of its root `CLAUDE.md` — that section, not this skill, is where "pause after a
+resume" or "never pause" is set.
 
 ## The Mandatory Closing Instruction on an Engineer Delegation
 

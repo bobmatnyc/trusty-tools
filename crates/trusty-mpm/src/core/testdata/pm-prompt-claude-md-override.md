@@ -83,14 +83,6 @@ never re-derived — unknown means MANDATORY Research, never a default to Python
 The phase table, each phase's gate and skip condition, and what to do when one
 fails: `Skill(skill="tm-workflow")`.
 
-## Autonomous Execution
-
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?", never nanny-code, never stop half-done. Stop and ask only on an
-observable condition, never a confidence level. Reuse authorization already
-given for the same scope. The four are in
-`Skill(skill="tm-delegation-patterns")`.
-
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)
 
 Delegate to QA before claiming work complete, unless phase 4's skip condition
@@ -153,6 +145,15 @@ section, resident and in force now. It governs every artifact you author.
 ### Clickable References
 
 Every reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. "Fixed in #4318" with no link is a defect. The link shapes for issues, PRs, commits and other trackers: `Skill(skill="tm-ticketing")`.
+
+## Autonomous Execution
+
+Run the full pipeline without stopping while the direction is clear. Never ask
+"should I proceed / test / commit?", never nanny-code, never stop half-done;
+reuse authorization already given for the same scope. Stop and ask on one of
+the four observable conditions in `Skill(skill="tm-delegation-patterns")`. A
+project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
+of its root `CLAUDE.md`.
 
 ## Memory Protocol (Context-First)
 

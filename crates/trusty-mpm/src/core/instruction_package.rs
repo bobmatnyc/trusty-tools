@@ -15,9 +15,10 @@
 //! (`assets/instructions/instruction-package.schema.json`, embedded as
 //! [`SCHEMA_JSON`]). A package has two arrays:
 //!
-//! * `sections` — the closed nine-member taxonomy (five content sections plus
+//! * `sections` — the closed ten-member taxonomy (six content sections plus
 //!   the four floor sections: three absorbed from BASE_PM, plus the
-//!   delegation-enforcement tables split out of `core` by #4573) carrying the
+//!   delegation-enforcement tables split out of `core` by #4573; autonomy was
+//!   split out of `core` the same way by #8361) carrying the
 //!   `customization_tier` axis. Declaration order is fixed and canonical; it
 //!   has **no** effect on composed bytes.
 //! * `blocks` — the ordered composition stream. Output is `blocks` in array
@@ -110,10 +111,11 @@ pub const SCHEMA_JSON: &str =
 /// Why: a closed enum makes the taxonomy reviewable and makes "every section is
 /// accounted for" a compile-time-shaped question rather than a grep. Unknown
 /// ids fail deserialization loudly instead of being dropped.
-/// What: the five content sections (Core, Memory, Search, Workflow, Agent
-/// Delegation) plus the four floor sections — the three absorbed from BASE_PM by
-/// #4183 (Identity, Non-Overridable Rules, Framework-Guaranteed Conventions) and
-/// Enforcement, split out of Core by #4573.
+/// What: the six content sections (Core, Autonomous Execution, Memory, Search,
+/// Workflow, Agent Delegation) plus the four floor sections — the three absorbed
+/// from BASE_PM by #4183 (Identity, Non-Overridable Rules,
+/// Framework-Guaranteed Conventions) and Enforcement, split out of Core by
+/// #4573. Autonomous Execution was split out of Core the same way by #8361.
 ///
 /// Documented placement of each absorbed BASE_PM block:
 ///
@@ -138,6 +140,14 @@ pub enum SectionId {
     Identity,
     /// The PM's core operating instructions (today's `PM_INSTRUCTIONS.md` body).
     Core,
+    /// When the PM runs without stopping, and when it may stop and ask.
+    ///
+    /// Was prose inside [`SectionId::Core`] until #8361. `core` is tier `fixed`,
+    /// so no project could set its own comfort level: on a session resume the PM
+    /// read one rule telling it to continue and a skill telling it to confirm,
+    /// with no override surface to settle the two. Its own tier-`project`
+    /// section gives a project the `AUTONOMOUS-EXECUTION` marker instead.
+    AutonomousExecution,
     /// Memory protocol guidance.
     Memory,
     /// Code/architecture search guidance.
@@ -172,12 +182,13 @@ impl SectionId {
     /// Why: `sections` must be declared in this order so a package manifest
     /// reads the same way in every project; the order is also the enum's `Ord`,
     /// so the check is a simple sortedness test.
-    /// What: the nine ids, floor-first-and-last around the five content
+    /// What: the ten ids, floor-first-and-last around the six content
     /// sections.
     /// Test: `canonical_order_is_sorted_and_complete`.
-    pub const CANONICAL: [SectionId; 9] = [
+    pub const CANONICAL: [SectionId; 10] = [
         SectionId::Identity,
         SectionId::Core,
+        SectionId::AutonomousExecution,
         SectionId::Memory,
         SectionId::Search,
         SectionId::Workflow,
@@ -952,7 +963,7 @@ impl InstructionPackage {
     ///
     /// Test: `authored_run_projects_blocks_in_order_with_joins`,
     /// `authored_run_skips_generated_blocks`,
-    /// `pm_instructions_is_its_three_sections`.
+    /// `pm_instructions_is_its_four_sections`.
     pub fn authored_run(&self, sections: &[SectionId]) -> String {
         let mut out = String::new();
         let mut emitted = false;
