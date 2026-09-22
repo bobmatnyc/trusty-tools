@@ -1,0 +1,80 @@
+# #8341: the workspace's home for a test that spans TWO production crates.
+#
+# Why this crate exists at all: the point of separate crates is an efficient
+# compilation process (owner, 2026-09-21). A cross-crate test parked in one of
+# the two crates it spans has to be paid for with a `[dev-dependencies]` edge on
+# the other, and that edge welds the two compile graphs together for EVERY
+# `cargo test -p <crate>` and `cargo clippy -p <crate> --all-targets` in every
+# worktree — the test's cost lands on everyone who never runs it. Hosting the
+# test HERE instead, over NORMAL dependencies on both sides, costs the same
+# compilation once, to whoever actually runs this crate.
+#
+# `scripts/check_dev_dep_edges.sh` is what keeps the arrangement from decaying:
+# it fails when any workspace crate's dev/build dependencies reach a workspace
+# crate its normal dependencies do not.
+[package]
+name = "trusty-crate-contracts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test-only home for cross-crate contract tests, so no production crate dev-depends on another (#8341)."
+# Never published: it carries no library surface anyone could consume, and its
+# whole dependency set is other workspace crates pinned by path.
+publish = false
+
+# A doc-only library target. Cargo needs at least one non-test target, and this
+# one is where the rule the crate enforces is written down.
+[lib]
+name = "trusty_crate_contracts"
+path = "src/lib.rs"
+
+# Every dependency here is NORMAL, deliberately. A dev-dependency in this crate
+# would be exactly the shape `scripts/check_dev_dep_edges.sh` exists to refuse,
+# and the whole point of the crate is that its dependencies are honest about
+# what it compiles.
+[dependencies]
+# #8341 (A): `tests/conformance_cross_gate.rs` drives the trusty-mpm FRONT gate
+# and the trusty-review BACK gate from one shared `ResolvedIntent`. It used to
+# live in trusty-mpm over a `trusty-review` dev-dependency that added 8 crates
+# (four AWS SDK crates, redb, hmac, arc-swap, trusty-review) to every
+# trusty-mpm test build.
+trusty-mpm = { workspace = true }
+trusty-review = { workspace = true }
+# #8341 (B): `tests/analyze_uds_consumers.rs` stands the trusty-analyze daemon
+# up on its derived socket and asks each of its four consumers what it sees.
+# The four used to be dev-dependencies of trusty-analyze, adding ~135 crates to
+# every `cargo test -p trusty-analyze`.
+trusty-analyze = { path = "../trusty-analyze" }
+trusty-console = { workspace = true }
+trusty-installer = { workspace = true }
+tga = { workspace = true }
+trusty-audit = { workspace = true }
+# #8341 (C): `tests/memory_uds_consumer.rs` asks tctl's probe about a live
+# trusty-memory daemon. `trusty-installer` above was a trusty-memory
+# dev-dependency for this one test, adding 13 crates to its test build.
+trusty-memory = { path = "../trusty-memory" }
+# The features the moved tests need from the shared crate, named here rather
+# than inherited from whichever neighbour happens to enable them:
+#   `intent-source`  — the real ISR the cross-gate test resolves through (A).
+#   `uds`            — `socket_is_serving` / `daemon_socket_path` (B, C).
+#   `memory-core` + `embedder-test-support` — the mock embedder seam (C).
+#   `memory-rpc`     — the shared memory client (C).
+trusty-common = { workspace = true, features = [
+    "intent-source",
+    "uds",
+    "memory-core",
+    "embedder-test-support",
+    "memory-rpc",
+] }
+
+async-trait = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# The consumer guards and the console connector all read process-global
+# environment, so the tests that drive them run serially.
+serial_test = { workspace = true }

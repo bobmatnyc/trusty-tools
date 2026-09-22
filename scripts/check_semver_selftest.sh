@@ -132,8 +132,8 @@
 #   silently — the day something depends on the excluded crate's library, the row
 #   is wrong and nothing says so — so the gate re-checks the premise on every
 #   run:
-#     23. honoured        — trusty-mpm is a recorded skip naming the file it came
-#                           from, and NO comparison is attempted.
+#     23. honoured        — an excluded crate is a recorded skip naming the file
+#                           the row came from, and NO comparison is attempted.
 #     24. premise died    — a workspace crate depends on the excluded one, so the
 #                           skip is REFUSED (exit 3) and the dependent is named.
 #   Case 8 is the other half: a non-excluded crate still runs a full clean
@@ -803,13 +803,16 @@ done <<<"$RELEASE_TYPE_CASES"
 # 23-24. Crate exclusions, and the guard that keeps one from going silent.
 #
 # scripts/semver-checks-crate-exclusions.tsv skips a crate that has no LIBRARY
-# consumer to protect — trusty-mpm is installed as the `tm` binary, and a binary
-# user gets a whole new executable, so its library API compatibility protects
-# nobody. That is a claim about consumption, and a skip list is exactly the shape
-# that stops protecting silently: the day something depends on the excluded
-# crate's library, the row is wrong and nothing says so.
+# consumer to protect — trusty-mpm carried the one row until #8341, on the claim
+# that it is installed as the `tm` binary and a binary user gets a whole new
+# executable, so its library API compatibility protects nobody. That is a claim
+# about consumption, and a skip list is exactly the shape that stops protecting
+# silently: the day something depends on the excluded crate's library, the row is
+# wrong and nothing says so. That day came, the row went, and these two cases
+# test the arm rather than any crate's current status.
 #
-#   23. the exclusion is honoured — a recorded skip, and NO comparison attempted.
+#   23. the exclusion is honoured — a recorded skip, and NO comparison attempted,
+#       over a fixture row naming a crate picked for having no dependent.
 #   24. the premise has died — a workspace crate depends on the excluded one, so
 #       the skip is REFUSED (exit 3) and the dependent is named. Uses
 #       trusty-agents-common, which trusty-agents, trusty-code and trusty-mpm all
@@ -825,17 +828,52 @@ done <<<"$RELEASE_TYPE_CASES"
 # to every crate fails there.
 # ===========================================================================
 
-# --- 23. trusty-mpm is excluded on main, and the skip attempts no comparison.
-rc=0
-out="$(cd "$REPO_ROOT" && bash "$GATE" --crate trusty-mpm 2>&1)" || rc=$?
-if [[ "$rc" -ne 0 ]]; then
-  fail_case "exclusion/honoured: an excluded crate must be a recorded skip (exit ${rc})" "$out"
-elif [[ "$out" != *"SKIP trusty-mpm"* || "$out" != *"semver-checks-crate-exclusions.tsv"* ]]; then
-  fail_case "exclusion/honoured: the skip did not name the crate and the file it came from" "$out"
-elif [[ "$out" == *"CHECK trusty-mpm:"* ]]; then
-  fail_case "exclusion/honoured: the gate compared a crate it had already excluded" "$out"
+# --- 23. An exclusion whose premise still holds is honoured, and the skip
+# attempts no comparison.
+#
+# #8341: THE CRATE IS PICKED, NOT NAMED. This case used to run `--crate
+# trusty-mpm` against the real exclusions file, on the strength of trusty-mpm
+# being the one row it carried. crates/trusty-crate-contracts then declared a
+# normal trusty-mpm dependency, the gate refused the skip its premise had
+# outlived (case 24's arm, working as designed), the row was deleted, and this
+# case failed over a crate's status rather than over the arm it tests. A picked
+# crate cannot decay that way, and a fixture row — case 24's own device — keeps
+# the case honest whether or not the real file has any rows left.
+EXCL_HONOURED="$("$REAL_CARGO" metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
+import json, sys
+
+pkgs = json.load(sys.stdin)["packages"]
+names = {p["name"] for p in pkgs}
+depended = {d["name"] for p in pkgs for d in p["dependencies"] if d["name"] in names}
+# Publishable, with a library target, and nothing in the workspace depending on
+# it: the gate would compare this crate for real, and the premise check grants
+# the skip.
+for p in sorted(pkgs, key=lambda pkg: pkg["name"]):
+    if p.get("publish") == [] or p["name"] in depended:
+        continue
+    if {k for t in p["targets"] for k in t["kind"]} & {"lib", "rlib", "cdylib", "proc-macro"}:
+        print(p["name"])
+        break
+')"
+if [[ -z "$EXCL_HONOURED" ]]; then
+  fail_case "exclusion/honoured: no publishable lib crate in this workspace lacks a workspace dependent, so the case cannot build a skip the gate would grant" ""
 else
-  pass_case "an excluded crate is skipped with its reason, and nothing is compared"
+  EXCL_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/semver-selftest-excl.XXXXXX")"
+  printf '# fixture\n%s\tfixture row: no workspace package depends on this crate\n' \
+    "$EXCL_HONOURED" > "$EXCL_FIXTURE"
+  rc=0
+  out="$(cd "$REPO_ROOT" && SEMVER_GATE_CRATE_EXCLUSIONS="$EXCL_FIXTURE" \
+    bash "$GATE" --crate "$EXCL_HONOURED" 2>&1)" || rc=$?
+  rm -f "$EXCL_FIXTURE"
+  if [[ "$rc" -ne 0 ]]; then
+    fail_case "exclusion/honoured: an excluded crate must be a recorded skip (exit ${rc})" "$out"
+  elif [[ "$out" != *"SKIP ${EXCL_HONOURED}"* || "$out" != *"semver-checks-crate-exclusions.tsv"* ]]; then
+    fail_case "exclusion/honoured: the skip did not name the crate and the file it came from" "$out"
+  elif [[ "$out" == *"CHECK ${EXCL_HONOURED}:"* ]]; then
+    fail_case "exclusion/honoured: the gate compared a crate it had already excluded" "$out"
+  else
+    pass_case "an excluded crate is skipped with its reason, and nothing is compared"
+  fi
 fi
 
 # --- 24. An exclusion whose premise has died refuses the skip.
