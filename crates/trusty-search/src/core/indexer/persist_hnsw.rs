@@ -487,64 +487,7 @@ impl CodeIndexer {
         // captured once at spawn.
         self.snapshot_writer_shape();
         tokio::spawn(async move {
-            use crate::service::storage_layout::{is_write_refusal, HNSW_FILE, HNSW_STAGING_FILE};
-            // Re-resolve paths in the task so the persistence layer's path
-            // resolution failures don't crash the commit caller.
-            //
-            // #8438: resolved through the registry-named layout, and FIRST, so
-            // a refusal (guard, or a colocated root that no longer exists)
-            // skips the checkpoint before anything else is created. The skip
-            // leaves `dirty` set — nothing was written. Never redirected.
-            let hnsw_path = match layout.file(&index_id, &root_path, HNSW_FILE) {
-                Ok(p) => p,
-                Err(e) => {
-                    if is_write_refusal(&e) {
-                        tracing::error!("incremental persist: {e:#} — checkpoint skipped");
-                    } else {
-                        tracing::debug!(
-                            "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
-                        );
-                    }
-                    persist_state.in_flight.store(false, Ordering::Release);
-                    return;
-                }
-            };
-            // The chunks JSON path is only needed in the legacy (no redb) mode.
-            let chunks_path = if persist_chunks_json {
-                // #8438: `chunks.json` is a data-dir-only legacy artifact (the
-                // read side looks nowhere else), resolved through the guard.
-                match crate::service::storage_layout::StorageLayout::DataDir.file(
-                    &index_id,
-                    &root_path,
-                    crate::service::storage_layout::CHUNKS_JSON_FILE,
-                ) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        if is_write_refusal(&e) {
-                            tracing::error!("incremental persist: {e:#} — checkpoint skipped");
-                        } else {
-                            tracing::debug!(
-                                "incremental persist: cannot resolve chunks path for \
-                                 '{index_id}': {e}"
-                            );
-                        }
-                        persist_state.in_flight.store(false, Ordering::Release);
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            // Issue #3970: while a reindex is staging (`PersistState::reindexing`),
-            // periodic checkpoints must never publish straight to the live
-            // snapshot — reindex progress is monotonic, so ordinary healthy
-            // progress on any reasonably large reindex WOULD otherwise cross
-            // the `save()` shrink guard's threshold and replace the complete
-            // pre-reindex snapshot with a still-partial one. Resolved once per
-            // coalescing-loop iteration (below), not just once up front, so a
-            // reindex that completes mid-loop is picked up on the very next
-            // iteration rather than staying pinned to a stale destination.
-            let hnsw_staging_path = layout.file(&index_id, &root_path, HNSW_STAGING_FILE);
+            use crate::service::storage_layout::{is_write_refusal, StorageLayout};
 
             // Coalescing loop: snapshot+save while `dirty` keeps being set.
             // Bound the loop so a pathological caller can't pin us forever
@@ -553,36 +496,59 @@ impl CodeIndexer {
             // hot loop's behalf).
             const MAX_COALESCED_ITERATIONS: u32 = 8;
             for _ in 0..MAX_COALESCED_ITERATIONS {
+                // #8438: every target is resolved on EVERY iteration, before
+                // `dirty` is cleared — a path resolved once and reused let a
+                // later `UsearchStore::save` (`create_dir_all(parent)`)
+                // recreate a colocated root deleted mid-loop. A refusal skips
+                // the checkpoint and leaves `dirty` set: nothing was written.
+                // Issue #3970: `reindexing` is re-read here too, so a reindex
+                // that completes mid-loop is picked up on the next iteration.
+                let reindexing = persist_state.reindexing.load(Ordering::Acquire);
+                let Some(hnsw_target) =
+                    checkpoint_hnsw_target(layout, &index_id, &root_path, reindexing)
+                else {
+                    persist_state.in_flight.store(false, Ordering::Release);
+                    return;
+                };
+                // The chunks JSON path is only needed in the legacy (no redb)
+                // mode. #8438: `chunks.json` is a data-dir-only legacy
+                // artifact (the read side looks nowhere else).
+                let chunks_path = if persist_chunks_json {
+                    match StorageLayout::DataDir.file(
+                        &index_id,
+                        &root_path,
+                        crate::service::storage_layout::CHUNKS_JSON_FILE,
+                    ) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            if is_write_refusal(&e) {
+                                tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+                            } else {
+                                tracing::debug!(
+                                    "incremental persist: cannot resolve chunks path for \
+                                     '{index_id}': {e}"
+                                );
+                            }
+                            persist_state.in_flight.store(false, Ordering::Release);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 // Clear `dirty` *before* snapshotting so any commit that
                 // races in after we start reading is guaranteed to set it
                 // again — ensuring we don't miss it.
                 persist_state.dirty.store(false, Ordering::Release);
 
-                // Save HNSW first (large, parallel-friendly). Issue #3970:
-                // resolved fresh each iteration so a reindex that flips
-                // `reindexing` off mid-coalesce is observed promptly.
+                // Save HNSW first (large, parallel-friendly).
                 if let Some(store) = &store {
-                    let reindexing = persist_state.reindexing.load(Ordering::Acquire);
-                    let target: &std::path::Path = if reindexing {
-                        match &hnsw_staging_path {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::debug!(
-                                    "incremental persist: cannot resolve hnsw staging path \
-                                     for '{index_id}' ({e}) — falling back to the live path \
-                                     for this checkpoint"
-                                );
-                                &hnsw_path
-                            }
-                        }
-                    } else {
-                        &hnsw_path
-                    };
-                    if let Err(e) = store.save_to(target).await {
+                    if let Err(e) = store.save_to(&hnsw_target).await {
                         tracing::warn!(
                             "incremental persist: failed to save HNSW for '{index_id}' \
                              (target={}, reindexing={reindexing}): {e}",
-                            target.display()
+                            hnsw_target.display()
                         );
                     }
                 }
@@ -674,5 +640,50 @@ impl CodeIndexer {
             );
             persist_state.in_flight.store(false, Ordering::Release);
         });
+    }
+}
+
+/// Resolve one incremental checkpoint's HNSW target (#8438, #3970).
+///
+/// Why: the staging path must never fall back to the live one when the
+/// resolver refused it — a refusal means the storage directory must not be
+/// written at all (a missing colocated root, or a data dir under the root).
+/// What: `reindexing` → the staging path; a refusal logs at error and returns
+/// `None` (the caller skips the checkpoint), any other failure falls back to
+/// the live path. Otherwise the live path, `None` on any failure.
+/// Test: `persist_loop_never_recreates_a_root_deleted_between_iterations`.
+fn checkpoint_hnsw_target(
+    layout: crate::service::storage_layout::StorageLayout,
+    index_id: &str,
+    root_path: &std::path::Path,
+    reindexing: bool,
+) -> Option<std::path::PathBuf> {
+    use crate::service::storage_layout::{is_write_refusal, HNSW_FILE, HNSW_STAGING_FILE};
+    if reindexing {
+        match layout.file(index_id, root_path, HNSW_STAGING_FILE) {
+            Ok(p) => return Some(p),
+            // #8438: a refused staging path skips; it never becomes a live write.
+            Err(e) if is_write_refusal(&e) => {
+                tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+                return None;
+            }
+            Err(e) => tracing::debug!(
+                "incremental persist: cannot resolve hnsw staging path for '{index_id}' \
+                 ({e}) — falling back to the live path for this checkpoint"
+            ),
+        }
+    }
+    match layout.file(index_id, root_path, HNSW_FILE) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            if is_write_refusal(&e) {
+                tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+            } else {
+                tracing::debug!(
+                    "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
+                );
+            }
+            None
+        }
     }
 }

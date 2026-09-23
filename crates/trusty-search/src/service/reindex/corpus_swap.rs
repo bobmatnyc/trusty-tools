@@ -38,8 +38,9 @@ use super::checkpoint::{ReindexCheckpoint, ResumeState};
 /// share this one function.
 /// What: returns `index.redb.tmp` inside the registry-named storage directory
 /// (#8438 — never chosen by probing for `<root>/.trusty-search/`). A resolution
-/// failure, including a #8438 guard refusal, is logged at `warn` and returns
-/// `None`, which puts the caller on the direct-write-to-live fallback; the live
+/// failure is logged — a #8438 guard refusal at `error`, anything else at
+/// `warn` — and returns `None`, which puts the caller on the
+/// direct-write-to-live fallback; the live
 /// path goes through the same resolver and is refused the same way.
 /// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`
 /// depends on the probe and the swap agreeing on one path.
@@ -55,11 +56,20 @@ pub(super) async fn staging_corpus_path(
     match resolved {
         Ok(p) => Some(p),
         Err(e) => {
-            tracing::warn!(
-                "staged corpus swap: cannot resolve staging corpus path for '{}' ({e:#}) — \
-                 reindex will write directly to the live corpus",
-                index_id.0
-            );
+            // #8438: a resolver refusal is a misconfiguration, logged at error.
+            if crate::service::storage_layout::is_write_refusal(&e) {
+                tracing::error!(
+                    "staged corpus swap: staging corpus path for '{}' refused ({e:#}) — the \
+                     live corpus path is refused the same way",
+                    index_id.0
+                );
+            } else {
+                tracing::warn!(
+                    "staged corpus swap: cannot resolve staging corpus path for '{}' ({e:#}) \
+                     — reindex will write directly to the live corpus",
+                    index_id.0
+                );
+            }
             None
         }
     }

@@ -501,13 +501,12 @@ pub(crate) async fn create_index_report(
     // Fix #483/#485: use `build_indexer_from_entry` with `colocated: true`
     // instead of `build_indexer_with_persisted_state` (which hard-codes
     // `colocated: false`).  The entry-aware builder routes the corpus store
-    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`,
-    // and crucially `colocated_redb_path` → `colocated_storage_dir` calls
-    // `create_dir_all` — so the `.trusty-search/` directory exists on-disk
-    // BEFORE the first reindex.  Every write-path probe
-    // (`has_colocated_storage` in persist.rs / reindex.rs) then sees the dir
-    // and routes HNSW + corpus writes to the colocated path too.  Without this
-    // fix the writer used the app-data path while the loader used the colocated
+    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`.
+    // #8438: every write path takes its layout from
+    // `StorageLayout::for_entry(init_entry)`, carried on the indexer, so HNSW
+    // and corpus writes follow the registry flag — never a probe of whether
+    // `.trusty-search/` exists on disk.  Without the entry-aware builder the
+    // writer used the app-data path while the loader used the colocated
     // path (because `indexes.toml` recorded `colocated = true`), producing 0
     // chunks and no corpus store after the first restart.  A missing corpus
     // store also causes `write_schema_version` to return

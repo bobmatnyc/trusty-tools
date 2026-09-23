@@ -73,6 +73,26 @@ pub(super) struct HnswSwapPaths {
     pub(super) staging: PathBuf,
 }
 
+/// Log an unresolvable HNSW path for [`begin_staged_hnsw_swap`].
+///
+/// #8438: a resolver refusal is a misconfiguration and logs at `error`; any
+/// other resolution failure keeps its `warn`.
+fn log_unresolved_path(kind: &str, index_id: &IndexId, e: &anyhow::Error) {
+    if crate::service::storage_layout::is_write_refusal(e) {
+        tracing::error!(
+            "staged hnsw swap: {kind} hnsw path for '{}' refused ({e:#}) — periodic \
+             checkpoints for this index are refused the same way",
+            index_id.0
+        );
+    } else {
+        tracing::warn!(
+            "staged hnsw swap: cannot resolve {kind} hnsw path for '{}' ({e:#}) — periodic \
+             checkpoints will keep writing directly to the live path",
+            index_id.0
+        );
+    }
+}
+
 /// Begin staged HNSW persistence for a reindex (issue #3970).
 ///
 /// Why: called once, before the batch loop starts, so every periodic
@@ -97,22 +117,14 @@ pub(super) async fn begin_staged_hnsw_swap(
     let live = match handle_file(handle, HNSW_FILE).await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(
-                "staged hnsw swap: cannot resolve live hnsw path for '{}' ({e:#}) — periodic \
-                 checkpoints will keep writing directly to the live path",
-                index_id.0
-            );
+            log_unresolved_path("live", index_id, &e);
             return None;
         }
     };
     let staging = match handle_file(handle, HNSW_STAGING_FILE).await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(
-                "staged hnsw swap: cannot resolve staging hnsw path for '{}' ({e:#}) — periodic \
-                 checkpoints will keep writing directly to the live path",
-                index_id.0
-            );
+            log_unresolved_path("staging", index_id, &e);
             return None;
         }
     };
