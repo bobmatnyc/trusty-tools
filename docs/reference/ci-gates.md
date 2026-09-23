@@ -99,9 +99,52 @@ processes (a fixed path, a fixed port, one real file): use
 `#[serial_test::file_serial]` for those, and keep redirecting `$HOME` per test.
 Measurements: [test-ladder-baseline.md](test-ladder-baseline.md).
 
-🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
-run the ladder rung your change earns before merging. Full suite on a branch:
+🟡 A PR proves every test target COMPILES, and executes the tests of the crates
+it affects (next section); the full workspace suite defers to `main`, so run
+the ladder rung your change earns before merging. Full suite on a branch:
 Actions → CI → "Run workflow".
+
+## `Rust tests (affected crates)` runs on every PR
+
+🟡 **Owner ruling 2026-09-23.** `ci.yml` runs `cargo test --no-fail-fast` on
+every pull request for the crates the PR touches plus their dependents. It is
+meant to become a required context once the owner confirms the
+branch-protection change; until then it is not required. Check the live list
+above.
+
+- **Crate set.** The `affected-plan` job resolves the merge-base of the PR's
+  merge commit with the refreshed base branch, then runs
+  `scripts/ci-affected-test-plan.sh`, a thin wrapper over
+  `scripts/select-test-crates.sh --range <merge-base>..HEAD`. The selector
+  returns each crate that owns a changed file, plus that crate's transitive
+  reverse-dependency closure (normal, dev and build edges). The wrapper adds
+  three rules. A `docs_only=true` verdict from the `changes` job selects
+  nothing. The four Tauri UI crates are dropped, because their own jobs test
+  them. What is left is split into at most 8 legs, largest test suite first.
+- **Workspace-wide inputs select every crate.** A change to the root
+  `Cargo.toml` or `Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `clippy.toml`,
+  `rustfmt.toml`, `scripts/**` or `.github/**` selects every headless crate,
+  and so does any path the selector cannot classify. A workflow-only PR
+  therefore runs the full 8-leg set. `detect-docs-only.sh` exempts a few named
+  doc-governance scripts and workflows; those PRs select nothing.
+- **Nothing to test still reports.** A docs-only PR, a push to `main` and a
+  `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
+  job, named exactly `Rust tests (affected crates)`, reports success with a
+  "no affected crates" line. The roll-up reads the plan's result, never the
+  skipped matrix, so a failed plan turns it red.
+- **Each leg matches `test-shard`**: the stable toolchain, the same apt
+  packages, the .NET SDK, `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, and a
+  read of the shared `test` rust-cache and the fastembed model cache. The one
+  test `test-shard` filters out,
+  `update::tests::cache_fresh_returns_some_when_newer`, is skipped in the main
+  run and re-run with `CI` unset. The leg that holds `trusty-common` also runs
+  the `codex-config` step. Nothing else is filtered: no `--lib`, no
+  `continue-on-error`, and no flake list.
+- 🟡 **Feature coverage is a subset of the shards'.** Each leg is its own
+  `cargo test -p …` invocation, so it resolves features only across that leg's
+  crates. `trusty-common` gets `--features trusty-common/unconditional-only`
+  (#4901), plus whatever its leg-mates unify in. Its tests that sit behind a
+  gated module run in full only on `main`.
 
 ## A red `main` files an issue
 
