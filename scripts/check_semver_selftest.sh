@@ -153,7 +153,10 @@
 #   replayed BREAK and pin preflight CHECK 5's accepted-break decision in the PR
 #   check: a covered break passes with the ACCEPTED BREAK WARN; an undeclared
 #   break, a second uncovered crate, a blind crate, a declaration missing at
-#   DECL_REV, or no declaration at all keeps the BREAK.
+#   DECL_REV, or no declaration at all keeps the BREAK. A PR cannot accept its
+#   own break: a declaration only on the PR head, or one the PR modifies, keeps
+#   it; one on the base and unchanged by the PR is accepted. With no PR, the
+#   checked-out commit must be on main.
 #
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
@@ -1091,10 +1094,13 @@ rm -rf "$STUB_DIR"
 # scripts/check_semver.sh replays the real trusty-mpm 1.6.3 -> 1.6.4 break
 # (scripts/test-data/preflight-check5/break-lints.out) at exit 1. The library and
 # scripts/semver_ci_accept.sh are copied in from the tree under test, and the
-# declarations are committed, because the step reads them from DECL_REV.
+# declarations are committed, because the step reads them from DECL_REV. A PR
+# case checks out a two-parent merge of a base and a head commit, the shape
+# actions/checkout gives a pull_request run.
 #
 # SEMVER_SELFTEST_TREE points at another checkout's files. Against a tree
-# without the #8372 step every case below fails on its asserted message.
+# without the #8372 step every case below fails on its asserted message, and
+# against a tree without the base rule the last five cases fail.
 # ===========================================================================
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 TREE="${SEMVER_SELFTEST_TREE:-$REPO_ROOT}"
@@ -1126,7 +1132,6 @@ agit() {
 agit init -q
 agit add -A -- .
 agit commit -q --no-verify -m "selftest: stub gate and manifests"
-NO_DECL_REV="$(agit rev-parse HEAD)"
 
 # The replayed gate runs. ONE is the real single-crate break; TWO repeats its
 # section as stub-crate, the shape of a release PR that bumps two crates;
@@ -1173,15 +1178,41 @@ set_decls() {
   agit commit -q --no-verify --allow-empty -m "selftest: declarations"
 }
 
-# ci_enforce <name> <gate-log> <crates> <decl-rev> <want-exit> <want-label>
-#            <must-not, or -> <must-have>... — run the extracted step once.
+# pr_merge <base-spec>... -- <head-spec>... — commit the base's declarations,
+# then the PR head's on top of them, and check out the merge commit a
+# pull_request run checks out: parents (base, head), the head's tree. Sets
+# PR_BASE_REV and PR_HEAD_REV.
+pr_merge() {
+  local base=()
+  while [[ "$1" != "--" ]]; do
+    base+=("$1")
+    shift
+  done
+  shift
+  set_decls ${base[@]+"${base[@]}"}
+  PR_BASE_REV="$(agit rev-parse HEAD)"
+  set_decls ${1+"$@"}
+  PR_HEAD_REV="$(agit rev-parse HEAD)"
+  agit checkout -q --detach "$(agit commit-tree -p "$PR_BASE_REV" -p "$PR_HEAD_REV" \
+    -m "selftest: PR merge" "${PR_HEAD_REV}^{tree}")"
+}
+
+# ci_enforce <name> <gate-log> <crates> <pr-head, or - for no PR> <want-exit>
+#            <want-label> <must-not, or -> <must-have>... — run the extracted
+#            step once. DECL_REV is the PR head, else HEAD, as in the workflow.
 ci_enforce() {
-  local name="$1" log="$2" crates="$3" rev="$4" want="$5" want_label="$6" must_not="$7"
-  local out rc=0 label needle
+  local name="$1" log="$2" crates="$3" pr_head="$4" want="$5" want_label="$6" must_not="$7"
+  local out rc=0 label needle rev
   shift 7
+  if [[ "$pr_head" == "-" ]]; then
+    pr_head=""
+    rev="$(agit rev-parse HEAD)"
+  else
+    rev="$pr_head"
+  fi
   : > "${ACC}/output"
   out="$(cd "$AREPO" && env ACCEPT_SELFTEST_LOG="$log" ACCEPT_SELFTEST_RC=1 \
-    CRATES="$crates" DECL_REV="$rev" SKIP_UI_BUILD=1 RUNNER_TEMP="${ACC}/tmp" \
+    CRATES="$crates" DECL_REV="$rev" PR_HEAD="$pr_head" SKIP_UI_BUILD=1 RUNNER_TEMP="${ACC}/tmp" \
     GITHUB_OUTPUT="${ACC}/output" GITHUB_STEP_SUMMARY="${ACC}/summary" \
     bash -e "${ACC}/enforce.sh" 2>&1)" || rc=$?
   label="$(sed -n 's/^verdict_label=//p' "${ACC}/output")"
@@ -1206,55 +1237,97 @@ ci_enforce() {
   pass_case "ci-accept/${name} (exit ${rc})"
 }
 
+MPM="trusty-mpm:${ACCEPT_ROWS_CI}"
+MPM_SHORT="trusty-mpm:$(printf '%s\n' "$ACCEPT_ROWS_CI" | grep -v ' ResumeManagedError')"
 if [[ ! -s "${ACC}/enforce.sh" ]]; then
   fail_case "ci-accept: no 'id: enforce' run block in ${TREE}/.github/workflows/semver-checks.yml"
 else
   # --- A covered break passes, with the WARN in the log and an annotation.
-  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
-  ci_enforce "covered break" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 0 \
+  pr_merge "$MPM" -- "$MPM"
+  ci_enforce "covered break" "$ONE" trusty-mpm "$PR_HEAD_REV" 0 \
     "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
     "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
     "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — trusty-mpm 1.6.4" \
     "Reason: owner ruling 2026-09-22"
 
-  # --- The declaration is read from DECL_REV (the PR head), not from HEAD: a
-  #     rev that predates it accepts nothing.
-  ci_enforce "declaration read from DECL_REV" "$ONE" trusty-mpm "$NO_DECL_REV" 1 \
+  # --- The declaration is read from DECL_REV (the PR head), not only from the
+  #     base: a head that deletes it accepts nothing.
+  pr_merge "$MPM" --
+  ci_enforce "declaration read from DECL_REV" "$ONE" trusty-mpm "$PR_HEAD_REV" 1 \
     "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
-    "is not tracked at ${NO_DECL_REV}" "::error title=SemVer break::"
+    "does not exist at ${PR_HEAD_REV}" "::error title=SemVer break::"
 
   # --- An undeclared break fails, naming the entry.
-  set_decls "trusty-mpm:$(printf '%s\n' "$ACCEPT_ROWS_CI" | grep -v ' ResumeManagedError')"
-  ci_enforce "undeclared break" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 1 \
+  pr_merge "$MPM_SHORT" -- "$MPM_SHORT"
+  ci_enforce "undeclared break" "$ONE" trusty-mpm "$PR_HEAD_REV" 1 \
     "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
     "NOT DECLARED  enum_variant_added: variant ResumeManagedError:AlreadyResuming" "::error title=SemVer break::"
 
   # --- Two changed crates, one covered and one not, fails on the uncovered one.
-  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
-  ci_enforce "two crates, one covered" "$TWO" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 1 \
+  pr_merge "$MPM" -- "$MPM"
+  ci_enforce "two crates, one covered" "$TWO" "trusty-mpm stub-crate" "$PR_HEAD_REV" 1 \
     "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
     "stub-crate 1.6.4 breaks its public API, and scripts/semver-accepted-breaks/stub-crate-1.6.4.txt" \
     "::error title=SemVer break::"
 
   # --- Both covered passes: each crate is decided on its own section.
-  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}" "stub-crate:${ACCEPT_ROWS_CI}"
-  ci_enforce "two crates, both covered" "$TWO" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 0 \
+  pr_merge "$MPM" "stub-crate:${ACCEPT_ROWS_CI}" -- "$MPM" "stub-crate:${ACCEPT_ROWS_CI}"
+  ci_enforce "two crates, both covered" "$TWO" "trusty-mpm stub-crate" "$PR_HEAD_REV" 0 \
     "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
     "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — trusty-mpm 1.6.4" \
     "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — stub-crate 1.6.4"
 
   # --- A covered break beside a crate the gate never compared still fails.
-  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
-  ci_enforce "covered break + blind crate" "$BLIND" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 1 \
+  pr_merge "$MPM" -- "$MPM"
+  ci_enforce "covered break + blind crate" "$BLIND" "trusty-mpm stub-crate" "$PR_HEAD_REV" 1 \
     "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
     "so part of it" "::error title=SemVer break::"
 
   # --- No declaration keeps today's failure.
-  set_decls
-  ci_enforce "no declaration" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 1 \
+  pr_merge --
+  ci_enforce "no declaration" "$ONE" trusty-mpm "$PR_HEAD_REV" 1 \
     "SemVer: BREAK" "ACCEPTED BREAK" \
     "scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt" \
     "::error title=SemVer break::trusty-mpm has a breaking public-API change"
+
+  # --- A PR cannot accept its own break: a declaration only on the PR head,
+  #     complete and valid, still fails.
+  pr_merge -- "$MPM"
+  ci_enforce "declaration only on the PR head" "$ONE" trusty-mpm "$PR_HEAD_REV" 1 \
+    "SemVer: BREAK" "ACCEPTED BREAK" \
+    "exists only on this PR, not on the base branch at ${PR_BASE_REV}" \
+    "land the declaration on main in its own PR first" "::error title=SemVer break::"
+
+  # --- On the base and byte-identical on the head is accepted, and says so.
+  pr_merge "$MPM" -- "$MPM"
+  ci_enforce "declaration on base, unchanged by the PR" "$ONE" trusty-mpm "$PR_HEAD_REV" 0 \
+    "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
+    "is on the base branch at ${PR_BASE_REV}, and this PR leaves it unchanged" \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4"
+
+  # --- A declaration on the base that the PR edits fails, even when the edit
+  #     is exactly what would cover the break.
+  pr_merge "$MPM_SHORT" -- "$MPM"
+  ci_enforce "declaration the PR modifies" "$ONE" trusty-mpm "$PR_HEAD_REV" 1 \
+    "SemVer: BREAK" "ACCEPTED BREAK" \
+    "this PR changes scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt" \
+    "land the declaration on main in its own PR first" "::error title=SemVer break::"
+
+  # --- No PR (tag push, workflow_dispatch): the checked-out commit is on main
+  #     and holds the declaration, so it is accepted.
+  set_decls "$MPM"
+  agit update-ref refs/remotes/origin/main HEAD
+  ci_enforce "no PR context, on main" "$ONE" trusty-mpm - 0 \
+    "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
+    "no pull request context — the declaration is read from the checked-out" \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4"
+
+  # --- No PR, but the checked-out commit is not on main (a dispatch on a PR
+  #     branch): the same declaration fails.
+  agit update-ref refs/remotes/origin/main HEAD~1
+  ci_enforce "no PR context, not on main" "$ONE" trusty-mpm - 1 \
+    "SemVer: BREAK" "ACCEPTED BREAK" \
+    "only once that commit is on refs/remotes/origin/main" "::error title=SemVer break::"
 fi
 rm -rf "$ACC"
 

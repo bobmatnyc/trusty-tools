@@ -331,6 +331,12 @@ jobs:
       # library also requires the checked-out copy to equal that blob, so a base
       # branch that changed the file fails closed. Tag and dispatch runs use
       # github.sha, which is HEAD there.
+      #
+      # A PR cannot accept its own break: the declaration must already be on
+      # the base, byte-identical. A PR run passes `--merge HEAD`, whose first
+      # parent is that base for fork and same-repo PRs alike, and which the
+      # script ties to this PR through its second parent. Any other run passes
+      # `--main`, and counts the declaration only once HEAD is on main.
       - name: Enforce public-API SemVer against crates.io
         id: enforce
         if: steps.crate.outputs.have_work == 'true'
@@ -338,6 +344,7 @@ jobs:
           SKIP_UI_BUILD: '1'
           CRATES: ${{ steps.crate.outputs.crates }}
           DECL_REV: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -uo pipefail
           # One `--crate` per selected crate: check_semver.sh accumulates them
@@ -360,8 +367,13 @@ jobs:
           inventoried="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]inventoried=([0-9]+).*/\1/p')"
 
           accepted=0
+          if [[ -n "${PR_HEAD:-}" ]]; then
+            decl_base=(--merge HEAD)
+          else
+            decl_base=(--main refs/remotes/origin/main)
+          fi
           if [[ "$rc" -eq 1 ]]; then
-            if bash scripts/semver_ci_accept.sh --rev "$DECL_REV" "$rc" "${RUNNER_TEMP}/gate.log" \
+            if bash scripts/semver_ci_accept.sh --rev "$DECL_REV" "${decl_base[@]}" "$rc" "${RUNNER_TEMP}/gate.log" \
                 > "${RUNNER_TEMP}/accept.log" 2>&1; then
               accepted=1
             fi

@@ -27,7 +27,16 @@
 #   PR check it is the PR head commit, not the merge commit the job checks out;
 #   the library still requires the working-tree copy to equal that blob.
 #
-# Usage: scripts/semver_ci_accept.sh [--rev <commit>] <gate-exit> <gate-log>
+#   A declaration counts only once it is on main (#8372), so a PR cannot accept
+#   its own break. --merge <commit> (a PR run) names the checked-out merge
+#   commit: its second parent must be --rev, and the declaration must already
+#   sit on its first parent — the base — with the same mode and blob as on
+#   --rev. --main <ref> (tag push, workflow_dispatch) requires --rev to be the
+#   checked-out commit and an ancestor of <ref>, so the file it holds is already
+#   on main. Exactly one of the two is required.
+#
+# Usage: scripts/semver_ci_accept.sh [--rev <commit>] (--merge <commit> | --main <ref>)
+#          <gate-exit> <gate-log>
 # Exit:  0 every break accepted; 1 the BREAK stands; 2 usage error.
 #
 # Test: scripts/check_semver_selftest.sh, the `ci-accept/` cases.
@@ -41,14 +50,27 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 # A full run: never the --check-only preview of an uncommitted working copy.
 CHECK_ONLY=0
 
-rev="HEAD"
-if [ "${1:-}" = "--rev" ]; then
-  rev="${2:-}"
-  shift 2 || true
-fi
-if [ "$#" -ne 2 ] || [ -z "$rev" ]; then
-  echo "usage: semver_ci_accept.sh [--rev <commit>] <gate-exit> <gate-log>" >&2
+usage() {
+  echo "usage: semver_ci_accept.sh [--rev <commit>] (--merge <commit> | --main <ref>) <gate-exit> <gate-log>" >&2
   exit 2
+}
+rev="HEAD"
+merge=""
+main_ref=""
+while [ "$#" -gt 2 ]; do
+  case "$1" in
+    --rev) rev="$2" ;;
+    --merge) merge="$2" ;;
+    --main) main_ref="$2" ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+# Exactly one context: a PR run names its merge commit, any other run the
+# branch its checkout must already be on. Neither, or both, decides nothing.
+if [ "$#" -ne 2 ] || [ -z "$rev" ] || { [ -z "$merge" ] && [ -z "$main_ref" ]; } \
+  || { [ -n "$merge" ] && [ -n "$main_ref" ]; }; then
+  usage
 fi
 gate_rc="$1"
 gate_log="$2"
@@ -63,6 +85,36 @@ if ! SEMVER_ACCEPT_REV="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "${rev}
   echo "[FAIL] semver: --rev '${rev}' is not a commit in this checkout, so no" >&2
   echo "       declaration can be read. The BREAK stands." >&2
   exit 1
+fi
+
+# The base the declaration must already be on (#8372). A PR run: the merge
+# commit's first parent, which is the base-branch commit this checkout merges
+# into — the event's base.sha is a snapshot that can lag it (#4688). Its second
+# parent must be --rev, the PR head, or this is not that PR's merge. Any other
+# run: the checked-out commit itself, which must already be on --main.
+base=""
+if [ -n "$merge" ]; then
+  parents="$(git -C "$REPO_ROOT" rev-list --parents -n 1 "${merge}^{commit}" -- 2> /dev/null)"
+  read -r _ p1 p2 extra <<< "$parents"
+  if [ -z "${p2:-}" ] || [ -n "${extra:-}" ] || [ "$p2" != "$SEMVER_ACCEPT_REV" ]; then
+    echo "[FAIL] semver: --merge '${merge}' is not a two-parent merge whose second parent is the" >&2
+    echo "       PR head ${SEMVER_ACCEPT_REV}, so the base branch a declaration must already" >&2
+    echo "       be on is unknown. The BREAK stands." >&2
+    exit 1
+  fi
+  base="$p1"
+else
+  checked_out="$(git -C "$REPO_ROOT" rev-parse --verify --quiet 'HEAD^{commit}')"
+  if [ "$SEMVER_ACCEPT_REV" != "$checked_out" ] \
+    || ! git -C "$REPO_ROOT" merge-base --is-ancestor "$SEMVER_ACCEPT_REV" "$main_ref" 2> /dev/null; then
+    echo "[FAIL] semver: with no pull request, a declaration counts only at the checked-out" >&2
+    echo "       commit, and only once that commit is on ${main_ref}. --rev ${SEMVER_ACCEPT_REV}" >&2
+    echo "       is not both, so this run could accept a declaration main never reviewed." >&2
+    echo "       The BREAK stands." >&2
+    exit 1
+  fi
+  echo "semver_ci_accept: no pull request context — the declaration is read from the checked-out" >&2
+  echo "       commit ${SEMVER_ACCEPT_REV}, which is already on ${main_ref}." >&2
 fi
 
 if [ "$gate_rc" != "1" ]; then
@@ -133,6 +185,25 @@ while IFS= read -r pkg <&3; do
     echo "       does not exist at ${SEMVER_ACCEPT_REV}. The BREAK stands." >&2
     refused=1
     continue
+  fi
+  # #8372: a PR cannot accept its own break. Same mode and blob on the base as
+  # on the head, or nothing is accepted.
+  if [ -n "$base" ]; then
+    at_base="$(git -C "$REPO_ROOT" ls-tree "$base" -- "$rel" 2> /dev/null)"
+    if [ -z "$at_base" ]; then
+      echo "[FAIL] semver: ${pkg} ${version} breaks its public API, and ${rel}" >&2
+      echo "       exists only on this PR, not on the base branch at ${base}. A PR cannot" >&2
+      echo "       accept its own break: land the declaration on main in its own PR first." >&2
+      refused=1
+      continue
+    elif [ "$at_base" != "$(git -C "$REPO_ROOT" ls-tree "$SEMVER_ACCEPT_REV" -- "$rel" 2> /dev/null)" ]; then
+      echo "[FAIL] semver: ${pkg} ${version} breaks its public API, and this PR changes ${rel}" >&2
+      echo "       from the copy on the base branch at ${base}. A PR cannot rewrite the" >&2
+      echo "       declaration that accepts its break: land the declaration on main in its own PR first." >&2
+      refused=1
+      continue
+    fi
+    echo "semver_ci_accept: ${rel} is on the base branch at ${base}, and this PR leaves it unchanged." >&2
   fi
   # This crate's own run: its CHECK line through its FAIL line. The library
   # refuses a section holding any other crate's CHECK or lint summary.
