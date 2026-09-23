@@ -227,3 +227,19 @@ fn remedy_quotes_a_path_with_a_space() {
     );
     assert_eq!(shell_quote(Path::new("/it's")), "'/it'\\''s'");
 }
+
+/// #8415 owner rule: a test build never reads the operator's real
+/// `~/Library/LaunchAgents`, even through `run_doctor`.
+#[test]
+fn test_builds_never_read_the_real_launch_agents() {
+    let real = PathBuf::from("/Users/operator");
+    let redirected = launch_agents_home(&real);
+    assert_ne!(redirected, real);
+    assert!(
+        redirected.starts_with(std::env::temp_dir()),
+        "{redirected:?}"
+    );
+    let row = check_launchd_process_type(&redirected);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(row.message.contains("no tm LaunchAgent"), "{}", row.message);
+}

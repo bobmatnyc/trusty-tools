@@ -220,6 +220,22 @@ pub(crate) fn build_process_type_check(readings: &[PlistReading]) -> DoctorCheck
     DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, message)
 }
 
+/// The home whose `Library/LaunchAgents` [`check_launchd_process_type`] reads.
+///
+/// Why (#8415, owner rule 2026-09-23): no test may read the operator's real
+/// `~/Library/LaunchAgents`. Every `run_doctor` unit test would otherwise read
+/// it through this row, so a test build points the row at an empty temp path.
+/// What: `home` in a normal build; `<temp>/tm-doctor-test-no-launch-agents`
+/// under `cfg(test)`.
+/// Test: `test_builds_never_read_the_real_launch_agents`.
+pub(crate) fn launch_agents_home(home: &Path) -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join("tm-doctor-test-no-launch-agents")
+    } else {
+        home.to_path_buf()
+    }
+}
+
 /// Read the tmux-hosting tm plists under `home` and build the row.
 ///
 /// Why: `home` is a parameter so tests read a temp directory, never the real
