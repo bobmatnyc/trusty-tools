@@ -16,7 +16,8 @@
 //! Test: `pr_8431_a_missing_convention_label_is_created_and_the_create_retried`,
 //! `pr_8431_a_label_that_cannot_be_created_is_dropped_with_a_warning`,
 //! `pr_8431_other_create_failures_still_fail`,
-//! `pr_8431_a_missing_workstream_label_still_fails_loudly`.
+//! `pr_8431_a_missing_workstream_label_still_fails_loudly`,
+//! `pr_8431_a_label_created_concurrently_counts_as_seeded`.
 
 use trusty_mpm::core::policy_labels;
 
@@ -87,12 +88,28 @@ pub(crate) fn create<R: GhRunner>(
 }
 
 /// Create the convention label, without `--force`; true when it now exists.
+///
+/// Why: between the missing-label refusal and this create, another process
+/// (a concurrent `tm pr open`, or GitHub's own read-after-write lag) can
+/// create the same label first — a real race, not a hypothetical one. `gh
+/// label create` then reports "already exists" and exits non-zero, but the
+/// label the retry needs is there either way.
+/// What: a failing run whose stderr names the label already existing counts
+/// as success, same as a run that created it, so the retry proceeds.
+/// Test: `pr_8431_a_label_created_concurrently_counts_as_seeded`.
 fn seed_convention_label<R: GhRunner>(gh: &R, repo: Option<&str>) -> bool {
     let argv = policy_labels::create_label_argv(&policy_labels::convention_label(), repo, false);
     match gh.run(&argv) {
         Ok(run) if run.success => {
             eprintln!(
                 "  note: created the missing `{}` label",
+                policy_labels::CONVENTION_LABEL
+            );
+            true
+        }
+        Ok(run) if label_already_exists(&run.stderr) => {
+            eprintln!(
+                "  note: the `{}` label already exists (created concurrently)",
                 policy_labels::CONVENTION_LABEL
             );
             true
@@ -113,6 +130,14 @@ fn seed_convention_label<R: GhRunner>(gh: &R, repo: Option<&str>) -> bool {
             false
         }
     }
+}
+
+/// True when `gh label create`'s stderr says the label already exists — a
+/// race (a concurrent creator, or read-after-write lag), not a real failure.
+///
+/// Test: `pr_8431_a_label_created_concurrently_counts_as_seeded`.
+fn label_already_exists(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("already exists")
 }
 
 /// Remove the `--label <name>` pair from a `gh pr create` argv.

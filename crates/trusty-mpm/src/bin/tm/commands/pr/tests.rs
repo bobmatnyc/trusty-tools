@@ -3242,3 +3242,34 @@ fn pr_8431_a_missing_workstream_label_still_fails_loudly() {
         .count();
     assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
 }
+
+/// Review follow-up on #8431: `gh label create` losing a race — another
+/// process (or GitHub's own read-after-write lag) created the convention
+/// label first — reports "already exists" and a non-zero exit, but the
+/// label the retry needs is there either way, so the retry still proceeds.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_label_created_concurrently_counts_as_seeded() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        (
+            "label create trusty-mpm",
+            false,
+            "",
+            "HTTP 422: Label \"trusty-mpm\" already exists",
+        ),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let seen = gh.seen();
+    let creates: Vec<&String> = seen.iter().filter(|c| c.starts_with("pr create")).collect();
+    assert_eq!(creates.len(), 2, "{seen:?}");
+    assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
+}
