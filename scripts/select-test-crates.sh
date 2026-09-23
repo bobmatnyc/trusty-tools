@@ -122,9 +122,14 @@
 #
 # Exit: 0 for every well-formed invocation, including every detection
 #   failure covered by FAIL OPEN above (a bad `--range`, missing value on
-#   `--range`, unresolvable ref, a diff base that is not one commit — `a^!`
-#   resolves to `a^`, `a^-` does not resolve — missing `cargo`/`jq`, bash <4
-#   — see below).
+#   `--range`, unresolvable ref, a diff base that is not one commit, `a^!` on
+#   a merge commit, missing `cargo`/`jq`, bash <4 — see below). `a^!` on a
+#   single-parent commit diffs from `a^`; on a merge commit git prints a
+#   combined diff, which omits a change one parent already carried, so it
+#   fails open; `a^-` does not resolve to one commit and fails open.
+#   Exit 3 when a fail-open path cannot name a single crate (bash <4 with no
+#   crate found, no temp dir, an empty fallback scan): empty output would read
+#   as "nothing to test" and turn the plan green.
 #   A malformed CLI invocation — an argument this parser does not recognize
 #   at all — exits 2 with a usage message on stderr; that scope exclusion is
 #   deliberate (#7777 review) so a real usage typo stays visible to a human
@@ -232,8 +237,8 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
     fi
   fi
   if [ -z "$BASH32_NAMES" ]; then
-    echo "select-test-crates: WARNING: could not determine any crate names under bash <4 — no output produced" >&2
-    exit 0
+    echo "select-test-crates: ERROR: could not determine any crate names under bash <4 — no output produced" >&2
+    exit 3
   fi
   if [ "$CARGO_ARGS_MODE" = "1" ]; then
     BASH32_ARGS=""
@@ -250,8 +255,8 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
 fi
 
 TMPDIR_SELF="$(mktemp -d 2>/dev/null)" || {
-  echo "select-test-crates: WARNING: cannot create a temp dir — no output produced" >&2
-  exit 0
+  echo "select-test-crates: ERROR: cannot create a temp dir — no output produced" >&2
+  exit 3
 }
 trap 'rm -rf "${TMPDIR_SELF}"' EXIT
 
@@ -334,7 +339,8 @@ emit_output() {
   fi
 }
 
-# fail_open <reason> — warn, print every crate we can still name, exit 0.
+# fail_open <reason> — warn, print every crate we can still name, exit 0; exit
+# 3 when it can name none.
 #
 # #7777: try cargo metadata first; the shallow scan misses nested members (trusty-agents-ui)
 fail_open() {
@@ -361,6 +367,10 @@ fail_open() {
       done < <(fallback_all_crates)
     fi
   fi
+  if [ ${#crates[@]} -eq 0 ]; then
+    echo "select-test-crates: ERROR: fail-open found no crate to print — no output produced" >&2
+    exit 3
+  fi
   emit_output "${crates[@]}"
   exit 0
 }
@@ -383,6 +393,15 @@ case "$MODE" in
     ;;
   range)
     [ -n "$RANGE_SPEC" ] || fail_open "no range given"
+    case "$RANGE_SPEC" in
+      *^!)
+        # #7777 review round 3: a merge's `^!` is a combined diff, which drops
+        # a change one parent already carried
+        merge_parents="$(git rev-list --parents -n 1 "${RANGE_SPEC%^!}" 2>/dev/null | wc -w)"
+        [ "${merge_parents:-0}" -le 2 ] ||
+          fail_open "'${RANGE_SPEC}' names a merge commit, whose ^! is a combined diff"
+        ;;
+    esac
     if ! git diff -z --name-only --no-renames "$RANGE_SPEC" 2>/dev/null |
       tr '\0' '\n' >"${CHANGED_FILE}"; then
       fail_open "git diff over range '${RANGE_SPEC}' failed"
@@ -392,8 +411,8 @@ esac
 
 # The diff's old side, for rule 4's existence check: a script deleted or
 # renamed in the change set is absent on disk but still named by crates.
-# `a...b` diffs from merge-base(a, b); `a^!` from `a^`; `a..b` and a lone `a`
-# diff from `a`.
+# `a...b` diffs from merge-base(a, b); `a^!` (single-parent only — a merge
+# failed open above) from `a^`; `a..b` and a lone `a` diff from `a`.
 DIFF_BASE=""
 case "$MODE" in
   staged) DIFF_BASE="HEAD" ;;

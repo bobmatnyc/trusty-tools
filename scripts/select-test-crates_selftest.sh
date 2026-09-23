@@ -195,6 +195,17 @@ echo "fixture: --cargo-args mode"
 assert_eq "isolated --cargo-args -> -p isolated" \
   "-p isolated" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --files crates/isolated/src/lib.rs --cargo-args 2>/dev/null)"
 
+# #7777 review round 3: before the first commit HEAD is unborn, so --staged
+# has no diff base and fails open. The exclude list hides every root input and
+# crate so the untracked set is one docs file, which alone would select nothing.
+echo "fixture: --staged before the first commit fails open"
+printf '/*\n!/docs/\n' >"${FIXTURE}/.git/info/exclude"
+mkdir -p "${FIXTURE}/docs" && echo probe >"${FIXTURE}/docs/staged-probe.md"
+assert_eq "--staged with an unborn HEAD (docs-only untracked set) -> all crates" \
+  "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --staged 2>/dev/null)"
+rm -rf "${FIXTURE}/docs"
+: >"${FIXTURE}/.git/info/exclude"
+
 echo "fixture: --staged mode sees an untracked file"
 (cd "${FIXTURE}" && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1)
 (cd "${FIXTURE}" && mkdir -p crates/top/src && echo 'pub fn y() {}' >crates/top/src/extra.rs)
@@ -506,6 +517,35 @@ trusty-console
 trusty-mpm
 trusty-mpm-gui
 trusty-search" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^-" 2>/dev/null)"
+# #7777 review round 3: a merge commit's `^!` is a combined diff, which omits
+# a change one parent already carried. Evil merge: the first parent deletes
+# check_changelog_fragment.sh (named by trusty-mpm), the merge itself adds
+# zz-evil.md. Both merges fail open.
+SR_ALL="bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search"
+srr git checkout -q "${SRR_BASE}"
+srr git rm -q scripts/check_changelog_fragment.sh
+srr git commit -qm "first parent: delete check_changelog_fragment.sh"
+SRR_P1="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_BASE}"
+srr sh -c 'echo side >side.md && git add side.md && git commit -qm "second parent: side.md"'
+SRR_P2="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_P1}"
+srr git merge -q --no-ff --no-commit "${SRR_P2}"
+srr sh -c 'echo evil >zz-evil.md && git add zz-evil.md && git commit -qm "evil merge"'
+SRR_EVIL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range <evil-merge>^! -> all crates, never empty" \
+  "${SR_ALL}" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_EVIL}^!" 2>/dev/null)"
+srr git checkout -q "${SRR_P1}"
+srr git merge -q --no-ff -m "clean merge" "${SRR_P2}"
+SRR_CLEAN="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range <clean-merge>^! -> all crates" \
+  "${SR_ALL}" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_CLEAN}^!" 2>/dev/null)"
 
 # The literal scan needs git; outside a repo it must fail open, never answer
 # "no reference". Asserted on a path that answers `trusty-mpm` when git works.
@@ -519,6 +559,26 @@ trusty-console
 trusty-mpm
 trusty-mpm-gui
 trusty-search" "$(cd "${SR_NOGIT}" && bash "${SCRIPT}" --files scripts/check_changelog_fragment.sh 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# #7777 review round 3: a fail-open that can name no crate used to exit 0 with
+# empty stdout, which ci-affected-test-plan.sh reads as count=0 and a green
+# check. Each such arm exits 3. EMPTY_DIR has no workspace and no git repo, so
+# neither cargo metadata nor the crates/*/Cargo.toml fallback finds a crate.
+# ---------------------------------------------------------------------------
+echo "fixture: a fail-open that can name no crate exits 3"
+EMPTY_DIR="${WORK}/empty"
+mkdir -p "${EMPTY_DIR}"
+(cd "${EMPTY_DIR}" && bash "${SCRIPT}" --files >/dev/null 2>&1)
+assert_eq "fail-open with an empty fallback scan -> exit 3" "3" "$?"
+# A failing mktemp stub, not a TMPDIR under a regular file: macOS
+# /usr/bin/mktemp -d ignores TMPDIR when given no template.
+MKTEMP_STUB_DIR="${WORK}/stub-mktemp"
+mkdir -p "${MKTEMP_STUB_DIR}"
+printf '#!/usr/bin/env bash\nexit 1\n' >"${MKTEMP_STUB_DIR}/mktemp"
+chmod +x "${MKTEMP_STUB_DIR}/mktemp"
+(cd "${FIXTURE}" && PATH="${MKTEMP_STUB_DIR}:${PATH}" bash "${SCRIPT}" --files crates/isolated/src/lib.rs >/dev/null 2>&1)
+assert_eq "mktemp -d failure -> exit 3" "3" "$?"
 
 # ---------------------------------------------------------------------------
 # bash 3.2 path (#7777 review, finding 2): macOS ships bash 3.2.57 as
@@ -549,6 +609,8 @@ if [ -n "${LEGACY_MAJOR}" ] && [ "${LEGACY_MAJOR}" -lt 4 ] 2>/dev/null; then
       fail "bash <4 stderr warning missing"
       ;;
   esac
+  (cd "${EMPTY_DIR}" && "${LEGACY_BASH}" "${SCRIPT}" --files x >/dev/null 2>&1)
+  assert_eq "bash <4 with no crate to name -> exit 3" "3" "$?"
 else
   echo "  skip: /bin/bash on this host is not pre-4 — nothing to guard here (macOS repro in #7777 review)"
 fi
