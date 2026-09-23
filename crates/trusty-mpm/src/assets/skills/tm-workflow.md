@@ -405,6 +405,17 @@ file-mutating agent, wait for it, dispatch the next. Serializing is always
 available and always correct. Hand-rolling a worktree in order to parallelize
 anyway is what this rule forbids.
 
+**A brief that needs a named branch names the BRANCH, never a second worktree
+(#8337).** An isolated agent that runs `git worktree add` for a ticket-named
+path gets the tree, then every Edit, `git -C`, `--git-dir` and removal against
+it is refused: Claude Code pins the agent to its assigned worktree, and no
+`tm` hook can move that pin. The sanctioned pattern: the agent stays in its
+assigned worktree and creates the target-convention local branch there,
+tracking the remote branch (`git checkout -b DE-2854 --track origin/DE-2854`),
+then pushes it. When the repository needs the directory itself to carry the
+ticket name, the PM creates that worktree before dispatch and serializes the
+work into it; the agent never creates it.
+
 The dispatch still forbids leaving the assigned tree into the main checkout, and
 forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
 
