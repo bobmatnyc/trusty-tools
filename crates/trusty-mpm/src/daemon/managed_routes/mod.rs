@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
+use crate::session_manager::decommission_force::ProvisioningDirt;
 
 pub mod activity;
 pub(crate) mod auto_relaunch;
@@ -354,6 +355,12 @@ pub struct DecommissionResponse {
     /// Used by the CLI to locate the base git repo and run `git worktree prune`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path_was: Option<String>,
+    /// #7660: why a workspace decommission could have removed was kept — the
+    /// dirty-tree guard, the containment guard, or a failed removal. Absent
+    /// when it was removed, already gone, or never tm's to remove. The CLI
+    /// exits non-zero when this is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_reason: Option<String>,
 }
 
 /// Query parameters for POST /api/v1/sessions/managed/{id}/delete (#2012).
@@ -659,6 +666,10 @@ pub async fn resume_managed_session(
 pub struct DecommissionQuery {
     #[serde(default)]
     pub record_only: bool,
+    /// #7660: `--force` — excuse tm's own provisioning files in the dirty-tree
+    /// guard. Never excuses other changes or unpushed commits.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
@@ -680,7 +691,16 @@ pub async fn decommission_managed_session(
     AxumPath(id_str): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<DecommissionQuery>,
 ) -> impl IntoResponse {
-    cores::decommission_core(&state, &id_str, q.record_only).await // #6288
+    cores::decommission_core(&state, &id_str, q.record_only, dirt_policy(q.force)).await // #6288
+}
+
+/// Map the wire's `force` flag onto the decommission dirt policy (#7660).
+pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
+    if force {
+        ProvisioningDirt::Discard
+    } else {
+        ProvisioningDirt::Refuse
+    }
 }
 
 #[cfg(test)]

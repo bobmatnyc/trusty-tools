@@ -103,7 +103,7 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             TrustyCommand::ManagedRuntimeStop { target: id.clone() }
         }
         SessionAction::ManagedResume { id } => TrustyCommand::ManagedResume { target: id.clone() },
-        SessionAction::Decommission { id } => {
+        SessionAction::Decommission { id, .. } => {
             TrustyCommand::ManagedDecommission { target: id.clone() }
         }
         // Every other variant is project-session / TUI / prune; not routed here.
@@ -442,7 +442,10 @@ mod tests {
             Some(TrustyCommand::ManagedResume { .. })
         ));
         assert!(matches!(
-            to_command(&SessionAction::Decommission { id: "x".into() }),
+            to_command(&SessionAction::Decommission {
+                id: "x".into(),
+                force: false,
+            }),
             Some(TrustyCommand::ManagedDecommission { .. })
         ));
         assert!(matches!(

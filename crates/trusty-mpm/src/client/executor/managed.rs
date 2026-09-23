@@ -368,7 +368,39 @@ impl CommandExecutor {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedDecommissionOutcome> {
-        let outcome = self.client().decommission_managed_session(id).await?;
+        self.decommission_managed_id_with(id, false).await
+    }
+
+    /// Resolve `target` and decommission it, honouring `--force` (#7660).
+    ///
+    /// Why: `tm session decommission` has to see the daemon's kept-workspace
+    /// reason to exit non-zero, which [`CommandResult`] does not carry.
+    /// What: the fuzzy resolution [`Self::managed_decommission`] does, then
+    /// [`Self::decommission_managed_id_with`]; the outcome is returned whole.
+    /// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+    pub async fn decommission_managed_target(
+        &self,
+        target: &str,
+        force: bool,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        let id = match self.resolve_managed(target).await {
+            Ok(s) => s.id,
+            Err(CommandResult::Error(msg)) => anyhow::bail!("{msg}"),
+            Err(other) => anyhow::bail!("could not resolve {target}: {other:?}"),
+        };
+        self.decommission_managed_id_with(&id, force).await
+    }
+
+    /// [`Self::decommission_managed_id`] with the `--force` flag (#7660).
+    pub async fn decommission_managed_id_with(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        let outcome = self
+            .client()
+            .decommission_managed_session_with(id, force)
+            .await?;
         if !outcome.unrecognized.is_empty() {
             tracing::debug!(
                 fields = ?outcome.unrecognized.keys().collect::<Vec<_>>(),

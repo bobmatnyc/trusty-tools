@@ -322,8 +322,24 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        self.decommission_managed_session_with(id, false).await
+    }
+
+    /// [`decommission_managed_session`](Self::decommission_managed_session),
+    /// with `force` sent as `?force=true` (#7660).
+    ///
+    /// Test: `force_decommission_removes_a_provisioning_only_worktree`.
+    pub async fn decommission_managed_session_with(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
         let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
-        let resp = self.http.post(&url).send().await?;
+        let mut req = self.http.post(&url);
+        if force {
+            req = req.query(&[("force", "true")]);
+        }
+        let resp = req.send().await?;
         // #5913: name the 404 here, once. `prune.rs`'s sweep records the resulting
         // `Err` as a failed row (#2457), and that fail-closed behaviour must not
         // depend on which entry point issued the request.

@@ -908,6 +908,19 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
 /// before #5913, so it never once exercised a 404. A well-formed id absent from
 /// the store is the real 404, and the friendly message proves the mapping (not
 /// `error_for_status`'s generic status text) produced it.
+/// #7660 error arm: a kept workspace turns the decommission into an error
+/// that names the blocker; a removed or never-removable one does not.
+#[test]
+fn session_decommission_exits_non_zero_when_the_workspace_is_kept() {
+    let err = super::decommission_kept_error(Some("the dirty-tree guard kept it"))
+        .expect("a kept workspace must fail the command");
+    assert!(
+        err.to_string().contains("the dirty-tree guard kept it"),
+        "{err}"
+    );
+    assert!(super::decommission_kept_error(None).is_none());
+}
+
 #[tokio::test]
 async fn session_decommission_not_found_errors() {
     let url = spawn_test_daemon().await;

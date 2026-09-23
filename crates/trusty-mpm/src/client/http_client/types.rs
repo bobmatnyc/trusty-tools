@@ -684,6 +684,10 @@ pub struct ManagedDecommissionOutcome {
     /// `git worktree prune`; `None` for adopted/local-path sessions.
     #[serde(default)]
     pub workspace_path_was: Option<String>,
+    /// #7660: why the daemon kept a workspace it could have removed. `Some`
+    /// means the decommission declined, and the CLI exits non-zero.
+    #[serde(default)]
+    pub workspace_kept_reason: Option<String>,
     /// Every response key this client does not model yet.
     ///
     /// Why: an unmodelled key is the exact shape of #5899 — the daemon sends

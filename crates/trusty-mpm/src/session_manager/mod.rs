@@ -11,6 +11,8 @@
 pub mod adopt;
 pub mod create;
 pub mod decommission;
+// #7660: the in-project removal step, `--force` policy and kept reason.
+pub mod decommission_force;
 pub mod dedup;
 pub mod delete;
 pub mod driver;

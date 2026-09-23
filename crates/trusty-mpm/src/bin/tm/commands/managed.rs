@@ -594,6 +594,41 @@ pub(crate) async fn session_decommission(
     Ok(())
 }
 
+/// `tm session decommission <id> [--force]` — resolve, tear down, and fail
+/// when the workspace is kept (#7660).
+///
+/// Why: decommission exited 0 while leaving a workspace on disk, so scripted
+/// cleanup read success; and it never said what blocked the removal.
+/// What: resolves `target` like every managed verb, sends `force`, prints
+/// [`decommission_message`], and returns [`decommission_kept_error`] when the
+/// daemon reports a kept-workspace reason.
+/// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+pub(crate) async fn session_decommission_routed(
+    client: &reqwest::Client,
+    url: &str,
+    target: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let outcome = super::managed_route::executor(client, url)
+        .decommission_managed_target(target, force)
+        .await?;
+    println!(
+        "{}",
+        decommission_message(&outcome.summary.id, outcome.workspace_removed)
+    );
+    match decommission_kept_error(outcome.workspace_kept_reason.as_deref()) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// The error a kept workspace turns into, or `None` (#7660).
+///
+/// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+pub(crate) fn decommission_kept_error(reason: Option<&str>) -> Option<anyhow::Error> {
+    reason.map(|r| anyhow::anyhow!("workspace NOT removed: {r}"))
+}
+
 // #2012: `tm session delete` lives in the sibling `commands::delete` module —
 // this file is at the 500-SLOC production cap, mirroring the pattern used to
 // keep `session_manager`'s files under the same cap (`adopt.rs`/`decommission.rs`/
