@@ -52,12 +52,11 @@ use super::registry::ManagedRegistry;
 /// returns false immediately and an inherited `CLAUDE_CODE_CHILD_SESSION` always
 /// wins.
 ///
-/// Issues #6495/#7160: also provisions the classic-renderer and mouse-capture
-/// defaults via [`crate::core::alt_screen::apply_default_to_command`] —
-/// `tm run` is an interactive session, the fullscreen renderer costs it
-/// terminal scrollback, and Claude Code sets tmux's per-pane `mouse_any_flag`
-/// even under the classic renderer. Nothing is set for a variable the
-/// launching shell already exports; the two are decided independently.
+/// Issues #6495/#7160/#8405: also provisions the renderer and mouse-capture
+/// defaults via [`crate::core::alt_screen::apply_configured_to_command`]. The
+/// renderer is the one config `tmux.alternate_screen` decides (`true` → `=0`,
+/// `false` → `=1`), assigned whatever the launching shell exports; the
+/// mouse-capture default still yields to an exported value.
 ///
 /// Issue #7422: `mcp_config` names the composed, default-deny MCP file, and
 /// `--mcp-config <it>` is appended only when it is `Some` (#7892: never
@@ -73,13 +72,14 @@ use super::registry::ManagedRegistry;
 /// `test_build_launch_command_no_bare_without_api_key`,
 /// `test_build_launch_command_includes_bypass_permissions`,
 /// `test_build_launch_command_scrubs_inherited_session_markers`,
-/// `test_build_launch_command_defaults_the_alternate_screen_off`,
+/// `test_build_launch_command_assigns_the_configured_renderer`,
 /// `test_build_launch_command_defaults_the_mouse_capture_off`.
 pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
     api_key: Option<&str>,
     mcp_config: Option<&Path>,
+    alternate_screen: bool,
 ) -> Command {
     let mut cmd = Command::new("claude");
     cmd.current_dir(repo_path);
@@ -91,9 +91,8 @@ pub fn build_launch_command(
     // on the tmux server's global env. Runs before the `CLAUDE_CONFIG_DIR`
     // assignment below so the deliberate value always wins (#4455).
     crate::core::claude_env_scrub::scrub_command(&mut cmd);
-    // #6495: start on Claude Code's classic renderer so the terminal keeps its
-    // scrollback; a value this shell already exports wins.
-    crate::core::alt_screen::apply_default_to_command(&mut cmd);
+    // #6495/#8405: the config-decided renderer, whatever this shell exports.
+    crate::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -254,6 +253,9 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         claude_config_dir,
         api_key.as_deref(),
         Some(&mcp_config),
+        // #8405: config decides the renderer; an unreadable config warns and
+        // falls back with the tmux option.
+        crate::core::alt_screen::configured_alternate_screen(),
     );
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
@@ -304,7 +306,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
         let composed = tmp.path().join("state").join("session-mcp").join("ab.json");
 
-        let cmd = build_launch_command(&repo, &cfg, None, Some(&composed));
+        let cmd = build_launch_command(&repo, &cfg, None, Some(&composed), false);
 
         let args: Vec<String> = cmd
             .get_args()
@@ -335,6 +337,7 @@ mod tests {
             &tmp.path().join("claude-config"),
             None,
             None,
+            false,
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -354,7 +357,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, None, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None, false);
 
         // Verify program is "claude".
         assert_eq!(cmd.get_program(), "claude");
@@ -383,7 +386,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None);
+        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None, false);
 
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
@@ -400,7 +403,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // None key → no --bare
-        let cmd = build_launch_command(&repo, &cfg, None, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None, false);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             !args.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -408,7 +411,7 @@ mod tests {
         );
 
         // Empty key → no --bare (treated same as None)
-        let cmd2 = build_launch_command(&repo, &cfg, Some(""), None);
+        let cmd2 = build_launch_command(&repo, &cfg, Some(""), None, false);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             !args2.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -416,7 +419,7 @@ mod tests {
         );
 
         // Whitespace-only key → no --bare
-        let cmd3 = build_launch_command(&repo, &cfg, Some("   "), None);
+        let cmd3 = build_launch_command(&repo, &cfg, Some("   "), None, false);
         let args3: Vec<_> = cmd3.get_args().collect();
         assert!(
             !args3.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -433,7 +436,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // Without API key.
-        let cmd = build_launch_command(&repo, &cfg, None, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None, false);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             args.iter()
@@ -442,7 +445,7 @@ mod tests {
         );
 
         // With API key (--bare should co-exist with bypass flag).
-        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None);
+        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None, false);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             args2
@@ -466,7 +469,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
-        let cmd = build_launch_command(&repo, &cfg, None, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None, false);
 
         let envs: Vec<(String, Option<String>)> = cmd
             .get_envs()
@@ -503,40 +506,36 @@ mod tests {
         );
     }
 
-    /// #6495: `tm run` is an interactive session with no tmux and no shell, so
-    /// it needs the classic-renderer default set on the `Command` — and it must
-    /// leave a value the launching shell already exports alone.
-    ///
-    /// The expectation is derived from the ambient environment, which is what
-    /// makes it deterministic in both directions: the rule under test IS
-    /// "override exactly when the launch carries no value". The precedence logic
-    /// itself is proven with injected lookups in `core::alt_screen`.
+    /// #8405: `tm run` assigns the renderer config decides, in both
+    /// directions, whatever the launching shell exports. At df212601d the
+    /// builder yielded to an exported value, so this fails there under any
+    /// ambient environment: one of the two directions disagrees with it.
     #[test]
-    fn test_build_launch_command_defaults_the_alternate_screen_off() {
-        use crate::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
+    fn test_build_launch_command_assigns_the_configured_renderer() {
+        use crate::core::alt_screen::ALT_SCREEN_ENV_VAR;
 
         let tmp = TempDir::new().unwrap();
-        let cmd = build_launch_command(
-            &tmp.path().join("repo"),
-            &tmp.path().join("cfg"),
-            None,
-            None,
-        );
-
-        let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
-        let provisioned = cmd.get_envs().any(|(k, v)| {
-            k == ALT_SCREEN_ENV_VAR
-                && v.is_some_and(|v| v == std::ffi::OsStr::new(ALT_SCREEN_DEFAULT))
-        });
-        assert_eq!(
-            provisioned, !carried_by_the_launch,
-            "tm run must provision {ALT_SCREEN_ENV_VAR}={ALT_SCREEN_DEFAULT} when the \
-             launch carries no value, and leave an operator value untouched when it does"
-        );
+        for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+            let cmd = build_launch_command(
+                &tmp.path().join("repo"),
+                &tmp.path().join("cfg"),
+                None,
+                None,
+                alternate_screen,
+            );
+            let carried = cmd
+                .get_envs()
+                .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+            assert_eq!(
+                carried.as_deref(),
+                Some(want),
+                "alternate_screen={alternate_screen}"
+            );
+        }
     }
 
-    /// #7160: the mouse-capture counterpart of
-    /// `test_build_launch_command_defaults_the_alternate_screen_off`.
+    /// #7160: the mouse-capture default still yields to an exported value.
     #[test]
     fn test_build_launch_command_defaults_the_mouse_capture_off() {
         use crate::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
@@ -547,6 +546,7 @@ mod tests {
             &tmp.path().join("cfg"),
             None,
             None,
+            false,
         );
 
         let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();

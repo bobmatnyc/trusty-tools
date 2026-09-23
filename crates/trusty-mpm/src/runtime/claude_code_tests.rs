@@ -1654,42 +1654,51 @@ fn spawn_carries_the_configured_fullscreen_renderer() {
     }
 }
 
-/// #8405 fail-open check: an unreadable config must fail the launch before
-/// anything is typed, never launch on the default while reporting success.
+/// #8405: an unreadable config never blocks a spawn or a restart. Both proceed,
+/// a warning names the file, and the renderer falls back to exactly what the
+/// tmux `alternate-screen` option gets from the same file — read here through
+/// `TrustyToolsConfig::load()`, the call `apply_scrollback_options` makes — so
+/// the two steps of one launch cannot disagree.
 #[test]
 #[serial_test::serial]
-fn spawn_fails_closed_on_an_unreadable_config() {
+fn spawn_falls_back_with_the_tmux_option_on_an_unreadable_config() {
+    use tracing_subscriber::layer::SubscriberExt;
     let home = HomeGuard::set();
     write_state_config(&home, "tmux:\n  alternate_screen: [broken\n");
-    let bin_dir = home.home().join("bin");
-    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
-    plant_fake_claude(&bin_dir);
-    let _path = PathGuard::prepend(&bin_dir);
-    let fake = FakeTmux::new();
-    let adapter =
-        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
-    let spawn_err = adapter
-        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
-        .expect_err("a malformed config must not report a successful spawn");
-    let resume_err = adapter
-        .spawn_resume(
-            "tm-sess",
-            None,
-            home.home(),
-            "task",
-            None,
-            TEST_SESSION_ID,
-            &[],
-        )
-        .expect_err("a malformed config must not report a successful restart");
-    for err in [spawn_err, resume_err] {
-        assert!(matches!(err, RuntimeError::Spawn(_)), "{err}");
-        assert!(err.to_string().contains("alternate_screen"), "{err}");
+    let tmux_option = crate::core::trusty_tools_config::resolve_tmux_options(
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+    )
+    .alternate_screen;
+    let want = crate::core::alt_screen::configured_env(tmux_option);
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let (spawned, resumed) = (FakeTmux::new(), FakeTmux::new());
+    tracing::subscriber::with_default(subscriber, || {
+        drive_spawn(&spawned, &home);
+        drive_resume(&resumed, &home, home.home(), None, None);
+    });
+
+    for spec in [
+        sent_spec(&only_line(&spawned)),
+        sent_spec(&only_line(&resumed)),
+    ] {
+        for pair in &want {
+            assert!(
+                spec.env_set.contains(pair),
+                "the renderer must match the tmux option's fallback {pair:?}: {:?}",
+                spec.env_set
+            );
+        }
     }
+    let logged = buffer.tail(256).join("\n");
+    let config = home.home().join(".trusty-tools/trusty-mpm/config.yaml");
     assert!(
-        fake.sends.lock().expect("send log").is_empty()
-            && fake.pane_sends.lock().expect("pane send log").is_empty(),
-        "nothing may be typed into the pane"
+        logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
+        "the warning must name the file: {logged}"
     );
 }
 

@@ -199,11 +199,14 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     );
 }
 
-/// #8405 fail-open check: an unreadable `config.yaml` fails `tm session start`
-/// with an error naming `tmux.alternate_screen`, before `prepare_session` or the
-/// daemon POST run, rather than launching on the default renderer.
+/// #8405: an unreadable `config.yaml` never blocks `tm session start`. The
+/// launch proceeds — `prepare_session` runs and the only error is the
+/// unreachable daemon — and a warning names the file. The renderer value it
+/// falls back to is pinned against the tmux option by
+/// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
 #[tokio::test]
-async fn session_start_in_place_fails_closed_on_an_unreadable_config() {
+async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config() {
+    use tracing_subscriber::layer::SubscriberExt;
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
     let target = tempfile::TempDir::new().expect("tmp target dir");
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -215,20 +218,40 @@ async fn session_start_in_place_fails_closed_on_an_unreadable_config() {
     )
     .expect("write config");
 
-    let err = start_session_in_place(
+    // #4931: WARN must pass the process-global level for a thread-local capture
+    // to see it; a bare registry admits every level.
+    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    assert!(tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN);
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let guard = tracing::subscriber::set_default(subscriber);
+    let result = start_session_in_place(
         &reqwest::Client::new(),
         UNREACHABLE_URL,
         target.path(),
         &fw,
         Some(tmp_home.path()),
     )
-    .await
-    .expect_err("a malformed config must fail the launch");
+    .await;
+    drop(guard);
 
-    assert!(err.to_string().contains("alternate_screen"), "{err}");
+    let err = result.expect_err("the unreachable daemon, not the config, ends this launch");
+    assert!(!err.to_string().contains("alternate_screen"), "{err}");
     assert!(
-        !target.path().join(".trusty-mpm").exists(),
-        "the config read must fail before any side effect"
+        target
+            .path()
+            .join(".trusty-mpm")
+            .join("last-instructions.md")
+            .exists(),
+        "the launch must proceed past the config read into prepare_session"
+    );
+    let logged = buffer.tail(256).join("\n");
+    let config = state.join("config.yaml");
+    assert!(
+        logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
+        "the warning must name the file: {logged}"
     );
 }
 

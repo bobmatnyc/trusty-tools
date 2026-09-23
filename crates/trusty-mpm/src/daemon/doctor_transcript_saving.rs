@@ -148,6 +148,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         &config_dir,
         None,
         None,
+        false,
     );
     let stream_cmd = crate::control::backend::stream_json::build_claude_command(
         std::path::Path::new("/probe"),

@@ -157,14 +157,10 @@ async fn start_session_in_place(
     home: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // #8405: config decides the renderer, read from the same named root as the
-    // rest of this launch; an unreadable config fails before any side effect.
+    // rest of this launch; an unreadable config warns and falls back with the
+    // tmux option instead of blocking the launch.
     let alternate_screen =
-        trusty_mpm::core::alt_screen::configured_alternate_screen_at(&fw.crate_config_root())
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "cannot resolve tmux.alternate_screen for this launch (#8405): {err}"
-                )
-            })?;
+        trusty_mpm::core::alt_screen::configured_alternate_screen_at(&fw.crate_config_root());
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain

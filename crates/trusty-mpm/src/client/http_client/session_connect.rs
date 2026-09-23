@@ -32,14 +32,9 @@ impl DaemonClient {
     /// exactly as the CLI does it.
     /// Test: `launch_session_errors_when_daemon_unreachable`.
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: config decides the renderer; an unreadable config fails the
-        // launch here, before any side effect, rather than launching on a default.
-        let alternate_screen =
-            crate::core::alt_screen::configured_alternate_screen().map_err(|err| {
-                anyhow::anyhow!(
-                    "cannot resolve tmux.alternate_screen for this launch (#8405): {err}"
-                )
-            })?;
+        // #8405: config decides the renderer; an unreadable config warns and
+        // falls back with the tmux option instead of blocking the launch.
+        let alternate_screen = crate::core::alt_screen::configured_alternate_screen();
         // Prepare the custom instructions Claude Code reads at startup: deploy
         // composed agents to `~/.claude/agents/` and merge the project
         // `CLAUDE.md`. Most prep failures are logged but not fatal (#2149) —
@@ -180,14 +175,9 @@ impl DaemonClient {
     /// not artifact deployment. Returns the daemon-assigned tmux session name.
     /// Test: `connect_session_errors_when_daemon_unreachable`.
     pub async fn connect_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: config decides the renderer; an unreadable config fails the
-        // launch here, before any side effect, rather than launching on a default.
-        let alternate_screen =
-            crate::core::alt_screen::configured_alternate_screen().map_err(|err| {
-                anyhow::anyhow!(
-                    "cannot resolve tmux.alternate_screen for this launch (#8405): {err}"
-                )
-            })?;
+        // #8405: config decides the renderer; an unreadable config warns and
+        // falls back with the tmux option instead of blocking the launch.
+        let alternate_screen = crate::core::alt_screen::configured_alternate_screen();
         #[derive(Deserialize)]
         struct Body {
             #[serde(default)]

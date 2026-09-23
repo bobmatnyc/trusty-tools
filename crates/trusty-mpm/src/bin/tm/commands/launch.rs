@@ -117,12 +117,9 @@ pub(crate) async fn launch(
     worktree: bool,
     launch_dir: super::managed_workspace::LaunchDir,
 ) -> anyhow::Result<()> {
-    // #8405: config decides the renderer; an unreadable config fails the
-    // launch here, before any side effect, rather than launching on a default.
-    let alternate_screen =
-        trusty_mpm::core::alt_screen::configured_alternate_screen().map_err(|err| {
-            anyhow::anyhow!("cannot resolve tmux.alternate_screen for this launch (#8405): {err}")
-        })?;
+    // #8405: config decides the renderer; an unreadable config warns and falls
+    // back with the tmux option instead of blocking the launch.
+    let alternate_screen = trusty_mpm::core::alt_screen::configured_alternate_screen();
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
@@ -496,12 +493,9 @@ pub(crate) async fn connect(
     url: &str,
     dir: Option<String>,
 ) -> anyhow::Result<()> {
-    // #8405: config decides the renderer; an unreadable config fails the
-    // launch here, before any side effect, rather than launching on a default.
-    let alternate_screen =
-        trusty_mpm::core::alt_screen::configured_alternate_screen().map_err(|err| {
-            anyhow::anyhow!("cannot resolve tmux.alternate_screen for this launch (#8405): {err}")
-        })?;
+    // #8405: config decides the renderer; an unreadable config warns and falls
+    // back with the tmux option instead of blocking the launch.
+    let alternate_screen = trusty_mpm::core::alt_screen::configured_alternate_screen();
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
     let path = path.canonicalize().unwrap_or(path);

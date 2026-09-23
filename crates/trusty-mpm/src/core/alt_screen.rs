@@ -61,9 +61,9 @@
 //! `inplace_session_command_defaults_the_mouse_capture_off`,
 //! `client_session_command_assigns_the_configured_renderer` /
 //! `client_session_command_defaults_the_mouse_capture_off`,
-//! `test_build_launch_command_defaults_the_alternate_screen_off` /
+//! `test_build_launch_command_assigns_the_configured_renderer` /
 //! `test_build_launch_command_defaults_the_mouse_capture_off`,
-//! `inplace_exec_command_defaults_the_alternate_screen_off` /
+//! `inplace_exec_command_assigns_the_configured_renderer` /
 //! `inplace_exec_command_defaults_the_mouse_capture_off`.
 
 /// The Claude Code variable that selects the classic (non-fullscreen) renderer.
@@ -135,21 +135,33 @@ pub fn configured_shell_assignments(alternate_screen: bool) -> String {
 /// (`~/.trusty-tools/trusty-mpm`) — the CLI launch paths' entry point (#8405).
 ///
 /// Why: the `tm` CLI launches run in the operator's home, not under a daemon
-/// framework root. An unresolvable home means no config file exists to read,
-/// the same answer [`trusty_common::crate_config::load`] gives.
-/// What: resolves the directory, then delegates; `Ok(false)`-by-default when the
-/// home is unknown.
-/// Test: covered via `configured_alternate_screen_reads_the_named_root`.
-pub fn configured_alternate_screen() -> Result<bool, trusty_common::crate_config::ConfigError> {
+/// framework root.
+/// What: resolves the directory and delegates. An unresolvable home means no
+/// config file exists, which resolves to the built-in default — the answer
+/// [`crate::core::trusty_tools_config::TrustyToolsConfig::load`] gives too.
+/// Test: `configured_alternate_screen_reads_the_named_root`,
+/// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
+pub fn configured_alternate_screen() -> bool {
     match trusty_common::crate_config::crate_config_dir(
         crate::core::trusty_tools_config::CRATE_NAME,
     ) {
         Some(root) => configured_alternate_screen_at(&root),
-        None => Ok(
-            crate::core::trusty_tools_config::resolve_tmux_options(&Default::default())
-                .alternate_screen,
-        ),
+        None => tmux_option_fallback(),
     }
+}
+
+/// The renderer a launch uses when its config cannot be read (#8405).
+///
+/// Why: the same launch applies the tmux `alternate-screen` option from
+/// [`crate::core::trusty_tools_config::TrustyToolsConfig::load`], which turns an
+/// unreadable file into `TrustyToolsConfig::default()`. The renderer must fall
+/// back to that same value, or tmux and `claude` disagree about the screen.
+/// What: `resolve_tmux_options(&TrustyToolsConfig::default()).alternate_screen`.
+/// Test: `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`
+/// compares it with the tmux path's own answer for the same malformed file.
+fn tmux_option_fallback() -> bool {
+    use crate::core::trusty_tools_config::{TrustyToolsConfig, resolve_tmux_options};
+    resolve_tmux_options(&TrustyToolsConfig::default()).alternate_screen
 }
 
 /// Read `tmux.alternate_screen` from the `config.yaml` under
@@ -157,23 +169,50 @@ pub fn configured_alternate_screen() -> Result<bool, trusty_common::crate_config
 ///
 /// Why: a managed launch must know the configured value to carry it, and must
 /// read it from the state home the caller named (#8233), not `$HOME`. A config
-/// that cannot be read or parsed is an error, never a silent fall back to
-/// the default: a launch that reports success while dropping the operator's
-/// `alternate_screen: true` is the fail-open this issue is about.
+/// that cannot be read never blocks a launch: the renderer is a display
+/// preference, so the launch proceeds on [`tmux_option_fallback`] — the value
+/// the tmux `alternate-screen` option falls back to in the same launch — and a
+/// warning names the file and the error.
 /// What: [`trusty_common::crate_config::load_at`] on
 /// `<crate_config_root>/config.yaml`, resolved by
 /// [`crate::core::trusty_tools_config::resolve_tmux_options`]. An absent file
-/// resolves to the built-in default (`false`, #5364).
+/// resolves to the built-in default (`false`, #5364); a read or parse error
+/// logs a `warn!` and returns [`tmux_option_fallback`].
 /// Test: `configured_alternate_screen_reads_the_named_root`,
 /// `configured_alternate_screen_defaults_off_without_a_config`,
-/// `configured_alternate_screen_errors_on_a_malformed_config`.
-pub fn configured_alternate_screen_at(
-    crate_config_root: &std::path::Path,
-) -> Result<bool, trusty_common::crate_config::ConfigError> {
+/// `configured_alternate_screen_warns_and_falls_back_on_a_malformed_config`.
+pub fn configured_alternate_screen_at(crate_config_root: &std::path::Path) -> bool {
     use crate::core::trusty_tools_config::{TrustyToolsConfig, resolve_tmux_options};
     let path = crate_config_root.join(trusty_common::crate_config::CONFIG_FILE);
-    let config = trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path)?;
-    Ok(resolve_tmux_options(&config.unwrap_or_default()).alternate_screen)
+    match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
+        Ok(config) => resolve_tmux_options(&config.unwrap_or_default()).alternate_screen,
+        Err(err) => {
+            let fallback = tmux_option_fallback();
+            tracing::warn!(
+                path = %path.display(),
+                "#8405: cannot read tmux.alternate_screen ({err}); the launch proceeds with \
+                 alternate_screen={fallback}, the value the tmux alternate-screen option \
+                 falls back to"
+            );
+            fallback
+        }
+    }
+}
+
+/// Provision a `claude` [`std::process::Command`] with the config-decided
+/// renderer and the remaining managed defaults (#8405).
+///
+/// Why: the exec launch paths (`tm run`, the bare-`tm` in-place relaunch) have
+/// no shell and no launch spec, so this is their carrier for
+/// [`configured_env`]; without it the pane's inherited value would still win.
+/// What: `cmd.env` for each [`configured_env`] pair, then
+/// [`apply_default_to_command`], which skips the variables just assigned.
+/// Test: `configured_command_assigns_the_renderer_over_the_pane`.
+pub fn apply_configured_to_command(cmd: &mut std::process::Command, alternate_screen: bool) {
+    for (name, value) in configured_env(alternate_screen) {
+        cmd.env(name, value);
+    }
+    apply_default_to_command(cmd);
 }
 
 /// The `env` operand every shell-string launch line carries (#6495).
@@ -481,23 +520,59 @@ mod tests {
     fn configured_alternate_screen_reads_the_named_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_config(dir.path(), "tmux:\n  alternate_screen: true\n");
-        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(true));
+        assert!(configured_alternate_screen_at(dir.path()));
         write_config(dir.path(), "tmux:\n  alternate_screen: false\n");
-        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(false));
+        assert!(!configured_alternate_screen_at(dir.path()));
     }
 
     #[test]
     fn configured_alternate_screen_defaults_off_without_a_config() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(false));
+        assert!(!configured_alternate_screen_at(dir.path()));
     }
 
-    /// #8405 fail-open check: a config that cannot be parsed must be an error,
-    /// not a silent `false` that drops the operator's `alternate_screen: true`.
+    /// #8405: a malformed config falls back and warns, naming the file and the
+    /// error, instead of blocking the launch. The fallback's agreement with the
+    /// tmux option is pinned against the tmux path itself by
+    /// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
     #[test]
-    fn configured_alternate_screen_errors_on_a_malformed_config() {
+    fn configured_alternate_screen_warns_and_falls_back_on_a_malformed_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_config(dir.path(), "tmux:\n  alternate_screen: [not, a, bool\n");
-        assert!(configured_alternate_screen_at(dir.path()).is_err());
+        let (value, logged) = capture_warnings(|| configured_alternate_screen_at(dir.path()));
+        assert_eq!(value, tmux_option_fallback());
+        let path = dir.path().join("config.yaml");
+        assert!(logged.contains(&path.display().to_string()), "{logged}");
+        assert!(
+            logged.contains("YAML"),
+            "the warning must carry the error: {logged}"
+        );
+    }
+
+    /// #8405: `tm run` and the in-place relaunch carry the configured renderer
+    /// as an explicit assignment, so the pane's inherited value cannot win in
+    /// either direction — whatever the test process itself exports.
+    #[test]
+    fn configured_command_assigns_the_renderer_over_the_pane() {
+        for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+            let mut cmd = std::process::Command::new("claude");
+            apply_configured_to_command(&mut cmd, alternate_screen);
+            assert_eq!(
+                override_for(&cmd, ALT_SCREEN_ENV_VAR),
+                Some(Some(want.to_string()))
+            );
+        }
+    }
+
+    /// Run `f` under a capturing subscriber; return its value and the log text.
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+        use tracing_subscriber::layer::SubscriberExt;
+        crate::test_support::enable_event_capture();
+        let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+        let subscriber = tracing_subscriber::registry().with(
+            trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+        );
+        let value = tracing::subscriber::with_default(subscriber, f);
+        (value, buffer.tail(64).join("\n"))
     }
 }
