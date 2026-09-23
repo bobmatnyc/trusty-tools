@@ -172,28 +172,6 @@ pub(crate) fn gh_pr_list_command(dir: &Path, gh_env: &GhEnv, repo: &str) -> Comm
     cmd
 }
 
-/// Resolve the [`GhEnv`] to apply to a `gh` spawn rooted at `dir` — the
-/// production wiring every real call site in this module uses (#6623).
-///
-/// Why: the daemon's `gh` spawn sites have a WORKING DIRECTORY only. Under
-/// launchd they inherit neither `GH_TOKEN` nor `GH_CONFIG_DIR` (this issue's
-/// root cause), so each call must resolve its own identity the same way an
-/// interactive `tm` invocation's `resolve_project_aware` does. Kept separate
-/// from [`gh_identity::select_config_for_origin`] (the pure selection) so that
-/// function stays unit-testable without disk or subprocess I/O; this wrapper
-/// is the impure boundary, deliberately thin and exercised only through its
-/// callers — mirroring `bin/tm/gh_identity::load_gh_env`.
-/// What: reads `dir`'s `remote.origin.url` (best-effort — an unreadable or
-/// non-git directory falls through to the global tier, never a hard failure,
-/// and is logged at `warn`), loads [`TrustyToolsConfig`] from disk, and
-/// resolves via [`gh_identity::select_config_for_origin`] +
-/// [`gh_identity::resolve_gh_env`]. An `account`-only binding (refused by
-/// `resolve_gh_env` — see its module docs) is logged and treated as ambient:
-/// a housekeeping spawn must not mutate the operator's global `gh` account,
-/// and a misconfigured project must not block the whole reclaim survey.
-/// Test: exercised through the production `gh_command` call sites
-/// (`PrIndex::from_gh`, `pr_state_for_branch`); the pure selection is unit-
-/// tested via `select_config_for_origin_*` in `core::gh_identity`.
 /// Will `gh` have to look its token up itself, rather than read one this
 /// binding handed it (#6867)?
 ///
@@ -241,19 +219,64 @@ fn warn_once_about_the_keychain() {
     WARNED.call_once(|| tracing::warn!("{}", keychain_warning()));
 }
 
-pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
-    let origin_url = crate::daemon::managed_routes::inproject::get_origin_url(dir)
-        .inspect_err(|e| {
-            tracing::warn!(
-                dir = %dir.display(),
-                "worktree-reclaim: cannot read git origin remote for gh identity \
-                 resolution — falling back to the global github: binding (#6623): {e}"
-            );
-        })
-        .ok()
-        .flatten();
+/// Resolve the [`GhEnv`] to apply to a `gh` spawn rooted at `dir` — the
+/// production wiring every real call site in this module uses (#6623, #5850).
+///
+/// Why: the daemon's `gh` spawn sites have a WORKING DIRECTORY only. Under
+/// launchd they inherit neither `GH_TOKEN` nor `GH_CONFIG_DIR` (#6623's root
+/// cause), so each call must resolve its own identity the same way an
+/// interactive `tm` invocation's `resolve_project_aware` does. #5850 adds the
+/// tier that was missing: `tm --user <login> <url>` persists the selected
+/// account onto the project's REGISTRY record, which the static
+/// [`TrustyToolsConfig`] `projects:` list never sees — so a repository only
+/// that account can see was probed as the machine's global account and every
+/// branch under it blocked with "Could not resolve to a Repository".
+/// What: takes the repository the caller already resolved (`origin`, an
+/// `owner/repo` slug or a URL — #5850 dropped the second `git config` read of
+/// `dir`), then asks
+/// [`crate::core::gh_account_registry::pinned_gh_env_in`] FIRST, against this
+/// host's registry directory. Only
+/// "no pin recorded" falls through to [`gh_identity::select_config_for_origin`]
+/// over the static config; every unanswerable registry outcome is returned as a
+/// [`GhFailure`], which the caller renders as
+/// `BranchPrState::LookupFailed { reason }` rather than probing as the wrong
+/// user. A static-config `account`-only binding DOES name an account, but
+/// `resolve_gh_env` refuses to honour it (#5851: `gh auth token -u` does not
+/// select an account on a keyring-backed host). That refusal is logged at `warn`
+/// and `gh` spawns with the ambient environment, so the probe runs as the
+/// machine's globally active account, which may not be the one configured. This
+/// static-tier fallback is unchanged by #5850.
+/// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
+/// `an_account_only_pin_fails_closed_naming_the_account` and the other
+/// `gh_account_registry_tests` arms cover the registry tier;
+/// `daemon_gh_env_refuses_when_the_registry_cannot_answer` covers the wiring;
+/// the static tier is unit-tested via `select_config_for_origin_*` in
+/// `core::gh_identity`.
+pub(crate) fn resolve_daemon_gh_env(dir: &Path, origin: &str) -> Result<GhEnv, GhFailure> {
+    resolve_daemon_gh_env_in(dir, origin, &crate::project::registry_data_dir())
+}
+
+/// [`resolve_daemon_gh_env`] against an explicit registry directory (#5850).
+///
+/// Why: the seam that lets a test prove a registry refusal reaches the caller
+/// as a [`GhFailure`] instead of falling through to the ambient account.
+/// Test: `daemon_gh_env_refuses_when_the_registry_cannot_answer`,
+/// `daemon_gh_env_uses_the_registry_pin`.
+pub(crate) fn resolve_daemon_gh_env_in(
+    dir: &Path,
+    origin: &str,
+    registry_dir: &Path,
+) -> Result<GhEnv, GhFailure> {
+    let origin = slug_as_url(origin);
+    // #5850: the registry is what the operator-facing pinning paths write, so
+    // it is consulted before the static config — and its failures BLOCK.
+    match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, &origin) {
+        Ok(Some(env)) => return Ok(env),
+        Ok(None) => {}
+        Err(reason) => return Err(GhFailure::new(reason)),
+    }
     let config = TrustyToolsConfig::load();
-    let selected = gh_identity::select_config_for_origin(&config, origin_url.as_deref());
+    let selected = gh_identity::select_config_for_origin(&config, Some(&origin));
     let env = match gh_identity::resolve_gh_env(selected) {
         Ok(env) => env,
         Err(e) => {
@@ -268,7 +291,24 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
     if consults_the_keychain(&env) {
         warn_once_about_the_keychain();
     }
-    env
+    Ok(env)
+}
+
+/// Turn a `repo_slug_for` slug back into a URL `repo_url_matches` can compare.
+///
+/// Why (#5850): `parse_github_path` reads a bare `owner/repo` as `host/repo`
+/// and drops the owner, so a slug never matched a registered `repo_url`.
+/// What: a value carrying `://` or `@` is already a URL and passes through;
+/// `owner/repo` gains `https://github.com/`; `host/owner/repo` gains `https://`.
+/// Test: `daemon_gh_env_uses_the_registry_pin`.
+fn slug_as_url(origin: &str) -> String {
+    if origin.contains("://") || origin.contains('@') {
+        origin.to_string()
+    } else if origin.matches('/').count() == 1 {
+        format!("https://github.com/{origin}")
+    } else {
+        format!("https://{origin}")
+    }
 }
 
 /// Why one `gh` call failed, and whether it failed by HANGING (#6561, #6867).
