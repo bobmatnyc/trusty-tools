@@ -1578,6 +1578,7 @@ fn entry(pr: u64, cleaned: bool) -> OpenedPr {
         repo_root: root(),
         opened_at: chrono::Utc::now(),
         cleaned_at: cleaned.then(chrono::Utc::now),
+        scope: Default::default(),
     }
 }
 

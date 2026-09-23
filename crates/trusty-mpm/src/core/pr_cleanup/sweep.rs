@@ -29,7 +29,7 @@ use tracing::{info, warn};
 
 use super::auth_backoff::{AuthBackoff, is_auth_failure};
 use super::driver::{ClaimEnder, Gh, Git, Landing};
-use super::registry::{CleanupRegistry, OpenedPr};
+use super::registry::{CleanupRegistry, CleanupScope, OpenedPr};
 use super::{CleanupRequest, DirtProbe, plan};
 
 /// What the periodic trigger decided about one registry entry.
@@ -81,6 +81,9 @@ pub fn sweep_decision(entry: &OpenedPr, view: &plan::PrView) -> SweepDecision {
 /// their work rather than being silently forgotten.
 /// Returns the number of entries cleaned this sweep.
 ///
+/// #8301: an entry's recorded [`CleanupScope`] bounds the run — a deferred
+/// entry is never read at all, and a head-only one is cleaned head-only.
+///
 /// #8058: every `gh` call passes `backoff` first. An authentication failure is
 /// not a per-entry problem the next entry can succeed at — it is host-wide — so
 /// without the gate one tick spawned one doomed `gh` per pending entry, every
@@ -92,7 +95,9 @@ pub fn sweep_decision(entry: &OpenedPr, view: &plan::PrView) -> SweepDecision {
 /// Test: `sweep_stamps_only_a_fully_successful_run`,
 /// `sweep_leaves_a_dirty_worktree_pending`,
 /// `sweep_stops_calling_gh_after_repeated_auth_failures`,
-/// `a_non_auth_failure_never_suspends_the_sweep`.
+/// `a_non_auth_failure_never_suspends_the_sweep`,
+/// `sweep_never_touches_a_deferred_entry`,
+/// `sweep_honours_a_recorded_head_only_scope`.
 pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     gh: &G,
     git: &T,
@@ -114,7 +119,9 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
             repo: Some(entry.repo.clone()),
             repo_root: entry.repo_root.clone(),
             dry_run: false,
-            head_only: false,
+            // #8301: a merge-chained cleanup's head-only scope outlives the
+            // merge; a deferred entry never reaches here (`pending` drops it).
+            head_only: entry.scope == CleanupScope::HeadOnly,
         };
         let view = match super::view_pr(gh, &req) {
             Ok(v) => {

@@ -58,6 +58,7 @@ fn entry(pr: u64, cleaned: bool, root: &Path) -> OpenedPr {
         repo_root: root.to_path_buf(),
         opened_at: Utc::now(),
         cleaned_at: cleaned.then(Utc::now),
+        scope: Default::default(),
     }
 }
 
@@ -454,6 +455,124 @@ async fn a_non_auth_failure_never_suspends_the_sweep() {
         reg.pending().len(),
         3,
         "nothing is stamped on a failed read"
+    );
+}
+
+// ── #8301: the operator's recorded scope ─────────────────────────────────
+
+/// Write one registry entry for PR 7275 with `scope` spelled as raw JSON.
+///
+/// Why raw JSON: it is the on-disk shape `tm pr merge` writes and the sweep
+/// reads, so the test pins the wire format rather than a Rust constructor.
+fn registry_with_scope(dir: &Path, scope: &str) -> CleanupRegistry {
+    let reg = CleanupRegistry::under_root(dir);
+    let body = format!(
+        "{{\"entries\":[{{\"pr\":7275,\"repo\":\"{REPO}\",\"repo_root\":\"/repo\",\
+         \"opened_at\":\"2026-09-23T00:00:00Z\",\"scope\":\"{scope}\"}}]}}"
+    );
+    std::fs::write(reg.path(), body).expect("write registry");
+    reg
+}
+
+const OTHER_TREE: &str = "/repo/.claude/worktrees/agent-cc33";
+
+/// A `git` fake with the PR's head tree plus an unnamed agent tree whose tip is
+/// the merged head — the tree the wide cleanup removes and head-only keeps.
+fn git_head_and_unnamed_tree() -> Scripted {
+    let head_tree = "/repo/.claude/worktrees/agent-aa11";
+    Scripted::new()
+        .on(
+            "config --get remote.origin.url",
+            "https://github.com/bobmatnyc/trusty-tools.git\n",
+        )
+        .on("git ls-remote", "")
+        .on(
+            "git worktree list",
+            &format!(
+                "worktree /repo\nHEAD 1111\nbranch refs/heads/main\n\n\
+                 worktree {head_tree}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n\
+                 worktree {OTHER_TREE}\nHEAD {HEAD_OID}\nbranch refs/heads/worktree-agent-cc33\n\n"
+            ),
+        )
+        .on("rev-parse HEAD", &format!("{HEAD_OID}\n"))
+        .on("git worktree remove", "")
+        .on(
+            "git branch --format",
+            &format!("main 1111\n{BRANCH} {HEAD_OID}\nworktree-agent-cc33 {HEAD_OID}\n"),
+        )
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "")
+}
+
+/// 🔴 #8301: `tm pr merge --no-cleanup` recorded the entry as deferred, and
+/// the sweep never asks about it, let alone removes anything. Fails before the
+/// fix, which read the entry as pending and ran the wide cleanup.
+#[tokio::test]
+async fn sweep_never_touches_a_deferred_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = registry_with_scope(dir.path(), "deferred");
+    let gh = gh_merged();
+    let git = git_head_and_unnamed_tree();
+
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
+
+    assert_eq!(cleaned, 0, "a deferred entry is never cleaned by the sweep");
+    assert!(
+        gh.calls().is_empty() && git.calls().is_empty(),
+        "a deferred entry is not even asked about: gh={:?} git={:?}",
+        gh.calls(),
+        git.calls()
+    );
+    assert!(
+        reg.entries()[0].cleaned_at.is_none(),
+        "it stays for `tm pr cleanup <n>`"
+    );
+}
+
+/// 🔴 #8301: a merge-chained cleanup that blocked left a head-only entry, and
+/// the sweep's retry stays head-only — the unnamed tree and its branch
+/// survive. Fails before the fix, whose sweep always ran wide.
+#[tokio::test]
+async fn sweep_honours_a_recorded_head_only_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = registry_with_scope(dir.path(), "head_only");
+    let gh = gh_merged();
+    let git = git_head_and_unnamed_tree();
+
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
+
+    let joined = git.calls().join("\n");
+    assert_eq!(cleaned, 1, "the head-only retry completes: {joined}");
+    assert!(
+        joined.contains("git worktree remove /repo/.claude/worktrees/agent-aa11"),
+        "the PR's own head tree is still removed: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git worktree remove {OTHER_TREE}")),
+        "the unnamed tree must survive a head-only sweep: {joined}"
+    );
+    assert!(
+        !joined.contains("git branch -D worktree-agent-cc33"),
+        "its branch must survive too: {joined}"
     );
 }
 

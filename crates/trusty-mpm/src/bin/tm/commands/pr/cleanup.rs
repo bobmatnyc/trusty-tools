@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::core::pr_cleanup::{
-    ClaimEnder, CleanupRegistry, CleanupRequest, RealGit, RealLanding,
+    ClaimEnder, CleanupRegistry, CleanupRequest, CleanupScope, RealGit, RealLanding,
 };
 use trusty_mpm::session_manager::worktree_safety::inspect_dirt;
 
@@ -187,13 +187,70 @@ async fn run_scoped(
     Ok(EXIT_OK)
 }
 
+/// What `tm pr merge` does once the merge itself succeeded (#8301).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PostMerge {
+    /// Run the head-only cleanup now, against `repo`.
+    Cleanup { repo: String },
+    /// The operator deferred cleanup; the registry entry says so.
+    Deferred,
+    /// `--auto`: nothing has merged yet, so the daemon's sweep acts later.
+    AwaitSweep,
+}
+
+/// Decide the post-merge step and persist the operator's choice (#8301).
+///
+/// Why: `--no-cleanup`, `--no-delete-branch` and the merge's head-only scope
+/// used to live only in this process. The registry entry stayed `pending`, so
+/// the supervisor sweep later ran the WIDE cleanup and removed trees and
+/// branches the operator had been told were untouched.
+/// What: either flag records [`CleanupScope::Deferred`] (also under `--auto`)
+/// and returns [`PostMerge::Deferred`]; `--auto` alone returns
+/// [`PostMerge::AwaitSweep`]; otherwise [`CleanupScope::HeadOnly`] is recorded
+/// BEFORE the cleanup runs, so a blocked head-only run is never retried wide.
+/// A failed write is an error naming the risk: nothing has been removed yet.
+/// `repo` is resolved only when a write is needed.
+/// Test: `post_merge_no_cleanup_never_reaches_after_merge`,
+/// `post_merge_no_cleanup_defers_the_registry_entry`,
+/// `post_merge_cleanup_records_a_head_only_scope`,
+/// `post_merge_auto_leaves_the_entry_to_the_sweep`.
+pub(crate) fn post_merge_step(
+    args: &crate::cli::PrMergeArgs,
+    repo: impl FnOnce() -> anyhow::Result<String>,
+    registry: &CleanupRegistry,
+) -> anyhow::Result<PostMerge> {
+    let deferred = args.no_cleanup || args.no_delete_branch;
+    if args.auto && !deferred {
+        return Ok(PostMerge::AwaitSweep);
+    }
+    let scope = if deferred {
+        CleanupScope::Deferred
+    } else {
+        CleanupScope::HeadOnly
+    };
+    let repo = repo()?;
+    registry.record_scope(&repo, args.pr, scope).map_err(|e| {
+        anyhow::anyhow!(
+            "#{} merged, but its post-merge choice could not be recorded in {}: {e:#}. \
+                 Nothing was removed; the daemon's sweep may still run the full cleanup on it",
+            args.pr,
+            registry.path().display()
+        )
+    })?;
+    Ok(if deferred {
+        PostMerge::Deferred
+    } else {
+        PostMerge::Cleanup { repo }
+    })
+}
+
 /// Run cleanup as `tm pr merge`'s final step (#7275, owner amendment).
 ///
 /// Why: the owner's ruling is that cleanup "should be run as the final step
 /// after merge confirmation", and a merge is "the most likely determiner of the
 /// obsolescence" of the worktree, branches and claim. Chaining it here is what
 /// makes the common path need no second command.
-/// What: forwards to [`run_scoped`] with the merged PR's number and `--repo`,
+/// What: forwards to [`run_scoped`] with the merged PR's number and resolved `repo`,
 /// scoped to the PR's own head worktree and branch (#8301) — other trees and
 /// branches the merge made obsolete are reported and left for `tm pr cleanup`.
 /// The merge itself has already reported success, so a cleanup failure is
@@ -203,14 +260,20 @@ async fn run_scoped(
 /// `cli_parses_pr_merge` pins the args this forwards.
 pub(crate) async fn after_merge(
     args: &crate::cli::PrMergeArgs,
+    repo: String,
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<i32> {
     let cleanup = PrCleanupArgs {
         pr: args.pr,
-        repo: args.repo.clone(),
+        // #8301: the slug `post_merge_step` recorded the scope under.
+        repo: Some(repo),
         dry_run: false,
     };
     // #8301: a merge names one PR, so its cleanup removes only that PR's tree.
     run_scoped(&cleanup, client, url, true).await
 }
+
+#[cfg(test)]
+#[path = "cleanup_tests.rs"]
+mod cleanup_tests;

@@ -47,14 +47,51 @@ pub struct OpenedPr {
     /// When cleanup last ran to completion for it; `None` while pending.
     #[serde(default)]
     pub cleaned_at: Option<DateTime<Utc>>,
+    /// The operator's recorded post-merge choice (#8301); absent means
+    /// [`CleanupScope::Wide`], the pre-#8301 sweep behaviour.
+    #[serde(default, skip_serializing_if = "CleanupScope::is_wide")]
+    pub scope: CleanupScope,
+}
+
+/// How far the periodic sweep may reach for one entry (#8301).
+///
+/// Why: `tm pr merge --no-cleanup` promises that no worktree or local branch is
+/// touched, and a merge-chained cleanup is limited to the PR's own head tree.
+/// Both choices lived only in the process that made them, so the supervisor
+/// sweep later ran the WIDE cleanup on the same entry and broke the promise.
+/// What: `Wide` is the default and the sweep's historical scope; `HeadOnly`
+/// makes the sweep pass `head_only: true`; `Deferred` removes the entry from
+/// the sweep entirely — only `tm pr cleanup <n>` by hand acts on it.
+/// Test: `sweep_never_touches_a_deferred_entry`,
+/// `sweep_honours_a_recorded_head_only_scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupScope {
+    /// The sweep may run the full cleanup.
+    #[default]
+    Wide,
+    /// The sweep may remove only the PR's own head worktree and branch.
+    HeadOnly,
+    /// The operator deferred cleanup; the sweep never touches the entry.
+    Deferred,
+}
+
+impl CleanupScope {
+    /// Whether this is the default scope (serde skips writing it).
+    pub fn is_wide(&self) -> bool {
+        *self == Self::Wide
+    }
 }
 
 impl OpenedPr {
     /// Whether the periodic sweep should still consider this entry.
     ///
-    /// Test: `registry_pending_excludes_a_cleaned_entry`.
+    /// #8301: a deferred entry is not pending — only a hand-run
+    /// `tm pr cleanup <n>` may act on it.
+    /// Test: `registry_pending_excludes_a_cleaned_entry`,
+    /// `sweep_never_touches_a_deferred_entry`.
     pub fn pending(&self) -> bool {
-        self.cleaned_at.is_none()
+        self.cleaned_at.is_none() && self.scope != CleanupScope::Deferred
     }
 }
 
@@ -167,6 +204,30 @@ impl CleanupRegistry {
             return Ok(());
         }
         self.write(entries)
+    }
+
+    /// Record the operator's post-merge scope for one PR (#8301).
+    ///
+    /// Why: the sweep runs in the daemon, minutes after `tm pr merge` exits, so
+    /// the operator's `--no-cleanup` or the merge's head-only scope must be on
+    /// disk for the sweep to honour it.
+    /// What: sets `scope` on the matching (repo, pr) entry and rewrites the
+    /// file. Returns `Ok(false)` when no entry matches: a PR `tm pr open` never
+    /// recorded is one the sweep never visits, so there is nothing to narrow.
+    /// Test: `post_merge_no_cleanup_defers_the_registry_entry`.
+    pub fn record_scope(&self, repo: &str, pr: u64, scope: CleanupScope) -> anyhow::Result<bool> {
+        let mut entries = self.entries();
+        let mut hit = false;
+        for e in &mut entries {
+            if e.pr == pr && e.repo == repo {
+                e.scope = scope;
+                hit = true;
+            }
+        }
+        if hit {
+            self.write(entries)?;
+        }
+        Ok(hit)
     }
 
     /// Rewrite the whole file atomically.

@@ -243,19 +243,27 @@ async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::R
             // runs only when this invocation actually merged. Under `--auto`
             // the merge has not happened yet — the daemon's periodic sweep
             // picks that PR up when it does.
-            if code == EXIT_OK && !args.auto {
-                // #8301: either flag means "delete no branch, remove no tree".
-                if args.no_cleanup || args.no_delete_branch {
+            if code != EXIT_OK {
+                return Ok(code);
+            }
+            // #8301: the operator's choice is written to the cleanup registry
+            // first, so the daemon's sweep cannot later override it.
+            let registry = trusty_mpm::core::pr_cleanup::CleanupRegistry::production();
+            let slug = || repo_slug(&gh, args.repo.as_deref());
+            match cleanup::post_merge_step(&args, slug, &registry)? {
+                cleanup::PostMerge::Deferred => {
                     println!(
                         "post-merge cleanup skipped — no worktree or local branch was touched; \
                          run `tm pr cleanup {}` when ready",
                         args.pr
                     );
-                    return Ok(code);
+                    Ok(code)
                 }
-                return cleanup::after_merge(&args, client, url).await;
+                cleanup::PostMerge::AwaitSweep => Ok(code),
+                cleanup::PostMerge::Cleanup { repo } => {
+                    cleanup::after_merge(&args, repo, client, url).await
+                }
             }
-            Ok(code)
         }
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
         // #7275: the executor every cleanup trigger shares.

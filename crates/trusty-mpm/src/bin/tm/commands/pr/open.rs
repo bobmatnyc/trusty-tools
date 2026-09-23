@@ -752,6 +752,7 @@ fn record_for_cleanup<P: Preflight>(pre: &P, url: &str, number: &str) {
         repo_root: root,
         opened_at: chrono::Utc::now(),
         cleaned_at: None,
+        scope: Default::default(),
     };
     if let Err(e) = pre.cleanup_registry().record_open(entry) {
         eprintln!("tm pr open: could not record #{pr} for post-merge cleanup: {e:#}");

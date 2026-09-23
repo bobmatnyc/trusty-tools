@@ -101,7 +101,7 @@ pub use driver::{
     ClaimEnder, CmdOut, Gh, Git, Landing, RealGh, RealGit, RealLanding, UnavailableClaims,
 };
 pub use plan::{PrView, StepLine, StepStatus};
-pub use registry::{CleanupRegistry, OpenedPr};
+pub use registry::{CleanupRegistry, CleanupScope, OpenedPr};
 pub use sweep::{SweepDecision, sweep_decision};
 
 use crate::session_manager::DirtyWorktree;
