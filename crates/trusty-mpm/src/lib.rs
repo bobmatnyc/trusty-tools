@@ -255,6 +255,17 @@ pub mod telegram;
 #[cfg(feature = "slack")]
 pub mod slack;
 
+/// The daemon's one credential read (#8236).
+///
+/// Why: three readers each walked `.env.local` → `.env` → `std::env::var` by
+/// hand, so none could reach the `0600` store or the Keychain, and every
+/// failure looked like "not configured".
+/// What: [`secret_source::resolve_secret`] routes them through
+/// `trusty_common::credentials::resolve_env_var_bounded` and logs every failure
+/// at ERROR by name and kind, leaving the dependent feature disabled.
+/// Test: `secret_source_tests.rs`.
+pub mod secret_source;
+
 // ── Test-only support ────────────────────────────────────────────────────────
 
 /// Hermetic test temp-directory helper (#3382).

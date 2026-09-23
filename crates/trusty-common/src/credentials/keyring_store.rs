@@ -96,6 +96,24 @@ impl KeyStore for KeyringStore {
             .ok()
     }
 
+    /// #8236: the arm a fail-closed caller needs. `NoEntry` is a genuine miss;
+    /// every other backend answer (locked, denied, unsupported) is an ERROR the
+    /// daemon logs by kind instead of mistaking for "not configured".
+    fn try_get(&self, provider: &str) -> Result<Option<String>, KeyStoreError> {
+        if !self.probe_available() {
+            return Err(KeyStoreError::Keyring(
+                "keychain backend unavailable".to_string(),
+            ));
+        }
+        let entry = keyring::Entry::new(SERVICE, provider)
+            .map_err(|e| KeyStoreError::Keyring(e.to_string()))?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(KeyStoreError::Keyring(e.to_string())),
+        }
+    }
+
     fn set(&self, provider: &str, value: &str) -> Result<(), KeyStoreError> {
         if !self.probe_available() {
             return Err(KeyStoreError::Keyring(

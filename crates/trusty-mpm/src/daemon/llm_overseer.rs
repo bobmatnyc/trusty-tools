@@ -127,9 +127,13 @@ normal development operations.";
 /// built eagerly.
 ///
 /// Test: `disabled_without_key`, `enabled_with_key`.
-#[derive(Debug)]
 pub struct LlmOverseer {
     /// OpenRouter API key, empty when none was found (overseer then disabled).
+    ///
+    /// #8236 item 9: the struct's `#[derive(Debug)]` used to render this field
+    /// verbatim, so any `{:?}` of an overseer — a panic message, a `tracing`
+    /// field, a test failure — printed the live key. The manual `Debug` below
+    /// is what replaced it.
     api_key: String,
     /// OpenRouter model id to query.
     model: String,
@@ -150,6 +154,24 @@ pub struct LlmOverseer {
     /// client would stall the runtime; chat gets its own async client with a
     /// longer timeout.
     chat_client: reqwest::Client,
+}
+
+/// Render an overseer without its API key (#8236 item 9).
+///
+/// Why: the derived `Debug` printed `api_key` in full. What a reader of a log
+/// line actually needs is whether the overseer is enabled and which model it
+/// queries; the key itself is never useful and always dangerous.
+/// What: the model, the enabled flag, and a fixed placeholder in place of the
+/// key. No field here can carry a value.
+/// Test: `debug_never_renders_the_api_key`.
+impl std::fmt::Debug for LlmOverseer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmOverseer")
+            .field("model", &self.model)
+            .field("api_key", &"<redacted>")
+            .field("enabled", &!self.api_key.is_empty())
+            .finish_non_exhaustive()
+    }
 }
 
 impl LlmOverseer {
@@ -369,51 +391,26 @@ fn parse_verdict(reply: &str) -> OverseerDecision {
     }
 }
 
-/// Resolve an API key from `.env.local`, then `.env`, then the process env.
+/// Resolve an API key through the shipped credential resolver.
 ///
-/// Why: the operator stores `OPENROUTER_API_KEY` in `.env.local` (gitignored)
-/// or `.env`; the daemon does not load a dotenv crate, so this reads the files
-/// directly. The process environment wins last so an explicit `export` always
-/// overrides the files.
-/// What: scans `.env.local` then `.env` in the current directory for a
-/// `KEY=value` line, falling back to `std::env::var`. Returns `""` when the
-/// key is not found anywhere.
-/// Test: `resolve_api_key_reads_env_var`, `resolve_api_key_missing_is_empty`.
+/// Why (#8236): this used to read `.env.local`, then `.env`, then
+/// `std::env::var` by hand, which could not reach the `0600` credential store
+/// or the Keychain — so the only way to configure the daemon was a plaintext
+/// file, and a plaintext LaunchAgent plist was where that ended. It also could
+/// not tell "not configured" from "the store refused", so a Keychain refusal
+/// after a reinstall was silent.
+/// What: delegates to [`crate::secret_source::resolve_secret`] — process env,
+/// then `.env.local`, then the bounded store — and returns `""` on EVERY
+/// failure, which is the existing "overseer disabled" signal. The failure is
+/// logged at ERROR by name and kind there; nothing here retries or falls back.
+/// Test: `overseer_stays_disabled_when_the_credential_is_unresolvable`.
 fn resolve_api_key(var_name: &str) -> String {
-    for file in [".env.local", ".env"] {
-        if let Some(value) = read_dotenv_key(std::path::Path::new(file), var_name) {
-            return value;
-        }
-    }
-    std::env::var(var_name).unwrap_or_default()
+    crate::secret_source::resolve_secret(var_name).unwrap_or_default()
 }
 
-/// Read one `KEY=value` entry from a dotenv-style file.
-///
-/// Why: a tiny, dependency-free dotenv reader is enough for a single key;
-/// pulling it out keeps [`resolve_api_key`] testable against a temp file.
-/// What: scans `path` line by line for `var_name=...`, trimming surrounding
-/// quotes and whitespace from the value. Comment lines (`#`) are skipped.
-/// Returns `None` when the file is absent or the key is not present.
-/// Test: `read_dotenv_key_parses_value`, `read_dotenv_key_missing_file`.
-fn read_dotenv_key(path: &std::path::Path, var_name: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=')
-            && key.trim() == var_name
-        {
-            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
+// #8236: the hand-rolled `read_dotenv_key` that used to live here is gone.
+// `.env.local` is now loaded by `dotenvy` inside the shared resolver, and `.env`
+// is deliberately NOT a tier any more — see `crate::secret_source`.
 
 /// Trim a chat history to the last [`CHAT_HISTORY_LIMIT`] messages.
 ///
@@ -558,24 +555,50 @@ mod tests {
         }
     }
 
+    /// Why (#8236 item 9): the derived `Debug` rendered `api_key` verbatim, so
+    /// one `{:?}` in a log or a panic disclosed the live key.
+    /// Test: this test.
     #[test]
-    fn read_dotenv_key_parses_value() {
-        use std::io::Write;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".env");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "# a comment").unwrap();
-        writeln!(file, "OTHER=ignored").unwrap();
-        writeln!(file, "OPENROUTER_API_KEY=\"sk-or-v1-abc\"").unwrap();
-        let value = read_dotenv_key(&path, "OPENROUTER_API_KEY");
-        assert_eq!(value.as_deref(), Some("sk-or-v1-abc"));
+    fn debug_never_renders_the_api_key() {
+        // SAFETY: tests in this module run single-threaded for this var.
+        unsafe {
+            std::env::set_var("TRUSTY_MPM_TEST_DEBUG_KEY", "sk-or-v1-FAKEFAKEFAKE");
+        }
+        let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_TEST_DEBUG_KEY");
+        let rendered = format!("{overseer:?}");
+        unsafe {
+            std::env::remove_var("TRUSTY_MPM_TEST_DEBUG_KEY");
+        }
+
+        assert!(
+            !rendered.contains("sk-or-v1-FAKEFAKEFAKE"),
+            "the API key reached a Debug rendering: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("test-model"), "{rendered}");
     }
 
+    /// Why (#8236 item 7): an unresolvable credential must leave the overseer
+    /// DISABLED, with no fallback to the retired `.env` read. The other three
+    /// failure arms are pinned in `secret_source_tests.rs`.
+    /// Test: this test.
     #[test]
-    fn read_dotenv_key_missing_file() {
-        // An absent file is not an error — it just yields None.
-        let value = read_dotenv_key(std::path::Path::new("/no/such/.env"), "ANY");
-        assert!(value.is_none());
+    fn overseer_stays_disabled_when_the_credential_is_unresolvable() {
+        let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_TEST_UNREGISTERED_KEY");
+        assert!(
+            !overseer.is_enabled(),
+            "an unresolvable credential left the overseer enabled"
+        );
+        assert_eq!(
+            overseer.pre_tool_use(&OverseerContext::new(
+                crate::core::session::SessionId::new(),
+                "tmpm-credential-test",
+                Some("Bash".into()),
+                Some("ls".into()),
+            )),
+            OverseerDecision::Allow,
+            "a disabled overseer must not block"
+        );
     }
 
     #[test]
