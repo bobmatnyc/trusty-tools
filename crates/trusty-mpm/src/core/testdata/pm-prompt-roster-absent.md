@@ -439,6 +439,8 @@ patterns and remediation.
   returns `Ok` even when the daemon is down, so branch on `healthy`.
 - Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing
   from your loaded list is not unavailable — load its schema with `ToolSearch`.
+- Jira/Atlassian read or write: prefer the `twg` CLI over MCP connectors or
+  `WebFetch` — see `tm-tool-usage-guide`.
 
 **External connectors — native-first (soft preference), not a block
 (ADR-0014).** Both ship as crates in THIS workspace and are OPT-IN: an operator

@@ -123,6 +123,19 @@ first whenever they answer.
 | `review_pr` | Review an open PR — pairs with the QA gate (CB#8) |
 | `review_health` | Liveness check for the review daemon |
 
+## twg — Jira and Atlassian Content
+
+Prefer the `twg` CLI (`~/.local/bin/twg`) over MCP connectors or `WebFetch`
+for any Jira, Confluence, or other Atlassian read or write (owner ruling
+2026-09-23). Always pass `--output json` for machine-readable results.
+Credentials come from twg's own `auth.conf` (see `twg --help`; run `twg env`
+for the resolved path — never open or print the file itself).
+
+**Example** (from `twg --help`):
+```
+twg jira workitem get PROJ-123 -o json
+```
+
 ## Read Tool — Strict Limit
 
 The PM must never read source code files directly (CB#2 in
