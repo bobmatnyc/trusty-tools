@@ -234,7 +234,8 @@ fn warn_once_about_the_keychain() {
 /// What: reads `dir`'s `remote.origin.url` (best-effort — an unreadable or
 /// non-git directory resolves from the global tier, never a hard failure, and
 /// is logged at `warn`), then asks
-/// [`crate::core::gh_account_registry::pinned_gh_env_for_origin`] FIRST. Only
+/// [`crate::core::gh_account_registry::pinned_gh_env_in`] FIRST, against this
+/// host's registry directory. Only
 /// "no pin recorded" falls through to [`gh_identity::select_config_for_origin`]
 /// over the static config; every unanswerable registry outcome is returned as a
 /// [`GhFailure`], which the caller renders as
@@ -243,9 +244,24 @@ fn warn_once_about_the_keychain() {
 /// nothing pins that project, so there is no wrong identity to protect it from.
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
 /// `an_account_only_pin_fails_closed_naming_the_account` and the other
-/// `gh_account_registry_tests` arms cover the registry tier; the static tier is
-/// unit-tested via `select_config_for_origin_*` in `core::gh_identity`.
+/// `gh_account_registry_tests` arms cover the registry tier;
+/// `daemon_gh_env_refuses_when_the_registry_cannot_answer` covers the wiring;
+/// the static tier is unit-tested via `select_config_for_origin_*` in
+/// `core::gh_identity`.
 pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> Result<GhEnv, GhFailure> {
+    resolve_daemon_gh_env_in(dir, &crate::project::registry_data_dir())
+}
+
+/// [`resolve_daemon_gh_env`] against an explicit registry directory (#5850).
+///
+/// Why: the seam that lets a test prove a registry refusal reaches the caller
+/// as a [`GhFailure`] instead of falling through to the ambient account.
+/// Test: `daemon_gh_env_refuses_when_the_registry_cannot_answer`,
+/// `daemon_gh_env_uses_the_registry_pin`.
+pub(crate) fn resolve_daemon_gh_env_in(
+    dir: &Path,
+    registry_dir: &Path,
+) -> Result<GhEnv, GhFailure> {
     let origin_url = crate::daemon::managed_routes::inproject::get_origin_url(dir)
         .inspect_err(|e| {
             tracing::warn!(
@@ -259,7 +275,7 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> Result<GhEnv, GhFailure> {
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
     if let Some(origin) = origin_url.as_deref() {
-        match crate::core::gh_account_registry::pinned_gh_env_for_origin(origin) {
+        match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, origin) {
             Ok(Some(env)) => return Ok(env),
             Ok(None) => {}
             Err(reason) => return Err(GhFailure::new(reason)),

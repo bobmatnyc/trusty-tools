@@ -24,6 +24,7 @@ use super::{RegistryPin, pinned_gh_env_in};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::ProjectRegistry;
 use crate::project::record::Project;
+use crate::session_manager::worktree_reclaim_gh::resolve_daemon_gh_env_in;
 
 /// A repository only the pinned account can see.
 const ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
@@ -295,9 +296,92 @@ async fn an_account_only_pin_fails_closed_naming_the_account() {
     );
 }
 
+/// 🔴 FAIL-CLOSED arm 3c: a `token_env` pin whose variable is unset blocks.
+///
+/// Why: `resolve_gh_env` skips a `token_env` it cannot read, so the binding
+/// resolves to NO identity. Reading that as "nothing pinned" hands the probe to
+/// the static config and then the machine's global account.
+/// Test: itself.
+#[test]
+fn an_unset_token_env_pin_fails_closed() {
+    const VAR: &str = "TRUSTY_MPM_TEST_5850_UNSET_TOKEN_ENV";
+    assert!(std::env::var_os(VAR).is_none(), "{VAR} must stay unset");
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","github":{{"token_env":"{VAR}"}}}}}}}}"#
+        ),
+    );
+    let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect_err("an unreadable token_env pin must refuse, never fall back");
+    assert!(
+        err.contains(VAR) && err.contains("refusing to fall back"),
+        "the refusal must name the variable; got: {err}"
+    );
+}
+
 /// A record that pins nothing is not a pin, and falls through unchanged.
 /// Test: itself.
 #[test]
 fn a_record_pinning_nothing_is_not_a_pin() {
     assert!(RegistryPin::default().is_empty());
+}
+
+/// A git checkout whose `origin` is `origin` — what a daemon `gh` spawn holds.
+fn checkout_with_origin(origin: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", origin]] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(&args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    dir
+}
+
+/// 🔴 FAIL-CLOSED arm 4: a registry refusal reaches the daemon's `gh` spawn as
+/// a [`GhFailure`], never as the static/ambient identity.
+///
+/// Why: every arm above returns an `Err`, but the refusal only protects the
+/// operator if `resolve_daemon_gh_env` propagates it. Swallowing it there
+/// would fall through to `TrustyToolsConfig` and the machine's global account.
+/// Test: itself.
+#[test]
+fn daemon_gh_env_refuses_when_the_registry_cannot_answer() {
+    let checkout = checkout_with_origin(ORIGIN);
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(registry_dir.path(), "{ this is not json");
+    let failure = resolve_daemon_gh_env_in(checkout.path(), registry_dir.path())
+        .expect_err("a registry refusal must block the gh spawn, never fall back");
+    assert!(
+        failure.to_string().contains("refusing to probe"),
+        "the caller must surface the refusal; got: {failure}"
+    );
+}
+
+/// The daemon's `gh` spawn runs inside the registry-pinned config dir.
+/// Test: itself.
+#[test]
+fn daemon_gh_env_uses_the_registry_pin() {
+    let checkout = checkout_with_origin(ORIGIN);
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}}}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let env = resolve_daemon_gh_env_in(checkout.path(), registry_dir.path())
+        .expect("a usable pin must resolve");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
 }

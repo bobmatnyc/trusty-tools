@@ -106,19 +106,6 @@ pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Opti
     }
 }
 
-/// Resolve the registry's pinned `gh` identity for `origin` against THIS
-/// host's registry directory.
-///
-/// Why: the production wiring, kept a one-liner so [`pinned_gh_env_in`] stays
-/// the whole testable surface. `registry_data_dir` is the same `$HOME`-derived
-/// helper the out-of-process CLI readers use (#4300), so this can never point
-/// at a different file than the daemon writes.
-/// Test: covered through [`pinned_gh_env_in`]; the directory itself is pinned
-/// by `registry_dir_name_is_frozen`.
-pub(crate) fn pinned_gh_env_for_origin(origin: &str) -> Result<Option<GhEnv>, String> {
-    pinned_gh_env_in(&crate::project::registry_data_dir(), origin)
-}
-
 /// What a registered project pins, or `None` when nothing matches.
 ///
 /// Why: separating "what does the registry say" from "what env does that mean"
