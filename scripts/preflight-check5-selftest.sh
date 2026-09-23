@@ -94,6 +94,11 @@
 #     (d) blind gate            a complete declaration + no verdict: [FAIL].
 #     (e) no declaration        the break stops, as before.
 #     (g) unreadable list       fail counts and failure blocks disagree: [FAIL].
+#     (h) gate compared another declaration version = argument, but the gate
+#                               compared the manifest version: [FAIL].
+#     (i) full run, arg != manifest  full_mode_version_is_manifest refuses;
+#                               --check-only and an equal argument pass.
+#   PREFLIGHT_SELFTEST_LIB points at another semver_accepted_breaks.sh.
 #
 # HOW IT DRIVES THE REAL DECISION: the two functions are lifted out of
 #   preflight-publish.sh BY PATTERN (the same awk-extraction
@@ -121,6 +126,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_TOP="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 UNDER_TEST="${PREFLIGHT_SELFTEST_SCRIPT:-${REPO_TOP}/scripts/preflight-publish.sh}"
+# The sourced accepted-breaks library, overridable for the same red-then-green proof.
+LIB_UNDER_TEST="${PREFLIGHT_SELFTEST_LIB:-${REPO_TOP}/scripts/lib/semver_accepted_breaks.sh}"
 FIXTURES="${REPO_TOP}/scripts/test-data/preflight-check5"
 
 if [[ ! -f "$UNDER_TEST" ]]; then
@@ -206,7 +213,7 @@ run_decision() {
 
     # The accepted-breaks library preflight-publish.sh sources, from this tree.
     # shellcheck source=lib/semver_accepted_breaks.sh
-    . "${REPO_TOP}/scripts/lib/semver_accepted_breaks.sh"
+    . "$LIB_UNDER_TEST"
 
     # The shipped definitions, lifted by pattern so a drifted copy cannot be
     # what passes. A missing function is a loud failure, not a silent skip.
@@ -575,11 +582,48 @@ check_raw "accepted/(e) no declaration" 1 "ACCEPTED BREAK" "[FAIL] semver: publi
 
 # --- (g) A break list that does not parse is never matched. break.out counts 9
 #         failed lints and carries no failure block.
-write_decl stub-crate 9.9.9 "$(decl_body stub-crate 9.9.9 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_decision break.out 1)"
+write_decl stub-crate 1.3.5 "$(decl_body stub-crate 1.3.5 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(SELFTEST_VERSION=1.3.5 run_decision break.out 1)"
 check_raw "accepted/(g) unreadable break list" 1 "ACCEPTED BREAK" "[FAIL]" \
   "could not be read completely"
+
+# --- (h) The declaration, the version argument and the file name all say
+#         1.99.0, but the gate compared the manifest's 1.6.4. The breaks listed
+#         belong to 1.6.4, so nothing is accepted.
+write_decl trusty-mpm 1.99.0 "$(decl_body trusty-mpm 1.99.0 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.99.0 run_decision break-lints.out 1)"
+check_raw "accepted/(h) declaration names the argument, gate compared the manifest" 1 \
+  "ACCEPTED BREAK" "[FAIL]" \
+  "names version '1.99.0', but the gate compared trusty-mpm '1.6.4' (the manifest version)"
 rm -rf "$DECL_DIR"
+
+# --- (i) A full run whose version argument is not the manifest version is
+#         refused; --check-only keeps the hypothetical-version preview.
+# shellcheck disable=SC2034  # read by the function eval'd below
+run_version_guard() {
+  (
+    set +e
+    CHECK_ONLY="$1" VERSION="$2" MANIFEST_VERSION="$3"
+    PKG_NAME="trusty-mpm" MANIFEST="crates/trusty-mpm/Cargo.toml"
+    eval "$(awk '/^full_mode_version_is_manifest\(\) \{/,/^\}/' "$UNDER_TEST")"
+    if ! declare -f full_mode_version_is_manifest > /dev/null; then
+      echo "127"
+      echo "SELF-TEST HARNESS: ${UNDER_TEST} defines no full_mode_version_is_manifest()"
+      exit 0
+    fi
+    out="$(full_mode_version_is_manifest 2>&1)"
+    echo "$?"
+    printf '%s\n' "$out"
+  )
+}
+raw="$(run_version_guard 0 1.99.0 1.6.4)"
+check_raw "version/(i) full run, argument != manifest" 1 "-" \
+  "[FAIL] version-arg: full mode was asked to certify trusty-mpm 1.99.0" \
+  "declares version '1.6.4'"
+raw="$(run_version_guard 1 1.99.0 1.6.4)"
+check_raw "version/(i) --check-only keeps the preview" 0 "[FAIL]"
+raw="$(run_version_guard 0 1.6.4 1.6.4)"
+check_raw "version/(i) full run, argument == manifest" 0 "[FAIL]"
 
 echo
 if [[ "$FAILED" -ne 0 ]]; then

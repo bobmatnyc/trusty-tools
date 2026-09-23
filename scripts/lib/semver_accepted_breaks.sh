@@ -15,7 +15,8 @@
 #   committed file scripts/semver-accepted-breaks/<package>-<version>.txt exists
 #   and all of these hold; any other state is [FAIL]:
 #     - exactly one `crate` row, equal to <package>;
-#     - exactly one `version` row, equal to <version>;
+#     - exactly one `version` row, equal to <version> AND to the version the
+#       gate's `CHECK <package>: <base> -> <current>` line compared;
 #     - exactly one `reason` row, not blank;
 #     - at least one `accept <lint> <item>...` row, and no unknown row;
 #     - the gate output parses: exactly one `CHECK <package>:` comparison, no
@@ -208,7 +209,7 @@ semver_accept_provenance() {
 # (prints [WARN]), 1 to stop (prints [FAIL]).
 semver_accept_decide() {
   local log="$1" pkg="$2" version="$3"
-  local rel decl work lints n_items lint items tab rc=0
+  local rel decl work lints n_items lint items tab compared_to rc=0
   tab="$(printf '\t')"
   rel="$(semver_accept_rel "$pkg" "$version")"
   decl="${REPO_ROOT}/${rel}"
@@ -216,6 +217,13 @@ semver_accept_decide() {
 
   semver_accept_parse "$decl" "$pkg" "$version" "${work}/accept" "${work}/err"
   semver_break_entries "$log" "$pkg" > "${work}/entries" || true
+
+  # The declaration binds to the version the gate COMPARED (the manifest's), not
+  # only to the version argument; an unreadable CHECK line is refused too.
+  compared_to="$(sed -n "s/^CHECK ${pkg}: [^ ]* -> \([^ ]*\) .*/\1/p" "$log" | head -1)"
+  if [ "$compared_to" != "$version" ]; then
+    echo "names version '${version}', but the gate compared ${pkg} '${compared_to:-<unknown>}' (the manifest version) — the breaks it lists belong to that release" >> "${work}/err"
+  fi
 
   if [ -s "${work}/err" ]; then
     echo "[FAIL] semver: ${pkg} ${version} breaks its public API, and ${rel} is not" >&2

@@ -457,11 +457,14 @@ if [ -z "$PKG_NAME" ]; then
   exit 2
 fi
 
+# The version `cargo publish` ships and check_semver.sh compares. Read even
+# when a version argument is given, so full mode can refuse a mismatch.
+MANIFEST_VERSION="$(grep -m1 -E '^version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$MANIFEST" \
+  | sed -E 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' || true)"
 if [ -n "$VERSION_ARG" ]; then
   VERSION="$VERSION_ARG"
 else
-  VERSION="$(grep -m1 -E '^version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$MANIFEST" \
-    | sed -E 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+  VERSION="$MANIFEST_VERSION"
   if [ -z "$VERSION" ]; then
     echo "preflight-publish: ERROR: could not find version = \"X.Y.Z\" in ${MANIFEST}" >&2
     echo "  (pass an explicit version argument instead: scripts/preflight-publish.sh ${CRATE_INPUT} <version>)" >&2
@@ -1047,6 +1050,22 @@ semver_decide() {
 #   full mode a [FAIL] and the exact remedy, the same as any other check. A
 #   no-op in --check-only mode, and a no-op once the tag has actually been
 #   created — the corrected sequence never trips it.
+# full_mode_version_is_manifest — a full run publishes the MANIFEST version, so
+# a <version> argument naming anything else would certify one release while
+# `cargo publish` ships another; CHECK 5's gate compares the manifest version
+# too. --check-only keeps the hypothetical-version preview. A no-op when the
+# argument is omitted or equal. Test: preflight-check5-selftest.sh case (i).
+full_mode_version_is_manifest() {
+  [ "$CHECK_ONLY" -eq 1 ] && return 0
+  [ -n "$MANIFEST_VERSION" ] && [ "$VERSION" = "$MANIFEST_VERSION" ] && return 0
+  echo "[FAIL] version-arg: full mode was asked to certify ${PKG_NAME} ${VERSION}, but" >&2
+  echo "       ${MANIFEST:-the crate manifest} declares version '${MANIFEST_VERSION:-<unreadable>}'," >&2
+  echo "       and that is what 'cargo publish' ships and what CHECK 5 compared." >&2
+  echo "       Bump the manifest (scripts/bump-version.sh), or drop the version" >&2
+  echo "       argument. A hypothetical version belongs in --check-only." >&2
+  return 1
+}
+
 full_mode_requires_tag() {
   [ "$CHECK_ONLY" -eq 1 ] && return 0
   local candidates="${CRATE_DIR}-v${VERSION}" tag
@@ -1696,6 +1715,7 @@ check2_identity;            [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check3_clean_tree;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check4_version_not_live;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check5_semver;              [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+full_mode_version_is_manifest || FAILURES=$((FAILURES + 1))
 full_mode_requires_tag;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))

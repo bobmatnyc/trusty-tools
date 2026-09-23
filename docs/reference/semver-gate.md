@@ -126,6 +126,12 @@ prints `[WARN] semver-types: NOT RUN` and reads no cache.
 For a permanently-excluded crate the only route is two hand-built documents
 passed to `--baseline-json` / `--current-json`.
 
+The cache must also sit where the differ looks. `check_semver.sh` unsets
+`CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` for the `cargo-semver-checks`
+subprocess. It cannot unset a `build.target-dir` set in a `.cargo/config.toml`
+above the checkout: cargo then writes the current crate's JSON flat, to
+`<target-dir>/doc/<crate>.json`, and the differ reports `NO VERDICT`.
+
 That is a deliberate posture, not an oversight. The differ compares *rendered*
 types, so a lifetime rename or a re-export path shift is a real signature
 difference no caller has to care about. Giving that a veto over `cargo publish`
@@ -602,6 +608,10 @@ It fails closed. CHECK 5 stays `[FAIL]` when:
   entry needs a row for its lint whose item tokens match as whole tokens;
 - the file inside names a different crate or version, or the only declaration is
   for another version;
+- the declared version is not the one the gate compared. `check_semver.sh`
+  compares the manifest version, so a declaration for a hypothetical version
+  argument accepts nothing. A full (non-`--check-only`) run also refuses a
+  version argument that differs from the manifest (`[FAIL] version-arg`);
 - the `reason` row is missing or blank, a row is unknown, or no `accept` row
   exists;
 - the break list does not parse completely: the tool's failed-lint count and the
