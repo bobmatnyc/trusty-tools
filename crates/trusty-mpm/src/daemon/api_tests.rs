@@ -1409,6 +1409,8 @@ async fn doctor_endpoint_returns_report() {
         "tmux_options",
         // #8415: the launchd ProcessType of the jobs that start tmux servers.
         "launchd_process_type",
+        // #8415: the observed priority of the running tmux server.
+        "tmux_priority",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",
