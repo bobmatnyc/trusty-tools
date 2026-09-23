@@ -780,7 +780,7 @@ fn strip_delegation_block_noop_when_absent() {
 }
 
 #[test]
-fn pm_instructions_is_its_three_sections() {
+fn pm_instructions_is_its_four_sections() {
     // #4183: the legacy PM body is RECONSTITUTED, never kept as a fourth copy
     // on disk. #4318 moved the source of that reconstitution from the
     // `include_str!` constants to the MANIFEST, because the manifest may now
@@ -790,6 +790,7 @@ fn pm_instructions_is_its_three_sections() {
     let body = pm_instructions();
     let projected = crate::core::bundled_pm_package::authored_run(&[
         SectionId::Core,
+        SectionId::AutonomousExecution,
         SectionId::Memory,
         SectionId::Search,
     ])
@@ -800,11 +801,16 @@ fn pm_instructions_is_its_three_sections() {
     // manifest-authored rules ride along.
     for expected in [
         SECTION_CORE.trim(),
+        SECTION_AUTONOMOUS_EXECUTION.trim(),
         SECTION_MEMORY.trim(),
         SECTION_SEARCH.trim(),
     ] {
         assert!(body.contains(expected), "a section source went missing");
     }
+    // #8361: autonomy is its own section now. On the legacy path it lives
+    // inside this blob, so omitting it from the run would drop the rule from
+    // every roster-absent prompt while the packaged path kept it.
+    assert!(body.contains("## Autonomous Execution"));
     assert!(body.contains("### Clickable References"));
     // The "honest" ban now lives only in the output styles' `Communication —
     // Write Plainly` section, the one channel a manual `claude` launch keeps.

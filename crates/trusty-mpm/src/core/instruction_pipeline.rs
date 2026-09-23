@@ -66,6 +66,15 @@ pub(crate) const SECTION_IDENTITY: &str =
     include_str!("../assets/instructions/sections/identity.md");
 /// The PM's core operating instructions. Tier `project`.
 pub(crate) const SECTION_CORE: &str = include_str!("../assets/instructions/sections/core.md");
+/// When the PM runs without stopping, and when it may stop and ask. Tier
+/// `project`.
+///
+/// Split out of `core.md` by #8361: `core` is tier `fixed`, so while the rule
+/// lived there no project could set its own comfort level — and on a session
+/// resume the PM read one rule telling it to continue and a skill telling it to
+/// confirm, with no override surface to settle the two.
+pub(crate) const SECTION_AUTONOMOUS_EXECUTION: &str =
+    include_str!("../assets/instructions/sections/autonomous-execution.md");
 /// Memory (context-first) protocol guidance. Tier `project`.
 pub(crate) const SECTION_MEMORY: &str = include_str!("../assets/instructions/sections/memory.md");
 /// Code/architecture search protocol guidance. Tier `project`.
@@ -107,13 +116,17 @@ pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
 /// content drop. Every entry here is an `include_str!` of a constant declared
 /// above, so the build stays hermetic and a missing section file is a compile
 /// error rather than a launch-time surprise.
-/// What: the nine canonical section sources, keyed by the path form the manifest
+/// What: the ten canonical section sources, keyed by the path form the manifest
 /// uses — relative to `assets/instructions/`. Table order is irrelevant; the
 /// manifest's `blocks` array alone decides emission order.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
+pub(crate) const SECTION_SOURCES: [(&str, &str); 10] = [
     ("sections/identity.md", SECTION_IDENTITY),
     ("sections/core.md", SECTION_CORE),
+    (
+        "sections/autonomous-execution.md",
+        SECTION_AUTONOMOUS_EXECUTION,
+    ),
     ("sections/memory.md", SECTION_MEMORY),
     ("sections/search.md", SECTION_SEARCH),
     ("sections/workflow.md", WORKFLOW),
@@ -134,7 +147,7 @@ pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
 /// Why: one lookup point means a path typo in the manifest becomes a named
 /// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
 /// instead of an empty block.
-/// What: a linear scan of [`SECTION_SOURCES`] — nine entries, called a handful
+/// What: a linear scan of [`SECTION_SOURCES`] — ten entries, called a handful
 /// of times per process, so a map would buy nothing and would reintroduce the
 /// iteration-order hazard the package format exists to avoid.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
@@ -145,33 +158,42 @@ pub(crate) fn section_source(path: &str) -> Option<&'static str> {
         .map(|(_, body)| *body)
 }
 
-/// The former `PM_INSTRUCTIONS.md` body, rebuilt from its three sections.
+/// The former `PM_INSTRUCTIONS.md` body, rebuilt from its four sections.
 ///
 /// Why: the legacy override assembly
 /// ([`crate::core::instruction_overrides::assemble_sections`]) treats the PM body
 /// as one section it may be fully replaced by `PM_INSTRUCTIONS_DEPLOYED.md`. It
-/// still needs that single string, but the *authored* source is now three files.
-/// Reconstituting here — rather than keeping a fourth copy on disk — is what
+/// still needs that single string, but the *authored* source is now four files.
+/// Reconstituting here — rather than keeping a fifth copy on disk — is what
 /// stops the legacy path and the packaged path from delivering different
 /// content once a section is edited (#4183).
-/// What: Core, Memory and Search joined with a paragraph break, in that order,
-/// with the trailing newline a file would have carried. The paragraph break is
-/// deliberately [`crate::core::instruction_package::Join::Blank`]'s literal, so
-/// this string is byte-identical to what the packaged composer emits for the
-/// same three blocks.
-/// Test: `pm_instructions_is_its_three_sections`,
+/// What: Core, Autonomous Execution, Memory and Search joined with a paragraph
+/// break, in block order, with the trailing newline a file would have carried.
+/// The paragraph break is deliberately
+/// [`crate::core::instruction_package::Join::Blank`]'s literal, so this string
+/// is byte-identical to what the packaged composer emits for the same blocks.
+/// #8361 added the autonomy section here: it is inside this opaque blob on the
+/// legacy path, so leaving it out would have dropped the rule from every
+/// roster-absent prompt.
+/// Test: `pm_instructions_is_its_four_sections`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
 pub(crate) fn pm_instructions() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let run = manifest_run(&[SectionId::Core, SectionId::Memory, SectionId::Search])
-            .unwrap_or_else(|| {
-                format!(
-                    "{}\n\n{}\n\n{}",
-                    SECTION_CORE.trim(),
-                    SECTION_MEMORY.trim(),
-                    SECTION_SEARCH.trim()
-                )
-            });
+        let run = manifest_run(&[
+            SectionId::Core,
+            SectionId::AutonomousExecution,
+            SectionId::Memory,
+            SectionId::Search,
+        ])
+        .unwrap_or_else(|| {
+            format!(
+                "{}\n\n{}\n\n{}\n\n{}",
+                SECTION_CORE.trim(),
+                SECTION_AUTONOMOUS_EXECUTION.trim(),
+                SECTION_MEMORY.trim(),
+                SECTION_SEARCH.trim()
+            )
+        });
         format!("{run}\n")
     });
     &JOINED
@@ -187,7 +209,7 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// as the retained fallback for the case where the manifest itself is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
-/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_four_sections`.
+/// Test: `pm_instructions_is_its_four_sections`, `base_pm_is_its_four_sections`.
 fn manifest_run(sections: &[SectionId]) -> Option<String> {
     crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
 }
@@ -614,9 +636,11 @@ a section of the framework prompt, put the replacement between a marker pair —
 mechanism, so a worked example here would take effect as a real override — see
 `seeded_claude_md_declares_no_overrides`.)
 
-Tokens: `IDENTITY`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
-`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`.
-`CORE` is the one token that is always declined. Prose outside the markers is
+Tokens: `IDENTITY`, `AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`,
+`AGENT-DELEGATION`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`,
+`FRAMEWORK-GUARANTEED-CONVENTIONS`. `CORE` is the one token that is always
+declined. `AUTONOMOUS-EXECUTION` is where a project sets how freely the PM runs
+— e.g. \"ask before dispatching after a resume\" (#8361). Prose outside the markers is
 project context — Claude Code loads it natively, so it is never copied into the
 composed prompt.
 

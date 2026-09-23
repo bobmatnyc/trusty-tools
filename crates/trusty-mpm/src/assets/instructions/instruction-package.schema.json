@@ -30,13 +30,13 @@
       "default": false
     },
     "sections": {
-      "description": "The section taxonomy. Declaration order MUST be the canonical order (identity, core, memory, search, workflow, agent-delegation, enforcement, non-overridable-rules, framework-guaranteed-conventions) and every canonical section MUST be declared exactly once. Declaration order does not affect composed bytes — `blocks` alone determines output order.",
+      "description": "The section taxonomy. Declaration order MUST be the canonical order (identity, core, autonomous-execution, memory, search, workflow, agent-delegation, enforcement, non-overridable-rules, framework-guaranteed-conventions) and every canonical section MUST be declared exactly once. Declaration order does not affect composed bytes — `blocks` alone determines output order.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/section"
       },
-      "minItems": 9,
-      "maxItems": 9
+      "minItems": 10,
+      "maxItems": 10
     },
     "blocks": {
       "description": "The ordered composition stream. Emitted strictly in array order. A section may own several non-contiguous blocks, which is what lets a section be lifted out of the middle of a legacy asset without moving a single byte.",
@@ -54,6 +54,7 @@
       "enum": [
         "identity",
         "core",
+        "autonomous-execution",
         "memory",
         "search",
         "workflow",
@@ -232,6 +233,12 @@
           "customization_tier": "fixed"
         },
         {
+          "id": "autonomous-execution",
+          "title": "Autonomous Execution",
+          "customization_tier": "project",
+          "description": "When the PM runs without stopping, and when it may stop and ask (#8361)."
+        },
+        {
           "id": "memory",
           "title": "Memory",
           "customization_tier": "project"
@@ -277,6 +284,14 @@
           "body": {
             "kind": "text",
             "text": "# PM Agent -- Trusty MPM"
+          }
+        },
+        {
+          "section": "autonomous-execution",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## Autonomous Execution"
           }
         },
         {

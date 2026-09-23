@@ -11,7 +11,7 @@ numbers drift; names are greppable.
 
 ## The shape in one paragraph
 
-Nine markdown files here are the authored prose. A JSON manifest one level up,
+Ten markdown files here are the authored prose. A JSON manifest one level up,
 `pm-instruction-package.json`, declares which sections exist, what tier each is,
 and the ordered stream of blocks that fill them. At session launch a composer
 reads the manifest, resolves each block to text, folds in two pieces of
@@ -54,9 +54,10 @@ Every section declares a `customization_tier`:
 
 - `fixed` — **`core`, and only `core`.** A `CORE` marker in a project's
   `CLAUDE.md` is declined and logged; the bundled core section stays in force.
-- `project` — **every other section**: `identity`, `memory`, `search`,
-  `workflow`, `agent-delegation`, `enforcement`, `non-overridable-rules`,
-  `framework-guaranteed-conventions`. A project may replace any of them.
+- `project` — **every other section**: `identity`, `autonomous-execution`,
+  `memory`, `search`, `workflow`, `agent-delegation`, `enforcement`,
+  `non-overridable-rules`, `framework-guaranteed-conventions`. A project may
+  replace any of them.
 
 `InstructionPackage::validate` enforces that as an **iff**: `core` must be
 `fixed` and nothing else may be. Both directions are red, because retiering
@@ -98,6 +99,12 @@ own words were "this should be part of the core instruction set." That is a
 deliberate placement decision by the same authority who made the ruling above,
 not a routine protection-seeking promotion. It is not precedent for moving
 other content into `core.md`.
+
+**The reverse move, 2026-09-21 (#8361):** `## Autonomous Execution` left
+`core.md` for its own tier-`project` section. Inside `core` no project could set
+its own comfort level, so on a session resume the PM read one rule telling it to
+continue and a skill telling it to confirm, with no override surface to settle
+the two. A project now answers that with an `AUTONOMOUS-EXECUTION` block.
 
 ## How a project overrides a section
 

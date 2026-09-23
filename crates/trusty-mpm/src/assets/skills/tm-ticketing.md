@@ -172,7 +172,7 @@ Every ticket, defect or not, conveys its relationship to parent work,
 including the search/dispatch outcome — a fact about the issue, not a heading
 to fill in.
 
-**Bounded exceptions.** Three shapes may exceed the short-body form, and only
+**Bounded exceptions.** Four shapes may exceed the short-body form, and only
 these:
 
 | Shape | What it may add |
@@ -180,6 +180,7 @@ these:
 | `epic` | A child-work checklist and the scope boundary between children |
 | Security | Impact, affected versions, and disclosure state |
 | Research / audit | The evidence inventory the audit produced |
+| Phase of an epic | The five headings Scope, Acceptance criteria, Non-goals, Risk, Gate — `tm-epic`, `references/phase-template.md` |
 
 An exception buys length for *evidence*, never for narrative. Everything else
 stays sparse.
@@ -314,7 +315,7 @@ gh issue edit 7067 --milestone "mpm 1.4"
 gh project item-add 25 --owner bobmatnyc --url https://github.com/…/issues/7067
 ```
 
-Installed `gh` is 2.98; `--milestone` and `--parent` are supported unchanged on
+Installed `gh` is 2.96; `--milestone` and `--parent` are supported unchanged on
 both `issue create` and `issue edit`, and the token carries the `project`
 scope.
 
@@ -389,7 +390,7 @@ used for anything but the literal fix link.
 
 **Commands.** For parent/child, `gh issue create --parent <n>` and
 `gh issue edit <n> --parent <p>` take the parent's ISSUE NUMBER and are the
-shortest path (gh 2.98). The API forms below take the child/blocker's numeric
+shortest path (gh 2.96). The API forms below take the child/blocker's numeric
 database id instead, and remain the only route for blocked-by. `-F` sends a
 field as an integer; `-f` sends it as a string and the call fails.
 
@@ -426,6 +427,18 @@ gh api repos/OWNER/REPO/issues/ISSUE_NUM/dependencies/blocked_by --paginate --jq
 
 `gh api` pages at 30 items by default — add `--paginate` (used above) on every
 listing call.
+
+### Epics and phases
+
+A tracker is titled `[EPIC <epic#>] <outcome>` and each phase
+`[EPIC_<epic#> PHASE_<n>] <what>`, where `<epic#>` is the tracker's own number
+— file the tracker, read the number back, edit it into the title. Phases are
+native sub-issues (`--parent <epic#>`), each with a type label from the
+six-value set and the parent's milestone. The tracker body carries three marker
+blocks — `phases` (regenerated wholesale from child state, never hand-patched),
+`deferred` (scope removed from the plan) and `followups` (findings surfaced
+during execution). The gate test, the four rules, the templates and the manual
+`gh` sequence are in `tm-epic`.
 
 ## Lifecycle — open → in-progress → coded → merged → tested → closed
 

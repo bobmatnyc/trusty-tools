@@ -87,13 +87,8 @@ never re-derived — unknown means MANDATORY Research, never a default to Python
 The phase table, each phase's gate and skip condition, and what to do when one
 fails: `Skill(skill="tm-workflow")`.
 
-## Autonomous Execution
-
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?", never nanny-code, never stop half-done. Stop and ask only on an
-observable condition, never a confidence level. Reuse authorization already
-given for the same scope. The four are in
-`Skill(skill="tm-delegation-patterns")`.
+<!-- #8361: "## Autonomous Execution" moved to `sections/autonomous-execution.md`,
+     its own tier-`project` section, so a project can retune it. -->
 
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)
 

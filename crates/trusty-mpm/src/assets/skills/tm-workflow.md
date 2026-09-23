@@ -2,7 +2,7 @@
 name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
-version: "2.0.0"
+version: "2.1.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -814,10 +814,11 @@ compile time via `bundled_pm_package.rs`. It declares section order and
 composition; the prose for each section is stored separately in
 `assets/instructions/sections/*.md`, pulled in as `include_str!` constants
 registered in the `SECTION_SOURCES` table (`core/instruction_pipeline.rs`) — a
-missing section file is a compile error, not a launch-time surprise. The nine
+missing section file is a compile error, not a launch-time surprise. The ten
 marker tokens (`core/claude_md_sections.rs::section_token`) are `IDENTITY`,
-`CORE`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
-`NON-OVERRIDABLE-RULES`, and `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+`CORE`, `AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`,
+`AGENT-DELEGATION`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, and
+`FRAMEWORK-GUARANTEED-CONVENTIONS`.
 
 **`CORE` is the only one a project cannot replace.** Every other section,
 including `NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS`, can be
@@ -869,6 +870,7 @@ optional or absent (#4069).
 | "remember/always/never/for this project" | Plain prose in `CLAUDE.md` (no marker needed) |
 | "use X agent for Y" / "route/change agent" | `<!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->` block in `CLAUDE.md` |
 | "add/change workflow phase" | `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` block in `CLAUDE.md` |
+| "stop and check with me more/less often" | `<!-- TRUSTY-MPM: AUTONOMOUS-EXECUTION START v=1 -->` block in `CLAUDE.md` — e.g. tightening it to "ask before dispatching after a resume" (#8361) |
 | "memory behavior" | `<!-- TRUSTY-MPM: MEMORY START v=1 -->` block in `CLAUDE.md` |
 
 After writing an override, confirm the marker to the user and note it "takes

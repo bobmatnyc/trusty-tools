@@ -203,7 +203,7 @@ gh issue create --title "…" --body "…" \
 gh issue edit 7070 --milestone "mpm 1.4" --add-project "trusty-mpm"
 ```
 
-Installed `gh` is 2.98 — `--milestone` and `--parent` work unchanged on both
+Installed `gh` is 2.96 — `--milestone` and `--parent` work unchanged on both
 `issue create` and `issue edit`; the project flag does not — `issue create`
 takes `--project`, `issue edit` takes `--add-project` — and the token carries
 the `project` scope. `issue create` also takes `--blocked-by <numbers>`
@@ -289,6 +289,13 @@ On **mcp-ticketer / aitrackdown**:
 - **EP-XXXX**: Epics — major initiatives
 - **ISS-XXXX**: Issues — bugs, features, user requests
 - **TSK-XXXX**: Tasks — individual work items
+
+## Epics and Phases
+
+Titles `[EPIC <n>] <outcome>` / `[EPIC_<n> PHASE_<m>] <what>`; a phase is a
+native sub-issue (`--parent`). 🔴 Never hand-patch inside
+`phases:start`/`phases:end` — regenerate it from live child state. The rest:
+Read `{{TM_SKILLS}}/tm-epic/SKILL.md` (#8376).
 
 ## Scope Boundary — Ticketing vs. Version Control
 
