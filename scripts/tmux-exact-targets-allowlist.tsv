@@ -1,0 +1,6 @@
+# Allowlist for scripts/check_tmux_exact_targets.sh (#8443).
+# One row per excused line: path<TAB>perl regex matched against the line<TAB>reason.
+# A row that excuses nothing fails the gate, so remove a row when its line goes.
+crates/trusty-common/src/tmux_tests.rs	assert_eq!\(kill, \["kill-session", "-t", "\$"\]	asserts the unresolvable `$` sentinel an empty session name renders (#8443)
+crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#S"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged
+crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#\{pane_tty\}"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged

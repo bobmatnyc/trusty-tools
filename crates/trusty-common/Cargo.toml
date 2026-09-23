@@ -98,7 +98,16 @@ name = "trusty-common"
 # 0.51.2 (#8267): patch — the UDS RPC client gets a bounded retry with a
 # named-socket failure message, and a failed half-close is no longer retried.
 # No public item was removed or changed shape.
-version = "0.52.0"
+# 0.52.1 (#8443): patch — 0.52.0 is already live on crates.io and this PR
+# changes `src/tmux.rs`, so the "PR version bump vs crates.io" gate (#4421)
+# requires a bump. Everything is additive: the new public
+# `exact_session_target`, `exact_window_target`, `exact_pane_target`,
+# `shell_exact_session_target`, `shell_attach_command`, `check_session_name`,
+# `is_immutable_id`, `TmuxTargetError` and `TmuxTarget::{try_session,
+# validate}`/`TmuxCommand::validate_targets`. `cargo-semver-checks` reports no
+# break; `TmuxTarget::as_target`'s rendered string changes (now `=`-exact) but
+# its signature is unchanged, so this stays PATCH under Cargo's 0.x rule.
+version = "0.52.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -2607,7 +2607,11 @@ fn live_pane_scoped_send_targets_original_pane_not_sibling() {
     // active one — this is precisely the state that caused the hijack: any
     // SESSION-scoped send would now land here instead of the original pane.
     let status = std::process::Command::new("tmux")
-        .args(["new-window", "-t", &session_name])
+        .args([
+            "new-window",
+            "-t",
+            &trusty_mpm::core::tmux::exact_window_target(&session_name),
+        ])
         .status()
         .expect("spawn tmux new-window");
     assert!(status.success(), "tmux new-window must succeed");

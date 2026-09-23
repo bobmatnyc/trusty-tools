@@ -60,9 +60,9 @@ warn()  { echo "${YELLOW}[warn]${RESET} $*"; }
 # ---------- cleanup trap ----------
 cleanup() {
     local code=$?
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
+    if tmux has-session -t "=$SESSION" 2>/dev/null; then
         info "Cleaning up tmux session '$SESSION'..."
-        tmux kill-session -t "$SESSION" 2>/dev/null || true
+        tmux kill-session -t "=$SESSION" 2>/dev/null || true
     fi
     exit $code
 }
@@ -76,9 +76,9 @@ fi
 info "tmux: $(tmux -V)"
 
 # Kill any stale session from a previous run
-if tmux has-session -t "$SESSION" 2>/dev/null; then
+if tmux has-session -t "=$SESSION" 2>/dev/null; then
     warn "Stale session '$SESSION' present — killing it."
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    tmux kill-session -t "=$SESSION" 2>/dev/null || true
 fi
 
 # ---------- resolve binary ----------
@@ -107,14 +107,14 @@ info "Creating tmux session '$SESSION' (${COLS}x${ROWS})..."
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
 
 info "Sending run command: TAGENT_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl"
-tmux send-keys -t "$SESSION" "TAGENT_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl" Enter
+tmux send-keys -t "=$SESSION:" "TAGENT_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl" Enter
 
 # ---------- poll for startup ----------
 info "Polling for 'ctrl>' prompt (max ${STARTUP_TIMEOUT_S}s)..."
 startup_capture=""
 deadline=$(( $(date +%s) + STARTUP_TIMEOUT_S ))
 while (( $(date +%s) < deadline )); do
-    startup_capture="$(tmux capture-pane -t "$SESSION" -p -S -200 2>/dev/null || true)"
+    startup_capture="$(tmux capture-pane -t "=$SESSION:" -p -S -200 2>/dev/null || true)"
     if echo "$startup_capture" | grep -q 'ctrl>'; then
         break
     fi
@@ -122,7 +122,7 @@ while (( $(date +%s) < deadline )); do
 done
 
 # Take a final capture to be safe
-startup_capture="$(tmux capture-pane -t "$SESSION" -p -S -200 2>/dev/null || true)"
+startup_capture="$(tmux capture-pane -t "=$SESSION:" -p -S -200 2>/dev/null || true)"
 
 echo ""
 echo "${BOLD}---------- STARTUP CAPTURE ----------${RESET}"
@@ -181,7 +181,7 @@ fi
 
 # ---------- send chat message ----------
 info "Sending chat message: 'hello'"
-tmux send-keys -t "$SESSION" "hello" Enter
+tmux send-keys -t "=$SESSION:" "hello" Enter
 
 # Wait until response indicator appears (alt-screen's fixed buffer means
 # line count doesn't grow; we look for ratatui's `⏺` response glyph + the
@@ -193,7 +193,7 @@ info "Waiting for response (max ${RESPONSE_TIMEOUT_S}s)..."
 response_capture="$startup_capture"
 deadline=$(( $(date +%s) + RESPONSE_TIMEOUT_S ))
 while (( $(date +%s) < deadline )); do
-    response_capture="$(tmux capture-pane -t "$SESSION" -p -S -500 2>/dev/null || true)"
+    response_capture="$(tmux capture-pane -t "=$SESSION:" -p -S -500 2>/dev/null || true)"
     if echo "$response_capture" | grep -q '⏺' \
        && echo "$response_capture" | grep -q '❯ hello'; then
         break
@@ -202,7 +202,7 @@ while (( $(date +%s) < deadline )); do
 done
 
 # Final capture
-response_capture="$(tmux capture-pane -t "$SESSION" -p -S -500 2>/dev/null || true)"
+response_capture="$(tmux capture-pane -t "=$SESSION:" -p -S -500 2>/dev/null || true)"
 
 echo ""
 echo "${BOLD}---------- POST-CHAT CAPTURE ----------${RESET}"

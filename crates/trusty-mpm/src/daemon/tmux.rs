@@ -300,6 +300,15 @@ impl TmuxDriver {
         Ok(Self { tmux_path: path })
     }
 
+    /// A driver bound to `tmux_path` with no discovery — tests only, so a test
+    /// can point it at a private `-L` server shim (#8443).
+    #[cfg(test)]
+    pub(crate) fn with_tmux_path_for_test(tmux_path: impl Into<String>) -> Self {
+        Self {
+            tmux_path: tmux_path.into(),
+        }
+    }
+
     /// True if a `tmux` binary is available on this host.
     pub fn is_available() -> bool {
         Self::discover().is_ok()
@@ -834,17 +843,20 @@ impl TmuxDriver {
     /// restore it on resume; `tmux display-message -p '#{pane_current_path}'`
     /// is the standard mechanism. The call is best-effort — callers must handle
     /// `None` gracefully (resume falls back to workspace_path/cwd).
-    /// What: runs `tmux display-message -t <name> -p '#{pane_current_path}'`,
+    /// What: runs `tmux display-message -t =<name>: -p '#{pane_current_path}'`,
     /// trims the output, and returns `Some(path)` on success or `None` if the
     /// session does not exist, tmux is unavailable, or the path is empty.
     /// Test: exercised indirectly via `snapshot::capture_into` with a live tmux;
     /// `RealTmuxDriver::get_pane_cwd` wraps this method.
     pub fn pane_current_path(&self, session_name: &str) -> Option<std::path::PathBuf> {
+        // #8443: an empty name would render a target matching no pane; say so.
+        crate::core::tmux::check_session_name(session_name).ok()?;
         let output = Command::new(&self.tmux_path)
             .args([
                 "display-message",
                 "-t",
-                session_name,
+                // #8443: pane-typed target — `=name:`, never a bare name.
+                &crate::core::tmux::exact_window_target(session_name),
                 "-p",
                 "#{pane_current_path}",
             ])
@@ -873,7 +885,7 @@ impl TmuxDriver {
     /// the full empirical proof). tmux's own `pane_id` (distinct from
     /// `pane_pid`, which the OS can reuse across a pane's lifetime) is that
     /// signal.
-    /// What: runs `tmux display-message -t <name> -p '#{pane_id}'`, trims the
+    /// What: runs `tmux display-message -t =<name>: -p '#{pane_id}'`, trims the
     /// output, and returns `Some(id)` on success or `None` if the session does
     /// not exist, tmux is unavailable, or the id is empty. Mirrors
     /// [`Self::pane_current_path`]'s exact shape.
@@ -881,8 +893,15 @@ impl TmuxDriver {
     /// `mark_runtime_exited_stopped` with a live tmux;
     /// `RealTmuxDriver::get_pane_id` wraps this method.
     pub fn pane_id(&self, session_name: &str) -> Option<String> {
+        crate::core::tmux::check_session_name(session_name).ok()?; // #8443
         let output = Command::new(&self.tmux_path)
-            .args(["display-message", "-t", session_name, "-p", "#{pane_id}"])
+            .args([
+                "display-message",
+                "-t",
+                &crate::core::tmux::exact_window_target(session_name),
+                "-p",
+                "#{pane_id}",
+            ])
             .output()
             .ok()?;
         if !output.status.success() {
@@ -1069,3 +1088,7 @@ pub struct SessionSnapshot {
 #[cfg(test)]
 #[path = "tmux_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tmux_exact_target_tests.rs"]
+mod exact_target_tests;

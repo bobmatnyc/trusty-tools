@@ -307,7 +307,7 @@ async fn spawn_capturing_managed_spawn_server_answering(
                     "name": "tmpm-test-session",
                     "state": "Active",
                     "runtime": "claude-code",
-                    "attach_cmd": "tmux attach -t tmpm-test-session",
+                    "attach_cmd": "tmux attach -t '=tmpm-test-session'",
                 })),
             )
         }

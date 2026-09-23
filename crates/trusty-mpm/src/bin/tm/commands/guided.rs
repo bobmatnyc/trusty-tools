@@ -810,7 +810,10 @@ pub(crate) fn print_non_tty_hint(
     } else {
         let n = sessions.len();
         eprintln!("tm: {n} session(s) found for {source_id}");
-        eprintln!("tm: to resume: tmux attach-session -t {}", sessions[0].name);
+        eprintln!(
+            "tm: to resume: {}",
+            trusty_mpm::core::tmux::shell_attach_command(&sessions[0].name)
+        );
         eprintln!("tm: to launch: run `tm` from an interactive terminal");
     }
 }

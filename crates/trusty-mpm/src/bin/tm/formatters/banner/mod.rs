@@ -395,15 +395,25 @@ pub(crate) fn normalize_workdir(workdir: &str) -> String {
 /// Why: the daemon may hold a stale session record after its tmux session has
 /// exited; `tm launch` must verify the tmux session is live before attaching,
 /// otherwise it would fall through to a normal launch.
-/// What: runs `tmux has-session -t <name>` and returns true on exit code 0.
-/// Test: covered indirectly by the launch reconnect integration path.
+/// What: runs `tmux has-session -t =<name>` (exact, #8443) and returns true on
+/// exit code 0.
+/// Test: `tmux_has_session_ignores_a_prefix_sibling`.
 pub(crate) fn tmux_has_session(name: &str) -> bool {
+    tmux_has_session_with_bin(&trusty_mpm::core::tmux::resolve_tmux_binary_or_bare(), name)
+}
+
+/// [`tmux_has_session`] against an explicit tmux binary — the seam a test
+/// points at a private `-L` server (#8443).
+pub(crate) fn tmux_has_session_with_bin(tmux_bin: &str, name: &str) -> bool {
     // #2398 architecture consolidation: routes through the crate's single
     // tmux entry point instead of shelling out independently.
     matches!(
-        trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::HasSession {
-            name: name.to_string(),
-        }),
+        trusty_mpm::core::tmux::run_tmux_with_bin(
+            tmux_bin,
+            &trusty_mpm::core::tmux::TmuxCommand::HasSession {
+                name: name.to_string(),
+            }
+        ),
         Ok(output) if output.status.success()
     )
 }
