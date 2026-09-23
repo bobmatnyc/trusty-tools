@@ -499,13 +499,15 @@ async fn run_managed(
 /// What: returns the tokens with the flag and its value removed, plus the
 /// login. Both spellings are accepted in both `--user <login>` and
 /// `--user=<login>` forms; a flag with no value is an error rather than a
-/// silent drop, and two occurrences naming DIFFERENT logins are refused rather
-/// than resolved by position. The login is not validated here —
+/// silent drop, and so is a blank value (`--user=`), which `resolve_account`
+/// would otherwise read as absent. Two occurrences naming DIFFERENT logins are
+/// refused rather than resolved by position. The login is not validated here —
 /// [`super::register_args::resolve_account`] owns that and runs on this value
 /// downstream, so the two spellings cannot diverge.
 /// Test: `bare_form_lifts_a_trailing_user_flag`,
 /// `bare_form_lifts_an_inline_account_value`,
 /// `bare_form_rejects_a_trailing_flag_with_no_value`,
+/// `bare_form_rejects_an_empty_account_value`,
 /// `bare_form_leaves_unrelated_tokens_alone`.
 pub(crate) fn split_trailing_account(
     tokens: &[String],
@@ -519,10 +521,14 @@ pub(crate) fn split_trailing_account(
             continue;
         };
         let login = match inline {
-            Some(value) => value.to_string(),
-            None => it.next().cloned().ok_or_else(|| {
-                anyhow::anyhow!("'{token}' needs a gh login — e.g. `{token} bob-duetto`.")
-            })?,
+            Some(value) => Some(value.to_string()),
+            None => it.next().cloned(),
+        };
+        // #5850: a blank value (`--user=`, `--user ""`) must refuse here —
+        // `resolve_account` treats a blank flag as absent, which would clone
+        // as the global account the operator meant to override.
+        let Some(login) = login.filter(|l| !l.trim().is_empty()) else {
+            anyhow::bail!("'{token}' needs a gh login — e.g. `--user bob-duetto`.");
         };
         if let Some(existing) = account.as_deref()
             && existing != login

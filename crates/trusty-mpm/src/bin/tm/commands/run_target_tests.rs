@@ -447,3 +447,29 @@ fn bare_form_refuses_two_different_accounts_around_the_repository() {
         Some("bob-duetto")
     );
 }
+
+/// 🔴 #5850 REGRESSION (fail-open): an EMPTY account value is refused at the
+/// lift, never carried downstream.
+///
+/// Why this is the assertion: `--user=` used to lift as `Some("")`, and
+/// `resolve_account` treats a blank flag as absent — so the clone ran as the
+/// machine's global account while the operator believed they had pinned one.
+/// Covers the inline `=` form and a blank separate value, for both spellings.
+/// Test: itself.
+#[test]
+fn bare_form_rejects_an_empty_account_value() {
+    for tokens in [
+        &["acme/widget", "--user="][..],
+        &["acme/widget", "--account="][..],
+        &["acme/widget", "--user", ""][..],
+        &["acme/widget", "--account", "   "][..],
+        &["acme/widget", "--user=  "][..],
+    ] {
+        let err = split_trailing_account(&toks(tokens))
+            .expect_err("an empty account value must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{tokens:?}: {err}"
+        );
+    }
+}
