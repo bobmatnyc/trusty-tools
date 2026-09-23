@@ -1478,3 +1478,99 @@ async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
         "once the claim is gone the sweep resumes it as usual: {after:?}"
     );
 }
+
+// ── #8396: a resume refused because the session is already active ────────────
+
+/// REGRESSION (#8396): a stale `Stopped` read of a session another path has
+/// already made `Active` is resume's goal reached, not a failure.
+///
+/// Why: the sweep's generic arm marked the refusal errored, which demoted a
+/// running session and appended "cannot resume a session in state 'active'" to
+/// its task on every sweep — two to eight copies were observed live.
+/// What: seeds an `Active` record, takes the real refusal `resume_auto`
+/// returns for it, and settles it twice through the sweep's failure handler
+/// with a stale `Stopped` snapshot. The record must stay `Active` with an
+/// unchanged task, and no failure may be counted.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_already_active_session_is_not_marked_errored_by_a_stale_resume() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let fresh = mgr.get(&ids[0]).await.expect("record");
+    let mut stale = fresh.clone();
+    stale.state = ManagedSessionState::Stopped;
+
+    let mut report = super::poller::TickReport::default();
+    for _ in 0..2 {
+        let refusal = mgr
+            .resume_auto(&ids[0])
+            .await
+            .expect_err("an active session cannot be resumed");
+        assert!(
+            matches!(refusal, ManagedError::InvalidState(..)),
+            "{refusal:?}"
+        );
+        super::poller::settle_failed_resume(&mgr, &stale, refusal, &mut report).await;
+    }
+
+    assert_eq!(report.resume_failures, 0, "nothing failed: {report:?}");
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
+    assert_eq!(after.task, fresh.task, "no note accumulates on the task");
+}
+
+/// #8396 error arm: an `InvalidState` refusal for a state that is NOT active
+/// is still a real failure — marked errored and counted.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_resume_refusal_for_a_non_active_state_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Provisioning, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+    let refusal = mgr
+        .resume_auto(&ids[0])
+        .await
+        .expect_err("a provisioning session cannot be resumed");
+    assert!(
+        matches!(refusal, ManagedError::InvalidState(..)),
+        "{refusal:?}"
+    );
+
+    let mut report = super::poller::TickReport::default();
+    super::poller::settle_failed_resume(&mgr, &record, refusal, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert_eq!(after.task.matches("[error: auto-resume failed").count(), 1);
+}
+
+/// #8396 error arm: any other resume error keeps the #5208 handling.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_non_state_resume_error_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+
+    let mut report = super::poller::TickReport::default();
+    let err = ManagedError::TmuxUnavailable("tmux server went away".to_owned());
+    super::poller::settle_failed_resume(&mgr, &record, err, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert!(
+        after.task.contains("tmux server went away"),
+        "{}",
+        after.task
+    );
+}
