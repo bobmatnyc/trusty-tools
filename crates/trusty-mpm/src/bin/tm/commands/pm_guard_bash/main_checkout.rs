@@ -137,6 +137,7 @@ use super::{
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
+use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 
 /// Deny a whole-tree-destructive git command aimed at a main checkout.
 ///
@@ -161,7 +162,8 @@ use crate::commands::pm_guard_bash::shell_lex;
 /// Test: the two halves are covered separately (see the module doc);
 /// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
 /// `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`,
-/// `destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree`; the
+/// `destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree`,
+/// `destructive_allows_a_checkout_in_a_scratchpad_clone_only` (#8339); the
 /// composition runs end to end in `tests/tm_hook_pm_guard.rs`.
 pub(crate) fn evaluate_main_checkout_destructive_command(
     command: &str,
@@ -189,7 +191,17 @@ fn evaluate_main_checkout_destructive_command_in(
     // #7100: an unexpanded variable in the path is not evidence about which
     // tree this lands in, so the refusal must not read as if it were.
     // #7234: a `~` left literal because `$HOME` was unset says the same thing.
-    match unresolved_target(&target) {
+    let unresolved = unresolved_target(&target);
+    // #8339: a disposable clone under the session scratchpad is nobody's shared
+    // tree — the #7778 proof, canonicalized. Never for an unresolved path: a
+    // literal `$WT` joined to a scratchpad cwd proves nothing about `$WT`.
+    if unresolved.is_none()
+        && main_checkout_root(&target)
+            .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
+    {
+        return None;
+    }
+    match unresolved {
         Some(unresolved) => Some(unresolved_directory_deny_reason(
             DESTRUCTIVE_UNRESOLVED_HEADLINE,
             &verb,
@@ -1330,6 +1342,42 @@ mod tests {
             )
             .is_some(),
             "the main checkout itself stays denied"
+        );
+    }
+
+    /// 🔴 REGRESSION (#8339): `git checkout <sha> -- <paths>` inside a
+    /// disposable clone under the session scratchpad — the git-workflow
+    /// skill's pre-fix red-proof recipe — is not a main checkout. Denied on
+    /// origin/main. The adjacent cases still deny: a symlink in the scratchpad
+    /// pointing at a real checkout, and an unresolved `-C $WT` run from the
+    /// clone.
+    #[test]
+    fn destructive_allows_a_checkout_in_a_scratchpad_clone_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join("red-proof");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone .git");
+        assert!(
+            evaluate_main_checkout_destructive_command(
+                "git checkout abc1234 -- src/lib.rs",
+                &clone
+            )
+            .is_none(),
+            "a scratchpad clone is nobody's shared tree"
+        );
+
+        let real = dir.path().join("realrepo");
+        std::fs::create_dir_all(real.join(".git")).expect("mkdir real .git");
+        let link = dir.path().join("scratchpad").join("linkrepo");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert!(
+            evaluate_main_checkout_destructive_command("git checkout abc1234 -- src/lib.rs", &link)
+                .is_some(),
+            "a symlink into a real checkout must not buy the exemption"
+        );
+        assert!(
+            evaluate_main_checkout_destructive_command("git -C $WT checkout -- .", &clone)
+                .is_some(),
+            "an unresolved directory proves nothing about where the checkout runs"
         );
     }
 
