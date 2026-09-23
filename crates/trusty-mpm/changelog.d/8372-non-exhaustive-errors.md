@@ -1,0 +1,12 @@
+Breaking
+- This 1.x release breaks the trusty-mpm library API against 1.6.3 and ships under an owner-approved override of the semver gate ([#8372](https://github.com/bobmatnyc/trusty-tools/issues/8372)). The `tm` binary's behaviour is unaffected. The list below is every break `scripts/check_semver.sh --crate trusty-mpm` reports, grouped by the issue that introduced it.
+- #8233: `ManagedError` gained the `ResumeInFlight` and `AutoResumeRecorded` variants, and `ResumeManagedError` gained `AlreadyResuming`.
+- #8233: `runtime::build_adapter` takes a fourth parameter, `framework_root: &Path`, the framework root the Claude Code adapter writes its managed config under.
+- #8233: `runtime::ClaudeCodeAdapter::new` takes a third parameter, `framework_root: &Path`, for the same reason.
+- #8261: `core::builders::BuildersConfig` gained the public fields `load_factor`, `free_memory_floor_mb` and `slot_pool_root`, so a struct literal outside trusty-mpm no longer compiles.
+- #8261: `core::builders::BuildersConfig` no longer derives `Eq`, because `load_factor` is an `f64`. It still derives `PartialEq`.
+- #8261: `daemon::builder_slot_routes::BuilderSlotResponse` gained the public fields `ceiling`, `capacity_reason`, `fail_closed_surface`, `slot_path`, `slot_seed`, `slot_notice` and `slot_refused`, so a struct literal outside trusty-mpm no longer compiles.
+- #8261: `core::agent::Delegation` is now `#[non_exhaustive]`, so it can no longer be built with a struct literal outside trusty-mpm.
+- #8361: `core::instruction_package::SectionId` gained the `AutonomousExecution` variant, inserted after `Core`. Every later variant (`Memory` through `FrameworkGuaranteedConventions`) moved one position, which changes its implicit discriminant and its derived `PartialOrd`/`Ord` order.
+- #8372: `ManagedError` and `ResumeManagedError` are now `#[non_exhaustive]`. A `match` on them outside trusty-mpm needs a wildcard arm.
+- #8372: `runtime::launch_spec::LaunchSpecError`, `core::builder_slot_pool::SlotPoolError`, `core::builders::BuildersConfigError` and `core::memory_verbs::MemoryVerbError` are new since 1.6.3 and ship `#[non_exhaustive]` from their first release. This is not a break; it means a later variant is not one either.

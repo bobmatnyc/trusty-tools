@@ -42,7 +42,9 @@ use crate::session_manager::ManagedError;
 /// Test: `resume_managed_typed_*` in tests/session_manager_mvp.rs drive the
 /// 404/409/422 paths through the typed value (no `Display` matching), and the
 /// MCP `session_resume_unknown_id_errors` test asserts the rendered string.
+// #8372: non_exhaustive, so a new failure mode is not an API break.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResumeManagedError {
     /// The requested session id was not present in the store → HTTP 404.
     #[error("session not found: {0}")]

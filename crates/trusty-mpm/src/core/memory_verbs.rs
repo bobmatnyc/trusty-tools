@@ -52,7 +52,9 @@ pub const NOTE_METHOD: &str = "memory_note";
 /// [`Self::Call`] when the daemon did not answer — or answered with an error.
 /// Test: `a_dead_socket_is_an_error_naming_it`,
 /// `a_write_without_a_resolvable_palace_is_refused`.
+// #8372: non_exhaustive from its first release, so a new failure is not an API break.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MemoryVerbError {
     /// A write verb, and no palace could be resolved for the working directory.
     #[error("no palace resolved for {cwd}: {detail} — pass --palace <slug>")]
