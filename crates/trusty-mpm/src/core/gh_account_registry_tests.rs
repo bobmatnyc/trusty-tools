@@ -513,6 +513,69 @@ fn same_login_with_conflicting_config_dirs_fails_closed() {
     );
 }
 
+/// 🔴 #5850 REGRESSION: a `config_dir` pin with NO login agrees with a login
+/// pin on the same dir, and the chosen pin inherits that login.
+///
+/// Why: `seed_from_config` and `tm projects register --gh-config-dir` both write
+/// a `github: {config_dir}` record with no login. Treating "no login" as a
+/// login of its own refused the repository ("different gh accounts") and
+/// spawned the session as the global account.
+/// Test: itself.
+#[test]
+fn a_no_login_pin_agrees_with_a_login_pin_on_the_same_config_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"config_dir":"{0}"}}}},
+                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{0}","account":"bob-duetto"}}}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let pin = super::read_pin(registry_dir.path(), ORIGIN)
+        .expect("a missing login is not a disagreement")
+        .expect("the pins must resolve");
+    assert_eq!(
+        pin.account.as_deref(),
+        Some("bob-duetto"),
+        "the login must be inherited"
+    );
+    let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect("a missing login is not a disagreement")
+        .expect("the pin must resolve");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a no-login `config_dir` pin next to a login pin with a
+/// DIFFERENT dir still blocks — leaving the login out never skips the dir check.
+/// Test: itself.
+#[test]
+fn a_no_login_pin_with_a_different_config_dir_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"config_dir":"/tmp/gh-one"}}}},
+                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-two"}}}}
+            }}}}"#
+        ),
+    );
+    let err =
+        pinned_gh_env_in(registry_dir.path(), ORIGIN).expect_err("two config dirs must refuse");
+    assert!(
+        err.contains("different gh config dirs") && !err.contains("different gh accounts"),
+        "the refusal must name the real conflict; got: {err}"
+    );
+}
+
 /// A host-only record next to a pinned duplicate does not block the pin.
 ///
 /// Why: a host-only binding names no identity. Counting it as a pin would make

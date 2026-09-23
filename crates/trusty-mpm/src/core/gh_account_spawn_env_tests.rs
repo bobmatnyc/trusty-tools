@@ -453,6 +453,44 @@ async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
     assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
 }
 
+/// 🔴 #5850 REGRESSION: a no-login `config_dir` record next to a login record on
+/// the same dir gives the session that dir AND the login.
+///
+/// Why: the login keeps `configured_account_pair` enforcement armed; losing it,
+/// or refusing the pair, spawned the session as the global account.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    registry
+        .register(Project {
+            gh_account: None,
+            ..project_with_config_dir("jev", "https://github.com/acme/widget", &config_dir)
+        })
+        .await
+        .expect("register");
+    registry
+        .register(Project {
+            gh_account: Some("bob-duetto".to_string()),
+            github: Some(GithubConfig {
+                config_dir: Some(config_dir.clone()),
+                account: Some("bob-duetto".to_string()),
+                ..GithubConfig::default()
+            }),
+            ..project("widget", "https://github.com/acme/widget", None)
+        })
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("a missing login is not a disagreement");
+    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
+}
+
 /// 🔴 #5850: two records pinning DIFFERENT accounts yield no pin for a session,
 /// where the daemon refuses the same registry — neither side guesses.
 /// Test: itself.

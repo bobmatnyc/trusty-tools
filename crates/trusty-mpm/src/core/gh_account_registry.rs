@@ -223,18 +223,22 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
 /// position guesses at an account. The daemon's housekeeping probe and the
 /// session-spawn path both call this, so they cannot choose differently.
 /// What: drops records that pin nothing. Agreement is judged on the identity a
-/// pin selects, not on the whole record: every remaining pin must carry the
-/// same effective login (case-insensitive), and no two may set different
-/// non-empty `config_dir` or `token_env` values — otherwise `Err` names two
-/// records. `Ok(Some(pin))` is the most specific agreeing pin (a `config_dir`
-/// outranks a `token_env`, which outranks neither), ties broken by record name,
-/// so the answer is order-independent. `Ok(None)` when no pin is left.
+/// pin selects, not on the whole record: every pin that NAMES a login must name
+/// the same one (case-insensitive; a pin with no login sits out), and no two may
+/// set different non-empty `config_dir` or `token_env` values — otherwise `Err`
+/// names two records and the field that conflicts. `Ok(Some(pin))` is the most
+/// specific agreeing pin (a `config_dir` outranks a `token_env`, which outranks
+/// neither), ties broken by record name, so the answer is order-independent; a
+/// winner with no login inherits the agreed one. `Ok(None)` when no pin is left.
 /// Test: `an_unpinned_record_does_not_shadow_a_pinned_one`,
 /// `two_disagreeing_pins_for_one_repository_fail_closed`,
 /// `same_login_pins_prefer_the_one_with_a_config_dir`,
 /// `same_login_in_a_different_case_agrees`,
 /// `same_login_with_conflicting_config_dirs_fails_closed`,
 /// `a_host_only_duplicate_does_not_block_the_pinned_record`,
+/// `a_no_login_pin_agrees_with_a_login_pin_on_the_same_config_dir`,
+/// `a_no_login_pin_with_a_different_config_dir_fails_closed`,
+/// `find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pin`,
 /// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
 /// `find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login`,
 /// `find_pinned_gh_identity_refuses_disagreeing_pins`.
@@ -254,7 +258,9 @@ pub(crate) fn select_pin(
             .and_then(named_token_env)
             .map(str::to_string)
     };
-    if let Some((a, b)) = first_disagreement(&pinned, |pin| Some(login(pin))) {
+    // #5850: a pin with no login (`github: {config_dir}` from seed_from_config or
+    // `--gh-config-dir`) sits out the login comparison; the dir checks still apply.
+    if let Some((a, b)) = first_disagreement(&pinned, login) {
         return Err(disagreement(a, b, "log in as different gh accounts"));
     }
     if let Some((a, b)) = first_disagreement(&pinned, config_dir) {
@@ -268,12 +274,23 @@ pub(crate) fn select_pin(
         ));
     }
     let specificity = |pin: &RegistryPin| (config_dir(pin).is_some(), token_env(pin).is_some());
+    // The login every record that names one agrees on, in its written case.
+    let agreed = pinned
+        .iter()
+        .find_map(|(_, pin)| pin.login().map(str::to_string));
     // `rev` makes `max_by_key` keep the FIRST record by name on a tie.
     Ok(pinned
         .into_iter()
         .rev()
         .max_by_key(|(_, pin)| specificity(pin))
-        .map(|(_, pin)| pin))
+        .map(|(_, mut pin)| {
+            // #5850: a winner with no login inherits the agreed one, so
+            // `configured_account_pair` enforcement stays armed.
+            if pin.login().is_none() {
+                pin.account = agreed;
+            }
+            pin
+        }))
 }
 
 /// The first pair of records whose `field` values are both set and differ.
