@@ -7,9 +7,16 @@
 // leading `=` as a command-path expansion.
 // Test: `tmuxAttach.test.ts`.
 
-/** `tmux attach-session -t '=<name>'`, normalized and quoted for a POSIX shell. */
+/**
+ * `tmux attach-session -t '=<name>'`, normalized and quoted for a POSIX shell.
+ * An empty (or `=`-only) name gets `'$'`, which matches no session: `'='` is
+ * what tmux reads as the mouse target.
+ */
 export function shellAttachCommand(name: string): string {
   const normalized = name.replace(/^=/, '').replace(/[:.]/g, '_');
+  if (normalized.trim() === '') {
+    return "tmux attach-session -t '$'";
+  }
   const quoted = normalized.replace(/'/g, "'\\''");
   return `tmux attach-session -t '=${quoted}'`;
 }

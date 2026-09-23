@@ -45,6 +45,15 @@
 #   - A conditional binding whose bare branch uses none of the listed builders
 #     (e.g. `let t = if c { exact_session_target(n) } else { n };`) passes:
 #     only the builder list above is recognised as "bare".
+#   - A bare value that reaches tmux through a mutation other than `x = …`
+#     (`t.clear(); t.push_str(n)`, `std::mem::swap`) passes.
+#   - A verb alias is recognised only as a quoted argv literal within 3 lines
+#     of the `-t`; an alias built at runtime, or in a file that never mentions
+#     tmux and names no verb, is invisible.
+#   - Combined short flags (`-st`) are checked only on a line that names tmux
+#     or a verb, because `-it`/`-rt` belong to other tools; a combined flag on
+#     a wrapper line (`"${TM[@]}" list-panes -st "$S"` names the verb, so it is
+#     caught, but `"${TM[@]}" lsp -st "$S"` is not).
 #   - A `let` bound more than 30 lines above its `-t`, and a `{…}` placeholder
 #     whose value is computed outside its own statement, read as findings —
 #     the safe direction; restructure or add an allowlist row.
@@ -102,6 +111,9 @@ while (my $l = <$af>) {
 
 my $helper = qr/\b(?:shell_)?exact_(?:session|window|pane)_target\s*\(|\bshell_attach_command\s*\(|\.as_target\s*\(\s*\)/;
 my $bare_builder = qr/\.(?:to_string|to_owned|clone|into)\s*\(|\bString::from\b|\bformat!/;
+# tmux verb ALIASES as quoted argv literals (`["has", "-t", n]`): too short to
+# match as bare words, so only a quoted literal counts.
+my $verb_literal = qr/[\x27"`](?:has|killp|killw|send|capturep|display|lsp|lsw|lsc|rename|renamew|neww|splitw|selectw|selectp|respawnp|attach|switchc|setenv|showenv|pipep)[\x27"`]/;
 my $verb = qr/\b(?:has-session|kill-session|rename-session|list-windows|list-panes|list-clients|send-keys|capture-pane|display-message|split-window|new-window|select-window|select-pane|kill-window|kill-pane|respawn-pane|attach-session|switch-client|set-environment|show-environment|pipe-pane)\b/;
 my (@findings, $scanned, $tmux_files);
 
@@ -118,10 +130,38 @@ sub token_ok {
     $tok =~ s/^[\x27"`]+//;
     return 1 if $tok =~ /^=/;
     return 1 if $tok =~ /^[@%][0-9]+/;
+    # The unresolvable sentinels an empty session name renders (#8443).
+    return 1 if $tok =~ /^[\$%](?:[\x27"`;),]|$)/;
     return 1 if !$shell && $tok =~ /^\$[0-9]+/;
     return 1 if !$shell && $tok =~ /^</;
     return 1 if !$shell && $tok =~ /^\{/ && $stmt =~ $helper;
     return 0;
+}
+
+sub whole_helper_call {
+    my ($e) = @_;
+    $e =~ s/^&\s*//;
+    return 1 if $e =~ /\.as_target\s*\(\s*\)$/ && $e !~ $bare_builder;
+    return 0 unless $e =~ /^(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:shell_)?exact_(?:session|window|pane)_target\s*\(/;
+    my $open = index($e, "(");
+    my $depth = 0;
+    for my $k ($open .. length($e) - 1) {
+        my $c = substr($e, $k, 1);
+        $depth++ if $c eq "(";
+        $depth-- if $c eq ")";
+        return (substr($e, $k + 1) =~ /^\s*$/) ? 1 : 0 if $depth == 0;
+    }
+    return 0;
+}
+
+# A binding RHS is exact when it is one whole helper call, or when it builds
+# only from helper calls (`pane.map_or_else(|| exact_window_target(s), …)`):
+# no bare builder, and nothing indexed or sliced off a helper's result.
+sub rhs_ok {
+    my ($rhs) = @_;
+    $rhs =~ s/^\s+|\s+$//g;
+    return 1 if whole_helper_call($rhs);
+    return $rhs =~ $helper && $rhs !~ $bare_builder && $rhs !~ /\)\s*\[/ ? 1 : 0;
 }
 
 sub next_arg {
@@ -189,12 +229,16 @@ for my $path (split /\n/, $ENV{TMUX_GATE_FILES}) {
         $i++;
         # An attached `-t…` opening a string literal (`format!("-t{n}")`) in a
         # file that mentions tmux applies even without the word on the line.
-        my $applies = ($shell && $mentions) || $l =~ /\btmux\b/ || $l =~ $verb
+        my $named = $l =~ /\btmux\b/ || $l =~ $verb;
+        my $applies = ($shell && $mentions) || $named
             || ($mentions && $l =~ /[\x27"`]-t[^\s\x27"`]/);
         next unless $applies;
         my $stmt = $md ? $l : statement_from(\@code, $start);
-        while ($l =~ /(?:^|[\s\x27"`(\[,])-t(?:\s+|(?=[\x27"{\$=%@]))(\S+)/g) {
-            my $tok = $1;
+        # `-t`, or combined short flags ending in t (`-st`) on a line that
+        # names tmux or a verb — elsewhere `-it`/`-rt` belong to other tools.
+        while ($l =~ /(?:^|[\s\x27"`(\[,])-([A-Za-z]*)t(?:\s+|(?=[\x27"{\$=%@]))(\S+)/g) {
+            my ($flags, $tok) = ($1, $2);
+            next if length($flags) && !$named;
             next if token_ok($tok, $shell, $stmt);
             # A lone `"-t"` argv token is Shape A`s job.
             next if !$shell && !$md && $tok =~ /^[\x27"](?:[,.)\]]|$)/;
@@ -206,26 +250,31 @@ for my $path (split /\n/, $ENV{TMUX_GATE_FILES}) {
 
     next if $shell || $md;
     my $text = join "", @code;
-    while ($text =~ /([\x27"])-t\1/g) {
+    # Backticks quote a string only in the JS family (`"-t"` in Rust is prose
+    # when written `-t` inside a message).
+    my $q = $path =~ /\.(?:ts|tsx|js|mjs|svelte)$/ ? qr/[\x27"`]/ : qr/[\x27"]/;
+    while ($text =~ /($q)-([A-Za-z]*)t\1/g) {
         my $pos = pos($text);
-        my $start = $pos - 4;
+        my $start = $pos - 4 - length($2);
         my $pre = substr($text, $start > 40 ? $start - 40 : 0, $start > 40 ? 40 : $start);
         my $post = substr($text, $pos, 40);
         next if $pre =~ /[=!]=\s*$/ || $post =~ /^\s*(?:=>|==|!=)/;
         my $line_no = (substr($text, 0, $pos) =~ tr/\n//) + 1;
         my $lo3 = $line_no - 4 < 0 ? 0 : $line_no - 4;
-        next unless $mentions || join("", @code[$lo3 .. $line_no - 1]) =~ $verb;
+        my $near = join("", @code[$lo3 .. $line_no - 1]);
+        next unless $mentions || $near =~ $verb || $near =~ $verb_literal;
         my $arg = next_arg(substr($text, $pos));
         my $ok = 0;
-        $ok = 1 if $arg =~ $helper && $arg !~ $bare_builder;
+        $ok = 1 if whole_helper_call($arg);
         $ok = 1 if $arg =~ /^&?\s*[\x27"]=/ || $arg =~ /^&?\s*[\x27"][\$@%][0-9]+[\x27"]/;
         if (!$ok && $arg =~ /^&?\s*([A-Za-z_][A-Za-z0-9_]*)$/) {
             my $var = $1;
             my $lo = $line_no - 31 < 0 ? 0 : $line_no - 31;
             my $window = join "", @code[$lo .. $line_no - 1];
-            while ($window =~ /\blet\s+(?:mut\s+)?\Q$var\E\b(?:\s*:[^=]+)?\s*=([^;]*);/gs) {
-                my $rhs = $1;
-                $ok = ($rhs =~ $helper && $rhs !~ $bare_builder) ? 1 : 0;
+            # The LAST binding or reassignment before the use decides:
+            # `let mut t = exact_…; t = n.to_string();` is bare.
+            while ($window =~ /(?:\blet\s+(?:mut\s+)?|(?<![\w.])(?=\Q$var\E\s*=[^=]))\Q$var\E\b(?:\s*:[^=;]+)?\s*=(?!=)([^;]*);/gs) {
+                $ok = rhs_ok($1);
             }
         }
         next if $ok;

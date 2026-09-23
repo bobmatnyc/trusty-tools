@@ -76,10 +76,25 @@ impl ClaudeCodeRestarter {
     /// Test: `find_claude_processes_does_not_panic`; the pane/session target
     /// DECISION is unit-tested (no live tmux needed) via `restart_target_*`.
     pub fn restart_in_session(tmux_session: &str, pane_id: Option<&str>) -> Result<()> {
+        Self::restart_in_session_with(
+            tmux_session,
+            pane_id,
+            crate::daemon::tmux::TmuxDriver::discover,
+        )
+    }
+
+    /// [`Self::restart_in_session`] with the driver supplied by `discover`, so a
+    /// test can hand it a driver that cannot reach any tmux server (#8443).
+    /// Test: `restart_refuses_an_empty_session_name`.
+    fn restart_in_session_with(
+        tmux_session: &str,
+        pane_id: Option<&str>,
+        discover: impl FnOnce() -> Result<crate::daemon::tmux::TmuxDriver>,
+    ) -> Result<()> {
         // #8443: refuse an empty session before touching tmux at all.
         crate::core::tmux::check_session_name(tmux_session)
-            .map_err(|e| Error::Protocol(e.to_string()))?;
-        let driver = crate::daemon::tmux::TmuxDriver::discover()?;
+            .map_err(|e| Error::Protocol(format!("restart refused before tmux ran: {e}")))?;
+        let driver = discover()?;
         driver.apply_scrollback_options();
         let pane_alive = pane_id.is_some_and(|p| driver.pane_exists(tmux_session, p));
         let target = restart_target(tmux_session, pane_id, pane_alive)?;
@@ -157,11 +172,23 @@ mod tests {
     #[test]
     fn restart_refuses_an_empty_session_name() {
         // #8443 critic HIGH: `""` used to render `=:`, the CURRENT session.
+        // The injected driver points at a binary that does not exist, so even a
+        // regressed guard can never reach a real tmux server (#8443 review).
         for name in ["", "=", "  "] {
             assert!(restart_target(name, None, false).is_err(), "{name:?}");
-            let err = ClaudeCodeRestarter::restart_in_session(name, None)
-                .expect_err("an empty session must be refused before tmux runs");
-            assert!(err.to_string().contains("#8443"), "{err}");
+            let discovered = std::cell::Cell::new(false);
+            let err = ClaudeCodeRestarter::restart_in_session_with(name, None, || {
+                discovered.set(true);
+                Ok(crate::daemon::tmux::TmuxDriver::with_tmux_path_for_test(
+                    "/nonexistent/tmux-8443-missing",
+                ))
+            })
+            .expect_err("an empty session must be refused");
+            assert!(
+                !discovered.get(),
+                "{name:?}: the guard must refuse before any tmux driver is built"
+            );
+            assert!(err.to_string().contains("before tmux ran"), "{err}");
         }
     }
 }

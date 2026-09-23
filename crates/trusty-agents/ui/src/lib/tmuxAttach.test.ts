@@ -11,6 +11,12 @@ describe('shellAttachCommand', () => {
     expect(shellAttachCommand('tm:proj.0')).toBe("tmux attach-session -t '=tm_proj_0'");
   });
 
+  it('never renders a bare = for an empty name', () => {
+    for (const name of ['', '=', '  ']) {
+      expect(shellAttachCommand(name)).toBe("tmux attach-session -t '$'");
+    }
+  });
+
   it("escapes a single quote for the shell", () => {
     expect(shellAttachCommand("a'b")).toBe("tmux attach-session -t '=a'\\''b'");
   });

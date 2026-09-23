@@ -160,7 +160,10 @@ impl std::error::Error for TmuxTargetError {}
 const UNRESOLVABLE_SESSION_TARGET: &str = "$";
 
 /// Target rendered for a rejected name on a WINDOW/PANE-typed verb: `%` is a
-/// pane-id lookup with no number (`can't find pane: %` on tmux 3.6b).
+/// pane-id lookup with no number. On tmux 3.6b `send-keys`, `capture-pane`,
+/// `list-panes` and `split-window` fail with `can't find pane: %`, but
+/// `display-message -t %` exits 0 with EMPTY output — a `display-message`
+/// caller must treat empty stdout as "no such pane", not rely on the exit code.
 const UNRESOLVABLE_PANE_TARGET: &str = "%";
 
 /// The session name tmux actually stores for `name`, or `Err` when there is
@@ -225,7 +228,8 @@ pub fn exact_session_target(name: &str) -> String {
 /// `display-message`, `list-panes` (with or without `-s`), `split-window`,
 /// `new-window`, `select-window` and `set-option -t`. Normalizes and passes
 /// immutable ids through exactly like [`exact_session_target`]; a rejected
-/// name renders `%`, which no pane matches.
+/// name renders `%`, which no pane matches (`display-message` answers it with
+/// exit 0 and empty output — see `UNRESOLVABLE_PANE_TARGET`).
 /// Test: `exact_window_target_appends_colon`,
 /// `exact_targets_leave_immutable_ids_unchanged`,
 /// `empty_session_names_never_render_a_resolvable_target`.

@@ -147,6 +147,56 @@ printf 'Run `tmux select-window -t %s` to realign.\n' "'main:2'" \
   > "$d/crates/x/src/assets/skills/s.md"
 run_case markdown_asset 1 "bare tmux target 'main:2'" "$d"
 
+d="$(new_fixture shell_combined_flags)"
+cat > "$d/src/a.sh" <<'SH'
+tmux list-panes -st "$S"
+SH
+run_case shell_combined_flags 1 'bare tmux target "$S"' "$d"
+
+d="$(new_fixture rust_combined_flags)"
+cat > "$d/src/a.rs" <<'RS'
+fn panes(n: &str) {
+    let _ = std::process::Command::new("tmux").args(["list-panes", "-st", n]);
+}
+RS
+run_case rust_combined_flags 1 'non-exact target `n`' "$d"
+
+d="$(new_fixture rust_verb_alias)"
+mkdir -p "$d/other"
+printf 'tmux is used elsewhere\n' > "$d/other/readme.sh"
+cat > "$d/src/a.rs" <<'RS'
+fn probe(bin: &str, n: &str) {
+    let _ = std::process::Command::new(bin).args(["has", "-t", n]);
+}
+RS
+run_case rust_verb_alias 1 'non-exact target `n`' "$d"
+
+d="$(new_fixture rust_sliced_helper)"
+cat > "$d/src/a.rs" <<'RS'
+fn kill(n: &str) {
+    let _ = std::process::Command::new("tmux")
+        .args(["kill-session", "-t", &exact_session_target(n)[1..]]);
+}
+RS
+run_case rust_sliced_helper 1 'non-exact target `&exact_session_target(n)[1..]`' "$d"
+
+d="$(new_fixture rust_reassigned)"
+cat > "$d/src/a.rs" <<'RS'
+fn kill(n: &str) {
+    let mut t = exact_session_target(n);
+    t = n.to_string();
+    let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &t]);
+}
+RS
+run_case rust_reassigned 1 'non-exact target `&t`' "$d"
+
+d="$(new_fixture ts_backtick)"
+cat > "$d/src/a.ts" <<'TS'
+// Runs tmux through a child process.
+export const argv = (n: string) => ['kill-session', `-t`, n];
+TS
+run_case ts_backtick 1 'non-exact target `n`' "$d"
+
 d="$(new_fixture rust_exact_forms)"
 cat > "$d/src/a.rs" <<'RS'
 // A comment naming tmux has-session -t bare is prose, not an invocation.
