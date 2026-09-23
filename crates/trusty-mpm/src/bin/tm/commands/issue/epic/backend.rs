@@ -16,8 +16,11 @@
 //! `gh_backend_refuses_a_create_whose_url_carries_no_number`,
 //! `gh_backend_parses_the_sub_issue_connection`,
 //! `gh_backend_pages_a_truncated_sub_issue_connection`,
+//! `gh_backend_pages_a_body_carrying_a_reference_style_link`,
 //! `gh_backend_trusts_a_complete_sub_issue_page`,
 //! `gh_backend_finds_a_tracker_in_a_label_filtered_listing`,
+//! `gh_backend_finds_a_placeholder_titled_tracker`,
+//! `gh_backend_reads_an_issues_comment_bodies`,
 //! `gh_backend_refuses_a_full_page_rather_than_reporting_no_tracker`,
 //! `gh_backend_reports_an_absent_plan_doc_as_none` in `tests.rs`.
 
@@ -126,21 +129,48 @@ pub(crate) trait EpicBackend {
     /// Every native sub-issue of `tracker`, with bodies.
     fn children(&self, tracker: u64) -> anyhow::Result<Vec<ChildIssue>>;
 
-    /// The tracker already carrying `outcome` as its title suffix, if any,
-    /// searched among the issues carrying every one of `labels`.
+    /// The tracker already carrying `outcome` in its title, if any, searched
+    /// among the issues carrying every one of `labels`.
     ///
     /// Contract: `Ok(None)` means the implementation ENUMERATED the candidate
     /// set and none matched. An implementation that cannot rule out a
     /// truncated or stale listing must return `Err`, never `Ok(None)` — the
     /// caller files a new tracker on `None`, and a duplicate tracker cannot be
-    /// undone.
-    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>>;
+    /// undone. A match may be a [`FoundTracker::placeholder`], which is what a
+    /// run KILLED between the create and the retitle leaves behind.
+    fn find_tracker(
+        &self,
+        outcome: &str,
+        labels: &[String],
+    ) -> anyhow::Result<Option<FoundTracker>>;
 
     /// Add an issue to the owner's project `number`, in `repo` (`owner/name`).
     fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()>;
 
+    /// Every comment body on an issue, oldest first.
+    fn comments(&self, issue: u64) -> anyhow::Result<Vec<String>>;
+
     /// Post a comment on an issue.
     fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()>;
+}
+
+/// A tracker the lookup matched, and which of the two title forms it wore.
+///
+/// Why: the two-step creation (file with a placeholder, read the number back,
+/// retitle) is not atomic, so a KILLED process — no error, no unwinding — can
+/// leave `[EPIC] <outcome>` on the record. A lookup that matched only the final
+/// form would report "no tracker exists" and the re-run would file a duplicate.
+/// Reporting WHICH form matched lets the caller finish the call the killed run
+/// owed instead of refusing or duplicating.
+/// What: the issue number, and whether its title is still the placeholder.
+/// Test: `gh_backend_finds_a_placeholder_titled_tracker`,
+/// `create_retitles_a_placeholder_tracker_on_re_run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FoundTracker {
+    /// The tracker's issue number.
+    pub(crate) number: u64,
+    /// Whether the title is still `[EPIC] <outcome>`, never `[EPIC <n>] …`.
+    pub(crate) placeholder: bool,
 }
 
 /// `{"subIssues": {"nodes": [...]}}` — gh 2.96 renders the connection as an
@@ -192,6 +222,14 @@ struct BodyOnly {
     body: String,
 }
 
+/// `{"comments": [{"body": "..."}]}` — the same field `core::issue_audit`
+/// already fetches for its `no-milestone:` / `no-component-label:` hatches.
+#[derive(Debug, Deserialize)]
+struct CommentList {
+    #[serde(default)]
+    comments: Vec<BodyOnly>,
+}
+
 /// `{"nameWithOwner": "owner/repo"}`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,34 +259,29 @@ impl<R: CommandRunner> GhEpicBackend<R> {
         Self { runner }
     }
 
-    /// Run a `git` read whose empty stdout is a meaningful "not found".
-    ///
-    /// Why: three of this backend's reads (`ls-files`, the two `log` lookups)
-    /// exit 0 with empty output when nothing matches, so "empty" has to be
-    /// mapped to `None` exactly once rather than at each call site.
-    /// Test: `gh_backend_reports_an_absent_plan_doc_as_none`.
     /// Every sub-issue of `tracker`, through the paginated REST endpoint.
     ///
     /// Why: the GraphQL connection `gh issue view --json subIssues` serves is
     /// one page. This is the fallback the `tm-epic` manual procedure already
     /// names for an epic with more children than that page holds, used
     /// whenever `totalCount` says the page was short.
-    /// Test: `gh_backend_pages_a_truncated_sub_issue_connection`.
+    /// What: `gh api --paginate` MERGES its pages into one JSON array — verified
+    /// against the installed gh 2.96, and `pkg/cmd/api/pagination.go`'s
+    /// `jsonArrayWriter` is what strips the intervening brackets — so the normal
+    /// response is a single array. Reading it as a STREAM of top-level values
+    /// rather than splitting on a `][` seam covers an older gh that concatenated
+    /// its pages without costing anything on the current one, and, unlike a
+    /// split, cannot be fooled by a child body containing a reference-style
+    /// markdown link such as `[text][ref]`.
+    /// Test: `gh_backend_pages_a_truncated_sub_issue_connection`,
+    /// `gh_backend_pages_a_body_carrying_a_reference_style_link`.
     fn sub_issues_paginated(&self, tracker: u64) -> anyhow::Result<Vec<SubIssueNode>> {
         let endpoint = format!("repos/{{owner}}/{{repo}}/issues/{tracker}/sub_issues");
         let out = self.runner.run("gh", &["api", &endpoint, "--paginate"])?;
         let text = out.ok_or_stderr("gh api …/sub_issues --paginate")?;
-        // `--paginate` concatenates one JSON array per page; gh emits them
-        // back to back, so each array is parsed on its own.
         let mut nodes = Vec::new();
-        for chunk in text.split("][") {
-            let repaired = match (chunk.starts_with('['), chunk.ends_with(']')) {
-                (true, true) => chunk.to_string(),
-                (true, false) => format!("{chunk}]"),
-                (false, true) => format!("[{chunk}"),
-                (false, false) => format!("[{chunk}]"),
-            };
-            let page: Vec<SubIssueNode> = serde_json::from_str(&repaired).map_err(|e| {
+        for page in serde_json::Deserializer::from_str(&text).into_iter::<Vec<SubIssueNode>>() {
+            let page = page.map_err(|e| {
                 anyhow::anyhow!("failed to parse a sub-issue page for #{tracker}: {e}")
             })?;
             nodes.extend(page);
@@ -256,6 +289,12 @@ impl<R: CommandRunner> GhEpicBackend<R> {
         Ok(nodes)
     }
 
+    /// Run a `git` read whose empty stdout is a meaningful "not found".
+    ///
+    /// Why: three of this backend's reads (`ls-files`, the two `log` lookups)
+    /// exit 0 with empty output when nothing matches, so "empty" has to be
+    /// mapped to `None` exactly once rather than at each call site.
+    /// Test: `gh_backend_reports_an_absent_plan_doc_as_none`.
     fn git_first_line(&self, args: &[&str]) -> anyhow::Result<Option<String>> {
         let out = self.runner.run("git", args)?;
         let text = out.ok_or_stderr("git")?;
@@ -389,7 +428,11 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
         Ok(children)
     }
 
-    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>> {
+    fn find_tracker(
+        &self,
+        outcome: &str,
+        labels: &[String],
+    ) -> anyhow::Result<Option<FoundTracker>> {
         // #8447: this read decides whether a SECOND tracker gets filed, and a
         // duplicate tracker cannot be undone. It therefore goes through the
         // directly-consistent issue connection, filtered by label, rather than
@@ -425,10 +468,27 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
                 labels.join(", ")
             );
         }
-        let matches: Vec<u64> = rows
+        // #8447: BOTH title forms count as a match. A run killed between the
+        // create and the retitle leaves the placeholder form, and matching only
+        // the final form would report "no tracker exists" and file a duplicate.
+        let placeholder = super::render::placeholder_tracker_title(outcome);
+        let matches: Vec<FoundTracker> = rows
             .iter()
-            .filter(|r| super::render::is_tracker_title(&r.title, r.number, outcome))
-            .map(|r| r.number)
+            .filter_map(|r| {
+                if super::render::is_tracker_title(&r.title, r.number, outcome) {
+                    Some(FoundTracker {
+                        number: r.number,
+                        placeholder: false,
+                    })
+                } else if r.title.trim() == placeholder {
+                    Some(FoundTracker {
+                        number: r.number,
+                        placeholder: true,
+                    })
+                } else {
+                    None
+                }
+            })
             .collect();
         match matches.as_slice() {
             [] => Ok(None),
@@ -438,7 +498,7 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
                  pass `--tracker <number>` to say which one to resume",
                 many.len(),
                 many.iter()
-                    .map(|n| format!("#{n}"))
+                    .map(|m| format!("#{}", m.number))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -466,6 +526,17 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
             )?
             .ok_or_stderr("gh project item-add")?;
         Ok(())
+    }
+
+    fn comments(&self, issue: u64) -> anyhow::Result<Vec<String>> {
+        let n = issue.to_string();
+        let out = self
+            .runner
+            .run("gh", &["issue", "view", &n, "--json", "comments"])?;
+        let text = out.ok_or_stderr("gh issue view --json comments")?;
+        let parsed: CommentList = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("failed to parse the comment list for #{issue}: {e}"))?;
+        Ok(parsed.comments.into_iter().map(|c| c.body).collect())
     }
 
     fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()> {

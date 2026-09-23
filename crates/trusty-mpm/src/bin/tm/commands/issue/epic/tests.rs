@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
-use super::backend::{ChildIssue, EpicBackend, NewIssue, issue_number_from_url};
+use super::backend::{ChildIssue, EpicBackend, FoundTracker, NewIssue, issue_number_from_url};
 use super::create::{self, CreateOptions, NO_PROJECT_PREFIX};
 use super::plan::{self, PlanError};
 use super::render::{
@@ -25,6 +25,10 @@ use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
 const REL_PATH: &str = "docs/research/tm-epic-cli/epic-plan.md";
 /// A plausible 40-hex commit for the permalink assertions.
 const PUBLISHED_SHA: &str = "581cfb4da254f7448c5c042c8d9bea50ebe84828";
+/// gh's handled wording when the token lacks the `project` scope — the ONE
+/// attach failure that degrades to a `no-project:` comment.
+const SCOPE_REFUSAL: &str = "error: your authentication token is missing required scopes [project]. \
+     To add them, run `gh auth refresh -s project`";
 
 /// A two-phase plan document exercising every heading the schema declares,
 /// including the document's own `phases` and `deferred` marker blocks.
@@ -122,7 +126,7 @@ struct FakeBackend {
     issues: RefCell<BTreeMap<u64, FakeIssue>>,
     next_number: Cell<u64>,
     counts: RefCell<HashMap<String, usize>>,
-    fail: RefCell<Vec<String>>,
+    fail: RefCell<Vec<(String, String)>>,
     /// The label set the last `find_tracker` call narrowed by (#8447 HIGH).
     find_labels: RefCell<Vec<String>>,
 }
@@ -142,9 +146,27 @@ impl FakeBackend {
         }
     }
 
-    /// Script one call to fail. `key` is `<op>` or `<op>:<nth>`.
+    /// Script one call to fail with a generic message. `key` is `<op>` or
+    /// `<op>:<nth>`.
     fn fails(self, key: &str) -> Self {
-        self.fail.borrow_mut().push(key.to_string());
+        self.fail
+            .borrow_mut()
+            .push((key.to_string(), String::new()));
+        self
+    }
+
+    /// Script one call to fail with a SPECIFIC message.
+    ///
+    /// Why: a generic "scripted failure" cannot distinguish a scope refusal
+    /// from a 502, which is the distinction `is_scope_refusal` draws — a test
+    /// named for the scope arm that fed the backend a generic error passed over
+    /// the broken behaviour it claimed to cover.
+    /// Test: `create_waives_a_project_attach_the_token_refuses`,
+    /// `create_propagates_a_non_scope_attach_error`.
+    fn fails_with(self, key: &str, msg: &str) -> Self {
+        self.fail
+            .borrow_mut()
+            .push((key.to_string(), msg.to_string()));
         self
     }
 
@@ -161,8 +183,14 @@ impl FakeBackend {
             *n
         };
         let fail = self.fail.borrow();
-        if fail.iter().any(|k| k == op || k == &format!("{op}:{nth}")) {
-            anyhow::bail!("scripted failure: {op} call {nth}");
+        let hit = fail
+            .iter()
+            .find(|(k, _)| k == op || k == &format!("{op}:{nth}"));
+        if let Some((_, msg)) = hit {
+            if msg.is_empty() {
+                anyhow::bail!("scripted failure: {op} call {nth}");
+            }
+            anyhow::bail!("{msg}");
         }
         Ok(())
     }
@@ -298,15 +326,29 @@ impl EpicBackend for FakeBackend {
             .collect())
     }
 
-    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>> {
+    fn find_tracker(
+        &self,
+        outcome: &str,
+        labels: &[String],
+    ) -> anyhow::Result<Option<FoundTracker>> {
         self.tick("find_tracker")?;
         self.find_labels.borrow_mut().clone_from(&labels.to_vec());
-        Ok(self
-            .issues
-            .borrow()
-            .iter()
-            .find(|(n, i)| render::is_tracker_title(&i.title, **n, outcome))
-            .map(|(n, _)| *n))
+        let placeholder = render::placeholder_tracker_title(outcome);
+        Ok(self.issues.borrow().iter().find_map(|(n, i)| {
+            if render::is_tracker_title(&i.title, *n, outcome) {
+                Some(FoundTracker {
+                    number: *n,
+                    placeholder: false,
+                })
+            } else if i.title.trim() == placeholder {
+                Some(FoundTracker {
+                    number: *n,
+                    placeholder: true,
+                })
+            } else {
+                None
+            }
+        }))
     }
 
     fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()> {
@@ -316,6 +358,11 @@ impl EpicBackend for FakeBackend {
             found.projects.push(number);
         }
         Ok(())
+    }
+
+    fn comments(&self, issue: u64) -> anyhow::Result<Vec<String>> {
+        self.tick("comments")?;
+        Ok(self.issue(issue).comments)
     }
 
     fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()> {
@@ -929,7 +976,10 @@ fn create_labels_every_issue_it_files() {
 #[test]
 fn create_waives_a_project_attach_the_token_refuses() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let backend = FakeBackend::new().fails("attach_project");
+    // The error text matters: only a SCOPE refusal degrades, so the fake must
+    // speak gh's handled wording. A generic "scripted failure" here is what let
+    // this test pass over a version that waived on any attach error at all.
+    let backend = FakeBackend::new().fails_with("attach_project", SCOPE_REFUSAL);
     let report =
         create::create(&backend, &opts_for(&dir, Some(3))).expect("the run still succeeds");
 
@@ -954,11 +1004,149 @@ fn create_waives_a_project_attach_the_token_refuses() {
 #[test]
 fn create_fails_when_the_waiver_comment_fails() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let backend = FakeBackend::new().fails("attach_project").fails("comment");
+    let backend = FakeBackend::new()
+        .fails_with("attach_project", SCOPE_REFUSAL)
+        .fails("comment");
     let err = create::create(&backend, &opts_for(&dir, Some(3))).unwrap_err();
     assert!(
         err.to_string().contains("scripted failure: comment"),
         "{err}"
+    );
+}
+
+/// Review finding: `attach_project_or_waive` degraded on ANY attach error, so
+/// a 502 wrote `no-project: …502…` onto every issue and exited 0 — a permanent
+/// record of a transient, retryable outage.
+#[test]
+fn create_propagates_a_non_scope_attach_error() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new().fails_with(
+        "attach_project",
+        "HTTP 502: Bad gateway (https://api.github.com/graphql)",
+    );
+    let err = create::create(&backend, &opts_for(&dir, Some(3))).unwrap_err();
+    assert!(
+        err.to_string().contains("not the token's project scope"),
+        "{err}"
+    );
+    assert!(
+        backend.issue(100).comments.is_empty(),
+        "a retryable failure must leave no waiver: {:?}",
+        backend.issue(100).comments
+    );
+}
+
+/// Both wordings a scope refusal reaches us in: gh's handled form, and the raw
+/// GraphQL message it wraps.
+#[test]
+fn a_scope_refusal_is_recognised_in_both_wordings() {
+    assert!(create::is_scope_refusal(SCOPE_REFUSAL));
+    assert!(create::is_scope_refusal(
+        "your token has not been granted the required scopes to execute this query. The \
+         'id' field requires one of the following scopes: ['read:project']"
+    ));
+    assert!(!create::is_scope_refusal("HTTP 502: Bad gateway"));
+    assert!(!create::is_scope_refusal(
+        "could not resolve to a ProjectV2"
+    ));
+}
+
+/// Review finding: the skip branch posted a waiver unconditionally, so a second
+/// run with the scope still missing left two `no-project:` comments per issue,
+/// a third after the third run.
+#[test]
+fn create_leaves_one_waiver_per_issue_across_two_runs() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new().fails_with("attach_project", SCOPE_REFUSAL);
+    let opts = opts_for(&dir, Some(3));
+    create::create(&backend, &opts).expect("first run waives");
+    let report = create::create(&backend, &opts).expect("second run waives again");
+
+    // The report still names all three, because all three still lack a project.
+    assert_eq!(report.waived.len(), 3, "{:?}", report.waived);
+    for number in [100, 101, 102] {
+        assert_eq!(
+            backend.issue(number).comments.len(),
+            1,
+            "#{number} collected a second waiver: {:?}",
+            backend.issue(number).comments
+        );
+    }
+}
+
+/// Review finding: the tracker attach lived inside the FILING branch, so an
+/// adopted tracker — and every `--tracker <n>` run — got neither a project nor
+/// a waiver recording why.
+#[test]
+fn create_attaches_an_adopted_tracker_to_the_project() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // Die at the tracker's own attach, after it is filed and retitled.
+    let backend = FakeBackend::new()
+        .fails("attach_project:1")
+        .fails("comment:1");
+    let opts = opts_for(&dir, Some(3));
+    create::create(&backend, &opts).expect_err("the run dies at the tracker's attach");
+    assert_eq!(
+        backend.issue(100).title,
+        "[EPIC 100] Automate tracker and phase-issue authoring",
+        "the retitle had already happened"
+    );
+    assert!(backend.issue(100).projects.is_empty());
+
+    backend.clear_failures();
+    create::create(&backend, &opts).expect("the re-run adopts the tracker");
+    assert_eq!(
+        backend.issue(100).projects,
+        vec![3],
+        "the adopted tracker is attached exactly once"
+    );
+}
+
+/// Review finding: `create` filed the tracker and attached it in one branch, so
+/// the freshly filed path must not attach twice now that the call moved out.
+#[test]
+fn create_attaches_a_freshly_filed_tracker_exactly_once() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new();
+    create::create(&backend, &opts_for(&dir, Some(3))).expect("creates");
+    assert_eq!(
+        backend.issue(100).projects,
+        vec![3],
+        "attached once, not twice"
+    );
+}
+
+/// Review finding: a SIGKILL between `create_issue` and `set_title` leaves
+/// `[EPIC] <outcome>`, which the exact-match lookup could not see — so the
+/// re-run filed a duplicate tracker. It now adopts and finishes the retitle.
+#[test]
+fn create_retitles_a_placeholder_tracker_on_re_run() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new();
+    // Exactly what the killed process left: created, never renamed. Seeded
+    // below the fake's allocator so the phases this run files take fresh
+    // numbers rather than landing on the tracker's.
+    backend.seed_tracker(
+        90,
+        "[EPIC] Automate tracker and phase-issue authoring",
+        &tracker_fixture(
+            "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
+        ),
+    );
+    let report = create::create(&backend, &opts_for(&dir, None)).expect("adopts and finishes");
+
+    assert_eq!(report.tracker, Some(90), "no duplicate tracker was filed");
+    assert_eq!(
+        backend.issue(90).title,
+        "[EPIC 90] Automate tracker and phase-issue authoring",
+        "the re-run finished the retitle the killed run owed"
+    );
+    assert_eq!(report.filed.len(), 2, "{:?}", report.filed);
+    assert_eq!(
+        backend.titles().len(),
+        3,
+        "one tracker, two phases: {:?}",
+        backend.titles()
     );
 }
 
@@ -1381,7 +1569,12 @@ fn gh_backend_pages_a_truncated_sub_issue_connection() {
         ok_out(
             r#"{"subIssues":{"nodes":[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"OPEN"}],"totalCount":2}}"#,
         ),
-        // The REST fallback, two pages concatenated the way `--paginate` emits.
+        // Two arrays back to back. gh 2.96 does NOT emit this — its
+        // `jsonArrayWriter` merges `--paginate` pages into one array, verified
+        // live over 68 pages with zero `][` seams — so this case is defence
+        // against an OLDER gh that concatenated them, kept because the stream
+        // reader handles it for free. The merged shape is the normal one, and
+        // `gh_backend_pages_a_body_carrying_a_reference_style_link` covers it.
         ok_out(
             r#"[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"open"}][{"number":2,"title":"[EPIC_9 PHASE_2] b","state":"closed"}]"#,
         ),
@@ -1438,9 +1631,74 @@ fn gh_backend_finds_a_tracker_in_a_label_filtered_listing() {
     let backend = super::backend::GhEpicBackend::new(runner);
     assert_eq!(
         backend.find_tracker("An outcome", &labels).expect("reads"),
-        Some(8445),
-        "only the title carrying the issue's OWN number is a tracker"
+        Some(FoundTracker {
+            number: 8445,
+            placeholder: false
+        }),
+        "only the title carrying the issue's OWN number is a final-form tracker"
     );
+}
+
+/// Review finding: `split("][")` cut a child body containing a
+/// reference-style markdown link, so `create` and `sync` both failed closed on
+/// any epic whose connection page was short. Streaming top-level values cannot
+/// be fooled by content.
+#[test]
+fn gh_backend_pages_a_body_carrying_a_reference_style_link() {
+    let runner = FakeRunner::new(vec![
+        ok_out(
+            r#"{"subIssues":{"nodes":[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"OPEN"}],"totalCount":2}}"#,
+        ),
+        // gh 2.96 merges `--paginate` pages into ONE array; the `][` here is
+        // inside a title, which is exactly what a seam-split would cut.
+        ok_out(
+            r#"[{"number":1,"title":"see [the spec][ref]","state":"open"},{"number":2,"title":"[EPIC_9 PHASE_2] b","state":"closed"}]"#,
+        ),
+        ok_out("{\"body\":\"## Gate\\n\\nga\\n\"}"),
+        ok_out("{\"body\":\"## Gate\\n\\ngb\\n\"}"),
+    ]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let children = backend
+        .children(9)
+        .expect("parses a body with a `][` in it");
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].title, "see [the spec][ref]");
+}
+
+/// Review finding: a run KILLED between the create and the retitle leaves the
+/// placeholder title, and an exact-match lookup reported "no tracker exists".
+#[test]
+fn gh_backend_finds_a_placeholder_titled_tracker() {
+    let labels = vec!["epic".to_string()];
+    let runner = FakeRunner::new(vec![ok_out(
+        r#"[{"number":8445,"title":"[EPIC] An outcome"}]"#,
+    )]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let found = backend
+        .find_tracker("An outcome", &labels)
+        .expect("reads")
+        .expect("the placeholder is a match");
+    assert_eq!(found.number, 8445);
+    assert!(found.placeholder, "and it reports WHICH form matched");
+
+    // A placeholder AND a real tracker is still ambiguous, so it still refuses.
+    let runner = FakeRunner::new(vec![ok_out(
+        r#"[{"number":8445,"title":"[EPIC 8445] An outcome"},{"number":8446,"title":"[EPIC] An outcome"}]"#,
+    )]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let err = backend.find_tracker("An outcome", &labels).unwrap_err();
+    assert!(err.to_string().contains("--tracker"), "{err}");
+}
+
+#[test]
+fn gh_backend_reads_an_issues_comment_bodies() {
+    let runner = FakeRunner::new(vec![ok_out(
+        r#"{"comments":[{"body":"no-project: missing scopes"},{"body":"unrelated"}]}"#,
+    )]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let comments = backend.comments(8445).expect("reads");
+    assert_eq!(comments.len(), 2);
+    assert!(comments[0].starts_with(NO_PROJECT_PREFIX), "{comments:?}");
 }
 
 #[test]
