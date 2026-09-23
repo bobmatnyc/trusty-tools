@@ -159,6 +159,12 @@ use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 /// (`.claude/worktrees/…`, `.worktrees/…`) was and stays outside this rule:
 /// [`is_main_checkout`] answers `false` for it, whether or not the directory
 /// exists yet.
+///
+/// A disposable clone under the session scratchpad is exempt (#8339). The
+/// #5769 residual still applies there: `git --git-dir=<main>/.git
+/// --work-tree=<main> checkout -- .` and the `GIT_DIR=`/`GIT_WORK_TREE=`
+/// prefixes, run from a scratchpad clone or any non-repo cwd, resolve to the
+/// cwd rather than `<main>` and stay ALLOWED.
 /// Test: the two halves are covered separately (see the module doc);
 /// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
 /// `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`,
@@ -195,6 +201,10 @@ fn evaluate_main_checkout_destructive_command_in(
     // #8339: a disposable clone under the session scratchpad is nobody's shared
     // tree — the #7778 proof, canonicalized. Never for an unresolved path: a
     // literal `$WT` joined to a scratchpad cwd proves nothing about `$WT`.
+    // Residual (#5769, module doc): `--git-dir=`/`--work-tree=` and a
+    // `GIT_DIR=`/`GIT_WORK_TREE=` prefix are never resolved into the target, so
+    // from a scratchpad clone (or any non-repo cwd) they still reach a main
+    // checkout unrefused.
     if unresolved.is_none()
         && main_checkout_root(&target)
             .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
