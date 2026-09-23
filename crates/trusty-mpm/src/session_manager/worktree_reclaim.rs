@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 // #7889: gate 5's landed-content admission lives next door so this file stays
 // under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
 pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
-use super::worktree_reclaim_landed::no_pr_verdict;
+use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict};
 
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
@@ -873,13 +873,9 @@ pub(crate) fn classify_with_landed_content(
     // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
     // unpushed source. This is the last gate and it fails toward dirty.
-    if let Some(dirt) = probe_dirt(path) {
-        return ReclaimVerdict::blocked(
-            ReclaimGate::UnsavedWork,
-            format!("holds unsaved work: {}", dirt.reason),
-        );
-    }
-    ReclaimVerdict::Reclaimable { pr: merged_pr }
+    // #7889: commits-only dirt reaches the landing admission — see
+    // `merged_pr_verdict`.
+    merged_pr_verdict(path, merged_pr, probe_dirt, landed_content)
 }
 
 /// One surveyed worktree and everything the survey learned about it (#2919).

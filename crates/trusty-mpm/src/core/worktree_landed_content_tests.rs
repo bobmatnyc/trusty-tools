@@ -12,7 +12,10 @@
 
 use std::time::Duration;
 
-use super::{LANDED_CONTENT_CHECK, LandedContent, landed_content_verdict, merge_residue};
+use super::{
+    LANDED_CONTENT_CHECK, LandedContent, LandingAdmission, landed_content_verdict, merge_residue,
+};
+use crate::core::worktree_carried_by_pr::{CarriedByPr, MERGED_PR_ANCESTRY_CHECK};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 
 /// The bound every test here runs the refresh under.
@@ -158,4 +161,60 @@ fn the_note_names_the_admission_in_every_arm() {
         "the residual arm names the path: {}",
         residual.note()
     );
+}
+
+/// 🔴 #7889: routes (b) and (c) combine — either admits, and a refusal names
+/// BOTH predicates and (b)'s first residual path, so an operator sees every
+/// route that was tried.
+#[test]
+fn admission_admits_on_either_route_and_names_both_refusals() {
+    let residual = LandedContent::Residual {
+        base: "origin/main".into(),
+        first_path: "src/lib.rs".into(),
+    };
+    let not_carried = CarriedByPr::NotCarried {
+        head: "1111111".into(),
+    };
+
+    // (b) alone: a fake that states only the content answer.
+    let only_b = LandingAdmission::from(residual.clone());
+    assert!(!only_b.admits());
+
+    // (c) admits where (b) found residue.
+    let carried = LandingAdmission {
+        content: residual.clone(),
+        carried: Some(CarriedByPr::Carried {
+            pr: 8328,
+            pr_head: "2222222".into(),
+        }),
+    };
+    assert!(carried.admits());
+    assert_eq!(carried.carried_pr(), Some(8328));
+    assert!(
+        carried.note().contains(MERGED_PR_ANCESTRY_CHECK),
+        "{}",
+        carried.note()
+    );
+
+    // Neither admits: the refusal names both routes and the residual path.
+    let neither = LandingAdmission {
+        content: residual,
+        carried: Some(not_carried),
+    };
+    assert!(!neither.admits());
+    assert_eq!(neither.carried_pr(), None);
+    let note = neither.note();
+    assert!(note.contains(LANDED_CONTENT_CHECK), "{note}");
+    assert!(note.contains(MERGED_PR_ANCESTRY_CHECK), "{note}");
+    assert!(note.contains("src/lib.rs"), "{note}");
+
+    // (c) carrying a pull request with no head commit proves nothing.
+    let headless = LandingAdmission {
+        content: LandedContent::unavailable("x"),
+        carried: Some(CarriedByPr::Carried {
+            pr: 1,
+            pr_head: "  ".into(),
+        }),
+    };
+    assert!(!headless.admits());
 }

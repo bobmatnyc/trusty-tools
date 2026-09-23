@@ -216,14 +216,28 @@ the guard will establish every precondition itself.
      repository is outside HEAD and still refuses, and the pre-delete re-check
      asks the admission again rather than demanding a merged pull request.
 
-     Ancestry is still never evidence: `git merge-base --is-ancestor` and `git
-     cherry` both answer "not merged" for a squash-merged branch, and neither is
-     consulted. Being a relaxation, it inherits decision 6 in the one direction
-     available — a failed or expired refresh, a base that will not resolve, a
-     `merge-tree` that errored or conflicted, and a residual path all refuse,
-     and so does an unanswerable `gh` lookup, which never reaches the admission
-     at all. An open pull request, a dirty tree and a live owner are decided
-     before it, exactly as before.
+     When `landed-content` does not admit, a second route is asked:
+     `merged-pr-ancestry` admits when HEAD is the head commit of a MERGED pull
+     request, or an ancestor of it (`gh pr list --state merged --search
+     <HEAD>`, then `git merge-base --is-ancestor HEAD <headRefOid>`). That is
+     the donor shape itself, and it still admits a donor whose change the pull
+     request later superseded, or whose files `main` has since edited so the
+     merge conflicts. Only that one direction counts: a pull request whose head
+     is BEHIND HEAD leaves commits here the merge never saw. On the sweep the
+     same pair of routes also judges a donor that gate 5 matched to its
+     sibling's merged pull request through the #7267 commit search, whose
+     commits gate 6 would otherwise count as unpushed.
+
+     Ancestry against the squash commit is still never evidence: `git
+     merge-base --is-ancestor` and `git cherry` both answer "not merged" for a
+     squash-merged branch, and neither is consulted that way. Being a
+     relaxation, it inherits decision 6 in the one direction available — a
+     failed or expired refresh, a base that will not resolve, a `merge-tree`
+     that errored or conflicted, a residual path, a commit search that did not
+     answer and an ancestry check that could not run all refuse, and so does an
+     unanswerable `gh` branch lookup, which never reaches the admission at all.
+     An open pull request, a dirty tree and a live owner are decided before it,
+     exactly as before.
 
      This SUPERSEDES half of the #7275 round-2 finding. The never-pushed branch
      holding one empty or self-reverting commit is now admitted — not because

@@ -33,7 +33,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::core::worktree_carried_by_pr::{CarriedByPr, carried_by_merged_pr};
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
+use crate::session_manager::worktree_reclaim_pr_match::LandingProbe;
 use crate::session_manager::worktree_safety::git_stdout;
 
 /// The admission's name, quoted by both ladders' refusals (#7889).
@@ -129,6 +131,85 @@ impl LandedContent {
                  either — {detail} — and a fact that cannot be established never grants"
             ),
         }
+    }
+}
+
+/// Both content routes of the #7889 admission, as one answer.
+///
+/// Why: owner ruling 2026-09-22 admits a clean tree on (b) landed content OR
+/// (c) HEAD inside a merged pull request's history. Both ladders ask both, in
+/// that order, through [`landing_admission`], so they cannot disagree.
+/// What: `content` is route (b); `carried` is route (c), `None` when it was not
+/// asked — because (b) already admitted, or because a test fake stated only
+/// (b). [`admits`](Self::admits) is true when either route admits.
+/// Test: `admission_admits_on_either_route_and_names_both_refusals`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingAdmission {
+    /// Route (b): is the content already on the landing base?
+    pub content: LandedContent,
+    /// Route (c): is HEAD inside a merged pull request's history?
+    pub carried: Option<CarriedByPr>,
+}
+
+impl From<LandedContent> for LandingAdmission {
+    fn from(content: LandedContent) -> Self {
+        Self {
+            content,
+            carried: None,
+        }
+    }
+}
+
+impl LandingAdmission {
+    /// True when route (b) or route (c) admits.
+    pub fn admits(&self) -> bool {
+        self.content.is_landed() || self.carried.as_ref().is_some_and(CarriedByPr::is_carried)
+    }
+
+    /// The merged pull request route (c) admitted on, if that is the grant.
+    pub fn carried_pr(&self) -> Option<u64> {
+        match &self.carried {
+            Some(c @ CarriedByPr::Carried { pr, .. }) if c.is_carried() => Some(*pr),
+            _ => None,
+        }
+    }
+
+    /// The sentence a refusal or a grant quotes (#7889).
+    ///
+    /// What: the admitting route's own sentence on a grant; on a refusal, both
+    /// routes' sentences, so the refusal names each predicate that failed and,
+    /// for (b), the first residual path.
+    /// Test: `admission_admits_on_either_route_and_names_both_refusals`.
+    pub fn note(&self) -> String {
+        match &self.carried {
+            _ if self.content.is_landed() => self.content.note(),
+            Some(c) if c.is_carried() => c.note(),
+            Some(c) => format!("{}; {}", self.content.note(), c.note()),
+            None => self.content.note(),
+        }
+    }
+}
+
+/// Route (b), then route (c) when (b) did not admit (#7889).
+///
+/// Why: the one entry point both ladders' production probes call. (c) costs a
+/// `gh` search, so it runs only when the local comparison did not admit.
+/// What: [`landed_content_verdict`] under `refresh_timeout`; on anything but
+/// `Landed`, [`carried_by_merged_pr`] through `probe`.
+/// Test: `admission_admits_on_either_route_and_names_both_refusals`;
+/// `worktree_carried_by_pr_tests` for route (c).
+pub(crate) fn landing_admission(
+    dir: &Path,
+    refresh_timeout: Duration,
+    probe: &dyn LandingProbe,
+) -> LandingAdmission {
+    let content = landed_content_verdict(dir, refresh_timeout);
+    if content.is_landed() {
+        return content.into();
+    }
+    LandingAdmission {
+        content,
+        carried: Some(carried_by_merged_pr(dir, probe)),
     }
 }
 

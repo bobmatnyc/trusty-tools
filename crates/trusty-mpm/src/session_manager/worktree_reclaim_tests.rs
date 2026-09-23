@@ -25,7 +25,8 @@ use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all}
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_safety::inspect_dirt;
 // #7889: gate 5's admission verdict, now defined outside `worktree_reclaim`.
-use crate::core::worktree_landed_content::LandedContent;
+use crate::core::worktree_carried_by_pr::CarriedByPr;
+use crate::core::worktree_landed_content::{LandedContent, LandingAdmission};
 
 /// A dirt probe that always reports CLEAN — used only where the test's subject
 /// is a gate ABOVE the dirt gate, so a real probe would add nothing.
@@ -162,17 +163,30 @@ fn classify_landed(
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
     landed: LandedContent,
 ) -> ReclaimVerdict {
-    let ask = |_: &Path| landed.clone();
+    classify_admission(path, &BranchPrState::NoPr, probe_dirt, Some(landed.into()))
+}
+
+/// [`classify_landed`] for any pull-request state and both admission routes,
+/// or with no probe offered at all (#7889).
+fn classify_admission(
+    path: &Path,
+    pr: &BranchPrState,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    admission: Option<LandingAdmission>,
+) -> ReclaimVerdict {
+    let ask = |_: &Path| admission.clone().expect("probe asked only when offered");
     classify_with_landed_content(
         path,
         Admission::Admitted,
         &claim(false),
-        &BranchPrState::NoPr,
+        pr,
         probe_dirt,
         &no_agents,
         &SessionOwners::default(),
         &KeepList::default(),
-        Some(&ask),
+        admission
+            .as_ref()
+            .map(|_| &ask as &dyn Fn(&Path) -> LandingAdmission),
     )
 }
 
@@ -440,6 +454,82 @@ fn worktree_7889_classify_refuses_files_beside_unpushed_commits() {
     let v = classify_landed(&wt(), &both, landed_on_main());
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
+}
+
+/// The (b) refusal and (c) answer a superseded donor produces (#7889).
+fn residual_then(carried: CarriedByPr) -> LandingAdmission {
+    LandingAdmission {
+        content: LandedContent::Residual {
+            base: "origin/main".to_string(),
+            first_path: "src/superseded.rs".to_string(),
+        },
+        carried: Some(carried),
+    }
+}
+
+/// Commits no `origin` ref reaches and no patch id matches — the donor's dirt.
+fn donor_commits(p: &Path) -> Option<DirtyWorktree> {
+    Some(DirtyWorktree::new(p, "0 files, 2 unpushed", 0, 2))
+}
+
+/// 🔴 REGRESSION (#7889, route (c)): with no pull request under this name, a
+/// HEAD inside a merged pull request's history is reclaimable under THAT pull
+/// request, even where the content comparison found residue.
+#[test]
+fn worktree_7889_classify_admits_a_tree_a_merged_pr_carried() {
+    let carried = residual_then(CarriedByPr::Carried {
+        pr: 8328,
+        pr_head: "2222222222222222222222222222222222222222".to_string(),
+    });
+    let v = classify_admission(&wt(), &BranchPrState::NoPr, &clean, Some(carried));
+    assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 8328 });
+}
+
+/// 🔴 REGRESSION (#7889): gate 5 found the sibling's merged pull request through
+/// the #7267 commit search, and gate 6 then counted the donor's commits as
+/// unpushed. Those commits are in HEAD, so the admission judges them.
+///
+/// Fails before the fix: gate 6 refused any dirt on a merged pull request, so
+/// a donor matched by commit never reached the admission.
+#[test]
+fn worktree_7889_a_merged_pr_with_commits_only_dirt_reaches_the_admission() {
+    let merged = BranchPrState::Merged { pr: 8328 };
+    let v = classify_admission(
+        &wt(),
+        &merged,
+        &donor_commits,
+        Some(landed_on_main().into()),
+    );
+    assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 8328 });
+    // No probe offered keeps the pre-#7889 refusal.
+    let unoffered = classify_admission(&wt(), &merged, &donor_commits, None);
+    assert!(
+        reason(&unoffered).contains("unsaved work"),
+        "{}",
+        reason(&unoffered)
+    );
+}
+
+/// 🔴 #7889: on a merged pull request, commits the admission cannot vouch for
+/// still refuse, and the refusal names the dirt and each route that failed.
+#[test]
+fn worktree_7889_a_merged_pr_with_unlanded_commits_still_refuses() {
+    let neither = residual_then(CarriedByPr::Unavailable {
+        detail: "gh timed out".to_string(),
+    });
+    let v = classify_admission(
+        &wt(),
+        &BranchPrState::Merged { pr: 8328 },
+        &donor_commits,
+        Some(neither),
+    );
+    assert!(!v.is_reclaimable());
+    let r = reason(&v);
+    assert!(r.contains("2 unpushed"), "{r}");
+    assert!(r.contains("landed-content"), "{r}");
+    assert!(r.contains("src/superseded.rs"), "{r}");
+    assert!(r.contains("merged-pr-ancestry"), "{r}");
+    assert!(r.contains("gh timed out"), "{r}");
 }
 
 #[test]

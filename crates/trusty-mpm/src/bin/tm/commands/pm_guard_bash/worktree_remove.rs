@@ -305,8 +305,11 @@ mod tests {
         CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks,
     };
     // #7889: the admission's slug is spelled once, in the shared predicate.
+    use trusty_mpm::core::worktree_carried_by_pr::{
+        CarriedByPr, MERGED_PR_ANCESTRY_CHECK as CHECK_MERGED_PR_ANCESTRY,
+    };
     use trusty_mpm::core::worktree_landed_content::{
-        LANDED_CONTENT_CHECK as CHECK_LANDED_CONTENT, LandedContent,
+        LANDED_CONTENT_CHECK as CHECK_LANDED_CONTENT, LandedContent, LandingAdmission,
     };
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
@@ -382,6 +385,8 @@ mod tests {
         /// default, so every pre-#7889 expectation stands and a test that
         /// wants the admission has to say so.
         landed: LandedContent,
+        /// #7889 route (c): whether a merged pull request carried HEAD.
+        carried: Option<CarriedByPr>,
     }
 
     /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
@@ -447,6 +452,8 @@ mod tests {
                 // #7889: the admission establishes nothing unless a test asks
                 // it to, so no pre-#7889 fixture can grant through it.
                 landed: LandedContent::unavailable("no landed-content answer was fabricated"),
+                // #7889 route (c): not asked unless a test states it.
+                carried: None,
             }
         }
 
@@ -513,8 +520,11 @@ mod tests {
             *self.asked_base.borrow_mut() = Some(base_ref.to_string());
             self.noop_merge.clone()
         }
-        fn landed_content(&self, _dir: &Path) -> LandedContent {
-            self.landed.clone()
+        fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
+            LandingAdmission {
+                content: self.landed.clone(),
+                carried: self.carried.clone(),
+            }
         }
     }
 
@@ -552,6 +562,55 @@ mod tests {
             None,
             "a clean tree holding no content the remote lacks must be reclaimable"
         );
+    }
+
+    /// 🔴 REGRESSION (#7889, route (c)): HEAD inside the history of a merged
+    /// pull request's head admits even where the content comparison refuses —
+    /// a donor whose change the pull request itself later superseded.
+    #[test]
+    fn worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable() {
+        let probe = FakeProbe {
+            landed: LandedContent::Residual {
+                base: "origin/main".to_string(),
+                first_path: "crates/trusty-mpm/src/daemon/mod.rs".to_string(),
+            },
+            carried: Some(CarriedByPr::Carried {
+                pr: 8328,
+                pr_head: "2222222222222222222222222222222222222222".to_string(),
+            }),
+            ..donor_branch_landed()
+        };
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe),
+            None,
+            "every commit here was inside what PR #8328 merged"
+        );
+    }
+
+    /// 🔴 #7889: both content routes failing denies, and the deny names each
+    /// predicate that failed — (b) with its first residual path, (c) with what
+    /// could not be established.
+    #[test]
+    fn worktree_7889_both_routes_failing_denies_and_names_each() {
+        let probe = FakeProbe {
+            landed: LandedContent::Residual {
+                base: "origin/main".to_string(),
+                first_path: "crates/trusty-mpm/src/daemon/mod.rs".to_string(),
+            },
+            carried: Some(CarriedByPr::Unavailable {
+                detail: "the MERGED pull request search did not answer: gh timed out".to_string(),
+            }),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("neither route admitting must deny removal");
+        assert!(reason.contains(CHECK_LANDED_CONTENT), "{reason}");
+        assert!(reason.contains(CHECK_MERGED_PR_ANCESTRY), "{reason}");
+        assert!(
+            reason.contains("crates/trusty-mpm/src/daemon/mod.rs"),
+            "{reason}"
+        );
+        assert!(reason.contains("gh timed out"), "{reason}");
     }
 
     /// 🔴 #7889, the refusing direction: one path the merge would still change
@@ -666,6 +725,11 @@ mod tests {
     /// construction: clean by being clean, `unpushed-commits` by reporting
     /// `NoUpstream`, `sole-owner` by holding no live claim. The guard deleted a
     /// tree GitHub had never seen. Fails on the round-1 commit, which grants.
+    ///
+    /// #7889 (owner ruling 2026-09-22) superseded half of this: a never-pushed
+    /// tree may now be admitted — but only by the refreshed `landed-content`
+    /// admission, never by the merged-PR route's un-refreshed merge-tree
+    /// question, which is still not asked without a pull request.
     #[test]
     fn an_empty_merge_tree_without_any_merged_pr_still_denies() {
         let probe = FakeProbe {
@@ -678,11 +742,16 @@ mod tests {
             ..FakeProbe::upstream_deleted()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
-            .expect("content-equivalence alone is not landing evidence");
+            .expect("the merged-PR route's merge-tree answer alone is not landing evidence");
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(
-            reason.contains("never pushed"),
-            "the deny must say why an empty merge proves nothing: {reason}"
+            reason.contains(CHECK_LANDED_CONTENT),
+            "the deny must name the admission that did not establish landing: {reason}"
+        );
+        assert_eq!(
+            *probe.asked_base.borrow(),
+            None,
+            "the merge-tree question must not be asked without a merged pull request"
         );
     }
 

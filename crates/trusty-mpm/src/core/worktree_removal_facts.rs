@@ -118,12 +118,14 @@
 //! **Landed content is landing evidence of its own (#7889).** A donor branch
 //! fast-forwarded onto a sibling's head and squash-merged under THAT name
 //! leaves GitHub with no pull request carrying the donor's own name, forever.
-//! [`WorktreeRemovalProbe::landed_content`] answers the question that ruling
-//! (owner, 2026-09-22) turns on instead — would merging this HEAD into the
-//! landing base change any file — through
+//! [`WorktreeRemovalProbe::landing_admission`] answers the two questions that
+//! ruling (owner, 2026-09-22) turns on instead — (b) would merging this HEAD
+//! into the landing base change any file, and (c) is HEAD inside the history
+//! of a merged pull request's head — through
 //! [`crate::core::worktree_landed_content`], which the reclaim sweep's gate 5
-//! also calls. It is a RELAXATION, so only an affirmative, refreshed answer
-//! admits; ancestry is still never consulted.
+//! also calls. It is a RELAXATION, so only an affirmative answer admits. The
+//! only ancestry consulted is (c)'s one direction; ancestry against the squash
+//! commit is never evidence.
 //!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`,
@@ -143,7 +145,9 @@
 
 use std::path::Path;
 
-use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict, merge_residue};
+use crate::core::worktree_landed_content::{
+    LandedContent, LandingAdmission, landing_admission, merge_residue,
+};
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
@@ -456,24 +460,27 @@ pub trait WorktreeRemovalProbe {
     /// which denies, like every other undeterminable answer here.
     fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
 
-    /// Is this tree's content already standing on its landing base (#7889)?
+    /// Is this tree's content landed, or its HEAD inside a merged pull
+    /// request's history (#7889)?
     ///
     /// Why: the admission for the one shape no pull request can ever vouch
-    /// for — a parked branch fast-forwarded onto a sibling `-r2` head that
-    /// squash-merged under THAT name. Nineteen such trees were refused across
-    /// 2026-09-21 and 2026-09-22 while holding nothing `origin/main` lacked.
+    /// for by name — a parked branch fast-forwarded onto a sibling `-r2` head
+    /// that squash-merged under THAT name. Nineteen such trees were refused
+    /// across 2026-09-21 and 2026-09-22 while holding nothing `origin/main`
+    /// lacked. Owner ruling 2026-09-22 admits routes (b) and (c).
     /// What: delegates to
-    /// [`landed_content_verdict`](crate::core::worktree_landed_content::landed_content_verdict)
+    /// [`landing_admission`](crate::core::worktree_landed_content::landing_admission)
     /// under [`ADMISSION_FETCH_TIMEOUT`], so this ladder and the reclaim
     /// sweep's gate 5 run one predicate rather than two. The default
     /// implementation establishes nothing, which never grants.
     /// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
     /// `worktree_7889_a_residual_path_denies_and_names_it`,
-    /// `worktree_7889_an_unestablished_landed_content_answer_never_grants` in
+    /// `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
+    /// `worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable` in
     /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
     /// `an_unoverridden_probe_establishes_neither_new_fact`.
-    fn landed_content(&self, _dir: &Path) -> LandedContent {
-        LandedContent::unavailable(NOT_IMPLEMENTED)
+    fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
+        LandedContent::unavailable(NOT_IMPLEMENTED).into()
     }
 }
 
@@ -692,11 +699,16 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         Ok(merge_residue(dir, base_ref)?.is_empty())
     }
 
-    fn landed_content(&self, dir: &Path) -> LandedContent {
+    fn landing_admission(&self, dir: &Path) -> LandingAdmission {
         // #7889: the same 3 s bound the #7914 admission's fetch runs under —
         // this also executes inside the `PreToolUse` hook, whose own 5 s
-        // timeout kills a decision that has not been printed yet.
-        landed_content_verdict(dir, ADMISSION_FETCH_TIMEOUT)
+        // timeout kills a decision that has not been printed yet. Route (c)
+        // reuses the sweep's `gh` commit search and `git` ancestry probe.
+        landing_admission(
+            dir,
+            ADMISSION_FETCH_TIMEOUT,
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+        )
     }
 }
 
@@ -879,7 +891,7 @@ mod tests {
         );
         // #7889: the admission's default is the same — establishing nothing,
         // which never grants.
-        assert!(!UnoverriddenProbe.landed_content(dir).is_landed());
+        assert!(!UnoverriddenProbe.landing_admission(dir).admits());
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.

@@ -96,7 +96,8 @@
 //! 2026-09-21 and 2026-09-22, every file of which was byte-identical on
 //! `origin/main`. Owner ruling 2026-09-22: admit them.
 //! [`landed_content_admission`] runs after that refusal, refreshes `origin` and
-//! asks whether merging HEAD into the landing base would change any file.
+//! asks (b) whether merging HEAD into the landing base would change any file,
+//! then (c) whether HEAD is inside the history of a merged pull request's head.
 //!
 //! That supersedes half of #7275 round 2. The never-pushed branch holding one
 //! empty or self-reverting commit IS now admitted — not because the guard
@@ -140,6 +141,7 @@
 //! `an_unanswerable_commit_search_denies_a_detached_head`,
 //! `an_unresolvable_head_sha_denies_a_detached_head`,
 //! `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+//! `worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable`,
 //! `worktree_7889_a_residual_path_denies_and_names_it`,
 //! `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
 //! `worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed`,
@@ -545,21 +547,23 @@ enum LandingFailure {
     Undeterminable(String),
 }
 
-/// The #7889 admission: is this tree's content already on its landing base?
+/// The #7889 admission: is this tree's content landed, or its HEAD inside a
+/// merged pull request's history?
 ///
 /// Why: a donor branch fast-forwarded onto a sibling's head and squash-merged
 /// under that name can never acquire a pull request of its own, so the
 /// merged-PR refusal is permanent for a tree that holds nothing. Owner ruling
-/// 2026-09-22 admits it. Reached ONLY after `clean-tree`, `sole-owner` and the
-/// branch lookup have passed, and only for a genuine `version-control`
-/// dispatch — [`super::worktree_remove`] settles the identity and scope halves
-/// before this module runs at all.
-/// What: `None` grants when
-/// [`WorktreeRemovalProbe::landed_content`] reports the merge would change no
-/// file. Everything else appends that verdict's own sentence — the first
-/// residual path, or what could not be established — to the merged-PR deny and
-/// refuses, so the refusal names both routes that failed.
+/// 2026-09-22 admits it on (b) landed content or (c) merged-PR ancestry.
+/// Reached ONLY after `clean-tree`, `sole-owner` and the branch lookup have
+/// passed, and only for a genuine `version-control` dispatch —
+/// [`super::worktree_remove`] settles the identity and scope halves before this
+/// module runs at all.
+/// What: `None` grants when [`WorktreeRemovalProbe::landing_admission`] admits
+/// on either route. Everything else appends that answer's own sentence — each
+/// route that failed, (b)'s first residual path, or what could not be
+/// established — to the merged-PR deny and refuses.
 /// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+/// `worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable`,
 /// `worktree_7889_a_residual_path_denies_and_names_it`,
 /// `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
 /// `worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed`,
@@ -569,11 +573,11 @@ fn landed_content_admission(
     probe: &dyn WorktreeRemovalProbe,
     no_pr_deny: String,
 ) -> Option<String> {
-    let verdict = probe.landed_content(target);
-    if verdict.is_landed() {
+    let admission = probe.landing_admission(target);
+    if admission.admits() {
         return None;
     }
-    Some(format!("{no_pr_deny} {}", verdict.note()))
+    Some(format!("{no_pr_deny} {}", admission.note()))
 }
 
 /// A MERGED pull request that vouches for this worktree, and the base it merged

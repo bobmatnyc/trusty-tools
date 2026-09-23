@@ -90,14 +90,14 @@ fn worktree_7889_the_sweep_probe_refuses_an_uncommitted_file() {
     std::fs::write(wt.join("notes.md"), "never committed\n").expect("write untracked file");
     let verdict = reclaim_landed_content(&wt);
     assert!(
-        !verdict.is_landed(),
+        !verdict.admits(),
         "an uncommitted file must refuse: {verdict:?}"
     );
     assert!(verdict.note().contains("uncommitted"), "{}", verdict.note());
 
     // A path git cannot answer for fails the dirty-check itself, and refuses.
     let tmp = tempfile::tempdir().expect("tempdir");
-    assert!(!reclaim_landed_content(tmp.path()).is_landed());
+    assert!(!reclaim_landed_content(tmp.path()).admits());
 }
 
 /// 🔴 REGRESSION (#7889): the pre-delete re-check admits a landed tree with no
@@ -150,4 +150,37 @@ fn worktree_7889_the_recheck_refuses_a_tree_no_longer_landed() {
     )
     .expect("no probe offered must refuse");
     assert!(unoffered.contains("no longer a merge"), "{unoffered}");
+}
+
+/// 🔴 REGRESSION (#7889): a donor matched to its sibling's merged pull request
+/// by the #7267 commit search still carries commits `inspect_dirt` counts as
+/// unpushed. The re-check asks the admission about them rather than refusing.
+///
+/// Fails before the fix: a merge re-ran `inspect_dirt` alone, which refused
+/// this tree on its donor commit, so the candidate was never removed.
+#[test]
+fn worktree_7889_the_recheck_admits_a_merged_donor_with_commits_only_dirt() {
+    let (_fx, wt) = donor("donor-merged-7889");
+    let merged = BranchPrState::Merged { pr: 8328 };
+    assert_eq!(
+        recheck_before_delete(
+            &wt,
+            &KeepList::default(),
+            Some(&LiveClaims::default()),
+            &merged,
+            &no_agents,
+            Some(&reclaim_landed_content),
+        ),
+        None
+    );
+    let unoffered = recheck_before_delete(
+        &wt,
+        &KeepList::default(),
+        Some(&LiveClaims::default()),
+        &merged,
+        &no_agents,
+        None,
+    )
+    .expect("no probe offered keeps the pre-#7889 refusal");
+    assert!(unoffered.contains("unpushed"), "{unoffered}");
 }
