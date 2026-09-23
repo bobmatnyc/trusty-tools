@@ -15,7 +15,7 @@ name = "trusty-mcp"
 # 0.1.4 -> 0.1.5: additive, feature-gated `config` module (#7452).
 # 0.1.5 -> 0.1.6: patch — `daemon_bridge_json_rpc` follows the trusty-common
 # UDS retry/half-close changes (#8267). No public item removed or changed.
-version = "0.1.6"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
