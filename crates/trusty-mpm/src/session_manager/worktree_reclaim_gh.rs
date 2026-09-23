@@ -267,15 +267,16 @@ pub(crate) fn resolve_daemon_gh_env_in(
     origin: &str,
     registry_dir: &Path,
 ) -> Result<GhEnv, GhFailure> {
+    let origin = slug_as_url(origin);
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
-    match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, origin) {
+    match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, &origin) {
         Ok(Some(env)) => return Ok(env),
         Ok(None) => {}
         Err(reason) => return Err(GhFailure::new(reason)),
     }
     let config = TrustyToolsConfig::load();
-    let selected = gh_identity::select_config_for_origin(&config, Some(origin));
+    let selected = gh_identity::select_config_for_origin(&config, Some(&origin));
     let env = match gh_identity::resolve_gh_env(selected) {
         Ok(env) => env,
         Err(e) => {
@@ -291,6 +292,23 @@ pub(crate) fn resolve_daemon_gh_env_in(
         warn_once_about_the_keychain();
     }
     Ok(env)
+}
+
+/// Turn a `repo_slug_for` slug back into a URL `repo_url_matches` can compare.
+///
+/// Why (#5850): `parse_github_path` reads a bare `owner/repo` as `host/repo`
+/// and drops the owner, so a slug never matched a registered `repo_url`.
+/// What: a value carrying `://` or `@` is already a URL and passes through;
+/// `owner/repo` gains `https://github.com/`; `host/owner/repo` gains `https://`.
+/// Test: `daemon_gh_env_uses_the_registry_pin`.
+fn slug_as_url(origin: &str) -> String {
+    if origin.contains("://") || origin.contains('@') {
+        origin.to_string()
+    } else if origin.matches('/').count() == 1 {
+        format!("https://github.com/{origin}")
+    } else {
+        format!("https://{origin}")
+    }
 }
 
 /// Why one `gh` call failed, and whether it failed by HANGING (#6561, #6867).
