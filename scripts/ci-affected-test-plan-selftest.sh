@@ -9,9 +9,10 @@
 # What: runs a copy of the plan next to a STUB select-test-crates.sh that
 #   prints a fixed crate list (or fails), so the Cargo-inert short-circuit, the
 #   Tauri UI exclusion, the leg split and the error arms are checked without
-#   depending on this repo's live dependency graph. Two live cases at the end
-#   run the real selector against this checkout: a docs-only path selects
-#   nothing, and a trusty-common path selects trusty-common and no Tauri crate.
+#   depending on this repo's live dependency graph. Three live cases at the end
+#   run the real selector against this checkout: a docs-only path and an
+#   unreferenced script each select nothing, and a trusty-common path selects
+#   trusty-common and no Tauri crate.
 #
 # Test: this file is the test; ci.yml's `affected-plan` job runs it before
 #   the step that consults the plan.
@@ -111,6 +112,11 @@ if [ $? -eq 2 ]; then pass "unknown argument -> exit 2"; else fail "unknown argu
 cp "${REPO}/scripts/select-test-crates.sh" "${WORK}/select-test-crates.sh"
 out="$(plan -- --files docs/reference/ci-gates.md)"
 if [ "$(field "$out" count)" = 0 ]; then pass "live: docs path -> count=0"; else fail "live docs: $out"; fi
+# #7777 ruling (c): a script no crate names plans zero crates, same as docs.
+out="$(plan -- --files scripts/ci-free-disk-space.sh)"
+if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" matrix)" = '{"include":[]}' ]; then
+  pass "live: unreferenced script -> count=0, empty matrix"
+else fail "live unreferenced script: $out"; fi
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in

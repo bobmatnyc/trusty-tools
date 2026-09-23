@@ -18,9 +18,12 @@
 #      owning crate; detect-docs-only.sh already rules those Cargo-inert, and the
 #      two answers must agree with every other job in ci.yml.
 #   2. Otherwise run select-test-crates.sh with every argument after `--`. Its
-#      own rules apply unchanged, including "a root Cargo.toml/Cargo.lock,
-#      rust-toolchain, .cargo/**, scripts/** or .github/** change selects ALL
-#      crates" and its FAIL OPEN on any detection error.
+#      own rules apply unchanged: a root Cargo.toml/Cargo.lock, deny.toml,
+#      rust-toolchain or .cargo/** change selects ALL crates; this job's own
+#      inputs select the trusty-common + trusty-mpm canary; any other
+#      scripts/** or .github/** path selects only the crates whose Rust source
+#      names it literally, often none (#7777); and its FAIL OPEN applies on any
+#      detection error.
 #   3. Drop the four Tauri UI crates. The headless runner has no WebKit2GTK, and
 #      each has its own dedicated job in ci.yml (see that file's header).
 #   4. Split the rest into at most `--max-legs` legs (default 8, the shard

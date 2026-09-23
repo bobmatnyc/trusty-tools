@@ -67,7 +67,7 @@ gate that cannot fail makes its own green meaningless:
 | `generate-homebrew-formula.sh` | `scripts/generate-homebrew-formula-selftest.sh` |
 | `classify-ci-results.sh` | `scripts/check-ci-helpers-selftest.sh` |
 | `detect-embedder-cuda-relevant.sh` | `scripts/check-ci-helpers-selftest.sh` |
-| `ci-affected-test-plan.sh` | `scripts/ci-affected-test-plan-selftest.sh`, run by `ci.yml`'s `affected-plan` job after `select-test-crates_selftest.sh` and before the plan step. It uses a stub selector, so its cases do not depend on this repo's graph; two live cases use the real one |
+| `ci-affected-test-plan.sh` | `scripts/ci-affected-test-plan-selftest.sh`, run by `ci.yml`'s `affected-plan` job after `select-test-crates_selftest.sh` and before the plan step. It uses a stub selector, so its cases do not depend on this repo's graph; three live cases use the real one |
 | `ci-crate-relevance.sh` | `scripts/ci-crate-relevance-selftest.sh`, run as a step of `ci.yml`'s `changes` job before the step that consults the detector. Its closure cases run against a throwaway fixture workspace rather than this repo's graph, so an unrelated PR that adds a dependency edge does not turn them red; a short live section holds only #7063's four acceptance pairs |
 | `check_token_drift.mjs` | `scripts/check_token_drift.test.mjs`, a `node:test` suite `token-drift.yml` runs before the gate |
 | `check_workspace_dep_versions.sh` | `scripts/check_workspace_dep_versions_selftest.sh`, run as the step before the gate in the same job |

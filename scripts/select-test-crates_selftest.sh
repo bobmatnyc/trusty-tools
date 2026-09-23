@@ -14,8 +14,10 @@
 #   two-hop REVERSE chain, the shape the selector exists to compute) — and
 #   asserts the crate set `select-test-crates.sh --files ...` prints for each
 #   case. A fixture rather than this repo's live graph, so an unrelated PR
-#   that adds a dependency edge cannot turn these cases red. A short LIVE
-#   section follows, checking this repo's own trusty-common override.
+#   that adds a dependency edge cannot turn these cases red. A second fixture
+#   covers the scripts/** and .github/** rules (#7777 ruling). A short LIVE
+#   section follows, checking this repo's own trusty-common override and its
+#   real scripts/** literal edges.
 #
 # Usage: bash scripts/select-test-crates_selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing both sides of each
@@ -170,8 +172,11 @@ assert_eq "root-level *.md prints nothing" \
   "" "$(run README.md)"
 assert_eq "Cargo.lock prints all crates" \
   "${ALL_EIGHT}" "$(run Cargo.lock)"
-assert_eq "scripts/** prints all crates" \
-  "${ALL_EIGHT}" "$(run scripts/some-gate.sh)"
+assert_eq "deny.toml prints all crates" \
+  "${ALL_EIGHT}" "$(run deny.toml)"
+# #7777 ruling (c): was "scripts/** prints all crates".
+assert_eq "an unreferenced scripts/** path prints nothing" \
+  "" "$(run scripts/some-gate.sh)"
 assert_eq "an unknown path prints all crates (fail open)" \
   "${ALL_EIGHT}" "$(run some/unclassified/path.rs)"
 
@@ -285,6 +290,102 @@ assert_eq "fail-open before cargo metadata has run still finds a nested member" 
 alpha-ui" "${nested_out}"
 
 # ---------------------------------------------------------------------------
+# scripts/** and .github/** (#7777 owner ruling 2026-09-23). Its own
+# workspace, named after the real crates the ruling cites, so the canary set
+# and the UI-crate relevance list resolve without an override:
+#
+#   trusty-mpm        src names "scripts/check_changelog_fragment.sh" in code
+#                     and "scripts/unrelated.sh" only in comments
+#   trusty-search     build.rs names "scripts/check-ui-bundle-freshness.sh"
+#   trusty-console    build.rs names "../../scripts/check-ui-bundle-freshness.sh"
+#   search-consumer   depends on trusty-search — rule 4 must NOT select it
+#   bystander         test fixture strings "scripts/go.sh", "scripts/ingest.sh"
+#                     — neither file exists
+#   trusty-mpm-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
+# ---------------------------------------------------------------------------
+echo "fixture: scripts/** and .github/** selection rules (#7777 ruling)"
+
+SR="${WORK}/scriptref"
+sr_crate() {
+  local name="$1"
+  mkdir -p "${SR}/crates/${name}/src"
+  : >"${SR}/crates/${name}/src/lib.rs"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$name" >"${SR}/crates/${name}/Cargo.toml"
+}
+mkdir -p "${SR}/scripts" "${SR}/.github/workflows"
+printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >"${SR}/Cargo.toml"
+for c in trusty-common trusty-mpm trusty-search trusty-console search-consumer bystander trusty-mpm-gui; do
+  sr_crate "$c"
+done
+printf '\n[dependencies]\ntrusty-search = { path = "../trusty-search" }\n' >>"${SR}/crates/search-consumer/Cargo.toml"
+cat >"${SR}/crates/trusty-mpm/src/lib.rs" <<'EOF'
+// Runs scripts/unrelated.sh? No: this comment must not count.
+/// Nor does this doc line naming "scripts/unrelated.sh".
+pub fn gate(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("scripts/check_changelog_fragment.sh")
+}
+EOF
+cat >"${SR}/crates/trusty-search/build.rs" <<'EOF'
+fn main() {
+    let _ = std::path::Path::new(".").join("scripts/check-ui-bundle-freshness.sh");
+}
+EOF
+cat >"${SR}/crates/trusty-console/build.rs" <<'EOF'
+fn main() {
+    let _ = std::path::Path::new("../../scripts/check-ui-bundle-freshness.sh");
+}
+EOF
+mkdir -p "${SR}/crates/bystander/tests"
+cat >"${SR}/crates/bystander/tests/fixtures.rs" <<'EOF'
+#[test]
+fn fixture_strings() {
+    assert_ne!("scripts/go.sh", "scripts/ingest.sh");
+}
+EOF
+for f in scripts/check_changelog_fragment.sh scripts/check-ui-bundle-freshness.sh scripts/unrelated.sh \
+  .github/workflows/ci.yml .github/workflows/other.yml; do
+  echo '# fixture' >"${SR}/${f}"
+done
+(cd "${SR}" && git init -q . && git config user.email selftest@example.invalid &&
+  git config user.name selftest && git add -A && git commit -qm base) >/dev/null 2>&1
+
+sr_run() { (cd "${SR}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
+
+assert_eq "ci.yml-only diff -> canary + the one relevant UI crate" \
+  "trusty-common
+trusty-mpm
+trusty-mpm-gui" "$(sr_run .github/workflows/ci.yml)"
+assert_eq "select-test-crates.sh diff -> canary only (UI crate inert)" \
+  "trusty-common
+trusty-mpm" "$(sr_run scripts/select-test-crates.sh)"
+assert_eq "check_changelog_fragment.sh -> trusty-mpm only" \
+  "trusty-mpm" "$(sr_run scripts/check_changelog_fragment.sh)"
+assert_eq "check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
+  "trusty-console
+trusty-search" "$(sr_run scripts/check-ui-bundle-freshness.sh)"
+assert_eq "a script named only in comments -> nothing" \
+  "" "$(sr_run scripts/unrelated.sh)"
+assert_eq "an unreferenced .github/** file -> nothing" \
+  "" "$(sr_run .github/workflows/other.yml)"
+assert_eq "fixture-shaped literal with no file on disk -> nothing" \
+  "" "$(sr_run scripts/ingest.sh)"
+assert_eq "crate change + fixture-shaped nonexistent path -> nothing extra" \
+  "trusty-mpm-gui" "$(sr_run crates/trusty-mpm-gui/src/lib.rs scripts/go.sh)"
+
+# The literal scan needs git; outside a repo it must fail open, never answer
+# "no reference". Asserted on a path that answers `trusty-mpm` when git works.
+SR_NOGIT="${WORK}/scriptref-nogit"
+cp -R "${SR}" "${SR_NOGIT}" && rm -rf "${SR_NOGIT}/.git"
+assert_eq "literal scan unavailable (no git repo) -> all crates" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOGIT}" && bash "${SCRIPT}" --files scripts/check_changelog_fragment.sh 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
 # bash 3.2 path (#7777 review, finding 2): macOS ships bash 3.2.57 as
 # /bin/bash. `declare -A` there is a non-fatal error under `set -uo
 # pipefail` (no `-e`), so the unguarded script fell through to exit 0 with
@@ -328,6 +429,14 @@ case "${live_out}" in
     fail "trusty-common --cargo-args override missing: got '${live_out}'"
     ;;
 esac
+
+echo "live: this repo's own scripts/** literal edges (#7777 ruling)"
+live_run() { (cd "${REPO_ROOT}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
+assert_eq "live: check_changelog_fragment.sh -> trusty-mpm" \
+  "trusty-mpm" "$(live_run scripts/check_changelog_fragment.sh)"
+assert_eq "live: check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
+  "trusty-console
+trusty-search" "$(live_run scripts/check-ui-bundle-freshness.sh)"
 
 echo
 echo "${CASES} cases, ${FAILURES} failures"

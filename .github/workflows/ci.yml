@@ -1415,10 +1415,13 @@ jobs:
   # itself says there is nothing to run; the roll-up then checks the plan,
   # never the skipped matrix.
   #
-  # A workspace-wide input (root Cargo.toml / Cargo.lock, rust-toolchain,
-  # .cargo/**, scripts/**, .github/**) selects every crate — that is the
-  # selector's own rule. The 8-leg split keeps that run inside one leg's
-  # timeout; trusty-mpm, the largest suite, lands in a leg of its own.
+  # A workspace-wide input (root Cargo.toml / Cargo.lock, deny.toml,
+  # rust-toolchain, .cargo/**) selects every crate — that is the selector's own
+  # rule. The 8-leg split keeps that run inside one leg's timeout; trusty-mpm,
+  # the largest suite, lands in a leg of its own. scripts/** and .github/**
+  # select narrowly (#7777): this file and the selector select trusty-common +
+  # trusty-mpm; any other such path selects only the crates whose Rust source
+  # names it, often none, and a zero-crate plan reports success.
   #
   # Toolchain, env, cache and fastembed handling copy `test-shard`, so the
   # restored `test` cache matches. Not copied: nextest (`cargo test` runs the

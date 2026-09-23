@@ -48,17 +48,33 @@
 #                                       most specific (longest) matching
 #                                       `crates/...` directory prefix.
 #   2. Root `Cargo.toml`, `Cargo.lock`, `rust-toolchain`,
-#      `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `rustfmt.toml`
-#                                    -> ALL crates (every cargo invocation
+#      `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `rustfmt.toml`,
+#      `deny.toml`                  -> ALL crates (every cargo invocation
 #                                       reads these).
-#   3. `scripts/**`, `.github/**`   -> ALL crates (deliberately broad, not a
-#                                       computed closure — see the report for
-#                                       the narrower rule considered and
-#                                       rejected in favor of this one).
-#   4. `docs/**`, `website/**`, a root-level `*.md`
+#   3. The affected-crate CI job's own inputs — `.github/workflows/ci.yml`,
+#      this script, `scripts/ci-affected-test-plan.sh`, and their selftests
+#                                    -> the CANARY set (trusty-common +
+#                                       trusty-mpm), unioned with each Tauri
+#                                       UI crate `ci-crate-relevance.sh`
+#                                       answers `true` for over the same
+#                                       change set. Direct only, no closure.
+#   4. Any other `scripts/**` or `.github/**` path
+#                                    -> each crate with a `*.rs` file (build.rs,
+#                                       tests, include_str!, production code)
+#                                       whose non-comment line names that path
+#                                       literally, found by `git grep` at
+#                                       selection time. Counts only when the
+#                                       path EXISTS on disk, so a fixture
+#                                       string like "scripts/go.sh" selects
+#                                       nothing. No reference -> NO crates.
+#                                       Direct only: a build.rs failure shows
+#                                       in the owning crate's own test run.
+#   5. `docs/**`, `website/**`, a root-level `*.md`
 #                                    -> NO crates.
-#   5. anything else                -> ALL crates (fail open on an
+#   6. anything else                -> ALL crates (fail open on an
 #                                       unclassified path).
+#   Rules 2-4: owner ruling 2026-09-23 on #7777. A literal scan that cannot
+#   run (git grep error) fails open to ALL.
 #
 # FAIL OPEN. A `cargo metadata` failure, a missing `jq`, or an empty/
 #   unresolvable change set prints every crate cargo metadata (or, failing
@@ -240,6 +256,13 @@ declare -A CARGO_ARGS_FEATURE_OVERRIDES=(
   [trusty-common]="--features unconditional-only"
 )
 
+# #7777 ruling (b): what a change to the affected-crate job's own inputs tests.
+CANARY_CRATES="trusty-common trusty-mpm"
+# The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
+# list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
+RELEVANCE_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # fallback_all_crates — last-resort crate-name scan needing neither cargo nor
 # jq, for the case where `cargo metadata` itself is the thing that is broken.
 # Reads `[package] name = "..."` out of every `crates/*/Cargo.toml` directly.
@@ -382,17 +405,23 @@ if ! jq -r --arg root "$WORKSPACE_ROOT" '
 fi
 [ -s "${DIRMAP_FILE}" ] || fail_open "workspace has no members"
 
+declare -A IS_MEMBER=()
 while IFS=$'\t' read -r dir name; do
   [ -n "$dir" ] && [ -n "$name" ] || continue
   NAME_OF_DIR["$dir"]="$name"
   CRATE_DIRS+=("$dir")
   ALL_CRATES+=("$name")
+  IS_MEMBER["$name"]=1
 done <"${DIRMAP_FILE}"
 
 # ---------------------------------------------------------------------------
-# 4. Classify each changed path: an owning crate name, ALL, or NONE.
+# 4. Classify each changed path: an owning crate name, ALL, NONE, CANARY
+#    (rule 3) or SCRIPTREF (rule 4).
 # ---------------------------------------------------------------------------
-classify_path() {
+
+# owning_crate <path> — the crate whose directory is the longest prefix of
+# <path>, on a segment boundary; prints nothing when no crate owns it.
+owning_crate() {
   local path="$1" d best="" bestlen=-1
   for d in "${CRATE_DIRS[@]}"; do
     if [ "$path" = "$d" ] || [ "${path#"$d"/}" != "$path" ]; then
@@ -402,12 +431,18 @@ classify_path() {
       fi
     fi
   done
-  if [ -n "$best" ]; then
-    printf '%s\n' "${NAME_OF_DIR[$best]}"
+  [ -n "$best" ] && printf '%s\n' "${NAME_OF_DIR[$best]}"
+}
+
+classify_path() {
+  local path="$1" owner
+  owner="$(owning_crate "$path")"
+  if [ -n "$owner" ]; then
+    printf '%s\n' "$owner"
     return
   fi
   case "$path" in
-    Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | clippy.toml | rustfmt.toml)
+    Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | clippy.toml | rustfmt.toml | deny.toml)
       echo "ALL"
       return
       ;;
@@ -415,8 +450,12 @@ classify_path() {
       echo "ALL"
       return
       ;;
+    .github/workflows/ci.yml | scripts/select-test-crates.sh | scripts/select-test-crates_selftest.sh | scripts/ci-affected-test-plan.sh | scripts/ci-affected-test-plan-selftest.sh)
+      echo "CANARY"
+      return
+      ;;
     scripts/* | .github/*)
-      echo "ALL"
+      echo "SCRIPTREF"
       return
       ;;
     docs/* | website/*)
@@ -434,14 +473,74 @@ classify_path() {
   echo "ALL"
 }
 
+# crates_referencing <path> — rule 4. Prints the owning crate of every `*.rs`
+# file (tracked or untracked, not ignored) with a non-comment line naming
+# <path> literally. A <path> absent on disk references nothing. Returns 2 when
+# git grep itself fails, so the caller can fail open.
+crates_referencing() {
+  local path="$1" re hits rc line file content
+  [ -f "${WORKSPACE_ROOT}/${path}" ] || return 0
+  re="$(printf '%s' "$path" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
+  # Path boundaries: `../` or a non-path byte before, no longer name after —
+  # "scripts/go.sh" must not match "myscripts/go.sh" or "scripts/go.sh.bak".
+  hits="$(git -C "$WORKSPACE_ROOT" grep --untracked -n -I -E \
+    -e "(^|[^A-Za-z0-9_./-]|\.\./)${re}([^A-Za-z0-9_.-]|\.[^A-Za-z0-9]|\.?\$)" \
+    -- '*.rs' </dev/null 2>/dev/null)"
+  rc=$?
+  [ "$rc" -le 1 ] || return 2
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    file="${line%%:*}"
+    content="${line#*:}"
+    content="${content#*:}"
+    content="${content#"${content%%[![:space:]]*}"}"
+    case "$content" in
+      //* | /\** | \*/* | '* '* | '*') continue ;;
+    esac
+    owning_crate "$file"
+  done <<<"$hits"
+  return 0
+}
+
+# relevant_ui_crates — rule 3's union: each RELEVANCE_CRATES member that
+# ci-crate-relevance.sh answers `true` for over this change set. That script
+# fails closed (`true`); a missing copy of it counts the same way.
+relevant_ui_crates() {
+  local relevance="${SELF_DIR}/ci-crate-relevance.sh" c verdict
+  for c in $RELEVANCE_CRATES; do
+    [ -n "${IS_MEMBER[$c]:-}" ] || continue
+    verdict="true"
+    if [ -f "$relevance" ]; then
+      verdict="$(cd "$WORKSPACE_ROOT" && GITHUB_OUTPUT="" bash "$relevance" "$c" <"${CHANGED_FILE}" 2>/dev/null)"
+    else
+      echo "select-test-crates: WARNING: ${relevance} missing — counting ${c} relevant" >&2
+    fi
+    [ "$verdict" = "false" ] || printf '%s\n' "$c"
+  done
+}
+
 declare -A DIRECT_SET=()
+# Rules 3 and 4 select crates directly, never through the reverse closure.
+declare -A EXTRA_SET=()
 ANY_ALL=0
+CANARY_HIT=0
 while IFS= read -r path; do
   [ -n "$path" ] || continue
   cls="$(classify_path "$path")"
   case "$cls" in
     ALL) ANY_ALL=1 ;;
     NONE) : ;;
+    CANARY) CANARY_HIT=1 ;;
+    SCRIPTREF)
+      if ! refs="$(crates_referencing "$path")"; then
+        echo "select-test-crates: WARNING: git grep failed scanning crates for '${path}' — printing ALL crates" >&2
+        ANY_ALL=1
+        continue
+      fi
+      while IFS= read -r c; do
+        [ -n "$c" ] && EXTRA_SET["$c"]=1
+      done <<<"$refs"
+      ;;
     *) DIRECT_SET["$cls"]=1 ;;
   esac
 done <"${CHANGED_FILE}"
@@ -454,8 +553,23 @@ if [ "$ANY_ALL" = "1" ]; then
   exit 0
 fi
 
-# Docs/website/root-md-only change: nothing owns a crate, nothing to test.
+if [ "$CANARY_HIT" = "1" ]; then
+  for c in $CANARY_CRATES; do
+    if [ -n "${IS_MEMBER[$c]:-}" ]; then
+      EXTRA_SET["$c"]=1
+    else
+      echo "select-test-crates: WARNING: canary crate '${c}' is not a workspace member — skipped" >&2
+    fi
+  done
+  while IFS= read -r c; do
+    [ -n "$c" ] && EXTRA_SET["$c"]=1
+  done < <(relevant_ui_crates)
+fi
+
+# Nothing owns a crate (docs, website, root md, an unreferenced script): print
+# the direct picks, if any, and stop — there is no closure to walk.
 if [ ${#DIRECT_SET[@]} -eq 0 ]; then
+  [ ${#EXTRA_SET[@]} -eq 0 ] || emit_output "${!EXTRA_SET[@]}"
   exit 0
 fi
 
@@ -505,4 +619,4 @@ while [ ${#QUEUE[@]} -gt 0 ]; do
   done
 done
 
-emit_output "${!CLOSURE[@]}"
+emit_output "${!CLOSURE[@]}" "${!EXTRA_SET[@]}"

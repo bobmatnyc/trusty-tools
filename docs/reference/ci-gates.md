@@ -123,10 +123,19 @@ above.
   them. What is left is split into at most 8 legs, largest test suite first.
 - **Workspace-wide inputs select every crate.** A change to the root
   `Cargo.toml` or `Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `clippy.toml`,
-  `rustfmt.toml`, `scripts/**` or `.github/**` selects every headless crate,
-  and so does any path the selector cannot classify. A workflow-only PR
-  therefore runs the full 8-leg set. `detect-docs-only.sh` exempts a few named
-  doc-governance scripts and workflows; those PRs select nothing.
+  `rustfmt.toml` or `deny.toml` selects every headless crate, and so does any
+  path the selector cannot classify.
+- **`scripts/**` and `.github/**` select narrowly** (owner ruling 2026-09-23,
+  #7777). A change to `ci.yml`, `select-test-crates.sh`,
+  `ci-affected-test-plan.sh` or their selftests selects the canary
+  `trusty-common` + `trusty-mpm`, plus each Tauri UI crate
+  `ci-crate-relevance.sh` marks relevant (the wrapper then drops those). Any
+  other such path selects the crates whose `*.rs` source names it literally
+  on a non-comment line, found by `git grep` at plan time — for example
+  `scripts/check-ui-bundle-freshness.sh` selects `trusty-search` and
+  `trusty-console` through their `build.rs`. A literal counts only when the
+  file exists, so a test fixture string such as `"scripts/go.sh"` selects
+  nothing. Most script and workflow PRs therefore select zero crates.
 - **Nothing to test still reports.** A docs-only PR, a push to `main` and a
   `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
   job, named exactly `Rust tests (affected crates)`, reports success with a
