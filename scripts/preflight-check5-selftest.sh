@@ -98,6 +98,16 @@
 #                               compared the manifest version: [FAIL].
 #     (i) full run, arg != manifest  full_mode_version_is_manifest refuses;
 #                               --check-only and an equal argument pass.
+#     (j) symlink / mode        committed as a symlink (target edited or not), a
+#                               symlink in the working tree, or mode 100755:
+#                               [FAIL] in both modes.
+#     (k) not the committed content  an edited working copy or an untracked
+#                               file: [FAIL] on a full run, a NOT COMMITTED
+#                               [WARN] preview under --check-only.
+#     (l) committed, unmodified [WARN] naming the HEAD blob it read.
+#     (m) two-path entry        an item only in the text after the first
+#                               ` in /<path>` is matched.
+#   The scratch root is a git repo, so every declaration is committed first.
 #   PREFLIGHT_SELFTEST_LIB points at another semver_accepted_breaks.sh.
 #
 # HOW IT DRIVES THE REAL DECISION: the two functions are lifted out of
@@ -183,6 +193,20 @@ exit "${SELFTEST_TYPES_RC:-0}"
 STUB
 chmod +x "${SCRATCH}/scripts/check_semver_types.sh"
 
+# The scratch root is a git repo: a declaration counts only as committed at HEAD,
+# so the accepted-break cases commit theirs. OUTSIDE is a directory outside it,
+# the target of case (j)'s symlink.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5-outside.XXXXXX")"
+trap 'rm -rf "$SCRATCH" "$OUTSIDE"' EXIT
+sgit() {
+  git -C "$SCRATCH" -c user.name=selftest -c user.email=selftest@example.invalid \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
+}
+sgit init -q
+sgit add -A -- scripts
+sgit commit -q --no-verify -m "selftest: stub gate"
+
 # ---------------------------------------------------------------------------
 # run_decision <fixture> <gate-rc> — run the shipped CHECK 5 end to end and
 # print `<return-status>` on the first line, then everything it wrote.
@@ -205,6 +229,7 @@ run_decision() {
     # that never reached the count must refuse, not inherit a stale number.
     SEMVER_GATE_COMPARED=0
     MANIFEST="crates/stub-crate/Cargo.toml"
+    CHECK_ONLY="${SELFTEST_CHECK_ONLY:-0}"
     REPO_ROOT="$SCRATCH"
     TMP_SEMVER="$(mktemp "${SCRATCH}/log.XXXXXX")"
     SELFTEST_FIXTURE="${FIXTURES}/${fixture}"
@@ -475,11 +500,30 @@ accept function_parameter_count_changed build_adapter
 accept method_parameter_count_changed ClaudeCodeAdapter::new
 accept struct_marked_non_exhaustive Delegation"
 
-# write_decl <file-pkg> <file-version> <body> — leave exactly one declaration.
-write_decl() {
+# put_decl <file-pkg> <file-version> <body> — leave exactly one declaration in
+# the working tree, uncommitted.
+put_decl() {
   rm -rf "$DECL_DIR"
   mkdir -p "$DECL_DIR"
   printf '%s\n' "$3" > "${DECL_DIR}/$1-$2.txt"
+}
+
+# commit_decl — commit the declaration directory as it now stands at HEAD.
+commit_decl() {
+  sgit add -A -- scripts
+  sgit commit -q --no-verify --allow-empty -m "selftest: declaration"
+}
+
+# write_decl <file-pkg> <file-version> <body> — put_decl, then commit it.
+write_decl() {
+  put_decl "$@"
+  commit_decl
+}
+
+# clear_decl — no declaration in the working tree or at HEAD.
+clear_decl() {
+  rm -rf "$DECL_DIR"
+  commit_decl
 }
 
 # decl_body <crate> <version> <reason-row> <accept-rows>
@@ -575,7 +619,7 @@ check_raw "accepted/(d) no verdict (exit 3)" 1 "ACCEPTED BREAK" "[FAIL]" \
 
 # --- (e) No declaration: the break stops the publish, and the remedy names the
 #         one file that could change that.
-rm -rf "$DECL_DIR"
+clear_decl
 raw="$(run_mpm break-lints.out 1)"
 check_raw "accepted/(e) no declaration" 1 "ACCEPTED BREAK" "[FAIL] semver: public-API check failed" \
   "committed scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
@@ -595,7 +639,78 @@ raw="$(SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.99.0 run_decision break-lints.
 check_raw "accepted/(h) declaration names the argument, gate compared the manifest" 1 \
   "ACCEPTED BREAK" "[FAIL]" \
   "names version '1.99.0', but the gate compared trusty-mpm '1.6.4' (the manifest version)"
+
+# --- (j) A declaration is a plain committed file, never a symlink. The target
+#         sits outside the repo, so editing it leaves no git trace.
+DECL_REL="scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
+COMPLETE_DECL="$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
 rm -rf "$DECL_DIR"
+mkdir -p "$DECL_DIR"
+printf '%s\n' "$COMPLETE_DECL" > "${OUTSIDE}/target.txt"
+ln -s "${OUTSIDE}/target.txt" "${SCRATCH}/${DECL_REL}"
+commit_decl
+if [[ "$(sgit ls-tree HEAD -- "$DECL_REL")" != 120000* ]]; then
+  fail_case "accepted/(j) harness: the fixture was not committed as a symlink" "$(sgit ls-tree HEAD -- "$DECL_REL")"
+fi
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(j) committed symlink, full run" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "is committed at HEAD as a SYMLINK (git mode 120000)"
+printf '%s\n' "$(decl_body trusty-mpm 1.6.4 "reason edited outside git" "$ACCEPT_ROWS")" > "${OUTSIDE}/target.txt"
+raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
+check_raw "accepted/(j) committed symlink, target edited, --check-only" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "is committed at HEAD as a SYMLINK (git mode 120000)"
+
+write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
+rm -f "${SCRATCH}/${DECL_REL}"
+ln -s "${OUTSIDE}/target.txt" "${SCRATCH}/${DECL_REL}"
+raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
+check_raw "accepted/(j) plain at HEAD, symlink in the working tree, --check-only" 1 "ACCEPTED BREAK" \
+  "[FAIL]" "is a SYMLINK in the working tree"
+
+write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
+chmod +x "${SCRATCH}/${DECL_REL}"
+commit_decl
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(j) committed with mode 100755" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "is committed at HEAD with git mode 100755 (blob), not as a plain file (100644)"
+
+# --- (k) Only the committed content counts on a full run. --check-only may
+#         preview an edited or untracked working copy, marked NOT COMMITTED.
+write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
+printf '%s\n' "$(decl_body trusty-mpm 1.6.4 "reason edited after review" "$ACCEPT_ROWS")" \
+  > "${SCRATCH}/${DECL_REL}"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(k) committed, working copy edited, full run" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "has a working-tree copy that differs from the content committed at HEAD"
+raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
+check_raw "accepted/(k) committed, working copy edited, --check-only preview" 0 "[PASS] semver:" \
+  "[WARN] semver: ACCEPTED BREAK" "Reason: edited after review" "Declaration: NOT COMMITTED"
+
+clear_decl
+put_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(k) untracked, full run" 1 "ACCEPTED BREAK" "[FAIL]" "is not tracked at HEAD"
+raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
+check_raw "accepted/(k) untracked, --check-only preview" 0 "[PASS] semver:" \
+  "[WARN] semver: ACCEPTED BREAK" "Declaration: NOT COMMITTED"
+
+# --- (l) The positive control: a committed, unmodified 100644 file is accepted,
+#         and the output names the exact blob it read.
+write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(l) committed plain file, unmodified" 0 "[PASS] semver:" \
+  "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+  "Declaration: read from the commit at HEAD (blob $(sgit rev-parse --short=12 "HEAD:${DECL_REL}")"
+
+# --- (m) An arity entry carries two ` in /<path>` suffixes. Its second clause,
+#         `now takes 3 parameters`, is part of the break and must be matchable.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
+  "$(printf '%s\n' "$ACCEPT_ROWS" | sed 's/ClaudeCodeAdapter::new$/ClaudeCodeAdapter::new now takes 3 parameters/')")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(m) item only in an entry's second clause" 0 "NOT DECLARED" \
+  "[WARN] semver: ACCEPTED BREAK" \
+  "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
+clear_decl
 
 # --- (i) A full run whose version argument is not the manifest version is
 #         refused; --check-only keeps the hypothetical-version preview.

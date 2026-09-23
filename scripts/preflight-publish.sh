@@ -894,7 +894,8 @@ semver_decide() {
   # --- A COMPUTED VERDICT THAT SAYS BREAK. PREFLIGHT_SEMVER_UNVERIFIED does not
   #     apply; only a declaration for this exact release can (ruling 2026-09-22).
   if [ "$rc" -eq 1 ]; then
-    if [ -f "${REPO_ROOT}/$(semver_accept_rel "$pkg" "$version")" ]; then
+    # Present in any form, a symlink included, so a refused one says why.
+    if semver_accept_present "$(semver_accept_rel "$pkg" "$version")"; then
       semver_accept_decide "$log" "$pkg" "$version"
       return $?
     fi

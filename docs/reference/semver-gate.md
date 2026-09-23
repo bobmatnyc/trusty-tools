@@ -622,10 +622,13 @@ A declaration never covers a blind gate. That arm stays governed by
 `PREFLIGHT_SEMVER_UNVERIFIED` alone, and CHECK 5 says so when a declaration is
 present there. With no declaration, CHECK 5 behaves as before.
 
-The file is the audit trail. It reaches `main` in a reviewed PR, because CHECK 1
-and CHECK 3 refuse a publish from a checkout that carries an uncommitted one, and
-it names one release, so a later version needs a new file and a new review. It
-changes no exclusion TSV and no other check.
+The file is the audit trail. It must be a plain tracked file (git mode 100644),
+and CHECK 5 reads it from the commit at HEAD (`git cat-file`), not through the
+filesystem. A symlink, any other mode, an untracked file, or a working copy that
+differs from HEAD is `[FAIL]`. Only `--check-only` previews an uncommitted copy,
+marked `NOT COMMITTED`; a symlink fails there too. It names one release, so a
+later version needs a new file and a new review. It changes no exclusion TSV and
+no other check.
 
 ## Reading the gate's result
 

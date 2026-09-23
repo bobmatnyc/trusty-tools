@@ -14,6 +14,11 @@
 # What: a computed break for <package> <version> is ACCEPTED only when the
 #   committed file scripts/semver-accepted-breaks/<package>-<version>.txt exists
 #   and all of these hold; any other state is [FAIL]:
+#     - it is committed at HEAD as a plain file (git mode 100644, never a 120000
+#       symlink, a submodule or a tree), the working-tree copy is a regular file
+#       byte-identical to that blob, and the rows are read from the blob itself
+#       (`git cat-file`), never through the filesystem. Only --check-only may
+#       preview an uncommitted or edited working copy, marked NOT COMMITTED;
 #     - exactly one `crate` row, equal to <package>;
 #     - exactly one `version` row, equal to <version> AND to the version the
 #       gate's `CHECK <package>: <base> -> <current>` line compared;
@@ -30,10 +35,11 @@
 #   blind arm stays governed by PREFLIGHT_SEMVER_UNVERIFIED alone, and only
 #   prints semver_accept_blind_note below.
 #
-# Test: scripts/preflight-check5-selftest.sh, the accepted-break cases (a)-(g).
+# Test: scripts/preflight-check5-selftest.sh, the accepted-break cases (a)-(m).
 #
-# Portability: bash 3.2 and bash 5; BSD and GNU awk/sed. Reads REPO_ROOT from
-#   the caller; sets SEMVER_ACCEPTED_BREAKS and SEMVER_GATE_COMPARED.
+# Portability: bash 3.2 and bash 5; BSD and GNU awk/sed. Reads REPO_ROOT and
+#   CHECK_ONLY from the caller; sets SEMVER_ACCEPTED_BREAKS and
+#   SEMVER_GATE_COMPARED.
 
 # Set when a declaration accepted a break; read by the final summary line.
 SEMVER_ACCEPTED_BREAKS=""
@@ -43,12 +49,20 @@ semver_accept_rel() {
   printf 'scripts/semver-accepted-breaks/%s-%s.txt' "$1" "$2"
 }
 
+# semver_accept_present <rel> — true when a declaration is there in ANY form: in
+# the working tree (a dangling symlink included) or in HEAD's tree. Presence only
+# routes a break to semver_accept_decide; whether it counts is decided there.
+semver_accept_present() {
+  [ -e "${REPO_ROOT}/$1" ] || [ -L "${REPO_ROOT}/$1" ] \
+    || [ -n "$(git -C "$REPO_ROOT" ls-tree HEAD -- "$1" 2> /dev/null)" ]
+}
+
 # semver_accept_blind_note <package> <version> — on the blind arm, say that a
 # declaration present for this release does not apply there. Always returns 0.
 semver_accept_blind_note() {
   local rel
   rel="$(semver_accept_rel "$1" "$2")"
-  [ -f "${REPO_ROOT}/${rel}" ] || return 0
+  semver_accept_present "$rel" || return 0
   echo "       ${rel} exists, but a declaration accepts only breaks a completed" >&2
   echo "       comparison COMPUTED. It does not cover a gate that produced no verdict;" >&2
   echo "       that case is PREFLIGHT_SEMVER_UNVERIFIED's alone." >&2
@@ -114,7 +128,7 @@ semver_accept_parse() {
 }
 
 # semver_break_entries <gate-log> <package> — print one `<lint>\t<entry>` line per
-# `Failed in:` entry, location stripped. On any inconsistency print one
+# `Failed in:` entry, every location stripped. On any inconsistency print one
 # `ERROR\t<why>` line instead and return 1: a list this cannot read completely
 # is never compared against a declaration.
 semver_break_entries() {
@@ -144,7 +158,10 @@ semver_break_entries() {
     }
     state == 1 && /^Failed in:/ { state = 2; next }
     state == 2 && /^  [^ ]/ {
-      e = substr($0, 3); p = index(e, " in /"); if (p > 0) e = substr(e, 1, p - 1)
+      # Strip EVERY ` in /<path>:<line>` suffix, not only the first: an arity
+      # lint prints `takes 2 parameters in /old:1, but now takes 3 parameters in
+      # /new:2`, and the second clause is part of the break.
+      e = substr($0, 3); gsub(/ in \/[^ ]*:[0-9]+/, "", e); sub(/ in \/[^ ]*$/, "", e)
       sub(/,$/, "", e); print lint "\t" e; nent++; next
     }
     state == 2 { state = 0 }
@@ -191,17 +208,64 @@ semver_accept_match() {
   ' "$1" "$2"
 }
 
-# semver_accept_provenance <rel> — say whether the declaration is committed, and
-# by whom. Informational: CHECK 1 and CHECK 3 are what force it onto main.
-semver_accept_provenance() {
-  local rel="$1" who
-  if git -C "$REPO_ROOT" ls-files --error-unmatch -- "$rel" > /dev/null 2>&1 \
-    && git -C "$REPO_ROOT" diff --quiet HEAD -- "$rel" 2> /dev/null; then
-    who="$(git -C "$REPO_ROOT" log -1 --format='%h by %an on %ad' --date=short -- "$rel" 2> /dev/null)"
-    echo "committed (${who})"
-  else
-    echo "NOT COMMITTED — CHECK 3 refuses a publish carrying it; land it on main in a reviewed PR"
+# semver_accept_source <rel> <content-out> <err-out> — copy the declaration
+# content CHECK 5 may evaluate to <content-out> and set SEMVER_ACCEPT_PROVENANCE;
+# on refusal write the reason to <err-out> and return 1.
+#
+# Why: `[ -f ]` follows symlinks, so a declaration committed as a symlink to a
+#   file outside the repo passed CHECK 1 and CHECK 3 while its target stayed
+#   editable with no git trace, defeating the audit trail the declaration exists
+#   for. What was reviewed is the blob at HEAD, so that blob is what is read.
+# What: HEAD's tree entry must be mode 100644 (blob); its content comes from
+#   `git cat-file`, and the working-tree copy must be a regular file,
+#   byte-identical to it (`cmp`). --check-only (CHECK_ONLY=1) alone may instead
+#   preview a regular working-tree file that is untracked or edited, marked NOT
+#   COMMITTED. A symlink or a non-100644 mode is refused in both modes.
+# Test: preflight-check5-selftest.sh cases (j), (k), (l).
+SEMVER_ACCEPT_PROVENANCE=""
+semver_accept_source() {
+  local rel="$1" out="$2" err="$3" path tree mode otype obj who
+  path="${REPO_ROOT}/${rel}"
+  SEMVER_ACCEPT_PROVENANCE=""
+  tree="$(git -C "$REPO_ROOT" ls-tree HEAD -- "$rel" 2> /dev/null | head -1)"
+  mode=""
+  otype=""
+  obj=""
+  [ -n "$tree" ] && read -r mode otype obj _ <<< "$tree"
+  if [ "$mode" = "120000" ]; then
+    echo "is committed at HEAD as a SYMLINK (git mode 120000); a declaration must be a plain file (100644), because a symlink's target can change with no git trace" >> "$err"
+    return 1
+  elif [ -n "$tree" ] && { [ "$mode" != "100644" ] || [ "$otype" != "blob" ]; }; then
+    echo "is committed at HEAD with git mode ${mode} (${otype}), not as a plain file (100644)" >> "$err"
+    return 1
+  elif [ -L "$path" ]; then
+    echo "is a SYMLINK in the working tree; a declaration must be a plain file, read as committed" >> "$err"
+    return 1
   fi
+  if [ -n "$tree" ]; then
+    if ! git -C "$REPO_ROOT" cat-file blob "$obj" > "$out" 2> /dev/null; then
+      echo "could not be read from HEAD (blob ${obj})" >> "$err"
+      return 1
+    fi
+    if [ -f "$path" ] && cmp -s "$path" "$out"; then
+      who="$(git -C "$REPO_ROOT" log -1 --format='%h by %an on %ad' --date=short -- "$rel" 2> /dev/null)"
+      SEMVER_ACCEPT_PROVENANCE="read from the commit at HEAD (blob $(git -C "$REPO_ROOT" rev-parse --short=12 "$obj"), last changed in ${who:-<unknown>})"
+      return 0
+    fi
+  fi
+  if [ "${CHECK_ONLY:-0}" -eq 1 ] && [ -f "$path" ]; then
+    cat "$path" > "$out"
+    SEMVER_ACCEPT_PROVENANCE="NOT COMMITTED — a --check-only preview of the working-tree copy; a full run accepts only the content committed at HEAD, so land it on main in a reviewed PR"
+    return 0
+  fi
+  if [ -z "$tree" ]; then
+    echo "is not tracked at HEAD; a full run accepts only a declaration committed on main in a reviewed PR" >> "$err"
+  elif [ -f "$path" ]; then
+    echo "has a working-tree copy that differs from the content committed at HEAD; a full run accepts only the committed content" >> "$err"
+  else
+    echo "is committed at HEAD but missing from the working tree" >> "$err"
+  fi
+  return 1
 }
 
 # semver_accept_decide <gate-log> <package> <version> — decide a computed BREAK
@@ -212,8 +276,19 @@ semver_accept_decide() {
   local rel decl work lints n_items lint items tab compared_to rc=0
   tab="$(printf '\t')"
   rel="$(semver_accept_rel "$pkg" "$version")"
-  decl="${REPO_ROOT}/${rel}"
   work="$(mktemp -d "${TMPDIR:-/tmp}/preflight-accept.XXXXXX")"
+  decl="${work}/decl"
+
+  : > "${work}/src-err"
+  if ! semver_accept_source "$rel" "$decl" "${work}/src-err"; then
+    echo "[FAIL] semver: ${pkg} ${version} breaks its public API, and ${rel}" >&2
+    echo "       is not the reviewed, committed declaration, so nothing is accepted:" >&2
+    sed 's/^/         /' "${work}/src-err" >&2
+    echo "       Full gate output:" >&2
+    sed 's/^/       /' "$log" >&2
+    rm -rf "$work"
+    return 1
+  fi
 
   semver_accept_parse "$decl" "$pkg" "$version" "${work}/accept" "${work}/err"
   semver_break_entries "$log" "$pkg" > "${work}/entries" || true
@@ -267,7 +342,7 @@ semver_accept_decide() {
   echo "       version bump does not carry, accepted by ${rel}." >&2
   echo "       Accepted lints: ${lints}" >&2
   echo "       Reason: ${SEMVER_ACCEPT_REASON}" >&2
-  echo "       Declaration: $(semver_accept_provenance "$rel")" >&2
+  echo "       Declaration: ${SEMVER_ACCEPT_PROVENANCE}" >&2
   echo "       Gate compared: $(grep '^CHECK ' "$log" | head -1)" >&2
   echo "       Accept rows:" >&2
   while IFS="$tab" read -r lint items; do
