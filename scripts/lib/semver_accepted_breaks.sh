@@ -35,14 +35,22 @@
 #   blind arm stays governed by PREFLIGHT_SEMVER_UNVERIFIED alone, and only
 #   prints semver_accept_blind_note below.
 #
-# Test: scripts/preflight-check5-selftest.sh, the accepted-break cases (a)-(m).
+# Test: scripts/preflight-check5-selftest.sh, the accepted-break cases (a)-(m);
+#   scripts/check_semver_selftest.sh, the `ci-accept/` cases.
 #
 # Portability: bash 3.2 and bash 5; BSD and GNU awk/sed. Reads REPO_ROOT and
 #   CHECK_ONLY from the caller; sets SEMVER_ACCEPTED_BREAKS and
 #   SEMVER_GATE_COMPARED.
+#
+# Also sourced by scripts/semver_ci_accept.sh, the Public API / SemVer PR check,
+#   which sets SEMVER_ACCEPT_REV after sourcing (#8372).
 
 # Set when a declaration accepted a break; read by the final summary line.
 SEMVER_ACCEPTED_BREAKS=""
+
+# The commit whose tree holds the declaration; every "HEAD" below means this.
+# Assigned here, not inherited, so preflight-publish.sh always reads HEAD.
+SEMVER_ACCEPT_REV="HEAD"
 
 # semver_accept_rel <package> <version> — the declaration's repo-relative path.
 semver_accept_rel() {
@@ -54,7 +62,7 @@ semver_accept_rel() {
 # routes a break to semver_accept_decide; whether it counts is decided there.
 semver_accept_present() {
   [ -e "${REPO_ROOT}/$1" ] || [ -L "${REPO_ROOT}/$1" ] \
-    || [ -n "$(git -C "$REPO_ROOT" ls-tree HEAD -- "$1" 2> /dev/null)" ]
+    || [ -n "$(git -C "$REPO_ROOT" ls-tree "$SEMVER_ACCEPT_REV" -- "$1" 2> /dev/null)" ]
 }
 
 # semver_accept_blind_note <package> <version> — on the blind arm, say that a
@@ -224,19 +232,20 @@ semver_accept_match() {
 # Test: preflight-check5-selftest.sh cases (j), (k), (l).
 SEMVER_ACCEPT_PROVENANCE=""
 semver_accept_source() {
-  local rel="$1" out="$2" err="$3" path tree mode otype obj who
+  local rel="$1" out="$2" err="$3" path tree mode otype obj who at
   path="${REPO_ROOT}/${rel}"
+  at="$SEMVER_ACCEPT_REV"
   SEMVER_ACCEPT_PROVENANCE=""
-  tree="$(git -C "$REPO_ROOT" ls-tree HEAD -- "$rel" 2> /dev/null | head -1)"
+  tree="$(git -C "$REPO_ROOT" ls-tree "$at" -- "$rel" 2> /dev/null | head -1)"
   mode=""
   otype=""
   obj=""
   [ -n "$tree" ] && read -r mode otype obj _ <<< "$tree"
   if [ "$mode" = "120000" ]; then
-    echo "is committed at HEAD as a SYMLINK (git mode 120000); a declaration must be a plain file (100644), because a symlink's target can change with no git trace" >> "$err"
+    echo "is committed at ${at} as a SYMLINK (git mode 120000); a declaration must be a plain file (100644), because a symlink's target can change with no git trace" >> "$err"
     return 1
   elif [ -n "$tree" ] && { [ "$mode" != "100644" ] || [ "$otype" != "blob" ]; }; then
-    echo "is committed at HEAD with git mode ${mode} (${otype}), not as a plain file (100644)" >> "$err"
+    echo "is committed at ${at} with git mode ${mode} (${otype}), not as a plain file (100644)" >> "$err"
     return 1
   elif [ -L "$path" ]; then
     echo "is a SYMLINK in the working tree; a declaration must be a plain file, read as committed" >> "$err"
@@ -244,12 +253,12 @@ semver_accept_source() {
   fi
   if [ -n "$tree" ]; then
     if ! git -C "$REPO_ROOT" cat-file blob "$obj" > "$out" 2> /dev/null; then
-      echo "could not be read from HEAD (blob ${obj})" >> "$err"
+      echo "could not be read from ${at} (blob ${obj})" >> "$err"
       return 1
     fi
     if [ -f "$path" ] && cmp -s "$path" "$out"; then
-      who="$(git -C "$REPO_ROOT" log -1 --format='%h by %an on %ad' --date=short -- "$rel" 2> /dev/null)"
-      SEMVER_ACCEPT_PROVENANCE="read from the commit at HEAD (blob $(git -C "$REPO_ROOT" rev-parse --short=12 "$obj"), last changed in ${who:-<unknown>})"
+      who="$(git -C "$REPO_ROOT" log -1 --format='%h by %an on %ad' --date=short "$at" -- "$rel" 2> /dev/null)"
+      SEMVER_ACCEPT_PROVENANCE="read from the commit at ${at} (blob $(git -C "$REPO_ROOT" rev-parse --short=12 "$obj"), last changed in ${who:-<unknown>})"
       return 0
     fi
   fi
@@ -259,11 +268,11 @@ semver_accept_source() {
     return 0
   fi
   if [ -z "$tree" ]; then
-    echo "is not tracked at HEAD; a full run accepts only a declaration committed on main in a reviewed PR" >> "$err"
+    echo "is not tracked at ${at}; a full run accepts only a declaration committed on main in a reviewed PR" >> "$err"
   elif [ -f "$path" ]; then
-    echo "has a working-tree copy that differs from the content committed at HEAD; a full run accepts only the committed content" >> "$err"
+    echo "has a working-tree copy that differs from the content committed at ${at}; a full run accepts only the committed content" >> "$err"
   else
-    echo "is committed at HEAD but missing from the working tree" >> "$err"
+    echo "is committed at ${at} but missing from the working tree" >> "$err"
   fi
   return 1
 }

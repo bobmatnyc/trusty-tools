@@ -149,6 +149,12 @@
 #   exit 3, no version-bump remediation) AND that the package and its scratch
 #   version are named.
 #
+#   The `ci-accept/` cases (#8372) run the workflow's enforce step over a
+#   replayed BREAK and pin preflight CHECK 5's accepted-break decision in the PR
+#   check: a covered break passes with the ACCEPTED BREAK WARN; an undeclared
+#   break, a second uncovered crate, a blind crate, a declaration missing at
+#   DECL_REV, or no declaration at all keeps the BREAK.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -1077,6 +1083,180 @@ else
 fi
 
 rm -rf "$STUB_DIR"
+
+# ===========================================================================
+# ci-accept/ (#8372). The PR check's accepted-break decision. The workflow's
+# "Enforce public-API SemVer" run block is extracted from semver-checks.yml and
+# run as GitHub runs it (`bash -e`) in a scratch git repo, where
+# scripts/check_semver.sh replays the real trusty-mpm 1.6.3 -> 1.6.4 break
+# (scripts/test-data/preflight-check5/break-lints.out) at exit 1. The library and
+# scripts/semver_ci_accept.sh are copied in from the tree under test, and the
+# declarations are committed, because the step reads them from DECL_REV.
+#
+# SEMVER_SELFTEST_TREE points at another checkout's files. Against a tree
+# without the #8372 step every case below fails on its asserted message.
+# ===========================================================================
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+TREE="${SEMVER_SELFTEST_TREE:-$REPO_ROOT}"
+ACC="$(mktemp -d "${TMPDIR:-/tmp}/semver-ci-accept-selftest.XXXXXX")"
+AREPO="${ACC}/repo"
+mkdir -p "${AREPO}/scripts/lib" "${AREPO}/crates/trusty-mpm" "${AREPO}/crates/stub-crate" "${ACC}/tmp"
+cp "${TREE}/scripts/lib/semver_accepted_breaks.sh" "${AREPO}/scripts/lib/"
+if [[ -f "${TREE}/scripts/semver_ci_accept.sh" ]]; then
+  cp "${TREE}/scripts/semver_ci_accept.sh" "${AREPO}/scripts/"
+fi
+# shellcheck disable=SC2016  # the stub expands these at run time, not here
+printf '#!/usr/bin/env bash\ncat "$ACCEPT_SELFTEST_LOG"\nexit "$ACCEPT_SELFTEST_RC"\n' \
+  > "${AREPO}/scripts/check_semver.sh"
+for c in trusty-mpm stub-crate; do
+  printf '[package]\nname = "%s"\nversion = "1.6.4"\n' "$c" > "${AREPO}/crates/${c}/Cargo.toml"
+done
+awk '
+  /^        id: enforce$/ { found = 1; next }
+  found && !inrun && /^        run: \|$/ { inrun = 1; next }
+  inrun && /^          / { print substr($0, 11); next }
+  inrun && /^[[:space:]]*$/ { print ""; next }
+  inrun { exit }
+' "${TREE}/.github/workflows/semver-checks.yml" > "${ACC}/enforce.sh"
+
+agit() {
+  git -C "$AREPO" -c user.name=selftest -c user.email=selftest@example.invalid \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
+}
+agit init -q
+agit add -A -- .
+agit commit -q --no-verify -m "selftest: stub gate and manifests"
+NO_DECL_REV="$(agit rev-parse HEAD)"
+
+# The replayed gate runs. ONE is the real single-crate break; TWO repeats its
+# section as stub-crate, the shape of a release PR that bumps two crates;
+# BLIND pairs the trusty-mpm break with a stub-crate NO VERDICT.
+FIX5="${REPO_ROOT}/scripts/test-data/preflight-check5"
+ONE="${FIX5}/break-lints.out"
+TWO="${ACC}/two.out"
+BLIND="${ACC}/blind.out"
+{
+  sed '/^CHECK /,$d' "$ONE"
+  sed -n '/^CHECK /,/^FAIL /p' "$ONE"
+  sed -n '/^CHECK /,/^FAIL /p' "$ONE" \
+    | sed 's/^CHECK trusty-mpm:/CHECK stub-crate:/; s/^FAIL trusty-mpm:/FAIL stub-crate:/'
+  sed '1,/^FAIL /d' "$ONE"
+} > "$TWO"
+{
+  sed '/^FAIL /q' "$ONE"
+  printf '%s\n' "CHECK stub-crate: 1.6.3 -> 1.6.4 (patch release), 1 feature(s)" \
+    "NO VERDICT stub-crate: cargo semver-checks exited 101 and rustdoc failed to build."
+  sed '1,/^FAIL /d' "$ONE"
+} > "$BLIND"
+
+ACCEPT_ROWS_CI="accept constructible_struct_adds_field BuildersConfig
+accept constructible_struct_adds_field BuilderSlotResponse
+accept derive_trait_impl_removed BuildersConfig Eq
+accept enum_no_repr_variant_discriminant_changed SectionId
+accept enum_variant_added ManagedError
+accept enum_variant_added ResumeManagedError
+accept enum_variant_added SectionId
+accept function_parameter_count_changed build_adapter
+accept method_parameter_count_changed ClaudeCodeAdapter::new
+accept struct_marked_non_exhaustive Delegation"
+
+# set_decls <crate>:<rows>... — commit exactly these declarations, and nothing else.
+set_decls() {
+  local spec
+  rm -rf "${AREPO}/scripts/semver-accepted-breaks"
+  mkdir -p "${AREPO}/scripts/semver-accepted-breaks"
+  for spec in "$@"; do
+    printf 'crate %s\nversion 1.6.4\nreason owner ruling 2026-09-22\n%s\n' "${spec%%:*}" "${spec#*:}" \
+      > "${AREPO}/scripts/semver-accepted-breaks/${spec%%:*}-1.6.4.txt"
+  done
+  agit add -A -- scripts
+  agit commit -q --no-verify --allow-empty -m "selftest: declarations"
+}
+
+# ci_enforce <name> <gate-log> <crates> <decl-rev> <want-exit> <want-label>
+#            <must-not, or -> <must-have>... — run the extracted step once.
+ci_enforce() {
+  local name="$1" log="$2" crates="$3" rev="$4" want="$5" want_label="$6" must_not="$7"
+  local out rc=0 label needle
+  shift 7
+  : > "${ACC}/output"
+  out="$(cd "$AREPO" && env ACCEPT_SELFTEST_LOG="$log" ACCEPT_SELFTEST_RC=1 \
+    CRATES="$crates" DECL_REV="$rev" SKIP_UI_BUILD=1 RUNNER_TEMP="${ACC}/tmp" \
+    GITHUB_OUTPUT="${ACC}/output" GITHUB_STEP_SUMMARY="${ACC}/summary" \
+    bash -e "${ACC}/enforce.sh" 2>&1)" || rc=$?
+  label="$(sed -n 's/^verdict_label=//p' "${ACC}/output")"
+  if [[ "$rc" -ne "$want" ]]; then
+    fail_case "ci-accept/${name}: the enforce step exited ${rc}, expected ${want}" "$out"
+    return
+  fi
+  if [[ "$label" != "$want_label"* ]]; then
+    fail_case "ci-accept/${name}: verdict label '${label}', expected '${want_label}...'" "$out"
+    return
+  fi
+  if [[ "$must_not" != "-" && "$out" == *"$must_not"* ]]; then
+    fail_case "ci-accept/${name}: output wrongly said '${must_not}'" "$out"
+    return
+  fi
+  for needle in "$@"; do
+    if [[ "$out" != *"$needle"* ]]; then
+      fail_case "ci-accept/${name}: output never said '${needle}'" "$out"
+      return
+    fi
+  done
+  pass_case "ci-accept/${name} (exit ${rc})"
+}
+
+if [[ ! -s "${ACC}/enforce.sh" ]]; then
+  fail_case "ci-accept: no 'id: enforce' run block in ${TREE}/.github/workflows/semver-checks.yml"
+else
+  # --- A covered break passes, with the WARN in the log and an annotation.
+  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
+  ci_enforce "covered break" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 0 \
+    "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "Reason: owner ruling 2026-09-22"
+
+  # --- The declaration is read from DECL_REV (the PR head), not from HEAD: a
+  #     rev that predates it accepts nothing.
+  ci_enforce "declaration read from DECL_REV" "$ONE" trusty-mpm "$NO_DECL_REV" 1 \
+    "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
+    "is not tracked at ${NO_DECL_REV}" "::error title=SemVer break::"
+
+  # --- An undeclared break fails, naming the entry.
+  set_decls "trusty-mpm:$(printf '%s\n' "$ACCEPT_ROWS_CI" | grep -v ' ResumeManagedError')"
+  ci_enforce "undeclared break" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 1 \
+    "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
+    "NOT DECLARED  enum_variant_added: variant ResumeManagedError:AlreadyResuming" "::error title=SemVer break::"
+
+  # --- Two changed crates, one covered and one not, fails on the uncovered one.
+  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
+  ci_enforce "two crates, one covered" "$TWO" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 1 \
+    "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
+    "stub-crate 1.6.4 breaks its public API, and scripts/semver-accepted-breaks/stub-crate-1.6.4.txt" \
+    "::error title=SemVer break::"
+
+  # --- Both covered passes: each crate is decided on its own section.
+  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}" "stub-crate:${ACCEPT_ROWS_CI}"
+  ci_enforce "two crates, both covered" "$TWO" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 0 \
+    "SemVer: ACCEPTED BREAK" "::error title=SemVer break::" \
+    "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "::warning title=SemVer ACCEPTED BREAK::ACCEPTED BREAK — stub-crate 1.6.4"
+
+  # --- A covered break beside a crate the gate never compared still fails.
+  set_decls "trusty-mpm:${ACCEPT_ROWS_CI}"
+  ci_enforce "covered break + blind crate" "$BLIND" "trusty-mpm stub-crate" "$(agit rev-parse HEAD)" 1 \
+    "SemVer: BREAK" "::warning title=SemVer ACCEPTED BREAK" \
+    "so part of it" "::error title=SemVer break::"
+
+  # --- No declaration keeps today's failure.
+  set_decls
+  ci_enforce "no declaration" "$ONE" trusty-mpm "$(agit rev-parse HEAD)" 1 \
+    "SemVer: BREAK" "ACCEPTED BREAK" \
+    "scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt" \
+    "::error title=SemVer break::trusty-mpm has a breaking public-API change"
+fi
+rm -rf "$ACC"
 
 echo
 if [[ "$FAILED" -ne 0 ]]; then
