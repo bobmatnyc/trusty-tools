@@ -378,13 +378,15 @@ fn tmux_config_yaml_round_trip() {
 }
 
 /// Why: with no `tmux:` section at all, resolution must fall back to the
-/// built-in defaults (100,000-line history-limit, mouse on,
+/// built-in defaults (10,000-line history-limit since #8404, mouse on,
 /// alternate-screen off since #5364).
 /// Test: itself.
 #[test]
 fn tmux_options_default_when_no_config() {
     let opts = resolve_tmux_options(&TrustyToolsConfig::default());
     assert_eq!(opts.history_limit, DEFAULT_TMUX_HISTORY_LIMIT);
+    // #8404: pinned literally — 100,000 lagged every pane on the host.
+    assert_eq!(opts.history_limit, 10_000);
     assert_eq!(opts.mouse, DEFAULT_TMUX_MOUSE);
     assert_eq!(opts.alternate_screen, DEFAULT_TMUX_ALTERNATE_SCREEN);
 }
@@ -475,16 +477,18 @@ fn tmux_options_config_override() {
     assert!(!opts.mouse);
 
     // Partial override: only history_limit set, mouse falls back to default.
+    // #8404: 50_000, not 10_000 — the default is now 10_000, so an equal
+    // value could not show the override won.
     let partial = TrustyToolsConfig {
         tmux: Some(TmuxConfig {
-            history_limit: Some(10_000),
+            history_limit: Some(50_000),
             mouse: None,
             alternate_screen: None,
         }),
         ..Default::default()
     };
     let opts = resolve_tmux_options(&partial);
-    assert_eq!(opts.history_limit, 10_000);
+    assert_eq!(opts.history_limit, 50_000);
     assert_eq!(opts.mouse, DEFAULT_TMUX_MOUSE);
 }
 

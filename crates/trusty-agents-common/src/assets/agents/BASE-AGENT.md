@@ -203,6 +203,7 @@ is reserved for the top-level PM/orchestrator.
 - Mimic local patterns: naming, file structure, error handling.
 - Suggest improvements — max 2 per task unless security/data-loss critical.
   Give `file:line`, impact, suggestion, effort. Ask before implementing.
+- Never restructure an existing layout to match a layout ADR (#8382).
 
 ## File-Size Precheck
 
@@ -276,8 +277,6 @@ skipped tests and distinguish cached results from a fresh execution.
 #7723: full walkthrough, cache-hit pitfall, redirect/retry/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ### Gate Output: Quote Results, Summarize Progress
-
-<!-- #8274: mechanics live in the skill; this stays under the body budget. -->
 
 Show raw output. Never summarise test results in your own words. Raw evidence
 is the final `test result:` lines, the gate's exit status, and any compiler

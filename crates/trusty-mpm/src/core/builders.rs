@@ -109,7 +109,9 @@ const MAX_FREE_MEMORY_FLOOR_MB: u64 = 1024 * 1024;
 /// Test: `an_out_of_range_load_factor_is_refused_naming_the_key`,
 /// `an_out_of_range_memory_floor_is_refused_naming_the_key`,
 /// `an_empty_slot_pool_root_is_refused_naming_the_key`.
+// #8372: non_exhaustive from its first release, so a new failure is not an API break.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BuildersConfigError {
     /// A key's value is outside the range this harness accepts.
     #[error(

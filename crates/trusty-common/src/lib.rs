@@ -225,10 +225,51 @@ pub mod bin_resolve;
 /// gui_mcp_client`.
 pub mod gui_mcp_client;
 
+/// The unconditional `provider ↔ canonical env var` credential table (#4564).
+///
+/// Why: hoisted out of the `credentials`-gated module tree by #8236 so
+/// [`launchd_secrets`] can name a credential by REGISTRY membership on every
+/// feature set. `credentials::registry` re-exports every item, so the
+/// documented import path is unchanged.
+/// What: [`credential_registry::REGISTRY`],
+/// [`credential_registry::env_var_for`],
+/// [`credential_registry::provider_for_env_var`] and
+/// [`credential_registry::is_registered_credential_env_var`].
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// credential_registry`.
+pub mod credential_registry;
+
+/// Crash-safe file replacement: write a sibling temp file, then rename (#8236).
+///
+/// Why: `tm doctor --fix` rewrites a LIVE LaunchAgent plist. A direct
+/// `std::fs::write` interrupted partway leaves a truncated plist and the daemon
+/// cannot start.
+/// What: [`atomic_file::write_atomic`], which preserves the target's existing
+/// permission bits and leaves the original byte-identical on any failure.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// atomic_file`.
+pub mod atomic_file;
+
 /// macOS LaunchAgent generation and lifecycle management. macOS-only —
 /// the module compiles to nothing on every other platform.
 #[cfg(target_os = "macos")]
 pub mod launchd;
+
+/// Keep credential VALUES out of every generated launchd plist (#8236).
+///
+/// Why: `~/Library/LaunchAgents/*.plist` is user-readable, so a credential in
+/// its `EnvironmentVariables` dict is readable by every process running as the
+/// user and by every backup of the disk.
+/// What: [`launchd_secrets::is_credential_env_key`] and
+/// [`launchd_secrets::looks_like_credential_value`] detect;
+/// [`launchd_secrets::strip_credential_env`] guards the renderer and
+/// [`launchd_secrets::scrub_plist_credential_env`] remediates an already-
+/// installed plist.
+/// Deliberately NOT macOS-gated, unlike `launchd`, so `tm doctor`'s scan and
+/// the detection tests build on Linux CI too.
+/// Test: `credential_keys_are_detected`,
+/// `scrub_removes_the_credential_entry_and_keeps_the_rest`.
+pub mod launchd_secrets;
 
 /// Label-correct LaunchAgent activation with legacy eviction and rollback
 /// (#4919). macOS-only, like [`launchd`] itself.

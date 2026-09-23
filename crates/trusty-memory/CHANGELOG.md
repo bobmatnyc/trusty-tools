@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.26.2] — 2026-09-23
+
+### Fixed
+
+- `serve --stdio` answers `initialize` and `tools/list` from its own process, so a daemon that is unreachable during the MCP handshake no longer costs a client session its memory tools. The client marks a server that fails its handshake dead and never re-spawns it, which is how ten seconds of daemon downtime ended memory for a whole session (#8351).
+- `serve --stdio` no longer exits when the daemon cannot be started. The failure is reported on stderr and the bridge keeps serving: tool calls answer with an error naming the socket while the daemon is down, and succeed on the next call once it returns, with no restart. This deliberately replaces the exit-on-unreachable-daemon behaviour of #1152, whose no-spawn half is unchanged — the bridge still never starts an unmanaged daemon (#8351).
+- `serve --stdio` re-resolves the daemon socket for every forwarded request instead of trusting the path resolved at startup, so a bridge that resolved a stale path heals on the next call (#8351).
+
 ## [0.26.1] — 2026-09-18
 
 ### Added

@@ -99,7 +99,9 @@ const ORPHAN_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// What: one variant per step, each naming the path it was working on.
 /// Test: `write_reports_an_unwritable_directory`, `consume_reports_a_missing_spec`,
 /// `consume_reports_a_corrupt_spec`.
+// #8372: non_exhaustive from its first release, so a new step is not an API break.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LaunchSpecError {
     /// The home directory could not be resolved, so there is no spec root.
     #[error("launch-spec directory unavailable: home directory could not be resolved")]

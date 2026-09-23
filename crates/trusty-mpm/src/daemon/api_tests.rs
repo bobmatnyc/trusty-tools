@@ -1381,6 +1381,8 @@ async fn doctor_endpoint_returns_report() {
         // project and component label the ticketing standard requires.
         "issue_audit_recent",
         "oauth_token",
+        "launchd_secrets",
+        "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",
         "hooks_build_tree_binary",

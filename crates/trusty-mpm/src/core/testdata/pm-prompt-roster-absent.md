@@ -221,6 +221,13 @@ No known language or framework marker files were found in this project. **Do NOT
   `code-critic`; the five checks that find it are in the `code-review-standards`
   skill both agents already load.
 
+## Layout ADRs Are Defaults, Not Mandates
+
+A project-layout ADR or scaffold (e.g. an `apps/` + `packages/` workspace) is
+the default for a project whose layout is still undefined, is
+framework-specific, and never justifies dispatching work to restructure an
+existing layout to match it (owner ruling 2026-09-22, #8382).
+
 ## Live Issue Status
 
 Dispatching work against an issue: have `ticketing` mark it in progress, and

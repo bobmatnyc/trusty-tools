@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_six_checks() {
+async fn run_doctor_produces_fifty_eight_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -470,7 +470,8 @@ async fn run_doctor_produces_fifty_six_checks() {
     // fifty-two); issue #7867 renames `instruction_compression` to
     // `instruction_fold` and adds `tool_output_compression` (fifty-two →
     // fifty-three); issue #6556 adds `stop_spool` (fifty-four →
-    // fifty-five).
+    // fifty-five); issue #8236 adds `launchd_secrets` and `credential_reach`
+    // (fifty-six → fifty-eight).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -536,6 +537,8 @@ async fn run_doctor_produces_fifty_six_checks() {
         // project and component label the ticketing standard requires.
         "issue_audit_recent",
         "oauth_token",
+        "launchd_secrets",
+        "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",
         "hooks_build_tree_binary",
