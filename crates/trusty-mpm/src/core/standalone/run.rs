@@ -74,7 +74,7 @@ use super::registry::ManagedRegistry;
 /// `test_build_launch_command_scrubs_inherited_session_markers`,
 /// `test_build_launch_command_assigns_the_configured_renderer`,
 /// `test_build_launch_command_defaults_the_mouse_capture_off`.
-pub fn build_launch_command(
+pub fn build_launch_command_configured(
     repo_path: &Path,
     claude_config_dir: &Path,
     api_key: Option<&str>,
@@ -115,6 +115,55 @@ pub fn build_launch_command(
         cmd.arg("--bare");
     }
     cmd
+}
+
+/// The `claude` command `tm run` spawns, with the renderer the config under
+/// `config_root` decides (#8405).
+///
+/// Why: the one seam where `run_alias` turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`build_launch_command_configured`] with
+/// [`crate::core::alt_screen::configured_alternate_screen_in`].
+/// Test: `run_launch_command_follows_the_configured_renderer`.
+fn run_launch_command(
+    config_root: Option<&Path>,
+    repo_path: &Path,
+    claude_config_dir: &Path,
+    api_key: Option<&str>,
+    mcp_config: Option<&Path>,
+) -> Command {
+    build_launch_command_configured(
+        repo_path,
+        claude_config_dir,
+        api_key,
+        mcp_config,
+        crate::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
+}
+
+/// The 1.7.0 shape of [`build_launch_command_configured`] (#8405).
+///
+/// Why: trusty-mpm 1.7.x is published; removing this signature would fail the
+/// semver gate for a patch release.
+/// What: delegates with the renderer read from the operator's config
+/// ([`crate::core::alt_screen::configured_alternate_screen`]).
+///
+/// Superseded by [`build_launch_command_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_launch_command(
+    repo_path: &Path,
+    claude_config_dir: &Path,
+    api_key: Option<&str>,
+    mcp_config: Option<&Path>,
+) -> Command {
+    build_launch_command_configured(
+        repo_path,
+        claude_config_dir,
+        api_key,
+        mcp_config,
+        crate::core::alt_screen::configured_alternate_screen(),
+    )
 }
 
 /// Build the `claude auth login` `Command` for the tm-global config dir.
@@ -248,14 +297,13 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     let mcp_config = crate::core::session_mcp_scope::provision(&repo_path, claude_config_dir)
         .context("failed to compose the session-scoped MCP config")?;
 
-    let mut cmd = build_launch_command(
+    let mut cmd = run_launch_command(
+        // #8405: the operator's config decides the renderer.
+        crate::core::alt_screen::operator_config_root().as_deref(),
         &repo_path,
         claude_config_dir,
         api_key.as_deref(),
         Some(&mcp_config),
-        // #8405: config decides the renderer; an unreadable config warns and
-        // falls back with the tmux option.
-        crate::core::alt_screen::configured_alternate_screen(),
     );
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
@@ -306,7 +354,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
         let composed = tmp.path().join("state").join("session-mcp").join("ab.json");
 
-        let cmd = build_launch_command(&repo, &cfg, None, Some(&composed), false);
+        let cmd = build_launch_command_configured(&repo, &cfg, None, Some(&composed), false);
 
         let args: Vec<String> = cmd
             .get_args()
@@ -332,7 +380,7 @@ mod tests {
     #[test]
     fn test_build_launch_command_omits_the_mcp_config_flag_without_a_file() {
         let tmp = TempDir::new().unwrap();
-        let cmd = build_launch_command(
+        let cmd = build_launch_command_configured(
             &tmp.path().join("repo"),
             &tmp.path().join("claude-config"),
             None,
@@ -357,7 +405,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, None, None, false);
+        let cmd = build_launch_command_configured(&repo, &cfg, None, None, false);
 
         // Verify program is "claude".
         assert_eq!(cmd.get_program(), "claude");
@@ -386,7 +434,8 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None, false);
+        let cmd =
+            build_launch_command_configured(&repo, &cfg, Some("sk-ant-test-key"), None, false);
 
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
@@ -403,7 +452,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // None key → no --bare
-        let cmd = build_launch_command(&repo, &cfg, None, None, false);
+        let cmd = build_launch_command_configured(&repo, &cfg, None, None, false);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             !args.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -411,7 +460,7 @@ mod tests {
         );
 
         // Empty key → no --bare (treated same as None)
-        let cmd2 = build_launch_command(&repo, &cfg, Some(""), None, false);
+        let cmd2 = build_launch_command_configured(&repo, &cfg, Some(""), None, false);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             !args2.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -419,7 +468,7 @@ mod tests {
         );
 
         // Whitespace-only key → no --bare
-        let cmd3 = build_launch_command(&repo, &cfg, Some("   "), None, false);
+        let cmd3 = build_launch_command_configured(&repo, &cfg, Some("   "), None, false);
         let args3: Vec<_> = cmd3.get_args().collect();
         assert!(
             !args3.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -436,7 +485,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // Without API key.
-        let cmd = build_launch_command(&repo, &cfg, None, None, false);
+        let cmd = build_launch_command_configured(&repo, &cfg, None, None, false);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             args.iter()
@@ -445,7 +494,8 @@ mod tests {
         );
 
         // With API key (--bare should co-exist with bypass flag).
-        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None, false);
+        let cmd2 =
+            build_launch_command_configured(&repo, &cfg, Some("sk-ant-test-key"), None, false);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             args2
@@ -469,7 +519,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
-        let cmd = build_launch_command(&repo, &cfg, None, None, false);
+        let cmd = build_launch_command_configured(&repo, &cfg, None, None, false);
 
         let envs: Vec<(String, Option<String>)> = cmd
             .get_envs()
@@ -510,13 +560,46 @@ mod tests {
     /// directions, whatever the launching shell exports. At df212601d the
     /// builder yielded to an exported value, so this fails there under any
     /// ambient environment: one of the two directions disagrees with it.
+    /// #8405: `run_alias`'s seam reads the renderer from its config root, both
+    /// directions. Fails if the seam ignores the config.
+    #[test]
+    fn run_launch_command_follows_the_configured_renderer() {
+        use crate::core::alt_screen::ALT_SCREEN_ENV_VAR;
+
+        let tmp = TempDir::new().unwrap();
+        for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+            let root = TempDir::new().unwrap();
+            std::fs::write(
+                root.path().join("config.yaml"),
+                format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
+            )
+            .unwrap();
+            let cmd = run_launch_command(
+                Some(root.path()),
+                &tmp.path().join("repo"),
+                &tmp.path().join("cfg"),
+                None,
+                None,
+            );
+            let carried = cmd
+                .get_envs()
+                .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+            assert_eq!(
+                carried.as_deref(),
+                Some(want),
+                "alternate_screen={alternate_screen}"
+            );
+        }
+    }
+
     #[test]
     fn test_build_launch_command_assigns_the_configured_renderer() {
         use crate::core::alt_screen::ALT_SCREEN_ENV_VAR;
 
         let tmp = TempDir::new().unwrap();
         for (alternate_screen, want) in [(true, "0"), (false, "1")] {
-            let cmd = build_launch_command(
+            let cmd = build_launch_command_configured(
                 &tmp.path().join("repo"),
                 &tmp.path().join("cfg"),
                 None,
@@ -541,7 +624,7 @@ mod tests {
         use crate::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
 
         let tmp = TempDir::new().unwrap();
-        let cmd = build_launch_command(
+        let cmd = build_launch_command_configured(
             &tmp.path().join("repo"),
             &tmp.path().join("cfg"),
             None,

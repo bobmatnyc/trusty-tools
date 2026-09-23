@@ -26,14 +26,16 @@
 //!     builders that exec `claude` directly, applying each table entry
 //!     independently.
 //!
-//! Both carriers YIELD to a value the launch already carries; neither forces
-//! one, and each variable is decided independently — an operator who exported
-//! only one of the two still gets the tm default for the other.
-//!
-//! The renderer is the exception (#8405): config `tmux.alternate_screen`
-//! decides it through [`configured_env`] — `=0` for `true`, `=1` for `false` —
-//! as an explicit assignment on the daemon's launch spec and every shell launch
-//! line, so the tmux server's inherited environment cannot override it.
+//! The mouse-capture default YIELDS to a value the launch already carries.
+//! The renderer is ASSIGNED (#8405): config `tmux.alternate_screen` decides it
+//! through [`configured_env`] — `=0` for `true`, `=1` for `false` — as an
+//! explicit assignment on the daemon's launch spec, on the `tm launch` /
+//! `tm connect` / `tm session start` / client `/connect` shell lines, on the
+//! control-plane tmux backend's line, and on the `tm run` and bare-`tm`
+//! in-place relaunch exec paths ([`apply_configured_to_command`]). The tmux
+//! server's or the launching shell's inherited value cannot override it; a
+//! settings-tier `env` entry still can. The two variables are decided
+//! independently.
 //!
 //! Operator precedence, and where it comes from:
 //!   * launch environment — the shell operand expands `${NAME-default}`, so the
@@ -53,8 +55,9 @@
 //!
 //! Test: this module's `tests`, plus one per launch path for each variable —
 //! the daemon's spawn/resume/attach paths by
-//! `spec_command_yields_the_alt_screen_default_to_the_pane` (#8233 turned the
-//! `${NAME-1}` shell operand into `apply_default_to_command`), and
+//! `every_launch_path_carries_the_configured_fullscreen_renderer` and
+//! `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`,
+//! and
 //! `claude_command_assigns_the_configured_renderer` /
 //! `claude_command_defaults_the_mouse_capture_off`,
 //! `inplace_session_command_assigns_the_configured_renderer` /
@@ -131,6 +134,19 @@ pub fn configured_shell_assignments(alternate_screen: bool) -> String {
         .join(" ")
 }
 
+/// The 1.7.0 entry point for the shell-line operands (#8405).
+///
+/// Why: trusty-mpm 1.7.x is published; removing it would fail the semver gate.
+/// What: [`configured_shell_assignments`] with the renderer read from the
+/// operator's config ([`configured_alternate_screen`]).
+///
+/// Superseded by [`configured_shell_assignments`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn managed_shell_assignments() -> String {
+    configured_shell_assignments(configured_alternate_screen())
+}
+
 /// [`configured_alternate_screen_at`] against the operator's own state home
 /// (`~/.trusty-tools/trusty-mpm`) — the CLI launch paths' entry point (#8405).
 ///
@@ -142,10 +158,27 @@ pub fn configured_shell_assignments(alternate_screen: bool) -> String {
 /// Test: `configured_alternate_screen_reads_the_named_root`,
 /// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
 pub fn configured_alternate_screen() -> bool {
-    match trusty_common::crate_config::crate_config_dir(
-        crate::core::trusty_tools_config::CRATE_NAME,
-    ) {
-        Some(root) => configured_alternate_screen_at(&root),
+    configured_alternate_screen_in(operator_config_root().as_deref())
+}
+
+/// The operator's state home, `~/.trusty-tools/trusty-mpm`, where `config.yaml`
+/// lives; `None` when the home directory cannot be resolved (#8405).
+///
+/// Why: each CLI launch seam takes the config root as a parameter so a test can
+/// point it at a fixture; this is what production passes.
+/// Test: exercised via each seam's `*_follows_the_configured_renderer` test.
+pub fn operator_config_root() -> Option<std::path::PathBuf> {
+    trusty_common::crate_config::crate_config_dir(crate::core::trusty_tools_config::CRATE_NAME)
+}
+
+/// [`configured_alternate_screen_at`] for an optional config root (#8405).
+///
+/// What: `None` (no resolvable home) resolves to [`tmux_option_fallback`], the
+/// answer an absent config gives.
+/// Test: `configured_alternate_screen_reads_the_named_root`.
+pub fn configured_alternate_screen_in(crate_config_root: Option<&std::path::Path>) -> bool {
+    match crate_config_root {
+        Some(root) => configured_alternate_screen_at(root),
         None => tmux_option_fallback(),
     }
 }
@@ -540,7 +573,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         write_config(dir.path(), "tmux:\n  alternate_screen: [not, a, bool\n");
         let (value, logged) = capture_warnings(|| configured_alternate_screen_at(dir.path()));
-        assert_eq!(value, tmux_option_fallback());
+        // #8405 review: the tmux option's fallback, restated from the tmux path
+        // (`TrustyToolsConfig::load()` → `default()` → `resolve_tmux_options`),
+        // so an inverted `tmux_option_fallback` fails here.
+        let tmux_option = crate::core::trusty_tools_config::resolve_tmux_options(
+            &crate::core::trusty_tools_config::TrustyToolsConfig::default(),
+        )
+        .alternate_screen;
+        assert_eq!(value, tmux_option);
         let path = dir.path().join("config.yaml");
         assert!(logged.contains(&path.display().to_string()), "{logged}");
         assert!(

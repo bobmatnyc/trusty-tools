@@ -252,7 +252,7 @@ fn ok_message_names_every_binary_crate_gap() {
 #[test]
 fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
-    let prefix = crate::core::model_inject::build_claude_command_with(
+    let prefix = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),

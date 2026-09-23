@@ -119,7 +119,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
     // `_with` keeps the probe hermetic (no ambient token resolution).
-    let launch_line = crate::core::model_inject::build_claude_command_with(
+    let launch_line = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),
@@ -134,8 +134,8 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // probe reads the `-u` scrub, which no renderer value changes.
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command(false);
-    let client_line = crate::core::model_inject::build_client_session_command(
+    let inplace_line = crate::core::model_inject::build_inplace_session_command_configured(false);
+    let client_line = crate::core::model_inject::build_client_session_command_configured(
         Some(std::path::Path::new("/probe/prompt.txt")),
         false,
     );
@@ -143,7 +143,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // `Command` builders: an `env_remove` shows up as a `None` value.
     // #7422: `None` for the composed MCP file — this probe checks env scrubbing
     // and composes nothing, so it must not name a file that does not exist.
-    let run_cmd = crate::core::standalone::run::build_launch_command(
+    let run_cmd = crate::core::standalone::run::build_launch_command_configured(
         std::path::Path::new("/probe/repo"),
         &config_dir,
         None,

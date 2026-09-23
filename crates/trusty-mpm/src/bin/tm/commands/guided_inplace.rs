@@ -634,15 +634,35 @@ pub(crate) async fn run_inplace_relaunch(
         trusty_mpm::core::gh_identity::GhEnv::default()
     });
 
-    // #8405: config decides the renderer; an unreadable config warns and falls
-    // back with the tmux option.
-    let alternate_screen = trusty_mpm::core::alt_screen::configured_alternate_screen();
-    InPlaceOutcome::Result(exec_claude_in_place(build_inplace_exec_command(
+    InPlaceOutcome::Result(exec_claude_in_place(inplace_exec_command_for(
+        // #8405: the operator's config decides the renderer.
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
         &resume,
         &cwd,
         &gh_env,
-        alternate_screen,
     )))
+}
+
+/// The in-place relaunch command with the renderer the config under
+/// `config_root` decides (#8405).
+///
+/// Why: the one seam where the relaunch turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`build_inplace_exec_command`] with
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_in`].
+/// Test: `inplace_exec_command_for_follows_the_configured_renderer`.
+pub(crate) fn inplace_exec_command_for(
+    config_root: Option<&std::path::Path>,
+    resume: &trusty_mpm::runtime::InPlaceResumeCommand,
+    cwd: &std::path::Path,
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+) -> std::process::Command {
+    build_inplace_exec_command(
+        resume,
+        cwd,
+        gh_env,
+        trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
 }
 
 /// Assemble the [`std::process::Command`] the in-place relaunch execs — the

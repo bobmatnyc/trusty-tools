@@ -201,9 +201,10 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
 
 /// #8405: an unreadable `config.yaml` never blocks `tm session start`. The
 /// launch proceeds — `prepare_session` runs and the only error is the
-/// unreachable daemon — and a warning names the file. The renderer value it
-/// falls back to is pinned against the tmux option by
-/// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
+/// unreachable daemon — and the in-place seam turns the same malformed file into
+/// the tmux option's fallback renderer plus a warning naming the file. (The seam
+/// reads the config only when the daemon answered, so the warning is asserted
+/// on the seam itself.)
 #[tokio::test]
 async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -218,15 +219,6 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     )
     .expect("write config");
 
-    // #4931: WARN must pass the process-global level for a thread-local capture
-    // to see it; a bare registry admits every level.
-    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    assert!(tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN);
-    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
-    let subscriber = tracing_subscriber::registry().with(
-        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
-    );
-    let guard = tracing::subscriber::set_default(subscriber);
     let result = start_session_in_place(
         &reqwest::Client::new(),
         UNREACHABLE_URL,
@@ -235,8 +227,6 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
         Some(tmp_home.path()),
     )
     .await;
-    drop(guard);
-
     let err = result.expect_err("the unreachable daemon, not the config, ends this launch");
     assert!(!err.to_string().contains("alternate_screen"), "{err}");
     assert!(
@@ -245,9 +235,26 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
             .join(".trusty-mpm")
             .join("last-instructions.md")
             .exists(),
-        "the launch must proceed past the config read into prepare_session"
+        "the launch must proceed past the config into prepare_session"
     );
-    let logged = buffer.tail(256).join("\n");
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let line =
+        tracing::subscriber::with_default(subscriber, || super::inplace_session_line(&state));
+    let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
+        &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::default(),
+    )
+    .alternate_screen;
+    let want = crate::test_support::renderer_operand(tmux_option);
+    assert!(
+        line.contains(want),
+        "want the tmux option's fallback {want:?} in: {line}"
+    );
+    let logged = buffer.tail(64).join("\n");
     let config = state.join("config.yaml");
     assert!(
         logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
@@ -607,4 +614,16 @@ async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
         Some(&serde_json::Value::Bool(true)),
         "an isolation request must send worktree: true: {body}"
     );
+}
+
+/// #8405: the in-place start seam reads the renderer from its config root,
+/// both directions. Fails if the seam ignores the config.
+#[test]
+fn inplace_session_line_follows_the_configured_renderer() {
+    for alternate_screen in [true, false] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let line = super::inplace_session_line(root.path());
+        let want = crate::test_support::renderer_operand(alternate_screen);
+        assert!(line.contains(want), "want {want:?} in: {line}");
+    }
 }

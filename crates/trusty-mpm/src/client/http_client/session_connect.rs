@@ -32,9 +32,8 @@ impl DaemonClient {
     /// exactly as the CLI does it.
     /// Test: `launch_session_errors_when_daemon_unreachable`.
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: config decides the renderer; an unreadable config warns and
-        // falls back with the tmux option instead of blocking the launch.
-        let alternate_screen = crate::core::alt_screen::configured_alternate_screen();
+        // #8405: the operator's config decides the renderer (see `client_claude_cmd`).
+        let config_root = crate::core::alt_screen::operator_config_root();
         // Prepare the custom instructions Claude Code reads at startup: deploy
         // composed agents to `~/.claude/agents/` and merge the project
         // `CLAUDE.md`. Most prep failures are logged but not fatal (#2149) —
@@ -107,13 +106,10 @@ impl DaemonClient {
             // check can read it. Hand-building it here is what left this launch
             // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => crate::core::model_inject::build_client_session_command(
-                    Some(&path),
-                    alternate_screen,
-                ),
+                Ok(()) => client_claude_cmd(config_root.as_deref(), Some(&path)),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    crate::core::model_inject::build_client_session_command(None, alternate_screen)
+                    client_claude_cmd(config_root.as_deref(), None)
                 }
             }
         };
@@ -175,9 +171,8 @@ impl DaemonClient {
     /// not artifact deployment. Returns the daemon-assigned tmux session name.
     /// Test: `connect_session_errors_when_daemon_unreachable`.
     pub async fn connect_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: config decides the renderer; an unreadable config warns and
-        // falls back with the tmux option instead of blocking the launch.
-        let alternate_screen = crate::core::alt_screen::configured_alternate_screen();
+        // #8405: the operator's config decides the renderer (see `client_claude_cmd`).
+        let config_root = crate::core::alt_screen::operator_config_root();
         #[derive(Deserialize)]
         struct Body {
             #[serde(default)]
@@ -215,13 +210,10 @@ impl DaemonClient {
             // check can read it. Hand-building it here is what left this launch
             // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => crate::core::model_inject::build_client_session_command(
-                    Some(&path),
-                    alternate_screen,
-                ),
+                Ok(()) => client_claude_cmd(config_root.as_deref(), Some(&path)),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    crate::core::model_inject::build_client_session_command(None, alternate_screen)
+                    client_claude_cmd(config_root.as_deref(), None)
                 }
             }
         };
@@ -271,5 +263,49 @@ impl DaemonClient {
             }
         }
         Ok(body.name)
+    }
+}
+
+/// The `claude` line the daemon client types into a fresh pane (#8405).
+///
+/// Why: the one seam where `DaemonClient::launch_session` / `connect_session`
+/// turn the operator's config into the renderer, split out so a test can drive
+/// it from a config root.
+/// What: [`crate::core::model_inject::build_client_session_command_configured`]
+/// with the renderer
+/// [`crate::core::alt_screen::configured_alternate_screen_in`] reads from
+/// `config_root`.
+/// Test: `client_claude_cmd_follows_the_configured_renderer`.
+fn client_claude_cmd(
+    config_root: Option<&std::path::Path>,
+    prompt_file: Option<&std::path::Path>,
+) -> String {
+    crate::core::model_inject::build_client_session_command_configured(
+        prompt_file,
+        crate::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    /// #8405: both `DaemonClient` launch paths build their line here, so this
+    /// pins the seam in both directions. Fails if it ignores the config.
+    #[test]
+    fn client_claude_cmd_follows_the_configured_renderer() {
+        for (alternate_screen, want) in [
+            (true, "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
+            (false, "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                root.path().join("config.yaml"),
+                format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
+            )
+            .expect("write config");
+            for prompt in [None, Some(std::path::Path::new("/tmp/p.txt"))] {
+                let line = super::client_claude_cmd(Some(root.path()), prompt);
+                assert!(line.contains(want), "want {want:?} in: {line}");
+            }
+        }
     }
 }

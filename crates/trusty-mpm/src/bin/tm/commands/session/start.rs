@@ -95,6 +95,19 @@ pub(crate) async fn start_session(
     start_session_in_place(client, url, &path, &fw, dirs::home_dir().as_deref()).await
 }
 
+/// The `claude` line `tm session start` types into its in-place pane (#8405).
+///
+/// Why: the one seam where the in-place start turns the config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`trusty_mpm::core::model_inject::build_inplace_session_command_configured`]
+/// with [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
+/// Test: `inplace_session_line_follows_the_configured_renderer`.
+pub(crate) fn inplace_session_line(config_root: &std::path::Path) -> String {
+    trusty_mpm::core::model_inject::build_inplace_session_command_configured(
+        trusty_mpm::core::alt_screen::configured_alternate_screen_at(config_root),
+    )
+}
+
 /// Refuse a launch from a directory that belongs to no git project (#4832).
 ///
 /// Why: harness state belongs to a project, and outside a repository there is
@@ -156,11 +169,6 @@ async fn start_session_in_place(
     // `$HOME` — a write every sibling test in this binary would observe.
     home: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    // #8405: config decides the renderer, read from the same named root as the
-    // rest of this launch; an unreadable config warns and falls back with the
-    // tmux option instead of blocking the launch.
-    let alternate_screen =
-        trusty_mpm::core::alt_screen::configured_alternate_screen_at(&fw.crate_config_root());
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
@@ -285,7 +293,8 @@ async fn start_session_in_place(
             // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
             // launch line that silently saved no transcript.
             let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-                &trusty_mpm::core::model_inject::build_inplace_session_command(alternate_screen),
+                // #8405: the config under this launch's named root decides the renderer.
+                &inplace_session_line(&fw.crate_config_root()),
             );
             let send = trusty_mpm::core::tmux::send_line(
                 None,

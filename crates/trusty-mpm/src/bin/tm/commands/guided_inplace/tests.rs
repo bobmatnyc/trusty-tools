@@ -1079,3 +1079,30 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
         "the prompt-file argv token must name a readable file, unquoted: {prompt_path}"
     );
 }
+
+/// #8405: the relaunch seam reads the renderer from its config root, both
+/// directions. Fails if the seam ignores the config.
+#[test]
+fn inplace_exec_command_for_follows_the_configured_renderer() {
+    use trusty_mpm::core::alt_screen::ALT_SCREEN_ENV_VAR;
+
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let cmd = inplace_exec_command_for(
+            Some(root.path()),
+            &resume,
+            std::path::Path::new("/fake/cwd"),
+            &no_gh(),
+        );
+        let carried = cmd
+            .get_envs()
+            .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(
+            carried.as_deref(),
+            Some(want),
+            "alternate_screen={alternate_screen}"
+        );
+    }
+}
