@@ -16,8 +16,11 @@
 //! [`evaluate_adoption`](crate::session_manager::worktree_adopt::evaluate_adoption).
 //! A refusal is a 409 carrying the policy's own reason; nothing is written.
 //!
-//! It changes ONE thing on disk: the sentinel. It moves no files, commits
-//! nothing, and creates and deletes no worktree.
+//! It changes the sentinel, and then — #8318 — makes the tree usable by the
+//! next agent: it clears a harness lock whose pid is provably dead, and detaches
+//! HEAD to free the branch when the tree is provably clean. A dirty tree keeps
+//! its branch, and the response's `branch_release` says why. It moves no files,
+//! commits nothing, and creates and deletes no worktree.
 //!
 //! #7974: when the delegation registry cannot answer — the state every daemon
 //! restart leaves it in — [`lock_evidence_for`] asks git's own worktree lock
@@ -27,7 +30,8 @@
 //! Test: `adopt_worktree_route_refuses_a_live_owner`,
 //! `adopt_worktree_route_transfers_a_dead_owners_tree`,
 //! `adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart`,
-//! `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`.
+//! `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`,
+//! `adopt_worktree_route_frees_the_branch_and_clears_a_dead_agents_lock`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,6 +46,9 @@ use crate::session_manager::record::ManagedSessionId;
 use crate::session_manager::worktree_adopt::{
     AdoptionVerdict, LockEvidence, OwnerLiveness, adopt_worktree, evaluate_adoption,
     liveness_with_lock_fallback,
+};
+use crate::session_manager::worktree_adopt_release::{
+    clear_dead_agent_lock, release_branch_if_clean,
 };
 use crate::session_manager::worktree_ownership::{SentinelOwner, read_sentinel_owner};
 use crate::session_manager::worktree_registry::{harness_agent_lock_pid, pid_liveness};
@@ -135,10 +142,20 @@ pub(crate) async fn adopt_worktree_core(
                         owner = %req.as_session,
                         "adopt-worktree: ownership transferred (#6497)"
                     );
+                    // #8318: the lock is re-probed now, not reused from the gate.
+                    let harness_lock =
+                        clear_dead_agent_lock(&req.path, lock_evidence_for(&req.path));
+                    let branch_release = release_branch_if_clean(&req.path);
+                    tracing::info!(
+                        path = %req.path.display(), ?harness_lock, ?branch_release,
+                        "adopt-worktree: release steps ran (#8318)"
+                    );
                     RouteOutcome::ok(&serde_json::json!({
                         "adopted": true,
                         "path": req.path,
                         "owner": req.as_session.to_string(),
+                        "branch_release": branch_release,
+                        "harness_lock": harness_lock,
                     }))
                 }
                 Err(e) => RouteOutcome::text(500, format!("sentinel rewrite failed: {e}")),

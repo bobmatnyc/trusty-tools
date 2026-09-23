@@ -549,7 +549,8 @@ fn non_git_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// cannot answer (not a repository, git missing, spawn failure).
 /// Test: `inspect_dirt_treats_non_worktree_with_files_as_dirty` (the nested
 /// plain-directory case), `inspect_dirt_clean_pushed_worktree_is_none`.
-fn is_worktree_root(path: &Path) -> Result<bool, String> {
+// #8318: `pub(crate)` so adoption's branch release asks the same identity question.
+pub(crate) fn is_worktree_root(path: &Path) -> Result<bool, String> {
     let top = git_stdout(path, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.trim());
     if top.as_os_str().is_empty() {
