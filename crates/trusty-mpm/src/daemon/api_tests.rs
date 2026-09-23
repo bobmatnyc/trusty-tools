@@ -1407,6 +1407,8 @@ async fn doctor_endpoint_returns_report() {
         "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #8415: the launchd ProcessType of the jobs that start tmux servers.
+        "launchd_process_type",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",
