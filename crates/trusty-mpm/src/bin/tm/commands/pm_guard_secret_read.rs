@@ -577,7 +577,9 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         let Some(first) = named.first() else {
             continue;
         };
-        if segment_only_handles(trimmed, &named) {
+        // #8249: `terraform apply|plan -state=<file>` consumes the state and
+        // prints none of its bytes, unlike `terraform show <file>`.
+        if segment_only_handles(trimmed, &named) || terraform_only_consumes_state(trimmed, &named) {
             continue;
         }
         return Some(deny_reason(first, &describe_command(trimmed)));
@@ -1240,6 +1242,70 @@ fn segment_only_handles(segment: &str, named: &[String]) -> bool {
     named.iter().all(|n| operands.iter().any(|o| o == n))
 }
 
+/// `terraform` subcommands that may name a state file through a state flag.
+///
+/// Why (#8249): applying a scratchpad copy of a Terraform root against the
+/// main checkout's state is the sanctioned alternative to copying module files
+/// into the main checkout, and both consume the state without printing it.
+/// `show`, `state`, `output` and `console` print state and are absent.
+const STATE_CONSUMING_TERRAFORM_SUBCOMMANDS: &[&str] = &["apply", "plan"];
+
+/// The flags through which `terraform apply|plan` reads or writes a state file.
+const TERRAFORM_STATE_FLAGS: &[&str] = &["-state", "-state-out", "-backup"];
+
+/// Does this segment name secret files ONLY as `terraform apply|plan` state
+/// flag values (#8249)?
+///
+/// Why: see [`STATE_CONSUMING_TERRAFORM_SUBCOMMANDS`]. Terraform reads the
+/// state into its own process; the bytes never reach the agent's context,
+/// which is the leak #7266 guards.
+/// What: refuses on any [`NESTED_COMMAND_MARKERS`] hit and on an unlexable
+/// segment, then requires the program to be `terraform`, its first non-flag
+/// argument to be a [`STATE_CONSUMING_TERRAFORM_SUBCOMMANDS`] entry, and every
+/// word in `named` to come from a [`TERRAFORM_STATE_FLAGS`] value (`-state=<p>`
+/// or `-state <p>`). A `-var-file=<file>` naming a secret beside it is not a
+/// state flag and still denies.
+/// Test: `allows_terraform_apply_against_a_named_state_file`,
+/// `denies_terraform_forms_that_print_or_read_other_secrets`.
+fn terraform_only_consumes_state(segment: &str, named: &[String]) -> bool {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return false;
+    }
+    let Ok(argv) = tokenize(segment) else {
+        return false;
+    };
+    let Some(start) = strip_wrapper_prefix(&argv) else {
+        return false;
+    };
+    if argv.get(start).map(|t| command_basename(t)).as_deref() != Some("terraform") {
+        return false;
+    }
+    let args = argv.get(start + 1..).unwrap_or_default();
+    let subcommand = args.iter().find(|a| !a.starts_with('-'));
+    if !subcommand.is_some_and(|s| STATE_CONSUMING_TERRAFORM_SUBCOMMANDS.contains(&s.as_str())) {
+        return false;
+    }
+    let mut state_values: Vec<&str> = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        match arg.split_once('=') {
+            Some((flag, value)) if TERRAFORM_STATE_FLAGS.contains(&flag) => {
+                state_values.push(value)
+            }
+            None if TERRAFORM_STATE_FLAGS.contains(&arg.as_str()) => {
+                if let Some(value) = args.get(i + 1) {
+                    state_values.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let consumed: Vec<String> = state_values
+        .iter()
+        .flat_map(|v| secret_files_named_in(v, Scan::Argv))
+        .collect();
+    named.iter().all(|n| consumed.iter().any(|c| c == n))
+}
+
 /// Whether the git call's arguments from `after` carry a
 /// [`CONTENT_REVEALING_GIT_FLAGS`] spelling.
 ///
@@ -1506,6 +1572,38 @@ mod tests {
 
     fn eval(command: &str) -> Option<String> {
         evaluate_secret_file_read_command(command)
+    }
+
+    /// 🔴 REGRESSION (#8249): applying a scratchpad copy of a Terraform root
+    /// against the main checkout's state names the state only as a state-flag
+    /// value, which terraform consumes without printing. Denied on origin/main.
+    #[test]
+    fn allows_terraform_apply_against_a_named_state_file() {
+        for command in [
+            "terraform apply -state=/repo/infra/terraform.tfstate -target=module.x",
+            "terraform -chdir=/tmp/s/scratchpad/tf apply -state=/repo/infra/terraform.tfstate",
+            "terraform apply -state /repo/infra/terraform.tfstate -state-out=/repo/infra/terraform.tfstate",
+            "terraform plan -state=/repo/infra/terraform.tfstate -backup=/repo/infra/terraform.tfstate.backup",
+        ] {
+            assert_eq!(eval(command), None, "{command}");
+        }
+    }
+
+    /// #8249: the adjacent forms stay refused — a subcommand that prints state,
+    /// a secret named outside a state flag, a state read by another program,
+    /// and a state flag whose value is a command substitution.
+    #[test]
+    fn denies_terraform_forms_that_print_or_read_other_secrets() {
+        for command in [
+            "terraform show /repo/infra/terraform.tfstate",
+            "terraform state pull -state=/repo/infra/terraform.tfstate",
+            "terraform apply -state=/repo/infra/terraform.tfstate -var-file=prod.tfvars",
+            "terraform apply /repo/infra/terraform.tfstate",
+            "cat /repo/infra/terraform.tfstate",
+            "terraform apply -state=$(cat /repo/infra/terraform.tfstate)",
+        ] {
+            assert!(eval(command).is_some(), "{command}");
+        }
     }
 
     /// A `for` loop over BRANCH names, refused live on tm 1.5.33 (#7498).

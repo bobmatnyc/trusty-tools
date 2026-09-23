@@ -1,0 +1,2 @@
+Fixed
+- The #7266 secret-read guard no longer refuses `terraform apply` or `terraform plan` that names a state file only as a `-state`, `-state-out` or `-backup` value (#8249). A scratchpad copy of a Terraform root can now apply against the main checkout's state without copying module files into the main checkout. `terraform show`, `terraform state`, a secret named outside a state flag (a `-var-file`), a state file read by any other program, and a state flag built from a command substitution are still refused.
