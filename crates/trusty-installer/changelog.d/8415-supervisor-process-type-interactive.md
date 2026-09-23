@@ -1,0 +1,3 @@
+Fixed
+- The trusty-mpm supervisor LaunchAgent now declares `ProcessType` `Interactive` instead of `Background`. launchd passed the background clamp to every tmux server the supervisor resumed, so tm sessions and their `cargo` gates ran at Darwin priority 4 on efficiency cores (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
+- `tctl install` now fails when it cannot write or reload the supervisor plist, instead of printing a non-fatal warning and exiting 0 with the old job still running. The downgrade guard's refusal stays informational (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))

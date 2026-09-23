@@ -439,9 +439,8 @@ fn install_mpm_supervisor_for_refuses_downgrade_without_force() {
 
 /// Why: a genuine `launchctl bootstrap` failure (e.g. a malformed plist,
 /// or launchd rejecting the label) must surface as an `Err`, not a
-/// swallowed success — `install.rs` depends on this `Err` to narrate a
-/// non-fatal warning rather than silently reporting the supervisor as
-/// bootstrapped.
+/// swallowed success — `install.rs` depends on this `Err` to fail the install
+/// (#8415) rather than silently reporting the supervisor as bootstrapped.
 /// What: a `StubLaunchctl` configured with `fail_bootstrap` returns the
 /// given error string from `bootstrap`; asserts `install_mpm_supervisor_for`
 /// propagates it.
@@ -584,5 +583,143 @@ fn supervisor_plist_binds_no_port() {
     assert!(
         !PLIST_TEMPLATE.contains("127.0.0.1:"),
         "PLIST_TEMPLATE must seed no loopback bind address: {PLIST_TEMPLATE}"
+    );
+}
+
+// ── #8415: the supervisor's launchd scheduling class ───────────────────
+
+/// The `ProcessType` value a filled plist declares, or `None`.
+fn process_type(xml: &str) -> Option<&str> {
+    let rest = &xml[xml.find("<key>ProcessType</key>")?..];
+    let start = rest.find("<string>")? + "<string>".len();
+    Some(&rest[start..start + rest[start..].find("</string>")?])
+}
+
+/// REGRESSION (#8415): the supervisor auto-resumes tmux servers, and launchd's
+/// `Background` class is inherited by every child — tmux, the PM sessions and
+/// their `cargo` gates ran at Darwin priority 4.
+/// What: asserts the filled plist declares `ProcessType` `Interactive`.
+/// Test: This is the test.
+#[test]
+fn supervisor_plist_runs_interactive_not_background() {
+    let filled = fill_template("/Users/testuser", "/usr/local/bin/tm");
+    assert_eq!(process_type(&filled), Some("Interactive"), "{filled}");
+}
+
+/// REGRESSION (#8415): an existing install whose plist still says
+/// `Background` is rewritten when `tctl install` next replaces the supervisor.
+/// What: seeds the pre-#8415 plist (unprobeable registered binary, so the
+/// downgrade guard proceeds), runs the install, and reads back the file.
+/// Test: This is the test.
+#[test]
+fn install_mpm_supervisor_for_rewrites_a_background_plist() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl::new();
+    let agents_dir = tmp.path().join("Library").join("LaunchAgents");
+    std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
+    let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
+    let stale = fill_template(&tmp.path().to_string_lossy(), "/nonexistent/old-tm-8415").replace(
+        "<string>Interactive</string>",
+        "<string>Background</string>",
+    );
+    assert_eq!(process_type(&stale), Some("Background"), "fixture: {stale}");
+    std::fs::write(&plist_path, stale).expect("seed stale plist");
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    install_mpm_supervisor_for(&target, false, &tmp.path().join("new-tm"))
+        .expect("the rewrite must succeed");
+
+    let written = std::fs::read_to_string(&plist_path).expect("read rewritten plist");
+    assert_eq!(process_type(&written), Some("Interactive"), "{written}");
+    assert_eq!(
+        stub.calls().len(),
+        2,
+        "bootout + bootstrap: {:?}",
+        stub.calls()
+    );
+}
+
+/// REGRESSION (#8415, fail-open): a plist that could not be written, or a job
+/// launchd would not reload, leaves the old `Background` job running. That
+/// must fail the install, never print as a non-fatal warning beside exit 0.
+/// What: drives both failure arms through `install_mpm_supervisor_for` — a
+/// `LaunchAgents` path occupied by a file (write fails) and a stub whose
+/// `bootstrap` errors (reload fails) — and asserts each classifies `Failed`.
+/// Test: This is the test.
+#[test]
+fn classify_supervisor_bootstrap_fails_the_install_on_reload_error() {
+    // Arm 1: the plist write fails.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("Library")).expect("create Library");
+    std::fs::write(tmp.path().join("Library").join("LaunchAgents"), "a file")
+        .expect("occupy LaunchAgents with a file");
+    let stub = StubLaunchctl::new();
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+    let write_failed = classify_supervisor_bootstrap(install_mpm_supervisor_for(
+        &target,
+        false,
+        &tmp.path().join("tm"),
+    ));
+    assert!(write_failed.is_failure(), "write failure: {write_failed:?}");
+    assert!(
+        stub.calls().is_empty(),
+        "nothing to reload: {:?}",
+        stub.calls()
+    );
+
+    // Arm 2: the plist is written but launchd refuses to reload it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl {
+        fail_bootstrap: Some("Load failed: 5: Input/output error".to_owned()),
+        ..StubLaunchctl::new()
+    };
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+    let reload_failed = classify_supervisor_bootstrap(install_mpm_supervisor_for(
+        &target,
+        false,
+        &tmp.path().join("tm"),
+    ));
+    assert!(
+        reload_failed.is_failure(),
+        "reload failure: {reload_failed:?}"
+    );
+    assert!(
+        reload_failed.note().contains("Input/output error"),
+        "the note must carry launchctl's stderr: {}",
+        reload_failed.note()
+    );
+}
+
+/// #8415: the downgrade guard's refusal is a deliberate no-op, so it stays
+/// informational; a successful bootstrap is not a failure either.
+/// What: classifies a `DowngradeRefused` error and an `Ok(())`.
+/// Test: This is the test.
+#[test]
+fn classify_supervisor_bootstrap_keeps_refusal_informational() {
+    let refused = classify_supervisor_bootstrap(Err(DowngradeRefused {
+        current: "1.7.1".to_owned(),
+        candidate: "1.7.0".to_owned(),
+    }
+    .into()));
+    assert!(
+        matches!(refused, SupervisorBootstrapVerdict::Refused(_)),
+        "{refused:?}"
+    );
+    assert!(!refused.is_failure());
+    assert_eq!(
+        classify_supervisor_bootstrap(Ok(())),
+        SupervisorBootstrapVerdict::Installed
     );
 }

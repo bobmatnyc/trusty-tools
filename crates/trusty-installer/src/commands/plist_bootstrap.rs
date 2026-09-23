@@ -243,7 +243,15 @@ impl<'a> SupervisorTarget<'a> {
 /// What: A `&str` holding the full plist XML with the two placeholder tokens
 /// that `fill_template` will replace at runtime.
 ///
-/// Test: `tests::template_contains_placeholders`.
+/// #8415: `ProcessType` is `Interactive`. The supervisor auto-resumes tmux
+/// servers, and a process launchd starts as `Background` passes that clamp to
+/// every child: tmux, the PM `claude` sessions and their `cargo` gates all ran
+/// at Darwin priority 4, on efficiency cores, with throttled I/O. Apple's
+/// `launchd.plist(5)` documents four values; `Standard` (the default) still
+/// throttles and `Adaptive` needs XPC traffic the supervisor never has.
+///
+/// Test: `tests::template_contains_placeholders`,
+/// `tests::supervisor_plist_runs_interactive_not_background`.
 pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -277,7 +285,7 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <string>__HOME__/.trusty-mpm/logs/supervisor.err.log</string>
 
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 </dict>
 </plist>"#;
 
@@ -377,6 +385,78 @@ pub enum DowngradeDecision {
     Proceed,
     /// The candidate is not newer than what is currently registered — refuse.
     Refuse,
+}
+
+/// The downgrade guard refused to replace the registered supervisor (#3527).
+///
+/// Why (#8415): [`install_mpm_supervisor_for`] returns this and every real
+/// failure through one `anyhow::Error`. A distinct type lets
+/// [`classify_supervisor_bootstrap`] keep this deliberate no-op informational
+/// while a failed plist write or `launchctl` reload fails the install.
+/// Test: `tests::install_mpm_supervisor_for_refuses_downgrade_without_force`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to replace trusty-mpm supervisor: registered version {current} is not \
+     older than the candidate version {candidate} being installed; pass --force to \
+     override (this refusal leaves the currently-running supervisor untouched)"
+)]
+pub struct DowngradeRefused {
+    /// Version of the currently-registered `tm` binary.
+    pub current: String,
+    /// Version of the `tm` binary this install placed.
+    pub candidate: String,
+}
+
+/// How `tctl install` must report a supervisor bootstrap result (#8415).
+///
+/// Why: `install.rs` used to print every `Err` from
+/// [`install_mpm_supervisor`] as "warning ... (non-fatal)" and exit 0. A plist
+/// that failed to rewrite or reload keeps the old `ProcessType=Background`
+/// job running, so that report claimed a fix the host never received.
+/// What: `Installed` and `Refused` are not failures; `Failed` is, and folds
+/// into the member's `service_ok` and the install's exit code.
+/// Test: `tests::classify_supervisor_bootstrap_fails_the_install_on_reload_error`,
+/// `tests::classify_supervisor_bootstrap_keeps_refusal_informational`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorBootstrapVerdict {
+    /// The plist was written and bootstrapped.
+    Installed,
+    /// The downgrade guard left the registered supervisor untouched.
+    Refused(String),
+    /// Writing or reloading the plist failed.
+    Failed(String),
+}
+
+impl SupervisorBootstrapVerdict {
+    /// Whether the install must report this member as failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// The one line `tctl install` prints for this verdict.
+    pub fn note(&self) -> String {
+        match self {
+            Self::Installed => "trusty-mpm supervisor bootstrapped".to_owned(),
+            Self::Refused(e) => format!("trusty-mpm supervisor left as registered: {e}"),
+            Self::Failed(e) => format!("trusty-mpm supervisor bootstrap failed: {e}"),
+        }
+    }
+}
+
+/// Classify an [`install_mpm_supervisor`] result (#8415).
+///
+/// What: `Ok` → `Installed`; an `Err` carrying [`DowngradeRefused`] →
+/// `Refused`; any other `Err` → `Failed`, with the full error chain.
+/// Test: `tests::classify_supervisor_bootstrap_fails_the_install_on_reload_error`,
+/// `tests::classify_supervisor_bootstrap_keeps_refusal_informational`.
+pub fn classify_supervisor_bootstrap(result: anyhow::Result<()>) -> SupervisorBootstrapVerdict {
+    match result {
+        Ok(()) => SupervisorBootstrapVerdict::Installed,
+        Err(e) if e.downcast_ref::<DowngradeRefused>().is_some() => {
+            SupervisorBootstrapVerdict::Refused(e.to_string())
+        }
+        Err(e) => SupervisorBootstrapVerdict::Failed(format!("{e:#}")),
+    }
 }
 
 /// Decide whether replacing a registered supervisor with `candidate` is safe.
@@ -516,13 +596,13 @@ pub fn install_mpm_supervisor_for(
                 force,
             ) == DowngradeDecision::Refuse
             {
-                anyhow::bail!(
-                    "refusing to replace trusty-mpm supervisor: registered version {} is not \
-                     older than the candidate version {} being installed; pass --force to \
-                     override (this refusal leaves the currently-running supervisor untouched)",
-                    current_version.as_deref().unwrap_or("<unknown>"),
-                    candidate_version.as_deref().unwrap_or("<unknown>"),
-                );
+                // #8415: typed, so the caller can tell this deliberate no-op
+                // from a failed write or reload.
+                return Err(DowngradeRefused {
+                    current: current_version.unwrap_or_else(|| "<unknown>".to_owned()),
+                    candidate: candidate_version.unwrap_or_else(|| "<unknown>".to_owned()),
+                }
+                .into());
             }
         }
     }

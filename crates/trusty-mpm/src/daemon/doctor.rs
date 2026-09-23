@@ -681,6 +681,9 @@ pub(crate) async fn run_doctor_with_claims(
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
     checks.push(check_tmux_options());
+    // #8415: a tmux server inherits the launchd class of the job that started
+    // it; `Background` pinned every tm session to priority 4. Read-only.
+    checks.push(super::doctor_launchd_process_type::check_launchd_process_type(&home));
     // #6529: every tmux pane holds a pseudo-terminal and macOS caps the total,
     // so a session leak becomes a bare ENXIO on the next spawn with nothing
     // naming the cause. Read-only — it counts device nodes and reaps nothing.

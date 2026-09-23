@@ -1,0 +1,2 @@
+Added
+- `tm doctor` has a `launchd_process_type` row. It fails when the `com.trusty.mpm` or `com.trusty.mpm.supervisor` LaunchAgent declares `ProcessType` `Background`, which clamps tmux and every session it hosts to background QoS, and warns on any other value short of `Interactive`. The message names the `plutil` and `launchctl` commands for the plist on disk; the deploy supervisor template now declares `Interactive` (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
