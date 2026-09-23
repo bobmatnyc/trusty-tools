@@ -3012,3 +3012,57 @@ fn pr_7945_an_unreadable_confirmation_still_fails() {
         gh.calls()
     );
 }
+
+/// #8366: the component labels come from a diff base verified against the
+/// remote — never from whatever `origin/<base>` the checkout last fetched.
+///
+/// Why: #8366 reported labels derived off a stale `origin/main`. Since #7748
+/// the run verifies the base with a fetch-capable probe before any diff; this
+/// pins that the label diff sits behind that probe, so moving the label step
+/// ahead of it (or giving it its own unverified read) turns this red.
+/// What: a base the probe had to refresh still yields labels, read after a
+/// `FetchOnDrift` probe; a base that stays stale refuses before the label diff
+/// is ever read.
+/// Test: this function IS the test.
+#[test]
+fn pr_8366_component_labels_are_read_only_from_a_remote_verified_base() {
+    use trusty_mpm::core::base_ref_freshness::{BaseFreshness, RefreshMode};
+
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let mut pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    pre.base_freshness = BaseFreshness::Refreshed {
+        was: "old111".to_string(),
+        now: "new222".to_string(),
+    };
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("pr edit 4242", "");
+    assert_eq!(open::run(&gh, &args, &pre).expect("create"), super::EXIT_OK);
+    assert_eq!(
+        pre.freshness_modes.borrow().as_slice(),
+        [RefreshMode::FetchOnDrift]
+    );
+    assert_eq!(pre.diff_heads.borrow().as_slice(), ["HEAD"]);
+    assert!(
+        gh.calls()
+            .iter()
+            .any(|c| c.join(" ").contains("--add-label trusty-mpm")),
+        "{:?}",
+        gh.calls()
+    );
+
+    let stale = FakePreflight::ok()
+        .with_diff(&["crates/trusty-mpm/src/lib.rs"])
+        .with_stale_base();
+    let gh = FakeGh::new();
+    assert_eq!(
+        open::run(&gh, &args, &stale).expect("a refusal is not an error"),
+        super::EXIT_CHECK_FAILED
+    );
+    assert!(
+        stale.diff_heads.borrow().is_empty(),
+        "no label diff may be read against an unverified base"
+    );
+}
