@@ -105,22 +105,63 @@ fallback for an epic with more than the GraphQL page of children.
 
 Build the table from step 5's output — one row per child, in plan order, with
 the Gate column filled from each phase issue's `## Gate` section — into
-`phases-table.md` (header rows included). Then replace everything between the
-markers and push the body back:
+`phases-table.md` (header rows included). First save the pre-edit body, so a
+bad edit is always recoverable — this is what recovered
+[#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445) after the
+regeneration step below once wiped it:
 
 ```bash
-gh issue view "$EPIC" --repo <owner>/<repo> --json body --jq .body > body.md
-awk -v tbl="$(cat phases-table.md)" '
-  /<!-- phases:start -->/ { print; print tbl; skip = 1; next }
-  /<!-- phases:end -->/   { skip = 0 }
-  !skip' body.md > body.new
+gh issue view "$EPIC" --repo <owner>/<repo> --json body --jq .body > body.orig
+```
+
+Then replace everything between the markers:
+
+```bash
+cp body.orig body.md
+perl -e '
+  my ($body_file, $table_file) = @ARGV;
+  open my $tfh, "<", $table_file or die "open $table_file: $!";
+  local $/;
+  my $tbl = <$tfh>;
+  close $tfh;
+  $tbl =~ s/\n+\z//;
+  open my $bfh, "<", $body_file or die "open $body_file: $!";
+  my $body = <$bfh>;
+  close $bfh;
+  $body =~ s/(<!-- phases:start -->\n).*?(<!-- phases:end -->)/$1$tbl\n$2/s;
+  print $body;
+' body.md phases-table.md > body.new
+```
+
+`perl -e` reads `phases-table.md` and `body.md` as whole files and does the
+substitution in memory, so the multi-line table never has to travel through a
+shell scalar. The earlier `awk -v tbl="$(cat phases-table.md)"` form smuggled
+the table through an `awk` `-v` assignment; on BSD `awk` — the default on
+macOS, with no `gawk` installed — a `-v` scalar cannot hold an embedded
+literal newline, so it threw `newline in string` and silently emitted **empty
+stdout**. `gh issue edit --body-file` accepts an empty file without
+complaint, so that failure wiped the epic's body outright. The `perl` form
+keeps both marker lines and everything outside them untouched, so the
+`deferred` and `followups` blocks survive, and it runs unchanged on both BSD
+and GNU userlands.
+
+Before pushing, confirm the generated body is real — abort on either check
+failing rather than pushing a body that lost the table or lost everything:
+
+```bash
+[ -s body.new ] && grep -q '<!-- phases:start -->' body.new && grep -q '<!-- phases:end -->' body.new || {
+  echo "ABORT: body.new is empty or missing a phases marker — do not push. Recover from body.orig." >&2
+  exit 1
+}
+```
+
+```bash
 gh issue edit "$EPIC" --repo <owner>/<repo> --body-file body.new
 ```
 
-The `awk` keeps both marker lines and everything outside them untouched, so the
-`deferred` and `followups` blocks survive. Run this after any phase opens,
-closes, blocks or unblocks — and after `tm issue transition` on a phase, until
-that command regenerates the block itself.
+Run this after any phase opens, closes, blocks or unblocks — and after
+`tm issue transition` on a phase, until that command regenerates the block
+itself.
 
 ## 7. Verify before reporting
 
