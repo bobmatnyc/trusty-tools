@@ -164,3 +164,49 @@ fn clear_dead_agent_lock_never_touches_an_operator_lock() {
         "the operator lock must stay: {list}"
     );
 }
+
+/// #8318 critic MEDIUM-2: a dead pid's lock whose `git worktree unlock`
+/// really fails — the worktree's admin directory is unreadable — reports
+/// `Failed` with git's reason, and the lock stays.
+#[test]
+fn clear_dead_agent_lock_reports_an_unlock_that_fails() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("adopt-lock-fail-8318");
+    fx.harness_lock_worktree_with_pid(&wt, "agent-dead", 4243);
+    let admin = fx.repo.join(".git/worktrees/adopt-lock-fail-8318");
+    assert!(
+        admin.join("locked").exists(),
+        "premise: git keeps the lock here"
+    );
+
+    let outcome = {
+        let _restore = deny_all(&admin);
+        clear_dead_agent_lock(&wt, LockEvidence::HolderPidGone(4243))
+    };
+
+    let LockRelease::Failed { pid, reason } = outcome else {
+        panic!("an unlock git refused must be reported as failed; got {outcome:?}");
+    };
+    assert_eq!(pid, 4243);
+    assert!(!reason.is_empty(), "the failure must carry git's reason");
+    assert_eq!(
+        harness_agent_lock_pid(&wt),
+        Some(4243),
+        "the lock must still be there"
+    );
+}
+
+/// 🔴 #8318 critic LOW-1: the main checkout is never detached, however clean.
+/// Fails before the fix, which detached `main` in the owning checkout.
+#[test]
+fn release_refuses_the_main_checkout() {
+    let fx = GitWorktreeFixture::new();
+
+    let outcome = release_branch_if_clean(&fx.repo);
+
+    let BranchRelease::Kept { reason } = outcome else {
+        panic!("the main checkout must keep its branch; got {outcome:?}");
+    };
+    assert!(reason.contains("main checkout"), "reason: {reason}");
+    assert_eq!(head_of(&fx.repo), "main");
+}

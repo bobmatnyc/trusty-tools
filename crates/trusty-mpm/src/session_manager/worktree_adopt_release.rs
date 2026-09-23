@@ -49,7 +49,8 @@ pub(crate) enum BranchRelease {
 ///
 /// Test: `clear_dead_agent_lock_unlocks_a_dead_pids_tree`,
 /// `clear_dead_agent_lock_leaves_a_running_pids_lock`,
-/// `clear_dead_agent_lock_never_touches_an_operator_lock`.
+/// `clear_dead_agent_lock_never_touches_an_operator_lock`,
+/// `clear_dead_agent_lock_reports_an_unlock_that_fails`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub(crate) enum LockRelease {
@@ -70,12 +71,14 @@ pub(crate) enum LockRelease {
 /// `git switch <branch>` succeed in the successor's own tree. It is only safe
 /// to do without asking when there is no work in the tree the operator has not
 /// seen, so a dirty tree keeps its branch and the caller reports why.
-/// What: four steps, each of which returns [`BranchRelease::Kept`] on failure:
-/// the path must be its own worktree root, [`count_dirty_files`] must answer
-/// zero (the ownership sentinel does not count), HEAD must resolve, and
+/// What: five steps, each of which returns [`BranchRelease::Kept`] on failure:
+/// the path must be its own worktree root and a LINKED worktree, never the
+/// main checkout ([`is_linked_worktree`]); [`count_dirty_files`] must answer
+/// zero (the ownership sentinel does not count); HEAD must resolve; and
 /// `git switch --detach` must succeed. A HEAD that is already detached returns
 /// [`BranchRelease::AlreadyDetached`].
 /// Test: `release_detaches_a_clean_trees_branch_and_frees_it`,
+/// `release_refuses_the_main_checkout`,
 /// `release_keeps_a_dirty_trees_branch`,
 /// `release_keeps_the_branch_when_the_clean_check_cannot_complete`,
 /// `release_reports_an_already_detached_head`.
@@ -91,6 +94,22 @@ pub(crate) fn release_branch_if_clean(path: &Path) -> BranchRelease {
             ));
         }
         Err(e) => return kept(format!("the clean check could not complete: {e}")),
+    }
+    // #8318: detaching the main checkout's HEAD strands whoever works there.
+    match is_linked_worktree(path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return kept(format!(
+                "{} is the repository's main checkout, not a linked worktree; its branch is \
+                 never released",
+                path.display()
+            ));
+        }
+        Err(e) => {
+            return kept(format!(
+                "could not tell a linked worktree from the main one: {e}"
+            ));
+        }
     }
     let dirty = match count_dirty_files(path) {
         Ok(n) => n,
@@ -116,6 +135,25 @@ pub(crate) fn release_branch_if_clean(path: &Path) -> BranchRelease {
     }
 }
 
+/// Whether `path` is a LINKED worktree rather than the main checkout (#8318).
+///
+/// What: a linked worktree's `--git-dir` (`<common>/worktrees/<name>`) differs
+/// from its `--git-common-dir`; the main checkout's two are the same directory.
+/// Both are resolved against `path` and canonicalized before comparing, since
+/// git may answer either relative to the cwd. Any failure is an `Err`.
+/// Test: `release_refuses_the_main_checkout`.
+fn is_linked_worktree(path: &Path) -> Result<bool, String> {
+    let out = git_stdout(path, &["rev-parse", "--git-dir", "--git-common-dir"])?;
+    let mut dirs = out.lines().map(|l| {
+        let p = path.join(l.trim());
+        std::fs::canonicalize(&p).map_err(|e| format!("cannot resolve {}: {e}", p.display()))
+    });
+    match (dirs.next(), dirs.next()) {
+        (Some(git_dir), Some(common)) => Ok(git_dir? != common?),
+        _ => Err(format!("`git rev-parse` named no git directory: {out:?}")),
+    }
+}
+
 /// Remove `path`'s harness git lock when it belongs to a dead agent (#8318).
 ///
 /// Why: the harness writes `claude agent <id> (pid <n> …)` as the lock reason
@@ -128,7 +166,8 @@ pub(crate) fn release_branch_if_clean(path: &Path) -> BranchRelease {
 /// [`LockEvidence::HolderPidGone`] runs `git worktree unlock`.
 /// Test: `clear_dead_agent_lock_unlocks_a_dead_pids_tree`,
 /// `clear_dead_agent_lock_leaves_a_running_pids_lock`,
-/// `clear_dead_agent_lock_never_touches_an_operator_lock`.
+/// `clear_dead_agent_lock_never_touches_an_operator_lock`,
+/// `clear_dead_agent_lock_reports_an_unlock_that_fails`.
 pub(crate) fn clear_dead_agent_lock(path: &Path, evidence: LockEvidence) -> LockRelease {
     match evidence {
         LockEvidence::HolderPidGone(pid) => {

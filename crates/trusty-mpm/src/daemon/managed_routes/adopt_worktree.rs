@@ -19,7 +19,9 @@
 //! It changes the sentinel, and then — #8318 — makes the tree usable by the
 //! next agent: it clears a harness lock whose pid is provably dead, and detaches
 //! HEAD to free the branch when the tree is provably clean. A dirty tree keeps
-//! its branch, and the response's `branch_release` says why. It moves no files,
+//! its branch, and the response's `branch_release` says why; so does a tree
+//! whose harness lock names a running pid, even when the registry reported
+//! its owner dead. It moves no files,
 //! commits nothing, and creates and deletes no worktree.
 //!
 //! #7974: when the delegation registry cannot answer — the state every daemon
@@ -31,7 +33,8 @@
 //! `adopt_worktree_route_transfers_a_dead_owners_tree`,
 //! `adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart`,
 //! `adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart`,
-//! `adopt_worktree_route_frees_the_branch_and_clears_a_dead_agents_lock`.
+//! `adopt_worktree_route_frees_the_branch_and_clears_a_dead_agents_lock`,
+//! `adopt_worktree_route_keeps_the_branch_while_the_lock_pid_runs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,7 +51,7 @@ use crate::session_manager::worktree_adopt::{
     liveness_with_lock_fallback,
 };
 use crate::session_manager::worktree_adopt_release::{
-    clear_dead_agent_lock, release_branch_if_clean,
+    BranchRelease, LockRelease, clear_dead_agent_lock, release_branch_if_clean,
 };
 use crate::session_manager::worktree_ownership::{SentinelOwner, read_sentinel_owner};
 use crate::session_manager::worktree_registry::{harness_agent_lock_pid, pid_liveness};
@@ -97,7 +100,8 @@ pub async fn adopt_worktree_route(
 /// two automatic sweeps.
 /// Test: `adopt_worktree_route_refuses_a_live_owner`,
 /// `adopt_worktree_route_transfers_a_dead_owners_tree`,
-/// `adopt_worktree_route_refuses_a_claimant_under_a_symlinked_spelling`.
+/// `adopt_worktree_route_refuses_a_claimant_under_a_symlinked_spelling`,
+/// `adopt_worktree_route_keeps_the_branch_while_the_lock_pid_runs`.
 pub(crate) async fn adopt_worktree_core(
     state: &Arc<DaemonState>,
     req: AdoptWorktreeRequest,
@@ -145,7 +149,17 @@ pub(crate) async fn adopt_worktree_core(
                     // #8318: the lock is re-probed now, not reused from the gate.
                     let harness_lock =
                         clear_dead_agent_lock(&req.path, lock_evidence_for(&req.path));
-                    let branch_release = release_branch_if_clean(&req.path);
+                    // #8318: a running pid still holds the tree, whatever the
+                    // registry said — its branch is not ours to free.
+                    let branch_release = match &harness_lock {
+                        LockRelease::LeftRunning { pid } => BranchRelease::Kept {
+                            reason: format!(
+                                "the harness git lock names pid {pid}, which is still running; \
+                                 its branch stays checked out until that process ends"
+                            ),
+                        },
+                        _ => release_branch_if_clean(&req.path),
+                    };
                     tracing::info!(
                         path = %req.path.display(), ?harness_lock, ?branch_release,
                         "adopt-worktree: release steps ran (#8318)"

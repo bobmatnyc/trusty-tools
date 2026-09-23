@@ -232,6 +232,53 @@ async fn adopt_worktree_route_frees_the_branch_and_clears_a_dead_agents_lock() {
     );
 }
 
+/// 🔴 #8318 critic MEDIUM-1: the registry says the owning agent ended, but the
+/// harness lock names a pid that is still running. Adoption proceeds on the
+/// registry's word, yet the branch stays checked out and the response says
+/// which pid holds it. Fails before the fix, which detached HEAD anyway.
+#[tokio::test]
+async fn adopt_worktree_route_keeps_the_branch_while_the_lock_pid_runs() {
+    let running = std::process::id();
+    let agent = "agent-8318-lock-running";
+    let (_fixture, tree) = harness_locked_tree(agent, running);
+    let state = Arc::new(DaemonState::new());
+    // The registry's answer: every delegation naming the agent has ended.
+    state.upsert_delegation(delegation_for(
+        SessionId::new(),
+        agent,
+        DelegationStatus::Completed,
+    ));
+
+    let outcome = adopt_worktree_core(
+        &state,
+        AdoptWorktreeRequest {
+            path: tree.clone(),
+            as_session: ManagedSessionId::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.status, 200, "body: {:?}", outcome.body);
+    let RouteBody::Json(body) = &outcome.body else {
+        panic!("a 200 must carry JSON: {:?}", outcome.body);
+    };
+    assert_eq!(body["harness_lock"]["outcome"], "left_running", "{body}");
+    assert_eq!(body["branch_release"]["outcome"], "kept", "{body}");
+    let reason = body["branch_release"]["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(&running.to_string()), "{reason}");
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("run git");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        format!("session/{agent}"),
+        "a running pid's branch must stay checked out"
+    );
+}
+
 /// #7974, the arm that must NOT move: the same daemon-restart state, but the
 /// lock names a pid that is running. The fallback supplies no death evidence,
 /// so ADR-0045's refusal stands and the sentinel is untouched.

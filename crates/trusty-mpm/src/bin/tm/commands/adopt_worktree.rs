@@ -12,7 +12,9 @@
 //! `cli_adopt_worktree_requires_the_adopting_session`,
 //! `adoption_report_prints_a_released_branch_and_a_cleared_lock`,
 //! `adoption_report_fails_when_the_branch_is_kept`,
-//! `adoption_report_fails_when_the_daemon_reports_no_branch_outcome`.
+//! `adoption_report_fails_when_the_daemon_reports_no_branch_outcome`,
+//! `adoption_report_fails_when_the_dead_lock_could_not_be_cleared`,
+//! `adoption_outcome_fails_on_a_malformed_body`.
 
 use std::path::Path;
 
@@ -26,7 +28,7 @@ use serde_json::Value;
 /// What: 200 prints [`adoption_report`]'s lines, which can still fail the
 /// command (#8318); 409 prints the refusal reason and returns an error so the
 /// exit status is non-zero; anything else surfaces as the HTTP error it is.
-/// Test: `cli_parses_session_adopt_worktree`.
+/// Test: `cli_parses_session_adopt_worktree`, `adoption_outcome_fails_on_a_malformed_body`.
 pub(crate) async fn session_adopt_worktree(
     client: &reqwest::Client,
     url: &str,
@@ -49,9 +51,26 @@ pub(crate) async fn session_adopt_worktree(
     if !status.is_success() {
         anyhow::bail!("adopt-worktree failed ({status}): {body}");
     }
-    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    println!("{}", adoption_report(&parsed, path, as_session)?);
+    println!("{}", adoption_outcome(&body, path, as_session)?);
     Ok(())
+}
+
+/// Parse a 200 body and render it through [`adoption_report`] (#8318).
+///
+/// Why: a malformed body used to become `Value::Null`, which the report read as
+/// "the daemon predates #8318" — a wrong diagnosis for a corrupt response.
+/// What: a parse failure is an error naming the parse error and the body.
+/// Test: `adoption_outcome_fails_on_a_malformed_body`.
+pub(crate) fn adoption_outcome(
+    body: &str,
+    path: &Path,
+    as_session: &str,
+) -> anyhow::Result<String> {
+    // #8318: fail with the parse error, never a guessed daemon version.
+    let parsed: Value = serde_json::from_str(body).map_err(|e| {
+        anyhow::anyhow!("adopt-worktree answered 200 with a body that is not JSON ({e}): {body}")
+    })?;
+    adoption_report(&parsed, path, as_session)
 }
 
 /// Render a successful adoption, failing when the tree is still unusable
@@ -66,7 +85,8 @@ pub(crate) async fn session_adopt_worktree(
 /// otherwise. A running pid's lock is reported but is not a failure.
 /// Test: `adoption_report_prints_a_released_branch_and_a_cleared_lock`,
 /// `adoption_report_fails_when_the_branch_is_kept`,
-/// `adoption_report_fails_when_the_daemon_reports_no_branch_outcome`.
+/// `adoption_report_fails_when_the_daemon_reports_no_branch_outcome`,
+/// `adoption_report_fails_when_the_dead_lock_could_not_be_cleared`.
 pub(crate) fn adoption_report(
     body: &Value,
     path: &Path,
@@ -138,6 +158,31 @@ mod tests {
         });
         let err = adoption_report(&body, Path::new("/t"), "s1").expect_err("must fail");
         assert!(err.to_string().contains("the tree holds 2 files"), "{err}");
+    }
+
+    /// #8318 critic MEDIUM-2: a dead pid's lock that could not be cleared
+    /// fails the command even when the branch was released.
+    #[test]
+    fn adoption_report_fails_when_the_dead_lock_could_not_be_cleared() {
+        let body = json!({
+            "branch_release": {"outcome": "released", "branch": "session/x"},
+            "harness_lock": {"outcome": "failed", "pid": 42, "reason": "permission denied"},
+        });
+        let err = adoption_report(&body, Path::new("/t"), "s1").expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("dead pid 42"), "{msg}");
+        assert!(msg.contains("permission denied"), "{msg}");
+    }
+
+    /// 🔴 #8318 critic LOW-2: a malformed 200 body fails with the parse error,
+    /// never the "daemon predates #8318" diagnosis a `Value::Null` produced.
+    #[test]
+    fn adoption_outcome_fails_on_a_malformed_body() {
+        let err = adoption_outcome("<html>proxy error</html>", Path::new("/t"), "s1")
+            .expect_err("a malformed body must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("not JSON"), "{msg}");
+        assert!(!msg.contains("predates"), "{msg}");
     }
 
     #[test]
