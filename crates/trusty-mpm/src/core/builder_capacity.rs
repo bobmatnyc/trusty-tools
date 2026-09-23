@@ -814,9 +814,14 @@ mod tests {
             }
             Err(failure) => {
                 assert_eq!(failure.surface, FailClosedSurface::Memory, "{failure:?}");
+                // Review follow-up on #8410: a live host's TOTAL memory is
+                // never 0, so only the "available" branch is plausible here —
+                // a zero TOTAL reading is a bug, not a benign flake, and must
+                // still fail this test.
                 assert!(
-                    failure.detail.ends_with("memory of 0 bytes"),
-                    "only a zero sysinfo figure may make memory unavailable: {failure:?}"
+                    failure.detail.ends_with("available memory of 0 bytes"),
+                    "only a zero available figure may make memory unavailable on a live host: \
+                     {failure:?}"
                 );
             }
         }
