@@ -69,7 +69,7 @@ fn display_message_argv_untargeted() {
 fn display_message_argv_session_targeted() {
     assert_eq!(
         display_message_argv(Some(&TmuxTarget::session("tmpm-sess")), "#{pane_pid}"),
-        vec!["display-message", "-t", "tmpm-sess", "-p", "#{pane_pid}"]
+        vec!["display-message", "-t", "=tmpm-sess:", "-p", "#{pane_pid}"]
     );
 }
 
@@ -88,7 +88,7 @@ fn show_environment_argv_session_targeted() {
         vec![
             "show-environment",
             "-t",
-            "tmpm-sess",
+            "=tmpm-sess",
             "TM_MANAGED_SESSION_ID"
         ]
     );

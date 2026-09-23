@@ -79,8 +79,9 @@ use tracing::warn;
 pub use trusty_common::tmux::{
     ALTERNATE_SCREEN_OPTION, DEFAULT_TMUX_ALTERNATE_SCREEN, DEFAULT_TMUX_HISTORY_LIMIT,
     DEFAULT_TMUX_MOUSE, HISTORY_LIMIT_OPTION, MOUSE_OPTION, PANE_LIST_FORMAT, SESSION_LIST_FORMAT,
-    TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT, managed_session_commands,
-    scrollback_option_commands, tmux_argv,
+    TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT, exact_pane_target, exact_session_target,
+    exact_window_target, is_immutable_id, managed_session_commands, scrollback_option_commands,
+    shell_attach_command, tmux_argv,
 };
 
 /// Resolve the `tmux` binary, preferring live `PATH` and falling back to
@@ -300,14 +301,14 @@ pub fn display_message_argv(target: Option<&TmuxTarget>, format: &str) -> Vec<St
 /// What: `name: None` renders untargeted (`show-environment <key>`, querying
 /// the CURRENT session — the only shape this issue's call site uses, since it
 /// only ever runs from inside the tmux client whose own session it wants);
-/// `Some(name)` renders `-t <name> <key>` for a caller that needs an
-/// explicit session.
+/// `Some(name)` renders `-t =<name> <key>` (exact match, #8443) for a caller
+/// that needs an explicit session.
 /// Test: `show_environment_argv_untargeted`, `show_environment_argv_session_targeted`.
 pub fn show_environment_argv(name: Option<&str>, key: &str) -> Vec<String> {
     let mut argv = vec!["show-environment".to_string()];
     if let Some(n) = name {
         argv.push("-t".to_string());
-        argv.push(n.to_string());
+        argv.push(exact_session_target(n));
     }
     argv.push(key.to_string());
     argv

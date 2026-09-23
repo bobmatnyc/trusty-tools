@@ -121,13 +121,13 @@ impl AttachOutcome {
 /// `-c`), so a single combined builder would have to smuggle an `Option`
 /// through, reintroducing the "was a bare switch-client ever possible"
 /// ambiguity #2678 removes.
-/// What: returns `["attach-session", "-t", session]`.
+/// What: returns `["attach-session", "-t", "=<session>"]` (exact, #8443).
 /// Test: `attach_argv_uses_attach_session`.
 pub(crate) fn attach_argv(session: &str) -> Vec<String> {
     vec![
         "attach-session".to_string(),
         "-t".to_string(),
-        session.to_string(),
+        trusty_mpm::core::tmux::exact_session_target(session),
     ]
 }
 
@@ -142,7 +142,8 @@ pub(crate) fn attach_argv(session: &str) -> Vec<String> {
 /// crate MUST carry an explicit `-c <client_tty>` resolved by
 /// [`resolve_switch_target`] — there is no code path left that can construct
 /// a bare `switch-client`.
-/// What: returns `["switch-client", "-c", client_tty, "-t", session]`.
+/// What: returns `["switch-client", "-c", client_tty, "-t", "=<session>"]`
+/// (exact, #8443).
 /// Test: `switch_client_argv_targets_explicit_client`.
 pub(crate) fn switch_client_argv(session: &str, client_tty: &str) -> Vec<String> {
     vec![
@@ -150,7 +151,7 @@ pub(crate) fn switch_client_argv(session: &str, client_tty: &str) -> Vec<String>
         "-c".to_string(),
         client_tty.to_string(),
         "-t".to_string(),
-        session.to_string(),
+        trusty_mpm::core::tmux::exact_session_target(session),
     ]
 }
 
@@ -323,7 +324,11 @@ pub(crate) fn parse_single_client_tty(list_clients_output: &str) -> Option<Strin
 pub(crate) fn resolve_switch_target(session: &str) -> Option<String> {
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
     let output = std::process::Command::new(&tmux_bin)
-        .args(["list-clients", "-t", session])
+        .args([
+            "list-clients",
+            "-t",
+            &trusty_mpm::core::tmux::exact_session_target(session),
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -639,7 +644,7 @@ mod tests {
     fn attach_argv_uses_attach_session() {
         assert_eq!(
             attach_argv("my-session"),
-            vec!["attach-session", "-t", "my-session"]
+            vec!["attach-session", "-t", "=my-session"]
         );
     }
 
@@ -656,7 +661,7 @@ mod tests {
                 "-c",
                 "/dev/ttys021",
                 "-t",
-                "tmpm-mcp-a-protocol-00f6f5ef"
+                "=tmpm-mcp-a-protocol-00f6f5ef"
             ]
         );
     }

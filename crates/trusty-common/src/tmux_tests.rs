@@ -6,8 +6,70 @@ use super::*;
 
 #[test]
 fn target_renders_session_and_bare_pane() {
-    assert_eq!(TmuxTarget::session("s").as_target(), "s");
+    // #8443: a session-only target is the exact `=<name>:` form.
+    assert_eq!(TmuxTarget::session("s").as_target(), "=s:");
     assert_eq!(TmuxTarget::pane("s", "%2").as_target(), "%2");
+    assert_eq!(TmuxTarget::pane("s", "1.0").as_target(), "=s:1.0");
+}
+
+#[test]
+fn exact_session_target_prefixes_equals() {
+    assert_eq!(exact_session_target("tm-cto"), "=tm-cto");
+    // Idempotent: an already-exact target is not prefixed twice.
+    assert_eq!(exact_session_target("=tm-cto"), "=tm-cto");
+    // tmux stores `tm:proj.0` as `tm_proj_0`; the target must name that.
+    assert_eq!(exact_session_target("tm:proj.0"), "=tm_proj_0");
+}
+
+#[test]
+fn exact_window_target_appends_colon() {
+    assert_eq!(exact_window_target("tm-cto"), "=tm-cto:");
+    assert_eq!(exact_window_target("=tm-cto"), "=tm-cto:");
+    assert_eq!(exact_window_target("tm:proj:0"), "=tm_proj_0:");
+}
+
+#[test]
+fn exact_targets_leave_immutable_ids_unchanged() {
+    for id in ["$0", "@12", "%6015"] {
+        assert!(is_immutable_id(id), "{id}");
+        assert_eq!(exact_session_target(id), id);
+        assert_eq!(exact_window_target(id), id);
+    }
+    for not_id in ["$", "%", "$x", "%1a", "tm-1", ""] {
+        assert!(!is_immutable_id(not_id), "{not_id:?}");
+    }
+}
+
+#[test]
+fn exact_pane_target_keeps_ids_and_qualifies_specs() {
+    assert_eq!(exact_pane_target("s", "%7"), "%7");
+    assert_eq!(exact_pane_target("s", "0"), "=s:0");
+    assert_eq!(exact_pane_target("s", "1.2"), "=s:1.2");
+}
+
+#[test]
+fn shell_attach_command_quotes_exact_target() {
+    assert_eq!(
+        shell_attach_command("tm-cto"),
+        "tmux attach-session -t '=tm-cto'"
+    );
+    assert_eq!(
+        shell_attach_command("a'b"),
+        r"tmux attach-session -t '=a'\''b'"
+    );
+}
+
+#[test]
+fn kill_and_has_session_argv_are_exact() {
+    // #8443: a bare `-t tm-cto` prefix-matched and killed `tm-cto-reports`.
+    let kill = tmux_argv(&TmuxCommand::KillSession {
+        name: "tm-cto".into(),
+    });
+    assert_eq!(kill, ["kill-session", "-t", "=tm-cto"]);
+    let has = tmux_argv(&TmuxCommand::HasSession {
+        name: "tm-cto".into(),
+    });
+    assert_eq!(has, ["has-session", "-t", "=tm-cto"]);
 }
 
 #[test]
@@ -74,7 +136,7 @@ fn send_keys_literal_argv() {
         keys: "claude --help".into(),
         literal: true,
     });
-    assert_eq!(argv, ["send-keys", "-t", "s", "-l", "claude --help"]);
+    assert_eq!(argv, ["send-keys", "-t", "=s:", "-l", "claude --help"]);
 }
 
 #[test]
@@ -83,7 +145,7 @@ fn rename_session_argv() {
         old: "tm-old-01".into(),
         new: "tm-new-01".into(),
     });
-    assert_eq!(argv, ["rename-session", "-t", "tm-old-01", "tm-new-01"]);
+    assert_eq!(argv, ["rename-session", "-t", "=tm-old-01", "tm-new-01"]);
 }
 
 #[test]
@@ -117,13 +179,13 @@ fn capture_argv() {
         target: TmuxTarget::session("s"),
         lines: Some(50),
     });
-    assert_eq!(argv, ["capture-pane", "-t", "s", "-p", "-S", "-50"]);
+    assert_eq!(argv, ["capture-pane", "-t", "=s:", "-p", "-S", "-50"]);
 
     let argv = tmux_argv(&TmuxCommand::CapturePane {
         target: TmuxTarget::session("s"),
         lines: None,
     });
-    assert_eq!(argv, ["capture-pane", "-t", "s", "-p"]);
+    assert_eq!(argv, ["capture-pane", "-t", "=s:", "-p"]);
 }
 
 #[test]
@@ -139,7 +201,7 @@ fn list_windows_argv() {
     });
     assert_eq!(
         argv,
-        ["list-windows", "-t", "work", "-F", WINDOW_LIST_FORMAT]
+        ["list-windows", "-t", "=work", "-F", WINDOW_LIST_FORMAT]
     );
 }
 
@@ -150,7 +212,7 @@ fn list_panes_argv() {
     });
     assert_eq!(
         argv,
-        ["list-panes", "-s", "-t", "work", "-F", PANE_LIST_FORMAT]
+        ["list-panes", "-s", "-t", "=work:", "-F", PANE_LIST_FORMAT]
     );
 }
 
@@ -166,7 +228,7 @@ fn set_environment_argv() {
         [
             "set-environment",
             "-t",
-            "tmpm-brave-otter",
+            "=tmpm-brave-otter",
             "TM_MANAGED_SESSION_ID",
             "11111111-2222-3333-4444-555555555555"
         ]

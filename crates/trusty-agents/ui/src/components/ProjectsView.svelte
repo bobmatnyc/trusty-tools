@@ -242,7 +242,8 @@
 
   async function copyAttachCommand() {
     if (!attachModalName) return;
-    const cmd = `tmux attach-session -t ${attachModalName}`;
+    // #8443: exact, quoted target — a bare name prefix-matches another session.
+    const cmd = `tmux attach-session -t '=${attachModalName}'`;
     try {
       await navigator.clipboard.writeText(cmd);
       attachCopied = true;
@@ -798,7 +799,7 @@
         </p>
         <pre
           class="mb-3 overflow-x-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 text-xs font-mono text-foundry-light-text dark:text-foundry-text"
-        ><code>tmux attach-session -t {attachModalName}</code></pre>
+        ><code>tmux attach-session -t '={attachModalName}'</code></pre>
         <div class="flex justify-end gap-2">
           <button
             type="button"
