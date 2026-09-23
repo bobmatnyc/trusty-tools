@@ -242,7 +242,27 @@ pub(crate) struct AgentsDir {
 ///
 /// Test: `launch_agents_dir_honours_the_env_override`.
 pub(crate) fn launch_agents_dir(home: &Path) -> AgentsDir {
+    if let Some(path) = DIR_OVERRIDE.get() {
+        return AgentsDir {
+            path: path.clone(),
+            from_env: false,
+        };
+    }
     launch_agents_dir_from(home, std::env::var_os(LAUNCH_AGENTS_DIR_ENV), cfg!(test))
+}
+
+/// A process-wide directory that outranks every other source (#8415).
+static DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Point this row at `dir` for the rest of the process.
+///
+/// Why (#8415 owner rule, #5544): the `tm` bin's tests build this library
+/// without `cfg(test)` and may not write the process environment, so they
+/// inject the directory here instead. The first call wins; later calls are
+/// ignored. Production never calls it.
+/// Test: `override_outranks_every_other_source`.
+pub fn override_launch_agents_dir(dir: PathBuf) {
+    let _ = DIR_OVERRIDE.set(dir);
 }
 
 /// [`launch_agents_dir`] with the override and the build kind passed in, so

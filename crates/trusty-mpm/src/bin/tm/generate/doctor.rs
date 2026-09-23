@@ -349,26 +349,18 @@ mod tests {
     /// doctor's actual check count" the issue #2913 brief requires — and
     /// goes further by also asserting name equality, not just length.
     #[tokio::test]
-    #[serial_test::serial]
     async fn doctor_checks_match_run_doctor_names() {
         // #8415 owner rule: the bin builds the library without `cfg(test)`, so
-        // point the `launchd_process_type` row at an empty temp directory
-        // rather than the operator's real `~/Library/LaunchAgents`.
-        let agents = tempfile::tempdir().expect("tempdir");
-        // SAFETY: `#[serial]` keeps every other serial test off the env while
-        // this one runs; the variable is removed before the test returns.
-        unsafe {
-            std::env::set_var(
-                trusty_mpm::daemon::doctor_launchd_process_type::LAUNCH_AGENTS_DIR_ENV,
-                agents.path(),
-            );
-        }
+        // point the `launchd_process_type` row at a temp path that does not
+        // exist, never the operator's real `~/Library/LaunchAgents`. An
+        // injected override, not an env write (#5544).
+        trusty_mpm::daemon::doctor_launchd_process_type::override_launch_agents_dir(
+            std::env::temp_dir().join(format!(
+                "tm-bin-test-no-launch-agents-{}",
+                std::process::id()
+            )),
+        );
         let report = run_doctor(None, None, &[], None).await;
-        unsafe {
-            std::env::remove_var(
-                trusty_mpm::daemon::doctor_launchd_process_type::LAUNCH_AGENTS_DIR_ENV,
-            );
-        }
         let actual: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         let expected: Vec<&str> = DOCTOR_CHECKS.iter().map(|(name, _)| *name).collect();
         assert_eq!(

@@ -313,3 +313,18 @@ fn launch_agents_dir_honours_the_env_override() {
         row.message
     );
 }
+
+/// #8415: the injected override outranks the env var and the home default,
+/// and the first call wins. The path does not exist; nothing is created.
+#[test]
+fn override_outranks_every_other_source() {
+    let dir = std::env::temp_dir().join(format!(
+        "tm-lib-test-no-launch-agents-{}",
+        std::process::id()
+    ));
+    override_launch_agents_dir(dir.clone());
+    override_launch_agents_dir(PathBuf::from("/ignored"));
+    let got = launch_agents_dir(Path::new("/Users/operator"));
+    assert_eq!(got.path, dir);
+    assert!(!got.from_env);
+}
