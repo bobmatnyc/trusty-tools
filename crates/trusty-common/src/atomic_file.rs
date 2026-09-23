@@ -40,6 +40,13 @@ use std::path::{Path, PathBuf};
 /// publishes it, and the rename itself has to be on disk before the call
 /// returns. Same ordering as [`crate::json_rmw`]'s `publish_atomic`.
 ///
+/// Test: `write_atomic_replaces_the_contents`,
+/// `write_atomic_preserves_the_targets_mode`,
+/// `write_atomic_publishes_content_mode_and_no_temp_together`,
+/// `write_atomic_refuses_a_symlinked_target`,
+/// `write_atomic_leaves_the_original_intact_when_the_rename_fails`,
+/// `write_atomic_leaves_no_temp_file_behind`.
+///
 /// # Errors
 ///
 /// [`io::ErrorKind::InvalidInput`] when `path` is a symlink — `rename(2)` over
@@ -55,13 +62,6 @@ use std::path::{Path, PathBuf};
 /// - On `Err`, `path` is unchanged — absent, holding its prior bytes, or still
 ///   the symlink it was.
 /// - No temp file is left behind in either case.
-///
-/// Test: `write_atomic_replaces_the_contents`,
-/// `write_atomic_preserves_the_targets_mode`,
-/// `write_atomic_publishes_content_mode_and_no_temp_together`,
-/// `write_atomic_refuses_a_symlinked_target`,
-/// `write_atomic_leaves_the_original_intact_when_the_rename_fails`,
-/// `write_atomic_leaves_no_temp_file_behind`.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     refuse_symlink(path)?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
