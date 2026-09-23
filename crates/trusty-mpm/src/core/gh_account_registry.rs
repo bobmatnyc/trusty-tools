@@ -98,7 +98,8 @@ struct RegistrySnapshot {
 /// `an_unreadable_registry_fails_closed`,
 /// `a_malformed_matching_record_fails_closed`,
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
-/// `an_account_only_pin_fails_closed_naming_the_account`.
+/// `an_account_only_pin_fails_closed_naming_the_account`,
+/// `an_unset_token_env_pin_fails_closed`.
 pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Option<GhEnv>, String> {
     match read_pin(registry_dir, origin)? {
         None => Ok(None),
@@ -201,7 +202,8 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
 /// nothing gh reads and pins no account either, `Err` otherwise.
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
-/// `an_account_only_pin_fails_closed_naming_the_account`.
+/// `an_account_only_pin_fails_closed_naming_the_account`,
+/// `an_unset_token_env_pin_fails_closed`.
 fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
     // The record's own binding, with `gh_account` supplying `account` when the
     // binding does not name one itself — the same two keys
@@ -225,6 +227,20 @@ fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
             ));
         }
     };
+    // #5850: `resolve_gh_env` skips a `token_env` it cannot read, which leaves
+    // NO identity selected — reading that as "unpinned" is the fallback.
+    if let Some(var) = named_token_env(&cfg)
+        && selected_config_dir(&cfg).is_none()
+        && !env.vars().iter().any(|(key, _)| key == "GH_TOKEN")
+    {
+        let who = pin.who();
+        return Err(format!(
+            "this repository is pinned to {who} via `github.token_env` '{var}', which is \
+             unset or empty in this process — refusing to fall back to this machine's \
+             global gh account (#5850). Export {var} where the daemon runs, or set \
+             `github.config_dir` for this project."
+        ));
+    }
     if env.is_empty() {
         // Nothing gh reads, and no account either: not a pin at all.
         return Ok(None);
@@ -259,6 +275,15 @@ fn selected_config_dir(cfg: &GithubConfig) -> Option<PathBuf> {
         .map(|p| p.to_string_lossy().trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+}
+
+/// The trimmed, non-empty `token_env` variable name the binding names, if any.
+/// Test: `an_unset_token_env_pin_fails_closed`.
+fn named_token_env(cfg: &GithubConfig) -> Option<&str> {
+    cfg.token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// The refusal for a registry this process could not interrogate.
