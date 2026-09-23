@@ -48,6 +48,7 @@ no new CI job, and runs inside the existing workspace test run.
 | trusty-search | `crates/trusty-search/tests/generated_docs.rs` → `README.md`, `CLAUDE.md` |
 | trusty-memory | `crates/trusty-memory/tests/generated_docs.rs` → `README.md` |
 | trusty-analyze | `crates/trusty-analyze/tests/generated_docs.rs` → `README.md`, `CLAUDE.md` |
+| docs/roadmap/ (outside crates/) | `scripts/roadmap/generate.mjs` + `scripts/roadmap/generate.test.mjs` → `docs/roadmap/trusty-mpm.md`. A Node script, not a cargo test: it splices from live GitHub milestones instead of Rust descriptor functions, and is `scripts/check_generated_regions.sh`'s explicit `docs/roadmap/*.md)` owner case rather than a per-crate `tests/generated_docs.rs` (there is no owning crate). |
 | Orphan-marker guard | `scripts/check_generated_regions.sh` |
 
 `docgen` is test-facing: the three crates enable it in `[dev-dependencies]`, not

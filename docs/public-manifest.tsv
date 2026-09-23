@@ -115,6 +115,9 @@ PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
 PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
 PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
 
+SECTION	roadmap	Roadmap
+PAGE	roadmap	docs/roadmap/trusty-mpm.md	/roadmap/trusty-mpm	trusty-mpm roadmap
+
 SECTION	guides	User Guides
 PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
 PAGE	guides	docs/trusty-agents/user/cli-reference.md	/guides/trusty-agents/cli-reference	trusty-agents CLI Reference
