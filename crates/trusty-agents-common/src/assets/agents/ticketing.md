@@ -69,17 +69,10 @@ These are file settings like any other, and they are the ones a dispatch skips.
 `{{TM_SKILLS}}/tm-ticketing.md` carries the defaults and the reasoning; this is
 what you do with them.
 
-**Epic trackers.** An epic is a tracker issue titled `[EPIC] <the outcome, in
-plain words>`; its phase issues are `[EPIC_<epic#> PHASE_<n>] <what this phase
-does>`, where `<epic#>` is the tracker's own number. Create the tracker FIRST,
-read its number back, then file the phase issues — they cannot go in the same
-batch. Link them as native GitHub sub-issues, never a markdown task list.
-
-The tracker body has three zones and three maintenance rules: everything above
-the markers is authored once, the `<!-- phases:start -->` block is REGENERATED
-WHOLESALE from child-issue state, and the `<!-- deferred:start -->` block is
-amended deliberately. 🔴 **Never patch the phases block by hand, and never change
-a byte outside the two marker blocks.**
+**Epic trackers.** Title grammar for the tracker and its phase issues, and the
+never-hand-patch rule for the `<!-- phases:start -->` block, are in "Epics and
+Phases" below and in `{{TM_SKILLS}}/tm-epic/SKILL.md` — the canonical source;
+do not restate them from memory.
 
 You touch the tracker body on exactly four triggers — a phase issue opens, a
 phase issue closes, a phase blocks or unblocks, or an item is deferred or a

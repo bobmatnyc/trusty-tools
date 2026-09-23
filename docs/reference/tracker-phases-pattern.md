@@ -20,11 +20,14 @@ Link them as native GitHub sub-issues, not a markdown task list. The link surviv
 ## Naming
 
 ```
-[EPIC] <the outcome, in plain words>
+[EPIC <epic#>] <the outcome, in plain words>
 [EPIC_<epic#> PHASE_<n>] <what this phase does>
 ```
 
-`<epic#>` is the tracker's issue number. Create the tracker first and read its number back; phase issues cannot go in the same batch.
+`<epic#>` is the tracker's own issue number: file the tracker titled `[EPIC]
+<outcome>`, read its number back, then rename it in place; phase issues
+cannot go in the same batch. Full grammar and the manual `gh` sequence:
+`tm-epic`.
 
 ## Four rules
 

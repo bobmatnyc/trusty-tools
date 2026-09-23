@@ -94,7 +94,7 @@ and where this skill specifies it in full.
 | Relationships | native sub-issue and blocked-by only; `Refs #N` is fix linkage, never an issue-to-issue link | "Relationships (native, never prose)" |
 | Lifecycle states | `open → status:in-progress → status:coded → status:merged → status:tested → closed`, mutually exclusive | "Lifecycle" |
 | Dedupe disposition | `COMMENT` / `REOPEN` / `NEW REGRESSION` / `NO TICKET`, one per finding, reported by name | "Search first, then choose a disposition" |
-| Epic title | `[EPIC] <the outcome, in plain words>` | "Trackers and phase issues" |
+| Epic title | `[EPIC <epic#>] <the outcome, in plain words>`, created as `[EPIC]` and renamed once the number is known | "Trackers and phase issues" |
 | Phase title | `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, a native sub-issue of the tracker | "Trackers and phase issues" |
 | Research | a committed doc under `research_docs_path`, linked from the tracker — never pasted into an issue | "Trackers and phase issues" |
 | Title | `<type>: <what is wrong or wanted>`, under ~70 characters | "What a Ticket Says" |
@@ -124,7 +124,7 @@ each one as an explicit value so a user edits it rather than discovering it.
 | `rollup_issue` | none by default — a project names one for sub-HIGH review and self-improvement findings, which then never become their own issue |
 | `pr_issue_link` | `Refs #N` (fixed — see above) |
 | `status_on_creation` | plain `open`. Filing is not a dispatch; `status:in-progress` waits for a brief that says work starts now (#7803) |
-| `epics.title_format` | `[EPIC] <outcome>` for the tracker; `[EPIC_<epic#> PHASE_<n>] <what>` for a phase issue |
+| `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); `[EPIC_<epic#> PHASE_<n>] <what>` for a phase issue |
 | `epics.tracker_autoupdate` | `true` — the agent regenerates the `<!-- phases:start -->` block wholesale from child state, amends `<!-- deferred:start -->`, and changes nothing outside the markers |
 | `epics.update_triggers` | exactly four: a phase opens, a phase closes, a phase blocks or unblocks, an item is deferred or a deferred item lands |
 | `research_docs_path` | `docs/research/<effort>/` — research lives there, committed, and the tracker links to it; no issue body carries findings |
@@ -155,14 +155,16 @@ less and does not drift.
 **Naming.**
 
 ```
-[EPIC] <the outcome, in plain words>
+[EPIC <epic#>] <the outcome, in plain words>
 [EPIC_<epic#> PHASE_<n>] <what this phase does>
 ```
 
-`<epic#>` is the tracker's issue number, so the tracker is created FIRST and its
-number read back; phase issues cannot go in the same batch. They are native
-GitHub sub-issues of it, never a markdown task list — the link survives body
-regeneration and stays queryable.
+`<epic#>` is the tracker's own issue number, so the tracker is created FIRST
+titled `[EPIC] <outcome>`, its number read back, and the title renamed in
+place before phase issues are filed — they cannot go in the same batch. Full
+grammar and the manual `gh` sequence: `tm-epic`. Phase issues are native
+GitHub sub-issues of the tracker, never a markdown task list — the link
+survives body regeneration and stays queryable.
 
 **Three zones, three maintenance rules.** Everything above the markers is
 authored once. The `<!-- phases:start -->` block is regenerated wholesale from
@@ -358,7 +360,7 @@ It overrides the `tm-ticketing` skill defaults and the per-machine
 ## Epics — trackers and phase issues
 
 - Pattern reference: <path to the committed tracker+phase pattern doc>
-- Epic title: `[EPIC] <the outcome, in plain words>`
+- Epic title: `[EPIC <epic#>] <the outcome, in plain words>` (created `[EPIC]`, renamed once the number is known)
 - Phase title: `[EPIC_<epic#> PHASE_<n>] <what this phase does>`
 - Phase linkage: <native sub-issue>
 - Tracker markers: `<!-- phases:start -->` / `<!-- phases:end -->`, and

@@ -212,7 +212,7 @@ Every issue body and every comment ends with the attribution line below.
 | `pr_issue_link` | `Refs #N` (fixed) |
 | `status_on_creation` | plain `open` — filing is not a dispatch; `status:in-progress` waits for a brief that says work starts now |
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
-| `epics.title_format` | `[EPIC] <outcome>`; phases `[EPIC_<epic#> PHASE_<n>] <what>` |
+| `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>` |
 | `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |
 | `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed |
 | `research_docs_path` | `docs/research/<effort>/` — trackers link to the doc; no issue body carries findings |
@@ -240,11 +240,12 @@ committed verbatim. Read it before creating a tracker. Use it only when the work
 has a **gate** between stages — one stage verified, soaked, or deployed before
 the next starts. No gate means no tracker; one issue with a task list costs less.
 
-- Tracker title: `[EPIC] <the outcome, in plain words>`. Label `epic`.
+- Tracker title: `[EPIC <epic#>] <the outcome, in plain words>`. Label `epic`.
 - Phase title: `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, where
   `<epic#>` is the tracker's own issue number.
-- Create the tracker FIRST and read its number back; phase issues cannot go in
-  the same batch. Link them as **native sub-issues**, never a markdown task list.
+- Create the tracker FIRST titled `[EPIC] <outcome>`, read its number back, and
+  rename the title in place before filing phase issues — they cannot go in the
+  same batch. Link them as **native sub-issues**, never a markdown task list.
 - Tracker body, three zones and three maintenance rules: everything above the
   markers is authored once; the `<!-- phases:start -->` block is regenerated
   wholesale from child-issue state; the `<!-- deferred:start -->` block is
