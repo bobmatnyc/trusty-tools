@@ -695,20 +695,27 @@ fn an_unparseable_origin_refuses_even_with_a_valid_push_remote() {
 }
 
 /// #8403: a merged PR in `origin` grants even when the fork cannot be
-/// resolved — the reported failure, where the fork lookup errored.
+/// resolved — the reported failure, where the fork lookup errored. The fork is
+/// asked FIRST so its `Err` arm runs: a merged PR grants despite a failed
+/// sibling (#8403 review).
 #[test]
 fn a_merged_pr_in_origin_grants_when_the_fork_cannot_be_resolved() {
-    let repos = vec!["org/r".to_string(), "fork/r".to_string()];
+    let repos = vec!["fork/r".to_string(), "org/r".to_string()];
+    let mut asked = Vec::new();
     let found = first_merged(
         &repos,
-        |repo| match repo {
-            "org/r" => Ok((1, repo.to_string())),
-            _ => Err("Could not resolve to a Repository".to_string()),
+        |repo| {
+            asked.push(repo.to_string());
+            match repo {
+                "org/r" => Ok((1, repo.to_string())),
+                _ => Err("Could not resolve to a Repository".to_string()),
+            }
         },
         |(count, _)| *count > 0,
     )
     .expect("origin's merged PR is positive evidence");
     assert_eq!(found, (1, "org/r".to_string()));
+    assert_eq!(asked, repos, "the failing fork must have been asked first");
 }
 
 /// #8403 (fail-closed arm): when no repository found a merge and one could not
