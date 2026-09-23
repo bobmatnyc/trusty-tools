@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_eight_checks() {
+async fn run_doctor_produces_sixty_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -471,7 +471,8 @@ async fn run_doctor_produces_fifty_eight_checks() {
     // `instruction_fold` and adds `tool_output_compression` (fifty-two →
     // fifty-three); issue #6556 adds `stop_spool` (fifty-four →
     // fifty-five); issue #8236 adds `launchd_secrets` and `credential_reach`
-    // (fifty-six → fifty-eight).
+    // (fifty-six → fifty-eight); issue #8415 adds `launchd_process_type`
+    // (fifty-eight → fifty-nine), then `tmux_priority` (fifty-nine → sixty).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -563,6 +564,10 @@ async fn run_doctor_produces_fifty_eight_checks() {
         "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #8415: the launchd ProcessType of the jobs that start tmux servers.
+        "launchd_process_type",
+        // #8415: the observed priority of the running tmux server.
+        "tmux_priority",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",

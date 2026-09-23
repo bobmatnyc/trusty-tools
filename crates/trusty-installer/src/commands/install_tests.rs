@@ -1215,3 +1215,44 @@ fn unknown_members_message_names_bundle_keywords() {
     let code = run(&["cores".to_owned()], true, true, false, false, false, true);
     assert_eq!(code, 3, "an unknown keyword must still exit 3");
 }
+
+/// REGRESSION (#8415, fail-open): a supervisor plist that failed to write or
+/// reload must fail the trusty-mpm member and the install's exit code; a
+/// refusal or a platform skip must not.
+/// What: builds the report from each verdict's `service_outcome`, exactly as
+/// `install_all` does.
+/// Test: This is the test.
+#[test]
+fn failed_supervisor_bootstrap_fails_the_install_report() {
+    use super::super::plist_bootstrap::SupervisorBootstrapVerdict as V;
+    let report_for = |verdict: V| {
+        let (service_ok, service_detail) = verdict.service_outcome();
+        InstallReport::build(vec![InstallOutcome {
+            member: "trusty-mpm".to_owned(),
+            ok: true,
+            detail: "installed".to_owned(),
+            service_ok,
+            service_detail,
+            shadow_ok: true,
+            shadow_detail: String::new(),
+            required: true,
+            integrity_ok: true,
+        }])
+    };
+
+    let failed = report_for(V::Failed("Load failed: 5: Input/output error".to_owned()));
+    assert!(!failed.all_ok, "a failed reload must flip all_ok");
+    assert_eq!(failed.exit_code(), 2);
+    assert!(failed.members[0]
+        .service_detail
+        .contains("Input/output error"));
+
+    for ok in [
+        V::Installed,
+        V::Refused("registered version is newer".to_owned()),
+        V::Skipped("launchd is macOS-only".to_owned()),
+    ] {
+        let report = report_for(ok.clone());
+        assert!(report.all_ok, "{ok:?} must not fail the install");
+    }
+}

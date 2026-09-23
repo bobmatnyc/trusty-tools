@@ -44,6 +44,12 @@ pub mod doctor_credential_reach;
 // 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
 // is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.
 mod doctor_startup_context;
+// #8415: the launchd `ProcessType` of the tm jobs that start tmux servers.
+// Declared here for the same cap reason as the rows above.
+pub mod doctor_launchd_process_type;
+// #8415: the observed priority of the RUNNING tmux server, which a plist fix
+// does not lift until the server restarts.
+mod doctor_tmux_priority;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;

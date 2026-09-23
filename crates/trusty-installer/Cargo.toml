@@ -4,7 +4,8 @@ name = "trusty-installer"
 # `src/**` (launchd restart-race fix). No public API changes.
 # 0.13.7 (#8267): patch — `probe_http` follows the trusty-common UDS
 # retry/half-close changes. No public API changes.
-version = "0.13.7"
+# 0.13.8 (#8415): patch — launchd ProcessType fix. No public API changes.
+version = "0.13.8"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"

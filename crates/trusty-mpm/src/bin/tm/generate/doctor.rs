@@ -270,6 +270,14 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
     ),
     (
+        "launchd_process_type",
+        "The launchd `ProcessType` of the two tm jobs that start tmux servers — `com.trusty.mpm` and `com.trusty.mpm.supervisor`, read from `~/Library/LaunchAgents`. A tmux server inherits the class of the job that started it, and so does every session inside it: the supervisor plist declared `Background`, which held tmux, the PM sessions and their `cargo` gates at Darwin priority 4 on efficiency cores with throttled I/O, a clamp `taskpolicy -B` cannot lift (issue #8415). FAILS on `Background`; warns on any other value short of `Interactive`, including an absent key, which is launchd's throttled `Standard` default. Each finding names the `plutil -replace` and `launchctl bootout`/`bootstrap` commands for the plist on disk, with the path single-quoted; a tmux server already running keeps its class until it exits. A duplicated key resolves to the last one, as CoreFoundation does. UNKNOWN when a plist exists but cannot be judged: a binary plist, an empty `<string/>`, or a non-string value. `Ok` when neither plist is installed. `TRUSTY_MPM_LAUNCH_AGENTS_DIR` points the row at another directory, and every message then names that directory. Read-only.",
+    ),
+    (
+        "tmux_priority",
+        "The Darwin scheduling priority of the RUNNING tmux server, read with `tmux display-message -p '#{pid}'` and `ps -o pri= -p <pid>`. A server keeps the class it started with, so fixing a plist `launchd_process_type` flagged does not lift a server that is already clamped (issue #8415). FAILS below priority 20 (a `Background` job's tree runs at 4), naming the server PID, the observed priority, and the remedy: fix the plist, then restart the tmux server (`tmux kill-server` ends every session in it; `tm` resumes them). WARNS from 20 to 30, launchd `Standard` throttling, pointing at the `launchd_process_type` row. `Ok` at 31 (an interactive shell's priority) or above, and when no tmux server is running. macOS only: on other platforms `ps -o pri` uses a different scale, so the row reports not applicable. UNKNOWN — never `Ok` — when tmux cannot be run, `ps` fails, or either answer cannot be parsed. Read-only.",
+    ),
+    (
         "pty_headroom",
         "How much pseudo-terminal capacity the host has left. Every tmux pane holds one pty and macOS caps the total at `kern.tty.ptmx_max` (511 by default), so a session leak presents as a bare `ENXIO` on the next spawn, naming neither the limit nor the leak — 456 sessions the stalled orphan-GC never reaped put this host over the cap (issue #6529). Warns at 80% of the cap, FAILS at 95%, and names both numbers plus what actually reaps the sessions holding them. UNKNOWN — never `Ok` — when either number could not be read. macOS only; other platforms report the skip. Read-only — it counts device nodes and reaps nothing.",
     ),
@@ -342,6 +350,16 @@ mod tests {
     /// goes further by also asserting name equality, not just length.
     #[tokio::test]
     async fn doctor_checks_match_run_doctor_names() {
+        // #8415 owner rule: the bin builds the library without `cfg(test)`, so
+        // point the `launchd_process_type` row at a temp path that does not
+        // exist, never the operator's real `~/Library/LaunchAgents`. An
+        // injected override, not an env write (#5544).
+        trusty_mpm::daemon::doctor_launchd_process_type::override_launch_agents_dir(
+            std::env::temp_dir().join(format!(
+                "tm-bin-test-no-launch-agents-{}",
+                std::process::id()
+            )),
+        );
         let report = run_doctor(None, None, &[], None).await;
         let actual: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         let expected: Vec<&str> = DOCTOR_CHECKS.iter().map(|(name, _)| *name).collect();
