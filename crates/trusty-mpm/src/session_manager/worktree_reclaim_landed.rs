@@ -238,10 +238,14 @@ fn dirt_outside_head(path: &Path) -> Option<String> {
     match count_session_branch_unpushed(path) {
         Ok(0) => {}
         Ok(n) => {
+            // #7889 critic round 2: name the branch and a commit, so the
+            // operator can push or inspect exactly what would be orphaned.
+            let (branch, sha) = first_unreachable_session_commit(path)
+                .unwrap_or_else(|| ("session branch".to_string(), "unknown".to_string()));
             return Some(format!(
-                "{n} unpushed commit(s) on this tree's session branch are not reachable from \
-                 HEAD, so no comparison of HEAD can vouch for them, and removal deletes that \
-                 branch"
+                "{n} unpushed commit(s) on `{branch}` are not reachable from HEAD (first: \
+                 `{sha}`), so no comparison of HEAD can vouch for them, and removal deletes \
+                 that branch"
             ));
         }
         Err(e) => return Some(format!("the session-branch check failed: {e}")),
@@ -252,6 +256,32 @@ fn dirt_outside_head(path: &Path) -> Option<String> {
             nested.reason
         )
     })
+}
+
+/// The session branch holding a commit `HEAD` cannot reach, and that commit
+/// (#7889 critic round 2).
+///
+/// What: for `session/<leaf>`, then the bare `<leaf>`, the newest commit on
+/// that branch reachable from no remote and not from `HEAD`. `None` when
+/// neither branch resolves or names one; the caller still refuses.
+/// Test: `worktree_7889_a_session_branch_commit_head_cannot_reach_refuses`.
+fn first_unreachable_session_commit(path: &Path) -> Option<(String, String)> {
+    let leaf = path.file_name()?.to_str()?;
+    [format!("session/{leaf}"), leaf.to_string()]
+        .into_iter()
+        .find_map(|branch| {
+            let tip = format!("refs/heads/{branch}");
+            let args = [
+                "rev-list",
+                "--max-count=1",
+                &tip,
+                "--not",
+                "--remotes",
+                "HEAD",
+            ];
+            let sha = git_stdout(path, &args).ok()?.trim().to_string();
+            (!sha.is_empty()).then_some((branch, sha))
+        })
 }
 
 /// The landing evidence and the dirt check, re-asked immediately before one

@@ -181,6 +181,13 @@ fn worktree_7889_a_session_branch_commit_head_cannot_reach_refuses() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("moved-7889");
     GitWorktreeFixture::commit_unpushed(&wt);
+    let orphan = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let orphan = String::from_utf8_lossy(&orphan.stdout).trim().to_string();
     git(&wt, &["switch", "-c", "donor-moved", "origin/main"]);
     let s = survey_with_landed_content(
         &fx.repos_root,
@@ -203,11 +210,11 @@ fn worktree_7889_a_session_branch_commit_head_cannot_reach_refuses() {
         "a commit only session/moved-7889 holds must refuse: {:?}",
         found.verdict
     );
-    assert!(
-        format!("{:?}", found.verdict).contains("session branch"),
-        "the refusal must say where the work is: {:?}",
-        found.verdict
-    );
+    // #7889 critic round 2: the refusal names the branch and the commit.
+    let shown = format!("{:?}", found.verdict);
+    assert!(shown.contains("`session/moved-7889`"), "{shown}");
+    assert_eq!(orphan.len(), 40, "premise: a full sha: {orphan}");
+    assert!(shown.contains(&orphan), "the first unlanded sha: {shown}");
 }
 
 /// 🔴 REGRESSION (#7889, critic MEDIUM): the admission can take 40 s, so a

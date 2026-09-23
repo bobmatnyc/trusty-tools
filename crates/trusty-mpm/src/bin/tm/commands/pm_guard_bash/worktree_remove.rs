@@ -390,6 +390,8 @@ mod tests {
         /// #7889: `Some(true)` when the admission reused the #7914 fetch,
         /// `Some(false)` when it fetched again, `None` when never asked.
         asked_fresh: std::cell::Cell<Option<bool>>,
+        /// #7889 critic round 2: the nested-repository scan's answer.
+        nested: Result<Option<String>, String>,
     }
 
     /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
@@ -458,6 +460,7 @@ mod tests {
                 // #7889 route (c): not asked unless a test states it.
                 carried: None,
                 asked_fresh: std::cell::Cell::new(None),
+                nested: Ok(None),
             }
         }
 
@@ -536,6 +539,63 @@ mod tests {
             self.asked_fresh.set(Some(true));
             answer
         }
+        fn nested_dirt(&self, _dir: &Path) -> Result<Option<String>, String> {
+            self.nested.clone()
+        }
+    }
+
+    /// The nested clone the #7889 critic round 2 found the guard blind to.
+    const NESTED: &str = "nested git worktree/repository `scratch/side-project` holds unsaved \
+                          work that `git status` on this directory cannot see: 1 unpushed commit";
+
+    /// 🔴 REGRESSION (#7889 critic round 2): a landed donor tree holding an
+    /// ignored nested clone with an unpushed commit is refused, and the deny
+    /// names the nested path. `git worktree remove --force` would delete it.
+    ///
+    /// Fails at 548bc9626, which granted on landed content alone.
+    #[test]
+    fn worktree_7889_nested_dirt_denies_a_landed_grant() {
+        let probe = FakeProbe {
+            nested: Ok(Some(NESTED.to_string())),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("nested work must deny the landed-content grant");
+        assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
+        assert!(reason.contains("scratch/side-project"), "{reason}");
+    }
+
+    /// 🔴 REGRESSION (#7889 critic round 2): the merged-PR grant is guarded too.
+    ///
+    /// Fails at 548bc9626, whose merged-PR route counted only `git status`.
+    #[test]
+    fn worktree_7889_nested_dirt_denies_a_merged_pr_grant() {
+        let merged = FakeProbe::upstream_deleted();
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &merged),
+            None,
+            "premise: this merged, clean tree is granted"
+        );
+        let probe = FakeProbe {
+            nested: Ok(Some(NESTED.to_string())),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("nested work must deny the merged-PR grant");
+        assert!(reason.contains("scratch/side-project"), "{reason}");
+    }
+
+    /// 🔴 #7889 critic round 2, ADR-0045: a nested scan that could not run
+    /// establishes nothing, so it denies rather than granting.
+    #[test]
+    fn worktree_7889_an_unanswerable_nested_scan_denies() {
+        let probe = FakeProbe {
+            nested: Err("nested-repository scan failed: permission denied".to_string()),
+            ..donor_branch_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unanswerable scan must deny");
+        assert!(reason.contains("permission denied"), "{reason}");
     }
 
     /// 🔴 #7889: the admission reuses the #7914 `local-only-commits` fetch

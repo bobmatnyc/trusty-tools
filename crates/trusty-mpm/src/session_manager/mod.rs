@@ -68,7 +68,7 @@ pub(crate) mod worktree_liveness;
 // #6927: the operator's standing "never propose these" list, applied as
 // `worktree_reclaim::classify`'s first gate.
 pub(crate) mod worktree_keep_list;
-mod worktree_nested;
+pub(crate) mod worktree_nested;
 pub(crate) mod worktree_ownership;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;

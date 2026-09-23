@@ -213,7 +213,14 @@ the guard will establish every precondition itself.
      request has matched, and never for a detached HEAD, so on those paths it
      is stricter than the sweep. Where they disagree, one of them refuses.
      Making them agree would add a fetch and a `gh` call to a guard already
-     short of time. On the sweep, gate 6 counts a donor branch's commits as
+     short of time. That strictness is about the landing question only. Every
+     guard grant — merged pull request, landed content, `local-only-commits`
+     or detached head — now ends with the sweep's scan for nested repositories
+     holding work and high-value gitignored files, inside the deadline, because
+     `git worktree remove --force` deletes ignored content. The guard does not
+     check commits on `session/<leaf>` that HEAD cannot reach, because
+     `git worktree remove` deletes no branch, and it does not read the sweep's
+     keep-list. On the sweep, gate 6 counts a donor branch's commits as
      unpushed, because the squash also carried a sibling's work and no patch id
      matches. That count lets the tree reach the admission, which judges only
      the commits reachable from HEAD. Every other place work can live refuses

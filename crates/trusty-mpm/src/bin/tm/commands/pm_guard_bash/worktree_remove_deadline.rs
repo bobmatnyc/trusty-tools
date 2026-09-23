@@ -135,6 +135,11 @@ pub(crate) fn evaluate_removal_rechecks_within<P>(
 where
     P: WorktreeRemovalProbe + Send + 'static,
 {
+    // #7889 critic round 2: no time left means no check can finish, so deny
+    // without starting one — and deterministically, not by racing a thread.
+    if deadline.is_zero() {
+        return Some(out_of_time(CHECK_CLEAN_TREE, target, deadline));
+    }
     // The owner answer is already in hand, so the first probe-backed check
     // is the one pending until the thread reports otherwise.
     let pending = Arc::new(Mutex::new(CHECK_CLEAN_TREE));
@@ -162,17 +167,7 @@ where
     match rx.recv_timeout(deadline) {
         Ok(verdict) => verdict,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            let check = pending_check();
-            Some(recheck_deny(
-                check,
-                target,
-                &format!(
-                    "the ADR-0057 re-checks ran out of time — they did not finish within \
-                     {} ms, and `{check}` was still running. The hook is killed at 5 s and a \
-                     killed hook decides nothing, so an unfinished check denies.",
-                    deadline.as_millis()
-                ),
-            ))
+            Some(out_of_time(pending_check(), target, deadline))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => Some(recheck_deny(
             pending_check(),
@@ -180,6 +175,20 @@ where
             "the re-check thread stopped without an answer.",
         )),
     }
+}
+
+/// The deny for a deadline that expired while `check` was pending (#7889).
+fn out_of_time(check: &str, target: &Path, deadline: Duration) -> String {
+    recheck_deny(
+        check,
+        target,
+        &format!(
+            "the ADR-0057 re-checks ran out of time — they did not finish within {} ms, \
+             and `{check}` was still running. The hook is killed at 5 s and a killed hook \
+             decides nothing, so an unfinished check denies.",
+            deadline.as_millis()
+        ),
+    )
 }
 
 /// A probe that records which re-check each call belongs to (#7889).
@@ -244,6 +253,10 @@ impl<P: WorktreeRemovalProbe> WorktreeRemovalProbe for PendingProbe<P> {
     fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
         self.mark(LANDED_CONTENT_CHECK);
         self.inner.landing_admission_on_fetched_refs(dir)
+    }
+    fn nested_dirt(&self, dir: &Path) -> Result<Option<String>, String> {
+        self.mark(CHECK_CLEAN_TREE);
+        self.inner.nested_dirt(dir)
     }
 }
 

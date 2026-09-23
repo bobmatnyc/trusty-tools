@@ -233,6 +233,46 @@ pub(crate) fn evaluate_removal_rechecks(
     live_owners: Result<&[String], &str>,
     probe: &dyn WorktreeRemovalProbe,
 ) -> Option<String> {
+    if let Some(deny) = landing_rechecks(target, live_owners, probe) {
+        return Some(deny);
+    }
+    nested_dirt_deny(target, probe)
+}
+
+/// The last check before ANY grant: work `git status` cannot see (#7889).
+///
+/// Why: `git worktree remove --force` deletes gitignored content, so a clone
+/// with unpushed commits under an ignored directory, or a gitignored `.env`,
+/// dies with the tree. Every grant route above — merged pull request, landed
+/// content, `local-only-commits`, detached head — checked only `git status`.
+/// What: `None` when [`WorktreeRemovalProbe::nested_dirt`] reports nothing;
+/// otherwise a `clean-tree` deny naming the first nested path, or quoting why
+/// the scan could not run. It runs inside the caller's deadline.
+/// Test: `worktree_7889_nested_dirt_denies_a_landed_grant`,
+/// `worktree_7889_nested_dirt_denies_a_merged_pr_grant`,
+/// `worktree_7889_an_unanswerable_nested_scan_denies`.
+fn nested_dirt_deny(target: &Path, probe: &dyn WorktreeRemovalProbe) -> Option<String> {
+    match probe.nested_dirt(target) {
+        Ok(None) => None,
+        Ok(Some(reason)) => Some(recheck_deny(
+            CHECK_CLEAN_TREE,
+            target,
+            &format!("work `git status` cannot see would be deleted with the tree: {reason}."),
+        )),
+        Err(e) => Some(recheck_deny(
+            CHECK_CLEAN_TREE,
+            target,
+            &format!("the nested-repository scan could not run: {e}."),
+        )),
+    }
+}
+
+/// [`evaluate_removal_rechecks`] minus the nested-dirt check it ends with.
+fn landing_rechecks(
+    target: &Path,
+    live_owners: Result<&[String], &str>,
+    probe: &dyn WorktreeRemovalProbe,
+) -> Option<String> {
     match probe.dirty_entries(target) {
         Ok(0) => {}
         Ok(n) => {

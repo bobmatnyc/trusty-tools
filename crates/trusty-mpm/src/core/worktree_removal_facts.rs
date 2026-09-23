@@ -499,6 +499,25 @@ pub trait WorktreeRemovalProbe {
     fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
         self.landing_admission(dir)
     }
+
+    /// Work `git status` cannot see: a nested repository holding unsaved work,
+    /// or a high-value gitignored file (#7889 critic round 2).
+    ///
+    /// Why: `git worktree remove --force` deletes ignored content, so a clone
+    /// with unpushed commits under an ignored directory dies with the tree.
+    /// The sweep already refuses it; every guard grant now asks the same scan.
+    /// What: `Ok(None)` when there is none, `Ok(Some(reason))` naming the first
+    /// nested path, `Err` when the scan could not run. The default is `Err`,
+    /// which refuses: an implementor that has not overridden it establishes
+    /// nothing.
+    /// Test: `worktree_7889_nested_dirt_denies_a_landed_grant`,
+    /// `worktree_7889_nested_dirt_denies_a_merged_pr_grant`,
+    /// `worktree_7889_an_unanswerable_nested_scan_denies` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `nested_dirt_finds_an_ignored_clone_with_an_unpushed_commit`.
+    fn nested_dirt(&self, _dir: &Path) -> Result<Option<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
 }
 
 /// The row, if any, whose pull request was opened from exactly `sha` (#7832).
@@ -728,6 +747,12 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         )
     }
 
+    fn nested_dirt(&self, dir: &Path) -> Result<Option<String>, String> {
+        // #7889 critic round 2: the sweep's own scan. It fails toward dirty —
+        // an unreadable candidate or a failed walk is reported as dirt.
+        Ok(crate::session_manager::worktree_nested::nested_dirt(dir).map(|d| d.reason))
+    }
+
     fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
         // #7889: `local_only_commits` fetched `origin` in this evaluation and
         // answered `Ok` only because that fetch succeeded — see the trait doc.
@@ -918,6 +943,8 @@ mod tests {
         // #7889: the admission's default is the same — establishing nothing,
         // which never grants.
         assert!(!UnoverriddenProbe.landing_admission(dir).admits());
+        // #7889 critic round 2: an unoverridden nested scan is unanswerable.
+        assert!(UnoverriddenProbe.nested_dirt(dir).is_err());
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
@@ -1049,5 +1076,43 @@ mod tests {
             GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
             1
         );
+    }
+
+    /// 🔴 REGRESSION (#7889 critic round 2): a clone under an IGNORED directory,
+    /// holding a commit on no remote, is invisible to `git status` and would be
+    /// deleted by `git worktree remove --force`. The guard's probe finds it and
+    /// names its path. The ignore rule lives in `info/exclude`, so HEAD — and
+    /// with it any landed-content answer — is untouched.
+    #[test]
+    fn nested_dirt_finds_an_ignored_clone_with_an_unpushed_commit() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        let wt = fx.add_worktree("nested-clone-7889");
+        assert_eq!(
+            GitAndGhProbe.nested_dirt(&wt).expect("scan runs"),
+            None,
+            "premise: a fresh tree holds no nested work"
+        );
+        let exclude = fx.repo.join(".git").join("info").join("exclude");
+        std::fs::create_dir_all(exclude.parent().expect("parent")).expect("mkdir info");
+        std::fs::write(&exclude, "scratch/\n").expect("write exclude");
+        let inner = wt.join("scratch").join("side-project");
+        std::fs::create_dir_all(&inner).expect("mkdir inner");
+        git_ok(&inner, &["init", "--initial-branch=main"]);
+        git_ok(&inner, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&inner, &["config", "user.name", "CI"]);
+        git_ok(&inner, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(inner.join("work.rs"), "// only copy\n").expect("write work");
+        git_ok(&inner, &["add", "work.rs"]);
+        git_ok(&inner, &["commit", "-m", "only copy"]);
+        assert_eq!(
+            GitAndGhProbe.dirty_entries(&wt).expect("status readable"),
+            0,
+            "premise: git status cannot see the ignored clone"
+        );
+        let reason = GitAndGhProbe
+            .nested_dirt(&wt)
+            .expect("scan runs")
+            .expect("the ignored clone's unpushed commit must be reported");
+        assert!(reason.contains("scratch/side-project"), "{reason}");
     }
 }
