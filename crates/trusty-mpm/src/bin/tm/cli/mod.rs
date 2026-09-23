@@ -146,13 +146,28 @@ pub(crate) struct Cli {
     /// spelling, and none is added here (a network/subprocess call at parse
     /// time is not this flag's job).
     /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
-    /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`.
-    #[arg(long, visible_alias = "user", global = true)]
+    /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_rejects_a_blank_account_flag_before_the_repository`.
+    // #5850: a blank value is refused here, not read as absent downstream.
+    #[arg(long, visible_alias = "user", global = true, value_parser = non_blank_login)]
     pub(crate) account: Option<String>,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// Parse `--account`/`--user`, refusing a blank or whitespace-only login.
+///
+/// Why: `resolve_account` reads a blank flag as absent, so `tm --user= <url>`
+/// would run as the machine's global `gh` account (#5850).
+/// What: returns the value unchanged when it has any non-whitespace character.
+/// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
+fn non_blank_login(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+    }
+    Ok(value.to_string())
 }
 
 /// Top-level CLI subcommands.
