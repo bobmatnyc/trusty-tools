@@ -75,10 +75,13 @@
 #     push, but a CI job cannot stop a `cargo publish` a human runs locally —
 #     it reports, this blocks.
 #
-#     A BREAK HAS NO OVERRIDE, and none is needed: the correct response to a
-#     firing gate is to bump the breaking position, which the gate then records
-#     as an already-breaking release and inventories. A false positive and a
-#     real break have the same safe remedy.
+#     A BREAK HAS ONE NARROW OVERRIDE (owner ruling 2026-09-22). The default
+#     remedy is still to bump the breaking position, which the gate then records
+#     as an already-breaking release and inventories. The exception is a
+#     committed scripts/semver-accepted-breaks/<package>-<version>.txt naming
+#     this exact crate and version, a reason, and an accept row covering every
+#     break the gate computed. It prints [WARN], never [PASS], and fails closed
+#     on anything else — see scripts/lib/semver_accepted_breaks.sh.
 #
 #     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
 #     it computed a verdict that says break, and 3 when it could not compute one
@@ -287,7 +290,8 @@
 #
 # Exit codes: 0 = all checks passed, or were downgraded by an override that
 #   named itself in the output (PREFLIGHT_ALLOW_DETACHED for check 1,
-#   PREFLIGHT_SEMVER_UNVERIFIED for check 5) — safe to `cargo publish`, with
+#   PREFLIGHT_SEMVER_UNVERIFIED or an accepted-breaks declaration for check 5)
+#   — safe to `cargo publish`, with
 #   whatever the WARN lines disclosed. Nonzero = at least one check failed —
 #   DO NOT PUBLISH. 2 = usage error (bad arguments).
 #
@@ -372,6 +376,10 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# CHECK 5's accepted-breaks declaration (owner ruling 2026-09-22).
+# shellcheck source=lib/semver_accepted_breaks.sh
+. "${REPO_ROOT}/scripts/lib/semver_accepted_breaks.sh"
 
 CRATE_UA="trusty-tools-preflight-publish (github.com/bobmatnyc/trusty-tools)"
 
@@ -830,8 +838,11 @@ semver_types_decide() {
 #            It is not a statement that the API is unchanged.
 #     [WARN] 0 compared because the gate was BLIND, and PREFLIGHT_SEMVER_UNVERIFIED
 #            named a reason to accept that. Permits; never prints PASS.
-#     [FAIL] a computed break, a blind gate with no override, or a gate that
-#            malfunctioned.
+#     [WARN] ACCEPTED BREAK: a computed break that a committed per-crate,
+#            per-version declaration lists in full, with a reason (owner ruling
+#            2026-09-22). Permits; never prints PASS.
+#     [FAIL] a computed break with no valid, complete declaration, a blind gate
+#            with no override, or a gate that malfunctioned.
 #
 # THE OVERRIDE IS FOR SITUATIONAL BLINDNESS ONLY, and it takes a REASON, not a
 #   boolean:
@@ -853,9 +864,11 @@ semver_types_decide() {
 #   scrolls past every publish. An override that is always set is not an
 #   override.
 #
-# A COMPUTED BREAK IS NEVER OVERRIDE-ABLE. The override answers "the gate could
-#   not run"; exit 1 is the gate running and saying no. Its remedy is unchanged
-#   and is not a variable.
+# A COMPUTED BREAK IS NOT OVERRIDE-ABLE BY THIS VARIABLE. The override answers
+#   "the gate could not run"; exit 1 is the gate running and saying no. Its only
+#   exception is the committed declaration semver_accept_decide reads, which
+#   names the crate, the version, the reason and every accepted break, and which
+#   in turn never covers a blind gate.
 #
 # Test: scripts/preflight-check5-selftest.sh.
 # ---------------------------------------------------------------------------
@@ -875,8 +888,13 @@ semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
   local summary checked skipped inventoried blind compared blind_why
 
-  # --- A COMPUTED VERDICT THAT SAYS BREAK. Not override-able.
+  # --- A COMPUTED VERDICT THAT SAYS BREAK. PREFLIGHT_SEMVER_UNVERIFIED does not
+  #     apply; only a declaration for this exact release can (ruling 2026-09-22).
   if [ "$rc" -eq 1 ]; then
+    if [ -f "${REPO_ROOT}/$(semver_accept_rel "$pkg" "$version")" ]; then
+      semver_accept_decide "$log" "$pkg" "$version"
+      return $?
+    fi
     echo "[FAIL] semver: public-API check failed for ${pkg} ${version}:" >&2
     sed 's/^/       /' "$log" >&2
     echo "       Publishing this would ship a breaking change without a breaking" >&2
@@ -885,6 +903,9 @@ semver_decide() {
     echo "       or make the change non-breaking (#[non_exhaustive] on public" >&2
     echo "       structs and enums). PREFLIGHT_SEMVER_UNVERIFIED does not apply to" >&2
     echo "       a verdict — it covers a gate that could not run, not one that ran." >&2
+    echo "       Only an owner-accepted break may ship unbumped, declared in a" >&2
+    echo "       committed $(semver_accept_rel "$pkg" "$version") — see" >&2
+    echo "       docs/reference/semver-gate.md, \"Accepted breaks\"." >&2
     return 1
   fi
 
@@ -966,7 +987,9 @@ semver_decide() {
     blind_why="check_semver.sh reported on no crate at all — ${summary}"
   fi
 
-  # --- BLIND. Stop, unless an explicit reason says to accept it.
+  # --- BLIND. Stop, unless an explicit reason says to accept it. An
+  #     accepted-breaks declaration is never that reason; say so if one exists.
+  semver_accept_blind_note "$pkg" "$version"
   if [ -n "${PREFLIGHT_SEMVER_UNVERIFIED+x}" ]; then
     if [ -z "$(printf '%s' "${PREFLIGHT_SEMVER_UNVERIFIED}" | tr -d '[:space:]')" ]; then
       echo "[FAIL] semver: PREFLIGHT_SEMVER_UNVERIFIED is set but empty." >&2
@@ -1692,6 +1715,10 @@ if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
   # an operator is most likely to read on its own.
   echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but the" >&2
   echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
+elif [ -n "${SEMVER_ACCEPTED_BREAKS:-}" ]; then
+  # Ruling 2026-09-22: an accepted break still ships a break, so never "Safe to publish".
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but it SHIPS" >&2
+  echo "  A PUBLIC-API BREAK: ${SEMVER_ACCEPTED_BREAKS}. See the check 5 line above." >&2
 elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
   # The type differ blocks nothing, so without this the summary would say
   # "safe to publish" over a listed set of type changes nobody has confirmed.

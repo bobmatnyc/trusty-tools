@@ -574,10 +574,48 @@ construction — the fix #4088 asked for and deferred.
 cargo semver-checks --explain constructible_struct_adds_field
 ```
 
-A break has no override, and none is needed. Bumping the breaking position turns
-the run into an advisory inventory, so a false positive and a real break have the
-same safe remedy. `PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run,
-never one that ran and said no.
+Bumping the breaking position turns the run into an advisory inventory, so a
+false positive and a real break have the same safe remedy.
+`PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run, never one that
+ran and said no. A break has one narrow override, below.
+
+### Accepted breaks (owner ruling 2026-09-22)
+
+The owner ruled on 2026-09-22: "accept the breaking API changes on main and keep
+the existing release plan. Override the semver gate (CHECK 5) so 1.x releases can
+publish with them", because "the user base is small, and it does not dictate the
+release model."
+
+A release that ships a break without a breaking bump carries a committed
+declaration, `scripts/semver-accepted-breaks/<package>-<version>.txt`. It names
+the crate, the exact version, a reason, and one `accept <lint> <item>...` row per
+accepted break. Format:
+[`scripts/semver-accepted-breaks/README.md`](../../scripts/semver-accepted-breaks/README.md).
+When it covers the gate's output, CHECK 5 prints `[WARN] semver: ACCEPTED BREAK`
+with the crate, the version, the reason, every accepted lint, the declaration's
+commit, and the full list of breaks the gate computed. It never prints `[PASS]`,
+and the run's final line says the release ships a break.
+
+It fails closed. CHECK 5 stays `[FAIL]` when:
+
+- the gate computed a break the declaration does not list — every `Failed in:`
+  entry needs a row for its lint whose item tokens match as whole tokens;
+- the file inside names a different crate or version, or the only declaration is
+  for another version;
+- the `reason` row is missing or blank, a row is unknown, or no `accept` row
+  exists;
+- the break list does not parse completely: the tool's failed-lint count and the
+  failure blocks disagree, a block has no entries, or the gate also reported NO
+  VERDICT.
+
+A declaration never covers a blind gate. That arm stays governed by
+`PREFLIGHT_SEMVER_UNVERIFIED` alone, and CHECK 5 says so when a declaration is
+present there. With no declaration, CHECK 5 behaves as before.
+
+The file is the audit trail. It reaches `main` in a reviewed PR, because CHECK 1
+and CHECK 3 refuse a publish from a checkout that carries an uncommitted one, and
+it names one release, so a later version needs a new file and a new review. It
+changes no exclusion TSV and no other check.
 
 ## Reading the gate's result
 
@@ -608,7 +646,8 @@ together**, and each outcome gets its own label:
 | `[PASS]` | ≥ 1 crate compared — a pass/fail run or an inventory that ran — and no unbumped break | proceeds |
 | `[SKIP]` | 0 compared because no comparison was *possible*: no baseline on crates.io, no library target, or a row in `semver-checks-crate-exclusions.tsv` | proceeds |
 | `[WARN]` | 0 compared because the gate was blind, and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
-| `[FAIL]` | a computed break, a blind gate with no override, or a gate that malfunctioned | stops |
+| `[WARN] … ACCEPTED BREAK` | a computed break that a committed declaration for this crate and version lists in full ([Accepted breaks](#accepted-breaks-owner-ruling-2026-09-22)) | proceeds |
+| `[FAIL]` | a computed break with no valid, complete declaration, a blind gate with no override, or a gate that malfunctioned | stops |
 
 `[PASS]` states how many crates it compared. `[SKIP]` permits without an override
 because the reason is a fact about the crate that is already recorded in a
@@ -725,7 +764,10 @@ that was wrong in #5620. Its twelve cases pin every way the gate can conclude
 against the label and the permit/stop it must produce, including the
 trusty-review 0.16.0 run verbatim as case 3. `PREFLIGHT_SELFTEST_SCRIPT` points
 it at another revision of `preflight-publish.sh`, which is how the red-then-green
-is shown: against `main` before the fix, case 3 permits the publish.
+is shown: against `main` before the fix, case 3 permits the publish. Its
+accepted-break cases (a)-(g) run declarations against the real trusty-mpm 1.6.3
+-> 1.6.4 break (`break-lints.out`); each fails against a script with no
+declaration support.
 
 `scripts/check_semver_selftest.sh` runs first in CI. Cases 1-4 cover the gate's
 original fail-open surfaces — an unscanned diff and an unreachable or erroring

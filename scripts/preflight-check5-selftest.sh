@@ -83,6 +83,18 @@
 #                             is required for the clean arm, so a malfunctioning
 #                             differ lands in NO VERDICT rather than in [PASS].
 #
+#   Accepted-break cases (owner ruling 2026-09-22), over the real trusty-mpm
+#   1.6.3 -> 1.6.4 break and scripts/lib/semver_accepted_breaks.sh:
+#     (f) complete declaration  [WARN] naming crate, version, reason, every lint
+#                               and every computed entry; permits.
+#     (a) undeclared break      one item, then one whole lint, left out: [FAIL].
+#     (b) wrong release         crate or version inside the file differs, or the
+#                               only file is for another version: [FAIL].
+#     (c) no reason             blank or missing `reason` row: [FAIL].
+#     (d) blind gate            a complete declaration + no verdict: [FAIL].
+#     (e) no declaration        the break stops, as before.
+#     (g) unreadable list       fail counts and failure blocks disagree: [FAIL].
+#
 # HOW IT DRIVES THE REAL DECISION: the two functions are lifted out of
 #   preflight-publish.sh BY PATTERN (the same awk-extraction
 #   check_semver_selftest.sh uses for release_type), so this exercises the
@@ -179,8 +191,8 @@ run_decision() {
     set +e
     # Globals the extracted functions read. MANIFEST appears only in the
     # break-remedy text; PKG_NAME/VERSION are the crate under test.
-    PKG_NAME="stub-crate"
-    VERSION="9.9.9"
+    PKG_NAME="${SELFTEST_PKG:-stub-crate}"
+    VERSION="${SELFTEST_VERSION:-9.9.9}"
     # Mirrors the shipped globals: semver_decide sets this, semver_types_advisory
     # reads it. Initialised to 0 here for the same reason it is there — a run
     # that never reached the count must refuse, not inherit a stale number.
@@ -191,6 +203,10 @@ run_decision() {
     SELFTEST_FIXTURE="${FIXTURES}/${fixture}"
     SELFTEST_GATE_RC="$gate_rc"
     export SELFTEST_FIXTURE SELFTEST_GATE_RC
+
+    # The accepted-breaks library preflight-publish.sh sources, from this tree.
+    # shellcheck source=lib/semver_accepted_breaks.sh
+    . "${REPO_TOP}/scripts/lib/semver_accepted_breaks.sh"
 
     # The shipped definitions, lifted by pattern so a drifted copy cannot be
     # what passes. A missing function is a loud failure, not a silent skip.
@@ -431,6 +447,139 @@ elif [[ "$body" != *"left over from"* ]]; then
 else
   pass_case "gate compared nothing -> differ NOT RUN, no cache read"
 fi
+
+# ===========================================================================
+# (a)-(g). Accepted breaks (owner ruling 2026-09-22). break-lints.out is the
+#          real trusty-mpm 1.6.3 -> 1.6.4 break: 7 failed lints, 25 distinct entries.
+#          Every case must fail against a preflight-publish.sh with no
+#          declaration support: (f) because that script stops, the rest because
+#          they assert the reason the declaration was refused.
+# ===========================================================================
+DECL_DIR="${SCRATCH}/scripts/semver-accepted-breaks"
+ACCEPT_REASON="owner ruling 2026-09-22: accept the breaking API changes on main"
+ACCEPT_ROWS="accept constructible_struct_adds_field BuildersConfig
+accept constructible_struct_adds_field BuilderSlotResponse
+accept derive_trait_impl_removed BuildersConfig Eq
+accept enum_no_repr_variant_discriminant_changed SectionId
+accept enum_variant_added ManagedError
+accept enum_variant_added ResumeManagedError
+accept enum_variant_added SectionId
+accept function_parameter_count_changed build_adapter
+accept method_parameter_count_changed ClaudeCodeAdapter::new
+accept struct_marked_non_exhaustive Delegation"
+
+# write_decl <file-pkg> <file-version> <body> — leave exactly one declaration.
+write_decl() {
+  rm -rf "$DECL_DIR"
+  mkdir -p "$DECL_DIR"
+  printf '%s\n' "$3" > "${DECL_DIR}/$1-$2.txt"
+}
+
+# decl_body <crate> <version> <reason-row> <accept-rows>
+decl_body() {
+  printf 'crate %s\nversion %s\n%s\n%s\n' "$1" "$2" "$3" "$4"
+}
+
+# check_raw <name> <want-status> <must-not, or -> <must-have>... — over $raw.
+check_raw() {
+  local name="$1" want="$2" must_not="$3" status body needle
+  shift 3
+  status="$(printf '%s\n' "$raw" | sed -n 1p)"
+  body="$(printf '%s\n' "$raw" | sed '1d')"
+  if [[ "$status" != "$want" ]]; then
+    fail_case "${name}: expected the decision to return ${want}, got ${status}" "$body"
+    return
+  fi
+  if [[ "$must_not" != "-" && "$body" == *"$must_not"* ]]; then
+    fail_case "${name}: output wrongly said '${must_not}'" "$body"
+    return
+  fi
+  for needle in "$@"; do
+    if [[ "$body" != *"$needle"* ]]; then
+      fail_case "${name}: output never said '${needle}'" "$body"
+      return
+    fi
+  done
+  pass_case "${name} -> decision returns ${status}"
+}
+
+run_mpm() {
+  SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 run_decision "$1" "$2"
+}
+
+# --- (f) A complete declaration downgrades BREAK to WARN, naming everything.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(f) complete declaration" 0 "[PASS] semver:" \
+  "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+  "Reason: ${ACCEPT_REASON}" \
+  "Accepted lints: constructible_struct_adds_field, derive_trait_impl_removed, enum_no_repr_variant_discriminant_changed, enum_variant_added, function_parameter_count_changed, method_parameter_count_changed, struct_marked_non_exhaustive" \
+  "constructible_struct_adds_field: field BuilderSlotResponse.slot_refused" \
+  "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters"
+
+# --- (a) A break the declaration does not list still fails. Dropping the
+#         ResumeManagedError row also proves `ManagedError` does not cover it.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
+  "$(printf '%s\n' "$ACCEPT_ROWS" | grep -v ' ResumeManagedError$')")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(a) one item undeclared" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "NOT DECLARED  enum_variant_added: variant ResumeManagedError:AlreadyResuming"
+
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
+  "$(printf '%s\n' "$ACCEPT_ROWS" | grep -v struct_marked_non_exhaustive)")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(a) one lint undeclared" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "NOT DECLARED  struct_marked_non_exhaustive: struct Delegation"
+
+# --- (b) The declaration must name this crate and this version.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-common 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(b) wrong crate inside the file" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "names crate 'trusty-common', but this publish is 'trusty-mpm'"
+
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.3 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(b) wrong version inside the file" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "names version '1.6.3', but this publish is '1.6.4'"
+
+write_decl trusty-mpm 1.6.3 "$(decl_body trusty-mpm 1.6.3 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(b) declaration only for another version" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "committed scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
+
+# --- (c) The reason is mandatory and must say something.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason    " "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(c) empty reason" 1 "ACCEPTED BREAK" "[FAIL]" "the 'reason' row is empty"
+
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "# no reason" "$ACCEPT_ROWS")"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(c) missing reason" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "needs exactly one 'reason' row, found 0"
+
+# --- (d) A complete declaration never covers a gate with no verdict.
+write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_mpm inventory-blind.out 0)"
+check_raw "accepted/(d) blind inventory" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "does not cover a gate that produced no verdict"
+raw="$(run_mpm no-verdict.out 3)"
+check_raw "accepted/(d) no verdict (exit 3)" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "does not cover a gate that produced no verdict"
+
+# --- (e) No declaration: the break stops the publish, and the remedy names the
+#         one file that could change that.
+rm -rf "$DECL_DIR"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "accepted/(e) no declaration" 1 "ACCEPTED BREAK" "[FAIL] semver: public-API check failed" \
+  "committed scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
+
+# --- (g) A break list that does not parse is never matched. break.out counts 9
+#         failed lints and carries no failure block.
+write_decl stub-crate 9.9.9 "$(decl_body stub-crate 9.9.9 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
+raw="$(run_decision break.out 1)"
+check_raw "accepted/(g) unreadable break list" 1 "ACCEPTED BREAK" "[FAIL]" \
+  "could not be read completely"
+rm -rf "$DECL_DIR"
 
 echo
 if [[ "$FAILED" -ne 0 ]]; then
