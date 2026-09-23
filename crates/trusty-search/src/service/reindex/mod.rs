@@ -280,6 +280,9 @@ mod embed_pause_tests;
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]
 mod root_hijack_tests;
+// #8438: the swap and staging paths honour the registry's layout.
+#[cfg(test)]
+mod registry_layout_8438_tests;
 // Issue #3979: end-to-end interrupt/resume equivalence plus the corrupt- and
 // stale-checkpoint fallbacks. Isolated from `tests.rs` for the same reason
 // `root_hijack_tests` is — the 1500-SLOC test-file cap.

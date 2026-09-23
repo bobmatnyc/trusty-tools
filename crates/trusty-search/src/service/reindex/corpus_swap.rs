@@ -36,23 +36,27 @@ use super::checkpoint::{ReindexCheckpoint, ResumeState};
 /// of the colocated-vs-legacy routing would be a silent correctness hazard — the
 /// probe could inspect one file while the swap wrote another — so both callers
 /// share this one function.
-/// What: returns the colocated `.trusty-search/index.redb.tmp` when the root has
-/// colocated storage (#403), otherwise the daemon-global per-index staging path.
-/// A resolution failure is logged at `warn` and returns `None`, which puts the
-/// caller on the direct-write-to-live fallback exactly as before.
+/// What: returns `index.redb.tmp` inside the registry-named storage directory
+/// (#8438 — never chosen by probing for `<root>/.trusty-search/`). A resolution
+/// failure, including a #8438 guard refusal, is logged at `warn` and returns
+/// `None`, which puts the caller on the direct-write-to-live fallback; the live
+/// path goes through the same resolver and is refused the same way.
 /// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`
 /// depends on the probe and the swap agreeing on one path.
-pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> Option<PathBuf> {
-    let resolved = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
-        crate::service::colocated_storage::colocated_redb_tmp_path(&handle.root_path)
-    } else {
-        crate::service::persistence::corpus_redb_tmp_path(&index_id.0)
-    };
+pub(super) async fn staging_corpus_path(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+) -> Option<PathBuf> {
+    let resolved = crate::service::storage_layout::handle_file(
+        handle,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await;
     match resolved {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(
-                "staged corpus swap: cannot resolve staging corpus path for '{}' ({e}) — \
+                "staged corpus swap: cannot resolve staging corpus path for '{}' ({e:#}) — \
                  reindex will write directly to the live corpus",
                 index_id.0
             );
@@ -162,7 +166,7 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     // Issue #403: route tmp corpus path to colocated or legacy storage
     // (extracted to `staging_corpus_path` for #3979 — the resume probe must
     // resolve the identical path).
-    let Some(tmp_path) = staging_corpus_path(handle, index_id) else {
+    let Some(tmp_path) = staging_corpus_path(handle, index_id).await else {
         return Ok(None);
     };
     // Open the staging store on a blocking worker (redb's API is sync), then
@@ -596,32 +600,22 @@ pub(super) async fn commit_staged_corpus_swap(
     index_id: &IndexId,
     tmp_path: &Path,
 ) -> bool {
-    // Issue #403: route live corpus path to colocated or legacy storage.
-    let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
-        match crate::service::colocated_storage::colocated_redb_path(&handle.root_path) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "force reindex: cannot resolve colocated live corpus path for '{}' ({e}) — \
-                     staged corpus left at {}",
-                    index_id.0,
-                    tmp_path.display()
-                );
-                return false;
-            }
-        }
-    } else {
-        match crate::service::persistence::corpus_redb_path(&index_id.0) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "force reindex: cannot resolve live corpus path for '{}' ({e}) — \
-                     staged corpus left at {}",
-                    index_id.0,
-                    tmp_path.display()
-                );
-                return false;
-            }
+    // #8438: the live corpus path comes from the registry-named layout.
+    let live_path = match crate::service::storage_layout::handle_file(
+        handle,
+        crate::service::storage_layout::REDB_FILE,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "force reindex: cannot resolve live corpus path for '{}' ({e:#}) — \
+                 staged corpus left at {}",
+                index_id.0,
+                tmp_path.display()
+            );
+            return false;
         }
     };
     // #7991: take redb's own advisory lock on the live corpus and HOLD it
@@ -750,16 +744,18 @@ pub(super) async fn abort_staged_corpus_swap(
     index_id: &IndexId,
     tmp_path: &Path,
 ) {
-    {
+    // #8438: the layout is read under the same write guard that detaches the
+    // staging store, then the live path is resolved from it.
+    let layout = {
         let mut indexer = handle.indexer.write().await;
         let _ = indexer.take_corpus_store();
-    }
-    // Issue #403: route live corpus path to colocated or legacy storage.
-    let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
-        crate::service::colocated_storage::colocated_redb_path(&handle.root_path)
-    } else {
-        crate::service::persistence::corpus_redb_path(&index_id.0)
+        indexer.storage_layout()
     };
+    let live_path = layout.file(
+        &index_id.0,
+        &handle.root_path,
+        crate::service::storage_layout::REDB_FILE,
+    );
     let tmp = tmp_path.to_path_buf();
     let index_id_inner = index_id.0.clone();
 

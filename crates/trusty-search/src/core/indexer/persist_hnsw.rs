@@ -453,6 +453,8 @@ impl CodeIndexer {
 
         let index_id = self.index_id.clone();
         let root_path = self.root_path.clone();
+        // #8438: the registry-named layout, never a probe of the root.
+        let layout = self.storage_layout;
         let store = self.store.clone();
         let chunks = self.chunks.clone();
         let entities = self.entities.clone();
@@ -473,13 +475,18 @@ impl CodeIndexer {
         // captured once at spawn.
         self.snapshot_writer_shape();
         tokio::spawn(async move {
-            // Issue #403: route HNSW path to colocated or legacy storage.
-            let is_colocated = crate::service::colocated_storage::has_colocated_storage(&root_path);
+            use crate::service::storage_layout::{is_write_refusal, HNSW_FILE, HNSW_STAGING_FILE};
             // Re-resolve paths in the task so the persistence layer's path
             // resolution failures don't crash the commit caller. The chunks
             // JSON path is only needed in the legacy (no redb) mode.
             let chunks_path = if persist_chunks_json {
-                match crate::service::persistence::chunks_path(&index_id) {
+                // #8438: `chunks.json` is a data-dir-only legacy artifact (the
+                // read side looks nowhere else), resolved through the guard.
+                match crate::service::storage_layout::StorageLayout::DataDir.file(
+                    &index_id,
+                    &root_path,
+                    crate::service::storage_layout::CHUNKS_JSON_FILE,
+                ) {
                     Ok(p) => Some(p),
                     Err(e) => {
                         tracing::debug!(
@@ -492,27 +499,21 @@ impl CodeIndexer {
             } else {
                 None
             };
-            let hnsw_path = if is_colocated {
-                match crate::service::colocated_storage::colocated_hnsw_path(&root_path) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::debug!(
-                            "incremental persist: cannot resolve colocated hnsw path for '{index_id}': {e}"
-                        );
-                        persist_state.in_flight.store(false, Ordering::Release);
-                        return;
-                    }
-                }
-            } else {
-                match crate::service::persistence::hnsw_path(&index_id) {
-                    Ok(p) => p,
-                    Err(e) => {
+            // #8438: resolved through the registry-named layout. A guard
+            // refusal is an ERROR and the checkpoint is skipped — never
+            // redirected to another directory.
+            let hnsw_path = match layout.file(&index_id, &root_path, HNSW_FILE) {
+                Ok(p) => p,
+                Err(e) => {
+                    if is_write_refusal(&e) {
+                        tracing::error!("incremental persist: {e:#} — HNSW checkpoint skipped");
+                    } else {
                         tracing::debug!(
                             "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
                         );
-                        persist_state.in_flight.store(false, Ordering::Release);
-                        return;
                     }
+                    persist_state.in_flight.store(false, Ordering::Release);
+                    return;
                 }
             };
             // Issue #3970: while a reindex is staging (`PersistState::reindexing`),
@@ -524,11 +525,7 @@ impl CodeIndexer {
             // coalescing-loop iteration (below), not just once up front, so a
             // reindex that completes mid-loop is picked up on the very next
             // iteration rather than staying pinned to a stale destination.
-            let hnsw_staging_path = if is_colocated {
-                crate::service::colocated_storage::colocated_hnsw_staging_path(&root_path)
-            } else {
-                crate::service::persistence::hnsw_staging_path(&index_id)
-            };
+            let hnsw_staging_path = layout.file(&index_id, &root_path, HNSW_STAGING_FILE);
 
             // Coalescing loop: snapshot+save while `dirty` keeps being set.
             // Bound the loop so a pathological caller can't pin us forever

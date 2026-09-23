@@ -45,6 +45,8 @@ pub mod shutdown_flush;
 pub mod rpc;
 pub mod socket;
 pub mod stall_tracker;
+// #8438: the registry-resolved storage layout every write path resolves through.
+pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
 pub mod walker;

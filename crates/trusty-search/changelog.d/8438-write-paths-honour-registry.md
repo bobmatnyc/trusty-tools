@@ -1,0 +1,4 @@
+Fixed
+- Every write path now resolves its target from the index registry's `colocated` flag instead of probing whether `<root>/.trusty-search/` exists: the incremental HNSW persist (and so `index_file` and watcher batches), reindex corpus staging, commit and abort, the HNSW swap, the shutdown flush, and the M003 and M005 migrations. A `colocated=false` index whose repository already holds a `.trusty-search/` directory no longer writes into it, and its chunks and HNSW snapshot stay in the data dir together (#8438).
+- A resolution that would place a non-colocated index's storage inside `<root>/.trusty-search/` is refused with an error and the write is skipped, never redirected (#8438).
+- `DELETE /indexes/:id?delete_data=true` removes the colocated `<root>/.trusty-search/` directory of a colocated index, and never touches that directory for a non-colocated one (#8438).
