@@ -101,6 +101,9 @@ mod tests_6363;
 // #6380: a delete whose expected root moved must be refused, not applied.
 #[cfg(test)]
 mod tests_6380;
+// #8438: `delete_data` removes the directory the registry names, per source.
+#[cfg(test)]
+mod tests_8438;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

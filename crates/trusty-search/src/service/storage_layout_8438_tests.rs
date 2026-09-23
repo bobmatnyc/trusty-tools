@@ -82,6 +82,28 @@ impl Drop for Fixture {
     }
 }
 
+/// Delete the fixture's index root, leaving its parent in place.
+///
+/// Why (#8438): a colocated write used to `create_dir_all` the root back into
+/// existence, defeating the #484 missing-root guard at warm boot.
+pub(crate) fn remove_root(fx: &Fixture) {
+    std::fs::remove_dir_all(fx.root.path()).expect("remove root");
+    assert!(!fx.root.path().exists(), "precondition: the root is gone");
+}
+
+/// Poll up to 10 s until the detached incremental persist task has finished
+/// (`PersistState::in_flight` back to `false`). `force_incremental_persist`
+/// sets `in_flight` before it spawns, so a `false` read means the task ran.
+pub(crate) async fn wait_persist_task_done(indexer: &CodeIndexer) -> bool {
+    for _ in 0..1000 {
+        if !indexer.persist_flags_for_tests().0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
 /// Poll up to 10 s for `path` to exist (the incremental persist is detached).
 pub(crate) async fn wait_for(path: &Path) -> bool {
     for _ in 0..200 {
@@ -143,6 +165,33 @@ async fn colocated_layout_creates_a_missing_directory() {
     );
 }
 
+/// Why (#8438): the incremental persist (watcher batches, `index_file`) of a
+/// colocated index whose root was deleted recreated `<root>` through
+/// `create_dir_all`, so the #484 warm-boot guard passed and `git worktree add`
+/// at that path failed. The skip must also leave `dirty` set.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn colocated_persist_never_recreates_a_missing_root() {
+    let fx = Fixture::new(false);
+    let handle = fx.handle("ts-8438-gone", StorageLayout::Colocated).await;
+    remove_root(&fx);
+    let indexer = handle.indexer.read().await;
+    indexer.force_incremental_persist();
+    assert!(
+        wait_persist_task_done(&indexer).await,
+        "the persist task must finish"
+    );
+    assert!(
+        !fx.root.path().exists(),
+        "#8438: a colocated persist must never recreate a deleted root"
+    );
+    assert!(
+        indexer.persist_flags_for_tests().1,
+        "a skipped persist must not clear `dirty` as if it had written"
+    );
+}
+
 /// Why (#8438): a data dir that resolves INTO the repo's `.trusty-search/`
 /// must be refused with an error, and the write path must write nothing.
 /// Test: this test.
@@ -157,9 +206,19 @@ async fn guard_refuses_a_data_dir_that_resolves_into_the_repo() {
     assert!(is_write_refusal(&err), "wrong error: {err:#}");
 
     let handle = fx.handle("ts-8438-guard", StorageLayout::DataDir).await;
-    handle.indexer.read().await.force_incremental_persist();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let indexer = handle.indexer.read().await;
+    indexer.force_incremental_persist();
+    // #8438: observe the detached persist attempt finish, never a fixed sleep.
+    assert!(
+        wait_persist_task_done(&indexer).await,
+        "the persist task must finish"
+    );
     fx.assert_repo_dir_empty();
+    assert!(
+        indexer.persist_flags_for_tests().1,
+        "a refused persist must not clear `dirty` as if it had written"
+    );
+    drop(indexer);
 
     // Colocated is the registry naming that directory: allowed.
     assert!(StorageLayout::Colocated
@@ -186,6 +245,11 @@ fn delete_data_removes_the_directory_the_registry_names() {
         "a non-colocated delete must not touch <root>/.trusty-search/"
     );
 
+    // A colocated delete of a directory holding only index files removes it.
+    std::fs::remove_file(fx.repo_dir().join("marker")).unwrap();
+    for name in [REDB_FILE, HNSW_FILE, "hnsw.keys.json", SCHEMA_VERSION_FILE] {
+        std::fs::write(fx.repo_dir().join(name), b"index bytes").unwrap();
+    }
     StorageLayout::Colocated
         .remove_storage("ts-8438-del", Some(fx.root.path()))
         .unwrap();
@@ -193,6 +257,51 @@ fn delete_data_removes_the_directory_the_registry_names() {
         !fx.repo_dir().exists(),
         "a colocated delete must remove <root>/.trusty-search/"
     );
+}
+
+/// Why (#8438): `$HOME/.trusty-search/` is both a colocated index dir (for an
+/// index rooted at `$HOME`) and the daemon's runtime dir; `delete_data` must
+/// remove only the index files and keep the directory while anything else is
+/// in it.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn delete_data_keeps_foreign_files_in_a_shared_trusty_search_dir() {
+    let fx = Fixture::new(true);
+    let own = [
+        REDB_FILE,
+        HNSW_FILE,
+        "hnsw.keys.json",
+        HNSW_STAGING_FILE,
+        REDB_TMP_FILE,
+        SCHEMA_VERSION_FILE,
+        CHUNKS_JSON_FILE,
+    ];
+    for name in own {
+        std::fs::write(fx.repo_dir().join(name), b"index bytes").unwrap();
+    }
+    let foreign = ["config.toml", "http_addr", "mcp_http_addr"];
+    for name in foreign {
+        std::fs::write(fx.repo_dir().join(name), b"daemon runtime").unwrap();
+    }
+
+    StorageLayout::Colocated
+        .remove_storage("ts-8438-shared", Some(fx.root.path()))
+        .unwrap();
+
+    for name in own {
+        assert!(
+            !fx.repo_dir().join(name).exists(),
+            "index file {name} must be removed"
+        );
+    }
+    for name in foreign {
+        assert_eq!(
+            std::fs::read(fx.repo_dir().join(name)).unwrap(),
+            b"daemon runtime",
+            "#8438: foreign file {name} next to index.redb must survive delete_data"
+        );
+    }
 }
 
 /// Why (#8438): the split brain — chunks in the data dir, HNSW in the repo —

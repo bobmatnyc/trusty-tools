@@ -354,6 +354,18 @@ impl CodeIndexer {
             .store(in_flight, Ordering::Release);
     }
 
+    /// Test-only: `(in_flight, dirty)` of [`PersistState`].
+    ///
+    /// #8438: lets a test observe the detached persist task finish (and that a
+    /// skipped persist left `dirty` set) instead of sleeping.
+    #[cfg(test)]
+    pub(crate) fn persist_flags_for_tests(&self) -> (bool, bool) {
+        (
+            self.persist_state.in_flight.load(Ordering::Acquire),
+            self.persist_state.dirty.load(Ordering::Acquire),
+        )
+    }
+
     /// Force an HNSW snapshot now, bypassing the per-batch throttle
     /// ([`crate::core::indexer::HNSW_SNAPSHOT_BATCH_INTERVAL`], issue #29).
     ///
@@ -477,8 +489,27 @@ impl CodeIndexer {
         tokio::spawn(async move {
             use crate::service::storage_layout::{is_write_refusal, HNSW_FILE, HNSW_STAGING_FILE};
             // Re-resolve paths in the task so the persistence layer's path
-            // resolution failures don't crash the commit caller. The chunks
-            // JSON path is only needed in the legacy (no redb) mode.
+            // resolution failures don't crash the commit caller.
+            //
+            // #8438: resolved through the registry-named layout, and FIRST, so
+            // a refusal (guard, or a colocated root that no longer exists)
+            // skips the checkpoint before anything else is created. The skip
+            // leaves `dirty` set — nothing was written. Never redirected.
+            let hnsw_path = match layout.file(&index_id, &root_path, HNSW_FILE) {
+                Ok(p) => p,
+                Err(e) => {
+                    if is_write_refusal(&e) {
+                        tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+                    } else {
+                        tracing::debug!(
+                            "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
+                        );
+                    }
+                    persist_state.in_flight.store(false, Ordering::Release);
+                    return;
+                }
+            };
+            // The chunks JSON path is only needed in the legacy (no redb) mode.
             let chunks_path = if persist_chunks_json {
                 // #8438: `chunks.json` is a data-dir-only legacy artifact (the
                 // read side looks nowhere else), resolved through the guard.
@@ -489,32 +520,20 @@ impl CodeIndexer {
                 ) {
                     Ok(p) => Some(p),
                     Err(e) => {
-                        tracing::debug!(
-                            "incremental persist: cannot resolve chunks path for '{index_id}': {e}"
-                        );
+                        if is_write_refusal(&e) {
+                            tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+                        } else {
+                            tracing::debug!(
+                                "incremental persist: cannot resolve chunks path for \
+                                 '{index_id}': {e}"
+                            );
+                        }
                         persist_state.in_flight.store(false, Ordering::Release);
                         return;
                     }
                 }
             } else {
                 None
-            };
-            // #8438: resolved through the registry-named layout. A guard
-            // refusal is an ERROR and the checkpoint is skipped — never
-            // redirected to another directory.
-            let hnsw_path = match layout.file(&index_id, &root_path, HNSW_FILE) {
-                Ok(p) => p,
-                Err(e) => {
-                    if is_write_refusal(&e) {
-                        tracing::error!("incremental persist: {e:#} — HNSW checkpoint skipped");
-                    } else {
-                        tracing::debug!(
-                            "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
-                        );
-                    }
-                    persist_state.in_flight.store(false, Ordering::Release);
-                    return;
-                }
             };
             // Issue #3970: while a reindex is staging (`PersistState::reindexing`),
             // periodic checkpoints must never publish straight to the live

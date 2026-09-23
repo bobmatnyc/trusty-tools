@@ -689,7 +689,8 @@ pub fn hnsw_staging_path(index_id: &str) -> Result<PathBuf> {
 /// `<root>/.trusty-search/` when `entry.colocated`, else
 /// `<data_dir>/indexes/<id>/`, with the #8438 write guard applied.
 /// Test: `service::storage_layout::storage_layout_8438_tests`.
-pub fn storage_dir_for(entry: &PersistedIndex) -> Result<PathBuf> {
+// #8438: private — the `*_for_entry` helpers below are its only callers.
+fn storage_dir_for(entry: &PersistedIndex) -> Result<PathBuf> {
     crate::service::storage_layout::StorageLayout::for_entry(entry)
         .storage_dir(&entry.id, &entry.root_path)
 }
@@ -699,7 +700,7 @@ fn storage_file_for(entry: &PersistedIndex, name: &str) -> Result<PathBuf> {
     Ok(storage_dir_for(entry)?.join(name))
 }
 
-/// Resolve the HNSW snapshot path for `entry` through [`storage_dir_for`].
+/// Resolve the HNSW snapshot path for `entry` through `storage_dir_for`.
 ///
 /// Why: colocated indexes need the `root_path`, which the id-only helpers lack.
 /// What: `<storage dir>/hnsw.usearch`.
@@ -708,7 +709,7 @@ pub fn hnsw_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
     storage_file_for(entry, crate::service::storage_layout::HNSW_FILE)
 }
 
-/// Resolve the redb corpus path for `entry` through [`storage_dir_for`].
+/// Resolve the redb corpus path for `entry` through `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
 /// What: `<storage dir>/index.redb`.
@@ -718,7 +719,7 @@ pub fn corpus_redb_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
 }
 
 /// Resolve the schema-version stamp path for `entry` through
-/// [`storage_dir_for`].
+/// `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
 /// What: `<storage dir>/schema_version.json`.
@@ -728,7 +729,7 @@ pub fn schema_version_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> 
 }
 
 /// Resolve the staging redb corpus path for `entry` through
-/// [`storage_dir_for`].
+/// `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
 /// What: `<storage dir>/index.redb.tmp`.

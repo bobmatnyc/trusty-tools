@@ -380,24 +380,30 @@ async fn flush_one_index_on_shutdown(
             return false;
         }
     };
-    use crate::service::storage_layout::{is_write_refusal, CHUNKS_JSON_FILE, HNSW_FILE};
-    let resolve = |name: &str| match layout.file(&id.0, &handle.root_path, name) {
-        Ok(p) => Some(p),
-        Err(e) if is_write_refusal(&e) => {
-            tracing::error!("shutdown: {e:#} — flush skipped");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("shutdown: {name} path unresolvable for '{}': {e}", id.0);
-            None
-        }
+    use crate::service::storage_layout::{
+        is_write_refusal, StorageLayout, CHUNKS_JSON_FILE, HNSW_FILE,
     };
-    // `chunks.json` is only written when no `CorpusStore` is wired; a colocated
-    // index keeps its corpus in `.trusty-search/index.redb`.
-    let Some(chunks_path) = resolve(CHUNKS_JSON_FILE) else {
+    let resolve =
+        |layout: StorageLayout, name: &str| match layout.file(&id.0, &handle.root_path, name) {
+            Ok(p) => Some(p),
+            Err(e) if is_write_refusal(&e) => {
+                tracing::error!("shutdown: {e:#} — flush skipped");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("shutdown: {name} path unresolvable for '{}': {e}", id.0);
+                None
+            }
+        };
+    // #8438: HNSW first, so a refusal (guard, or a colocated root that no
+    // longer exists) skips the whole flush before anything is created.
+    let Some(hnsw_path) = resolve(layout, HNSW_FILE) else {
         return true;
     };
-    let Some(hnsw_path) = resolve(HNSW_FILE) else {
+    // #8438: `chunks.json` (written only when no `CorpusStore` is wired) is a
+    // data-dir-only artifact for every layout — the one reader,
+    // `JsonCorpusToRedbMigration`, looks nowhere else.
+    let Some(chunks_path) = resolve(StorageLayout::DataDir, CHUNKS_JSON_FILE) else {
         return true;
     };
 

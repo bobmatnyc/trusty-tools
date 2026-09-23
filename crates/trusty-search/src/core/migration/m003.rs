@@ -259,6 +259,66 @@ mod tests {
         assert_eq!(count2, 0, "second rewrite must be a no-op");
     }
 
+    /// Why (#8438): `resolve_hnsw_path` used to prefer
+    /// `<root>/.trusty-search/hnsw.usearch` whenever that file existed, so a
+    /// `colocated=false` index rewrote the repo's copy instead of its own.
+    /// What: the repo holds an `hnsw.usearch` + sidecar, the data dir holds the
+    /// index's own absolute-keyed snapshot; M003 resolves and rewrites, and the
+    /// repo copy must be byte-identical afterwards.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_m003_rewrites_the_data_dir_not_the_repo_copy() {
+        use crate::service::storage_layout::storage_layout_8438_tests::Fixture;
+        use crate::service::storage_layout::{StorageLayout, HNSW_FILE};
+        const ID: &str = "m003-8438";
+        let fx = Fixture::new(true);
+        let repo_hnsw = fx.repo_dir().join(HNSW_FILE);
+        let repo_keys = repo_hnsw.with_extension("keys.json");
+        std::fs::write(&repo_hnsw, b"another instance's usearch").unwrap();
+        std::fs::write(&repo_keys, b"{\"another\":\"instance\"}").unwrap();
+        let (hnsw_before, keys_before) = (
+            std::fs::read(&repo_hnsw).unwrap(),
+            std::fs::read(&repo_keys).unwrap(),
+        );
+
+        let own_hnsw = fx.data_index_dir(ID).join(HNSW_FILE);
+        let abs_id = format!("{}/src/lib.rs:1:9", fx.root.path().display());
+        let store = UsearchStore::new(4).expect("store init");
+        store
+            .upsert(&abs_id, vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        std::fs::create_dir_all(own_hnsw.parent().unwrap()).unwrap();
+        store.save(&own_hnsw).await.unwrap();
+        let mut indexer =
+            CodeIndexer::new(ID, fx.root.path()).with_storage_layout(StorageLayout::DataDir);
+        indexer.set_store(Arc::new(store));
+        let handle = IndexHandle::bare(
+            IndexId::new(ID),
+            Arc::new(RwLock::new(indexer)),
+            fx.root.path().to_path_buf(),
+        );
+
+        assert_eq!(resolve_hnsw_path(&handle).await.unwrap(), own_hnsw);
+        M003HnswKeyRelativization
+            .apply(&handle)
+            .await
+            .expect("apply");
+
+        let own_keys = std::fs::read_to_string(own_hnsw.with_extension("keys.json")).unwrap();
+        assert!(
+            own_keys.contains("src/lib.rs:1:9") && !own_keys.contains(&abs_id),
+            "M003 must rewrite the data-dir sidecar: {own_keys}"
+        );
+        assert_eq!(std::fs::read(&repo_hnsw).unwrap(), hnsw_before);
+        assert_eq!(
+            std::fs::read(&repo_keys).unwrap(),
+            keys_before,
+            "#8438: the repo's .trusty-search copy must be byte-identical after M003"
+        );
+    }
+
     /// Why: validates that an absolute ID that does NOT share `root_path` as a
     /// prefix is left unchanged (the defensive warn-and-skip branch).
     #[tokio::test]
