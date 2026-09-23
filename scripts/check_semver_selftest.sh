@@ -333,6 +333,11 @@ if [[ "${1:-}" == "semver-checks" ]]; then
       else
         echo "CARGO_TARGET_DIR_PRESENT=no"
       fi
+      if [[ -n "${CARGO_BUILD_TARGET_DIR+x}" ]]; then
+        echo "CARGO_BUILD_TARGET_DIR_PRESENT=yes(${CARGO_BUILD_TARGET_DIR})"
+      else
+        echo "CARGO_BUILD_TARGET_DIR_PRESENT=no"
+      fi
       echo "SKIP_UI_BUILD=${SKIP_UI_BUILD:-}"
     } > "$SEMVER_SELFTEST_ENV_OUT"
   fi
@@ -1051,6 +1056,24 @@ elif [[ "$rc" -ne 0 ]]; then
   fail_case "accel/ambient-target-dir: neutralising the ambient value broke the run (exit ${rc})" "$out"
 else
   pass_case "an ambient CARGO_TARGET_DIR is unset for the subprocess without failing the run"
+fi
+
+# --- 29. CARGO_BUILD_TARGET_DIR is `build.target-dir` under its env name and
+#         relocates the rustdoc JSON exactly as case 28's variable does.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "CARGO_BUILD_TARGET_DIR=${STUB_DIR}/ambient-build-target-dir" \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/clean.out" \
+  "SEMVER_SELFTEST_RC=0")" || rc=$?
+if [[ ! -f "$ENV_OUT" ]]; then
+  fail_case "accel/ambient-build-target-dir: the gate never reached cargo semver-checks, so this case proves nothing" "$out"
+elif ! grep -qx "CARGO_BUILD_TARGET_DIR_PRESENT=no" "$ENV_OUT"; then
+  fail_case "accel/ambient-build-target-dir: CARGO_BUILD_TARGET_DIR reached cargo-semver-checks — it relocates the current rustdoc JSON and blinds the type differ" "$(cat "$ENV_OUT")"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "accel/ambient-build-target-dir: neutralising the ambient value broke the run (exit ${rc})" "$out"
+else
+  pass_case "an ambient CARGO_BUILD_TARGET_DIR is unset for the subprocess without failing the run"
 fi
 
 rm -rf "$STUB_DIR"
