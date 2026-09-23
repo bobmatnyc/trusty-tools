@@ -10,8 +10,8 @@
 //! never touches a plist, and the `com.trusty.mpm` daemon plist has no
 //! generator at all. This row is how such an install learns its plist is stale.
 //!
-//! What: [`check_launchd_process_type`] reads the `com.trusty.mpm` daemon and
-//! `com.trusty.mpm.supervisor` plists — the two tm jobs that start tmux
+//! What: [`check_launchd_process_type_in`] reads the `com.trusty.mpm` daemon
+//! and `com.trusty.mpm.supervisor` plists — the two tm jobs that start tmux
 //! servers — and [`build_process_type_check`] folds the readings into one row.
 //! `Background` fails; any other value short of `Interactive`, including an
 //! absent key (launchd's throttled `Standard` default), warns. Read-only.
