@@ -414,6 +414,45 @@ async fn find_pinned_gh_identity_skips_an_unpinned_duplicate() {
     assert_eq!(found.account.as_deref(), Some("bobmatnyc"));
 }
 
+/// 🔴 #5850 REGRESSION: two records pinning the SAME login give the session the
+/// one carrying a `config_dir`, not the global account.
+///
+/// Why: the `seed_from_config` record (login only) and the `tm --user` record
+/// (login plus scoped dir) are one identity. Treating them as a conflict spawned
+/// the session unpinned.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    registry
+        .register(project(
+            "jev",
+            "https://github.com/acme/widget",
+            Some("bob-duetto"),
+        ))
+        .await
+        .expect("register");
+    registry
+        .register(Project {
+            gh_account: Some("bob-duetto".to_string()),
+            ..project_with_config_dir(
+                "jev-matching",
+                "https://github.com/acme/widget",
+                &config_dir,
+            )
+        })
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("one login must resolve to a pin");
+    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
+}
+
 /// 🔴 #5850: two records pinning DIFFERENT accounts yield no pin for a session,
 /// where the daemon refuses the same registry — neither side guesses.
 /// Test: itself.

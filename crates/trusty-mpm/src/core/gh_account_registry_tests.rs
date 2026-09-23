@@ -427,6 +427,121 @@ fn a_malformed_second_matching_record_fails_closed() {
     );
 }
 
+/// 🔴 #5850 REGRESSION: two records pinning the SAME login agree, and the one
+/// carrying a `config_dir` wins.
+///
+/// Why this shape: `seed_from_config` writes `jev` with only `gh_account`, and
+/// `tm <url> --user bob-duetto` later writes `jev-matching` with the same login
+/// plus a scoped `config_dir`. Comparing whole records called that a conflict
+/// and refused a repository that has one unambiguous identity.
+/// Test: itself.
+#[test]
+fn same_login_pins_prefer_the_one_with_a_config_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto"}},
+                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect("one login is not a disagreement")
+        .expect("the config_dir pin must resolve");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 #5850 REGRESSION: logins that differ only in case name one account.
+///
+/// Why: GitHub logins are case-insensitive, so `Bob-Duetto` and `bob-duetto`
+/// are the same identity and must not block the repository.
+/// Test: itself.
+#[test]
+fn same_login_in_a_different_case_agrees() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"Bob-Duetto","github":{{"config_dir":"{0}"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{0}"}}}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect("a case difference is not a disagreement")
+        .expect("the pin must resolve");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 FAIL-CLOSED: one login pinned through two DIFFERENT config dirs blocks.
+///
+/// Why: the two dirs may hold different credentials, so which one `gh` should
+/// read is unanswered.
+/// Test: itself.
+#[test]
+fn same_login_with_conflicting_config_dirs_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-one"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-two"}}}}
+            }}}}"#
+        ),
+    );
+    let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect_err("two config dirs for one repository must refuse");
+    assert!(
+        err.contains("a-jev") && err.contains("b-jev") && err.contains("refusing to probe"),
+        "got: {err}"
+    );
+}
+
+/// A host-only record next to a pinned duplicate does not block the pin.
+///
+/// Why: a host-only binding names no identity. Counting it as a pin would make
+/// it "disagree" with the real one and block the repository.
+/// Test: itself.
+#[test]
+fn a_host_only_duplicate_does_not_block_the_pinned_record() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"host":"github.com"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect("a host-only duplicate must not block")
+        .expect("the pinned record must resolve");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
+}
+
 /// A record that sets only `github.host` names no identity, and falls through.
 ///
 /// Why: `GH_HOST` alone selects no account, so returning it as a pin would stop

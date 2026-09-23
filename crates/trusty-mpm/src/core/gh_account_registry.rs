@@ -141,18 +141,28 @@ impl RegistryPin {
     }
 
     /// Does this record name no identity? A host-only `github:` names none.
-    /// Test: `a_host_only_binding_is_not_a_pin`, `a_record_pinning_nothing_is_not_a_pin`.
+    /// Test: `a_host_only_binding_is_not_a_pin`, `a_record_pinning_nothing_is_not_a_pin`,
+    /// `a_host_only_duplicate_does_not_block_the_pinned_record`.
     fn is_empty(&self) -> bool {
         self.account.is_none() && self.github.as_ref().is_none_or(|g| !names_identity(g))
     }
 
+    /// The login this pin selects: `gh_account`, else `github.account`.
+    /// Test: `same_login_in_a_different_case_agrees`.
+    fn login(&self) -> Option<&str> {
+        self.account.as_deref().or_else(|| {
+            self.github
+                .as_ref()?
+                .account
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+        })
+    }
+
     /// The account name to NAME in a failure, when one is known.
     fn who(&self) -> String {
-        match self
-            .account
-            .as_deref()
-            .or_else(|| self.github.as_ref()?.account.as_deref())
-        {
+        match self.login() {
             Some(account) => format!("gh account '{account}'"),
             None => "the pinned gh identity".to_string(),
         }
@@ -212,12 +222,21 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
 /// lets an unpinned record hide a pinned one, and picking between two pins by
 /// position guesses at an account. The daemon's housekeeping probe and the
 /// session-spawn path both call this, so they cannot choose differently.
-/// What: drops records that pin nothing; `Ok(None)` when none are left,
-/// `Ok(Some(pin))` when every remaining record pins the same identity, and
-/// `Err` naming two records when they pin different ones. Order-independent.
+/// What: drops records that pin nothing. Agreement is judged on the identity a
+/// pin selects, not on the whole record: every remaining pin must carry the
+/// same effective login (case-insensitive), and no two may set different
+/// non-empty `config_dir` or `token_env` values — otherwise `Err` names two
+/// records. `Ok(Some(pin))` is the most specific agreeing pin (a `config_dir`
+/// outranks a `token_env`, which outranks neither), ties broken by record name,
+/// so the answer is order-independent. `Ok(None)` when no pin is left.
 /// Test: `an_unpinned_record_does_not_shadow_a_pinned_one`,
 /// `two_disagreeing_pins_for_one_repository_fail_closed`,
+/// `same_login_pins_prefer_the_one_with_a_config_dir`,
+/// `same_login_in_a_different_case_agrees`,
+/// `same_login_with_conflicting_config_dirs_fails_closed`,
+/// `a_host_only_duplicate_does_not_block_the_pinned_record`,
 /// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
+/// `find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login`,
 /// `find_pinned_gh_identity_refuses_disagreeing_pins`.
 pub(crate) fn select_pin(
     candidates: Vec<(String, RegistryPin)>,
@@ -227,18 +246,64 @@ pub(crate) fn select_pin(
         .filter(|(_, pin)| !pin.is_empty())
         .collect();
     pinned.sort_by(|a, b| a.0.cmp(&b.0));
-    let Some((first_name, first)) = pinned.first() else {
-        return Ok(None);
+    let login = |pin: &RegistryPin| pin.login().map(str::to_ascii_lowercase);
+    let config_dir = |pin: &RegistryPin| pin.github.as_ref().and_then(selected_config_dir);
+    let token_env = |pin: &RegistryPin| {
+        pin.github
+            .as_ref()
+            .and_then(named_token_env)
+            .map(str::to_string)
     };
-    if let Some((other_name, _)) = pinned.iter().find(|(_, pin)| pin != first) {
-        return Err(format!(
-            "the project registry records '{first_name}' and '{other_name}' both name this \
-             repository but pin different gh identities — refusing to probe it as either, or \
-             as this machine's global gh account (#5850). Remove one of the records or make \
-             their gh_account/github settings agree."
+    if let Some((a, b)) = first_disagreement(&pinned, |pin| Some(login(pin))) {
+        return Err(disagreement(a, b, "log in as different gh accounts"));
+    }
+    if let Some((a, b)) = first_disagreement(&pinned, config_dir) {
+        return Err(disagreement(a, b, "pin different gh config dirs"));
+    }
+    if let Some((a, b)) = first_disagreement(&pinned, token_env) {
+        return Err(disagreement(
+            a,
+            b,
+            "pin different `github.token_env` variables",
         ));
     }
-    Ok(Some(first.clone()))
+    let specificity = |pin: &RegistryPin| (config_dir(pin).is_some(), token_env(pin).is_some());
+    // `rev` makes `max_by_key` keep the FIRST record by name on a tie.
+    Ok(pinned
+        .into_iter()
+        .rev()
+        .max_by_key(|(_, pin)| specificity(pin))
+        .map(|(_, pin)| pin))
+}
+
+/// The first pair of records whose `field` values are both set and differ.
+/// Test: `same_login_with_conflicting_config_dirs_fails_closed`.
+fn first_disagreement<'a, T: PartialEq>(
+    pinned: &'a [(String, RegistryPin)],
+    field: impl Fn(&RegistryPin) -> Option<T>,
+) -> Option<(&'a str, &'a str)> {
+    let mut seen: Option<(&'a str, T)> = None;
+    for (name, pin) in pinned {
+        let Some(value) = field(pin) else { continue };
+        if let Some((first, first_value)) = &seen {
+            if *first_value != value {
+                return Some((first, name));
+            }
+        } else {
+            seen = Some((name, value));
+        }
+    }
+    None
+}
+
+/// The refusal for two registry records that answer the identity differently.
+/// Test: `two_disagreeing_pins_for_one_repository_fail_closed`.
+fn disagreement(a: &str, b: &str, how: &str) -> String {
+    format!(
+        "the project registry records '{a}' and '{b}' both name this repository but {how} — \
+         refusing to probe it as either, or as this machine's global gh account (#5850). \
+         Remove one of the records or make their gh_account/github settings agree."
+    )
 }
 
 /// Turn a pinned record into the `gh` overrides the session-spawn path injects.
