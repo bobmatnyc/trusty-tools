@@ -122,7 +122,9 @@
 #
 # Exit: 0 for every well-formed invocation, including every detection
 #   failure covered by FAIL OPEN above (a bad `--range`, missing value on
-#   `--range`, unresolvable ref, missing `cargo`/`jq`, bash <4 — see below).
+#   `--range`, unresolvable ref, a diff base that is not one commit — `a^!`
+#   resolves to `a^`, `a^-` does not resolve — missing `cargo`/`jq`, bash <4
+#   — see below).
 #   A malformed CLI invocation — an argument this parser does not recognize
 #   at all — exits 2 with a usage message on stderr; that scope exclusion is
 #   deliberate (#7777 review) so a real usage typo stays visible to a human
@@ -390,12 +392,14 @@ esac
 
 # The diff's old side, for rule 4's existence check: a script deleted or
 # renamed in the change set is absent on disk but still named by crates.
-# `a...b` diffs from merge-base(a, b); `a..b` and a lone `a` diff from `a`.
+# `a...b` diffs from merge-base(a, b); `a^!` from `a^`; `a..b` and a lone `a`
+# diff from `a`.
 DIFF_BASE=""
 case "$MODE" in
   staged) DIFF_BASE="HEAD" ;;
   range)
     case "$RANGE_SPEC" in
+      *^!) DIFF_BASE="${RANGE_SPEC%^!}^" ;;
       *...*)
         r_old="${RANGE_SPEC%%...*}"
         r_new="${RANGE_SPEC#*...}"
@@ -409,6 +413,14 @@ case "$MODE" in
     esac
     ;;
 esac
+# #7777 review round 2: a base that is not one commit (`a^-`, a failed
+# merge-base, an unborn HEAD) would make every base lookup miss silently.
+if [ "$MODE" != "files" ]; then
+  base_of="$RANGE_SPEC"
+  [ "$MODE" = "staged" ] && base_of="the staged change set"
+  DIFF_BASE="$(git rev-parse -q --verify "${DIFF_BASE}^{commit}" 2>/dev/null)" ||
+    fail_open "cannot resolve the diff base of '${base_of}'"
+fi
 
 # A file of nothing but blank lines is the same "nothing to act on" case as a
 # zero-byte file — strip blanks before judging emptiness.

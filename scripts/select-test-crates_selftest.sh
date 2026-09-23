@@ -236,7 +236,7 @@ assert_eq "--range with no value terminates promptly (not a 124 timeout)" \
 assert_eq "--range with no value fails open -> all crates, never nothing" \
   "${ALL_EIGHT}" "${range_missing_out}"
 
-# #7777 review round 3: ci.yml passes `--range ""` when merge-base fails.
+# #7777 review round 2: ci.yml passes `--range ""` when merge-base fails.
 assert_eq "--range \"\" (explicit empty string) fails open -> all crates" \
   "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range "" 2>/dev/null)"
 
@@ -400,7 +400,7 @@ assert_eq "fixture-shaped literal with no file on disk -> nothing" \
 assert_eq "crate change + fixture-shaped nonexistent path -> nothing extra" \
   "trusty-mpm-gui" "$(sr_run crates/trusty-mpm-gui/src/lib.rs scripts/go.sh)"
 
-# #7777 review round 3: a `/` before the path is a boundary; a name byte is not.
+# #7777 review round 2: a `/` before the path is a boundary; a name byte is not.
 assert_eq "path form \"./scripts/dot.sh\" -> bystander" \
   "bystander" "$(sr_run scripts/dot.sh)"
 assert_eq "path form format!(\"{r}/scripts/fmt.sh\") -> bystander" \
@@ -444,7 +444,7 @@ trusty-console
 trusty-mpm-gui
 trusty-search" "$(cd "${SR_NOCANARY}" && bash "${SCRIPT}" --files .github/workflows/ci.yml 2>/dev/null)"
 
-# #7777 review round 3: a script deleted or renamed in the range is absent on
+# #7777 review round 2: a script deleted or renamed in the range is absent on
 # disk but existed at the range base, so the crate naming it is still selected.
 SR_RANGE="${WORK}/scriptref-range"
 cp -R "${SR}" "${SR_RANGE}"
@@ -488,6 +488,24 @@ srr sh -c 'echo "echo unsigned" >scripts/sign.sh && git commit -qam "drop codesi
 SRR_SIGNEDIT="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
 assert_eq "codesign: --range dropping codesign from sign.sh -> trusty-common" \
   "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_SIGNEDIT}" 2>/dev/null)"
+# #7777 review round 2, HIGH: `<sha>^!` is one commit's own diff. Its base is
+# `<sha>^`; read as a literal ref it resolved nothing and selected nothing.
+# HEAD sits at each deleting commit so the deleted file is absent on disk.
+srr git checkout -q "${SRR_DEL}"
+assert_eq "--range <sha>^! deleting include_str!'d scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_DEL}^!" 2>/dev/null)"
+srr git checkout -q "${SRR_SIGNDEL}"
+assert_eq "codesign: --range <sha>^! deleting scripts/sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^!" 2>/dev/null)"
+# A base git diff accepts but that is not one commit fails open, never empty.
+assert_eq "--range <sha>^- (base is not one commit) -> all crates" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^-" 2>/dev/null)"
 
 # The literal scan needs git; outside a repo it must fail open, never answer
 # "no reference". Asserted on a path that answers `trusty-mpm` when git works.
