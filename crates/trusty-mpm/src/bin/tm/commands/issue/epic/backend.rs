@@ -15,6 +15,10 @@
 //! Test: `gh_backend_creates_an_issue_and_reads_its_number`,
 //! `gh_backend_refuses_a_create_whose_url_carries_no_number`,
 //! `gh_backend_parses_the_sub_issue_connection`,
+//! `gh_backend_pages_a_truncated_sub_issue_connection`,
+//! `gh_backend_trusts_a_complete_sub_issue_page`,
+//! `gh_backend_finds_a_tracker_in_a_label_filtered_listing`,
+//! `gh_backend_refuses_a_full_page_rather_than_reporting_no_tracker`,
 //! `gh_backend_reports_an_absent_plan_doc_as_none` in `tests.rs`.
 
 use serde::Deserialize;
@@ -26,6 +30,13 @@ use crate::commands::ticket::runner::CommandRunner;
 /// D4: creation refuses until the document is on the remote, so the permalink
 /// the tracker carries resolves for everyone, not just the author's checkout.
 pub(crate) const PUBLISH_REF: &str = "origin/main";
+
+/// How many issues [`EpicBackend::find_tracker`] will enumerate before it
+/// refuses rather than guess. A page this full cannot be told from a truncated
+/// one, and guessing there files a duplicate tracker.
+const TRACKER_LIST_LIMIT_N: usize = 200;
+/// [`TRACKER_LIST_LIMIT_N`] as the argv token `gh --limit` takes.
+const TRACKER_LIST_LIMIT: &str = "200";
 
 /// A single issue to file.
 ///
@@ -115,11 +126,18 @@ pub(crate) trait EpicBackend {
     /// Every native sub-issue of `tracker`, with bodies.
     fn children(&self, tracker: u64) -> anyhow::Result<Vec<ChildIssue>>;
 
-    /// The tracker already carrying `outcome` as its title suffix, if any.
-    fn find_tracker(&self, outcome: &str) -> anyhow::Result<Option<u64>>;
+    /// The tracker already carrying `outcome` as its title suffix, if any,
+    /// searched among the issues carrying every one of `labels`.
+    ///
+    /// Contract: `Ok(None)` means the implementation ENUMERATED the candidate
+    /// set and none matched. An implementation that cannot rule out a
+    /// truncated or stale listing must return `Err`, never `Ok(None)` — the
+    /// caller files a new tracker on `None`, and a duplicate tracker cannot be
+    /// undone.
+    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>>;
 
-    /// Add an issue to the owner's project `number`.
-    fn attach_project(&self, issue: u64, number: u64) -> anyhow::Result<()>;
+    /// Add an issue to the owner's project `number`, in `repo` (`owner/name`).
+    fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()>;
 
     /// Post a comment on an issue.
     fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()>;
@@ -134,11 +152,17 @@ struct SubIssueEnvelope {
     sub_issues: SubIssueConnection,
 }
 
-/// The `nodes` page of a sub-issue connection.
+/// The `nodes` page of a sub-issue connection, plus the server-side total.
+///
+/// `totalCount` can exceed `nodes.len()` when the connection truncates, which
+/// is the only signal a caller gets that the page is short.
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SubIssueConnection {
     #[serde(default)]
     nodes: Vec<SubIssueNode>,
+    #[serde(default)]
+    total_count: u64,
 }
 
 /// One node of the sub-issue connection.
@@ -203,6 +227,35 @@ impl<R: CommandRunner> GhEpicBackend<R> {
     /// exit 0 with empty output when nothing matches, so "empty" has to be
     /// mapped to `None` exactly once rather than at each call site.
     /// Test: `gh_backend_reports_an_absent_plan_doc_as_none`.
+    /// Every sub-issue of `tracker`, through the paginated REST endpoint.
+    ///
+    /// Why: the GraphQL connection `gh issue view --json subIssues` serves is
+    /// one page. This is the fallback the `tm-epic` manual procedure already
+    /// names for an epic with more children than that page holds, used
+    /// whenever `totalCount` says the page was short.
+    /// Test: `gh_backend_pages_a_truncated_sub_issue_connection`.
+    fn sub_issues_paginated(&self, tracker: u64) -> anyhow::Result<Vec<SubIssueNode>> {
+        let endpoint = format!("repos/{{owner}}/{{repo}}/issues/{tracker}/sub_issues");
+        let out = self.runner.run("gh", &["api", &endpoint, "--paginate"])?;
+        let text = out.ok_or_stderr("gh api …/sub_issues --paginate")?;
+        // `--paginate` concatenates one JSON array per page; gh emits them
+        // back to back, so each array is parsed on its own.
+        let mut nodes = Vec::new();
+        for chunk in text.split("][") {
+            let repaired = match (chunk.starts_with('['), chunk.ends_with(']')) {
+                (true, true) => chunk.to_string(),
+                (true, false) => format!("{chunk}]"),
+                (false, true) => format!("[{chunk}"),
+                (false, false) => format!("[{chunk}]"),
+            };
+            let page: Vec<SubIssueNode> = serde_json::from_str(&repaired).map_err(|e| {
+                anyhow::anyhow!("failed to parse a sub-issue page for #{tracker}: {e}")
+            })?;
+            nodes.extend(page);
+        }
+        Ok(nodes)
+    }
+
     fn git_first_line(&self, args: &[&str]) -> anyhow::Result<Option<String>> {
         let out = self.runner.run("git", args)?;
         let text = out.ok_or_stderr("git")?;
@@ -310,8 +363,19 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
         let parsed: SubIssueEnvelope = serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!("failed to parse the sub-issue list for #{tracker}: {e}")
         })?;
+        // #8447: the GraphQL connection returns ONE page. A truncated page
+        // would drop rows from a block `sync` replaces wholesale, and would let
+        // `next_phase_number` reuse a number — both the data-loss class this
+        // feature exists to prevent. `totalCount` is the server's own count, so
+        // a short page is detectable; the paginated REST form is the fallback
+        // the `tm-epic` manual procedure already names for a large epic.
+        let nodes = if parsed.sub_issues.nodes.len() < parsed.sub_issues.total_count as usize {
+            self.sub_issues_paginated(tracker)?
+        } else {
+            parsed.sub_issues.nodes
+        };
         let mut children = Vec::new();
-        for node in parsed.sub_issues.nodes {
+        for node in nodes {
             // Fail-closed: a child whose body cannot be read would render a
             // blank Gate column, and the Gate is what justifies the pattern.
             let body = self.body(node.number)?;
@@ -325,26 +389,42 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
         Ok(children)
     }
 
-    fn find_tracker(&self, outcome: &str) -> anyhow::Result<Option<u64>> {
-        let search = format!("{outcome} in:title");
-        let out = self.runner.run(
-            "gh",
-            &[
-                "issue",
-                "list",
-                "--state",
-                "all",
-                "--limit",
-                "50",
-                "--search",
-                &search,
-                "--json",
-                "number,title",
-            ],
-        )?;
-        let text = out.ok_or_stderr("gh issue list --search")?;
+    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>> {
+        // #8447: this read decides whether a SECOND tracker gets filed, and a
+        // duplicate tracker cannot be undone. It therefore goes through the
+        // directly-consistent issue connection, filtered by label, rather than
+        // through GitHub's SEARCH index — a search is eventually consistent and
+        // interpolates the outcome into a query grammar, so a
+        // successful-but-empty result is indistinguishable from "no tracker
+        // exists". A full page is likewise indistinguishable from a truncated
+        // one, so it is an error below rather than a verdict.
+        let mut args: Vec<&str> = vec![
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            TRACKER_LIST_LIMIT,
+            "--json",
+            "number,title",
+        ];
+        for label in labels {
+            args.push("--label");
+            args.push(label);
+        }
+        let out = self.runner.run("gh", &args)?;
+        let text = out.ok_or_stderr("gh issue list --label")?;
         let rows: Vec<IssueRow> = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("failed to parse `gh issue list` JSON: {e}"))?;
+        if rows.len() >= TRACKER_LIST_LIMIT_N {
+            anyhow::bail!(
+                "`gh issue list` returned a full page of {TRACKER_LIST_LIMIT_N} issues for \
+                 labels [{}], so an existing tracker may have been cut off — refusing to file \
+                 one that might be a duplicate. Pass `--tracker <number>` to resume a known \
+                 tracker",
+                labels.join(", ")
+            );
+        }
         let matches: Vec<u64> = rows
             .iter()
             .filter(|r| super::render::is_tracker_title(&r.title, r.number, outcome))
@@ -365,11 +445,15 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
         }
     }
 
-    fn attach_project(&self, issue: u64, number: u64) -> anyhow::Result<()> {
+    fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()> {
         // #7952: `gh issue edit --add-project "<title>"` exits 0 and attaches
         // nothing when the title does not resolve in the scope gh derives from
         // the repository. The owner-and-number form names exactly one project.
-        let slug = self.repo_slug()?;
+        // #8447: `repo` is resolved ONCE by the caller. Resolving it here put a
+        // transient `gh repo view` failure inside the arm that degrades to a
+        // `no-project:` waiver, which would launder a retryable outage into a
+        // permanent comment on the record.
+        let slug = repo.to_string();
         let owner = slug.split('/').next().unwrap_or(&slug).to_string();
         let project = number.to_string();
         let url = format!("https://github.com/{slug}/issues/{issue}");

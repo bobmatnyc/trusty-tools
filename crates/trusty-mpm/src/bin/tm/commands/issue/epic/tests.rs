@@ -123,6 +123,8 @@ struct FakeBackend {
     next_number: Cell<u64>,
     counts: RefCell<HashMap<String, usize>>,
     fail: RefCell<Vec<String>>,
+    /// The label set the last `find_tracker` call narrowed by (#8447 HIGH).
+    find_labels: RefCell<Vec<String>>,
 }
 
 impl FakeBackend {
@@ -136,6 +138,7 @@ impl FakeBackend {
             next_number: Cell::new(100),
             counts: RefCell::new(HashMap::new()),
             fail: RefCell::new(Vec::new()),
+            find_labels: RefCell::new(Vec::new()),
         }
     }
 
@@ -295,8 +298,9 @@ impl EpicBackend for FakeBackend {
             .collect())
     }
 
-    fn find_tracker(&self, outcome: &str) -> anyhow::Result<Option<u64>> {
+    fn find_tracker(&self, outcome: &str, labels: &[String]) -> anyhow::Result<Option<u64>> {
         self.tick("find_tracker")?;
+        self.find_labels.borrow_mut().clone_from(&labels.to_vec());
         Ok(self
             .issues
             .borrow()
@@ -305,8 +309,9 @@ impl EpicBackend for FakeBackend {
             .map(|(n, _)| *n))
     }
 
-    fn attach_project(&self, issue: u64, number: u64) -> anyhow::Result<()> {
+    fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()> {
         self.tick("attach_project")?;
+        assert_eq!(repo, self.repo, "the caller resolves the slug once");
         if let Some(found) = self.issues.borrow_mut().get_mut(&issue) {
             found.projects.push(number);
         }
@@ -445,6 +450,102 @@ fn plan_drops_the_documents_own_deferred_markers() {
     assert!(!deferred.contains(DEFERRED_START), "{deferred}");
     assert!(!deferred.contains(DEFERRED_END), "{deferred}");
     assert!(deferred.contains("A thing"), "{deferred}");
+}
+
+/// Critic finding: no H1 yielded `outcome == ""`, a tracker titled
+/// `[EPIC 123] ` with a trailing space, and a lookup keyed on nothing.
+#[test]
+fn plan_refuses_a_document_with_no_h1() {
+    let no_h1 = PLAN_DOC.replace("# Automate tracker and phase-issue authoring\n", "");
+    let err = plan::parse(REL_PATH, &no_h1).unwrap_err();
+    assert!(matches!(err, PlanError::MissingTitle { .. }), "{err}");
+    assert!(err.to_string().contains("# <outcome>"), "{err}");
+    // A blank H1 is the same defect wearing a heading.
+    let blank_h1 = PLAN_DOC.replace("# Automate tracker and phase-issue authoring", "#   ");
+    assert!(matches!(
+        plan::parse(REL_PATH, &blank_h1),
+        Err(PlanError::MissingTitle { .. })
+    ));
+}
+
+/// Critic finding: two phases with one title filed the first, skipped the
+/// second as "already exists", and counted both in `phase <n> of <N>`.
+#[test]
+fn plan_refuses_two_phases_with_one_title() {
+    let doc = PLAN_DOC.replace(
+        "### Phase: defer, close and the transition hook",
+        "### Phase: tm issue epic create|sync",
+    );
+    let err = plan::parse(REL_PATH, &doc).unwrap_err();
+    assert!(matches!(err, PlanError::DuplicatePhase { .. }), "{err}");
+    assert!(err.to_string().contains("matched by title"), "{err}");
+}
+
+/// Critic finding: a `Gate:` line with nothing after it satisfied "the line
+/// exists" and rendered `(no gate declared)` into the tracker's Gate column.
+#[test]
+fn plan_refuses_a_phase_with_an_empty_gate_line() {
+    let doc = PLAN_DOC.replace("Gate: phase 1 used live against one real epic.", "Gate:   ");
+    let err = plan::parse(REL_PATH, &doc).unwrap_err();
+    assert!(matches!(err, PlanError::EmptyGate { .. }), "{err}");
+    assert!(
+        err.to_string()
+            .contains("defer, close and the transition hook"),
+        "{err}"
+    );
+}
+
+/// Critic finding: a plan document DESCRIBING this CLI quotes `### Phase: …`
+/// inside a fence, and a fence-blind parser filed it as a real phase.
+#[test]
+fn plan_ignores_a_heading_inside_a_fenced_block() {
+    let fenced = concat!(
+        "### Ordering\n\nPhase 1 before phase 2. For example:\n\n",
+        "```markdown\n",
+        "### Phase: an example nobody should file\n\n",
+        "Gate: made up.\n\n",
+        "#### Acceptance criteria\n\n- **AC1** invented.\n",
+        "```\n"
+    );
+    let doc = PLAN_DOC.replace(
+        "### Ordering\n\nPhase 1 must be used against a real epic before phase 2 is written.\n",
+        fenced,
+    );
+    let parsed = plan::parse(REL_PATH, &doc).expect("the fenced heading is prose");
+    assert_eq!(parsed.phases.len(), 2, "{:?}", parsed.phases);
+    assert!(
+        !parsed
+            .phases
+            .iter()
+            .any(|p| p.title.contains("an example nobody should file")),
+        "{:?}",
+        parsed.phases
+    );
+    // The fence survives into the tracker's Ordering prose, verbatim.
+    assert!(
+        parsed.ordering.iter().any(|l| l.trim() == "```markdown"),
+        "{:?}",
+        parsed.ordering
+    );
+}
+
+/// The same guard on the two scans inside a phase: a quoted `Gate:` line
+/// cannot satisfy the schema rule the phase itself does not meet.
+#[test]
+fn plan_ignores_a_gate_line_inside_a_fenced_block() {
+    let doc = PLAN_DOC.replace(
+        "Gate: phase 1 used live against one real epic.",
+        "```\nGate: quoted, not declared.\n```",
+    );
+    let err = plan::parse(REL_PATH, &doc).unwrap_err();
+    assert!(matches!(err, PlanError::MissingGate { .. }), "{err}");
+    // And the real gate line is still lifted out of the body it appears in.
+    let parsed = plan::parse(REL_PATH, PLAN_DOC).expect("parses");
+    assert!(
+        !parsed.phases[0].body.iter().any(|l| l.starts_with("Gate:")),
+        "{:?}",
+        parsed.phases[0].body
+    );
 }
 
 // ------------------------------------------------- titles, numbers, rendering
@@ -591,13 +692,14 @@ fn render_refuses_an_inverted_marker_pair() {
     assert!(err.to_string().contains("precedes"), "{err}");
 }
 
-/// The fail-open this whole module exists to not have: empty content accepted
-/// as a valid body. `replace_block` on an empty body has no markers to find, so
-/// it refuses; an empty replacement leaves the markers adjacent, never a wipe.
+/// The fail-open this whole module exists to not have, stated as what
+/// `replace_block` actually guarantees: an empty replacement is ACCEPTED and
+/// leaves the two markers adjacent. It never empties the body and never drops a
+/// marker, because both marker segments are copied through. The live refusal
+/// for an empty body belongs to `EpicBackend::set_body`, proved by
+/// `gh_backend_refuses_to_write_an_empty_body`.
 #[test]
-fn render_refuses_an_empty_replacement_body() {
-    let err = render::replace_block("", PHASES_START, PHASES_END, "rows").unwrap_err();
-    assert!(err.to_string().contains(PHASES_START), "{err}");
+fn an_empty_replacement_leaves_the_markers_adjacent_and_never_wipes_the_body() {
     let body = format!("prose\n{PHASES_START}\nold\n{PHASES_END}\n");
     let out = render::replace_block(&body, PHASES_START, PHASES_END, "").expect("empty rows");
     assert_eq!(out, format!("prose\n{PHASES_START}\n{PHASES_END}\n"));
@@ -858,6 +960,49 @@ fn create_fails_when_the_waiver_comment_fails() {
         err.to_string().contains("scripted failure: comment"),
         "{err}"
     );
+}
+
+/// Critic HIGH: a phase skipped as already-existing never re-ran the project
+/// attach, so a run that died between `create_issue` and the attach left a
+/// child with no project AND no waiver, and no re-run could repair it.
+#[test]
+fn create_repairs_a_missing_project_waiver_on_a_skipped_phase() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // Die after the first phase is filed but before its attach: the attach is
+    // the call right after `create_issue`, so failing `attach_project:2` and
+    // `comment` together aborts exactly there.
+    let backend = FakeBackend::new()
+        .fails("attach_project:2")
+        .fails("comment:1");
+    let opts = opts_for(&dir, Some(3));
+    create::create(&backend, &opts).expect_err("the run dies at the first phase's attach");
+    assert!(
+        backend.issue(101).projects.is_empty() && backend.issue(101).comments.is_empty(),
+        "the interruption left #101 with neither a project nor a waiver"
+    );
+
+    backend.clear_failures();
+    let report = create::create(&backend, &opts).expect("the re-run completes");
+    assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+    assert_eq!(
+        backend.issue(101).projects,
+        vec![3],
+        "the skip branch repaired the missing attach"
+    );
+}
+
+/// Critic HIGH: `find_tracker` must enumerate a label-filtered listing, not
+/// query the eventually-consistent search index. The label set it narrows by
+/// is the tracker's own.
+#[test]
+fn create_looks_up_the_tracker_by_its_label_set() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new();
+    create::create(&backend, &opts_for(&dir, None)).expect("creates");
+    let labels = backend.find_labels.borrow().clone();
+    assert!(labels.contains(&"epic".to_string()), "{labels:?}");
+    assert!(labels.contains(&"trusty-mpm".to_string()), "{labels:?}");
+    assert!(labels.iter().any(|l| l.starts_with("ws/")), "{labels:?}");
 }
 
 #[test]
@@ -1225,6 +1370,79 @@ fn gh_backend_parses_the_sub_issue_connection() {
     );
 }
 
+/// Critic HIGH: the GraphQL connection is ONE page. A short page would drop
+/// rows from a wholesale-replaced block and let `next_phase_number` reuse a
+/// number, so `totalCount > nodes.len()` falls back to the paginated REST
+/// endpoint the `tm-epic` manual procedure names.
+#[test]
+fn gh_backend_pages_a_truncated_sub_issue_connection() {
+    let runner = FakeRunner::new(vec![
+        // One node, but the server says there are two.
+        ok_out(
+            r#"{"subIssues":{"nodes":[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"OPEN"}],"totalCount":2}}"#,
+        ),
+        // The REST fallback, two pages concatenated the way `--paginate` emits.
+        ok_out(
+            r#"[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"open"}][{"number":2,"title":"[EPIC_9 PHASE_2] b","state":"closed"}]"#,
+        ),
+        ok_out("{\"body\":\"## Gate\\n\\nga\\n\"}"),
+        ok_out("{\"body\":\"## Gate\\n\\ngb\\n\"}"),
+    ]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let children = backend.children(9).expect("pages");
+    assert_eq!(
+        children.len(),
+        2,
+        "the short page was replaced, not trusted"
+    );
+    assert_eq!(children[1].number, 2);
+    assert_eq!(children[1].state, "closed");
+}
+
+/// The complete page is used as-is — the fallback costs a round trip and must
+/// not fire when the first read was whole.
+#[test]
+fn gh_backend_trusts_a_complete_sub_issue_page() {
+    let runner = FakeRunner::new(vec![
+        ok_out(
+            r#"{"subIssues":{"nodes":[{"number":1,"title":"[EPIC_9 PHASE_1] a","state":"OPEN"}],"totalCount":1}}"#,
+        ),
+        ok_out("{\"body\":\"## Gate\\n\\nga\\n\"}"),
+    ]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    assert_eq!(backend.children(9).expect("reads").len(), 1);
+}
+
+/// Critic HIGH: the lookup enumerates a label-filtered listing, never the
+/// search index, and a FULL page is an error rather than "none found" — a full
+/// page cannot be told from a truncated one, and guessing files a duplicate.
+#[test]
+fn gh_backend_refuses_a_full_page_rather_than_reporting_no_tracker() {
+    let labels = vec!["epic".to_string(), "ws/x".to_string()];
+    let rows: Vec<String> = (1..=200)
+        .map(|n| format!(r#"{{"number":{n},"title":"unrelated {n}"}}"#))
+        .collect();
+    let runner = FakeRunner::new(vec![ok_out(&format!("[{}]", rows.join(",")))]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let err = backend.find_tracker("An outcome", &labels).unwrap_err();
+    assert!(err.to_string().contains("full page"), "{err}");
+    assert!(err.to_string().contains("--tracker"), "{err}");
+}
+
+#[test]
+fn gh_backend_finds_a_tracker_in_a_label_filtered_listing() {
+    let labels = vec!["epic".to_string(), "ws/x".to_string()];
+    let runner = FakeRunner::new(vec![ok_out(
+        r#"[{"number":8445,"title":"[EPIC 8445] An outcome"},{"number":9,"title":"An outcome"}]"#,
+    )]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    assert_eq!(
+        backend.find_tracker("An outcome", &labels).expect("reads"),
+        Some(8445),
+        "only the title carrying the issue's OWN number is a tracker"
+    );
+}
+
 #[test]
 fn gh_backend_reports_an_absent_plan_doc_as_none() {
     // `git log` exits 0 with empty output when the path is on no commit of the
@@ -1271,6 +1489,13 @@ fn epic_create_requires_a_component() {
     assert_eq!(
         super::require_components(vec!["trusty-mpm".to_string()]).expect("accepts"),
         vec!["trusty-mpm".to_string()]
+    );
+    // Critic finding: `--component "" --component api` used to pass the empty
+    // label straight through to `gh`.
+    assert_eq!(
+        super::require_components(vec![String::new(), "api".to_string()]).expect("accepts"),
+        vec!["api".to_string()],
+        "a blank entry is dropped, never forwarded as a label"
     );
 }
 

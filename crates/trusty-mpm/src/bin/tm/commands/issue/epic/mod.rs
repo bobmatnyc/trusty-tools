@@ -6,8 +6,11 @@
 //! transition. The retyping IS the drift the pattern's second rule forbids, so
 //! this module makes the deterministic half code. The hand-run procedure it
 //! replaces is `crates/trusty-mpm/src/assets/skills/tm-epic/references/manual-procedure.md`,
-//! including the two guards it grew after an `awk` fail-open wiped a tracker
-//! body: never write an empty body, never write one that lost a marker.
+//! including the guard it grew after an `awk` fail-open wiped a tracker body:
+//! never write an empty body. Here that guard lives once, in
+//! [`backend::EpicBackend::set_body`]; the marker half is structural, since
+//! [`render::replace_block`] copies both marker lines through rather than
+//! re-serialising the body.
 //! What: the [`EpicCmd`] dispatcher — `create` (`create.rs`) and `sync`
 //! (`sync.rs`) — over the [`backend::EpicBackend`] seam (D7), with the plan
 //! parser in `plan.rs` and every title, marker and table rendering in
@@ -105,7 +108,13 @@ fn require_milestone(milestone: Option<String>) -> anyhow::Result<String> {
 ///
 /// Test: `epic_create_requires_a_component`.
 fn require_components(components: Vec<String>) -> anyhow::Result<Vec<String>> {
-    if components.iter().all(|c| c.trim().is_empty()) {
+    // #8447: drop blanks FIRST. Checking only that some entry is non-blank let
+    // `--component "" --component api` pass an empty label through to `gh`.
+    let components: Vec<String> = components
+        .into_iter()
+        .filter(|c| !c.trim().is_empty())
+        .collect();
+    if components.is_empty() {
         anyhow::bail!(
             "`--component <LABEL>` is required at least once — every issue this files needs one. \
              Run `tm issue standard` for the labels this workspace's crates map to"

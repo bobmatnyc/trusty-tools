@@ -19,8 +19,13 @@
 //! `plan_refuses_an_empty_ordering_section`,
 //! `plan_refuses_a_missing_ordering_section`,
 //! `plan_refuses_a_phase_with_no_gate_line`,
+//! `plan_refuses_a_phase_with_an_empty_gate_line`,
 //! `plan_refuses_a_phase_with_no_acceptance_criteria`,
 //! `plan_refuses_a_document_with_no_phases`,
+//! `plan_refuses_a_document_with_no_h1`,
+//! `plan_refuses_two_phases_with_one_title`,
+//! `plan_ignores_a_heading_inside_a_fenced_block`,
+//! `plan_ignores_a_gate_line_inside_a_fenced_block`,
 //! `plan_strips_the_documents_own_phases_block`.
 
 use crate::commands::issue::epic::render::{
@@ -71,11 +76,43 @@ pub(crate) enum PlanError {
         /// Document path, as the operator named it.
         path: String,
     },
+    /// The document has no level-1 heading to take the outcome from.
+    #[error(
+        "{path} declares no `# <outcome>` heading — the tracker's title is taken from it, so an \
+         absent or blank one would file an epic with no outcome in its title"
+    )]
+    MissingTitle {
+        /// Document path, as the operator named it.
+        path: String,
+    },
     /// The document declares no phase at all.
     #[error("{path} declares no `### Phase: <title>` section — an epic needs at least one phase")]
     NoPhases {
         /// Document path, as the operator named it.
         path: String,
+    },
+    /// Two phases share one title.
+    #[error(
+        "{path} declares `### Phase: {phase}` twice — phases are matched by title, so a duplicate \
+         would file one issue and silently skip the other. Give them distinct titles"
+    )]
+    DuplicatePhase {
+        /// Document path, as the operator named it.
+        path: String,
+        /// The repeated phase title.
+        phase: String,
+    },
+    /// A phase's `Gate:` line carries nothing.
+    #[error(
+        "{path}'s `### Phase: {phase}` has an empty `Gate:` line — a blank gate renders a tracker \
+         that looks complete with nothing justifying the pattern. State the gate, or drop the \
+         phase"
+    )]
+    EmptyGate {
+        /// Document path, as the operator named it.
+        path: String,
+        /// The phase title at fault.
+        phase: String,
     },
     /// A phase is missing its `Gate:` line.
     #[error(
@@ -154,10 +191,18 @@ pub(crate) struct EpicPlan {
 /// Test: see the module doc.
 pub(crate) fn parse(path: &str, text: &str) -> Result<EpicPlan, PlanError> {
     let lines: Vec<&str> = text.lines().collect();
+    // #8447: the H1 becomes the tracker's outcome and the key `find_tracker`
+    // resolves a resume by, so a defaulted empty string would file a tracker
+    // titled `[EPIC 123] ` and then fail to recognise it. Headings are the
+    // schema; this one is no exception.
     let outcome = lines
         .iter()
         .find(|l| l.starts_with("# ") && !l.starts_with("##"))
-        .map_or_else(String::new, |l| l[2..].trim().to_string());
+        .map(|l| l[2..].trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| PlanError::MissingTitle {
+            path: path.to_string(),
+        })?;
 
     let start = lines
         .iter()
@@ -187,7 +232,18 @@ pub(crate) fn parse(path: &str, text: &str) -> Result<EpicPlan, PlanError> {
             h if h == ORDERING_HEADING => ordering = Some(trim_block(strip_phases_block(body))),
             h if h == DEFERRED_HEADING => deferred = trim_block(drop_marker_lines(body)),
             h if h.starts_with(PHASE_PREFIX) => {
-                phases.push(parse_phase(path, h[PHASE_PREFIX.len()..].trim(), body)?);
+                let title = h[PHASE_PREFIX.len()..].trim();
+                // #8447: `create` matches an existing child by phase TITLE, so
+                // two phases with one title would file the first and skip the
+                // second as "already filed" while `phase <n> of <N>` counted
+                // both. Reject the ambiguity at the source.
+                if phases.iter().any(|p: &PhasePlan| p.title == title) {
+                    return Err(PlanError::DuplicatePhase {
+                        path: path.to_string(),
+                        phase: title.to_string(),
+                    });
+                }
+                phases.push(parse_phase(path, title, body)?);
             }
             _ => {}
         }
@@ -241,14 +297,49 @@ struct Sections<'a> {
     subsections: Vec<(&'a str, Vec<&'a str>)>,
 }
 
-/// Split a region on its level-3 headings.
+/// Whether a line opens or closes a fenced code block.
 ///
-/// Test: covered through `plan_parses_the_committed_epic_plan`.
+/// Why: a plan document that DESCRIBES this CLI quotes its own headings inside
+/// a fence, and a fence-blind scanner reads `### Phase: …` in a shell example
+/// as a real phase and files a bogus issue. Every structural scan in this
+/// module skips fenced content for that reason.
+/// Test: `plan_ignores_a_heading_inside_a_fenced_block`.
+fn is_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// The lines of `body` that sit outside every fenced code block.
+///
+/// Test: `plan_ignores_a_gate_line_inside_a_fenced_block`.
+fn unfenced<'a>(body: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in body.iter().copied() {
+        if is_fence(line) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// Split a region on its level-3 headings, ignoring fenced content.
+///
+/// Test: covered through `plan_parses_the_committed_epic_plan` and
+/// `plan_ignores_a_heading_inside_a_fenced_block`.
 fn split_sections<'a>(region: &[&'a str]) -> Sections<'a> {
     let mut leading = Vec::new();
     let mut subsections: Vec<(&'a str, Vec<&'a str>)> = Vec::new();
+    let mut in_fence = false;
     for line in region.iter().copied() {
-        if line.starts_with("### ") {
+        if is_fence(line) {
+            in_fence = !in_fence;
+        }
+        if !in_fence && !is_fence(line) && line.starts_with("### ") {
             subsections.push((line.trim_end(), Vec::new()));
         } else if let Some(last) = subsections.last_mut() {
             last.1.push(line);
@@ -264,10 +355,17 @@ fn split_sections<'a>(region: &[&'a str]) -> Sections<'a> {
 
 /// Parse one `### Phase:` subsection.
 ///
+/// Why: the `Gate:` line and the acceptance list are what make a phase a
+/// phase, so both are located before anything is built from the section — and
+/// both are located OUTSIDE fenced content, so a quoted example cannot satisfy
+/// a schema rule the document does not actually meet.
 /// Test: `plan_refuses_a_phase_with_no_gate_line`,
-/// `plan_refuses_a_phase_with_no_acceptance_criteria`.
+/// `plan_refuses_a_phase_with_an_empty_gate_line`,
+/// `plan_refuses_a_phase_with_no_acceptance_criteria`,
+/// `plan_ignores_a_gate_line_inside_a_fenced_block`.
 fn parse_phase(path: &str, title: &str, body: Vec<&str>) -> Result<PhasePlan, PlanError> {
-    let gate = body
+    let scan = unfenced(&body);
+    let gate = scan
         .iter()
         .find(|l| l.trim_start().starts_with(GATE_PREFIX))
         .map(|l| l.trim().trim_start_matches(GATE_PREFIX).trim().to_string())
@@ -275,15 +373,38 @@ fn parse_phase(path: &str, title: &str, body: Vec<&str>) -> Result<PhasePlan, Pl
             path: path.to_string(),
             phase: title.to_string(),
         })?;
-    if !body.iter().any(|l| l.trim_end() == ACCEPTANCE_HEADING) {
+    // #8447: a `Gate:` line with nothing after it satisfies "the line exists"
+    // and renders `(no gate declared)` into the tracker's Gate column — a
+    // tracker that looks complete with nothing justifying the pattern.
+    if gate.is_empty() {
+        return Err(PlanError::EmptyGate {
+            path: path.to_string(),
+            phase: title.to_string(),
+        });
+    }
+    if !scan.iter().any(|l| l.trim_end() == ACCEPTANCE_HEADING) {
         return Err(PlanError::MissingAcceptance {
             path: path.to_string(),
             phase: title.to_string(),
         });
     }
+    // Only the gate line itself is lifted out; a `Gate:` line inside a fence is
+    // prose the phase body keeps.
+    let mut gate_seen = false;
+    let mut in_fence = false;
     let rest: Vec<&str> = body
         .into_iter()
-        .filter(|l| !l.trim_start().starts_with(GATE_PREFIX))
+        .filter(|l| {
+            if is_fence(l) {
+                in_fence = !in_fence;
+                return true;
+            }
+            if !in_fence && !gate_seen && l.trim_start().starts_with(GATE_PREFIX) {
+                gate_seen = true;
+                return false;
+            }
+            true
+        })
         .collect();
     // `#### X` inside the plan becomes `## X` in the issue body, where it is a
     // top-level section rather than a nested one.

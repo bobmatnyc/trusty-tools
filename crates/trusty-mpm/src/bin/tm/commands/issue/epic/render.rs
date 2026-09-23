@@ -13,7 +13,7 @@
 //! `sync_leaves_every_byte_outside_the_markers_identical`,
 //! `render_refuses_a_body_with_no_markers`,
 //! `render_refuses_a_body_with_two_start_markers`,
-//! `render_refuses_an_empty_replacement_body`,
+//! `an_empty_replacement_leaves_the_markers_adjacent_and_never_wipes_the_body`,
 //! `render_escapes_a_pipe_in_a_phase_title`,
 //! `tracker_body_links_the_plan_by_sha`, `phase_title_carries_both_numbers`,
 //! `next_phase_number_never_reuses_a_deleted_number`.
@@ -43,10 +43,13 @@ const PHASES_HEADER: &str =
 /// Why a body cannot be rewritten.
 ///
 /// Why: every one of these is a case where the hand-run procedure would have
-/// written something — an appended block, a body with two tables, an empty
-/// body — and the resulting tracker would look plausible. D3 makes each of
-/// them a refusal instead.
-/// What: one variant per guard, each naming the marker at fault.
+/// written something — an appended block, a body with two tables, a rewrite
+/// against an inverted pair — and the resulting tracker would look plausible.
+/// D3 makes each of them a refusal instead.
+/// What: one variant per guard, each naming the marker at fault. There is no
+/// "lost content" variant: [`replace_block`] copies both marker segments
+/// through, so that state is unreachable and asserting it is honest where a
+/// branch would be dead code.
 /// Test: the `render_refuses_*` tests.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BlockError {
@@ -75,12 +78,6 @@ pub(crate) enum BlockError {
         /// The closing marker.
         end: &'static str,
     },
-    /// The rewrite produced nothing, or lost a marker.
-    #[error(
-        "the rewritten body is empty or lost the `{0}` marker — refusing to write it. This is \
-         the failure that wiped #8445 when empty output was accepted as a body"
-    )]
-    LostContent(&'static str),
 }
 
 /// Replace everything between two marker lines, keeping every other byte.
@@ -88,18 +85,21 @@ pub(crate) enum BlockError {
 /// Why: the one operation `sync` exists to perform, and the one with the
 /// largest blast radius — a wrong rewrite silently destroys authored prose. It
 /// therefore refuses rather than repairs: no marker pair, a duplicated marker,
-/// or an empty result is an error, never an append.
+/// or an inverted pair is an error, never an append.
 /// What: splits `body` into newline-terminated segments, locates exactly one
 /// `start` and one `end` segment, and concatenates
 /// `[..=start] + content + [end..]`. The untouched segments are re-emitted
 /// verbatim, so line endings, trailing whitespace and a missing final newline
 /// all survive unchanged. `content` is normalised to exactly one trailing
-/// newline so repeated runs converge.
+/// newline so repeated runs converge. Both marker segments are copied through,
+/// so the result carries both markers and is never empty BY CONSTRUCTION —
+/// that is a `debug_assert!`, not a runtime branch, and the live empty-body
+/// refusal belongs to [`super::backend::EpicBackend::set_body`].
 /// Test: `render_replaces_the_whole_phases_block`,
 /// `sync_leaves_every_byte_outside_the_markers_identical`,
 /// `render_refuses_a_body_with_no_markers`,
 /// `render_refuses_a_body_with_two_start_markers`,
-/// `render_refuses_an_empty_replacement_body`.
+/// `an_empty_replacement_leaves_the_markers_adjacent_and_never_wipes_the_body`.
 pub(crate) fn replace_block(
     body: &str,
     start: &'static str,
@@ -131,17 +131,17 @@ pub(crate) fn replace_block(
         out.push_str(segment);
     }
 
-    // #8447: the two guards the hand-run procedure learned the hard way. An
-    // empty body, or one that lost a marker, is never written.
-    if out.trim().is_empty() {
-        return Err(BlockError::LostContent(start));
-    }
-    if !out.contains(start) {
-        return Err(BlockError::LostContent(start));
-    }
-    if !out.contains(end) {
-        return Err(BlockError::LostContent(end));
-    }
+    // #8447: the hand-run procedure had to CHECK for an emptied body and a lost
+    // marker because its `awk` step re-serialised the whole thing. This
+    // function cannot produce either — both marker segments are copied
+    // verbatim, so a runtime check here would be unreachable. The invariant is
+    // asserted rather than branched on; `EpicBackend::set_body` carries the
+    // live empty-body refusal for every caller, including a future one that
+    // does not come through here.
+    debug_assert!(
+        !out.trim().is_empty() && out.contains(start) && out.contains(end),
+        "replace_block must preserve both markers and never empty the body"
+    );
     Ok(out)
 }
 

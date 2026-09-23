@@ -15,10 +15,13 @@
 //! # Fail-closed
 //!
 //! Every refusal [`super::render::BlockError`] can raise reaches the caller and
-//! nothing is written: no marker pair, a duplicated marker, an inverted pair,
-//! or a result that came out empty. That last one is the failure that wiped
-//! [#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445) when the
-//! hand-run procedure accepted an empty `awk` result as a body.
+//! nothing is written: no marker pair, a duplicated marker, an inverted pair.
+//! The empty-body case cannot arise here — `replace_block` copies both marker
+//! segments through — and the live refusal for it sits one layer down in
+//! [`super::backend::EpicBackend::set_body`], which is what any future caller
+//! not routed through `replace_block` would meet. That is the failure that
+//! wiped [#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445) when
+//! the hand-run procedure accepted an empty `awk` result as a body.
 //!
 //! Test: `sync_replaces_the_whole_block_and_discards_a_hand_edited_row`,
 //! `sync_leaves_every_byte_outside_the_markers_identical`,

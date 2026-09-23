@@ -21,7 +21,8 @@
 //! Everything else fails closed, including the tracker search, whose failure
 //! would otherwise file a duplicate tracker.
 //!
-//! Test: `create_files_a_tracker_then_its_phases`,
+//! Test: `create_repairs_a_missing_project_waiver_on_a_skipped_phase`,
+//! `create_files_a_tracker_then_its_phases`,
 //! `create_never_leaves_a_placeholder_title_when_a_phase_fails`,
 //! `create_skips_a_phase_that_already_exists`,
 //! `create_refuses_a_plan_doc_absent_from_origin_main`,
@@ -133,17 +134,24 @@ pub(crate) fn create<B: EpicBackend>(
     };
     let tracker = match opts.tracker {
         Some(n) => n,
-        None => adopt_or_file_tracker(backend, opts, &plan, &report.plan_url, &mut report.waived)?,
+        None => adopt_or_file_tracker(backend, opts, &plan, &repo, &mut report)?,
     };
     report.tracker = Some(tracker);
 
     let mut children = backend.children(tracker)?;
     let total = plan.phases.len();
     for (index, phase) in plan.phases.iter().enumerate() {
-        if children
+        if let Some(existing) = children
             .iter()
-            .any(|c| render::phase_what(&c.title) == phase.title)
+            .find(|c| render::phase_what(&c.title) == phase.title)
         {
+            // #8447: a run that died between `create_issue` and the project
+            // attach left a child with no project AND no waiver comment — a
+            // standard violation with nothing recording it. Skipping the
+            // attach on the re-run would make that state permanent, so the
+            // skip branch re-runs it and repairs what the interruption left.
+            let number = existing.number;
+            attach_project_or_waive(backend, &repo, number, opts.project, &mut report.waived)?;
             report.skipped.push(phase.title.clone());
             continue;
         }
@@ -159,7 +167,7 @@ pub(crate) fn create<B: EpicBackend>(
             parent: Some(tracker),
         };
         let filed = backend.create_issue(&spec)?;
-        attach_project_or_waive(backend, filed, opts.project, &mut report.waived)?;
+        attach_project_or_waive(backend, &repo, filed, opts.project, &mut report.waived)?;
         children.push(ChildIssue {
             number: filed,
             title: spec.title,
@@ -199,21 +207,25 @@ fn publish_sha<B: EpicBackend>(backend: &B, rel: &str) -> anyhow::Result<String>
 
 /// Adopt the tracker this plan already has, or file a new one.
 ///
-/// Why: resumability without a flag. The search failing is NOT "no tracker
-/// exists" — treating it that way files a duplicate tracker, which is the one
-/// mistake this verb cannot undo — so a failed search is a refusal that names
-/// `--tracker` as the way past it.
-/// What: [`EpicBackend::find_tracker`], then the two-call filing sequence.
+/// Why: resumability without a flag. A lookup that did not conclusively
+/// enumerate the candidate set is NOT "no tracker exists" — treating it that
+/// way files a duplicate tracker, which is the one mistake this verb cannot
+/// undo — so any such lookup is a refusal that names `--tracker` as the way
+/// past it. The backend contract puts that burden on the lookup itself:
+/// `Ok(None)` is a positive answer, and anything less is `Err`.
+/// What: [`EpicBackend::find_tracker`] over the tracker's own label set, then
+/// the two-call filing sequence.
 /// Test: `create_refuses_when_the_tracker_search_fails`,
 /// `create_files_a_tracker_then_its_phases`.
 fn adopt_or_file_tracker<B: EpicBackend>(
     backend: &B,
     opts: &CreateOptions,
     plan: &EpicPlan,
-    plan_url: &str,
-    waived: &mut Vec<String>,
+    repo: &str,
+    report: &mut CreateReport,
 ) -> anyhow::Result<u64> {
-    let found = backend.find_tracker(&plan.outcome).map_err(|e| {
+    let labels = tracker_labels(opts);
+    let found = backend.find_tracker(&plan.outcome, &labels).map_err(|e| {
         anyhow::anyhow!(
             "could not determine whether a tracker for this plan already exists ({}) — refusing \
              to file one that might be a duplicate; pass `--tracker <number>` to resume a known \
@@ -227,8 +239,8 @@ fn adopt_or_file_tracker<B: EpicBackend>(
 
     let spec = NewIssue {
         title: render::placeholder_tracker_title(&plan.outcome),
-        body: render::tracker_body(plan, plan_url),
-        labels: tracker_labels(opts),
+        body: render::tracker_body(plan, &report.plan_url),
+        labels,
         milestone: opts.milestone.clone(),
         parent: None,
     };
@@ -244,7 +256,7 @@ fn adopt_or_file_tracker<B: EpicBackend>(
                 spec.title
             )
         })?;
-    attach_project_or_waive(backend, tracker, opts.project, waived)?;
+    attach_project_or_waive(backend, repo, tracker, opts.project, &mut report.waived)?;
     Ok(tracker)
 }
 
@@ -262,6 +274,7 @@ fn adopt_or_file_tracker<B: EpicBackend>(
 /// `create_fails_when_the_waiver_comment_fails`.
 fn attach_project_or_waive<B: EpicBackend>(
     backend: &B,
+    repo: &str,
     issue: u64,
     project: Option<u64>,
     waived: &mut Vec<String>,
@@ -269,7 +282,7 @@ fn attach_project_or_waive<B: EpicBackend>(
     let Some(number) = project else {
         return Ok(());
     };
-    let Err(e) = backend.attach_project(issue, number) else {
+    let Err(e) = backend.attach_project(repo, issue, number) else {
         return Ok(());
     };
     let reason = one_line(&e);
