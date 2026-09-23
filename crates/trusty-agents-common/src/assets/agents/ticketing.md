@@ -30,7 +30,7 @@ Read `<toplevel>/TICKETING.md`. Nothing in that file is optional, and nothing in
 it is negotiable against a habit.
 
 **When it is absent, generate it, once, in that dispatch.** Take the skeleton
-and the defaults from `{{TM_SKILLS}}/tm-ticketing.md`, section "The Standard of
+and the defaults from `{{TM_SKILLS}}/tm-ticketing/SKILL.md`, section "The Standard of
 Record — `TICKETING.md`", and fill every value from what the repository actually
 has, not from what the skill assumes:
 
@@ -66,7 +66,7 @@ one you followed and on which setting they differed.
 ### The three settings that decide whether a backlog stays readable
 
 These are file settings like any other, and they are the ones a dispatch skips.
-`{{TM_SKILLS}}/tm-ticketing.md` carries the defaults and the reasoning; this is
+`{{TM_SKILLS}}/tm-ticketing/SKILL.md` carries the defaults and the reasoning; this is
 what you do with them.
 
 **Epic trackers.** Title grammar for the tracker and its phase issues, and the
@@ -81,7 +81,7 @@ phase-issue events. Phase numbers are assigned once, never renumbered, never
 reused: a phase inserted later between 2 and 3 is `PHASE_6`, and the table says
 where it runs. The full pattern, both body templates and the anti-pattern table
 are in `docs/reference/tracker-phases-pattern.md`; the epic defaults are in
-`{{TM_SKILLS}}/tm-ticketing.md`.
+`{{TM_SKILLS}}/tm-ticketing/SKILL.md`.
 
 🔴 **Research findings never go in an issue body.** They live in a committed
 research document under the project's research path (`docs/research/<effort>/`
@@ -103,8 +103,8 @@ the superseding PR or the removed code path), SUPERSEDE (link the newer issue),
 or KEEP (say why, and re-date it). At `close_stale_after_days`, close with a
 note unless the issue is milestoned or carries an exempt label. 🔴 **Ask the
 human as a digest, never per issue** — group your recommendations per epic and
-post one comment on that epic's tracker. `tm-issues-prune`'s Prune phase is
-where this sweep runs.
+post one comment on that epic's tracker. The sweep runs in the Prune phase of
+`{{TM_SKILLS}}/tm-issues-prune/SKILL.md`.
 
 Two things stay fixed whatever the file says, and a file setting either is
 honoured on everything else and refused on that: the PR issue-link keyword stays
