@@ -630,6 +630,20 @@ marked `NOT COMMITTED`; a symlink fails there too. It names one release, so a
 later version needs a new file and a new review. It changes no exclusion TSV and
 no other check.
 
+The **Public API / SemVer** PR check honours the same declaration through
+`scripts/semver_ci_accept.sh`, which sources the same library: it passes with
+the `ACCEPTED BREAK` warning only when every crate's break is covered, and reads
+the declaration from the PR head commit, which the checked-out merge commit's
+copy must match.
+
+**Declare first.** A PR cannot accept its own break. Land the declaration on
+`main` in its own PR, then open or re-run the release PR that needs it. The PR
+check accepts a declaration only when the same file, byte-identical, is already
+on the PR's base — the first parent of the merge commit it checks out. A
+declaration that exists only on the PR branch, or that the PR changes, stays
+`[FAIL]`. A tag or `workflow_dispatch` run has no base, so it reads the file at
+the checked-out commit and accepts it only when that commit is on `main`.
+
 ## Reading the gate's result
 
 `check_semver.sh` answers "did the API break?". `preflight-publish.sh` CHECK 5

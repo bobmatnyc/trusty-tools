@@ -6,10 +6,13 @@ without a breaking version bump. `scripts/preflight-publish.sh` CHECK 5 reads
 exact package and version. The rule, and every case where it fails closed, is
 in [semver-gate.md, "Accepted breaks"](../../docs/reference/semver-gate.md#accepted-breaks-owner-ruling-2026-09-22).
 
-A file lands on `main` through a reviewed PR before the release. It must be a
-plain tracked file (mode 100644): CHECK 5 reads the content committed at HEAD
-and refuses a symlink, an untracked file, or an edited working copy. Leave it
-in place after the release as the record of what shipped.
+**Declare first.** A file lands on `main` in its own reviewed PR, before the
+release PR that needs it. The Public API / SemVer PR check accepts it only when
+the release PR's base already holds it byte-identical; a declaration added or
+changed by the release PR itself stays `[FAIL]`. It must be a plain tracked file
+(mode 100644): CHECK 5 reads the content committed at HEAD and refuses a
+symlink, an untracked file, or an edited working copy. Leave it in place after
+the release as the record of what shipped.
 
 ## Format
 

@@ -322,12 +322,29 @@ jobs:
       # `semver-gate-verdict:` line, so nothing here re-parses the prose summary
       # that preflight-publish.sh CHECK 5 reads; a line this step cannot find is
       # treated as blindness, never as a clean compare.
+      #
+      # #8372: a BREAK (exit 1) goes through scripts/semver_ci_accept.sh, the
+      # same accepted-break decision preflight CHECK 5 makes, from the same
+      # library. It reads the declaration and manifest from the PR HEAD commit
+      # (DECL_REV), not from the merge commit actions/checkout gives a
+      # pull_request run: the head is the commit reviewers approved, and the
+      # library also requires the checked-out copy to equal that blob, so a base
+      # branch that changed the file fails closed. Tag and dispatch runs use
+      # github.sha, which is HEAD there.
+      #
+      # A PR cannot accept its own break: the declaration must already be on
+      # the base, byte-identical. A PR run passes `--merge HEAD`, whose first
+      # parent is that base for fork and same-repo PRs alike, and which the
+      # script ties to this PR through its second parent. Any other run passes
+      # `--main`, and counts the declaration only once HEAD is on main.
       - name: Enforce public-API SemVer against crates.io
         id: enforce
         if: steps.crate.outputs.have_work == 'true'
         env:
           SKIP_UI_BUILD: '1'
           CRATES: ${{ steps.crate.outputs.crates }}
+          DECL_REV: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -uo pipefail
           # One `--crate` per selected crate: check_semver.sh accumulates them
@@ -349,7 +366,25 @@ jobs:
           blind="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]blind=([0-9]+).*/\1/p')"
           inventoried="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]inventoried=([0-9]+).*/\1/p')"
 
+          accepted=0
+          if [[ -n "${PR_HEAD:-}" ]]; then
+            decl_base=(--merge HEAD)
+          else
+            decl_base=(--main refs/remotes/origin/main)
+          fi
           if [[ "$rc" -eq 1 ]]; then
+            if bash scripts/semver_ci_accept.sh --rev "$DECL_REV" "${decl_base[@]}" "$rc" "${RUNNER_TEMP}/gate.log" \
+                > "${RUNNER_TEMP}/accept.log" 2>&1; then
+              accepted=1
+            fi
+            cat "${RUNNER_TEMP}/accept.log"
+          fi
+
+          if [[ "$accepted" -eq 1 ]]; then
+            rc=0
+            label="SemVer: ACCEPTED BREAK — owner-declared break, not a pass"
+            echo "::warning title=SemVer ACCEPTED BREAK::${CRATES} ships a breaking public-API change without a breaking bump, accepted by a committed scripts/semver-accepted-breaks/ declaration. This is NOT a pass: a dependent whose requirement admits this version can stop compiling."
+          elif [[ "$rc" -eq 1 ]]; then
             label="SemVer: BREAK — a breaking public-API change without a breaking bump"
             echo "::error title=SemVer break::${CRATES} has a breaking public-API change without a breaking version bump. See the failing lints in the log."
           elif [[ "$rc" -eq 3 ]]; then
