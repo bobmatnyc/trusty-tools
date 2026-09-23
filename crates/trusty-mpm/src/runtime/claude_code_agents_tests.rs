@@ -119,6 +119,7 @@ fn inputs(cwd: &Path) -> ManagedLaunch<'_> {
         mcp_env: &[],
         // #8233: `config_dir: None`, so the launch provisioned no scoped file.
         mcp_config: None,
+        alternate_screen: false,
     }
 }
 

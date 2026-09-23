@@ -367,8 +367,10 @@ pub(crate) async fn launch(
     let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
         // #4181: `config_dir` selects `--setting-sources user,project,local` and
         // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
-        &trusty_mpm::core::model_inject::build_claude_command(
-            Some(&pm_model),
+        &launch_claude_cmd(
+            // #8405: the operator's config decides the renderer.
+            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+            &pm_model,
             prompt_path.as_deref(),
             config_dir.as_deref(),
             // #4181: the per-project MCP pins the shared user-scope declarations
@@ -650,6 +652,8 @@ pub(crate) async fn connect(
                 // #4181: the per-project MCP pins.
                 &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
                 scoped_mcp.as_deref(),
+                // #8405: the operator's config decides the renderer.
+                trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
             ));
         let send = trusty_mpm::core::tmux::send_line(
             None,
@@ -690,14 +694,16 @@ pub(crate) async fn connect(
 /// `--setting-sources user,project,local`; `None` (unresolvable home) keeps the
 /// pre-#4181 `project,local`.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir` (in
-/// `tests_behavior_b_tests.rs`) assert both flags are present in the output.
+/// `tests_behavior_b_tests.rs`) assert both flags are present in the output;
+/// `connect_claude_cmd_follows_the_configured_renderer` pins the #8405 renderer.
 pub(crate) fn connect_claude_cmd(
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
     scoped_mcp: Option<&std::path::Path>,
+    config_root: Option<&std::path::Path>,
 ) -> String {
-    trusty_mpm::core::model_inject::build_claude_command(
+    trusty_mpm::core::model_inject::build_claude_command_configured(
         None,
         prompt_file,
         config_dir,
@@ -705,6 +711,35 @@ pub(crate) fn connect_claude_cmd(
         // #7422: the composed default-deny MCP file, already written by the
         // caller; `None` only when the config dir did not relocate.
         scoped_mcp,
+        // #8405: the renderer the config under `config_root` decides.
+        trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
+}
+
+/// The `claude` line `tm launch` types into its fresh pane (#8405).
+///
+/// Why: the one seam where `tm launch` turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`trusty_mpm::core::model_inject::build_claude_command_configured`]
+/// with `--model <pm_model>` and the renderer
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_in`] reads from
+/// `config_root`.
+/// Test: `launch_claude_cmd_follows_the_configured_renderer`.
+pub(crate) fn launch_claude_cmd(
+    config_root: Option<&std::path::Path>,
+    pm_model: &str,
+    prompt_file: Option<&std::path::Path>,
+    config_dir: Option<&std::path::Path>,
+    mcp_env: &[(String, String)],
+    scoped_mcp: Option<&std::path::Path>,
+) -> String {
+    trusty_mpm::core::model_inject::build_claude_command_configured(
+        Some(pm_model),
+        prompt_file,
+        config_dir,
+        mcp_env,
+        scoped_mcp,
+        trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
     )
 }
 

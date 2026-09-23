@@ -91,6 +91,8 @@ impl Worst {
             mcp_env: &self.mcp_env,
             mcp_config: Some(&self.mcp_config),
             memory_reachable: true,
+            // #8405: the worst case carries the configured renderer too.
+            alternate_screen: true,
         }
     }
 }
@@ -109,6 +111,7 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         // #8233: `config_dir: None`, so no scoped file was provisioned.
         mcp_config: None,
         memory_reachable: false,
+        alternate_screen: false,
     }
 }
 
@@ -335,6 +338,51 @@ fn attach_and_resume_share_an_identical_environment() {
     assert_eq!(attach.cwd, resume.cwd);
     assert_eq!(attach.program, resume.program);
     assert_eq!(attach.session_id, resume.session_id);
+}
+
+/// #8405: with config `alternate_screen: true`, spawn, resume and attach all
+/// carry `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0`, and the `claude` the shim
+/// builds gets `0` whatever the pane (tmux server) environment holds. Before
+/// the fix the spec carried nothing, so the pane's inherited `=1` — or the
+/// `1` default when it held none — decided the renderer.
+#[test]
+fn every_launch_path_carries_the_configured_fullscreen_renderer() {
+    use crate::core::alt_screen::{ALT_SCREEN_ENABLED, ALT_SCREEN_ENV_VAR};
+    let w = Worst::new();
+    let launch = w.launch();
+    for spec in [
+        spawn_spec(&launch),
+        resume_spec(&launch, Some("conv")),
+        attach_spec(&launch, "short1"),
+    ] {
+        assert_eq!(
+            value_of(&spec.env_set, ALT_SCREEN_ENV_VAR),
+            Some(ALT_SCREEN_ENABLED),
+            "args {:?}",
+            spec.args
+        );
+        let cmd = spec.to_command();
+        let carried = cmd
+            .get_envs()
+            .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(carried.as_deref(), Some(ALT_SCREEN_ENABLED));
+    }
+}
+
+/// #8405: `alternate_screen: false` (the default) assigns the classic
+/// renderer explicitly, so a tmux server that inherited `=0` cannot put
+/// `claude` on the fullscreen one. At fcfd38e71 the spec carried nothing here.
+#[test]
+fn every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off() {
+    let cwd = PathBuf::from("/work");
+    let launch = bare_launch(&cwd, &[]);
+    for spec in [spawn_spec(&launch), attach_spec(&launch, "short1")] {
+        assert_eq!(
+            value_of(&spec.env_set, crate::core::alt_screen::ALT_SCREEN_ENV_VAR),
+            Some(crate::core::alt_screen::ALT_SCREEN_DEFAULT)
+        );
+    }
 }
 
 // ------------------------------------------------------------------ pane line

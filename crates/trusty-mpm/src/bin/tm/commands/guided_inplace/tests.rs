@@ -781,6 +781,7 @@ fn inplace_exec_command_carries_the_pinned_gh_identity() {
         &resume,
         std::path::Path::new("/fake/cwd"),
         &bound_gh("/cfg/pinned"),
+        false,
     );
 
     let envs = env_of(&cmd);
@@ -800,6 +801,7 @@ fn inplace_exec_command_clears_an_inherited_gh_token() {
         &resume,
         std::path::Path::new("/fake/cwd"),
         &bound_gh("/cfg/pinned"),
+        false,
     );
 
     let envs = env_of(&cmd);
@@ -823,7 +825,8 @@ fn inplace_exec_command_forwards_every_arg_in_order() {
         "--resume",
         "abc-123",
     ]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh(), false);
 
     let args: Vec<String> = cmd
         .get_args()
@@ -870,7 +873,8 @@ fn inplace_exec_command_carries_a_non_empty_mcp_env() {
         ),
         ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
     ];
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh(), false);
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -910,7 +914,8 @@ fn inplace_exec_command_scrubs_api_key_and_sets_auth_env() {
     // The env invariants `env_bin_prefix` encodes for the shell-string paths
     // must hold identically on the exec path (DOC-34 + #2246).
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh(), false);
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -950,7 +955,8 @@ fn inplace_exec_command_scrubs_inherited_session_markers() {
     // name is hard-coded so this cannot pass vacuously if the shared marker list
     // is emptied.
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh(), false);
 
     let envs: Vec<(String, Option<String>)> = cmd
         .get_envs()
@@ -981,43 +987,42 @@ fn inplace_exec_command_scrubs_inherited_session_markers() {
     );
 }
 
-/// #6495: the in-place relaunch execs `claude` directly, so the `env NAME=VALUE`
-/// operand the tmux-pane lines carry cannot reach it — the classic-renderer
-/// default has to be set on the `Command` instead, and it must not clobber a
-/// value this pane already exports.
-///
-/// The expectation is derived from the ambient environment rather than fixed,
-/// which is what makes this deterministic in both directions: the rule under
-/// test IS "override exactly when the launch carries no value". The precedence
-/// logic itself is proven with injected lookups in
-/// `core::alt_screen`'s `command_default_applies_when_the_variable_is_unset` /
-/// `command_default_yields_to_an_operator_value`; this asserts the wiring.
+/// #8405: the in-place relaunch assigns the renderer config decides, in both
+/// directions, whatever this pane exports. At df212601d the builder yielded to
+/// an exported value, so this fails there under any ambient environment: one
+/// of the two directions disagrees with it.
 #[test]
-fn inplace_exec_command_defaults_the_alternate_screen_off() {
-    use trusty_mpm::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
+fn inplace_exec_command_assigns_the_configured_renderer() {
+    use trusty_mpm::core::alt_screen::ALT_SCREEN_ENV_VAR;
 
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
-
-    let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
-    let provisioned = cmd.get_envs().any(|(k, v)| {
-        k == ALT_SCREEN_ENV_VAR && v.is_some_and(|v| v == std::ffi::OsStr::new(ALT_SCREEN_DEFAULT))
-    });
-    assert_eq!(
-        provisioned, !carried_by_the_launch,
-        "tm must provision {ALT_SCREEN_ENV_VAR}={ALT_SCREEN_DEFAULT} when the launch \
-         carries no value, and leave an operator value untouched when it does"
-    );
+    for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+        let cmd = build_inplace_exec_command(
+            &resume,
+            std::path::Path::new("/fake/cwd"),
+            &no_gh(),
+            alternate_screen,
+        );
+        let carried = cmd
+            .get_envs()
+            .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(
+            carried.as_deref(),
+            Some(want),
+            "alternate_screen={alternate_screen}"
+        );
+    }
 }
 
-/// #7160: the mouse-capture counterpart of
-/// `inplace_exec_command_defaults_the_alternate_screen_off`.
+/// #7160: the mouse-capture default still yields to an exported value.
 #[test]
 fn inplace_exec_command_defaults_the_mouse_capture_off() {
     use trusty_mpm::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
 
     let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
-    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh());
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &no_gh(), false);
 
     let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();
     let provisioned = cmd.get_envs().any(|(k, v)| {
@@ -1043,7 +1048,7 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
     let Ok(resume) = trusty_mpm::runtime::build_inplace_resume_command(tmp.path(), None) else {
         return;
     };
-    let cmd = build_inplace_exec_command(&resume, tmp.path(), &no_gh());
+    let cmd = build_inplace_exec_command(&resume, tmp.path(), &no_gh(), false);
     let args: Vec<String> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -1073,4 +1078,31 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
         std::path::Path::new(prompt_path).is_file(),
         "the prompt-file argv token must name a readable file, unquoted: {prompt_path}"
     );
+}
+
+/// #8405: the relaunch seam reads the renderer from its config root, both
+/// directions. Fails if the seam ignores the config.
+#[test]
+fn inplace_exec_command_for_follows_the_configured_renderer() {
+    use trusty_mpm::core::alt_screen::ALT_SCREEN_ENV_VAR;
+
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    for (alternate_screen, want) in [(true, "0"), (false, "1")] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let cmd = inplace_exec_command_for(
+            Some(root.path()),
+            &resume,
+            std::path::Path::new("/fake/cwd"),
+            &no_gh(),
+        );
+        let carried = cmd
+            .get_envs()
+            .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(
+            carried.as_deref(),
+            Some(want),
+            "alternate_screen={alternate_screen}"
+        );
+    }
 }

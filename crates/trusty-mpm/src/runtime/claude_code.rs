@@ -623,6 +623,19 @@ impl ClaudeCodeAdapter {
         super::launch_spec::LaunchSpec::root_at(&self.fw.crate_config_root())
     }
 
+    /// Config `tmux.alternate_screen` for this launch (#8405).
+    ///
+    /// Why: the launch spec carries the configured renderer explicitly, so the
+    /// tmux server's inherited env cannot decide it. An unreadable config never
+    /// blocks a spawn or restart: it warns and falls back with the tmux option.
+    /// What: [`crate::core::alt_screen::configured_alternate_screen_at`] under
+    /// [`FrameworkPaths::crate_config_root`].
+    /// Test: `spawn_carries_the_configured_fullscreen_renderer`,
+    /// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
+    fn configured_alternate_screen(&self) -> bool {
+        crate::core::alt_screen::configured_alternate_screen_at(&self.fw.crate_config_root())
+    }
+
     /// Durably publish `TM_MANAGED_SESSION_ID` (and `CLAUDE_CONFIG_DIR` when
     /// resolved) into the tmux SESSION environment (#2157 item 1).
     ///
@@ -696,6 +709,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        // #8405: the config-decided renderer; never blocks the spawn.
+        let alternate_screen = self.configured_alternate_screen();
         // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
         // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
         // #4873: the framework roster and skills load FROM this config dir —
@@ -775,6 +790,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
             memory_reachable,
+            alternate_screen,
         };
         // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
         // here, which makes every pane-directed step — the interrupt that
@@ -849,6 +865,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        // #8405: same config read as `spawn` — a restart is where #8405 was seen.
+        let alternate_screen = self.configured_alternate_screen();
         let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
         // #7422: same fail-closed MCP composition as `spawn`, in the same
         // position — a resumed pane must not be the one path that still loads
@@ -942,6 +960,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
             memory_reachable: resolve_memory_reachable(self.memory_reachable),
+            alternate_screen,
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its
