@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.13.7] — 2026-09-23
+
+### Fixed
+
+- `probe_socket` still reports a refused daemon as `Refused` now that a dial failure can arrive wrapped in the shared client's bounded-retry error (#8267).
+
 ## [0.13.6] — 2026-09-13
 
 ### Added

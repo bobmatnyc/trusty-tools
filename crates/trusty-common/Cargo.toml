@@ -98,7 +98,7 @@ name = "trusty-common"
 # 0.51.2 (#8267): patch — the UDS RPC client gets a bounded retry with a
 # named-socket failure message, and a failed half-close is no longer retried.
 # No public item was removed or changed shape.
-version = "0.51.2"
+version = "0.52.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

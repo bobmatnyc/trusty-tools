@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.0] — 2026-09-23
+
+### Added
+
+- `load_average` module (feature `load-average`): the kernel's 1/5/15-minute load average from `getloadavg(3)` on macOS/BSD and `/proc/loadavg` on Linux, as a `Result` that never substitutes a guessed value for a failed reading. Builder admission needs a sustained saturation measure, which `host_metrics`' instantaneous `CpuMetrics::usage_pct` is not. Adds no crate to the lockfile (#8261).
+
+### Fixed
+
+- `launchd_secrets`'s module doc no longer links to the private `plist` submodule, which rustdoc could never resolve (#8236).
+- The shared Unix-socket client retries a transient dial a bounded number of times instead of surfacing the first `ENOENT` / `ECONNREFUSED` / `ENOTCONN` as a hard failure. Three attempts with a 20 ms doubling backoff by default; `uds::ConnectRetry` and `uds::send_framed_request_retrying` let a caller state its own bound. Every attempt logs through `tracing`, and an exhausted retry returns `UdsRpcError::ConnectRetriesExhausted`, naming the socket, the attempt count and the last OS error. `UdsRpcError::is_dial_failure` is the predicate that spans that wrapper and the bare `Dial` variant (#8267).
+- Half-closing the write side is its own failure now, `UdsRpcError::HalfClose`, and is never retried. `UdsRpcError::Write` covers the `write_all` + `flush` phase only, where a failure provably leaves the peer without a newline-terminated frame. Folding the two together would have let a retry re-send a request the daemon had already dispatched (#8267).
+
+### Changed
+
+- `DEFAULT_TMUX_HISTORY_LIMIT` is now 10,000 lines, down from 100,000. The larger value, with a long pane history, gave every tmux pane on the host seconds of lag per keystroke. `tmux.history_limit` in `~/.trusty-tools/trusty-mpm/config.yaml` still overrides it, with the 1,000-line floor unchanged (Refs [#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
+
+### Security
+
+- `credentials::resolve_env_var_bounded` is the one credential read a daemon may make: process environment, then `.env.local`, then the credential store. `.env` is deliberately not a tier — it is a committed file, and a credential in one is the same defect as a credential in a LaunchAgent plist (#8236).
+- Every resolution failure is now a typed `SecretResolveError` naming the variable and a value-free error KIND — absent, unregistered, timeout, or the store's own failure class — so a caller can tell "nothing is configured" from "the keychain refused". No arm falls back to a default or a stale value.
+- Store reads are bounded at 3 seconds, single-flight per key, and negative-cached for 45 seconds, with the reading thread detached rather than cancelled. Under launchd a rebuilt binary's first Keychain read blocks on a SecurityAgent dialog; the caller now gives up while the read keeps waiting, so a late approval still counts (#8236).
+- `credential_registry` is ungated, so the LaunchAgent plist scanner names a credential by registry membership rather than by a suffix guess on every feature set. Plist rewrites go through a new `atomic_file::write_atomic`, which fsyncs the temp file before the rename and the directory after it, so an interrupted repair cannot leave a half-written plist and a power loss cannot lose the published one.
+- `atomic_file::write_atomic` refuses a symlinked target. `rename(2)` replaces the link itself, so writing through one would sever an operator's symlink and silently leave the real file stale.
+- A store read that succeeds now clears that key's negative-cache entry instead of waiting out the 45-second window. A Keychain approval that lands after the caller gave up is picked up by the next resolve, which is what detaching the reader was for; previously the cached timeout discarded it.
+- A resolution failure reports whether it came from the negative cache or from a fresh read, so "approve the dialog" and "the suppression window is still open" are distinguishable by the caller.
+- That retirement now holds under concurrency: the negative-cache write and the outcome publish share one critical section, so a caller whose bound elapsed can no longer record a `Timeout` after the reader cleared one and leave a stale entry suppressing reads for the full 45 seconds while the approved value was already in hand.
+- Generated launchd plists no longer carry credential values. `LaunchdConfig::render_plist` drops any `EnvironmentVariables` entry whose key names a credential (logging the key, never the value) and refuses a `ProgramArguments` entry carrying a credential-shaped value — a plist is user-readable, so anything written there is readable by every process running as the user and by every backup (#8236).
+- New `launchd_secrets` module: credential-key and credential-value detection, the renderer's strip, and `scrub_plist_credential_env` for rewriting an already-installed plist in place. A plist it cannot parse is an error, never a silent "clean".
+
 ## [0.51.1] — 2026-09-18
 
 ### Changed
