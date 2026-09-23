@@ -1622,6 +1622,86 @@ fn spawn_uses_the_launch_resolved_reachability() {
     );
 }
 
+/// Write `yaml` as the config under the redirected home's state root — the
+/// file the adapter's named framework root resolves to (#8405).
+fn write_state_config(home: &HomeGuard, yaml: &str) {
+    let root = home.home().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&root).expect("mkdir state root");
+    std::fs::write(root.join("config.yaml"), yaml).expect("write config");
+}
+
+/// #8405: config `alternate_screen: true` reaches the spec of a fresh spawn
+/// AND of a restart, as an explicit `=0` the pane environment cannot override.
+#[test]
+#[serial_test::serial]
+fn spawn_carries_the_configured_fullscreen_renderer() {
+    use crate::core::alt_screen::{ALT_SCREEN_ENABLED, ALT_SCREEN_ENV_VAR};
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: true\n");
+    let spawned = FakeTmux::new();
+    let spawn_spec = sent_spec(&drive_spawn(&spawned, &home));
+    let resumed = FakeTmux::new();
+    drive_resume(&resumed, &home, home.home(), None, None);
+    let resume_spec = sent_spec(&only_line(&resumed));
+    for spec in [spawn_spec, resume_spec] {
+        assert!(
+            spec.env_set
+                .iter()
+                .any(|(k, v)| k == ALT_SCREEN_ENV_VAR && v == ALT_SCREEN_ENABLED),
+            "the configured renderer must ride in the spec: {:?}",
+            spec.env_set
+        );
+    }
+}
+
+/// #8405: an unreadable config never blocks a spawn or a restart. Both proceed,
+/// a warning names the file, and the renderer falls back to exactly what the
+/// tmux `alternate-screen` option gets from the same file — read here through
+/// `TrustyToolsConfig::load()`, the call `apply_scrollback_options` makes — so
+/// the two steps of one launch cannot disagree.
+#[test]
+#[serial_test::serial]
+fn spawn_falls_back_with_the_tmux_option_on_an_unreadable_config() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: [broken\n");
+    let tmux_option = crate::core::trusty_tools_config::resolve_tmux_options(
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+    )
+    .alternate_screen;
+    let want = crate::core::alt_screen::configured_env(tmux_option);
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let (spawned, resumed) = (FakeTmux::new(), FakeTmux::new());
+    tracing::subscriber::with_default(subscriber, || {
+        drive_spawn(&spawned, &home);
+        drive_resume(&resumed, &home, home.home(), None, None);
+    });
+
+    for spec in [
+        sent_spec(&only_line(&spawned)),
+        sent_spec(&only_line(&resumed)),
+    ] {
+        for pair in &want {
+            assert!(
+                spec.env_set.contains(pair),
+                "the renderer must match the tmux option's fallback {pair:?}: {:?}",
+                spec.env_set
+            );
+        }
+    }
+    let logged = buffer.tail(256).join("\n");
+    let config = home.home().join(".trusty-tools/trusty-mpm/config.yaml");
+    assert!(
+        logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
+        "the warning must name the file: {logged}"
+    );
+}
+
 /// #2157 item 1: the durable `tmux set-environment` publish is belt-and-braces
 /// alongside the pane-shell export the launch line still carries.
 #[test]

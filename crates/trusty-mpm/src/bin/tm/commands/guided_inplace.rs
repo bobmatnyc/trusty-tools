@@ -634,9 +634,35 @@ pub(crate) async fn run_inplace_relaunch(
         trusty_mpm::core::gh_identity::GhEnv::default()
     });
 
-    InPlaceOutcome::Result(exec_claude_in_place(build_inplace_exec_command(
-        &resume, &cwd, &gh_env,
+    InPlaceOutcome::Result(exec_claude_in_place(inplace_exec_command_for(
+        // #8405: the operator's config decides the renderer.
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        &resume,
+        &cwd,
+        &gh_env,
     )))
+}
+
+/// The in-place relaunch command with the renderer the config under
+/// `config_root` decides (#8405).
+///
+/// Why: the one seam where the relaunch turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`build_inplace_exec_command`] with
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_in`].
+/// Test: `inplace_exec_command_for_follows_the_configured_renderer`.
+pub(crate) fn inplace_exec_command_for(
+    config_root: Option<&std::path::Path>,
+    resume: &trusty_mpm::runtime::InPlaceResumeCommand,
+    cwd: &std::path::Path,
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+) -> std::process::Command {
+    build_inplace_exec_command(
+        resume,
+        cwd,
+        gh_env,
+        trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
 }
 
 /// Assemble the [`std::process::Command`] the in-place relaunch execs — the
@@ -669,12 +695,12 @@ pub(crate) async fn run_inplace_relaunch(
 /// The scrub runs BEFORE the deliberate assignments below so it can never
 /// clobber `CLAUDE_CONFIG_DIR` (#4455) even if the marker list grew wrongly.
 ///
-/// Issues #6495/#7160: the same reasoning applies to the classic-renderer and
+/// Issues #6495/#7160/#8405: the same reasoning applies to the renderer and
 /// mouse-capture defaults — the `env NAME=VALUE` operands the tmux-pane paths
 /// carry cannot reach an exec, so
-/// [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets both here.
-/// It runs last and, for each variable independently, sets nothing when this
-/// pane already exports a value.
+/// [`trusty_mpm::core::alt_screen::apply_configured_to_command`] sets both here,
+/// last. The renderer is the one config `tmux.alternate_screen` decides,
+/// assigned whatever this pane exports; mouse capture still yields to it.
 ///
 /// #8233 review (HIGH): `gh_env` is the pinned `gh` identity
 /// (`GH_TOKEN`/`GH_CONFIG_DIR`/`GH_HOST`, #3025/#6668), and it is applied FIRST
@@ -693,12 +719,13 @@ pub(crate) async fn run_inplace_relaunch(
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`,
-/// `inplace_exec_command_defaults_the_alternate_screen_off`,
+/// `inplace_exec_command_assigns_the_configured_renderer`,
 /// `inplace_exec_command_defaults_the_mouse_capture_off`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
     gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+    alternate_screen: bool,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(&resume.claude_bin);
     cmd.args(&resume.args)
@@ -721,9 +748,8 @@ pub(crate) fn build_inplace_exec_command(
     for (name, value) in &resume.mcp_env {
         cmd.env(name, value);
     }
-    // #6495: relaunch on the classic renderer so the pane keeps its scrollback,
-    // unless this pane already carries an operator value.
-    trusty_mpm::core::alt_screen::apply_default_to_command(&mut cmd);
+    // #6495/#8405: the config-decided renderer, whatever this pane exports.
+    trusty_mpm::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd
 }
 

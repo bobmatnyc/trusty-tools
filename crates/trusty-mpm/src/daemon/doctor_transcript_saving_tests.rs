@@ -121,8 +121,8 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "core/alt_screen.rs",
-        3,
-        "test fixtures for apply_default_when_unset (#6495, #7160) — not launch lines. \
+        5,
+        "test fixtures for apply_default_when_unset and apply_configured_to_command (#6495, #7160, #8405) — not launch lines. \
          The module emits no command of its own: it supplies the alt-screen and \
          mouse-capture defaults the real builders carry, as a shell operand or a \
          Command mutation",
@@ -252,13 +252,14 @@ fn ok_message_names_every_binary_crate_gap() {
 #[test]
 fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
-    let prefix = crate::core::model_inject::build_claude_command_with(
+    let prefix = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),
         Some(PROBE_TOKEN),
         &[],
         None,
+        false,
     );
     assert!(
         prefix.contains("CLAUDE_CODE_OAUTH_TOKEN="),

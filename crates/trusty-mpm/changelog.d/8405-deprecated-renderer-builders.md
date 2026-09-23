@@ -1,0 +1,2 @@
+Changed
+- `model_inject::build_claude_command`, `build_claude_command_with`, `build_inplace_session_command`, `build_client_session_command`, `build_agent_command`, `standalone::run::build_launch_command` and `alt_screen::managed_shell_assignments` keep their 1.7.0 signatures and now read the renderer from the operator's config. They are superseded by the `*_configured` variants and `configured_shell_assignments`, which take the renderer as an argument (#8405).

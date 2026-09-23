@@ -129,7 +129,7 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     // Both shapes must carry the prompt and an isolation flag, so assert on both
     // rather than narrowing this to whichever one the test machine happens to
     // produce.
-    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[], None);
+    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[], None, None);
     assert!(
         fallback.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {fallback}"
@@ -141,7 +141,8 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     );
 
     let dir = std::path::Path::new("/tm/claude-config");
-    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[], None);
+    let relocated =
+        crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[], None, None);
     assert!(
         relocated.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {relocated}"
@@ -2279,4 +2280,35 @@ fn cli_parses_reinstall_binary() {
         })
     ));
     assert!(Cli::try_parse_from(["trusty-mpm", "reinstall", "--yes"]).is_err());
+}
+
+/// #8405: `tm connect` turns the config under its root into the renderer, both
+/// directions. Fails if the seam ignores the config (e.g. a hard-coded `false`).
+#[test]
+fn connect_claude_cmd_follows_the_configured_renderer() {
+    for alternate_screen in [true, false] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let line =
+            crate::commands::launch::connect_claude_cmd(None, None, &[], None, Some(root.path()));
+        let want = crate::test_support::renderer_operand(alternate_screen);
+        assert!(line.contains(want), "want {want:?} in: {line}");
+    }
+}
+
+/// #8405: the `tm launch` seam, both directions.
+#[test]
+fn launch_claude_cmd_follows_the_configured_renderer() {
+    for alternate_screen in [true, false] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let line = crate::commands::launch::launch_claude_cmd(
+            Some(root.path()),
+            "opus",
+            None,
+            None,
+            &[],
+            None,
+        );
+        let want = crate::test_support::renderer_operand(alternate_screen);
+        assert!(line.contains(want), "want {want:?} in: {line}");
+    }
 }
