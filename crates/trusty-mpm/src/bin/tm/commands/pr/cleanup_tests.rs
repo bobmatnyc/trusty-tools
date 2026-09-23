@@ -1,16 +1,20 @@
 //! Tests for #8301: `tm pr merge`'s post-merge choice outlives the process.
 //!
 //! Why: the supervisor sweep reads the cleanup registry minutes after the merge
-//! exits, so a choice that is not written there is overridden by the WIDE
-//! cleanup. Each test reads the registry back rather than the returned enum.
-//! What: [`post_merge_step`] against a tempdir registry holding one entry.
+//! exits, so a choice that is not written there — before the merge — is
+//! overridden by the WIDE cleanup. Each test reads the registry back rather
+//! than trusting a returned enum.
+//! What: [`record_merge_scope`], [`post_merge_step`] and
+//! [`merge_with_recorded_scope`] against a tempdir registry.
 //! Test: this file IS the test module.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use trusty_mpm::core::pr_cleanup::{CleanupRegistry, CleanupScope, OpenedPr};
 
-use super::{PostMerge, post_merge_step};
+use super::super::{GhRun, GhRunner};
+use super::{PostMerge, merge_with_recorded_scope, post_merge_step, record_merge_scope};
 use crate::cli::PrMergeArgs;
 
 const REPO: &str = "bobmatnyc/trusty-tools";
@@ -40,10 +44,6 @@ fn registry_with_entry(dir: &std::path::Path) -> CleanupRegistry {
     reg
 }
 
-fn slug() -> anyhow::Result<String> {
-    Ok(REPO.to_string())
-}
-
 /// #8301: either opt-out flag, with or without `--auto`, never yields the
 /// cleanup step.
 #[test]
@@ -53,26 +53,28 @@ fn post_merge_no_cleanup_never_reaches_after_merge() {
         (false, true, false),
         (true, false, true),
     ] {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let reg = registry_with_entry(dir.path());
         let args = merge_args(no_cleanup, no_delete_branch, auto);
-        let step = post_merge_step(&args, slug, &reg).expect("step");
         assert_eq!(
-            step,
+            post_merge_step(&args, REPO.to_string()),
             PostMerge::Deferred,
             "no_cleanup={no_cleanup} no_delete_branch={no_delete_branch} auto={auto}"
         );
     }
 }
 
-/// 🔴 #8301: `--no-cleanup` takes the entry out of the sweep. Fails before the
-/// fix, which left the entry `pending` for the sweep's wide cleanup.
+/// 🔴 #8301: `--no-cleanup` takes the entry out of the sweep, and the repo slug
+/// matches whatever case `gh` spelled it in.
 #[test]
 fn post_merge_no_cleanup_defers_the_registry_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = registry_with_entry(dir.path());
 
-    post_merge_step(&merge_args(true, false, false), slug, &reg).expect("step");
+    record_merge_scope(
+        &merge_args(true, false, false),
+        "BobMatNYC/Trusty-Tools",
+        &reg,
+    )
+    .expect("record");
 
     assert!(
         reg.pending().is_empty(),
@@ -82,34 +84,86 @@ fn post_merge_no_cleanup_defers_the_registry_entry() {
     assert_eq!(reg.entries()[0].scope, CleanupScope::Deferred);
 }
 
-/// 🔴 #8301: the merge-chained cleanup records its head-only scope before it
-/// runs, so a blocked run is retried head-only, never wide.
+/// 🔴 #8301: the merge-chained cleanup records its head-only scope, so a
+/// blocked run is retried head-only, never wide.
 #[test]
 fn post_merge_cleanup_records_a_head_only_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = registry_with_entry(dir.path());
+    let args = merge_args(false, false, false);
 
-    let step = post_merge_step(&merge_args(false, false, false), slug, &reg).expect("step");
+    record_merge_scope(&args, REPO, &reg).expect("record");
 
+    assert_eq!(reg.entries()[0].scope, CleanupScope::HeadOnly);
+    assert_eq!(reg.pending().len(), 1, "it is still swept, head-only");
     assert_eq!(
-        step,
+        post_merge_step(&args, REPO.to_string()),
         PostMerge::Cleanup {
             repo: REPO.to_string()
         }
     );
-    assert_eq!(reg.entries()[0].scope, CleanupScope::HeadOnly);
-    assert_eq!(reg.pending().len(), 1, "it is still swept, head-only");
 }
 
-/// `--auto` alone records nothing and resolves no repo: nothing has merged.
+/// 🔴 #8301 round 2: `--auto` leaves the entry to the sweep, but bound to the
+/// head-only scope. Fails before the fix, which recorded nothing under
+/// `--auto` and let the sweep run wide.
 #[test]
 fn post_merge_auto_leaves_the_entry_to_the_sweep() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = registry_with_entry(dir.path());
-    let no_slug = || -> anyhow::Result<String> { anyhow::bail!("must not be resolved") };
+    let args = merge_args(false, false, true);
 
-    let step = post_merge_step(&merge_args(false, false, true), no_slug, &reg).expect("step");
+    record_merge_scope(&args, REPO, &reg).expect("record");
 
-    assert_eq!(step, PostMerge::AwaitSweep);
-    assert_eq!(reg.entries()[0].scope, CleanupScope::Wide);
+    assert_eq!(
+        post_merge_step(&args, REPO.to_string()),
+        PostMerge::AwaitSweep
+    );
+    assert_eq!(reg.entries()[0].scope, CleanupScope::HeadOnly);
+}
+
+/// A `gh` that records every call and answers each one with a failure.
+struct RecordingGh {
+    calls: RefCell<Vec<String>>,
+}
+
+impl GhRunner for RecordingGh {
+    fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
+        self.calls.borrow_mut().push(args.join(" "));
+        Ok(GhRun {
+            success: false,
+            stdout: String::new(),
+            stderr: "RecordingGh answers nothing".to_string(),
+        })
+    }
+}
+
+/// 🔴 #8301 round 2: a registry that cannot be written stops the merge before
+/// `gh` is asked anything, with an error (a non-zero exit). Fails before the
+/// fix, which merged first and recorded the scope afterwards.
+#[test]
+fn merge_aborts_before_merging_when_the_scope_cannot_be_recorded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"a regular file").expect("write blocker");
+    // The registry's parent is a regular file, so neither lock nor write works.
+    let reg = CleanupRegistry::under_root(blocker.join("root"));
+    let gh = RecordingGh {
+        calls: RefCell::new(Vec::new()),
+    };
+
+    let outcome = merge_with_recorded_scope(
+        &gh,
+        &merge_args(false, false, false),
+        || Ok(REPO.to_string()),
+        &reg,
+    );
+
+    let err = outcome.expect_err("an unrecordable scope must fail the command");
+    assert!(err.to_string().contains("not merging #8301"), "{err:#}");
+    assert!(
+        gh.calls.borrow().is_empty(),
+        "nothing may reach `gh` — no merge: {:?}",
+        gh.calls.borrow()
+    );
 }

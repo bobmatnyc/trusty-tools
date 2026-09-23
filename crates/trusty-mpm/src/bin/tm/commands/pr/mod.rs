@@ -238,28 +238,22 @@ async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::R
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),
         // #6808: merge from the validated body, not GitHub's raw-message squash.
         PrCmd::Merge(args) => {
-            let code = merge::run(&gh, &args)?;
-            // #7275: cleanup is the final step after merge CONFIRMATION, so it
-            // runs only when this invocation actually merged. Under `--auto`
-            // the merge has not happened yet — the daemon's periodic sweep
-            // picks that PR up when it does.
-            if code != EXIT_OK {
-                return Ok(code);
-            }
-            // #8301: the operator's choice is written to the cleanup registry
-            // first, so the daemon's sweep cannot later override it.
+            // #8301: the cleanup scope is on disk BEFORE the merge; a failed
+            // write aborts the merge. #7275: cleanup is the final step after
+            // merge CONFIRMATION; under `--auto` the daemon's sweep acts later.
             let registry = trusty_mpm::core::pr_cleanup::CleanupRegistry::production();
             let slug = || repo_slug(&gh, args.repo.as_deref());
-            match cleanup::post_merge_step(&args, slug, &registry)? {
+            match cleanup::merge_with_recorded_scope(&gh, &args, slug, &registry)? {
+                cleanup::PostMerge::NotMerged(code) => Ok(code),
                 cleanup::PostMerge::Deferred => {
                     println!(
                         "post-merge cleanup skipped — no worktree or local branch was touched; \
                          run `tm pr cleanup {}` when ready",
                         args.pr
                     );
-                    Ok(code)
+                    Ok(EXIT_OK)
                 }
-                cleanup::PostMerge::AwaitSweep => Ok(code),
+                cleanup::PostMerge::AwaitSweep => Ok(EXIT_OK),
                 cleanup::PostMerge::Cleanup { repo } => {
                     cleanup::after_merge(&args, repo, client, url).await
                 }

@@ -576,6 +576,57 @@ async fn sweep_honours_a_recorded_head_only_scope() {
     );
 }
 
+/// A `gh` that records a deferral in the registry while it answers
+/// `pr view` — `tm pr merge --no-cleanup` landing mid-sweep.
+struct DeferringGh {
+    inner: Scripted,
+    registry: CleanupRegistry,
+}
+
+impl Gh for DeferringGh {
+    fn run(&self, args: &[String]) -> anyhow::Result<CmdOut> {
+        if args.iter().any(|a| a == "view") {
+            self.registry
+                .record_scope(REPO, 7275, crate::core::pr_cleanup::CleanupScope::Deferred)
+                .expect("defer mid-sweep");
+        }
+        Gh::run(&self.inner, args)
+    }
+}
+
+/// 🔴 #8301 round 2: a deferral written while the sweep waits on `gh pr view`
+/// wins — nothing is removed. Fails before the fix, which cleaned from the
+/// copy of the entry it read before asking `gh`.
+#[tokio::test]
+async fn sweep_rereads_a_deferral_written_during_the_pr_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = registry_with_scope(dir.path(), "wide");
+    let gh = DeferringGh {
+        inner: gh_merged(),
+        registry: reg.clone(),
+    };
+    let git = git_head_and_unnamed_tree();
+
+    let cleaned = run_sweep(
+        &gh,
+        &git,
+        &NoClaims,
+        &NoLanding,
+        &clean,
+        &reg,
+        &AuthBackoff::new(),
+    )
+    .await;
+
+    assert_eq!(cleaned, 0, "a deferred entry is never cleaned");
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "no worktree may be removed after the deferral: {:?}",
+        git.calls()
+    );
+    assert!(reg.entries()[0].cleaned_at.is_none());
+}
+
 #[test]
 fn sweep_registry_path_is_under_the_framework_root() {
     let reg = CleanupRegistry::under_root(PathBuf::from("/root"));

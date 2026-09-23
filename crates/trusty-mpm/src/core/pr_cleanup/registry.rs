@@ -10,11 +10,12 @@
 //! looked at again.
 //!
 //! What: [`OpenedPr`] (one entry) and [`CleanupRegistry`] (the file), with
-//! [`CleanupRegistry::record_open`] and [`CleanupRegistry::mark_cleaned`] as
-//! the only two mutations. Both rewrite the whole file atomically through the
-//! crate's shared [`atomic_write`](crate::core::agent_manifest::atomic_write),
-//! so a crash mid-write cannot leave a truncated registry that would strand
-//! every pending entry.
+//! [`CleanupRegistry::record_open`], [`CleanupRegistry::mark_cleaned`] and
+//! [`CleanupRegistry::record_scope`] (#8301) as the only mutations. Each runs
+//! under an exclusive sidecar lock and rewrites the whole file atomically
+//! through the crate's shared
+//! [`atomic_write`](crate::core::agent_manifest::atomic_write), so neither a
+//! crash mid-write nor a concurrent writer can strand or drop an entry.
 //!
 //! FAIL DIRECTION: toward doing nothing. A registry that cannot be read yields
 //! an EMPTY list, so the sweep cleans nothing rather than acting on a guess;
@@ -108,9 +109,26 @@ pub struct CleanupRegistry {
 /// have to guess at a bare array's provenance.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RegistryFile {
+    /// [`FORMAT_SCOPED`] when written by a writer that knows `scope`; absent
+    /// (0) from an older one (#8301).
+    #[serde(default)]
+    format: u32,
     /// Every PR recorded, newest last.
     #[serde(default)]
     entries: Vec<OpenedPr>,
+}
+
+/// The file format that carries per-entry `scope` (#8301).
+const FORMAT_SCOPED: u32 = 2;
+
+/// Warn at most once per process about a downgraded registry (#8301).
+static DOWNGRADE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether an entry is the one keyed by (`repo`, `pr`). #8301: the repo slug is
+/// matched case-insensitively — `tm pr open` reads it from a URL, `tm pr merge`
+/// from `gh`, and GitHub itself ignores case.
+fn same_pr(e: &OpenedPr, repo: &str, pr: u64) -> bool {
+    e.pr == pr && e.repo.eq_ignore_ascii_case(repo)
 }
 
 impl CleanupRegistry {
@@ -149,9 +167,61 @@ impl CleanupRegistry {
         let Ok(raw) = std::fs::read_to_string(&self.path) else {
             return Vec::new();
         };
-        serde_json::from_str::<RegistryFile>(&raw)
-            .map(|f| f.entries)
-            .unwrap_or_default()
+        let Ok(file) = serde_json::from_str::<RegistryFile>(&raw) else {
+            return Vec::new();
+        };
+        if self.downgraded(&file)
+            && !DOWNGRADE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                "the PR cleanup registry was rewritten by an older tm or daemon, which drops \
+                 recorded cleanup scopes (--no-cleanup, head-only); restart the daemon on the \
+                 upgraded binary (#8301)"
+            );
+        }
+        file.entries
+    }
+
+    /// The single entry for (`repo`, `pr`), read fresh from disk (#8301).
+    ///
+    /// Why: the sweep asks `gh` about each entry between reading the registry
+    /// and cleaning, and `tm pr merge --no-cleanup` may record a deferral in that
+    /// window. Re-reading immediately before cleaning is what honours it.
+    /// Test: `sweep_rereads_a_deferral_written_during_the_pr_read`.
+    pub fn entry(&self, repo: &str, pr: u64) -> Option<OpenedPr> {
+        self.entries().into_iter().find(|e| same_pr(e, repo, pr))
+    }
+
+    /// The marker a scope-aware writer leaves beside the registry (#8301).
+    fn scoped_marker(&self) -> PathBuf {
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".scoped");
+        self.path.with_file_name(name)
+    }
+
+    /// Whether an older writer rewrote a file a scope-aware writer had written
+    /// (#8301).
+    ///
+    /// Why: an older daemon's `mark_cleaned` deserializes without `scope` and
+    /// writes the entries back, so a deferral silently becomes a wide cleanup.
+    /// What: every scope-aware write stamps the file `format: 2` and creates a
+    /// sibling `<registry>.scoped` marker, which older writers never touch. A
+    /// file without the stamp beside an existing marker was therefore
+    /// rewritten by an older writer after a newer one wrote it.
+    /// Test: `registry_detects_a_rewrite_by_an_older_writer`.
+    fn downgraded(&self, file: &RegistryFile) -> bool {
+        file.format < FORMAT_SCOPED && self.scoped_marker().exists()
+    }
+
+    /// Whether the file on disk was rewritten by an older writer (#8301).
+    ///
+    /// Test: `registry_detects_a_rewrite_by_an_older_writer`.
+    pub fn rewritten_by_older_writer(&self) -> bool {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<RegistryFile>(&raw).ok())
+            .is_some_and(|f| self.downgraded(&f))
     }
 
     /// The entries the periodic sweep should still ask GitHub about.
@@ -174,10 +244,12 @@ impl CleanupRegistry {
     /// appends; then rewrites the file atomically.
     /// Test: `registry_record_open_is_idempotent`.
     pub fn record_open(&self, entry: OpenedPr) -> anyhow::Result<()> {
-        let mut entries = self.entries();
-        entries.retain(|e| !(e.pr == entry.pr && e.repo == entry.repo));
-        entries.push(entry);
-        self.write(entries)
+        self.update(|entries| {
+            entries.retain(|e| !same_pr(e, &entry.repo, entry.pr));
+            entries.push(entry);
+            true
+        })
+        .map(|_| ())
     }
 
     /// Stamp a PR as cleaned so no later sweep re-runs it.
@@ -192,18 +264,15 @@ impl CleanupRegistry {
     /// Test: `registry_mark_cleaned_stamps_the_entry`,
     /// `registry_mark_cleaned_ignores_an_unknown_pr`.
     pub fn mark_cleaned(&self, repo: &str, pr: u64, at: DateTime<Utc>) -> anyhow::Result<()> {
-        let mut entries = self.entries();
-        let mut hit = false;
-        for e in &mut entries {
-            if e.pr == pr && e.repo == repo {
+        self.update(|entries| {
+            let mut hit = false;
+            for e in entries.iter_mut().filter(|e| same_pr(e, repo, pr)) {
                 e.cleaned_at = Some(at);
                 hit = true;
             }
-        }
-        if !hit {
-            return Ok(());
-        }
-        self.write(entries)
+            hit
+        })
+        .map(|_| ())
     }
 
     /// Record the operator's post-merge scope for one PR (#8301).
@@ -214,30 +283,61 @@ impl CleanupRegistry {
     /// What: sets `scope` on the matching (repo, pr) entry and rewrites the
     /// file. Returns `Ok(false)` when no entry matches: a PR `tm pr open` never
     /// recorded is one the sweep never visits, so there is nothing to narrow.
-    /// Test: `post_merge_no_cleanup_defers_the_registry_entry`.
+    /// Test: `post_merge_no_cleanup_defers_the_registry_entry`,
+    /// `registry_record_scope_matches_the_repo_case_insensitively`.
     pub fn record_scope(&self, repo: &str, pr: u64, scope: CleanupScope) -> anyhow::Result<bool> {
-        let mut entries = self.entries();
-        let mut hit = false;
-        for e in &mut entries {
-            if e.pr == pr && e.repo == repo {
+        self.update(|entries| {
+            let mut hit = false;
+            for e in entries.iter_mut().filter(|e| same_pr(e, repo, pr)) {
                 e.scope = scope;
                 hit = true;
             }
-        }
-        if hit {
-            self.write(entries)?;
-        }
-        Ok(hit)
+            hit
+        })
     }
 
-    /// Rewrite the whole file atomically.
+    /// Read, modify and rewrite the file under an exclusive lock (#8301).
+    ///
+    /// Why: `tm pr open`, `tm pr merge` and the daemon's sweep all write this
+    /// file. Without a lock, a sweep's `mark_cleaned` that read before a
+    /// merge's `record_scope` wrote would write the stale copy back and lose
+    /// the deferral.
+    /// What: holds `trusty_common::file_lock`'s sidecar lock (`<registry>.lock`)
+    /// across the read, `f`, and the atomic rewrite; the rewrite happens only
+    /// when `f` returns `true`. Unlike [`Self::entries`], a present-but-
+    /// unreadable or malformed file is an error here, so a write never replaces
+    /// a registry it could not parse.
+    /// Test: `registry_concurrent_writers_lose_no_update`.
+    fn update(&self, f: impl FnOnce(&mut Vec<OpenedPr>) -> bool) -> anyhow::Result<bool> {
+        trusty_common::file_lock::with_exclusive_lock(&self.path, || {
+            let mut entries = match std::fs::read_to_string(&self.path) {
+                Ok(raw) => {
+                    serde_json::from_str::<RegistryFile>(&raw)
+                        .map_err(|e| anyhow::anyhow!("cannot parse {}: {e}", self.path.display()))?
+                        .entries
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => anyhow::bail!("cannot read {}: {e}", self.path.display()),
+            };
+            let changed = f(&mut entries);
+            if changed {
+                self.write(entries)?;
+            }
+            Ok(changed)
+        })
+        .map_err(|e| anyhow::anyhow!("cannot lock {}: {e}", self.path.display()))?
+    }
+
+    /// Rewrite the whole file atomically, stamped scope-aware (#8301).
     fn write(&self, entries: Vec<OpenedPr>) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let body = serde_json::to_string_pretty(&RegistryFile { entries })?;
+        let body = serde_json::to_string_pretty(&RegistryFile {
+            format: FORMAT_SCOPED,
+            entries,
+        })?;
         crate::core::agent_manifest::atomic_write(&self.path, &body)
             .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", self.path.display()))?;
-        Ok(())
+        // #8301: the marker `downgraded` reads; see there.
+        std::fs::write(self.scoped_marker(), b"")
+            .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", self.scoped_marker().display()))
     }
 }

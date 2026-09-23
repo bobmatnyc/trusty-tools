@@ -187,60 +187,105 @@ async fn run_scoped(
     Ok(EXIT_OK)
 }
 
-/// What `tm pr merge` does once the merge itself succeeded (#8301).
+/// What `tm pr merge` does after `gh` answered the merge (#8301).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PostMerge {
+    /// The merge did not succeed; exit with this code.
+    NotMerged(i32),
     /// Run the head-only cleanup now, against `repo`.
     Cleanup { repo: String },
     /// The operator deferred cleanup; the registry entry says so.
     Deferred,
-    /// `--auto`: nothing has merged yet, so the daemon's sweep acts later.
+    /// `--auto`: nothing has merged yet, so the daemon's sweep acts later —
+    /// head-only, as recorded.
     AwaitSweep,
 }
 
-/// Decide the post-merge step and persist the operator's choice (#8301).
+/// The scope a `tm pr merge` invocation binds the sweep to (#8301).
 ///
-/// Why: `--no-cleanup`, `--no-delete-branch` and the merge's head-only scope
-/// used to live only in this process. The registry entry stayed `pending`, so
-/// the supervisor sweep later ran the WIDE cleanup and removed trees and
-/// branches the operator had been told were untouched.
-/// What: either flag records [`CleanupScope::Deferred`] (also under `--auto`)
-/// and returns [`PostMerge::Deferred`]; `--auto` alone returns
-/// [`PostMerge::AwaitSweep`]; otherwise [`CleanupScope::HeadOnly`] is recorded
-/// BEFORE the cleanup runs, so a blocked head-only run is never retried wide.
-/// A failed write is an error naming the risk: nothing has been removed yet.
-/// `repo` is resolved only when a write is needed.
-/// Test: `post_merge_no_cleanup_never_reaches_after_merge`,
-/// `post_merge_no_cleanup_defers_the_registry_entry`,
-/// `post_merge_cleanup_records_a_head_only_scope`,
-/// `post_merge_auto_leaves_the_entry_to_the_sweep`.
-pub(crate) fn post_merge_step(
-    args: &crate::cli::PrMergeArgs,
-    repo: impl FnOnce() -> anyhow::Result<String>,
-    registry: &CleanupRegistry,
-) -> anyhow::Result<PostMerge> {
-    let deferred = args.no_cleanup || args.no_delete_branch;
-    if args.auto && !deferred {
-        return Ok(PostMerge::AwaitSweep);
-    }
-    let scope = if deferred {
+/// What: `--no-cleanup`/`--no-delete-branch` → [`CleanupScope::Deferred`];
+/// anything else, `--auto` included, → [`CleanupScope::HeadOnly`], because a
+/// merge names exactly one PR.
+fn merge_scope(args: &crate::cli::PrMergeArgs) -> CleanupScope {
+    if args.no_cleanup || args.no_delete_branch {
         CleanupScope::Deferred
     } else {
         CleanupScope::HeadOnly
-    };
-    let repo = repo()?;
-    registry.record_scope(&repo, args.pr, scope).map_err(|e| {
+    }
+}
+
+/// Persist the merge's scope in the cleanup registry (#8301).
+///
+/// Why: the sweep runs in the daemon, possibly minutes later, so the choice
+/// has to be on disk before anything can merge.
+/// What: writes [`merge_scope`] for (`repo`, PR). A failed write is an error
+/// that names the registry. A deferral that matched no entry warns on stderr:
+/// there is nothing for the sweep to skip, which is fine, but a mismatched
+/// repo slug would look the same.
+/// Test: `post_merge_no_cleanup_defers_the_registry_entry`,
+/// `post_merge_cleanup_records_a_head_only_scope`,
+/// `post_merge_auto_leaves_the_entry_to_the_sweep`.
+pub(crate) fn record_merge_scope(
+    args: &crate::cli::PrMergeArgs,
+    repo: &str,
+    registry: &CleanupRegistry,
+) -> anyhow::Result<()> {
+    let scope = merge_scope(args);
+    let hit = registry.record_scope(repo, args.pr, scope).map_err(|e| {
         anyhow::anyhow!(
-            "#{} merged, but its post-merge choice could not be recorded in {}: {e:#}. \
-                 Nothing was removed; the daemon's sweep may still run the full cleanup on it",
+            "not merging #{}: its post-merge cleanup choice could not be recorded in {} ({e:#}); \
+             without it the daemon's sweep would run the full cleanup",
             args.pr,
             registry.path().display()
         )
     })?;
-    Ok(if deferred {
+    // #8301: `Ok(false)` is not silent for a deferral.
+    if !hit && scope == CleanupScope::Deferred {
+        eprintln!(
+            "tm pr merge: no cleanup-registry entry for {repo}#{} in {}; nothing to defer (the \
+             daemon's sweep only visits PRs `tm pr open` recorded)",
+            args.pr,
+            registry.path().display()
+        );
+    }
+    Ok(())
+}
+
+/// The step after a successful merge (#8301).
+///
+/// Test: `post_merge_no_cleanup_never_reaches_after_merge`.
+pub(crate) fn post_merge_step(args: &crate::cli::PrMergeArgs, repo: String) -> PostMerge {
+    if merge_scope(args) == CleanupScope::Deferred {
         PostMerge::Deferred
+    } else if args.auto {
+        PostMerge::AwaitSweep
     } else {
         PostMerge::Cleanup { repo }
+    }
+}
+
+/// Record the merge's cleanup scope, THEN merge (#8301).
+///
+/// Why: recording after the merge left a window — and, on a failed write, a
+/// permanent state — in which the registry said "wide" for a PR that had
+/// merged, and the sweep acted on it.
+/// What: resolves `repo`, runs [`record_merge_scope`] and stops with its error
+/// before `gh` is asked to merge; then runs [`super::merge::run`] and maps the
+/// outcome through [`post_merge_step`].
+/// Test: `merge_aborts_before_merging_when_the_scope_cannot_be_recorded`.
+pub(crate) fn merge_with_recorded_scope<R: super::GhRunner>(
+    gh: &R,
+    args: &crate::cli::PrMergeArgs,
+    repo: impl FnOnce() -> anyhow::Result<String>,
+    registry: &CleanupRegistry,
+) -> anyhow::Result<PostMerge> {
+    let repo = repo()?;
+    record_merge_scope(args, &repo, registry)?;
+    let code = super::merge::run(gh, args)?;
+    Ok(if code == EXIT_OK {
+        post_merge_step(args, repo)
+    } else {
+        PostMerge::NotMerged(code)
     })
 }
 

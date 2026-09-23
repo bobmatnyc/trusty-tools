@@ -1649,6 +1649,116 @@ fn registry_unreadable_file_reads_as_empty() {
     );
 }
 
+/// 🔴 #8301 round 2: concurrent read-modify-write never loses an update — a
+/// sweep's `mark_cleaned` racing a merge's `record_scope` must keep both.
+/// Fails before the lock, where a writer that read first wrote a stale copy.
+#[test]
+fn registry_concurrent_writers_lose_no_update() {
+    const N: u64 = 24;
+    for round in 0..4 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = CleanupRegistry::under_root(dir.path());
+        for pr in 0..N {
+            reg.record_open(entry(pr, false)).expect("seed");
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N as usize));
+        let handles: Vec<_> = (0..N)
+            .map(|pr| {
+                let (reg, barrier) = (reg.clone(), std::sync::Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if pr % 2 == 0 {
+                        reg.mark_cleaned("bobmatnyc/trusty-tools", pr, chrono::Utc::now())
+                    } else {
+                        reg.record_scope(
+                            "bobmatnyc/trusty-tools",
+                            pr,
+                            super::CleanupScope::Deferred,
+                        )
+                        .map(|_| ())
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join").expect("write");
+        }
+        let entries = reg.entries();
+        assert_eq!(entries.len(), N as usize, "round {round}");
+        for e in &entries {
+            if e.pr % 2 == 0 {
+                assert!(
+                    e.cleaned_at.is_some(),
+                    "round {round}: #{} lost its stamp",
+                    e.pr
+                );
+            } else {
+                assert_eq!(
+                    e.scope,
+                    super::CleanupScope::Deferred,
+                    "round {round}: #{} lost its deferral",
+                    e.pr
+                );
+            }
+        }
+    }
+}
+
+/// #8301 round 2: the repo slug matches case-insensitively, as GitHub does.
+#[test]
+fn registry_record_scope_matches_the_repo_case_insensitively() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    reg.record_open(entry(7275, false)).expect("record");
+
+    let hit = reg
+        .record_scope(
+            "BobMatNYC/Trusty-Tools",
+            7275,
+            super::CleanupScope::Deferred,
+        )
+        .expect("write");
+
+    assert!(hit, "a differently cased slug names the same repository");
+    assert!(reg.pending().is_empty());
+}
+
+/// 🔴 #8301 round 2: an older writer's rewrite — no `format` stamp beside the
+/// scope-aware marker — is detected, and a scope-aware write clears it.
+#[test]
+fn registry_detects_a_rewrite_by_an_older_writer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    reg.record_open(entry(7275, false)).expect("record");
+    assert!(
+        !reg.rewritten_by_older_writer(),
+        "a scope-aware write is not a downgrade"
+    );
+
+    // What an older daemon's `mark_cleaned` writes: no `format`, no `scope`.
+    std::fs::write(
+        reg.path(),
+        "{\"entries\":[{\"pr\":7275,\"repo\":\"bobmatnyc/trusty-tools\",\
+         \"repo_root\":\"/repo\",\"opened_at\":\"2026-09-23T00:00:00Z\"}]}",
+    )
+    .expect("older write");
+    assert!(reg.rewritten_by_older_writer());
+
+    reg.mark_cleaned("bobmatnyc/trusty-tools", 7275, chrono::Utc::now())
+        .expect("scope-aware write");
+    assert!(!reg.rewritten_by_older_writer());
+}
+
+/// A pre-#8301 registry file, never touched by a scope-aware writer, is not a
+/// downgrade: no marker exists.
+#[test]
+fn registry_an_old_file_alone_is_not_a_downgrade() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    std::fs::write(reg.path(), "{\"entries\":[]}").expect("old file");
+    assert!(!reg.rewritten_by_older_writer());
+}
+
 // ── #7185: the harness marker git counts and this engine's gate does not ─────
 
 /// 🔴 REGRESSION (#7185, recurrence 2026-09-11): the worktree step clears the

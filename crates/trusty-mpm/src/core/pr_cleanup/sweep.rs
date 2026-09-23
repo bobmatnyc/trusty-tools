@@ -82,7 +82,9 @@ pub fn sweep_decision(entry: &OpenedPr, view: &plan::PrView) -> SweepDecision {
 /// Returns the number of entries cleaned this sweep.
 ///
 /// #8301: an entry's recorded [`CleanupScope`] bounds the run — a deferred
-/// entry is never read at all, and a head-only one is cleaned head-only.
+/// entry is never read at all, and a head-only one is cleaned head-only. The
+/// scope and stamp are re-read from disk immediately before cleaning, so a
+/// deferral recorded while `gh` answered is still honoured.
 ///
 /// #8058: every `gh` call passes `backoff` first. An authentication failure is
 /// not a per-entry problem the next entry can succeed at — it is host-wide — so
@@ -97,7 +99,8 @@ pub fn sweep_decision(entry: &OpenedPr, view: &plan::PrView) -> SweepDecision {
 /// `sweep_stops_calling_gh_after_repeated_auth_failures`,
 /// `a_non_auth_failure_never_suspends_the_sweep`,
 /// `sweep_never_touches_a_deferred_entry`,
-/// `sweep_honours_a_recorded_head_only_scope`.
+/// `sweep_honours_a_recorded_head_only_scope`,
+/// `sweep_rereads_a_deferral_written_during_the_pr_read`.
 pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     gh: &G,
     git: &T,
@@ -151,6 +154,20 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
                 info!(pr = entry.pr, repo = %entry.repo, "pr cleanup sweep: skipping — {reason}");
             }
             SweepDecision::Clean => {
+                // #8301: `gh pr view` took time; re-read this entry so a
+                // deferral or stamp written meanwhile wins, and so does a
+                // newly recorded head-only scope.
+                let Some(fresh) = registry
+                    .entry(&entry.repo, entry.pr)
+                    .filter(OpenedPr::pending)
+                else {
+                    info!(pr = entry.pr, repo = %entry.repo, "pr cleanup sweep: skipping — deferred or cleaned since it was read");
+                    continue;
+                };
+                let req = CleanupRequest {
+                    head_only: fresh.scope == CleanupScope::HeadOnly,
+                    ..req
+                };
                 let report = super::run(gh, git, claims, landing, probe_dirt, &req).await;
                 if report.failed() {
                     warn!(
