@@ -127,7 +127,9 @@ above.
   path the selector cannot classify.
 - **`scripts/**` and `.github/**` select narrowly** (owner ruling 2026-09-23,
   #7777). A change to `ci.yml`, `select-test-crates.sh`,
-  `ci-affected-test-plan.sh` or their selftests selects the canary
+  `ci-affected-test-plan.sh`, their selftests, or the job's helpers
+  `ci-create-local-main.sh`, `ci-free-disk-space.sh` and `ci-apt-install.sh`
+  selects the canary
   `trusty-common` + `trusty-mpm`, plus each Tauri UI crate
   `ci-crate-relevance.sh` marks relevant (the wrapper then drops those). Any
   other such path selects the crates whose `*.rs` source names it literally
@@ -139,6 +141,13 @@ above.
   `./`, `../`, `{root}/` or absolute prefix still names the path. Most
   script and workflow PRs therefore select zero crates. A canary crate
   missing from the workspace selects every crate.
+- **Codesign scripts select `trusty-common`.** A changed `scripts/<name>.sh`
+  directly in `scripts/` (no subdirectory) whose content contains
+  `codesign`, on disk or at the diff's base, selects `trusty-common`. The
+  rule mirrors the `codesign_scripts` directory scan in
+  `crates/trusty-common/src/launchd_labels/tests.rs`, which
+  `codesign_scripts_name_identifiers_by_convention` reads; change the two
+  together.
 - **Nothing to test still reports.** A docs-only PR, a push to `main` and a
   `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
   job, named exactly `Rust tests (affected crates)`, reports success with a

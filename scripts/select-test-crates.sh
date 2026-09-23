@@ -52,7 +52,9 @@
 #      `deny.toml`                  -> ALL crates (every cargo invocation
 #                                       reads these).
 #   3. The affected-crate CI job's own inputs — `.github/workflows/ci.yml`,
-#      this script, `scripts/ci-affected-test-plan.sh`, and their selftests
+#      this script, `scripts/ci-affected-test-plan.sh`, their selftests, and
+#      the job's helpers `scripts/ci-create-local-main.sh`,
+#      `scripts/ci-free-disk-space.sh`, `scripts/ci-apt-install.sh`
 #                                    -> the CANARY set (trusty-common +
 #                                       trusty-mpm), unioned with each Tauri
 #                                       UI crate `ci-crate-relevance.sh`
@@ -74,13 +76,20 @@
 #                                       No reference -> NO crates.
 #                                       Direct only: a build.rs failure shows
 #                                       in the owning crate's own test run.
+#      Plus: a `scripts/<name>.sh` directly in `scripts/` (no subdirectory,
+#      extension exactly `sh`) whose content contains the substring
+#      `codesign` — on disk, or at the diff's base for a deleted, renamed or
+#      edited script -> trusty-common. This mirrors the directory scan
+#      `codesign_scripts` in crates/trusty-common/src/launchd_labels/tests.rs,
+#      read by `codesign_scripts_name_identifiers_by_convention`; change the
+#      two together.
 #   5. `docs/**`, `website/**`, a root-level `*.md`
 #                                    -> NO crates.
 #   6. anything else                -> ALL crates (fail open on an
 #                                       unclassified path).
 #   Rules 2-4: owner ruling 2026-09-23 on #7777. A literal scan that cannot
-#   run (git grep error) fails open to ALL, and so does a canary crate that
-#   is not a workspace member.
+#   run (git grep error) fails open to ALL, and so does a canary crate or the
+#   codesign crate that is not a workspace member.
 #
 # FAIL OPEN. A `cargo metadata` failure, a missing `jq`, or an empty/
 #   unresolvable change set prints every crate cargo metadata (or, failing
@@ -264,6 +273,8 @@ declare -A CARGO_ARGS_FEATURE_OVERRIDES=(
 
 # #7777 ruling (b): what a change to the affected-crate job's own inputs tests.
 CANARY_CRATES="trusty-common trusty-mpm"
+# The crate whose test scans every codesign script (rule 4, codesign_script).
+CODESIGN_CRATE="trusty-common"
 # The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
 # list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
 RELEVANCE_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
@@ -478,7 +489,8 @@ classify_path() {
       echo "ALL"
       return
       ;;
-    .github/workflows/ci.yml | scripts/select-test-crates.sh | scripts/select-test-crates_selftest.sh | scripts/ci-affected-test-plan.sh | scripts/ci-affected-test-plan-selftest.sh)
+    .github/workflows/ci.yml | scripts/select-test-crates.sh | scripts/select-test-crates_selftest.sh | scripts/ci-affected-test-plan.sh | scripts/ci-affected-test-plan-selftest.sh | \
+      scripts/ci-create-local-main.sh | scripts/ci-free-disk-space.sh | scripts/ci-apt-install.sh)
       echo "CANARY"
       return
       ;;
@@ -536,6 +548,27 @@ crates_referencing() {
   return 0
 }
 
+# codesign_script <path> — true when <path> is one of the files trusty-common's
+# `codesign_scripts` test helper scans: a `*.sh` directly in `scripts/` whose
+# content contains "codesign", on disk or at DIFF_BASE. Keep in step with
+# crates/trusty-common/src/launchd_labels/tests.rs `codesign_scripts`.
+codesign_script() {
+  local path="$1" name="${1#scripts/}" base_body
+  [ "$name" != "$path" ] || return 1
+  case "$name" in
+    */* | .sh) return 1 ;; # a subdirectory, or a dotfile with no extension
+    *.sh) : ;;
+    *) return 1 ;;
+  esac
+  [ -f "${WORKSPACE_ROOT}/${path}" ] &&
+    grep -qF codesign "${WORKSPACE_ROOT}/${path}" 2>/dev/null && return 0
+  [ -n "$DIFF_BASE" ] || return 1
+  # Captured, not piped into `grep -q`: an early grep exit SIGPIPEs cat-file
+  # and pipefail would turn a match into a miss.
+  base_body="$(git -C "$WORKSPACE_ROOT" cat-file blob "${DIFF_BASE}:${path}" 2>/dev/null)" || return 1
+  [[ "$base_body" == *codesign* ]]
+}
+
 # relevant_ui_crates — rule 3's union: each RELEVANCE_CRATES member that
 # ci-crate-relevance.sh answers `true` for over this change set. That script
 # fails closed (`true`); a missing copy of it counts the same way.
@@ -558,6 +591,7 @@ declare -A DIRECT_SET=()
 declare -A EXTRA_SET=()
 ANY_ALL=0
 CANARY_HIT=0
+CODESIGN_HIT=0
 while IFS= read -r path; do
   [ -n "$path" ] || continue
   cls="$(classify_path "$path")"
@@ -566,6 +600,7 @@ while IFS= read -r path; do
     NONE) : ;;
     CANARY) CANARY_HIT=1 ;;
     SCRIPTREF)
+      codesign_script "$path" && CODESIGN_HIT=1
       if ! refs="$(crates_referencing "$path")"; then
         echo "select-test-crates: WARNING: git grep failed scanning crates for '${path}' — printing ALL crates" >&2
         ANY_ALL=1
@@ -596,6 +631,12 @@ if [ "$CANARY_HIT" = "1" ]; then
   while IFS= read -r c; do
     [ -n "$c" ] && EXTRA_SET["$c"]=1
   done < <(relevant_ui_crates)
+fi
+
+if [ "$CODESIGN_HIT" = "1" ]; then
+  [ -n "${IS_MEMBER[$CODESIGN_CRATE]:-}" ] ||
+    fail_open "codesign crate '${CODESIGN_CRATE}' is not a workspace member"
+  EXTRA_SET["$CODESIGN_CRATE"]=1
 fi
 
 # Nothing owns a crate (docs, website, root md, an unreferenced script): print

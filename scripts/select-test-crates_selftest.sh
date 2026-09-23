@@ -309,6 +309,8 @@ alpha-ui" "${nested_out}"
 #                     prefixes, mine.sh only as "myscripts/mine.sh", and
 #                     include_str!s h.sh (deleted / renamed in a --range copy)
 #   trusty-mpm-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
+#   scripts/sign.sh   contains `codesign`; scripts/sub/sign.sh and
+#                     scripts/sign.txt do too but sit outside the scan's scope
 # ---------------------------------------------------------------------------
 echo "fixture: scripts/** and .github/** selection rules (#7777 ruling)"
 
@@ -366,6 +368,12 @@ for f in scripts/check_changelog_fragment.sh scripts/check-ui-bundle-freshness.s
   .github/workflows/ci.yml .github/workflows/other.yml; do
   echo '# fixture' >"${SR}/${f}"
 done
+# Codesign rule: in scope only as scripts/<name>.sh, like trusty-common's scan.
+mkdir -p "${SR}/scripts/sub"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sign.sh"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sub/sign.sh"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sign.txt"
+echo 'echo "no signing here"' >"${SR}/scripts/nosign.sh"
 (cd "${SR}" && git init -q . && git config user.email selftest@example.invalid &&
   git config user.name selftest && git add -A && git commit -qm base) >/dev/null 2>&1
 
@@ -403,6 +411,27 @@ assert_eq "path form \"/abs/scripts/abs.sh\" -> bystander" \
   "bystander" "$(sr_run scripts/abs.sh)"
 assert_eq "\"myscripts/mine.sh\" does not name scripts/mine.sh -> nothing" \
   "" "$(sr_run scripts/mine.sh)"
+
+# #7777 ruling 2026-09-23 23:17Z: a scripts/*.sh containing `codesign` is in
+# trusty-common's codesign_scripts scan, so it selects trusty-common. Same
+# scope as that scan: no subdirectory, extension exactly `sh`.
+assert_eq "codesign: scripts/sign.sh containing codesign -> trusty-common" \
+  "trusty-common" "$(sr_run scripts/sign.sh)"
+assert_eq "codesign: scripts/nosign.sh without codesign -> nothing" \
+  "" "$(sr_run scripts/nosign.sh)"
+assert_eq "codesign: scripts/sub/sign.sh (subdirectory) -> nothing" \
+  "" "$(sr_run scripts/sub/sign.sh)"
+assert_eq "codesign: scripts/sign.txt (not .sh) -> nothing" \
+  "" "$(sr_run scripts/sign.txt)"
+SR_NOCOMMON="${WORK}/scriptref-nocommon"
+cp -R "${SR}" "${SR_NOCOMMON}" && rm -rf "${SR_NOCOMMON}/crates/trusty-common"
+assert_eq "codesign: trusty-common not a workspace member -> all crates" \
+  "bystander
+search-consumer
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOCOMMON}" && bash "${SCRIPT}" --files scripts/sign.sh 2>/dev/null)"
 
 # A canary missing from the workspace fails open rather than testing less.
 SR_NOCANARY="${WORK}/scriptref-nocanary"
@@ -447,6 +476,18 @@ SRR_GO="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
 srr git checkout -q "${SRR_BASE}"
 assert_eq "--range naming a path absent on disk and at base -> nothing" \
   "" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_GO}" 2>/dev/null)"
+# A codesign script deleted in the range, or edited to drop codesign, left
+# the scan's set: its content at the range base still selects trusty-common.
+srr git rm -q scripts/sign.sh
+srr git commit -qm "delete sign.sh"
+SRR_SIGNDEL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "codesign: --range deleting scripts/sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_SIGNDEL}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr sh -c 'echo "echo unsigned" >scripts/sign.sh && git commit -qam "drop codesign from sign.sh"'
+SRR_SIGNEDIT="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "codesign: --range dropping codesign from sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_SIGNEDIT}" 2>/dev/null)"
 
 # The literal scan needs git; outside a repo it must fail open, never answer
 # "no reference". Asserted on a path that answers `trusty-mpm` when git works.
@@ -513,6 +554,20 @@ assert_eq "live: check_changelog_fragment.sh -> trusty-mpm" \
 assert_eq "live: check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
   "trusty-console
 trusty-search" "$(live_run scripts/check-ui-bundle-freshness.sh)"
+assert_eq "live: codesign build-console-saver.sh -> trusty-common" \
+  "trusty-common" "$(live_run scripts/build-console-saver.sh)"
+assert_eq "live: codesign install-trusty-mpm-signed.sh -> trusty-common" \
+  "trusty-common" "$(live_run scripts/install-trusty-mpm-signed.sh)"
+# The job's helper scripts select the canary. The Tauri UI crates the
+# relevance union may add are that rule's business, not this assertion's.
+live_canary() {
+  live_run "$1" | grep -vxE 'trusty-(agents-ui|audit-ui|code-gui|mpm-gui)'
+}
+for helper in ci-create-local-main.sh ci-free-disk-space.sh ci-apt-install.sh; do
+  assert_eq "live: helper ${helper} -> canary trusty-common + trusty-mpm" \
+    "trusty-common
+trusty-mpm" "$(live_canary "scripts/${helper}")"
+done
 
 echo
 echo "${CASES} cases, ${FAILURES} failures"
