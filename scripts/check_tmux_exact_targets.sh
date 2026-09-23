@@ -94,7 +94,13 @@ fi
 
 [ -f "$ALLOWLIST" ] || { echo "check_tmux_exact_targets: TOOL ERROR: missing $ALLOWLIST" >&2; exit 2; }
 
-TMUX_GATE_FILES="$files" perl - "$ALLOWLIST" <<'PERL'
+# The file list goes through a temp file: as one environment string it
+# exceeds Linux's 128 KiB per-argument limit (`Argument list too long`).
+FILE_LIST="$(mktemp)"
+trap 'rm -f "$FILE_LIST"' EXIT
+printf '%s\n' "$files" > "$FILE_LIST"
+
+TMUX_GATE_FILE_LIST="$FILE_LIST" perl - "$ALLOWLIST" <<'PERL'
 use strict;
 use warnings;
 
@@ -198,7 +204,10 @@ sub statement_from {
     return $s;
 }
 
-for my $path (split /\n/, $ENV{TMUX_GATE_FILES}) {
+open(my $lf, "<", $ENV{TMUX_GATE_FILE_LIST}) or die "open file list: $!";
+my @paths = map { chomp; $_ } <$lf>;
+close $lf;
+for my $path (@paths) {
     next unless length $path;
     open(my $fh, "<", $path) or die "open $path: $!";
     my @lines = <$fh>;
