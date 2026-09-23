@@ -107,7 +107,9 @@ pub(crate) struct Cli {
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 
-    /// Select which logged-in `gh` account clones/runs a managed repo (#7166).
+    /// Select which logged-in `gh` account clones/runs a managed repo (alias:
+    /// `--user`). The value must be a login `gh auth status` already lists on
+    /// this host (#7166, #5850).
     ///
     /// Why: `tm <url>` fails on a private repo when every credential path on
     /// the machine resolves to one identity (an exported `GH_TOKEN`, git's
@@ -135,13 +137,37 @@ pub(crate) struct Cli {
     /// then builds and reuses its own isolated `gh` config dir for that login
     /// automatically (#7166); it never runs `gh auth switch`, so a
     /// concurrently-running session under a different account is unaffected.
-    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
-    #[arg(long, global = true)]
+    /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
+    /// second one — the owner reached for that spelling (`tm <url> --user
+    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// every parse position and the `is_name_segment` validation in
+    /// [`crate::commands::register_args::resolve_account`] carry over
+    /// unchanged; no validation against `gh auth status` exists for either
+    /// spelling, and none is added here (a network/subprocess call at parse
+    /// time is not this flag's job).
+    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
+    /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_rejects_a_blank_account_flag_before_the_repository`.
+    // #5850: a blank value is refused here, not read as absent downstream.
+    #[arg(long, visible_alias = "user", global = true, value_parser = non_blank_login)]
     pub(crate) account: Option<String>,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// Parse `--account`/`--user`, refusing a blank or whitespace-only login.
+///
+/// Why: `resolve_account` reads a blank flag as absent, so `tm --user= <url>`
+/// would run as the machine's global `gh` account (#5850).
+/// What: returns the value unchanged when it has any non-whitespace character.
+/// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
+fn non_blank_login(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+    }
+    Ok(value.to_string())
 }
 
 /// Top-level CLI subcommands.

@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.52.0] — 2026-09-23
 
+This release lowers the tmux scrollback limit from 100,000 lines to 10,000. The lower limit removes the keystroke lag in tm sessions ([#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
+
 ### Added
 
 - `load_average` module (feature `load-average`): the kernel's 1/5/15-minute load average from `getloadavg(3)` on macOS/BSD and `/proc/loadavg` on Linux, as a `Result` that never substitutes a guessed value for a failed reading. Builder admission needs a sustained saturation measure, which `host_metrics`' instantaneous `CpuMetrics::usage_pct` is not. Adds no crate to the lockfile (#8261).

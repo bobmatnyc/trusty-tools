@@ -1181,6 +1181,62 @@ fn cli_account_flag_after_subcommand() {
     assert!(matches!(cli.command, Some(Command::Run { .. })));
 }
 
+/// 🔴 #5850 REGRESSION: `--user <login>` must bind the same field as
+/// `--account <login>`.
+///
+/// Why this is the assertion: the owner's report was
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto`
+/// failing at clap parsing. `--user` is the spelling `gh` itself uses for the
+/// same concept (`gh auth token -u`), so it has to be accepted, and it has to
+/// land on `cli.account` — an alias that parsed into a SECOND field would give
+/// the two spellings different behaviour downstream.
+#[test]
+fn cli_parses_user_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #5850 REGRESSION (fail-open): a blank `--user`/`--account` given BEFORE
+/// the repository is refused at parse time.
+///
+/// Why this is the assertion: `tm --user= <url>` parsed as `Some("")`, and
+/// `resolve_account` reads a blank flag as absent, so the clone ran as the
+/// machine's global `gh` account. Same refusal text as the trailing form
+/// (`bare_form_rejects_an_empty_account_value`).
+#[test]
+fn cli_rejects_a_blank_account_flag_before_the_repository() {
+    for argv in [
+        &["trusty-mpm", "--user=", "acme/widget"][..],
+        &["trusty-mpm", "--account=", "acme/widget"][..],
+        &["trusty-mpm", "--user", "", "acme/widget"][..],
+        &["trusty-mpm", "--account", "   ", "acme/widget"][..],
+        &["trusty-mpm", "--user=  ", "run", "acme/widget"][..],
+    ] {
+        let err = Cli::try_parse_from(argv)
+            .expect_err("a blank account flag must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{argv:?}: {err}"
+        );
+    }
+}
+
+/// The alias inherits `global = true`, so it also parses AFTER the positional
+/// — the exact shape the owner typed (`tm <url> --user <login>`).
+#[test]
+fn cli_user_alias_after_subcommand() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "run",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ])
+    .unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert!(matches!(cli.command, Some(Command::Run { .. })));
+}
+
 #[test]
 fn cli_bare_invocation_uses_guided_default() {
     // Since #1708, a bare `tm` invocation is valid: clap parses it with
