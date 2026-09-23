@@ -79,7 +79,7 @@ Live titles, as of generation:
   `Backlog · embedderd`, `Backlog · installer`, `Backlog · mcp`,
   `Backlog · memory (triaged)`, `Backlog · mpm/core`, `Backlog · search`,
   `Backlog · tc-services`, `Backlog · tga`.
-- Version milestones: `1.6.4`, `1.6.5 · Build efficiency`, `1.6.6`, `1.6.7`.
+- Version milestones: `1.6.4`, `1.6.5 · Build efficiency`, `1.7.1`, `1.6.7`.
 - Release cleanup: `Release cleanup · memory`, `Release cleanup · mpm/core`,
   `Release cleanup · tga`.
 - Epic milestones: `Issue management` (#94) — issue-management work and its
