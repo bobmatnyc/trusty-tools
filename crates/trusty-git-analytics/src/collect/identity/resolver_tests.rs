@@ -518,13 +518,13 @@ fn tier3_does_not_merge_bots_sharing_domain_suffix() {
         "precondition: full-string similarity should exceed the threshold"
     );
 
-    let (name, email) = r.resolve("Snyk Bot", "ops+snyk@examplecorpresearch.com");
+    let (name, email) = r.resolve("Jordan Sampleauthor", "ops+snyk@examplecorpresearch.com");
     assert_ne!(
         name, "Jenkins CI",
         "Snyk bot must not be misattributed to Jenkins CI (#2253)"
     );
     // The unrelated bot falls through unchanged.
-    assert_eq!(name, "Snyk Bot");
+    assert_eq!(name, "Jordan Sampleauthor");
     assert_eq!(email, "ops+snyk@examplecorpresearch.com");
 }
 
@@ -979,8 +979,8 @@ fn issue_2253_domain_gate_intact_when_fuzzy_enabled() {
         ) >= DEFAULT_SIMILARITY_THRESHOLD,
         "precondition: full-string similarity clears the threshold"
     );
-    let (n, e) = r.resolve("Snyk Bot", "ops+snyk@examplecorpresearch.com");
-    assert_eq!(n, "Snyk Bot");
+    let (n, e) = r.resolve("Jordan Sampleauthor", "ops+snyk@examplecorpresearch.com");
+    assert_eq!(n, "Jordan Sampleauthor");
     assert_eq!(e, "ops+snyk@examplecorpresearch.com");
 
     // ...while a genuine same-domain, near-identical local-part still matches.
@@ -1018,12 +1018,12 @@ fn member_order_is_deterministic_across_rebuilds() {
     fn build() -> IdentityResolver {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for (name, email) in [
-            ("Joshua Lepage", "joshua.lepage@acme.com"),
-            ("Joshua Mccartney", "joshua.mccartney@acme.com"),
-            ("Joshua Renner", "joshua.renner@acme.com"),
-            ("Joshua Vance", "joshua.vance@acme.com"),
-            ("Joshua Whitlock", "joshua.whitlock@acme.com"),
-            ("Joshua Ackley", "joshua.ackley@acme.com"),
+            ("Alex Mockdata", "alex.mockdata@acme.com"),
+            ("Alex Placeholder", "alex.placeholder@acme.com"),
+            ("Alex Samplename", "alex.samplename@acme.com"),
+            ("Alex Stubvalue", "alex.stubvalue@acme.com"),
+            ("Alex Testfixture", "alex.testfixture@acme.com"),
+            ("Alex Dummyrecord", "alex.dummyrecord@acme.com"),
         ] {
             map.insert(name.to_string(), vec![email.to_string()]);
         }
@@ -1032,18 +1032,18 @@ fn member_order_is_deterministic_across_rebuilds() {
 
     // Sorted by (canonical_email, canonical_name), not by declaration order.
     let expected_members: Vec<(String, String)> = [
-        ("Joshua Ackley", "joshua.ackley@acme.com"),
-        ("Joshua Lepage", "joshua.lepage@acme.com"),
-        ("Joshua Mccartney", "joshua.mccartney@acme.com"),
-        ("Joshua Renner", "joshua.renner@acme.com"),
-        ("Joshua Vance", "joshua.vance@acme.com"),
-        ("Joshua Whitlock", "joshua.whitlock@acme.com"),
+        ("Alex Dummyrecord", "alex.dummyrecord@acme.com"),
+        ("Alex Mockdata", "alex.mockdata@acme.com"),
+        ("Alex Placeholder", "alex.placeholder@acme.com"),
+        ("Alex Samplename", "alex.samplename@acme.com"),
+        ("Alex Stubvalue", "alex.stubvalue@acme.com"),
+        ("Alex Testfixture", "alex.testfixture@acme.com"),
     ]
     .iter()
     .map(|(n, e)| ((*n).to_string(), (*e).to_string()))
     .collect();
 
-    let expected_resolution = build().resolve("josh", "josh@unaffiliated.test");
+    let expected_resolution = build().resolve("alex", "alex@unaffiliated.test");
     for i in 0..100 {
         let r = build();
         assert_eq!(
@@ -1051,7 +1051,7 @@ fn member_order_is_deterministic_across_rebuilds() {
             "members order differs on rebuild {i}"
         );
         assert_eq!(
-            r.resolve("josh", "josh@unaffiliated.test"),
+            r.resolve("alex", "alex@unaffiliated.test"),
             expected_resolution,
             "resolution differs on rebuild {i}"
         );
@@ -1080,10 +1080,10 @@ fn fuzzy_tie_breaks_on_stable_key() {
         }
     }
 
-    let a = ("Sam Taylor", "a.taylor@acme.com");
-    let b = ("Sam Taylor", "b.taylor@acme.com");
-    let inbound_name = "Sam Taylorr";
-    let inbound_email = "sam@unaffiliated.test";
+    let a = ("Chris Testperson", "a.testperson@acme.com");
+    let b = ("Chris Testperson", "b.testperson@acme.com");
+    let inbound_name = "Chris Testpersonn";
+    let inbound_email = "chris@unaffiliated.test";
 
     // Precondition: the two members score an EXACT tie for this inbound pair.
     // An exact tie is the trigger condition for the defect.
@@ -1098,9 +1098,9 @@ fn fuzzy_tie_breaks_on_stable_key() {
     for order in [[a, b], [b, a]] {
         let r = IdentityResolver::new(Some(&team(order)));
         let (n, e) = r.resolve(inbound_name, inbound_email);
-        assert_eq!(n, "Sam Taylor");
+        assert_eq!(n, "Chris Testperson");
         assert_eq!(
-            e, "a.taylor@acme.com",
+            e, "a.testperson@acme.com",
             "tie must go to the lowest (email, name) key; declared order was {order:?}"
         );
     }
