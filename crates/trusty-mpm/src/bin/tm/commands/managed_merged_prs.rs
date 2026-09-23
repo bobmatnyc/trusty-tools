@@ -187,6 +187,30 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// Is `url` the trusty-console gateway base (`http://<console>/api/mpm`)? (#8347)
+fn is_gateway_url(url: &str) -> bool {
+    url.trim_end_matches('/')
+        .ends_with(trusty_mpm::core::discovery::GATEWAY_PATH)
+}
+
+/// The prune-worktrees endpoint, addressed to the daemon itself (#8347).
+///
+/// Why: `tm` resolves its base URL gateway-first, so with the console running
+/// the request went to `http://<console>/api/mpm/api/v1/…`. The console proxy
+/// cuts every forwarded call at its 30 s client timeout, and a merged-PR survey
+/// runs for minutes, so the proxy answered 502 for a healthy daemon.
+/// What: joins `/api/v1/sessions/managed/prune-worktrees` onto `direct` when
+/// `url` is the gateway base, else onto `url`, with any trailing `/` removed.
+/// The result always carries exactly one `/api/` prefix.
+/// Test: `prune_worktrees_url_bypasses_the_gateway_prefix`.
+pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
+    let base = if is_gateway_url(url) { direct } else { url };
+    format!(
+        "{}/api/v1/sessions/managed/prune-worktrees",
+        base.trim_end_matches('/')
+    )
+}
+
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
 ///
 /// Why: sessions decommissioned before Fix 1a (#1840), or where
@@ -219,8 +243,16 @@ pub(crate) async fn session_prune_worktrees(
     merged_prs: bool,
     invoking_session: Option<String>,
 ) -> anyhow::Result<()> {
+    // #8347: resolve the daemon's own address when `url` is the console gateway.
+    let direct = if is_gateway_url(url) {
+        trusty_mpm::core::resolve_daemon_url_probing(client, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot resolve the daemon's direct URL: {e}"))?
+    } else {
+        String::new()
+    };
     let mut request = client
-        .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
+        .post(prune_worktrees_url(url, &direct))
         .json(&serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,

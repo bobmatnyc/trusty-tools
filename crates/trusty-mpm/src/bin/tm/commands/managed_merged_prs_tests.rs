@@ -383,6 +383,26 @@ async fn capturing_prune_server() -> (String, tokio::task::JoinHandle<serde_json
     (url, handle)
 }
 
+/// 🔴 #8347: a gateway base URL never reaches the wire as a doubled
+/// `/api/mpm/api/v1/` path — the request goes to the daemon itself.
+#[test]
+fn prune_worktrees_url_bypasses_the_gateway_prefix() {
+    const ENDPOINT: &str = "http://127.0.0.1:7880/api/v1/sessions/managed/prune-worktrees";
+    for gateway in [
+        "http://127.0.0.1:7788/api/mpm",
+        "http://127.0.0.1:7788/api/mpm/",
+    ] {
+        let url = super::prune_worktrees_url(gateway, "http://127.0.0.1:7880");
+        assert_eq!(url, ENDPOINT, "gateway base {gateway}");
+        assert!(!url.contains("/api/mpm"), "{url}");
+    }
+    // A direct base is used verbatim, a trailing slash included.
+    assert_eq!(
+        super::prune_worktrees_url("http://127.0.0.1:7880/", "unused"),
+        ENDPOINT
+    );
+}
+
 #[test]
 fn merged_pr_pass_tolerates_missing_fields() {
     // A third-party or older daemon may omit fields entirely; the renderer must
