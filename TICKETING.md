@@ -79,16 +79,13 @@ Live titles, as of generation:
   `Backlog · embedderd`, `Backlog · installer`, `Backlog · mcp`,
   `Backlog · memory (triaged)`, `Backlog · mpm/core`, `Backlog · search`,
   `Backlog · tc-services`, `Backlog · tga`.
-- Version milestones: `1.6.4`, `1.6.5 · Build efficiency`, `1.7.1`, `1.6.7`.
-- Release cleanup: `Release cleanup · memory`, `Release cleanup · mpm/core`,
-  `Release cleanup · tga`.
+- Version milestones: `1.7.1`, `1.7.2`, `trusty-mpm 2.0.0`.
 - Epic milestones: `Issue management` (#94) — issue-management work and its
   follow-ups; `Instructional content` (#95).
-- Themed: `Advisory exception review — 2026-09`, `CTO assistant — base case`,
-  `Fail-open & silent-success fixes · mpm/core`, `PAUSED · agents`,
+- Themed: `Advisory exception review — 2026-09`,
+  `Fail-open & silent-success fixes · mpm/core`,
   `Session, worktree & daemon lifecycle · mpm/core`, `trusty agents mvp`,
   `trusty-agents 1.0 — assistant platform`,
-  `trusty-audit — client re-run package`,
   `trusty-code R1 · Reliable independent core`,
   `trusty-code R2 · Shared instructions, agents & skills`,
   `trusty-code R3 · MCP & channel interoperability`,
