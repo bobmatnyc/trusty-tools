@@ -35,6 +35,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Generated launchd plists no longer carry credential values. `LaunchdConfig::render_plist` drops any `EnvironmentVariables` entry whose key names a credential (logging the key, never the value) and refuses a `ProgramArguments` entry carrying a credential-shaped value — a plist is user-readable, so anything written there is readable by every process running as the user and by every backup (#8236).
 - New `launchd_secrets` module: credential-key and credential-value detection, the renderer's strip, and `scrub_plist_credential_env` for rewriting an already-installed plist in place. A plist it cannot parse is an error, never a silent "clean".
 
+### Documentation
+
+- `write_atomic`'s `Test:` pointer now sits in the Why/What/Test section, not inside its `# Code Contract` block, so the contract check computes a verdict again. `contracts.json` now carries the `write_atomic`, `is_credential_env_key` and `strip_credential_env` contracts. (#8236)
+
 ## [0.51.1] — 2026-09-18
 
 ### Changed
