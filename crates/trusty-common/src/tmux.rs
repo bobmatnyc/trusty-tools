@@ -78,6 +78,29 @@ impl TmuxTarget {
         }
     }
 
+    /// [`Self::session`], refusing a name that addresses no session (#8443).
+    ///
+    /// Why: `=:`, what an empty name used to render, resolves to the CURRENT
+    /// session, so `POST /claude-config/restart {"tmux_session":""}` typed
+    /// `C-c` and `claude` into whichever session tmux picked.
+    /// What: `Err` when [`check_session_name`] rejects `name`.
+    /// Test: `empty_session_names_never_render_a_resolvable_target`.
+    pub fn try_session(name: impl Into<String>) -> Result<Self, TmuxTargetError> {
+        let target = Self::session(name);
+        target.validate()?;
+        Ok(target)
+    }
+
+    /// `Ok` when this target addresses exactly one thing: an immutable pane id,
+    /// or a session name [`check_session_name`] accepts (#8443).
+    /// Test: `empty_session_names_never_render_a_resolvable_target`.
+    pub fn validate(&self) -> Result<(), TmuxTargetError> {
+        if self.pane.as_deref().is_some_and(is_immutable_id) {
+            return Ok(());
+        }
+        check_session_name(&self.session).map(|_| ())
+    }
+
     /// Render the tmux `-t` target string for a window- or pane-typed verb
     /// (`send-keys`, `capture-pane`, `display-message`).
     ///
@@ -112,13 +135,52 @@ pub fn is_immutable_id(target: &str) -> bool {
         && chars.all(|c| c.is_ascii_digit())
 }
 
-/// The session name tmux actually stores for `name`: `:` and `.` become `_`.
+/// A tmux target that would not address exactly one session (#8443).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxTargetError {
+    /// The rejected session name, verbatim.
+    pub name: String,
+}
+
+impl std::fmt::Display for TmuxTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tmux session name {:?} is empty; refusing to target it, because tmux \
+             resolves an empty exact target to the current session (#8443)",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for TmuxTargetError {}
+
+/// Target rendered for a rejected name on a SESSION-typed verb: `$` is an id
+/// lookup with no number, which tmux 3.6b answers `can't find session: $`.
+const UNRESOLVABLE_SESSION_TARGET: &str = "$";
+
+/// Target rendered for a rejected name on a WINDOW/PANE-typed verb: `%` is a
+/// pane-id lookup with no number (`can't find pane: %` on tmux 3.6b).
+const UNRESOLVABLE_PANE_TARGET: &str = "%";
+
+/// The session name tmux actually stores for `name`, or `Err` when there is
+/// none (#8443).
 ///
 /// Why: `new-session -s tm:proj:0` creates `tm_proj_0` (tmux 3.6b), so a
-/// target spelled with the raw name can never match exactly.
-fn tmux_session_name(name: &str) -> String {
+/// target spelled with the raw name can never match exactly. An empty name,
+/// or `=` alone, renders `=:`, which tmux resolves to the current session.
+/// What: strips one leading `=`, rejects what is then empty or whitespace, and
+/// maps `:` and `.` to `_`.
+/// Test: `exact_session_target_prefixes_equals`,
+/// `empty_session_names_never_render_a_resolvable_target`.
+pub fn check_session_name(name: &str) -> Result<String, TmuxTargetError> {
     let bare = name.strip_prefix('=').unwrap_or(name);
-    bare.replace([':', '.'], "_")
+    if bare.trim().is_empty() {
+        return Err(TmuxTargetError {
+            name: name.to_string(),
+        });
+    }
+    Ok(bare.replace([':', '.'], "_"))
 }
 
 /// Exact `-t` target for a SESSION-typed tmux verb: `=<name>` (#8443).
@@ -132,15 +194,21 @@ fn tmux_session_name(name: &str) -> String {
 /// `list-clients`, `attach-session` and `switch-client`. `name` is normalized
 /// the way tmux normalizes session names (`:`/`.` → `_`). An immutable id is
 /// returned unchanged, and an already `=`-prefixed name is not prefixed twice.
+/// A name [`check_session_name`] rejects renders `$`, which no session
+/// matches; callers that must fail loudly check the name first.
 /// Do NOT use it for window- or pane-typed verbs: tmux 3.6b resolves `=name`
 /// there as a WINDOW name first — use [`exact_window_target`].
 /// Test: `exact_session_target_prefixes_equals`,
-/// `exact_targets_leave_immutable_ids_unchanged`.
+/// `exact_targets_leave_immutable_ids_unchanged`,
+/// `empty_session_names_never_render_a_resolvable_target`.
 pub fn exact_session_target(name: &str) -> String {
     if is_immutable_id(name) {
         return name.to_string();
     }
-    format!("={}", tmux_session_name(name))
+    match check_session_name(name) {
+        Ok(session) => format!("={session}"),
+        Err(_) => UNRESOLVABLE_SESSION_TARGET.to_string(),
+    }
 }
 
 /// Exact `-t` target for a WINDOW- or PANE-typed tmux verb, addressing the
@@ -156,14 +224,19 @@ pub fn exact_session_target(name: &str) -> String {
 /// What: returns `=<name>:` for `send-keys`, `capture-pane`,
 /// `display-message`, `list-panes` (with or without `-s`), `split-window`,
 /// `new-window`, `select-window` and `set-option -t`. Normalizes and passes
-/// immutable ids through exactly like [`exact_session_target`].
+/// immutable ids through exactly like [`exact_session_target`]; a rejected
+/// name renders `%`, which no pane matches.
 /// Test: `exact_window_target_appends_colon`,
-/// `exact_targets_leave_immutable_ids_unchanged`.
+/// `exact_targets_leave_immutable_ids_unchanged`,
+/// `empty_session_names_never_render_a_resolvable_target`.
 pub fn exact_window_target(name: &str) -> String {
     if is_immutable_id(name) {
         return name.to_string();
     }
-    format!("={}:", tmux_session_name(name))
+    match check_session_name(name) {
+        Ok(session) => format!("={session}:"),
+        Err(_) => UNRESOLVABLE_PANE_TARGET.to_string(),
+    }
 }
 
 /// Exact `-t` target for `pane` inside `session` (#8443).
@@ -178,7 +251,20 @@ pub fn exact_pane_target(session: &str, pane: &str) -> String {
     if is_immutable_id(pane) {
         return pane.to_string();
     }
-    format!("{}{pane}", exact_window_target(session))
+    match check_session_name(session) {
+        Ok(_) => format!("{}{pane}", exact_window_target(session)),
+        Err(_) => UNRESOLVABLE_PANE_TARGET.to_string(),
+    }
+}
+
+/// [`exact_session_target`] single-quoted for a POSIX shell or zsh (#8443).
+///
+/// Why: operators paste hints into zsh, where an unquoted leading `=` is
+/// "equals expansion" (`=foo` → the path of command `foo`).
+/// What: `'=<normalized name>'`, with any `'` escaped as `'\''`.
+/// Test: `shell_attach_command_quotes_exact_target`.
+pub fn shell_exact_session_target(name: &str) -> String {
+    format!("'{}'", exact_session_target(name).replace('\'', r"'\''"))
 }
 
 /// A copy-pasteable shell command that attaches to session `name` exactly.
@@ -190,8 +276,10 @@ pub fn exact_pane_target(session: &str, pane: &str) -> String {
 /// escaped for POSIX shells.
 /// Test: `shell_attach_command_quotes_exact_target`.
 pub fn shell_attach_command(name: &str) -> String {
-    let target = exact_session_target(name).replace('\'', r"'\''");
-    format!("tmux attach-session -t '{target}'")
+    format!(
+        "tmux attach-session -t {}",
+        shell_exact_session_target(name)
+    )
 }
 
 /// A typed tmux sub-command.
@@ -393,6 +481,35 @@ pub enum TmuxCommand {
         /// tmux window option name to read back (e.g. `alternate-screen`).
         name: String,
     },
+}
+
+impl TmuxCommand {
+    /// `Err` when this command's `-t` target addresses no session (#8443).
+    ///
+    /// Why: a spawning layer checks here once, before any process runs, so an
+    /// empty name fails loudly instead of rendering a target that matches
+    /// nothing (or, before #8443, the current session).
+    /// What: validates the session name of every targeted variant; untargeted
+    /// variants (`new-session`, `list-sessions`, option commands) are `Ok`.
+    /// Test: `command_targets_refuse_empty_session_names`.
+    pub fn validate_targets(&self) -> Result<(), TmuxTargetError> {
+        match self {
+            Self::KillSession { name }
+            | Self::HasSession { name }
+            | Self::ListWindows { name }
+            | Self::ListPanes { name }
+            | Self::RenameSession { old: name, .. }
+            | Self::SetEnvironment { session: name, .. } => {
+                if is_immutable_id(name) {
+                    Ok(())
+                } else {
+                    check_session_name(name).map(|_| ())
+                }
+            }
+            Self::SendKeys { target, .. } | Self::CapturePane { target, .. } => target.validate(),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// tmux `-F` format string for `list-sessions`.

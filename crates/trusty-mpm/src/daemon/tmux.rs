@@ -849,6 +849,8 @@ impl TmuxDriver {
     /// Test: exercised indirectly via `snapshot::capture_into` with a live tmux;
     /// `RealTmuxDriver::get_pane_cwd` wraps this method.
     pub fn pane_current_path(&self, session_name: &str) -> Option<std::path::PathBuf> {
+        // #8443: an empty name would render a target matching no pane; say so.
+        crate::core::tmux::check_session_name(session_name).ok()?;
         let output = Command::new(&self.tmux_path)
             .args([
                 "display-message",
@@ -891,6 +893,7 @@ impl TmuxDriver {
     /// `mark_runtime_exited_stopped` with a live tmux;
     /// `RealTmuxDriver::get_pane_id` wraps this method.
     pub fn pane_id(&self, session_name: &str) -> Option<String> {
+        crate::core::tmux::check_session_name(session_name).ok()?; // #8443
         let output = Command::new(&self.tmux_path)
             .args([
                 "display-message",

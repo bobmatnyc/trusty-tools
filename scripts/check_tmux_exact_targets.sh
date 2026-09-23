@@ -9,27 +9,47 @@
 #   `trusty_common::tmux`; this gate keeps a hand-built bare target from coming
 #   back.
 #
-# What: scans every tracked Rust, shell, Swift, TS/JS and Svelte file that
-#   mentions `tmux` for two shapes, ignoring comment lines:
-#     A. an argv token `"-t"` (or `'-t'`) — the NEXT argument must be a string
-#        literal starting with `=`, an immutable id literal (`$N` `@N` `%N`), a
-#        call to an approved helper (`exact_session_target(`,
-#        `exact_window_target(`, `exact_pane_target(`, `.as_target()`), or a
-#        variable whose `let` binding within the previous 30 lines makes such a
-#        call. A `"-t"` compared with `==`/`!=` or used as a match arm is not
-#        an argument and is skipped.
-#     B. a line containing `tmux … -t <tok>` (a shell command, a format
-#        string) — `<tok>`, less any leading quote, must start with `=`, be an
-#        immutable id, or be a `<placeholder>` in prose.
+# What: scans every tracked Rust, shell, Swift, TS/JS and Svelte file, plus the
+#   bundled Markdown assets under `crates/*/src/assets/` (skills and agents that
+#   tell an agent which tmux command to run). Comment lines are ignored, and a
+#   line ending in `\` is joined to the next before matching.
+#     A. an argv token `"-t"` (or `'-t'`) in a non-shell file that mentions
+#        tmux, or within 3 lines of a tmux verb literal. The NEXT argument must
+#        be a string literal starting with `=`, an immutable id literal (`$N`
+#        `@N` `%N`), a call to an approved helper, or a variable whose `let`
+#        binding (within 30 lines) starts with such a call or builds its value
+#        only from such calls — a binding that also calls `to_string`,
+#        `to_owned`, `clone`, `into`, `String::from` or `format!` is bare. A
+#        `"-t"` compared with `==`/`!=` or used as a match arm is skipped.
+#     B. any `-t <tok>`, `-t"<tok>"` or `-t{<tok>}` on a line that mentions tmux
+#        or a tmux verb — and, in a shell file that mentions tmux, on EVERY
+#        line, because a wrapper (`"${TM[@]}" … -t "$S"`) hides the word.
+#        `<tok>`, less any leading quote, must start with `=` or be a `%N`/`@N`
+#        id. In a shell file `$N` is a positional parameter, never a session
+#        id, so it is a finding; elsewhere `$N` is accepted. Outside shell a
+#        `<placeholder>` is prose, and a `{…}` format placeholder is accepted
+#        only when its statement calls an approved helper.
+#   Approved helpers: `exact_session_target(`, `exact_window_target(`,
+#   `exact_pane_target(`, `shell_exact_session_target(`,
+#   `shell_attach_command(`, `.as_target()`.
 #   A finding is excused only by a row in scripts/tmux-exact-targets-allowlist.tsv
 #   (`path<TAB>line-regex<TAB>reason`). A row that excuses nothing is itself a
 #   failure, so the allowlist cannot rot.
 #
-#   Scan floor: zero files scanned is a failure (#4618), never a pass.
+#   Scan floor: zero files enumerated, or zero tmux-mentioning files read, is a
+#   failure (#4618), never a pass.
 #
-# Known limits: textual, not a parser. It cannot see a target assembled in a
-#   variable bound more than 30 lines up, or passed through a helper function
-#   of the crate's own; both read as findings, which is the safe direction.
+# Known limits — textual, not a parser:
+#   - A target built in one function and passed to another that spawns tmux is
+#     invisible unless the spawning call site holds a `-t` next to it.
+#   - A conditional binding whose bare branch uses none of the listed builders
+#     (e.g. `let t = if c { exact_session_target(n) } else { n };`) passes:
+#     only the builder list above is recognised as "bare".
+#   - A `let` bound more than 30 lines above its `-t`, and a `{…}` placeholder
+#     whose value is computed outside its own statement, read as findings —
+#     the safe direction; restructure or add an allowlist row.
+#   - Markdown outside `crates/*/src/assets/` (ADRs, research notes) is not
+#     scanned: it records history, and nothing executes it.
 #
 # Usage: bash scripts/check_tmux_exact_targets.sh
 # Exit:  0 clean; 1 on findings, a stale allowlist row, or a scan-floor breach;
@@ -48,29 +68,24 @@ ALLOWLIST="$SCRIPT_DIR/tmux-exact-targets-allowlist.tsv"
 
 cd "$REPO_ROOT"
 
-set +e
-files="$(git grep -l -i -I 'tmux' -- \
+if ! files="$(git ls-files -- \
   '*.rs' '*.sh' '*.swift' '*.ts' '*.tsx' '*.js' '*.mjs' '*.svelte' \
+  'crates/*/src/assets/**/*.md' \
   ':!**/node_modules/**' ':!scripts/check_tmux_exact_targets.sh' \
-  ':!scripts/check_tmux_exact_targets_selftest.sh')"
-status=$?
-set -e
-# git grep exits 1 on "no match" (the scan floor below) and >1 on a real error.
-if [ "$status" -gt 1 ]; then
-  echo "check_tmux_exact_targets: TOOL ERROR: git grep exited $status" >&2
+  ':!scripts/check_tmux_exact_targets_selftest.sh')"; then
+  echo "check_tmux_exact_targets: TOOL ERROR: git ls-files failed" >&2
   exit 2
 fi
 
 if [ -z "$files" ]; then
-  echo "check_tmux_exact_targets: SCAN FLOOR: no tracked source file mentions tmux;" >&2
+  echo "check_tmux_exact_targets: SCAN FLOOR: no tracked source file to scan;" >&2
   echo "  a gate that scanned nothing has proven nothing (#4618)." >&2
   exit 1
 fi
 
 [ -f "$ALLOWLIST" ] || { echo "check_tmux_exact_targets: TOOL ERROR: missing $ALLOWLIST" >&2; exit 2; }
 
-# shellcheck disable=SC2086
-printf '%s\n' "$files" | perl -e '
+TMUX_GATE_FILES="$files" perl - "$ALLOWLIST" <<'PERL'
 use strict;
 use warnings;
 
@@ -85,9 +100,10 @@ while (my $l = <$af>) {
     push @allow, { path => $p, re => qr/$re/, why => $why, used => 0 };
 }
 
-my $helper = qr/\bexact_(?:session|window|pane)_target\s*\(|\.as_target\s*\(\s*\)/;
-my $id_lit = qr/^[\x27"][\$@%][0-9]+[\x27"]/;
-my (@findings, $scanned);
+my $helper = qr/\b(?:shell_)?exact_(?:session|window|pane)_target\s*\(|\bshell_attach_command\s*\(|\.as_target\s*\(\s*\)/;
+my $bare_builder = qr/\.(?:to_string|to_owned|clone|into)\s*\(|\bString::from\b|\bformat!/;
+my $verb = qr/\b(?:has-session|kill-session|rename-session|list-windows|list-panes|list-clients|send-keys|capture-pane|display-message|split-window|new-window|select-window|select-pane|kill-window|kill-pane|respawn-pane|attach-session|switch-client|set-environment|show-environment|pipe-pane)\b/;
+my (@findings, $scanned, $tmux_files);
 
 sub excused {
     my ($path, $text) = @_;
@@ -98,16 +114,16 @@ sub excused {
 }
 
 sub token_ok {
-    my ($tok) = @_;
+    my ($tok, $shell, $stmt) = @_;
     $tok =~ s/^[\x27"`]+//;
     return 1 if $tok =~ /^=/;
-    return 1 if $tok =~ /^[\$@%][0-9]+/;
-    return 1 if $tok =~ /^</;
+    return 1 if $tok =~ /^[@%][0-9]+/;
+    return 1 if !$shell && $tok =~ /^\$[0-9]+/;
+    return 1 if !$shell && $tok =~ /^</;
+    return 1 if !$shell && $tok =~ /^\{/ && $stmt =~ $helper;
     return 0;
 }
 
-# The next argument after a "-t" token: skip conversions, closers and push/arg
-# wrappers, then read one expression up to a top-level separator.
 sub next_arg {
     my ($rest) = @_;
     for (1 .. 8) {
@@ -131,35 +147,65 @@ sub next_arg {
     return $out;
 }
 
-while (my $path = <STDIN>) {
-    chomp $path;
+# The statement a line belongs to: this line through the next `;` (max 6 lines).
+sub statement_from {
+    my ($code, $i) = @_;
+    my $s = "";
+    for my $j ($i .. ($i + 5 > $#$code ? $#$code : $i + 5)) {
+        $s .= $code->[$j];
+        last if $code->[$j] =~ /;\s*$/;
+    }
+    return $s;
+}
+
+for my $path (split /\n/, $ENV{TMUX_GATE_FILES}) {
     next unless length $path;
     open(my $fh, "<", $path) or die "open $path: $!";
     my @lines = <$fh>;
     close $fh;
     $scanned++;
+    my $all = join "", @lines;
+    my $mentions = $all =~ /tmux/i;
+    $tmux_files++ if $mentions;
     my $shell = $path =~ /\.sh$/;
-    # Blank comment lines, keeping line numbers.
+    my $md = $path =~ /\.md$/;
+    next if $md && !$mentions;
+
     my @code = map {
         my $l = $_;
         ($l =~ m{^\s*(?://|/\*|\*|<!--)} || ($shell && $l =~ /^\s*#/)) ? "\n" : $l
     } @lines;
-    my $text = join "", @code;
 
-    # Shape B: tmux ... -t <tok> on one line.
-    for my $i (0 .. $#code) {
+    # Shape B on logical lines (a trailing `\` joins the next physical line).
+    my $i = 0;
+    while ($i <= $#code) {
+        my $start = $i;
         my $l = $code[$i];
-        while ($l =~ /\btmux\b[^\n]*?\s-t\s+(\S+)/g) {
+        while ($l =~ /\\\s*\n\z/ && $i < $#code) {
+            $l =~ s/\\\s*\n\z/ /;
+            $i++;
+            $l .= $code[$i];
+        }
+        $i++;
+        # An attached `-t…` opening a string literal (`format!("-t{n}")`) in a
+        # file that mentions tmux applies even without the word on the line.
+        my $applies = ($shell && $mentions) || $l =~ /\btmux\b/ || $l =~ $verb
+            || ($mentions && $l =~ /[\x27"`]-t[^\s\x27"`]/);
+        next unless $applies;
+        my $stmt = $md ? $l : statement_from(\@code, $start);
+        while ($l =~ /(?:^|[\s\x27"`(\[,])-t(?:\s+|(?=[\x27"{\$=%@]))(\S+)/g) {
             my $tok = $1;
-            next if token_ok($tok);
-            my $src = $lines[$i]; chomp $src;
+            next if token_ok($tok, $shell, $stmt);
+            # A lone `"-t"` argv token is Shape A`s job.
+            next if !$shell && !$md && $tok =~ /^[\x27"](?:[,.)\]]|$)/;
+            my $src = $lines[$start]; chomp $src;
             next if excused($path, $src);
-            push @findings, sprintf("%s:%d: bare tmux target %s\n    %s", $path, $i + 1, $tok, $src);
+            push @findings, sprintf("%s:%d: bare tmux target %s\n    %s", $path, $start + 1, $tok, $src);
         }
     }
 
-    next if $shell;
-    # Shape A: an argv "-t" token.
+    next if $shell || $md;
+    my $text = join "", @code;
     while ($text =~ /([\x27"])-t\1/g) {
         my $pos = pos($text);
         my $start = $pos - 4;
@@ -167,15 +213,20 @@ while (my $path = <STDIN>) {
         my $post = substr($text, $pos, 40);
         next if $pre =~ /[=!]=\s*$/ || $post =~ /^\s*(?:=>|==|!=)/;
         my $line_no = (substr($text, 0, $pos) =~ tr/\n//) + 1;
+        my $lo3 = $line_no - 4 < 0 ? 0 : $line_no - 4;
+        next unless $mentions || join("", @code[$lo3 .. $line_no - 1]) =~ $verb;
         my $arg = next_arg(substr($text, $pos));
         my $ok = 0;
-        $ok = 1 if $arg =~ $helper;
-        $ok = 1 if $arg =~ /^&?\s*[\x27"]=/ || $arg =~ /^&?\s*$id_lit/;
+        $ok = 1 if $arg =~ $helper && $arg !~ $bare_builder;
+        $ok = 1 if $arg =~ /^&?\s*[\x27"]=/ || $arg =~ /^&?\s*[\x27"][\$@%][0-9]+[\x27"]/;
         if (!$ok && $arg =~ /^&?\s*([A-Za-z_][A-Za-z0-9_]*)$/) {
             my $var = $1;
             my $lo = $line_no - 31 < 0 ? 0 : $line_no - 31;
             my $window = join "", @code[$lo .. $line_no - 1];
-            $ok = 1 if $window =~ /\blet\s+(?:mut\s+)?\Q$var\E\b[^;]*?$helper/s;
+            while ($window =~ /\blet\s+(?:mut\s+)?\Q$var\E\b(?:\s*:[^=]+)?\s*=([^;]*);/gs) {
+                my $rhs = $1;
+                $ok = ($rhs =~ $helper && $rhs !~ $bare_builder) ? 1 : 0;
+            }
         }
         next if $ok;
         my $src = $lines[$line_no - 1]; chomp $src;
@@ -186,8 +237,8 @@ while (my $path = <STDIN>) {
 }
 
 my $status = 0;
-if (!$scanned) {
-    print STDERR "check_tmux_exact_targets: SCAN FLOOR: zero files read\n";
+if (!$scanned || !$tmux_files) {
+    print STDERR "check_tmux_exact_targets: SCAN FLOOR: no file that mentions tmux was read\n";
     exit 1;
 }
 for my $a (@allow) {
@@ -205,7 +256,7 @@ if (@findings) {
     $status = 1;
 }
 if ($status == 0) {
-    print "check_tmux_exact_targets: OK: $scanned tmux-mentioning file(s) scanned, every -t target exact\n";
+    print "check_tmux_exact_targets: OK: $scanned file(s) scanned ($tmux_files mention tmux), every -t target exact\n";
 }
 exit $status;
-' "$ALLOWLIST"
+PERL

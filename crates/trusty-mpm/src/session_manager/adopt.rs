@@ -504,7 +504,8 @@ impl SessionManager {
                 format!(
                     "adopt half-applied: the live tmux session was renamed to '{deduped}' but \
                      nothing was persisted ({cause}), and the rollback failed ({rollback}) — \
-                     manually run `tmux rename-session -t '={deduped}' {original}`"
+                     manually run `tmux rename-session -t {} {original}`",
+                    crate::core::tmux::shell_exact_session_target(deduped)
                 ),
             ),
         }

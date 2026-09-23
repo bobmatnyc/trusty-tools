@@ -354,7 +354,9 @@ pub(crate) fn parse_pane_probes(
 ///
 /// What: FAILS OPEN — returns `true` (assume live, preserving the pre-#3873
 /// `Attach` behavior) for a blank session name, a `tmux` spawn failure, a
-/// non-zero exit, a listing that cannot be fully parsed
+/// non-zero exit OTHER than `can't find session` / `no server running`
+/// (those PROVE the session absent under an exact target and return `false`,
+/// #8443), a listing that cannot be fully parsed
 /// ([`parse_pane_probes`]), or a listing [`panes_prove_session_dead`] declines
 /// to convict (no pane attributable to this session, or any pane still live).
 /// Only a fully-parsed listing in which EVERY pane of this session is a

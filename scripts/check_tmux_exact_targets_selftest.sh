@@ -87,6 +87,66 @@ tmux has-session -t "$SESSION" && echo up
 SH
 run_case shell_bare 1 'bare tmux target "$SESSION"' "$d"
 
+d="$(new_fixture shell_positional)"
+cat > "$d/src/a.sh" <<'SH'
+tmux kill-session -t "$1"
+SH
+run_case shell_positional 1 'bare tmux target "$1"' "$d"
+
+d="$(new_fixture shell_continuation)"
+cat > "$d/src/a.sh" <<'SH'
+tmux kill-session \
+  -t "$SESSION"
+SH
+run_case shell_continuation 1 'bare tmux target "$SESSION"' "$d"
+
+d="$(new_fixture shell_attached)"
+cat > "$d/src/a.sh" <<'SH'
+tmux send-keys -t"$S" Enter
+SH
+run_case shell_attached 1 'bare tmux target "$S"' "$d"
+
+d="$(new_fixture shell_wrapper_array)"
+cat > "$d/src/a.sh" <<'SH'
+TM=(tmux -L private)
+"${TM[@]}" has-session -t "$S"
+SH
+run_case shell_wrapper_array 1 'bare tmux target "$S"' "$d"
+
+d="$(new_fixture rust_conditional_let)"
+cat > "$d/src/a.rs" <<'RS'
+fn kill(n: &str, c: bool) {
+    let t = if c { exact_session_target(n) } else { n.to_string() };
+    let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &t]);
+}
+RS
+run_case rust_conditional_let 1 'non-exact target `&t`' "$d"
+
+d="$(new_fixture rust_attached_format)"
+cat > "$d/src/a.rs" <<'RS'
+fn arg(n: &str) -> String {
+    let _ = "tmux";
+    format!("-t{n}")
+}
+RS
+run_case rust_attached_format 1 'bare tmux target {n}' "$d"
+
+d="$(new_fixture rust_no_tmux_word)"
+mkdir -p "$d/other"
+printf 'tmux is used elsewhere\n' > "$d/other/readme.sh"
+cat > "$d/src/a.rs" <<'RS'
+fn kill(bin: &str, name: &str) {
+    let _ = std::process::Command::new(bin).args(["kill-session", "-t", name]);
+}
+RS
+run_case rust_no_tmux_word 1 'non-exact target `name`' "$d"
+
+d="$(new_fixture markdown_asset)"
+mkdir -p "$d/crates/x/src/assets/skills"
+printf 'Run `tmux select-window -t %s` to realign.\n' "'main:2'" \
+  > "$d/crates/x/src/assets/skills/s.md"
+run_case markdown_asset 1 "bare tmux target 'main:2'" "$d"
+
 d="$(new_fixture rust_exact_forms)"
 cat > "$d/src/a.rs" <<'RS'
 // A comment naming tmux has-session -t bare is prose, not an invocation.

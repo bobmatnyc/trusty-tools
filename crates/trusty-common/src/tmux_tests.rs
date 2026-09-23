@@ -60,6 +60,61 @@ fn shell_attach_command_quotes_exact_target() {
 }
 
 #[test]
+fn empty_session_names_never_render_a_resolvable_target() {
+    // #8443 critic HIGH: `=:` resolves to the current session on tmux 3.6b.
+    for name in ["", "=", "  ", "= "] {
+        assert!(check_session_name(name).is_err(), "{name:?}");
+        assert!(TmuxTarget::try_session(name).is_err(), "{name:?}");
+        assert!(TmuxTarget::session(name).validate().is_err(), "{name:?}");
+        assert_eq!(exact_session_target(name), "$", "{name:?}");
+        assert_eq!(exact_window_target(name), "%", "{name:?}");
+        assert_eq!(exact_pane_target(name, "0"), "%", "{name:?}");
+        assert_eq!(TmuxTarget::session(name).as_target(), "%", "{name:?}");
+        let kill = tmux_argv(&TmuxCommand::KillSession { name: name.into() });
+        assert_eq!(kill, ["kill-session", "-t", "$"], "{name:?}");
+    }
+    // A live pane id needs no session name to be exact.
+    assert!(TmuxTarget::pane("", "%4").validate().is_ok());
+    assert!(TmuxTarget::try_session("tm-cto").is_ok());
+}
+
+#[test]
+fn command_targets_refuse_empty_session_names() {
+    let bad = [
+        TmuxCommand::KillSession { name: "".into() },
+        TmuxCommand::HasSession { name: "=".into() },
+        TmuxCommand::ListPanes { name: " ".into() },
+        TmuxCommand::SendKeys {
+            target: TmuxTarget::session(""),
+            keys: "C-c".into(),
+            literal: false,
+        },
+        TmuxCommand::CapturePane {
+            target: TmuxTarget::session(""),
+            lines: None,
+        },
+    ];
+    for cmd in &bad {
+        assert!(cmd.validate_targets().is_err(), "{cmd:?}");
+    }
+    assert!(
+        TmuxCommand::KillSession { name: "s".into() }
+            .validate_targets()
+            .is_ok()
+    );
+    assert!(TmuxCommand::ListSessions.validate_targets().is_ok());
+}
+
+#[test]
+fn shell_targets_are_normalized_and_quoted() {
+    assert_eq!(shell_exact_session_target("tm:proj:0"), "'=tm_proj_0'");
+    assert_eq!(
+        shell_attach_command("tm:proj.0"),
+        "tmux attach-session -t '=tm_proj_0'"
+    );
+}
+
+#[test]
 fn kill_and_has_session_argv_are_exact() {
     // #8443: a bare `-t tm-cto` prefix-matched and killed `tm-cto-reports`.
     let kill = tmux_argv(&TmuxCommand::KillSession {

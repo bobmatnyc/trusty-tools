@@ -115,3 +115,44 @@ fn send_and_capture_never_reach_a_prefix_sibling() {
         sibling.name()
     );
 }
+
+/// #8443 critic HIGH: an empty name rendered `=:`, which tmux 3.6b resolves
+/// to the CURRENT session — the private server's only session here.
+#[serial_test::serial]
+#[test]
+fn an_empty_session_name_never_reaches_a_session() {
+    let Some((server, sibling, _missing, driver)) = sibling_fixture("empty") else {
+        return;
+    };
+    let before = pane_identity(&server, sibling.name());
+    assert!(
+        before.is_some(),
+        "fixture precondition: the session is live"
+    );
+    let marker = "marker-8443-empty";
+
+    for name in ["", "="] {
+        let target = TmuxTarget::session(name);
+        assert!(
+            driver
+                .send_line(&target, &format!("echo {marker}"))
+                .is_err()
+        );
+        assert!(driver.send_interrupt(&target).is_err());
+        assert!(driver.capture(&target, Some(5)).is_err());
+        assert!(driver.kill_session(name).is_err());
+        assert!(driver.pane_id(name).is_none());
+        assert!(driver.pane_current_path(name).is_none());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    assert_eq!(pane_identity(&server, sibling.name()), before);
+    let screen = driver
+        .capture(&TmuxTarget::session(sibling.name()), Some(50))
+        .expect("capture the live session");
+    assert!(
+        !screen.contains(marker),
+        "an empty target typed into '{}'",
+        sibling.name()
+    );
+}

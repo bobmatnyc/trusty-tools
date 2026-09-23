@@ -49,6 +49,28 @@ impl PrivateServer {
         self.shim.to_string_lossy().into_owned()
     }
 
+    /// A shim that records every argv to `argv.log` and answers `has-session`
+    /// with success, so a caller's existence pre-check cannot short-circuit
+    /// the kill/send/capture call under test. Everything else reaches the
+    /// private server.
+    fn recording_shim(&self) -> (String, PathBuf) {
+        let dir = self.shim.parent().expect("shim dir");
+        let log = dir.join("argv.log");
+        let shim = dir.join("tmux-recording");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in has-session) exit 0;; esac\nexec tmux -L '{}' \"$@\"\n",
+                log.display(),
+                self.socket
+            ),
+        )
+        .expect("write recording shim");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (shim.to_string_lossy().into_owned(), log)
+    }
+
     fn tmux(&self, args: &[&str]) -> Option<String> {
         let out = Command::new("tmux")
             .arg("-L")
@@ -94,9 +116,22 @@ fn orchestrator_never_reaches_a_prefix_sibling() {
     let tmux = TmuxOrchestrator::with_tmux_path(server.shim());
 
     assert!(!tmux.session_exists("tga-x"), "has-session must be exact");
-    assert!(tmux.destroy_session("tga-x").is_err());
+
+    // The recording shim says `tga-x` exists, so each call gets past its
+    // existence check and its OWN target is what tmux resolves.
+    let (recording, log) = server.recording_shim();
+    let tmux = TmuxOrchestrator::with_tmux_path(recording);
+    assert!(tmux.destroy_session("tga-x").is_err(), "kill must miss");
     assert!(tmux.send_line("tga-x", None, "echo marker-8443").is_err());
     assert!(tmux.capture_output("tga-x", None, Some(20)).is_err());
+    let argv = std::fs::read_to_string(&log).expect("argv log");
+    for want in [
+        "kill-session -t =tga-x",
+        "send-keys -t =tga-x: -l",
+        "capture-pane -t =tga-x: ",
+    ] {
+        assert!(argv.contains(want), "missing `{want}` in:\n{argv}");
+    }
 
     assert_eq!(server.identity("tga-x-suffix"), Some(before));
     let screen = server

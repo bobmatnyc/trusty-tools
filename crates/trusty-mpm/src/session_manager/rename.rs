@@ -290,7 +290,8 @@ impl SessionManager {
                 format!(
                     "rename half-applied: tmux is now '{new_name}' but the store still \
                      records '{old_name}', and the rollback failed ({rollback}) — manually \
-                     run `tmux rename-session -t '={new_name}' {old_name}` (cause: {cause})"
+                     run `tmux rename-session -t {} {old_name}` (cause: {cause})",
+                    crate::core::tmux::shell_exact_session_target(new_name)
                 ),
             ),
         }

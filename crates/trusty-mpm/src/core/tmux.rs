@@ -79,9 +79,10 @@ use tracing::warn;
 pub use trusty_common::tmux::{
     ALTERNATE_SCREEN_OPTION, DEFAULT_TMUX_ALTERNATE_SCREEN, DEFAULT_TMUX_HISTORY_LIMIT,
     DEFAULT_TMUX_MOUSE, HISTORY_LIMIT_OPTION, MOUSE_OPTION, PANE_LIST_FORMAT, SESSION_LIST_FORMAT,
-    TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT, exact_pane_target, exact_session_target,
-    exact_window_target, is_immutable_id, managed_session_commands, scrollback_option_commands,
-    shell_attach_command, tmux_argv,
+    TmuxCommand, TmuxTarget, TmuxTargetError, WINDOW_LIST_FORMAT, check_session_name,
+    exact_pane_target, exact_session_target, exact_window_target, is_immutable_id,
+    managed_session_commands, scrollback_option_commands, shell_attach_command,
+    shell_exact_session_target, tmux_argv,
 };
 
 /// Resolve the `tmux` binary, preferring live `PATH` and falling back to
@@ -216,6 +217,9 @@ pub fn run_tmux_with_bin(
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
     host_state_guard()?;
+    // #8443: an empty session name addresses no session; never spawn for it.
+    cmd.validate_targets()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
 }
 

@@ -76,6 +76,9 @@ impl ClaudeCodeRestarter {
     /// Test: `find_claude_processes_does_not_panic`; the pane/session target
     /// DECISION is unit-tested (no live tmux needed) via `restart_target_*`.
     pub fn restart_in_session(tmux_session: &str, pane_id: Option<&str>) -> Result<()> {
+        // #8443: refuse an empty session before touching tmux at all.
+        crate::core::tmux::check_session_name(tmux_session)
+            .map_err(|e| Error::Protocol(e.to_string()))?;
         let driver = crate::daemon::tmux::TmuxDriver::discover()?;
         driver.apply_scrollback_options();
         let pane_alive = pane_id.is_some_and(|p| driver.pane_exists(tmux_session, p));
@@ -117,7 +120,8 @@ fn restart_target(
             "recorded pane {p} for session {tmux_session} no longer exists; refusing to \
              restart into an unrelated active pane"
         ))),
-        None => Ok(TmuxTarget::session(tmux_session)),
+        // #8443: an empty name must fail here, not render `=:` (current session).
+        None => TmuxTarget::try_session(tmux_session).map_err(|e| Error::Protocol(e.to_string())),
     }
 }
 
@@ -148,5 +152,16 @@ mod tests {
         let target = restart_target("trusty-mpm-xyz", None, false).expect("session target");
         // #8443: a session-only target renders exact, never bare.
         assert_eq!(target.as_target(), "=trusty-mpm-xyz:");
+    }
+
+    #[test]
+    fn restart_refuses_an_empty_session_name() {
+        // #8443 critic HIGH: `""` used to render `=:`, the CURRENT session.
+        for name in ["", "=", "  "] {
+            assert!(restart_target(name, None, false).is_err(), "{name:?}");
+            let err = ClaudeCodeRestarter::restart_in_session(name, None)
+                .expect_err("an empty session must be refused before tmux runs");
+            assert!(err.to_string().contains("#8443"), "{err}");
+        }
     }
 }
