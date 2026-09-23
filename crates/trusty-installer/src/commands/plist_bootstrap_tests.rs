@@ -757,7 +757,7 @@ fn skipped_supervisor_bootstrap_claims_no_bootstrap() {
 fn decide_supervisor_rewrite_table() {
     let base = RewriteInputs {
         existing: "stale",
-        filled: "fresh",
+        registered_template: "fresh",
         registered_is_candidate: false,
         current: Some("1.7.1"),
         candidate: Some("1.7.1"),
@@ -767,16 +767,17 @@ fn decide_supervisor_rewrite_table() {
     let refuse = DowngradeDecision::Refuse;
     let cases = [
         (
-            "same path, equal version",
+            "same path, equal version, fresh plist",
             RewriteInputs {
                 registered_is_candidate: true,
+                existing: "fresh",
                 ..base
             },
             proceed,
         ),
-        ("equal version, stale plist", base, proceed),
+        ("equal version, other path, stale plist", base, proceed),
         (
-            "equal version, identical plist",
+            "equal version, other path, fresh plist",
             RewriteInputs {
                 existing: "fresh",
                 ..base
@@ -808,19 +809,124 @@ fn decide_supervisor_rewrite_table() {
             },
             proceed,
         ),
-        (
-            "true downgrade, same path",
-            RewriteInputs {
-                candidate: Some("1.7.0"),
-                registered_is_candidate: true,
-                ..base
-            },
-            proceed,
-        ),
     ];
     for (name, inputs, want) in cases {
         assert_eq!(decide_supervisor_rewrite(&inputs), want, "{name}");
     }
+}
+
+/// Seed `<home>/Library/LaunchAgents/<label>.plist` and return its path.
+#[cfg(unix)]
+fn seed_plist(home: &std::path::Path, content: &str) -> std::path::PathBuf {
+    let agents_dir = home.join("Library").join("LaunchAgents");
+    std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
+    let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
+    std::fs::write(&plist_path, content).expect("seed plist");
+    plist_path
+}
+
+/// REGRESSION (#8415 review round 2, #3527): an equal-version install of a
+/// DIFFERENT binary over a plist that is already current is refused — it
+/// would only boot out the live supervisor.
+/// Test: This is the test.
+#[test]
+#[cfg(unix)]
+fn equal_version_other_path_fresh_plist_is_refused() {
+    let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl::new();
+    let registered = tmp.path().join("registered").join("tm");
+    write_fake_tm(&registered, "trusty-mpm 1.7.1");
+    let candidate = tmp.path().join("candidate").join("tm");
+    write_fake_tm(&candidate, "trusty-mpm 1.7.1");
+    let fresh = fill_template(&tmp.path().to_string_lossy(), &registered.to_string_lossy());
+    let plist_path = seed_plist(tmp.path(), &fresh);
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let verdict =
+        classify_supervisor_bootstrap(install_mpm_supervisor_for(&target, false, &candidate));
+
+    assert!(
+        matches!(verdict, SupervisorBootstrapVerdict::Refused(_)),
+        "{verdict:?}"
+    );
+    assert!(stub.calls().is_empty(), "{:?}", stub.calls());
+    assert_eq!(std::fs::read_to_string(&plist_path).expect("read"), fresh);
+    assert!(
+        !backup_path(&plist_path).exists(),
+        "nothing replaced, nothing backed up"
+    );
+}
+
+/// REGRESSION (#8415): an equal-version install of a different binary over a
+/// STALE (`Background`) plist rewrites it, keeping the old one as `.bak`.
+/// Test: This is the test.
+#[test]
+#[cfg(unix)]
+fn equal_version_other_path_stale_plist_is_rewritten_with_a_backup() {
+    let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl::new();
+    let registered = tmp.path().join("registered").join("tm");
+    write_fake_tm(&registered, "trusty-mpm 1.7.1");
+    let candidate = tmp.path().join("candidate").join("tm");
+    write_fake_tm(&candidate, "trusty-mpm 1.7.1");
+    let stale = fill_template(&tmp.path().to_string_lossy(), &registered.to_string_lossy())
+        .replace(
+            "<string>Interactive</string>",
+            "<string>Background</string>",
+        );
+    let plist_path = seed_plist(tmp.path(), &stale);
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let verdict =
+        classify_supervisor_bootstrap(install_mpm_supervisor_for(&target, false, &candidate));
+
+    assert_eq!(verdict, SupervisorBootstrapVerdict::Installed);
+    let written = std::fs::read_to_string(&plist_path).expect("read");
+    assert_eq!(process_type(&written), Some("Interactive"), "{written}");
+    assert_eq!(
+        std::fs::read_to_string(backup_path(&plist_path)).expect("read .bak"),
+        stale
+    );
+}
+
+/// #8415: `same_binary` is what lets an in-place upgrade through. Same path,
+/// identical (fresh) plist, equal version — without it this would refuse.
+/// Test: This is the test.
+#[test]
+#[cfg(unix)]
+fn same_path_identical_plist_equal_version_proceeds() {
+    let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl::new();
+    let tm_path = tmp.path().join(".cargo").join("bin").join("tm");
+    write_fake_tm(&tm_path, "trusty-mpm 1.7.1");
+    let fresh = fill_template(&tmp.path().to_string_lossy(), &tm_path.to_string_lossy());
+    let plist_path = seed_plist(tmp.path(), &fresh);
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let verdict =
+        classify_supervisor_bootstrap(install_mpm_supervisor_for(&target, false, &tm_path));
+
+    assert_eq!(verdict, SupervisorBootstrapVerdict::Installed);
+    assert_eq!(stub.calls().len(), 2, "{:?}", stub.calls());
+    assert!(
+        !backup_path(&plist_path).exists(),
+        "an identical plist needs no backup"
+    );
 }
 
 /// REGRESSION (#8415): a true downgrade — a DIFFERENT registered binary that

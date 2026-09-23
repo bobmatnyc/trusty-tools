@@ -543,8 +543,11 @@ pub fn decide_downgrade(
 pub struct RewriteInputs<'a> {
     /// The plist currently on disk.
     pub existing: &'a str,
-    /// The plist this install would write.
-    pub filled: &'a str,
+    /// What this installer would write for the REGISTERED binary — the
+    /// template filled with the plist's own `ProgramArguments[0]`. Comparing
+    /// against it asks "is this plist stale?" without the candidate's path
+    /// making every plist look different (#8415 review round 2).
+    pub registered_template: &'a str,
     /// The plist's registered binary is the file this install just replaced.
     pub registered_is_candidate: bool,
     /// Version of the registered binary, when probeable.
@@ -560,15 +563,18 @@ pub struct RewriteInputs<'a> {
 /// Why (#8415): `install_one` overwrites `tm_path` before this guard runs, so
 /// when the plist registers that same path the "current" version is the new
 /// binary compared with itself — equal, and every upgrade was refused, which
-/// kept the `Background` plist. And an equal version says nothing about the
-/// plist: its content can still be stale.
+/// kept the `Background` plist. #3527 still wants an older-or-equal install
+/// of a DIFFERENT binary refused, unless the plist itself is stale.
 /// What: `Proceed` when forced, when the registered binary IS the candidate,
-/// or when [`decide_downgrade`] proceeds. Otherwise `Refuse` a strictly older
-/// candidate (a different, newer binary is registered) and a plist identical
-/// to what would be written; `Proceed` for an equal version with a stale plist.
+/// or when [`decide_downgrade`] proceeds (newer, or unprobeable). `Refuse` a
+/// strictly older candidate. At an equal version, `Proceed` only when the
+/// plist differs from the template for its registered binary (stale).
 /// Test: `tests::decide_supervisor_rewrite_table`,
 /// `tests::install_mpm_supervisor_for_rewrites_a_background_plist`,
-/// `tests::install_mpm_supervisor_for_refuses_a_true_downgrade_with_a_stale_plist`.
+/// `tests::install_mpm_supervisor_for_refuses_a_true_downgrade_with_a_stale_plist`,
+/// `tests::equal_version_other_path_fresh_plist_is_refused`,
+/// `tests::equal_version_other_path_stale_plist_is_rewritten_with_a_backup`,
+/// `tests::same_path_identical_plist_equal_version_proceeds`.
 pub fn decide_supervisor_rewrite(i: &RewriteInputs<'_>) -> DowngradeDecision {
     if i.force
         || i.registered_is_candidate
@@ -586,11 +592,19 @@ pub fn decide_supervisor_rewrite(i: &RewriteInputs<'_>) -> DowngradeDecision {
         ),
         _ => false,
     };
-    if strictly_older || i.existing == i.filled {
+    let stale = i.existing != i.registered_template;
+    if strictly_older || !stale {
         DowngradeDecision::Refuse
     } else {
         DowngradeDecision::Proceed
     }
+}
+
+/// The path an existing plist is copied to before it is replaced (#8415).
+pub fn backup_path(plist_path: &Path) -> PathBuf {
+    let mut name = plist_path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
 }
 
 /// Whether two paths name the same file (textually, or after canonicalizing).
@@ -686,9 +700,10 @@ pub fn install_mpm_supervisor_for(
         if let Some(old_binary) = extract_program_path(&existing) {
             let current_version = super::update_engine::installed_version(&old_binary);
             let candidate_version = super::update_engine::installed_version(tm_path_str);
+            let registered_template = fill_template(home_str, &old_binary);
             if decide_supervisor_rewrite(&RewriteInputs {
                 existing: &existing,
-                filled: &plist_content,
+                registered_template: &registered_template,
                 registered_is_candidate: same_binary(Path::new(&old_binary), tm_path),
                 current: current_version.as_deref(),
                 candidate: candidate_version.as_deref(),
@@ -718,6 +733,20 @@ pub fn install_mpm_supervisor_for(
     std::fs::create_dir_all(&agents_dir)
         .with_context(|| format!("creating LaunchAgents dir {}", agents_dir.display()))?;
 
+    // #8415: keep what is being replaced. Any plist that differs from the new
+    // one is copied aside first — it may carry an operator's own edits.
+    if let Ok(existing) = std::fs::read_to_string(&plist_path) {
+        if existing != plist_content {
+            let bak = backup_path(&plist_path);
+            std::fs::copy(&plist_path, &bak).with_context(|| {
+                format!("backing up {} to {}", plist_path.display(), bak.display())
+            })?;
+            eprintln!(
+                "trusty-mpm supervisor: previous plist saved to {} before rewriting it.",
+                bak.display()
+            );
+        }
+    }
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("writing plist to {}", plist_path.display()))?;
 

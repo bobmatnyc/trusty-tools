@@ -104,7 +104,9 @@ pub(crate) fn process_type_of(xml: &str) -> Result<Option<String>, String> {
         ));
     };
     match body.find("</string>") {
-        Some(end) => Ok(Some(body[..end].trim().to_owned())),
+        // #8415: untrimmed — launchd compares the string as written, so a
+        // padded ` Interactive ` is not `Interactive`.
+        Some(end) => Ok(Some(body[..end].to_owned())),
         None => Err("ProcessType <string> is not closed".to_owned()),
     }
 }
@@ -227,25 +229,45 @@ pub(crate) fn build_process_type_check(readings: &[PlistReading]) -> DoctorCheck
 /// library without `cfg(test)`, so they need an override they can set.
 pub const LAUNCH_AGENTS_DIR_ENV: &str = "TRUSTY_MPM_LAUNCH_AGENTS_DIR";
 
-/// The LaunchAgents directory `run_doctor` reads for this row.
-///
-/// What: [`LAUNCH_AGENTS_DIR_ENV`] when set and non-empty; otherwise an empty
-/// temp path under `cfg(test)`; otherwise `<home>/Library/LaunchAgents`, the
-/// production default.
-/// Test: `launch_agents_dir_honours_the_env_override`,
-/// `test_builds_never_read_the_real_launch_agents`.
-pub(crate) fn launch_agents_dir(home: &Path) -> PathBuf {
-    launch_agents_dir_from(home, std::env::var_os(LAUNCH_AGENTS_DIR_ENV))
+/// The LaunchAgents directory the row reads, and whether the override chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentsDir {
+    /// The directory holding `<label>.plist`.
+    pub path: PathBuf,
+    /// [`LAUNCH_AGENTS_DIR_ENV`] named it.
+    pub from_env: bool,
 }
 
-/// [`launch_agents_dir`] with the override passed in, so tests need not
-/// mutate the process environment.
-pub(crate) fn launch_agents_dir_from(home: &Path, env: Option<std::ffi::OsString>) -> PathBuf {
-    match env {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ if cfg!(test) => std::env::temp_dir().join("tm-doctor-test-no-launch-agents"),
-        _ => home.join("Library").join("LaunchAgents"),
-    }
+/// The LaunchAgents directory `run_doctor` reads for this row.
+///
+/// Test: `launch_agents_dir_honours_the_env_override`.
+pub(crate) fn launch_agents_dir(home: &Path) -> AgentsDir {
+    launch_agents_dir_from(home, std::env::var_os(LAUNCH_AGENTS_DIR_ENV), cfg!(test))
+}
+
+/// [`launch_agents_dir`] with the override and the build kind passed in, so
+/// every arm is testable without touching the process environment.
+///
+/// What: [`LAUNCH_AGENTS_DIR_ENV`] when set and non-empty; otherwise, when
+/// `is_test`, an empty temp path; otherwise `<home>/Library/LaunchAgents`,
+/// the production default.
+/// Test: `launch_agents_dir_honours_the_env_override`,
+/// `test_builds_never_read_the_real_launch_agents`,
+/// `production_reads_library_launch_agents_under_home`.
+pub(crate) fn launch_agents_dir_from(
+    home: &Path,
+    env: Option<std::ffi::OsString>,
+    is_test: bool,
+) -> AgentsDir {
+    let (path, from_env) = match env {
+        Some(dir) if !dir.is_empty() => (PathBuf::from(dir), true),
+        _ if is_test => (
+            std::env::temp_dir().join("tm-doctor-test-no-launch-agents"),
+            false,
+        ),
+        _ => (home.join("Library").join("LaunchAgents"), false),
+    };
+    AgentsDir { path, from_env }
 }
 
 /// Read the tmux-hosting tm plists under `home` and build the row.
@@ -253,15 +275,21 @@ pub(crate) fn launch_agents_dir_from(home: &Path, env: Option<std::ffi::OsString
 /// Test: `check_reads_plists_under_the_given_home`.
 #[cfg(test)]
 pub(crate) fn check_launchd_process_type(home: &Path) -> DoctorCheck {
-    check_launchd_process_type_in(&home.join("Library").join("LaunchAgents"))
+    check_launchd_process_type_in(&AgentsDir {
+        path: home.join("Library").join("LaunchAgents"),
+        from_env: false,
+    })
 }
 
 /// Read `<agents>/<label>.plist` for the daemon and supervisor labels and
 /// build the row with [`build_process_type_check`].
 ///
+/// What: when the override chose the directory, the message names it, so an
+/// Ok row never passes for the real `~/Library/LaunchAgents` unread.
 /// Test: `check_reads_plists_under_the_given_home`,
 /// `launch_agents_dir_honours_the_env_override`.
-pub(crate) fn check_launchd_process_type_in(agents: &Path) -> DoctorCheck {
+pub(crate) fn check_launchd_process_type_in(dir: &AgentsDir) -> DoctorCheck {
+    let agents = &dir.path;
     let readings: Vec<PlistReading> = [MPM, MPM_SUPERVISOR]
         .into_iter()
         .map(|label| {
@@ -273,7 +301,15 @@ pub(crate) fn check_launchd_process_type_in(agents: &Path) -> DoctorCheck {
             }
         })
         .collect();
-    build_process_type_check(&readings)
+    let mut row = build_process_type_check(&readings);
+    if dir.from_env {
+        row.message = format!(
+            "{} — read `{}` (from `{LAUNCH_AGENTS_DIR_ENV}`)",
+            row.message,
+            agents.display()
+        );
+    }
+    row
 }
 
 #[cfg(test)]

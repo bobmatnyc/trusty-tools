@@ -191,10 +191,21 @@ fn process_type_of_rejects_malformed_values() {
     let row = check_launchd_process_type(home.path());
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
     assert_eq!(
-        process_type_of("<key>ProcessType</key>\n\t  <string> Interactive </string>"),
+        process_type_of("<key>ProcessType</key>\n\t  <string>Interactive</string>"),
         Ok(Some("Interactive".to_owned())),
-        "whitespace between key and value is allowed"
+        "whitespace between the key and its <string> is allowed"
     );
+}
+
+/// #8415: launchd compares the value as written, so padding inside the
+/// `<string>` is not `Interactive` — the row warns instead of passing.
+#[test]
+fn padded_process_type_is_not_interactive() {
+    let xml = "<dict><key>ProcessType</key><string> Interactive </string></dict>";
+    assert_eq!(process_type_of(xml), Ok(Some(" Interactive ".to_owned())));
+    let home = home_with(&[(MPM_SUPERVISOR, xml.as_bytes())]);
+    let row = check_launchd_process_type(home.path());
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
 }
 
 /// #8415: CoreFoundation keeps the last of duplicated keys; so does the row.
@@ -233,11 +244,25 @@ fn remedy_quotes_a_path_with_a_space() {
 #[test]
 fn test_builds_never_read_the_real_launch_agents() {
     let real = PathBuf::from("/Users/operator");
-    let dir = launch_agents_dir_from(&real, None);
-    assert!(!dir.starts_with(&real), "{dir:?}");
-    assert!(dir.starts_with(std::env::temp_dir()), "{dir:?}");
+    let dir = launch_agents_dir_from(&real, None, true);
+    assert!(!dir.path.starts_with(&real), "{dir:?}");
+    assert!(dir.path.starts_with(std::env::temp_dir()), "{dir:?}");
     let row = check_launchd_process_type_in(&dir);
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// #8415: the production arm reads `<home>/Library/LaunchAgents`. A fake
+/// home only — nothing here touches the real directory.
+#[test]
+fn production_reads_library_launch_agents_under_home() {
+    let dir = launch_agents_dir_from(Path::new("/fake/home"), None, false);
+    assert_eq!(
+        dir,
+        AgentsDir {
+            path: PathBuf::from("/fake/home/Library/LaunchAgents"),
+            from_env: false,
+        }
+    );
 }
 
 /// #8415: `TRUSTY_MPM_LAUNCH_AGENTS_DIR` points the row at another directory,
@@ -252,12 +277,39 @@ fn launch_agents_dir_honours_the_env_override() {
         PRE_8415_SUPERVISOR,
     )
     .expect("write plist");
-    let dir = launch_agents_dir_from(Path::new("/Users/operator"), Some(agents.clone().into()));
-    assert_eq!(dir, agents);
+    let dir = launch_agents_dir_from(
+        Path::new("/Users/operator"),
+        Some(agents.clone().into()),
+        false,
+    );
+    assert_eq!(dir.path, agents);
+    assert!(dir.from_env);
     let row = check_launchd_process_type_in(&dir);
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert_ne!(
-        launch_agents_dir_from(Path::new("/Users/operator"), Some("".into())),
+        launch_agents_dir_from(Path::new("/Users/operator"), Some("".into()), false).path,
         agents
+    );
+
+    // #8415: an Ok row read through the override names the directory.
+    let empty = home.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir");
+    let row = check_launchd_process_type_in(&launch_agents_dir_from(
+        Path::new("/Users/operator"),
+        Some(empty.clone().into()),
+        false,
+    ));
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(row.message.contains("no tm LaunchAgent"), "{}", row.message);
+    assert!(
+        row.message.contains(&format!("`{}`", empty.display())),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.message
+            .contains("(from `TRUSTY_MPM_LAUNCH_AGENTS_DIR`)"),
+        "{}",
+        row.message
     );
 }
