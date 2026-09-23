@@ -895,19 +895,6 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
     );
 }
 
-/// #2457: a 404 from `decommission` on a nonexistent id must propagate as
-/// `Err` — `prune.rs`'s bulk sweep records that `Err` as a failed row, and a
-/// softened 404 would make a raced session read as a clean teardown.
-///
-/// #5913 moved the mapping into the shared transport
-/// (`DaemonClient::decommission_managed_session`) when both entry points
-/// converged onto one implementation; this test is what holds it there.
-///
-/// Two ids, because they take different daemon branches. `nonexistent-id` does
-/// not parse as a UUID and comes back 400 — which is what this test asserted
-/// before #5913, so it never once exercised a 404. A well-formed id absent from
-/// the store is the real 404, and the friendly message proves the mapping (not
-/// `error_for_status`'s generic status text) produced it.
 /// #7660 error arm: a kept workspace turns the decommission into an error
 /// that names the blocker; a removed or never-removable one does not.
 #[test]
@@ -921,6 +908,141 @@ fn session_decommission_exits_non_zero_when_the_workspace_is_kept() {
     assert!(super::decommission_kept_error(None).is_none());
 }
 
+/// `git -C <dir> <args>`, asserting success.
+fn git_ok(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "`git {}`: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A real daemon holding one in-project session whose `.worktrees/<name>` tree
+/// carries exactly tm's provisioning dirt (#7660): the scaffolded `.gitignore`
+/// block on a tracked `.gitignore`, plus untracked settings files and
+/// `CLAUDE.md`. Returns `(url, session id, worktree path)`.
+async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path::PathBuf) {
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    let root = std::fs::canonicalize(tempfile::tempdir().expect("tmp").keep()).expect("canon");
+    let (remote, repo) = (root.join("remote.git"), root.join("repo"));
+    std::fs::create_dir_all(&remote).expect("mkdir remote");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    git_ok(&remote, &["init", "--bare", "--initial-branch=main"]);
+    git_ok(&repo, &["init", "--initial-branch=main"]);
+    for (k, v) in [
+        ("user.email", "ci@test.invalid"),
+        ("user.name", "CI"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_ok(&repo, &["config", k, v]);
+    }
+    std::fs::write(repo.join(".gitignore"), "target/\n").expect("write .gitignore");
+    git_ok(&repo, &["add", ".gitignore"]);
+    git_ok(&repo, &["commit", "-m", "base"]);
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().expect("utf8")],
+    );
+    git_ok(&repo, &["push", "origin", "main"]);
+    git_ok(&repo, &["fetch", "origin"]);
+    let wt = repo.join(".worktrees").join("decom-7660");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "session/decom-7660",
+            wt.to_str().expect("utf8"),
+        ],
+    );
+    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold");
+    std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
+    std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("settings");
+    std::fs::write(wt.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");
+    std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("CLAUDE.md");
+
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.join("sm")).await);
+    let id = trusty_mpm::session_manager::ManagedSessionId::new();
+    state
+        .session_manager()
+        .await
+        .create_with_id(
+            id,
+            "regression: #7660 decommission end to end".to_string(),
+            Some(wt.clone()),
+            None,
+            Some(wt.clone()),
+            None,
+            None,
+            trusty_mpm::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(axum::serve(listener, api::router(state)).into_future());
+    (format!("http://{addr}"), id.to_string(), wt)
+}
+
+/// 🔴 #7660 critic MEDIUM-3, end to end: without `--force` the provisioned
+/// tree is kept, and `session_decommission_routed` returns an error carrying
+/// the daemon's reason — the non-zero exit a script sees.
+#[tokio::test]
+async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
+    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, false)
+        .await
+        .expect_err("a kept workspace must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("workspace NOT removed"), "{msg}");
+    assert!(
+        msg.contains("--force"),
+        "the reason must name the flag: {msg}"
+    );
+    assert!(wt.exists(), "the workspace must still be on disk");
+}
+
+/// #7660 end to end: `--force` removes a tree dirty only from provisioning.
+#[tokio::test]
+async fn session_decommission_routed_force_removes_a_provisioning_only_worktree() {
+    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    let client = reqwest::Client::new();
+
+    super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect("--force removes a provisioning-only tree");
+
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #2457: a 404 from `decommission` on a nonexistent id must propagate as
+/// `Err` — `prune.rs`'s bulk sweep records that `Err` as a failed row, and a
+/// softened 404 would make a raced session read as a clean teardown.
+///
+/// #5913 moved the mapping into the shared transport
+/// (`DaemonClient::decommission_managed_session`) when both entry points
+/// converged onto one implementation; this test is what holds it there.
+///
+/// Two ids, because they take different daemon branches. `nonexistent-id` does
+/// not parse as a UUID and comes back 400 — which is what this test asserted
+/// before #5913, so it never once exercised a 404. A well-formed id absent from
+/// the store is the real 404, and the friendly message proves the mapping (not
+/// `error_for_status`'s generic status text) produced it.
 #[tokio::test]
 async fn session_decommission_not_found_errors() {
     let url = spawn_test_daemon().await;

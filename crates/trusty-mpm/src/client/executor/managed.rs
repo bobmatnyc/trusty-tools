@@ -377,7 +377,8 @@ impl CommandExecutor {
     /// reason to exit non-zero, which [`CommandResult`] does not carry.
     /// What: the fuzzy resolution [`Self::managed_decommission`] does, then
     /// [`Self::decommission_managed_id_with`]; the outcome is returned whole.
-    /// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+    /// Test: `session_decommission_routed_fails_naming_why_the_workspace_was_kept`,
+    /// `session_decommission_routed_force_removes_a_provisioning_only_worktree`.
     pub async fn decommission_managed_target(
         &self,
         target: &str,

@@ -602,7 +602,8 @@ pub(crate) async fn session_decommission(
 /// What: resolves `target` like every managed verb, sends `force`, prints
 /// [`decommission_message`], and returns [`decommission_kept_error`] when the
 /// daemon reports a kept-workspace reason.
-/// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+/// Test: `session_decommission_routed_fails_naming_why_the_workspace_was_kept`,
+/// `session_decommission_routed_force_removes_a_provisioning_only_worktree`.
 pub(crate) async fn session_decommission_routed(
     client: &reqwest::Client,
     url: &str,

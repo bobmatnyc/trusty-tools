@@ -8,11 +8,14 @@
 //! What: [`remove_in_project_worktree`] — the dirty-gated removal step that used
 //! to sit inline in `decommission_with_root_checked` — now returns a
 //! [`WorkspaceVerdict`] that carries WHY a workspace was kept, and honours
-//! [`ProvisioningDirt::Discard`], under which exactly the four provisioning
-//! paths are excused. Unpushed commits, any other modified or untracked file,
-//! nested-repository work, and every check that cannot complete still keep the
-//! workspace.
+//! [`ProvisioningDirt::Discard`], under which the four provisioning paths are
+//! excused only in the exact state provisioning leaves them
+//! ([`is_provisioning_entry`]). Unpushed commits, any other modified or
+//! untracked file, an edit to a tracked provisioning path, nested-repository
+//! work, and every check that cannot complete still keep the workspace.
 //! Test: `force_decommission_removes_a_provisioning_only_worktree`,
+//! `force_decommission_keeps_an_edited_tracked_claude_md`,
+//! `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
 //! `force_decommission_still_refuses_user_work`,
 //! `force_decommission_still_refuses_unpushed_commits`,
 //! `force_decommission_removes_nothing_when_the_dirty_check_cannot_complete`,
@@ -82,18 +85,91 @@ pub(super) struct WorkspaceVerdict {
     pub kept_reason: Option<String>,
 }
 
-/// Is this `git status --porcelain` line one of tm's provisioning files, in the
-/// state provisioning leaves it (#7660)?
+/// The provisioning paths `--force` excuses only while git does not track them
+/// (#7660). A tracked one showing ` M` is an edit someone made, not a write
+/// provisioning did, so it is never excused.
+const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
+    ".claude/settings.json",
+    ".claude/settings.json.bak",
+    "CLAUDE.md",
+];
+
+/// Is this `git status --porcelain` line in `ws` one of tm's provisioning
+/// files, in exactly the state provisioning leaves it (#7660)?
 ///
-/// What: `true` only for an unstaged modification (` M`) or an untracked file
-/// (`??`) whose path is exactly one of [`PROVISIONING_FILES`]. A staged,
-/// deleted, renamed or conflicted entry is not provisioning's doing.
-/// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`.
-pub(crate) fn is_provisioning_entry(line: &str) -> bool {
-    matches!(line.get(..3), Some(" M " | "?? "))
-        && line
-            .get(3..)
-            .is_some_and(|path| PROVISIONING_FILES.contains(&path.trim()))
+/// Why: `--force` is followed by `git worktree remove --force`, which destroys
+/// whatever it excused. A repository that tracks `CLAUDE.md` shows an agent's
+/// edit to it as ` M CLAUDE.md`, and excusing that by path alone discarded it.
+/// What: the three [`UNTRACKED_PROVISIONING_FILES`] are excused only as `??`.
+/// `.gitignore` is excused as ` M` only when its unstaged diff adds nothing
+/// but the lines provisioning writes and removes nothing, and as `??` only
+/// when every line of it is such a line. Anything else — staged, deleted,
+/// renamed, conflicted, or an unreadable diff — is not excused.
+/// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`,
+/// `force_decommission_keeps_an_edited_tracked_claude_md`,
+/// `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`.
+pub(crate) fn is_provisioning_entry(ws: &Path, line: &str) -> bool {
+    let (Some(status), Some(path)) = (line.get(..3), line.get(3..)) else {
+        return false;
+    };
+    match (status, path.trim()) {
+        // #7660: `.gitignore` is checked line by line, never by path alone.
+        (" M ", ".gitignore") => gitignore_diff_is_provisioning(ws),
+        ("?? ", ".gitignore") => std::fs::read_to_string(ws.join(".gitignore"))
+            .is_ok_and(|body| body.lines().all(is_provisioning_gitignore_line)),
+        ("?? ", path) => UNTRACKED_PROVISIONING_FILES.contains(&path),
+        _ => false,
+    }
+}
+
+/// Whether `line` is one provisioning writes into `.gitignore` (#7660): a
+/// blank line, a managed-block marker, or a managed path.
+fn is_provisioning_gitignore_line(line: &str) -> bool {
+    use crate::core::scaffold_gitignore::{
+        SCAFFOLD_GITIGNORE_BEGIN, SCAFFOLD_GITIGNORE_END, SCAFFOLD_IGNORED_PATHS,
+    };
+    line.trim().is_empty()
+        || line == SCAFFOLD_GITIGNORE_BEGIN
+        || line == SCAFFOLD_GITIGNORE_END
+        || SCAFFOLD_IGNORED_PATHS.contains(&line)
+}
+
+/// Whether `ws`'s unstaged `.gitignore` diff only ADDS provisioning lines
+/// (#7660).
+///
+/// What: `git diff -U0` of the working tree against the index. Every `+` line
+/// must pass [`is_provisioning_gitignore_line`]; any `-` line, any line that is
+/// not a diff header, or a diff that cannot be read answers `false`.
+fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
+    let args = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U0",
+        "--",
+        ".gitignore",
+    ];
+    let Ok(diff) = super::worktree_safety::git_stdout(ws, &args) else {
+        return false;
+    };
+    let mut added = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("@@ ")
+            || line.starts_with("\\ ")
+        {
+            continue;
+        }
+        match line.strip_prefix('+') {
+            Some(body) if is_provisioning_gitignore_line(body) => added += 1,
+            _ => return false,
+        }
+    }
+    added > 0
 }
 
 /// Remove an in-project session worktree unless it holds work (#4344, #7660).
@@ -176,7 +252,9 @@ pub(super) async fn remove_in_project_worktree(
 fn dirt_under(ws: &Path, policy: ProvisioningDirt) -> Option<DirtyWorktree> {
     match policy {
         ProvisioningDirt::Refuse => inspect_dirt(ws),
-        ProvisioningDirt::Discard => inspect_dirt_excusing(ws, &is_provisioning_entry),
+        ProvisioningDirt::Discard => {
+            inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
+        }
     }
 }
 

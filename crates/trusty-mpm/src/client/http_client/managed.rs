@@ -328,7 +328,8 @@ impl DaemonClient {
     /// [`decommission_managed_session`](Self::decommission_managed_session),
     /// with `force` sent as `?force=true` (#7660).
     ///
-    /// Test: `force_decommission_removes_a_provisioning_only_worktree`.
+    /// Test: `session_decommission_routed_force_removes_a_provisioning_only_worktree`
+    /// (sends `force=true`), `session_decommission_routed_fails_naming_why_the_workspace_was_kept`.
     pub async fn decommission_managed_session_with(
         &self,
         id: &str,
