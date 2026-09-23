@@ -1,3 +1,0 @@
-Added
-
-- New bundled `tm-epic` skill (`/tm-epic`): authoring a GitHub epic as one tracker issue plus native phase sub-issues — the gate test, the four rules, acceptance-criteria writing, the four tracker-update triggers, and four reference files carrying the tracker template with its `phases`/`deferred`/`followups` marker blocks, the five-heading phase template, the manual `gh` procedure verified against gh 2.96, and the anti-pattern table. The `/tm-epic create|sync|defer|close` verbs are documented as the intended shape and are not yet implemented. `tm-ticketing` gains a bounded-exception row for the phase body and an "Epics and phases" pointer; its two gh-version claims now match the installed 2.96 ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
