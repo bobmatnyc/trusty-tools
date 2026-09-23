@@ -387,6 +387,9 @@ mod tests {
         landed: LandedContent,
         /// #7889 route (c): whether a merged pull request carried HEAD.
         carried: Option<CarriedByPr>,
+        /// #7889: `Some(true)` when the admission reused the #7914 fetch,
+        /// `Some(false)` when it fetched again, `None` when never asked.
+        asked_fresh: std::cell::Cell<Option<bool>>,
     }
 
     /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
@@ -454,6 +457,7 @@ mod tests {
                 landed: LandedContent::unavailable("no landed-content answer was fabricated"),
                 // #7889 route (c): not asked unless a test states it.
                 carried: None,
+                asked_fresh: std::cell::Cell::new(None),
             }
         }
 
@@ -521,11 +525,45 @@ mod tests {
             self.noop_merge.clone()
         }
         fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
+            self.asked_fresh.set(Some(false));
             LandingAdmission {
                 content: self.landed.clone(),
                 carried: self.carried.clone(),
             }
         }
+        fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
+            let answer = self.landing_admission(dir);
+            self.asked_fresh.set(Some(true));
+            answer
+        }
+    }
+
+    /// 🔴 #7889: the admission reuses the #7914 `local-only-commits` fetch
+    /// only when that probe ANSWERED — its production probe answers only after
+    /// a successful fetch. An unanswered count means the refs were never
+    /// refreshed, so the admission must fetch for itself.
+    #[test]
+    fn worktree_7889_the_admission_reuses_the_local_only_fetch_only_when_it_succeeded() {
+        let fresh = donor_branch_landed();
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &fresh),
+            None
+        );
+        assert_eq!(fresh.asked_fresh.get(), Some(true), "one fetch, reused");
+
+        let stale = FakeProbe {
+            local_only: Err("`git fetch --prune origin` did not finish within 3s".to_string()),
+            ..donor_branch_landed()
+        };
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &stale),
+            None
+        );
+        assert_eq!(
+            stale.asked_fresh.get(),
+            Some(false),
+            "a failed #7914 fetch must never be trusted as a refresh"
+        );
     }
 
     /// The #7889 shape: a clean, sole-owned tree holding commits no `origin`

@@ -344,7 +344,7 @@ pub(crate) fn evaluate_removal_rechecks(
         // landed under a sibling's name — so the third route to landing
         // evidence is asked before the refusal stands.
         Err(LandingFailure::NoMergedPr(deny)) => {
-            return landed_content_admission(target, probe, deny);
+            return landed_content_admission(target, probe, deny, local_only.is_ok());
         }
         // A lookup that did not answer establishes nothing, and an admission
         // is never reached from an unestablished fact (ADR-0045).
@@ -561,19 +561,28 @@ enum LandingFailure {
 /// What: `None` grants when [`WorktreeRemovalProbe::landing_admission`] admits
 /// on either route. Everything else appends that answer's own sentence — each
 /// route that failed, (b)'s first residual path, or what could not be
-/// established — to the merged-PR deny and refuses.
+/// established — to the merged-PR deny and refuses. `refs_fresh` is whether
+/// the #7914 `local-only-commits` probe answered, which its production probe
+/// does only after a successful `origin` fetch; only then is that fetch reused
+/// rather than repeated inside the hook's 5 s budget.
 /// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
 /// `worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable`,
 /// `worktree_7889_a_residual_path_denies_and_names_it`,
 /// `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
 /// `worktree_7889_a_dirty_tree_denies_even_when_its_content_is_landed`,
-/// `worktree_7889_a_live_owner_denies_even_when_its_content_is_landed`.
+/// `worktree_7889_a_live_owner_denies_even_when_its_content_is_landed`,
+/// `worktree_7889_the_admission_reuses_the_local_only_fetch_only_when_it_succeeded`.
 fn landed_content_admission(
     target: &Path,
     probe: &dyn WorktreeRemovalProbe,
     no_pr_deny: String,
+    refs_fresh: bool,
 ) -> Option<String> {
-    let admission = probe.landing_admission(target);
+    let admission = if refs_fresh {
+        probe.landing_admission_on_fetched_refs(target)
+    } else {
+        probe.landing_admission(target)
+    };
     if admission.admits() {
         return None;
     }

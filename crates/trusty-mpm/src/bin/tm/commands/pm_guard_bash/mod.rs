@@ -61,6 +61,7 @@ mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
+mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
@@ -106,7 +107,8 @@ pub(crate) use shell_lex::git_argv_at_subcommand;
 pub(crate) use worktree_remove::{
     DispatchIdentity, WorktreeRemoveVerdict, evaluate_worktree_remove_command,
 };
-pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
+// #7889: the re-checks are reached only through their deadline.
+pub(crate) use worktree_remove_deadline::{RECHECK_AUDIT_BUDGET, removal_recheck_deny};
 
 use std::path::{Path, PathBuf};
 

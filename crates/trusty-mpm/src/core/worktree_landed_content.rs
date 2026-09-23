@@ -203,7 +203,31 @@ pub(crate) fn landing_admission(
     refresh_timeout: Duration,
     probe: &dyn LandingProbe,
 ) -> LandingAdmission {
-    let content = landed_content_verdict(dir, refresh_timeout);
+    with_carried_fallback(dir, landed_content_verdict(dir, refresh_timeout), probe)
+}
+
+/// [`landing_admission`] against refs the CALLER refreshed moments ago (#7889).
+///
+/// Why: the removal guard's #7914 `local-only-commits` probe has already run a
+/// bounded `git fetch --prune origin` in this same evaluation, and a second
+/// fetch costs up to 3 s of the `PreToolUse` hook's 5 s. Only a caller that
+/// KNOWS its refresh succeeded may use this; any other caller fetches.
+/// What: as [`landing_admission`], minus the refresh.
+/// Test: `worktree_7889_the_admission_reuses_the_local_only_fetch_only_when_it_succeeded`
+/// in `bin/tm/commands/pm_guard_bash/worktree_remove`.
+pub(crate) fn landing_admission_on_fetched_refs(
+    dir: &Path,
+    probe: &dyn LandingProbe,
+) -> LandingAdmission {
+    with_carried_fallback(dir, landed_content_on_fetched_refs(dir), probe)
+}
+
+/// Route (c) asked only when route (b)'s `content` did not admit.
+fn with_carried_fallback(
+    dir: &Path,
+    content: LandedContent,
+    probe: &dyn LandingProbe,
+) -> LandingAdmission {
     if content.is_landed() {
         return content.into();
     }
@@ -244,6 +268,17 @@ pub fn landed_content_verdict(dir: &Path, refresh_timeout: Duration) -> LandedCo
              show what has landed: {e}"
         ));
     }
+    landed_content_on_fetched_refs(dir)
+}
+
+/// Route (b) against the remote-tracking refs as they stand (#7889).
+///
+/// Why: split from [`landed_content_verdict`] so a caller that has just
+/// refreshed `origin` itself does not pay for a second fetch.
+/// What: resolve the landing base, then [`merge_residue`].
+/// Test: `a_divergence_landed_by_another_route_reports_landed`,
+/// `an_unlanded_commit_reports_its_residual_path`.
+fn landed_content_on_fetched_refs(dir: &Path) -> LandedContent {
     let Some((base, base_sha)) = landing_base(dir) else {
         return LandedContent::unavailable(format!(
             "no landing base resolved in this worktree — none of {} names a commit",

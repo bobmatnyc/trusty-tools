@@ -239,6 +239,14 @@ the guard will establish every precondition itself.
      An open pull request, a dirty tree and a live owner are decided before it,
      exactly as before.
 
+     Because the admission lengthens the refusing path, the owner query and
+     every re-check now run under one 3.5 s deadline that DENIES on expiry and
+     names the check still running. The `PreToolUse` hook is killed at 5 s, and
+     a killed hook returns no decision, which is not a deny. The deny is printed
+     before its audit, which is capped at 0.75 s. The admission reuses the
+     `local-only-commits` fetch when that fetch succeeded, instead of fetching
+     a second time.
+
      This SUPERSEDES half of the #7275 round-2 finding. The never-pushed branch
      holding one empty or self-reverting commit is now admitted — not because
      evidence stopped being required, but because the ruling makes the evidence

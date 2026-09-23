@@ -146,7 +146,8 @@
 use std::path::Path;
 
 use crate::core::worktree_landed_content::{
-    LandedContent, LandingAdmission, landing_admission, merge_residue,
+    LandedContent, LandingAdmission, landing_admission, landing_admission_on_fetched_refs,
+    merge_residue,
 };
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
@@ -482,6 +483,22 @@ pub trait WorktreeRemovalProbe {
     fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
         LandedContent::unavailable(NOT_IMPLEMENTED).into()
     }
+
+    /// [`landing_admission`](Self::landing_admission), trusting a refresh
+    /// [`local_only_commits`](Self::local_only_commits) completed in this same
+    /// evaluation (#7889).
+    ///
+    /// Why: the guard runs inside a 5 s hook, and a second `git fetch` of up
+    /// to 3 s is the difference between a decision and none. The policy calls
+    /// this only after `local_only_commits` answered `Ok`, which the production
+    /// probe returns only once its fetch succeeded.
+    /// What: the default delegates to the fetching method, so an implementor
+    /// that does not override it loses time, never safety.
+    /// Test: `worktree_7889_the_admission_reuses_the_local_only_fetch_only_when_it_succeeded`
+    /// in `bin/tm/commands/pm_guard_bash/worktree_remove`.
+    fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
+        self.landing_admission(dir)
+    }
 }
 
 /// The row, if any, whose pull request was opened from exactly `sha` (#7832).
@@ -707,6 +724,15 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         landing_admission(
             dir,
             ADMISSION_FETCH_TIMEOUT,
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+        )
+    }
+
+    fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
+        // #7889: `local_only_commits` fetched `origin` in this evaluation and
+        // answered `Ok` only because that fetch succeeded — see the trait doc.
+        landing_admission_on_fetched_refs(
+            dir,
             &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
         )
     }
