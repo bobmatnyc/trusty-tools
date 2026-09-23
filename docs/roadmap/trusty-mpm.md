@@ -40,18 +40,34 @@ only. 2.0.0 follows.
 
 <!-- BEGIN GENERATED: roadmap -->
 
+## Now
+
+### 1.7.1
+
+1.7.1 is a reliability release focused on session and account safety. tm now always acts on the exact tmux session it means, so it never touches another session with a similar name; worktree removal only happens once your work has actually landed; and `--user`/account pinning no longer falls back silently to your global account. It also fixes the supervisor's background launch behavior, so the LaunchAgent no longer runs tmux at background priority and your `tmux.alternate_screen` setting reaches Claude Code on every launch path.
+
+6 of 50 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/92)
+
 ## Next
 
 ### 1.7.2
 
 trusty-mpm 1.7.2 — bug fixes after 1.7.1. The release line is 1.7.1 (in flight) → 1.7.2 (bug fixes) → 2.0.0 (supervisor and channels platform).
 
-0 of 45 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/96)
+0 of 59 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/96)
 
 ### 2.0.0
 
 trusty-mpm 2.0.0 adds a supervisor: one session that watches all of your projects, handles what it can, and asks you about the rest. You create it with a single request, and it comes with its own instructions and writing style, made for watching and reporting instead of for running coding work. Each project can be given its own chat channel, starting with Slack, so the supervisor can send you a question and take your answer there. Incoming messages go through a routing table that refuses anything not explicitly allowed, and a message can only answer a question the supervisor actually asked. One supervisor serves every project, so the same question never reaches you twice.
 
 0 of 8 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/97)
+
+## Later
+
+### cross-harness
+
+Work so trusty-mpm can drive coding harnesses other than Claude Code — Codex and Cursor — each independently usable behind one orchestration layer, without breaking any harness already deployed.
+
+0 of 7 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/99)
 
 <!-- END GENERATED: roadmap -->
