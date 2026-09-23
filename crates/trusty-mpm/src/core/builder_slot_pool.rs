@@ -106,7 +106,9 @@ pub enum SlotReservation {
 /// the clobbering this module exists to end.
 /// What: `thiserror`, because this is library code.
 /// Test: `an_unwritable_root_is_an_error_not_a_shared_fallback`.
+// #8372: non_exhaustive from its first release, so a new failure is not an API break.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SlotPoolError {
     /// The slot directory could not be created.
     #[error("could not create builder slot directory {path}: {source}")]
