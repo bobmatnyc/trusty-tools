@@ -236,6 +236,10 @@ assert_eq "--range with no value terminates promptly (not a 124 timeout)" \
 assert_eq "--range with no value fails open -> all crates, never nothing" \
   "${ALL_EIGHT}" "${range_missing_out}"
 
+# #7777 review round 3: ci.yml passes `--range ""` when merge-base fails.
+assert_eq "--range \"\" (explicit empty string) fails open -> all crates" \
+  "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range "" 2>/dev/null)"
+
 assert_eq "--range with an unresolvable ref fails open -> all crates" \
   "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range 'no-such-ref..also-fake' 2>/dev/null)"
 
@@ -300,7 +304,10 @@ alpha-ui" "${nested_out}"
 #   trusty-console    build.rs names "../../scripts/check-ui-bundle-freshness.sh"
 #   search-consumer   depends on trusty-search — rule 4 must NOT select it
 #   bystander         test fixture strings "scripts/go.sh", "scripts/ingest.sh"
-#                     — neither file exists
+#                     — neither file exists; src/paths.rs names dot.sh, fmt.sh,
+#                     up.sh and abs.sh through `./`, `{r}/`, `../` and `/abs/`
+#                     prefixes, mine.sh only as "myscripts/mine.sh", and
+#                     include_str!s h.sh (deleted / renamed in a --range copy)
 #   trusty-mpm-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
 # ---------------------------------------------------------------------------
 echo "fixture: scripts/** and .github/** selection rules (#7777 ruling)"
@@ -342,7 +349,20 @@ fn fixture_strings() {
     assert_ne!("scripts/go.sh", "scripts/ingest.sh");
 }
 EOF
+cat >"${SR}/crates/bystander/src/paths.rs" <<'EOF'
+pub const HOOK: &str = include_str!("../../../scripts/h.sh");
+pub fn paths(r: &str) -> [String; 5] {
+    [
+        "./scripts/dot.sh".to_string(),
+        format!("{r}/scripts/fmt.sh"),
+        "../scripts/up.sh".to_string(),
+        "/abs/scripts/abs.sh".to_string(),
+        "myscripts/mine.sh".to_string(),
+    ]
+}
+EOF
 for f in scripts/check_changelog_fragment.sh scripts/check-ui-bundle-freshness.sh scripts/unrelated.sh \
+  scripts/dot.sh scripts/fmt.sh scripts/up.sh scripts/abs.sh scripts/mine.sh scripts/h.sh \
   .github/workflows/ci.yml .github/workflows/other.yml; do
   echo '# fixture' >"${SR}/${f}"
 done
@@ -371,6 +391,62 @@ assert_eq "fixture-shaped literal with no file on disk -> nothing" \
   "" "$(sr_run scripts/ingest.sh)"
 assert_eq "crate change + fixture-shaped nonexistent path -> nothing extra" \
   "trusty-mpm-gui" "$(sr_run crates/trusty-mpm-gui/src/lib.rs scripts/go.sh)"
+
+# #7777 review round 3: a `/` before the path is a boundary; a name byte is not.
+assert_eq "path form \"./scripts/dot.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/dot.sh)"
+assert_eq "path form format!(\"{r}/scripts/fmt.sh\") -> bystander" \
+  "bystander" "$(sr_run scripts/fmt.sh)"
+assert_eq "path form \"../scripts/up.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/up.sh)"
+assert_eq "path form \"/abs/scripts/abs.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/abs.sh)"
+assert_eq "\"myscripts/mine.sh\" does not name scripts/mine.sh -> nothing" \
+  "" "$(sr_run scripts/mine.sh)"
+
+# A canary missing from the workspace fails open rather than testing less.
+SR_NOCANARY="${WORK}/scriptref-nocanary"
+cp -R "${SR}" "${SR_NOCANARY}" && rm -rf "${SR_NOCANARY}/crates/trusty-mpm"
+assert_eq "canary crate not a workspace member -> all crates (fail open)" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOCANARY}" && bash "${SCRIPT}" --files .github/workflows/ci.yml 2>/dev/null)"
+
+# #7777 review round 3: a script deleted or renamed in the range is absent on
+# disk but existed at the range base, so the crate naming it is still selected.
+SR_RANGE="${WORK}/scriptref-range"
+cp -R "${SR}" "${SR_RANGE}"
+srr() { (cd "${SR_RANGE}" && "$@") >/dev/null 2>&1; }
+SRR_BASE="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git rm -q scripts/h.sh
+srr git commit -qm "delete h.sh"
+SRR_DEL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range deleting include_str!'d scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_DEL}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr git mv scripts/h.sh scripts/h-renamed.sh
+srr git commit -qm "rename h.sh"
+SRR_REN="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range a...b renaming scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}...${SRR_REN}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr git rm -q scripts/h.sh
+# The earlier runs' untracked Cargo.lock would read as a root input (ALL).
+echo Cargo.lock >>"${SR_RANGE}/.git/info/exclude"
+assert_eq "--staged deletion of scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --staged 2>/dev/null)"
+# The range names scripts/go.sh, but HEAD sits at the base: the path is on
+# neither the disk nor the base, so bystander's fixture string still counts
+# for nothing.
+srr git reset -q --hard "${SRR_BASE}"
+srr sh -c 'echo "# fixture" >scripts/go.sh && git add scripts/go.sh && git commit -qm "add go.sh"'
+SRR_GO="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_BASE}"
+assert_eq "--range naming a path absent on disk and at base -> nothing" \
+  "" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_GO}" 2>/dev/null)"
 
 # The literal scan needs git; outside a repo it must fail open, never answer
 # "no reference". Asserted on a path that answers `trusty-mpm` when git works.

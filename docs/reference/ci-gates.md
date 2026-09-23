@@ -134,8 +134,11 @@ above.
   on a non-comment line, found by `git grep` at plan time — for example
   `scripts/check-ui-bundle-freshness.sh` selects `trusty-search` and
   `trusty-console` through their `build.rs`. A literal counts only when the
-  file exists, so a test fixture string such as `"scripts/go.sh"` selects
-  nothing. Most script and workflow PRs therefore select zero crates.
+  file exists, or existed at the diff's base (a deleted or renamed script),
+  so a test fixture string such as `"scripts/go.sh"` selects nothing. A
+  `./`, `../`, `{root}/` or absolute prefix still names the path. Most
+  script and workflow PRs therefore select zero crates. A canary crate
+  missing from the workspace selects every crate.
 - **Nothing to test still reports.** A docs-only PR, a push to `main` and a
   `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
   job, named exactly `Rust tests (affected crates)`, reports success with a

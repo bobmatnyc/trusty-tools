@@ -64,9 +64,14 @@
 #                                       whose non-comment line names that path
 #                                       literally, found by `git grep` at
 #                                       selection time. Counts only when the
-#                                       path EXISTS on disk, so a fixture
-#                                       string like "scripts/go.sh" selects
-#                                       nothing. No reference -> NO crates.
+#                                       path EXISTS on disk or, in --range /
+#                                       --staged mode, existed at the diff's
+#                                       base (a deleted or renamed script), so
+#                                       a fixture string like "scripts/go.sh"
+#                                       selects nothing. `./`, `../`,
+#                                       `{root}/` and `/abs/` prefixes all
+#                                       name the path; `myscripts/` does not.
+#                                       No reference -> NO crates.
 #                                       Direct only: a build.rs failure shows
 #                                       in the owning crate's own test run.
 #   5. `docs/**`, `website/**`, a root-level `*.md`
@@ -74,7 +79,8 @@
 #   6. anything else                -> ALL crates (fail open on an
 #                                       unclassified path).
 #   Rules 2-4: owner ruling 2026-09-23 on #7777. A literal scan that cannot
-#   run (git grep error) fails open to ALL.
+#   run (git grep error) fails open to ALL, and so does a canary crate that
+#   is not a workspace member.
 #
 # FAIL OPEN. A `cargo metadata` failure, a missing `jq`, or an empty/
 #   unresolvable change set prints every crate cargo metadata (or, failing
@@ -371,6 +377,28 @@ case "$MODE" in
     ;;
 esac
 
+# The diff's old side, for rule 4's existence check: a script deleted or
+# renamed in the change set is absent on disk but still named by crates.
+# `a...b` diffs from merge-base(a, b); `a..b` and a lone `a` diff from `a`.
+DIFF_BASE=""
+case "$MODE" in
+  staged) DIFF_BASE="HEAD" ;;
+  range)
+    case "$RANGE_SPEC" in
+      *...*)
+        r_old="${RANGE_SPEC%%...*}"
+        r_new="${RANGE_SPEC#*...}"
+        DIFF_BASE="$(git merge-base "${r_old:-HEAD}" "${r_new:-HEAD}" 2>/dev/null)"
+        ;;
+      *..*)
+        r_old="${RANGE_SPEC%%..*}"
+        DIFF_BASE="${r_old:-HEAD}"
+        ;;
+      *) DIFF_BASE="$RANGE_SPEC" ;;
+    esac
+    ;;
+esac
+
 # A file of nothing but blank lines is the same "nothing to act on" case as a
 # zero-byte file — strip blanks before judging emptiness.
 sed -i.bak '/^[[:space:]]*$/d' "${CHANGED_FILE}" 2>/dev/null || true
@@ -475,16 +503,22 @@ classify_path() {
 
 # crates_referencing <path> — rule 4. Prints the owning crate of every `*.rs`
 # file (tracked or untracked, not ignored) with a non-comment line naming
-# <path> literally. A <path> absent on disk references nothing. Returns 2 when
-# git grep itself fails, so the caller can fail open.
+# <path> literally. A <path> absent on disk, and absent at DIFF_BASE, references
+# nothing. Returns 2 when git grep itself fails, so the caller can fail open.
 crates_referencing() {
   local path="$1" re hits rc line file content
-  [ -f "${WORKSPACE_ROOT}/${path}" ] || return 0
+  if [ ! -f "${WORKSPACE_ROOT}/${path}" ]; then
+    # #7777: a deleted or renamed script still counts if the diff's base had it
+    [ -n "$DIFF_BASE" ] &&
+      git -C "$WORKSPACE_ROOT" cat-file -e "${DIFF_BASE}:${path}" 2>/dev/null ||
+      return 0
+  fi
   re="$(printf '%s' "$path" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
-  # Path boundaries: `../` or a non-path byte before, no longer name after —
+  # Path boundaries: a non-name byte before (`/` included, so `./`, `../`,
+  # `{root}/` and `/abs/` prefixes match), no longer name after —
   # "scripts/go.sh" must not match "myscripts/go.sh" or "scripts/go.sh.bak".
   hits="$(git -C "$WORKSPACE_ROOT" grep --untracked -n -I -E \
-    -e "(^|[^A-Za-z0-9_./-]|\.\./)${re}([^A-Za-z0-9_.-]|\.[^A-Za-z0-9]|\.?\$)" \
+    -e "(^|[^A-Za-z0-9_.-])${re}([^A-Za-z0-9_.-]|\.[^A-Za-z0-9]|\.?\$)" \
     -- '*.rs' </dev/null 2>/dev/null)"
   rc=$?
   [ "$rc" -le 1 ] || return 2
@@ -555,11 +589,9 @@ fi
 
 if [ "$CANARY_HIT" = "1" ]; then
   for c in $CANARY_CRATES; do
-    if [ -n "${IS_MEMBER[$c]:-}" ]; then
-      EXTRA_SET["$c"]=1
-    else
-      echo "select-test-crates: WARNING: canary crate '${c}' is not a workspace member — skipped" >&2
-    fi
+    # #7777: a missing canary means the canary set no longer tests anything
+    [ -n "${IS_MEMBER[$c]:-}" ] || fail_open "canary crate '${c}' is not a workspace member"
+    EXTRA_SET["$c"]=1
   done
   while IFS= read -r c; do
     [ -n "$c" ] && EXTRA_SET["$c"]=1
