@@ -211,6 +211,57 @@ pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
     )
 }
 
+/// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The prune-worktrees endpoint this invocation may POST to (#8347).
+///
+/// Why: the console gateway cuts a long survey at its 30 s proxy timeout, so a
+/// gateway base must be bypassed. But the bypass resolves the LOCAL daemon, and
+/// a gateway on another host fronts a different daemon: redirecting there would
+/// run a destructive prune against the wrong fleet, which #1737 forbids.
+/// What: a non-gateway `url` is used as given. A gateway on a loopback host is
+/// replaced by `direct()` (lock file, then default), which must answer
+/// `GET /health` before anything is posted. A gateway on any other host is an
+/// error that names the daemon URL to pass instead.
+/// Test: `prune_endpoint_refuses_a_remote_gateway`,
+/// `prune_endpoint_resolves_a_loopback_gateway_to_the_daemon`,
+/// `prune_endpoint_errors_when_the_direct_daemon_does_not_answer`.
+pub(crate) async fn prune_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    direct: impl FnOnce() -> String,
+) -> anyhow::Result<String> {
+    if !is_gateway_url(url) {
+        return Ok(prune_worktrees_url(url, url));
+    }
+    anyhow::ensure!(
+        is_loopback_url(url),
+        "prune-worktrees will not run through the console gateway at {url}: it cannot \
+         address that host's daemon directly, and it will not retarget the local one \
+         (#8347, #1737). Pass the daemon's own URL with --url or TRUSTY_MPM_URL."
+    );
+    let direct = direct();
+    // #8347: probe the daemon before a destructive POST is addressed to it.
+    let direct = trusty_mpm::core::resolve_daemon_url_probing(client, Some(&direct))
+        .await
+        .map_err(|e| anyhow::anyhow!("prune-worktrees bypasses the console gateway: {e}"))?;
+    Ok(prune_worktrees_url(url, &direct))
+}
+
 /// Turn a prune-worktrees transport failure into the operator's error (#7884).
 ///
 /// Why: a timed-out sweep printed reqwest's bare "error sending request for
@@ -263,26 +314,20 @@ pub(crate) async fn session_prune_worktrees(
     merged_prs: bool,
     invoking_session: Option<String>,
 ) -> anyhow::Result<()> {
-    // #8347: resolve the daemon's own address when `url` is the console gateway.
-    let direct = if is_gateway_url(url) {
-        trusty_mpm::core::resolve_daemon_url_probing(client, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot resolve the daemon's direct URL: {e}"))?
-    } else {
-        String::new()
-    };
-    let mut request = client
-        .post(prune_worktrees_url(url, &direct))
-        .json(&serde_json::json!({
-            "dry_run": dry_run,
-            "discard_dirty": discard_dirty,
-            // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
-            "merged_prs": merged_prs,
-            // #6806: the daemon occupies no pane and cannot discover who is
-            // asking, so the caller names itself. Absent outside a managed
-            // session, which leaves every claim foreign — the pre-#6806 gate.
-            "invoking_session": invoking_session,
-        }));
+    // #8347: a loopback gateway is bypassed for the local daemon; a remote one
+    // is refused rather than silently retargeted (#1737).
+    let endpoint =
+        prune_endpoint(client, url, || trusty_mpm::core::resolve_daemon_url(None)).await?;
+    let mut request = client.post(endpoint).json(&serde_json::json!({
+        "dry_run": dry_run,
+        "discard_dirty": discard_dirty,
+        // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
+        "merged_prs": merged_prs,
+        // #6806: the daemon occupies no pane and cannot discover who is
+        // asking, so the caller names itself. Absent outside a managed
+        // session, which leaves every claim foreign — the pre-#6806 gate.
+        "invoking_session": invoking_session,
+    }));
     if merged_prs {
         // #5830: the merged-PR survey runs synchronously in the handler and
         // takes minutes, so the client's 10s default aborted every invocation.
