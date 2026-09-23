@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use super::{RegistryPin, pinned_gh_env_in};
+use super::pinned_gh_env_in;
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::ProjectRegistry;
 use crate::project::record::Project;
@@ -321,26 +321,147 @@ fn an_unset_token_env_pin_fails_closed() {
     );
 }
 
-/// A record that pins nothing is not a pin, and falls through unchanged.
+/// A registered record with no `gh_account` and no `github` section is not a
+/// pin, and falls through unchanged.
 /// Test: itself.
 #[test]
 fn a_record_pinning_nothing_is_not_a_pin() {
-    assert!(RegistryPin::default().is_empty());
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main"}}}}}}"#
+        ),
+    );
+    assert_eq!(
+        pinned_gh_env_in(registry_dir.path(), ORIGIN).expect("readable"),
+        None,
+        "a record that pins nothing must fall through"
+    );
 }
 
-/// A git checkout whose `origin` is `origin` — what a daemon `gh` spawn holds.
-fn checkout_with_origin(origin: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().expect("tempdir");
-    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", origin]] {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir.path())
-            .args(&args)
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-    dir
+/// 🔴 #5850 REGRESSION: an unpinned record must not shadow a pinned one for
+/// the same repository.
+///
+/// Why this is the assertion: the lookup used to take the FIRST matching record
+/// in name order. `Jev-Matching` sorts before `jev-matching`, so the unpinned
+/// one won, the lookup answered "nothing pinned", and the probe ran as the
+/// machine's global account.
+/// Test: itself.
+#[test]
+fn an_unpinned_record_does_not_shadow_a_pinned_one() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "Jev-Matching":{{"name":"Jev-Matching","repo_url":"{ORIGIN}.git","default_branch":"main"}},
+                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect("readable")
+        .expect("the pinned record must win over the unpinned one");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        config_dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 FAIL-CLOSED: two records for one repository pinning DIFFERENT identities
+/// block, naming both records.
+///
+/// Why: picking one by position would probe as an account the operator may not
+/// have meant; there is no order in which that choice is right.
+/// Test: itself.
+#[test]
+fn two_disagreeing_pins_for_one_repository_fail_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bobmatnyc"}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto"}}
+            }}}}"#
+        ),
+    );
+    let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect_err("disagreeing pins must refuse, never pick one");
+    assert!(
+        err.contains("a-jev") && err.contains("b-jev") && err.contains("refusing to probe"),
+        "the refusal must name both records; got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a MATCHING record that does not parse blocks even when
+/// another matching record carries a usable pin.
+///
+/// Why: the broken record may pin a different account; "the other one pins" is
+/// not an answer to that.
+/// Test: itself.
+#[test]
+fn a_malformed_second_matching_record_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":42}}
+            }}}}"#,
+            config_dir.path().display()
+        ),
+    );
+    let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect_err("an unparsable matching record must refuse");
+    assert!(
+        err.contains("b-jev"),
+        "the refusal must name the record; got: {err}"
+    );
+}
+
+/// A record that sets only `github.host` names no identity, and falls through.
+///
+/// Why: `GH_HOST` alone selects no account, so returning it as a pin would stop
+/// the static tier from ever being consulted for that repository.
+/// Test: itself.
+#[test]
+fn a_host_only_binding_is_not_a_pin() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(
+        registry_dir.path(),
+        &format!(
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","github":{{"host":"github.example.com"}}}}}}}}"#
+        ),
+    );
+    assert_eq!(
+        pinned_gh_env_in(registry_dir.path(), ORIGIN).expect("readable"),
+        None
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a registry document with no `projects` key blocks.
+///
+/// Why: `ProjectStore` always writes the key, so `{}` is not a registry this
+/// process understands — reading it as "no pin" is the fallback.
+/// Test: itself.
+#[test]
+fn a_registry_without_a_projects_key_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_registry(registry_dir.path(), "{}");
+    let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
+        .expect_err("a document without `projects` must refuse");
+    assert!(
+        err.contains("did not parse") && err.contains("refusing to probe"),
+        "got: {err}"
+    );
 }
 
 /// 🔴 FAIL-CLOSED arm 4: a registry refusal reaches the daemon's `gh` spawn as
@@ -352,10 +473,10 @@ fn checkout_with_origin(origin: &str) -> tempfile::TempDir {
 /// Test: itself.
 #[test]
 fn daemon_gh_env_refuses_when_the_registry_cannot_answer() {
-    let checkout = checkout_with_origin(ORIGIN);
+    let dir = tempfile::tempdir().expect("tempdir");
     let registry_dir = tempfile::tempdir().expect("tempdir");
     write_registry(registry_dir.path(), "{ this is not json");
-    let failure = resolve_daemon_gh_env_in(checkout.path(), registry_dir.path())
+    let failure = resolve_daemon_gh_env_in(dir.path(), ORIGIN, registry_dir.path())
         .expect_err("a registry refusal must block the gh spawn, never fall back");
     assert!(
         failure.to_string().contains("refusing to probe"),
@@ -363,11 +484,13 @@ fn daemon_gh_env_refuses_when_the_registry_cannot_answer() {
     );
 }
 
-/// The daemon's `gh` spawn runs inside the registry-pinned config dir.
+/// The daemon's `gh` spawn runs inside the registry-pinned config dir, keyed by
+/// the repository the caller passes. `dir` is not a git checkout, so this also
+/// proves the lookup no longer re-reads `origin` from git (#5850).
 /// Test: itself.
 #[test]
 fn daemon_gh_env_uses_the_registry_pin() {
-    let checkout = checkout_with_origin(ORIGIN);
+    let dir = tempfile::tempdir().expect("tempdir");
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
     write_hosts_yml(config_dir.path(), "bob-duetto");
@@ -378,8 +501,12 @@ fn daemon_gh_env_uses_the_registry_pin() {
             config_dir.path().display()
         ),
     );
-    let env = resolve_daemon_gh_env_in(checkout.path(), registry_dir.path())
-        .expect("a usable pin must resolve");
+    let env = resolve_daemon_gh_env_in(
+        dir.path(),
+        "duettoresearch/jev-matching",
+        registry_dir.path(),
+    )
+    .expect("a usable pin must resolve");
     assert_eq!(
         value_of(&env, "GH_CONFIG_DIR"),
         config_dir.path().to_string_lossy()

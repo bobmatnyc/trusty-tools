@@ -377,6 +377,67 @@ async fn resolve_gh_account_env_for_registry_registered_without_gh_account_is_no
     assert_eq!(found, None);
 }
 
+/// 🔴 #5850 REGRESSION: an unpinned duplicate record for the same repository
+/// must not hide the pinned one from a session spawn.
+///
+/// Why this shape: `ProjectRegistry::list` returns records in `HashMap` order,
+/// so the old first-match lookup picked an arbitrary record. Sixteen unpinned
+/// duplicates make that pick land on an unpinned record almost every run
+/// (16 in 17), which is enough to fail against the first-match code.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_skips_an_unpinned_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    for i in 0..16 {
+        registry
+            .register(project(
+                &format!("widget-{i:02}"),
+                "https://github.com/acme/widget.git",
+                None,
+            ))
+            .await
+            .expect("register");
+    }
+    registry
+        .register(project(
+            "widget",
+            "https://github.com/acme/widget",
+            Some("bobmatnyc"),
+        ))
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("the pinned record must be found past its unpinned duplicates");
+    assert_eq!(found.account.as_deref(), Some("bobmatnyc"));
+}
+
+/// 🔴 #5850: two records pinning DIFFERENT accounts yield no pin for a session,
+/// where the daemon refuses the same registry — neither side guesses.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_refuses_disagreeing_pins() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    for (name, account) in [("widget-a", "bobmatnyc"), ("widget-b", "bob-duetto")] {
+        registry
+            .register(project(
+                name,
+                "https://github.com/acme/widget",
+                Some(account),
+            ))
+            .await
+            .expect("register");
+    }
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget").await;
+    assert_eq!(
+        found, None,
+        "disagreeing pins must not be resolved by position"
+    );
+}
+
 /// Why: a workspace with no git origin (a bare, non-git temp dir) must
 /// resolve to an EMPTY vec end-to-end via `resolve_gh_account_env_for_registry`
 /// itself — no regression for every workspace that predates #3025, and no

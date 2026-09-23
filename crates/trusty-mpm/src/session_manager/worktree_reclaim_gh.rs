@@ -231,25 +231,29 @@ fn warn_once_about_the_keychain() {
 /// [`TrustyToolsConfig`] `projects:` list never sees — so a repository only
 /// that account can see was probed as the machine's global account and every
 /// branch under it blocked with "Could not resolve to a Repository".
-/// What: reads `dir`'s `remote.origin.url` (best-effort — an unreadable or
-/// non-git directory resolves from the global tier, never a hard failure, and
-/// is logged at `warn`), then asks
+/// What: takes the repository the caller already resolved (`origin`, an
+/// `owner/repo` slug or a URL — #5850 dropped the second `git config` read of
+/// `dir`), then asks
 /// [`crate::core::gh_account_registry::pinned_gh_env_in`] FIRST, against this
 /// host's registry directory. Only
 /// "no pin recorded" falls through to [`gh_identity::select_config_for_origin`]
 /// over the static config; every unanswerable registry outcome is returned as a
 /// [`GhFailure`], which the caller renders as
 /// `BranchPrState::LookupFailed { reason }` rather than probing as the wrong
-/// user. A static-config `account`-only binding stays a `warn` + ambient spawn:
-/// nothing pins that project, so there is no wrong identity to protect it from.
+/// user. A static-config `account`-only binding DOES name an account, but
+/// `resolve_gh_env` refuses to honour it (#5851: `gh auth token -u` does not
+/// select an account on a keyring-backed host). That refusal is logged at `warn`
+/// and `gh` spawns with the ambient environment, so the probe runs as the
+/// machine's globally active account, which may not be the one configured. This
+/// static-tier fallback is unchanged by #5850.
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
 /// `an_account_only_pin_fails_closed_naming_the_account` and the other
 /// `gh_account_registry_tests` arms cover the registry tier;
 /// `daemon_gh_env_refuses_when_the_registry_cannot_answer` covers the wiring;
 /// the static tier is unit-tested via `select_config_for_origin_*` in
 /// `core::gh_identity`.
-pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> Result<GhEnv, GhFailure> {
-    resolve_daemon_gh_env_in(dir, &crate::project::registry_data_dir())
+pub(crate) fn resolve_daemon_gh_env(dir: &Path, origin: &str) -> Result<GhEnv, GhFailure> {
+    resolve_daemon_gh_env_in(dir, origin, &crate::project::registry_data_dir())
 }
 
 /// [`resolve_daemon_gh_env`] against an explicit registry directory (#5850).
@@ -260,29 +264,18 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> Result<GhEnv, GhFailure> {
 /// `daemon_gh_env_uses_the_registry_pin`.
 pub(crate) fn resolve_daemon_gh_env_in(
     dir: &Path,
+    origin: &str,
     registry_dir: &Path,
 ) -> Result<GhEnv, GhFailure> {
-    let origin_url = crate::daemon::managed_routes::inproject::get_origin_url(dir)
-        .inspect_err(|e| {
-            tracing::warn!(
-                dir = %dir.display(),
-                "worktree-reclaim: cannot read git origin remote for gh identity \
-                 resolution — falling back to the global github: binding (#6623): {e}"
-            );
-        })
-        .ok()
-        .flatten();
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
-    if let Some(origin) = origin_url.as_deref() {
-        match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, origin) {
-            Ok(Some(env)) => return Ok(env),
-            Ok(None) => {}
-            Err(reason) => return Err(GhFailure::new(reason)),
-        }
+    match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, origin) {
+        Ok(Some(env)) => return Ok(env),
+        Ok(None) => {}
+        Err(reason) => return Err(GhFailure::new(reason)),
     }
     let config = TrustyToolsConfig::load();
-    let selected = gh_identity::select_config_for_origin(&config, origin_url.as_deref());
+    let selected = gh_identity::select_config_for_origin(&config, Some(origin));
     let env = match gh_identity::resolve_gh_env(selected) {
         Ok(env) => env,
         Err(e) => {

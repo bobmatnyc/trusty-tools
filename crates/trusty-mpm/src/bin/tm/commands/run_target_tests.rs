@@ -473,3 +473,43 @@ fn bare_form_rejects_an_empty_account_value() {
         );
     }
 }
+
+/// 🔴 #5850 REGRESSION (wiring): the real parse of `tm <url> --user <login>`
+/// reaches a `RunTarget::Repo` carrying that login.
+///
+/// Why this is the assertion: the lift's unit tests stay green if
+/// `resolve_external` stops calling it. Driving clap's own output through the
+/// resolver fails the moment the lift is unwired, because the trailing tokens
+/// then hit the "takes no further arguments" refusal.
+/// Test: itself.
+#[test]
+fn bare_form_trailing_user_reaches_the_repo_target() {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from([
+        "tm",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ])
+    .expect("the bare form parses");
+    let Some(crate::cli::Command::External(tokens)) = cli.command else {
+        panic!("the bare form must reach the external catch-all");
+    };
+    let target = resolve_external(&tokens, cli.account)
+        .expect("a trailing --user must resolve, not refuse")
+        .expect("a repository URL is repo-shaped");
+    let RunTarget::Repo {
+        owner,
+        repo,
+        account,
+        ..
+    } = target
+    else {
+        panic!("expected a repository target, got {target:?}");
+    };
+    assert_eq!(
+        (owner.as_str(), repo.as_str()),
+        ("duettoresearch", "jev-matching")
+    );
+    assert_eq!(account.as_deref(), Some("bob-duetto"));
+}

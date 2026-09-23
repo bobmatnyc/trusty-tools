@@ -272,27 +272,11 @@ pub(crate) async fn run_external(
     help: &trusty_common::help::HelpConfig,
     account: Option<String>,
 ) -> anyhow::Result<()> {
-    // #5850: clap stops applying global flags once it starts COLLECTING an
-    // external subcommand's argv, so `tm <url> --user <login>` reaches here as
-    // three raw tokens and would die on the "takes no further arguments" bail
-    // below. Lifting the flag back out is what makes the two orderings
-    // equivalent; everything else still bails.
-    let (tokens, trailing) = split_trailing_account(tokens)?;
-    let account = reconcile_bare_account(account, trailing)?;
-    let token = tokens.first().map(String::as_str).unwrap_or_default();
-    let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
+    let Some(target) = resolve_external(tokens, account)? else {
         reject_unknown_subcommand(argv, help);
     };
 
-    if tokens.len() > 1 {
-        anyhow::bail!(
-            "tm {token} takes no further arguments (got {extra:?}). \
-             Use `tm run {token}` for the flag-bearing form.",
-            extra = &tokens[1..]
-        );
-    }
-
-    match classified? {
+    match target {
         RunTarget::Repo {
             owner,
             repo,
@@ -485,6 +469,37 @@ async fn run_managed(
         super::managed_workspace::LaunchDir::CallerResolved,
     )
     .await
+}
+
+/// Resolve the bare form's raw tokens into a [`RunTarget`], before any I/O.
+///
+/// Why (#5850): clap stops applying global flags once it starts COLLECTING an
+/// external subcommand's argv, so `tm <url> --user <login>` arrives as three
+/// raw tokens. Keeping the lift, the account reconciliation, and the
+/// extra-argument refusal in one pure function is what lets a test drive the
+/// real parse output through to the target.
+/// What: `Ok(None)` when the first token is not repo-shaped (the caller prints
+/// clap's usage error); `Err` for a bad account flag, conflicting accounts, or
+/// extra arguments; otherwise the classified target.
+/// Test: `bare_form_trailing_user_reaches_the_repo_target`.
+pub(crate) fn resolve_external(
+    tokens: &[String],
+    account: Option<String>,
+) -> anyhow::Result<Option<RunTarget>> {
+    let (tokens, trailing) = split_trailing_account(tokens)?;
+    let account = reconcile_bare_account(account, trailing)?;
+    let token = tokens.first().map(String::as_str).unwrap_or_default();
+    let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
+        return Ok(None);
+    };
+    if tokens.len() > 1 {
+        anyhow::bail!(
+            "tm {token} takes no further arguments (got {extra:?}). \
+             Use `tm run {token}` for the flag-bearing form.",
+            extra = &tokens[1..]
+        );
+    }
+    classified.map(Some)
 }
 
 /// Lift an `--account`/`--user <login>` out of an external subcommand's raw

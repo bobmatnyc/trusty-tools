@@ -13,9 +13,10 @@
 //! call came back "Could not resolve to a Repository", and every branch under
 //! that worktree blocked. This module is the missing read.
 //!
-//! What: [`pinned_gh_env_in`] reads `<registry_dir>/projects.json`, finds the
-//! record whose `repo_url` matches the checkout's `origin` under
-//! [`repo_url_matches`], and turns that record's `github:` binding into a
+//! What: [`pinned_gh_env_in`] reads `<registry_dir>/projects.json`, collects
+//! EVERY record whose `repo_url` matches the checkout's `origin` under
+//! [`repo_url_matches`], picks the one pin among them with [`select_pin`], and
+//! turns that record's `github:` binding into a
 //! [`GhEnv`] through the ONE existing precedence engine
 //! ([`gh_identity::resolve_gh_env`]) — no second copy of `config_dir >
 //! token_env > account`. `Ok(None)` means "no pin recorded", the only outcome
@@ -71,13 +72,15 @@ const REGISTRY_FILE: &str = "projects.json";
 /// malformed record poison every other project's lookup. Holding the records as
 /// raw values defers the strict parse to the record that actually matches, so a
 /// broken record blocks only its own repository — and blocks it loudly.
-/// What: the store's `projects` map, values left unparsed.
+/// What: the store's `projects` map, values left unparsed. The key is REQUIRED,
+/// as it is in `ProjectStore`'s own document: `{}` is not a registry this
+/// process understands, so it fails closed rather than reading as "no pin".
 /// Test: `a_malformed_matching_record_fails_closed`,
-/// `a_malformed_unrelated_record_does_not_block_a_match`.
+/// `a_malformed_unrelated_record_does_not_block_a_match`,
+/// `a_registry_without_a_projects_key_fails_closed`.
 #[derive(Debug, Deserialize)]
 struct RegistrySnapshot {
     /// Every registered project, keyed by registry name, still unparsed.
-    #[serde(default)]
     projects: BTreeMap<String, serde_json::Value>,
 }
 
@@ -115,18 +118,32 @@ pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Opti
 /// What: the matched record's `gh_account` (blank treated as unset) and its own
 /// `github:` binding, both exactly as persisted.
 /// Test: the arms listed on [`pinned_gh_env_in`].
-#[derive(Debug, Default)]
-struct RegistryPin {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RegistryPin {
     /// `Project::gh_account` — the login this project's sessions run as.
-    account: Option<String>,
+    pub(crate) account: Option<String>,
     /// `Project::github` — the per-project binding, `config_dir` included.
-    github: Option<GithubConfig>,
+    pub(crate) github: Option<GithubConfig>,
 }
 
 impl RegistryPin {
-    /// Does this record pin anything at all?
+    /// The pin a registry record carries, with a blank `gh_account` unset.
+    pub(crate) fn from_project(project: &Project) -> Self {
+        Self {
+            account: project
+                .gh_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string),
+            github: project.github.clone(),
+        }
+    }
+
+    /// Does this record name no identity? A host-only `github:` names none.
+    /// Test: `a_host_only_binding_is_not_a_pin`, `a_record_pinning_nothing_is_not_a_pin`.
     fn is_empty(&self) -> bool {
-        self.account.is_none() && self.github.is_none()
+        self.account.is_none() && self.github.as_ref().is_none_or(|g| !names_identity(g))
     }
 
     /// The account name to NAME in a failure, when one is known.
@@ -148,12 +165,14 @@ impl RegistryPin {
 /// ABSENT registry is a legitimate "nothing is pinned" (a host that has never
 /// registered a project), while an unreadable or unparsable one is a refusal.
 /// Folding the two together is how a pinned project would silently fall back.
-/// What: `Ok(None)` for an absent file, no matching record, or a record pinning
-/// nothing; `Err` for an I/O failure, a document that does not parse, or a
-/// MATCHING record that does not parse as a [`Project`].
+/// What: `Ok(None)` for an absent file, no matching record, or matching records
+/// that pin nothing; `Err` for an I/O failure, a document that does not parse,
+/// ANY matching record that does not parse as a [`Project`], or matching records
+/// that pin different identities — see [`select_pin`].
 /// Test: `an_absent_registry_file_is_not_a_pin`,
 /// `an_unreadable_registry_fails_closed`,
 /// `a_malformed_matching_record_fails_closed`,
+/// `a_malformed_second_matching_record_fails_closed`,
 /// `a_malformed_unrelated_record_does_not_block_a_match`.
 fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
     let path = registry_dir.join(REGISTRY_FILE);
@@ -166,28 +185,60 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
     };
     let snapshot: RegistrySnapshot = serde_json::from_str(&text)
         .map_err(|e| unanswerable(&path, &format!("did not parse ({e})")))?;
-    let Some((name, raw)) = snapshot.projects.iter().find(|(_, raw)| {
+    // #5850: EVERY matching record, not the first — an unpinned duplicate that
+    // sorts earlier must not shadow the pinned one.
+    let mut candidates = Vec::new();
+    for (name, raw) in snapshot.projects.iter().filter(|(_, raw)| {
         raw.get("repo_url")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|url| repo_url_matches(url, origin))
-    }) else {
+    }) {
+        let project: Project = serde_json::from_value(raw.clone()).map_err(|e| {
+            format!(
+                "the project registry record '{name}' names this repository but did not parse \
+                 ({e}), so whether it pins a gh account is unknown — refusing to probe the \
+                 repository as this machine's global gh account (#5850)"
+            )
+        })?;
+        candidates.push((name.clone(), RegistryPin::from_project(&project)));
+    }
+    select_pin(candidates)
+}
+
+/// Choose the one pin among every registry record that names a repository.
+///
+/// Why: the registry can hold two records for one origin (a re-registration
+/// under a different name, a URL spelled with `.git`). Taking the first match
+/// lets an unpinned record hide a pinned one, and picking between two pins by
+/// position guesses at an account. The daemon's housekeeping probe and the
+/// session-spawn path both call this, so they cannot choose differently.
+/// What: drops records that pin nothing; `Ok(None)` when none are left,
+/// `Ok(Some(pin))` when every remaining record pins the same identity, and
+/// `Err` naming two records when they pin different ones. Order-independent.
+/// Test: `an_unpinned_record_does_not_shadow_a_pinned_one`,
+/// `two_disagreeing_pins_for_one_repository_fail_closed`,
+/// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
+/// `find_pinned_gh_identity_refuses_disagreeing_pins`.
+pub(crate) fn select_pin(
+    candidates: Vec<(String, RegistryPin)>,
+) -> Result<Option<RegistryPin>, String> {
+    let mut pinned: Vec<(String, RegistryPin)> = candidates
+        .into_iter()
+        .filter(|(_, pin)| !pin.is_empty())
+        .collect();
+    pinned.sort_by(|a, b| a.0.cmp(&b.0));
+    let Some((first_name, first)) = pinned.first() else {
         return Ok(None);
     };
-    let project: Project = serde_json::from_value(raw.clone()).map_err(|e| {
-        format!(
-            "the project registry record '{name}' names this repository but did not parse \
-             ({e}), so whether it pins a gh account is unknown — refusing to probe the \
-             repository as this machine's global gh account (#5850)"
-        )
-    })?;
-    let pin = RegistryPin {
-        account: project
-            .gh_account
-            .map(|a| a.trim().to_string())
-            .filter(|a| !a.is_empty()),
-        github: project.github,
-    };
-    Ok((!pin.is_empty()).then_some(pin))
+    if let Some((other_name, _)) = pinned.iter().find(|(_, pin)| pin != first) {
+        return Err(format!(
+            "the project registry records '{first_name}' and '{other_name}' both name this \
+             repository but pin different gh identities — refusing to probe it as either, or \
+             as this machine's global gh account (#5850). Remove one of the records or make \
+             their gh_account/github settings agree."
+        ));
+    }
+    Ok(Some(first.clone()))
 }
 
 /// Turn a pinned record into the `gh` overrides the session-spawn path injects.
@@ -198,9 +249,11 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
 /// credential and an account with no `config_dir` both mean "no credential for
 /// the pinned account is available", and both must block rather than let `gh`
 /// answer as somebody else.
-/// What: `Ok(Some(env))` for a usable binding, `Ok(None)` when the record binds
-/// nothing gh reads and pins no account either, `Err` otherwise.
+/// What: `Ok(Some(env))` for a usable binding, `Ok(None)` when the resolved env
+/// sets neither `GH_CONFIG_DIR` nor `GH_TOKEN` (a host-only binding), `Err`
+/// otherwise.
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
+/// `a_host_only_binding_is_not_a_pin`,
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
 /// `an_account_only_pin_fails_closed_naming_the_account`,
 /// `an_unset_token_env_pin_fails_closed`.
@@ -241,8 +294,13 @@ fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
              `github.config_dir` for this project."
         ));
     }
-    if env.is_empty() {
-        // Nothing gh reads, and no account either: not a pin at all.
+    // #5850: `GH_HOST` alone selects no identity, so an env carrying neither
+    // identity var is not a pin — let the static tier answer.
+    if !env
+        .vars()
+        .iter()
+        .any(|(key, _)| key == "GH_CONFIG_DIR" || key == "GH_TOKEN")
+    {
         return Ok(None);
     }
     if let Some(dir) = selected_config_dir(&cfg)
@@ -275,6 +333,14 @@ fn selected_config_dir(cfg: &GithubConfig) -> Option<PathBuf> {
         .map(|p| p.to_string_lossy().trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+}
+
+/// Does `cfg` name an identity — a `config_dir`, a `token_env`, or an account?
+/// Test: `a_host_only_binding_is_not_a_pin`.
+fn names_identity(cfg: &GithubConfig) -> bool {
+    selected_config_dir(cfg).is_some()
+        || named_token_env(cfg).is_some()
+        || cfg.account.as_deref().is_some_and(|a| !a.trim().is_empty())
 }
 
 /// The trimmed, non-empty `token_env` variable name the binding names, if any.
