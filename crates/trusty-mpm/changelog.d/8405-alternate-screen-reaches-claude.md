@@ -1,0 +1,2 @@
+Fixed
+- With config `tmux.alternate_screen: true`, a daemon-managed spawn, restart or attach now starts `claude` with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0`, whatever environment the tmux server inherited. The launch previously let the pane's inherited value, or the `1` default, decide the renderer. A config file that cannot be read now fails the launch instead of silently falling back to the default (#8405).

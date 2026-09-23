@@ -42,6 +42,7 @@ fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
         mcp_config: config_dir.map(|_| Path::new(SCOPE_MCP_CONFIG)),
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
         memory_reachable: true,
+        alternate_screen: false,
     }
 }
 

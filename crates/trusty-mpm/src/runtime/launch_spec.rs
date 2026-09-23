@@ -407,9 +407,10 @@ impl LaunchSpec {
     /// `TM_MANAGED_SESSION_ID` (#2023 component B) and the
     /// `core::alt_screen` managed defaults, which yield per-variable to a value
     /// the pane already exports exactly as the `${NAME-1}` shell form did
-    /// (#6495/#7160).
+    /// (#6495/#7160), and never replace an `env_set` pair (#8405).
     /// Test: `spec_command_carries_cwd_program_argv_and_env`,
-    /// `spec_command_yields_the_alt_screen_default_to_the_pane`.
+    /// `spec_command_yields_the_alt_screen_default_to_the_pane`,
+    /// `every_launch_path_carries_the_configured_fullscreen_renderer`.
     pub fn to_command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(&self.program);
         cmd.args(&self.args).current_dir(&self.cwd);

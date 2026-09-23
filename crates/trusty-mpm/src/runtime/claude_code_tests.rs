@@ -1622,6 +1622,77 @@ fn spawn_uses_the_launch_resolved_reachability() {
     );
 }
 
+/// Write `yaml` as the config under the redirected home's state root — the
+/// file the adapter's named framework root resolves to (#8405).
+fn write_state_config(home: &HomeGuard, yaml: &str) {
+    let root = home.home().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&root).expect("mkdir state root");
+    std::fs::write(root.join("config.yaml"), yaml).expect("write config");
+}
+
+/// #8405: config `alternate_screen: true` reaches the spec of a fresh spawn
+/// AND of a restart, as an explicit `=0` the pane environment cannot override.
+#[test]
+#[serial_test::serial]
+fn spawn_carries_the_configured_fullscreen_renderer() {
+    use crate::core::alt_screen::{ALT_SCREEN_ENABLED, ALT_SCREEN_ENV_VAR};
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: true\n");
+    let spawned = FakeTmux::new();
+    let spawn_spec = sent_spec(&drive_spawn(&spawned, &home));
+    let resumed = FakeTmux::new();
+    drive_resume(&resumed, &home, home.home(), None, None);
+    let resume_spec = sent_spec(&only_line(&resumed));
+    for spec in [spawn_spec, resume_spec] {
+        assert!(
+            spec.env_set
+                .iter()
+                .any(|(k, v)| k == ALT_SCREEN_ENV_VAR && v == ALT_SCREEN_ENABLED),
+            "the configured renderer must ride in the spec: {:?}",
+            spec.env_set
+        );
+    }
+}
+
+/// #8405 fail-open check: an unreadable config must fail the launch before
+/// anything is typed, never launch on the default while reporting success.
+#[test]
+#[serial_test::serial]
+fn spawn_fails_closed_on_an_unreadable_config() {
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: [broken\n");
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fake = FakeTmux::new();
+    let adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    let spawn_err = adapter
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect_err("a malformed config must not report a successful spawn");
+    let resume_err = adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect_err("a malformed config must not report a successful restart");
+    for err in [spawn_err, resume_err] {
+        assert!(matches!(err, RuntimeError::Spawn(_)), "{err}");
+        assert!(err.to_string().contains("alternate_screen"), "{err}");
+    }
+    assert!(
+        fake.sends.lock().expect("send log").is_empty()
+            && fake.pane_sends.lock().expect("pane send log").is_empty(),
+        "nothing may be typed into the pane"
+    );
+}
+
 /// #2157 item 1: the durable `tmux set-environment` publish is belt-and-braces
 /// alongside the pane-shell export the launch line still carries.
 #[test]

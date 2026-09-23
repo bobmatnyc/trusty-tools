@@ -121,8 +121,8 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "core/alt_screen.rs",
-        3,
-        "test fixtures for apply_default_when_unset (#6495, #7160) — not launch lines. \
+        4,
+        "test fixtures for apply_default_when_unset (#6495, #7160, #8405) — not launch lines. \
          The module emits no command of its own: it supplies the alt-screen and \
          mouse-capture defaults the real builders carry, as a shell operand or a \
          Command mutation",

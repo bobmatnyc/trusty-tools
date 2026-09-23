@@ -30,6 +30,10 @@
 //! one, and each variable is decided independently — an operator who exported
 //! only one of the two still gets the tm default for the other.
 //!
+//! Config `tmux.alternate_screen: true` is the exception (#8405):
+//! [`configured_env`] turns it into an explicit `=0` assignment on the daemon's
+//! launch spec, so the tmux server's inherited environment cannot override it.
+//!
 //! Operator precedence, and where it comes from:
 //!   * launch environment — the shell operand expands `${NAME-default}`, so the
 //!     pane shell substitutes the default only when the variable is UNSET. A
@@ -66,6 +70,60 @@ pub const ALT_SCREEN_ENV_VAR: &str = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN";
 
 /// The value tm provisions when the launch carries none.
 pub const ALT_SCREEN_DEFAULT: &str = "1";
+
+/// The value that selects Claude Code's fullscreen renderer — what a managed
+/// launch carries when config `tmux.alternate_screen` is `true` (#8405).
+pub const ALT_SCREEN_ENABLED: &str = "0";
+
+/// The assignments a managed launch must carry for the configured
+/// `tmux.alternate_screen` (#8405).
+///
+/// Why: the `${NAME-1}` default is decided by the pane's environment, and a
+/// pane inherits the tmux SERVER's global environment — a snapshot of whatever
+/// process first started the server, never the daemon's own env. With config
+/// `alternate_screen: true`, tmux lets panes use the alternate screen, yet a
+/// server that inherited `=1` (or no value at all, which defaults to `1`) still
+/// told `claude` to stay on the classic renderer. Config is the operator's
+/// statement of intent, so it must reach `claude` without depending on the
+/// server's inherited environment.
+/// What: `[(ALT_SCREEN_ENV_VAR, ALT_SCREEN_ENABLED)]` when `alternate_screen`
+/// is `true`; empty when `false`, which leaves #6495's yield-to-the-pane
+/// default in charge. The caller puts these into an explicit assignment, which
+/// [`apply_default_when_unset`] never overrides. A settings-tier `env` entry
+/// still outranks it, as the module doc explains.
+/// Test: `configured_env_forces_the_fullscreen_renderer_when_enabled`,
+/// `configured_env_is_empty_when_disabled`.
+pub fn configured_env(alternate_screen: bool) -> Vec<(String, String)> {
+    if alternate_screen {
+        vec![(ALT_SCREEN_ENV_VAR.to_owned(), ALT_SCREEN_ENABLED.to_owned())]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Read `tmux.alternate_screen` from the `config.yaml` under
+/// `crate_config_root` (#8405).
+///
+/// Why: a managed launch must know the configured value to carry it, and must
+/// read it from the state home the caller named (#8233), not `$HOME`. A config
+/// that cannot be read or parsed is an error, never a silent fall back to
+/// the default: a launch that reports success while dropping the operator's
+/// `alternate_screen: true` is the fail-open this issue is about.
+/// What: [`trusty_common::crate_config::load_at`] on
+/// `<crate_config_root>/config.yaml`, resolved by
+/// [`crate::core::trusty_tools_config::resolve_tmux_options`]. An absent file
+/// resolves to the built-in default (`false`, #5364).
+/// Test: `configured_alternate_screen_reads_the_named_root`,
+/// `configured_alternate_screen_defaults_off_without_a_config`,
+/// `configured_alternate_screen_errors_on_a_malformed_config`.
+pub fn configured_alternate_screen_at(
+    crate_config_root: &std::path::Path,
+) -> Result<bool, trusty_common::crate_config::ConfigError> {
+    use crate::core::trusty_tools_config::{TrustyToolsConfig, resolve_tmux_options};
+    let path = crate_config_root.join(trusty_common::crate_config::CONFIG_FILE);
+    let config = trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path)?;
+    Ok(resolve_tmux_options(&config.unwrap_or_default()).alternate_screen)
+}
 
 /// The `env` operand every shell-string launch line carries (#6495).
 ///
@@ -198,15 +256,22 @@ pub fn apply_default_to_command(cmd: &mut std::process::Command) {
 /// Each variable is decided independently: an operator who exported only one
 /// of the two must still get the tm default for the other, never both-or-
 /// neither.
+/// An assignment the command already carries explicitly (a [`configured_env`]
+/// pair, #8405) also wins: the default fills a gap and never replaces a value
+/// the launch chose.
 /// What: for each entry in [`MANAGED_DEFAULTS`], no-op when
-/// `is_set(entry.env_var)` is true; otherwise
-/// `cmd.env(entry.env_var, entry.default)`.
+/// `is_set(entry.env_var)` is true or `cmd` already sets or removes that
+/// variable; otherwise `cmd.env(entry.env_var, entry.default)`.
 /// Test: `command_defaults_apply_when_every_variable_is_unset`,
 /// `command_defaults_yield_to_an_operator_value`,
-/// `command_defaults_yield_per_variable_independently`.
+/// `command_defaults_yield_per_variable_independently`,
+/// `command_defaults_never_replace_an_explicit_assignment`.
 pub fn apply_default_when_unset(cmd: &mut std::process::Command, is_set: impl Fn(&str) -> bool) {
     for entry in MANAGED_DEFAULTS {
-        if is_set(entry.env_var) {
+        // #8405: before this guard, an unset pane variable let the default
+        // overwrite a configured `=0` the launch had already assigned.
+        let explicit = cmd.get_envs().any(|(name, _)| name == entry.env_var);
+        if explicit || is_set(entry.env_var) {
             continue;
         }
         cmd.env(entry.env_var, entry.default);
@@ -333,5 +398,69 @@ mod tests {
             Some(Some(MOUSE_DEFAULT.to_string())),
             "the variable the launch does NOT carry must still be provisioned"
         );
+    }
+
+    /// #8405: a configured `=0` already on the command must survive a pane
+    /// that exports nothing. Before the fix the default overwrote it with `1`,
+    /// so config `alternate_screen: true` never reached `claude`.
+    #[test]
+    fn command_defaults_never_replace_an_explicit_assignment() {
+        let mut cmd = std::process::Command::new("claude");
+        for (name, value) in configured_env(true) {
+            cmd.env(name, value);
+        }
+        apply_default_when_unset(&mut cmd, |_| false);
+        assert_eq!(
+            override_for(&cmd, ALT_SCREEN_ENV_VAR),
+            Some(Some(ALT_SCREEN_ENABLED.to_string())),
+            "the default must not overwrite the configured fullscreen renderer"
+        );
+        assert_eq!(
+            override_for(&cmd, MOUSE_ENV_VAR),
+            Some(Some(MOUSE_DEFAULT.to_string())),
+            "a variable with no explicit assignment still gets the tm default"
+        );
+    }
+
+    #[test]
+    fn configured_env_forces_the_fullscreen_renderer_when_enabled() {
+        assert_eq!(
+            configured_env(true),
+            vec![(ALT_SCREEN_ENV_VAR.to_owned(), "0".to_owned())]
+        );
+    }
+
+    #[test]
+    fn configured_env_is_empty_when_disabled() {
+        assert!(configured_env(false).is_empty());
+    }
+
+    fn write_config(root: &std::path::Path, yaml: &str) {
+        std::fs::create_dir_all(root).expect("create root");
+        std::fs::write(root.join("config.yaml"), yaml).expect("write config");
+    }
+
+    #[test]
+    fn configured_alternate_screen_reads_the_named_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_config(dir.path(), "tmux:\n  alternate_screen: true\n");
+        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(true));
+        write_config(dir.path(), "tmux:\n  alternate_screen: false\n");
+        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(false));
+    }
+
+    #[test]
+    fn configured_alternate_screen_defaults_off_without_a_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(configured_alternate_screen_at(dir.path()).ok(), Some(false));
+    }
+
+    /// #8405 fail-open check: a config that cannot be parsed must be an error,
+    /// not a silent `false` that drops the operator's `alternate_screen: true`.
+    #[test]
+    fn configured_alternate_screen_errors_on_a_malformed_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_config(dir.path(), "tmux:\n  alternate_screen: [not, a, bool\n");
+        assert!(configured_alternate_screen_at(dir.path()).is_err());
     }
 }
