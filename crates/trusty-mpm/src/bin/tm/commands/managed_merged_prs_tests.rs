@@ -244,6 +244,29 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
     );
 }
 
+/// 🔴 #7884: a daemon that accepts the request and never answers ends the call
+/// in an error that names the timeout — never a hang, never success.
+#[tokio::test]
+async fn prune_worktrees_reports_a_timeout_as_an_error() {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(250))
+        .build()
+        .expect("build a short-bounded test client");
+    // Answers long after the client's bound, so the call must time out.
+    let (url, server) = slow_prune_server(Duration::from_secs(3)).await;
+    let outcome = session_prune_worktrees(&client, &url, false, false, false, None).await;
+    server.abort();
+    let err = outcome.expect_err("a timed-out prune must be an error, never success");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("timed out waiting for the daemon (#7884)"),
+        "{msg}"
+    );
+    assert!(msg.contains("Nothing is reported as removed"), "{msg}");
+}
+
 /// A one-shot HTTP server that answers a prune-worktrees POST after `delay`.
 ///
 /// Why: reproducing "the daemon is still working when the client's clock runs

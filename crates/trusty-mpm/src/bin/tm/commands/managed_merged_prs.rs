@@ -211,6 +211,26 @@ pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
     )
 }
 
+/// Turn a prune-worktrees transport failure into the operator's error (#7884).
+///
+/// Why: a timed-out sweep printed reqwest's bare "error sending request for
+/// url", which does not say the daemon went silent, or that removals may have
+/// happened before the client gave up.
+/// What: a timeout becomes an error naming the timeout, stating that nothing
+/// is reported as removed, and naming the dry run that shows what remains.
+/// Every other error passes through unchanged.
+/// Test: `prune_worktrees_reports_a_timeout_as_an_error`.
+fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
+    if !e.is_timeout() {
+        return e.into();
+    }
+    anyhow::anyhow!(
+        "prune-worktrees timed out waiting for the daemon (#7884): {e}. Nothing is reported \
+         as removed, but the daemon may still be sweeping — re-run without `--force` to see \
+         what remains."
+    )
+}
+
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
 ///
 /// Why: sessions decommissioned before Fix 1a (#1840), or where
@@ -276,8 +296,13 @@ pub(crate) async fn session_prune_worktrees(
              finishes (#5830)"
         );
     }
-    let resp = request.send().await?;
-    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    // #7884: a timeout is a named error, never a generic transport line.
+    let resp = request.send().await.map_err(prune_transport_error)?;
+    let body: serde_json::Value = resp
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(prune_transport_error)?;
     let paths = body
         .get("paths")
         .and_then(serde_json::Value::as_array)
