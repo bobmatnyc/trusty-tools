@@ -10,7 +10,7 @@ use trusty_mpm::core::worktree_removal_facts::{
     MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
 };
 
-use super::evaluate_removal_rechecks_within;
+use super::{DECISION_DEADLINE, REMOVAL_GUARD_BUDGET, evaluate_removal_rechecks_within, remaining};
 use crate::commands::pm_guard_bash::worktree_remove_rechecks::{
     CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS,
 };
@@ -80,6 +80,41 @@ fn a_recheck_slower_than_the_deadline_denies_and_names_the_pending_check() {
     assert!(
         reason.contains(&format!("`{CHECK_LOCAL_ONLY_COMMITS}` was still running")),
         "the deny must name the pending check: {reason}"
+    );
+}
+
+/// 🔴 REGRESSION (#7889, critic MEDIUM): the budget is measured from PROCESS
+/// START. A guard that reached this rule 2 s after `main` began has 1.5 s left,
+/// not 3.5 s, and a slow check still denies inside it. A start 4 s back leaves
+/// nothing, which denies at once; the audit's own deadline shrinks the same way.
+///
+/// Fails at bc9df345a, whose budget started inside `removal_recheck_deny`.
+#[test]
+fn a_late_start_still_denies_inside_the_remaining_budget() {
+    let two_s_ago = Instant::now() - Duration::from_secs(2);
+    let left = remaining(REMOVAL_GUARD_BUDGET, two_s_ago);
+    assert!(left <= Duration::from_millis(1500), "{left:?}");
+    assert!(left > Duration::from_millis(1000), "{left:?}");
+    let slow = SlowProbe {
+        slow: Duration::from_secs(5),
+        dirty: 0,
+        panics: false,
+    };
+    let reason = evaluate_removal_rechecks_within(Path::new(WT), Ok(Vec::new()), slow, left)
+        .expect("a late start must still deny, never allow");
+    assert!(
+        two_s_ago.elapsed() < REMOVAL_GUARD_BUDGET + Duration::from_millis(300),
+        "the deny must land inside the process-start budget: {:?}",
+        two_s_ago.elapsed()
+    );
+    assert!(reason.contains("ran out of time"), "{reason}");
+
+    let four_s_ago = Instant::now() - Duration::from_secs(4);
+    assert_eq!(remaining(REMOVAL_GUARD_BUDGET, four_s_ago), Duration::ZERO);
+    assert!(remaining(DECISION_DEADLINE, four_s_ago) <= Duration::from_millis(500));
+    assert_eq!(
+        remaining(DECISION_DEADLINE, Instant::now() - Duration::from_secs(5)),
+        Duration::ZERO
     );
 }
 

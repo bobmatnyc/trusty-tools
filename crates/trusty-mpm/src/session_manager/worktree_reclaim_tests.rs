@@ -487,7 +487,7 @@ fn worktree_7889_classify_admits_a_tree_a_merged_pr_carried() {
 
 /// 🔴 REGRESSION (#7889): gate 5 found the sibling's merged pull request through
 /// the #7267 commit search, and gate 6 then counted the donor's commits as
-/// unpushed. Those commits are in HEAD, so the admission judges them.
+/// unpushed. The admission judges them; its probe refuses any HEAD cannot reach.
 ///
 /// Fails before the fix: gate 6 refused any dirt on a merged pull request, so
 /// a donor matched by commit never reached the admission.

@@ -138,7 +138,7 @@ impl LandedContent {
 ///
 /// Why: owner ruling 2026-09-22 admits a clean tree on (b) landed content OR
 /// (c) HEAD inside a merged pull request's history. Both ladders ask both, in
-/// that order, through [`landing_admission`], so they cannot disagree.
+/// that order, through [`landing_admission`], when they ask at all.
 /// What: `content` is route (b); `carried` is route (c), `None` when it was not
 /// asked — because (b) already admitted, or because a test fake stated only
 /// (b). [`admits`](Self::admits) is true when either route admits.
@@ -240,7 +240,7 @@ fn with_carried_fallback(
 /// Is every byte this worktree holds already on its landing base (#7889)?
 ///
 /// Why: the predicate BOTH reclaim ladders ask, so one implementation answers
-/// for both and they cannot give one worktree opposite verdicts. See the
+/// for both wherever each asks it. See the
 /// module doc for the shape it admits and the ruling behind it.
 /// What: in order — refresh `origin` within `refresh_timeout` (a failure or an
 /// expiry is [`LandedContent::Unavailable`], never a comparison against the
@@ -362,7 +362,17 @@ pub fn merge_residue(dir: &Path, base: &str) -> Result<Vec<String>, String> {
     };
     // `--name-only` rather than `--quiet`: an empty answer is the no-op, and a
     // non-empty one names the residue the refusal has to quote.
-    let residue = git_stdout(dir, &["diff", "--name-only", base, tree])
+    // #7889 critic: `--ignore-submodules=none` overrides `diff.ignoreSubmodules`
+    // and `submodule.<name>.ignore`, either of which would hide a gitlink bump
+    // and read a donor holding one as landed.
+    let args = [
+        "diff",
+        "--name-only",
+        "--ignore-submodules=none",
+        base,
+        tree,
+    ];
+    let residue = git_stdout(dir, &args)
         .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
     Ok(residue
         .lines()

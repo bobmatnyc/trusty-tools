@@ -10,11 +10,12 @@
 //!
 //! What: [`removal_recheck_deny`] runs the daemon owner query and then
 //! [`evaluate_removal_rechecks_within`], all inside [`REMOVAL_GUARD_BUDGET`]
-//! measured from its own start. The re-checks run on a detached `std::thread`;
+//! measured from process start. The re-checks run on a detached `std::thread`;
 //! the caller waits on a channel with a timeout, so an expired deadline DENIES
 //! and names the check still running, and nothing joins the thread — process
 //! exit never waits for it.
 //! Test: `a_recheck_slower_than_the_deadline_denies_and_names_the_pending_check`,
+//! `a_late_start_still_denies_inside_the_remaining_budget`,
 //! `a_recheck_inside_the_deadline_returns_its_own_verdict`,
 //! `a_recheck_that_panics_denies`.
 
@@ -32,27 +33,36 @@ use super::worktree_remove_rechecks::{
     CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
     CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks, recheck_deny,
 };
+use crate::commands::pm_guard::{audit_denied_tool, build_pretooluse_deny_response};
 use crate::commands::pm_guard_dispatch;
+use std::io::Write;
 
-/// How long the owner query plus every re-check may take (#7889).
+/// By when, from PROCESS START, the re-checks must have decided (#7889).
 ///
-/// Why: the hook is killed at 5 s. After the re-checks a deny still has to be
-/// printed and audited (the audit is bounded by [`RECHECK_AUDIT_BUDGET`]), and
-/// the process has already spent time starting and parsing the payload before
-/// this runs. 3.5 s + 0.75 s leaves ~0.75 s for startup and output. It still
-/// fits the normal grant path: one fetch (~1.3 s measured 2026-09-15), one or
-/// two `gh` lookups (~1 s each) and a local `merge-tree`.
+/// Why: the hook is killed at 5 s, measured by Claude Code from the spawn, so
+/// the budget is measured from the first line of `main`, not from wherever the
+/// guard reaches this rule. 3.5 s leaves 1 s for the deny's print, its audit
+/// (which must end by [`DECISION_DEADLINE`]) and exit. It still fits the normal
+/// grant path: one fetch, one or two `gh` lookups and a local `merge-tree` —
+/// see the #7889 latency measurement in the PR.
 pub(crate) const REMOVAL_GUARD_BUDGET: Duration = Duration::from_millis(3500);
 
-/// How long the daemon audit of a re-check deny may take (#7889).
+/// By when, from process start, the deny's audit must have finished (#7889).
 ///
-/// Why: `audit_denied_tool` allows itself 2 s, which on top of
-/// [`REMOVAL_GUARD_BUDGET`] would pass the hook's 5 s. The deny is printed
-/// before the audit, and the audit is best-effort.
-pub(crate) const RECHECK_AUDIT_BUDGET: Duration = Duration::from_millis(750);
+/// Why: `audit_denied_tool` allows itself 2 s, which could carry the process
+/// past the 5 s kill. 4.5 s leaves 0.5 s to exit; the deny itself is already
+/// printed and flushed before the audit starts.
+pub(crate) const DECISION_DEADLINE: Duration = Duration::from_millis(4500);
+
+/// What is left of `budget` for a process that started at `started` (#7889).
+///
+/// Test: `a_late_start_still_denies_inside_the_remaining_budget`.
+pub(crate) fn remaining(budget: Duration, started: Instant) -> Duration {
+    budget.saturating_sub(started.elapsed())
+}
 
 /// The removal re-checks' deny reason, or `None` to allow, decided inside
-/// [`REMOVAL_GUARD_BUDGET`] (#7889, ADR-0057).
+/// [`REMOVAL_GUARD_BUDGET`] of process start (#7889, ADR-0057).
 ///
 /// Why: see the module doc. The owner query is inside the budget because it
 /// is a network call too (2 s client timeout). It uses `_or_deny`, not the
@@ -60,7 +70,7 @@ pub(crate) const RECHECK_AUDIT_BUDGET: Duration = Duration::from_millis(750);
 /// about who holds this tree. Keyed on the TARGET, not the caller's cwd — the
 /// tree being deleted is the one whose owner matters.
 /// What: the owner query, then [`evaluate_removal_rechecks_within`] with
-/// whatever budget the query left.
+/// whatever budget process start, startup and the query left.
 /// Test: as the module doc; the owner arm in
 /// `denies_worktree_remove_from_version_control_when_the_owner_query_fails`.
 pub(crate) async fn removal_recheck_deny(
@@ -68,12 +78,39 @@ pub(crate) async fn removal_recheck_deny(
     session_id: &str,
     target: &Path,
     payload: &Value,
+    started: Instant,
 ) -> Option<String> {
-    let started = Instant::now();
     let live =
         pm_guard_dispatch::live_shared_tree_writers_or_deny(url, session_id, target, payload).await;
-    let remaining = REMOVAL_GUARD_BUDGET.saturating_sub(started.elapsed());
-    evaluate_removal_rechecks_within(target, live, GitAndGhProbe, remaining)
+    let left = remaining(REMOVAL_GUARD_BUDGET, started);
+    evaluate_removal_rechecks_within(target, live, GitAndGhProbe, left)
+}
+
+/// Print and flush the deny, then audit it inside [`DECISION_DEADLINE`] (#7889).
+///
+/// Why: a deny still sitting in a buffer when the hook is killed decides
+/// nothing, and the audit is best-effort, so the decision goes out first.
+/// What: prints the `PreToolUse` deny, flushes stdout, then runs the audit
+/// under whatever is left before [`DECISION_DEADLINE`], skipping it when
+/// nothing is.
+/// Test: `a_late_start_still_denies_inside_the_remaining_budget` (the budget
+/// arithmetic); the print path in `tests/tm_hook_pm_guard.rs`.
+pub(crate) async fn print_deny_then_audit(
+    url: &str,
+    session_id: &str,
+    tool_name: &str,
+    reason: &str,
+    started: Instant,
+) {
+    println!("{}", build_pretooluse_deny_response(reason));
+    // Nothing useful can be done with a flush error; the deny is written.
+    let _ = std::io::stdout().flush();
+    let left = remaining(DECISION_DEADLINE, started);
+    if left.is_zero() {
+        return;
+    }
+    let audit = audit_denied_tool(url, session_id, tool_name, reason);
+    let _ = tokio::time::timeout(left, audit).await;
 }
 
 /// [`evaluate_removal_rechecks`] under a deadline; expiry denies (#7889).

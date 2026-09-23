@@ -108,7 +108,7 @@ pub(crate) use worktree_remove::{
     DispatchIdentity, WorktreeRemoveVerdict, evaluate_worktree_remove_command,
 };
 // #7889: the re-checks are reached only through their deadline.
-pub(crate) use worktree_remove_deadline::{RECHECK_AUDIT_BUDGET, removal_recheck_deny};
+pub(crate) use worktree_remove_deadline::{print_deny_then_audit, removal_recheck_deny};
 
 use std::path::{Path, PathBuf};
 

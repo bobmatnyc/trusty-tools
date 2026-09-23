@@ -208,13 +208,23 @@ the guard will establish every precondition itself.
      `origin/HEAD`, or `origin/main`/`origin/master` when the repository
      declares none. The same predicate — one implementation, in
      `core::worktree_landed_content` — decides gate 5 of `tm session
-     prune-worktrees --merged-prs`, so the two paths cannot give one worktree
-     opposite answers. On that sweep, gate 6 counts a donor branch's commits as
+     prune-worktrees --merged-prs`. The two paths do not ask it in the same
+     places. The guard never asks it once its own or a round sibling's pull
+     request has matched, and never for a detached HEAD, so on those paths it
+     is stricter than the sweep. Where they disagree, one of them refuses.
+     Making them agree would add a fetch and a `gh` call to a guard already
+     short of time. On the sweep, gate 6 counts a donor branch's commits as
      unpushed, because the squash also carried a sibling's work and no patch id
-     matches. Those commits are in HEAD, so the content comparison judges them
-     and they alone do not refuse. An uncommitted file or a dirty nested
-     repository is outside HEAD and still refuses, and the pre-delete re-check
-     asks the admission again rather than demanding a merged pull request.
+     matches. That count lets the tree reach the admission, which judges only
+     the commits reachable from HEAD. Every other place work can live refuses
+     before anything is compared: an uncommitted file, a dirty nested
+     repository, and a commit on `session/<leaf>` or `<leaf>` that HEAD cannot
+     reach, which the removal's `git branch -D` would orphan. The admission can
+     take up to 40 s on the sweep, so a grant re-reads that dirt, and HEAD,
+     before it is returned. The residue diff runs with `--ignore-submodules=none`,
+     so a `diff.ignoreSubmodules` or `submodule.<name>.ignore` setting cannot
+     hide a gitlink bump. The pre-delete re-check asks the admission again
+     rather than demanding a merged pull request.
 
      When `landed-content` does not admit, a second route is asked:
      `merged-pr-ancestry` admits when HEAD is the head commit of a MERGED pull
@@ -240,10 +250,11 @@ the guard will establish every precondition itself.
      exactly as before.
 
      Because the admission lengthens the refusing path, the owner query and
-     every re-check now run under one 3.5 s deadline that DENIES on expiry and
-     names the check still running. The `PreToolUse` hook is killed at 5 s, and
-     a killed hook returns no decision, which is not a deny. The deny is printed
-     before its audit, which is capped at 0.75 s. The admission reuses the
+     every re-check must now decide within 3.5 s of the `tm` process starting,
+     and DENY on expiry, naming the check still running. The `PreToolUse` hook
+     is killed at 5 s, and a killed hook returns no decision, which is not a
+     deny. The deny is printed and flushed before its audit, and the audit must
+     end 4.5 s after process start. The admission reuses the
      `local-only-commits` fetch when that fetch succeeded, instead of fetching
      a second time.
 
@@ -251,9 +262,11 @@ the guard will establish every precondition itself.
      holding one empty or self-reverting commit is now admitted — not because
      evidence stopped being required, but because the ruling makes the evidence
      CONTENT, and such a tree demonstrably holds none the remote lacks. What
-     round 2 established stands everywhere else: the merge-tree comparison is
-     still never asked before a landing question has been answered, and it still
-     grants nothing on its own.
+     round 2 established still holds for the merged-PR route: its merge-tree
+     comparison against a pull request's base is never asked until that pull
+     request is in evidence. The `landed-content` comparison is separate. It
+     can grant without any pull request, but only after a successful refresh of
+     `origin` and after the clean-tree and ownership checks.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

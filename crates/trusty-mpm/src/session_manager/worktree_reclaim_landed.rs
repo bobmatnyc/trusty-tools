@@ -19,10 +19,13 @@
 //! Gate 6's `inspect_dirt` counts a donor branch's commits as unpushed: they
 //! reach no `origin` ref, and the squash that landed them also carries the
 //! sibling's work, so no patch id matches. That holds whether gate 5 found no
-//! pull request or found the sibling's through the #7267 commit search. Those
-//! commits are exactly what the admission judges, so they are the one kind of
-//! dirt it may look past. Uncommitted files and nested repositories are not in
-//! `HEAD`, so no comparison of `HEAD` can vouch for them; they still refuse.
+//! pull request or found the sibling's through the #7267 commit search. The
+//! gates let commits-only dirt reach the admission, but that count also
+//! includes commits on `session/<leaf>` and `<leaf>` that `HEAD` cannot reach.
+//! The admission judges only the commits reachable from `HEAD`, so
+//! [`reclaim_landed_content`] refuses every other kind of work first:
+//! uncommitted files, dirty nested repositories, and those unreachable
+//! session-branch commits.
 //! Test: `worktree_7889_the_sweep_admits_a_real_donor_branch`,
 //! `worktree_7889_a_merged_pr_with_commits_only_dirt_reaches_the_admission`.
 
@@ -34,7 +37,9 @@ use super::worktree_landing_refresh::FETCH_TIMEOUT;
 use super::worktree_reclaim::BranchPrState;
 use super::worktree_reclaim_pr_match::GhLandingProbe;
 use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
-use super::worktree_safety::{DirtyWorktree, count_dirty_files, inspect_dirt};
+use super::worktree_safety::{
+    DirtyWorktree, count_dirty_files, count_session_branch_unpushed, git_stdout, inspect_dirt,
+};
 
 /// How the sweep answers "is this branch's work landed?" (#7889).
 ///
@@ -53,7 +58,7 @@ pub(crate) type LandedContentProbe<'a> = Option<&'a dyn Fn(&Path) -> LandingAdmi
 /// Why: nineteen clean worktrees across 2026-09-21 and 2026-09-22 were spared
 /// here while holding no content `origin/main` lacked. Owner ruling 2026-09-22
 /// admits exactly that shape, through the same predicate the ADR-0057 removal
-/// guard runs, so the two paths cannot give one worktree opposite answers.
+/// guard runs (the guard asks it in fewer places; see ADR-0057 decision 5).
 /// What: a caller offering no probe gets the pre-#7889 refusal verbatim.
 /// Otherwise gate 6's dirt check runs FIRST: any dirt but unpushed commits
 /// alone refuses (see [`commits_only`]). Then the admission: landed content is
@@ -107,7 +112,8 @@ pub(super) fn no_pr_verdict(
 /// Why: gate 5 can find the sibling's merged pull request through the #7267
 /// commit search, and then gate 6 counted the donor's commits as unpushed and
 /// refused — the same donor shape [`no_pr_verdict`] admits, refused one gate
-/// later. Those commits are in `HEAD`, so the admission judges them here too.
+/// later. The admission judges them here too, and its probe refuses any
+/// commit `HEAD` cannot reach (see [`reclaim_landed_content`]).
 /// What: clean is [`ReclaimVerdict::Reclaimable`], as before #7889. Commits-only
 /// dirt, with a probe offered, is reclaimable only when the admission admits;
 /// otherwise the refusal names the dirt and each route that failed. Any other
@@ -138,14 +144,14 @@ pub(super) fn merged_pr_verdict(
     )
 }
 
-/// Is this dirt nothing but commits no `origin` ref reaches (#7889)?
+/// Is this dirt nothing but unpushed commits, with no dirty file (#7889)?
 ///
-/// Why: those commits are in `HEAD`, so the landing admission judges them.
-/// Any other dirt — an uncommitted file, a failed check reported with zero
-/// counts — is outside `HEAD` and must still refuse.
+/// Why: this only decides whether the landing admission may be ASKED. It does
+/// not establish that those commits are in `HEAD`: `inspect_dirt` also counts
+/// commits on `session/<leaf>` and on a bare `<leaf>` branch that `HEAD` cannot
+/// reach, and the removal deletes those branches. [`reclaim_landed_content`]
+/// refuses any such commit before it compares anything.
 /// What: true only for zero dirty files and at least one unpushed commit.
-/// `inspect_dirt` stops before its nested-repository scan when it finds
-/// unpushed commits, so [`reclaim_landed_content`] runs that scan itself.
 /// Test: `worktree_7889_classify_admits_commits_only_dirt_when_landed`,
 /// `worktree_7889_classify_refuses_files_beside_unpushed_commits`,
 /// `worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed`.
@@ -155,40 +161,97 @@ fn commits_only(dirt: &DirtyWorktree) -> bool {
 
 /// The landing admission, as the reclaim sweep runs it (#7889).
 ///
-/// Why: the admission sees only `HEAD`. The gates let commits-only dirt
-/// through to it, and `inspect_dirt` never reached its nested-repository scan
-/// for such a tree, so this probe re-asks both kinds of dirt that live outside
-/// `HEAD` before it compares anything.
-/// What: an uncommitted file, an unreadable status, or a dirty nested
-/// repository is [`LandedContent::Unavailable`], which refuses and asks no
-/// further route. Otherwise
-/// [`landing_admission`] under [`FETCH_TIMEOUT`] — the sweep's own 30 s, not
-/// the removal guard's 3 s, because nothing here runs inside the `PreToolUse`
-/// hook's budget — with the #7267 `gh` and `git` probe for route (c).
+/// Why: the admission judges only `HEAD`. Every other place work can live —
+/// an uncommitted file, a dirty nested repository, and a commit on
+/// `session/<leaf>` or `<leaf>` that `HEAD` cannot reach, which the removal's
+/// `git branch -D` would orphan — is refused here before anything is
+/// compared. The admission can then take up to 40 s (a 30 s fetch and a 10 s
+/// `gh` search), so a grant is re-checked for dirt, and for a moved `HEAD`,
+/// before it is returned.
+/// What: [`reclaim_landed_content_with`] around [`landing_admission`] under
+/// [`FETCH_TIMEOUT`] — the sweep's own 30 s, not the removal guard's 3 s,
+/// because nothing here runs inside the `PreToolUse` hook's budget — with the
+/// #7267 `gh` and `git` probe for route (c).
 /// Test: `worktree_7889_the_sweep_admits_a_real_donor_branch`,
-/// `worktree_7889_the_sweep_probe_refuses_an_uncommitted_file`.
+/// `worktree_7889_the_sweep_probe_refuses_an_uncommitted_file`,
+/// `worktree_7889_a_session_branch_commit_head_cannot_reach_refuses`,
+/// `worktree_7889_dirt_that_appears_during_the_admission_refuses`.
 pub(crate) fn reclaim_landed_content(path: &Path) -> LandingAdmission {
-    match count_dirty_files(path) {
-        Ok(0) => {}
-        Ok(n) => {
-            return LandedContent::unavailable(format!(
-                "the tree holds {n} uncommitted/untracked file(s), which no comparison of HEAD \
-                 can vouch for"
-            ))
-            .into();
-        }
-        Err(e) => {
-            return LandedContent::unavailable(format!("the dirty-check failed: {e}")).into();
-        }
+    reclaim_landed_content_with(path, &|p| {
+        landing_admission(p, FETCH_TIMEOUT, &GhLandingProbe)
+    })
+}
+
+/// [`reclaim_landed_content`], with the admission itself injected (#7889).
+///
+/// Why: a test must be able to change the tree WHILE the admission runs.
+/// What: refuses on [`dirt_outside_head`], records `HEAD`, runs `admit`, and on
+/// a grant re-reads both: new dirt or a moved `HEAD` refuses.
+/// Test: `worktree_7889_dirt_that_appears_during_the_admission_refuses`.
+pub(super) fn reclaim_landed_content_with(
+    path: &Path,
+    admit: &dyn Fn(&Path) -> LandingAdmission,
+) -> LandingAdmission {
+    if let Some(dirt) = dirt_outside_head(path) {
+        return LandedContent::unavailable(dirt).into();
     }
-    if let Some(nested) = super::worktree_nested::nested_dirt(path) {
+    let head_before = git_stdout(path, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string());
+    let admission = admit(path);
+    if !admission.admits() {
+        return admission;
+    }
+    // #7889 critic: nothing ties the grant to the tree as it is NOW.
+    if let Some(dirt) = dirt_outside_head(path) {
         return LandedContent::unavailable(format!(
-            "a nested repository holds work outside HEAD: {}",
-            nested.reason
+            "work appeared while the admission ran: {dirt}"
         ))
         .into();
     }
-    landing_admission(path, FETCH_TIMEOUT, &GhLandingProbe)
+    let head_after = git_stdout(path, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string());
+    match (head_before, head_after) {
+        (Ok(before), Ok(after)) if before == after => admission,
+        (before, after) => LandedContent::unavailable(format!(
+            "HEAD moved or could not be read while the admission ran ({before:?} → {after:?})"
+        ))
+        .into(),
+    }
+}
+
+/// Work the landing admission cannot see, or `None` when there is none (#7889).
+///
+/// Why: the admission compares `HEAD` only. What: an uncommitted file or an
+/// unreadable status; a commit on `session/<leaf>`/`<leaf>` that `HEAD` cannot
+/// reach, or a count that failed; a dirty nested repository.
+/// Test: `worktree_7889_the_sweep_probe_refuses_an_uncommitted_file`,
+/// `worktree_7889_a_session_branch_commit_head_cannot_reach_refuses`.
+fn dirt_outside_head(path: &Path) -> Option<String> {
+    match count_dirty_files(path) {
+        Ok(0) => {}
+        Ok(n) => {
+            return Some(format!(
+                "the tree holds {n} uncommitted/untracked file(s), which no comparison of HEAD \
+                 can vouch for"
+            ));
+        }
+        Err(e) => return Some(format!("the dirty-check failed: {e}")),
+    }
+    match count_session_branch_unpushed(path) {
+        Ok(0) => {}
+        Ok(n) => {
+            return Some(format!(
+                "{n} unpushed commit(s) on this tree's session branch are not reachable from \
+                 HEAD, so no comparison of HEAD can vouch for them, and removal deletes that \
+                 branch"
+            ));
+        }
+        Err(e) => return Some(format!("the session-branch check failed: {e}")),
+    }
+    super::worktree_nested::nested_dirt(path).map(|nested| {
+        format!(
+            "a nested repository holds work outside HEAD: {}",
+            nested.reason
+        )
+    })
 }
 
 /// The landing evidence and the dirt check, re-asked immediately before one

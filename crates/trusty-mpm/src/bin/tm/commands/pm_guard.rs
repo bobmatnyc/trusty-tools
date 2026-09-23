@@ -210,12 +210,12 @@ use std::path::{Path, PathBuf};
 use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
-    CommitVerdict, DispatchIdentity, RECHECK_AUDIT_BUDGET, SHELL_EDIT_REASON,
-    WorktreeRemoveVerdict, docs_commit_deny_reason, evaluate_bash_command,
-    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, evaluate_secret_file_copy_command,
-    evaluate_worktree_add, evaluate_worktree_remove_command, extract_shell_edit_target,
-    head_move_deny_reason, main_checkout_head_move, removal_recheck_deny, unclassifiable_command,
+    CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
+    docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
+    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
+    print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -334,7 +334,7 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// `pm_guard_denies_an_empty_stdin_payload` and its siblings
 /// (`tests/tm_hook_pm_guard_stdin_7975.rs`); the pure policy by this module's
 /// unit tests.
-pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
+pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
     // Guard 2: universal opt-out for CI / build shells that can't edit
     // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
     // reordering from this function's original shape — see the code-critic
@@ -653,11 +653,9 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 // every re-check run under one deadline that DENIES on expiry.
                 // #7889: the deny is printed before the audit, and the audit is
                 // bounded, so neither can push the decision past the hook's 5 s.
-                if let Some(reason) = removal_recheck_deny(url, session_id, &target, &payload).await
-                {
-                    println!("{}", build_pretooluse_deny_response(&reason));
-                    let audit = audit_denied_tool(url, session_id, tool_name, &reason);
-                    let _ = tokio::time::timeout(RECHECK_AUDIT_BUDGET, audit).await;
+                let deny = removal_recheck_deny(url, session_id, &target, &payload, started);
+                if let Some(reason) = deny.await {
+                    print_deny_then_audit(url, session_id, tool_name, &reason, started).await;
                     return Ok(());
                 }
             }

@@ -16,7 +16,8 @@
 //! here was inside what merged. The reverse — the pull request's head is an
 //! ancestor of HEAD — leaves commits here the merge never saw, so it is never
 //! a match. That is why this does not reuse `worktree_reclaim_pr_match`'s
-//! either-way-round `vouches_for_head`, whose gate 6 catches the leftover.
+//! either-way-round `vouches_for_head`, which also accepts a pull request
+//! whose head is behind HEAD.
 //!
 //! **Every failure arm refuses** (ADR-0045): an unreadable HEAD, a commit
 //! search that did not answer, and an ancestry probe that errored — which is

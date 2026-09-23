@@ -81,10 +81,10 @@ fn a_worktree_with_no_resolvable_landing_base_is_unavailable() {
 /// cannot run leaves the remote-tracking refs stale, and a comparison against
 /// stale refs is exactly the grant this admission must never make.
 ///
-/// The tree here IS landed — `origin/main` already carries its content — so a
-/// comparison made anyway would report `Landed` and grant. Only refusing on the
-/// failed fetch produces the assertion below, which is why the fixture lands
-/// the content before breaking the remote.
+/// The tree's content IS on the remote, but this checkout's `origin/main` is
+/// stale, so a comparison made anyway after a swallowed refresh error reports
+/// `Residual`, which also refuses. Only the `Unavailable` variant proves the
+/// failed refresh itself was what decided, so that is what is asserted.
 #[test]
 fn a_refresh_that_fails_never_reports_landed() {
     let fx = GitWorktreeFixture::new();
@@ -104,14 +104,80 @@ fn a_refresh_that_fails_never_reports_landed() {
 
     let verdict = landed_content_verdict(&wt, BOUND);
     assert!(
-        !verdict.is_landed(),
-        "an unrefreshed comparison must never grant: {verdict:?}"
+        matches!(verdict, LandedContent::Unavailable { .. }),
+        "a failed refresh must decide, not a comparison against stale refs: {verdict:?}"
     );
     assert!(
         verdict.note().contains("refreshed"),
         "the refusal must name the refresh: {}",
         verdict.note()
     );
+}
+
+/// Run `git -C <dir> <args>` and return trimmed stdout, panicking on failure.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("fixture: git could not be run");
+    assert!(
+        out.status.success(),
+        "fixture: `git {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// 🔴 REGRESSION (#7889, critic HIGH): a donor that only bumps a gitlink holds
+/// work the remote lacks. `git diff` honours `diff.ignoreSubmodules=all` and
+/// `submodule.<name>.ignore=all`, which hid the bump and read the tree as
+/// landed. Both are set here, where a user's own config could set them.
+///
+/// Fails without `--ignore-submodules=none` on the residue diff.
+#[test]
+fn a_gitlink_bump_is_residue_even_when_submodule_diffs_are_ignored() {
+    let fx = GitWorktreeFixture::new();
+    let base = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(
+        &fx.repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{base},sub"),
+        ],
+    );
+    git(&fx.repo, &["commit", "-m", "add gitlink sub"]);
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&fx.repo, &["fetch", "origin"]);
+
+    let wt = fx.add_worktree("gitlink-bump");
+    let bumped = "1111111111111111111111111111111111111111";
+    git(
+        &wt,
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{bumped},sub"),
+        ],
+    );
+    git(&wt, &["commit", "-m", "bump sub"]);
+    git(&wt, &["config", "diff.ignoreSubmodules", "all"]);
+    git(&wt, &["config", "submodule.sub.ignore", "all"]);
+
+    let residue = merge_residue(&wt, "origin/main").expect("the merge must be answerable");
+    assert_eq!(
+        residue,
+        vec!["sub".to_string()],
+        "the gitlink bump is residue"
+    );
+    match landed_content_verdict(&wt, BOUND) {
+        LandedContent::Residual { first_path, .. } => assert_eq!(first_path, "sub"),
+        other => panic!("a gitlink bump must not read as landed: {other:?}"),
+    }
 }
 
 /// #7889: `merge-tree` against a ref that does not resolve is an `Err`, not an

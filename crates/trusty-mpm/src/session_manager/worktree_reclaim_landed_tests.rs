@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use super::reclaim_landed_content;
+use crate::core::worktree_landed_content::LandedContent;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_reclaim::{
@@ -150,6 +151,102 @@ fn worktree_7889_the_recheck_refuses_a_tree_no_longer_landed() {
     )
     .expect("no probe offered must refuse");
     assert!(unoffered.contains("no longer a merge"), "{unoffered}");
+}
+
+/// Run `git -C <dir> <args>`, panicking with git's stderr on failure.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("fixture: git could not be run");
+    assert!(
+        out.status.success(),
+        "fixture: `git {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 🔴 REGRESSION (#7889, critic CRITICAL): a commit on `session/<leaf>` that
+/// HEAD cannot reach is counted by gate 6 as an unpushed commit with no dirty
+/// file, so it reached the admission — which judges HEAD only, found HEAD on
+/// `origin/main`, and granted. The removal then deletes `session/<leaf>` and
+/// with it the commit's last ref.
+///
+/// Fails at bc9df345a: the verdict there is `ReclaimableLandedContent`.
+#[test]
+fn worktree_7889_a_session_branch_commit_head_cannot_reach_refuses() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("moved-7889");
+    GitWorktreeFixture::commit_unpushed(&wt);
+    git(&wt, &["switch", "-c", "donor-moved", "origin/main"]);
+    let s = survey_with_landed_content(
+        &fx.repos_root,
+        &LiveClaims::default(),
+        &unrelated_index,
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+        &KeepList::default(),
+        &[],
+        Some(&reclaim_landed_content),
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == wt)
+        .unwrap_or_else(|| panic!("survey missed {}", wt.display()));
+    assert!(
+        !found.verdict.is_reclaimable(),
+        "a commit only session/moved-7889 holds must refuse: {:?}",
+        found.verdict
+    );
+    assert!(
+        format!("{:?}", found.verdict).contains("session branch"),
+        "the refusal must say where the work is: {:?}",
+        found.verdict
+    );
+}
+
+/// 🔴 REGRESSION (#7889, critic MEDIUM): the admission can take 40 s, so a
+/// grant is re-checked. A file written, or a commit made, while it ran refuses.
+///
+/// Fails at bc9df345a, which returned the admission's grant unexamined.
+#[test]
+fn worktree_7889_dirt_that_appears_during_the_admission_refuses() {
+    let landed = || -> crate::core::worktree_landed_content::LandingAdmission {
+        LandedContent::Landed {
+            base: "origin/main".into(),
+            base_sha: "0".repeat(40),
+        }
+        .into()
+    };
+
+    let (_fx, wt) = donor("donor-late-file-7889");
+    let late_file = super::reclaim_landed_content_with(&wt, &|p| {
+        std::fs::write(p.join("late.txt"), "written mid-admission\n").expect("write");
+        landed()
+    });
+    assert!(!late_file.admits(), "{late_file:?}");
+    assert!(
+        late_file.note().contains("appeared while"),
+        "{}",
+        late_file.note()
+    );
+
+    let (_fx2, wt2) = donor("donor-late-commit-7889");
+    let late_commit = super::reclaim_landed_content_with(&wt2, &|p| {
+        GitWorktreeFixture::commit_unpushed(p);
+        landed()
+    });
+    assert!(!late_commit.admits(), "{late_commit:?}");
+    assert!(
+        late_commit.note().contains("HEAD moved"),
+        "{}",
+        late_commit.note()
+    );
 }
 
 /// 🔴 REGRESSION (#7889): a donor matched to its sibling's merged pull request
