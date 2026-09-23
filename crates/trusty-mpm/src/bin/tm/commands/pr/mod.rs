@@ -35,6 +35,7 @@ pub(crate) mod cleanup;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 pub(crate) mod metadata_apply;
+pub(crate) mod missing_label;
 pub(crate) mod open;
 pub(crate) mod queue_check;
 

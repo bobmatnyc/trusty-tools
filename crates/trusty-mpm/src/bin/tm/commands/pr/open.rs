@@ -620,7 +620,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         Ok(_) => {}
     }
 
-    let out = gh.run(&plan.argv)?;
+    // #8431: a repository with no `trusty-mpm` label gets it created, or the PR
+    // opens without it; every other create failure still fails below.
+    let repo = args.repo.as_deref().filter(|r| !r.trim().is_empty());
+    let (out, dropped) = super::missing_label::create(gh, &plan, repo)?;
     // #7869: `gh pr create` creates the PR and THEN applies the assignee and
     // labels over separate API calls. A 502 on one of those exits non-zero with
     // the PR already created, and bailing here printed no number at all — the
@@ -649,11 +652,12 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         .trim();
     let number = url.rsplit('/').next().unwrap_or("?");
     println!("opened PR #{number} — {url}");
-    println!(
-        "  labels: {}, {}",
-        policy_labels::CONVENTION_LABEL,
-        plan.workstream_label
-    );
+    let applied: Vec<String> = plan
+        .create_labels()
+        .into_iter()
+        .filter(|l| !dropped.contains(l))
+        .collect();
+    println!("  labels: {}", applied.join(", "));
     if let Some(rung) = args.rung {
         println!("  test-ladder rung claimed: {rung}");
     }
@@ -710,7 +714,7 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
 /// What: the last stdout line that starts with `http` and names a `/pull/` path.
 /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`,
 /// `pr_7869_a_create_that_fails_with_no_url_is_still_an_error`.
-fn created_pr_url(stdout: &str) -> Option<&str> {
+pub(crate) fn created_pr_url(stdout: &str) -> Option<&str> {
     stdout
         .lines()
         .map(str::trim)

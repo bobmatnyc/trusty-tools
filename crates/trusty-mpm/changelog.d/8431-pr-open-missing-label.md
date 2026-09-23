@@ -1,0 +1,2 @@
+Fixed
+- `tm pr open` no longer fails in a repository that has no `trusty-mpm` label. When `gh pr create` refuses with `could not add label: '<name>' not found` for a label the PR applies, `tm pr open` creates the `trusty-mpm` label (without `--force`) and retries; when the label cannot be created, it opens the PR without that label and prints a warning. Every other `gh pr create` failure still fails the command (#8431).

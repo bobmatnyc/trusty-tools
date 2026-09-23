@@ -3066,3 +3066,154 @@ fn pr_8366_component_labels_are_read_only_from_a_remote_verified_base() {
         "no label diff may be read against an unverified base"
     );
 }
+
+// ── #8431: a target repository without the `trusty-mpm` label ──────────────
+
+/// A `gh` fake whose answers are consumed in order, per argv substring.
+///
+/// Why: the #8431 recovery re-runs the SAME `gh pr create` argv after the label
+/// exists, so the first and second answers must differ — a static route table
+/// cannot say that.
+struct SeqGh {
+    answers: std::cell::RefCell<Vec<(String, GhRun)>>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl SeqGh {
+    fn new(answers: &[(&str, bool, &str, &str)]) -> Self {
+        let answers = answers
+            .iter()
+            .map(|(needle, success, stdout, stderr)| {
+                (
+                    (*needle).to_string(),
+                    GhRun {
+                        success: *success,
+                        stdout: (*stdout).to_string(),
+                        stderr: (*stderr).to_string(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            answers: std::cell::RefCell::new(answers),
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.borrow().clone()
+    }
+}
+
+impl GhRunner for SeqGh {
+    fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
+        let joined = args.join(" ");
+        self.seen.borrow_mut().push(joined.clone());
+        let mut answers = self.answers.borrow_mut();
+        let at = answers
+            .iter()
+            .position(|(needle, _)| joined.contains(needle.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("SeqGh: no answer left for `gh {joined}`"))?;
+        Ok(answers.remove(at).1)
+    }
+}
+
+const MISSING_CONVENTION: &str = "could not add label: 'trusty-mpm' not found";
+
+/// REGRESSION (#8431): the create no longer fails on a repository that lacks
+/// the `trusty-mpm` label — the label is created (without `--force`) and the
+/// create retried with it.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_missing_convention_label_is_created_and_the_create_retried() {
+    assert_eq!(
+        super::missing_label::missing_label(MISSING_CONVENTION),
+        Some("trusty-mpm")
+    );
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        ("label create trusty-mpm", true, "", ""),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let seen = gh.seen();
+    let seed = seen
+        .iter()
+        .find(|c| c.starts_with("label create trusty-mpm"))
+        .expect("the missing label was created");
+    assert!(
+        !seed.contains("--force"),
+        "never restyle a project's label: {seed}"
+    );
+    let creates: Vec<&String> = seen.iter().filter(|c| c.starts_with("pr create")).collect();
+    assert_eq!(creates.len(), 2, "{seen:?}");
+    assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
+}
+
+/// #8431: a label that cannot be created is dropped with a warning; the PR
+/// still opens with its other label.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_label_that_cannot_be_created_is_dropped_with_a_warning() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        (
+            "label create trusty-mpm",
+            false,
+            "",
+            "HTTP 403: Must have admin rights",
+        ),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let retry = gh
+        .seen()
+        .into_iter()
+        .filter(|c| c.starts_with("pr create"))
+        .nth(1)
+        .expect("a retried create");
+    assert!(!retry.contains("--label trusty-mpm"), "{retry}");
+    assert!(retry.contains("--label ws/tm-test-01"), "{retry}");
+}
+
+/// #8431 error arm: only "label not found" is recovered. Any other create
+/// failure — including a missing label the plan never applied — still fails,
+/// with no label created and no retry.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_other_create_failures_still_fail() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    for stderr in [
+        "GraphQL: Could not resolve to a Repository with the name 'o/r'",
+        "could not add label: 'someone-else' not found",
+    ] {
+        let gh = SeqGh::new(&[
+            ("label create ws/", true, "", ""),
+            ("pr create", false, "", stderr),
+        ]);
+        let err = open::run(&gh, &args, &FakePreflight::ok()).expect_err("still a failure");
+        assert!(format!("{err:#}").contains(stderr), "{err:#}");
+        let creates = gh
+            .seen()
+            .iter()
+            .filter(|c| c.starts_with("pr create") || c.starts_with("label create trusty"))
+            .count();
+        assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
+    }
+}
