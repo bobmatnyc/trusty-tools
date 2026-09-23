@@ -6,6 +6,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.1] — 2026-09-23
+
+### Added
+
+- `tm doctor` has a `launchd_process_type` row. It fails when the `com.trusty.mpm` or `com.trusty.mpm.supervisor` LaunchAgent declares `ProcessType` `Background`, which clamps tmux and every session it hosts to background QoS, and warns on any other value short of `Interactive`. The message names the `plutil` and `launchctl` commands for the plist on disk; the deploy supervisor template now declares `Interactive` (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
+- `tm doctor` has a `tmux_priority` row. It fails when the running tmux server's Darwin priority is below 20 and warns from 20 to 30 (launchd `Standard` throttling), naming the server PID, the observed priority and the remedy: fix the plist, then restart the tmux server. It runs on macOS only and reports not applicable elsewhere. A server keeps its class until it exits, so a plist fix alone does not lift it. It reports Unknown, never Ok, when tmux or `ps` cannot be read (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
+- `TRUSTY_MPM_LAUNCH_AGENTS_DIR` points the `launchd_process_type` row at another LaunchAgents directory; unset, it reads `~/Library/LaunchAgents` (Refs [#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
+
+### Fixed
+
+- `--user <login>` is now accepted everywhere `--account <login>` is, including after the repository in the bare form (`tm <url> --user bob-duetto`), which clap previously swallowed into the external subcommand's argv and refused as an extra argument (#5850).
+- The `gh pr list` calls in the worktree-reclaim survey (which `tm session prune-worktrees` runs) and in the ADR-0057 worktree-removal guard now resolve the project's pinned `gh` identity from the ProjectRegistry — what `tm --user`/`tm projects register --gh-account` actually write — before the static `trusty-tools` config, so a private repository only the pinned account can see is no longer probed as the machine's global account. Other daemon `gh` calls, such as the supervisor's PR-cleanup sweep, still use the ambient identity (#5850).
+- When several registry records name one repository, the pinned record is used even if an unpinned one sorts first, for both the worktree-reclaim lookup and the session-spawn `gh` environment. Records that pin different identities block the reclaim lookup and leave a spawned session unpinned, with a warning, instead of picking one by position. A registry document without a `projects` key now blocks too, and a record that sets only `github.host` no longer counts as a pin (#5850).
+- Two registry records that pin the same login now agree even when only one carries a `config_dir`, or when the login differs only in case, so a project registered once from config and again with `tm <url> --user <login>` uses the scoped config dir instead of being refused or spawned under the global account. Records conflict only when their logins differ or they set different `config_dir` or `token_env` values (#5850).
+- A registry record that pins a `config_dir` without naming a login (what `seed_from_config` and `tm projects register --gh-config-dir` write) no longer conflicts with a record naming a login on the same dir. The chosen pin carries both the dir and that login, instead of the reclaim lookup refusing with "different gh accounts" and the session spawning under the global account (#5850).
+- A registry a daemon `gh` spawn cannot interrogate — unreadable, unparsable, or pinning an account with no usable credential, including a `github.token_env` naming an unset variable — now blocks with a lookup failure naming that account instead of silently falling back to the global identity. Only "no pin recorded" falls through (#5850, #5851).
+- A trailing account flag with a blank value (`tm <url> --user=`, `--user ""`) is now refused with "needs a gh login" instead of being read as no account and cloning as the machine's global identity (#5850).
+- The same blank value given before the repository (`tm --user= <url>`, `tm --account "  " <url>`) is now refused at parse time with "needs a gh login" instead of falling back to the machine's global `gh` account (#5850).
+- A clean worktree whose work already landed can be reclaimed even when GitHub has no MERGED pull request for its branch ([#7889](https://github.com/bobmatnyc/trusty-tools/issues/7889)) — the donor-branch shape, where the work landed through a sibling `-r2` branch's squash and no pull request will ever carry the parked branch's own name
+  - two routes admit: `landed-content`, when merging HEAD into the freshly fetched landing base would change no file (gitlink bumps included, whatever the submodule-ignore config says), and `merged-pr-ancestry`, when HEAD is the head commit of a MERGED pull request or one of its ancestors
+  - the ADR-0057 `git worktree remove` guard and `tm session prune-worktrees --merged-prs` share one implementation of the check, but the guard does not ask it once its own or a sibling's pull request has matched, or for a detached HEAD, so it is stricter than the sweep there; where they disagree, one of them refuses
+  - every `git worktree remove` guard grant, including the merged-PR one, now refuses a tree holding a nested repository with unsaved work or a high-value gitignored file, naming the first nested path, because `--force` deletes ignored content; a scan that cannot run refuses too
+  - fail-closed throughout: a failed or expired `origin` refresh, an unresolvable landing base, a `git merge-tree` error or conflict, a residual path, a commit search that did not answer, an ancestry check that could not run, an open pull request, a dirty tree and a live owner all still refuse; a pull request whose head is behind HEAD is never a match, and ancestry against a squash commit is never used
+  - a refusal names each route that failed and the first path the merge would still change
+  - the `git worktree remove` guard now finishes its daemon owner query and every re-check within 3.5 s of the `tm` process starting and denies when time runs out, naming the check still running; before, a guard slower than the hook's 5 s limit was killed and returned no decision, which let the removal through. The deny is printed and flushed before its audit, the audit must end 4.5 s after process start, and the admission reuses the guard's own `origin` fetch instead of fetching twice
+  - on the sweep, a donor branch's commits that reach no `origin` ref no longer refuse on their own, whether gate 5 found no pull request or found the sibling's through its commit search; an uncommitted file, a dirty nested repository, or a commit on `session/<leaf>` that HEAD cannot reach still refuses (naming the branch and the first such commit), a grant is re-checked for new dirt and a moved HEAD before it is returned, and the pre-delete re-check asks the admission again
+- The `tm-epic` `manual-procedure.md` skill reference no longer regenerates the tracker's `phases:` block with `awk -v tbl="$(cat ...)"`, which threw `newline in string` and silently produced empty stdout on stock macOS/BSD `awk`, wiping the epic's body once `gh issue edit --body-file` accepted the empty file. The recipe now uses a `perl -e` whole-file substitution, adds an explicit non-empty-and-both-markers guard before pushing, and saves the pre-edit body to `body.orig` first ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
+- Config `tmux.alternate_screen` now decides Claude Code's renderer on these launch paths: `true` starts `claude` with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0`, `false` with `=1`. The paths are daemon spawn, restart and attach; the `tm launch`, `tm connect`, `tm session start` (in place) and client `/connect` launch lines; the control-plane tmux backend; `tm run`; and the bare-`tm` in-place relaunch. On these paths the value no longer comes from whatever environment the tmux server or the launching shell inherited. A settings-file `env` entry still overrides it. The GUI New Session path and the in-session restart still type `relaunch_command` and keep the inherited value. A config file that cannot be read never blocks a launch: tm logs a warning naming the file and the error, and falls back to the same value the tmux `alternate-screen` option falls back to (#8405).
+- `tm sessions resume X` with `X` gone no longer reaches a live session whose name starts with `X`. The `has-session` probe, the resume runtime probe (`list-panes -s`), the daemon's `kill-session` and `display-message` pane lookups, `attach-session`, `switch-client` and `list-clients` now all use exact tmux targets. Before, `tm sessions resume tm-cto` killed `tm-cto-reports` (#8443).
+- The resume runtime probe now reads a `can't find session` or `no server running` reply as "no runtime is live" instead of failing open, because an exact target makes that reply certain (#8443).
+- `POST /claude-config/restart` now answers 400 for an empty `tmux_session` instead of typing `C-c` and `claude` into whichever session tmux resolved `=:` to, and every tmux spawn refuses an empty session name before it runs (#8443).
+- `tm` only acts on `$TMUX_PANE` when it is an immutable `%N` pane id (#8443).
+- The `tm-session-resume` skill now realigns to the recorded window by its immutable `@N` id instead of a bare `session:index` target (#8443).
+- The attach command the daemon returns (`attach_cmd`) and the hints `tm` prints are now `tmux attach-session -t '=<name>'`, quoted so zsh does not read the leading `=` as a command-path expansion (#8443).
+
+### Changed
+
+- `model_inject::build_claude_command`, `build_claude_command_with`, `build_inplace_session_command`, `build_client_session_command`, `build_agent_command`, `standalone::run::build_launch_command` and `alt_screen::managed_shell_assignments` keep their 1.7.0 signatures and now read the renderer from the operator's config. They are superseded by the `*_configured` variants and `configured_shell_assignments`, which take the renderer as an argument (#8405).
+
+### Documentation
+
+- The `tm-tool-usage-guide` bundled skill and the resident PM's `Trusty Tool
+  Priority` section now name the Atlassian `twg` CLI as the preferred way to
+  read or write Jira and other Atlassian content, ahead of MCP connectors or
+  `WebFetch` (owner ruling 2026-09-23).
+- The launchd doctor row's module doc now links `check_launchd_process_type_in`
+  instead of the test-only `check_launchd_process_type`, fixing the broken
+  intra-doc link the `Rustdoc intra-doc links` CI job reported after #8415
+  renamed the production function ([#8415](https://github.com/bobmatnyc/trusty-tools/issues/8415))
+- The resident PM instructions (`sections/core.md`, the `fixed`-tier `core`
+  section) now name a project-root `TICKETING.md` as the `ticketing` agent's
+  override of the `tm-ticketing` defaults, so a PM no longer treats a
+  ticketing-generated `TICKETING.md` as an unrequested file ([#8437](https://github.com/bobmatnyc/trusty-tools/issues/8437))
+
 ## [1.7.0] — 2026-09-23
 
 This release lowers the tmux scrollback limit from 100,000 lines to 10,000. The lower limit removes the keystroke lag in tm sessions ([#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).

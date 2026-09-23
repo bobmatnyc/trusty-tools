@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.1] — 2026-09-23
+
+### Added
+
+- `tmux::exact_session_target`, `exact_window_target`, `exact_pane_target`, `shell_exact_session_target`, `shell_attach_command`, `is_immutable_id` and `check_session_name` are the one place a tmux target is spelled. They normalize `:` and `.` in a session name to `_`, matching the name tmux actually stores (#8443).
+- `TmuxTarget::try_session`, `TmuxTarget::validate`, `TmuxCommand::validate_targets` and `TmuxTargetError` let a caller refuse an empty session name before tmux runs (#8443).
+
+### Fixed
+
+- Every tmux `-t` target that `tmux::tmux_argv` and `TmuxTarget::as_target` render is now exact: `=<name>` for the session verbs (`has-session`, `kill-session`, `rename-session`, `list-windows`, `set-environment`) and `=<name>:` for the window and pane verbs (`list-panes -s`, `send-keys`, `capture-pane`). A bare name let tmux prefix-match `tm-cto` onto a live `tm-cto-reports` and kill it. `$N`, `@N` and `%N` ids pass through unchanged (#8443).
+- An empty session name (or `=` alone) no longer renders `=:`, which tmux resolves to the current session; it renders a target that matches nothing, and `TmuxCommand::validate_targets` rejects it (#8443).
+
 ## [0.52.0] — 2026-09-23
 
 This release lowers the tmux scrollback limit from 100,000 lines to 10,000. The lower limit removes the keystroke lag in tm sessions ([#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
