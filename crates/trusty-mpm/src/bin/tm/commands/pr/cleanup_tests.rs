@@ -162,8 +162,64 @@ fn merge_aborts_before_merging_when_the_scope_cannot_be_recorded() {
     let err = outcome.expect_err("an unrecordable scope must fail the command");
     assert!(err.to_string().contains("not merging #8301"), "{err:#}");
     assert!(
+        err.to_string().contains("aside to proceed"),
+        "the error names the recovery: {err:#}"
+    );
+    assert!(
         gh.calls.borrow().is_empty(),
         "nothing may reach `gh` — no merge: {:?}",
         gh.calls.borrow()
     );
+}
+
+/// 🔴 #8301 round 3: the scope-aware marker cannot be written (a directory
+/// occupies its path), so the write fails closed and nothing reaches `gh`.
+/// Fails if the marker write's error is dropped.
+#[test]
+fn merge_aborts_when_the_scope_marker_cannot_be_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = registry_with_entry(dir.path());
+    let marker = dir.path().join("pr-cleanup.json.scoped");
+    std::fs::remove_file(&marker).expect("premise: the seed write left a marker");
+    std::fs::create_dir(&marker).expect("occupy the marker path");
+    let gh = RecordingGh {
+        calls: RefCell::new(Vec::new()),
+    };
+
+    let outcome = merge_with_recorded_scope(
+        &gh,
+        &merge_args(false, false, false),
+        || Ok(REPO.to_string()),
+        &reg,
+    );
+
+    let err = outcome.expect_err("a failed marker write must fail the command");
+    assert!(err.to_string().contains("not merging #8301"), "{err:#}");
+    assert!(gh.calls.borrow().is_empty(), "{:?}", gh.calls.borrow());
+}
+
+/// 🔴 #8301 round 3: a registry an older writer rewrote makes
+/// `record_merge_scope` warn with the `tm restart` fix, and the scope is
+/// still recorded. Fails before the fix, which never looked.
+#[test]
+fn record_merge_scope_warns_on_a_registry_an_older_writer_rewrote() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = registry_with_entry(dir.path());
+    // What an older daemon's `mark_cleaned` writes: no `format` stamp.
+    std::fs::write(
+        reg.path(),
+        format!(
+            "{{\"entries\":[{{\"pr\":8301,\"repo\":\"{REPO}\",\"repo_root\":\"/repo\",\
+             \"opened_at\":\"2026-09-23T00:00:00Z\"}}]}}"
+        ),
+    )
+    .expect("older write");
+
+    let warnings = record_merge_scope(&merge_args(true, false, false), REPO, &reg).expect("record");
+
+    assert!(
+        warnings.iter().any(|w| w.contains("tm restart")),
+        "{warnings:?}"
+    );
+    assert_eq!(reg.entries()[0].scope, CleanupScope::Deferred);
 }

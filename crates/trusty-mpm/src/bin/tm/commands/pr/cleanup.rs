@@ -218,37 +218,58 @@ fn merge_scope(args: &crate::cli::PrMergeArgs) -> CleanupScope {
 ///
 /// Why: the sweep runs in the daemon, possibly minutes later, so the choice
 /// has to be on disk before anything can merge.
-/// What: writes [`merge_scope`] for (`repo`, PR). A failed write is an error
-/// that names the registry. A deferral that matched no entry warns on stderr:
-/// there is nothing for the sweep to skip, which is fine, but a mismatched
-/// repo slug would look the same.
+/// What: writes [`merge_scope`] for (`repo`, PR) and returns the warnings the
+/// caller prints. A failed write is an error that names the registry and how to
+/// recover. Two cases warn: a registry an older writer rewrote (checked before
+/// this write re-stamps it), and a deferral that matched no entry — nothing for
+/// the sweep to skip, but a mismatched repo slug would look the same.
 /// Test: `post_merge_no_cleanup_defers_the_registry_entry`,
 /// `post_merge_cleanup_records_a_head_only_scope`,
-/// `post_merge_auto_leaves_the_entry_to_the_sweep`.
+/// `post_merge_auto_leaves_the_entry_to_the_sweep`,
+/// `record_merge_scope_warns_on_a_registry_an_older_writer_rewrote`.
 pub(crate) fn record_merge_scope(
     args: &crate::cli::PrMergeArgs,
     repo: &str,
     registry: &CleanupRegistry,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     let scope = merge_scope(args);
+    let path = registry.path().display();
+    let mut warnings = Vec::new();
+    // #8301: checked BEFORE the write below, which re-stamps the file and
+    // would hide the downgrade. The merge still proceeds: this call records
+    // the scope, and a later downgrade only restores the pre-#8301 behaviour.
+    if registry.rewritten_by_older_writer() {
+        let daemon = trusty_mpm::core::daemon_identity::read_lock()
+            .map(|l| format!("the running daemon (pid {} at {})", l.pid, l.addr))
+            .unwrap_or_else(|| "a daemon or tm older than this one".to_string());
+        warnings.push(format!(
+            "tm pr merge: {path} was rewritten by {daemon}, which predates recorded cleanup \
+             scopes and drops them; run `tm restart` so the daemon matches this tm (#8301)"
+        ));
+    }
     let hit = registry.record_scope(repo, args.pr, scope).map_err(|e| {
+        // #8301: the sweep consequence is stated only when it is true — the
+        // sweep can read this entry, and it is still pending wide.
+        let sweep = registry
+            .entry(repo, args.pr)
+            .filter(|e| e.pending() && e.scope == CleanupScope::Wide)
+            .map(|_| "; until it is recorded, the daemon's sweep would run the full cleanup")
+            .unwrap_or_default();
         anyhow::anyhow!(
-            "not merging #{}: its post-merge cleanup choice could not be recorded in {} ({e:#}); \
-             without it the daemon's sweep would run the full cleanup",
-            args.pr,
-            registry.path().display()
+            "not merging #{}: its post-merge cleanup choice could not be recorded in {path} \
+             ({e:#}). Repair the file or move {path} aside to proceed{sweep}",
+            args.pr
         )
     })?;
     // #8301: `Ok(false)` is not silent for a deferral.
     if !hit && scope == CleanupScope::Deferred {
-        eprintln!(
-            "tm pr merge: no cleanup-registry entry for {repo}#{} in {}; nothing to defer (the \
-             daemon's sweep only visits PRs `tm pr open` recorded)",
-            args.pr,
-            registry.path().display()
-        );
+        warnings.push(format!(
+            "tm pr merge: no cleanup-registry entry for {repo}#{} in {path}; nothing to defer \
+             (the daemon's sweep only visits PRs `tm pr open` recorded)",
+            args.pr
+        ));
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// The step after a successful merge (#8301).
@@ -272,7 +293,8 @@ pub(crate) fn post_merge_step(args: &crate::cli::PrMergeArgs, repo: String) -> P
 /// What: resolves `repo`, runs [`record_merge_scope`] and stops with its error
 /// before `gh` is asked to merge; then runs [`super::merge::run`] and maps the
 /// outcome through [`post_merge_step`].
-/// Test: `merge_aborts_before_merging_when_the_scope_cannot_be_recorded`.
+/// Test: `merge_aborts_before_merging_when_the_scope_cannot_be_recorded`,
+/// `merge_aborts_when_the_scope_marker_cannot_be_written`.
 pub(crate) fn merge_with_recorded_scope<R: super::GhRunner>(
     gh: &R,
     args: &crate::cli::PrMergeArgs,
@@ -280,7 +302,9 @@ pub(crate) fn merge_with_recorded_scope<R: super::GhRunner>(
     registry: &CleanupRegistry,
 ) -> anyhow::Result<PostMerge> {
     let repo = repo()?;
-    record_merge_scope(args, &repo, registry)?;
+    for warning in record_merge_scope(args, &repo, registry)? {
+        eprintln!("{warning}");
+    }
     let code = super::merge::run(gh, args)?;
     Ok(if code == EXIT_OK {
         post_merge_step(args, repo)
@@ -311,7 +335,7 @@ pub(crate) async fn after_merge(
 ) -> anyhow::Result<i32> {
     let cleanup = PrCleanupArgs {
         pr: args.pr,
-        // #8301: the slug `post_merge_step` recorded the scope under.
+        // #8301: the slug `record_merge_scope` recorded the scope under.
         repo: Some(repo),
         dry_run: false,
     };

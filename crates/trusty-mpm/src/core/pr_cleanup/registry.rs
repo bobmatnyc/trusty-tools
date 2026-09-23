@@ -216,7 +216,8 @@ impl CleanupRegistry {
 
     /// Whether the file on disk was rewritten by an older writer (#8301).
     ///
-    /// Test: `registry_detects_a_rewrite_by_an_older_writer`.
+    /// Test: `registry_detects_a_rewrite_by_an_older_writer`,
+    /// `record_merge_scope_warns_on_a_registry_an_older_writer_rewrote`.
     pub fn rewritten_by_older_writer(&self) -> bool {
         std::fs::read_to_string(&self.path)
             .ok()
@@ -307,7 +308,9 @@ impl CleanupRegistry {
     /// when `f` returns `true`. Unlike [`Self::entries`], a present-but-
     /// unreadable or malformed file is an error here, so a write never replaces
     /// a registry it could not parse.
-    /// Test: `registry_concurrent_writers_lose_no_update`.
+    /// Test: `registry_concurrent_writers_lose_no_update`,
+    /// `registry_write_refuses_to_replace_a_malformed_file`,
+    /// `merge_aborts_when_the_scope_marker_cannot_be_written`.
     fn update(&self, f: impl FnOnce(&mut Vec<OpenedPr>) -> bool) -> anyhow::Result<bool> {
         trusty_common::file_lock::with_exclusive_lock(&self.path, || {
             let mut entries = match std::fs::read_to_string(&self.path) {

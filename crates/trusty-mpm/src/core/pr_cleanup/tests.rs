@@ -1749,6 +1749,30 @@ fn registry_detects_a_rewrite_by_an_older_writer() {
     assert!(!reg.rewritten_by_older_writer());
 }
 
+/// 🔴 #8301 round 3: a registry that does not parse is never replaced by a
+/// write — the write errors and the bytes stay exactly as they were. Fails
+/// if `update` treats a malformed file as empty.
+#[test]
+fn registry_write_refuses_to_replace_a_malformed_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    let garbage = b"{ this is not json".to_vec();
+    std::fs::write(reg.path(), &garbage).expect("write garbage");
+
+    let outcome = reg.record_scope(
+        "bobmatnyc/trusty-tools",
+        7275,
+        super::CleanupScope::Deferred,
+    );
+
+    assert!(outcome.is_err(), "a malformed registry must fail the write");
+    assert_eq!(
+        std::fs::read(reg.path()).expect("read back"),
+        garbage,
+        "the file must be left byte-for-byte"
+    );
+}
+
 /// A pre-#8301 registry file, never touched by a scope-aware writer, is not a
 /// downgrade: no marker exists.
 #[test]
