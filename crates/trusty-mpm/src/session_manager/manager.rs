@@ -50,7 +50,9 @@ type ResidencyCacheEntry = (PathBuf, Option<String>, Vec<String>);
 /// What: one variant per failure mode: tmux problems, missing sessions,
 /// store I/O, miscellaneous I/O errors, and invalid state transitions.
 /// Test: `ManagedError` variants are exercised by the manager unit tests.
+// #8372: non_exhaustive, so a new failure mode is not an API break.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ManagedError {
     /// tmux was unavailable or a tmux operation failed.
     #[error("tmux error: {0}")]
