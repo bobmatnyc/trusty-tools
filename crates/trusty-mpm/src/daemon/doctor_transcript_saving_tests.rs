@@ -259,6 +259,7 @@ fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
         Some(PROBE_TOKEN),
         &[],
         None,
+        false,
     );
     assert!(
         prefix.contains("CLAUDE_CODE_OAUTH_TOKEN="),

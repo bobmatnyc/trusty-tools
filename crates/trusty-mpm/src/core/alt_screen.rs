@@ -18,9 +18,9 @@
 //! and pinned shell operand — that drives every carrier below, so a third
 //! variable is a one-line addition to the table rather than a change repeated
 //! at each launch site:
-//!   * [`managed_shell_assignments`] composes the `env NAME="${NAME-default}"`
-//!     operands, space-joined in table order, for the builders that emit an
-//!     `env …` prefix string.
+//!   * [`configured_shell_assignments`] composes the `env` operands,
+//!     space-joined in table order, for the builders that emit an `env …`
+//!     prefix string.
 //!   * [`apply_default_to_command`] (and its hermetic core,
 //!     [`apply_default_when_unset`]) mutates a [`std::process::Command`] for the
 //!     builders that exec `claude` directly, applying each table entry
@@ -30,9 +30,10 @@
 //! one, and each variable is decided independently — an operator who exported
 //! only one of the two still gets the tm default for the other.
 //!
-//! Config `tmux.alternate_screen: true` is the exception (#8405):
-//! [`configured_env`] turns it into an explicit `=0` assignment on the daemon's
-//! launch spec, so the tmux server's inherited environment cannot override it.
+//! The renderer is the exception (#8405): config `tmux.alternate_screen`
+//! decides it through [`configured_env`] — `=0` for `true`, `=1` for `false` —
+//! as an explicit assignment on the daemon's launch spec and every shell launch
+//! line, so the tmux server's inherited environment cannot override it.
 //!
 //! Operator precedence, and where it comes from:
 //!   * launch environment — the shell operand expands `${NAME-default}`, so the
@@ -54,11 +55,11 @@
 //! the daemon's spawn/resume/attach paths by
 //! `spec_command_yields_the_alt_screen_default_to_the_pane` (#8233 turned the
 //! `${NAME-1}` shell operand into `apply_default_to_command`), and
-//! `claude_command_defaults_the_alternate_screen_off` /
+//! `claude_command_assigns_the_configured_renderer` /
 //! `claude_command_defaults_the_mouse_capture_off`,
-//! `inplace_session_command_defaults_the_alternate_screen_off` /
+//! `inplace_session_command_assigns_the_configured_renderer` /
 //! `inplace_session_command_defaults_the_mouse_capture_off`,
-//! `client_session_command_defaults_the_alternate_screen_off` /
+//! `client_session_command_assigns_the_configured_renderer` /
 //! `client_session_command_defaults_the_mouse_capture_off`,
 //! `test_build_launch_command_defaults_the_alternate_screen_off` /
 //! `test_build_launch_command_defaults_the_mouse_capture_off`,
@@ -83,21 +84,71 @@ pub const ALT_SCREEN_ENABLED: &str = "0";
 /// process first started the server, never the daemon's own env. With config
 /// `alternate_screen: true`, tmux lets panes use the alternate screen, yet a
 /// server that inherited `=1` (or no value at all, which defaults to `1`) still
-/// told `claude` to stay on the classic renderer. Config is the operator's
-/// statement of intent, so it must reach `claude` without depending on the
-/// server's inherited environment.
-/// What: `[(ALT_SCREEN_ENV_VAR, ALT_SCREEN_ENABLED)]` when `alternate_screen`
-/// is `true`; empty when `false`, which leaves #6495's yield-to-the-pane
-/// default in charge. The caller puts these into an explicit assignment, which
+/// told `claude` to stay on the classic renderer. The reverse leaks too: with
+/// `alternate_screen: false`, a server that inherited `=0` put `claude` on the
+/// fullscreen renderer while tmux discarded its alternate screen. Config is the
+/// operator's statement of intent, so it decides in both directions.
+/// What: `[(ALT_SCREEN_ENV_VAR, "0")]` when `alternate_screen` is `true`,
+/// `[(ALT_SCREEN_ENV_VAR, "1")]` when `false`. `false` assigns `1` rather than
+/// leaving the variable unset: unset lets an inherited `=0` through, and lets
+/// Claude Code pick its own renderer default, which #6495 found to be
+/// fullscreen. The caller puts these into an explicit assignment, which
 /// [`apply_default_when_unset`] never overrides. A settings-tier `env` entry
 /// still outranks it, as the module doc explains.
 /// Test: `configured_env_forces_the_fullscreen_renderer_when_enabled`,
-/// `configured_env_is_empty_when_disabled`.
+/// `configured_env_forces_the_classic_renderer_when_disabled`.
 pub fn configured_env(alternate_screen: bool) -> Vec<(String, String)> {
-    if alternate_screen {
-        vec![(ALT_SCREEN_ENV_VAR.to_owned(), ALT_SCREEN_ENABLED.to_owned())]
+    let value = if alternate_screen {
+        ALT_SCREEN_ENABLED
     } else {
-        Vec::new()
+        ALT_SCREEN_DEFAULT
+    };
+    vec![(ALT_SCREEN_ENV_VAR.to_owned(), value.to_owned())]
+}
+
+/// The `env` operand text a shell-string launch line carries for the
+/// configured `tmux.alternate_screen` (#8405).
+///
+/// Why: `tm launch`, `tm connect`, `tm session start` and the client
+/// `/connect` path type an `env … claude` line into a tmux pane, so they need
+/// the same config-decided value the daemon's launch spec carries.
+/// What: one operand per [`MANAGED_DEFAULTS`] entry, in table order: a plain
+/// `NAME=value` for each variable [`configured_env`] decides, the pinned
+/// `NAME="${NAME-default}"` operand for the rest (the mouse default, #7160).
+/// The values are `0`/`1`, so no quoting is needed.
+/// Test: `configured_shell_assignments_assign_the_renderer_in_both_directions`.
+pub fn configured_shell_assignments(alternate_screen: bool) -> String {
+    let configured = configured_env(alternate_screen);
+    MANAGED_DEFAULTS
+        .iter()
+        .map(
+            |d| match configured.iter().find(|(name, _)| name == d.env_var) {
+                Some((name, value)) => format!("{name}={value}"),
+                None => d.shell_assignment.to_owned(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// [`configured_alternate_screen_at`] against the operator's own state home
+/// (`~/.trusty-tools/trusty-mpm`) — the CLI launch paths' entry point (#8405).
+///
+/// Why: the `tm` CLI launches run in the operator's home, not under a daemon
+/// framework root. An unresolvable home means no config file exists to read,
+/// the same answer [`trusty_common::crate_config::load`] gives.
+/// What: resolves the directory, then delegates; `Ok(false)`-by-default when the
+/// home is unknown.
+/// Test: covered via `configured_alternate_screen_reads_the_named_root`.
+pub fn configured_alternate_screen() -> Result<bool, trusty_common::crate_config::ConfigError> {
+    match trusty_common::crate_config::crate_config_dir(
+        crate::core::trusty_tools_config::CRATE_NAME,
+    ) {
+        Some(root) => configured_alternate_screen_at(&root),
+        None => Ok(
+            crate::core::trusty_tools_config::resolve_tmux_options(&Default::default())
+                .alternate_screen,
+        ),
     }
 }
 
@@ -186,11 +237,11 @@ struct ManagedDefault {
 /// Every variable tm provisions a default for on a managed launch, in the
 /// order every carrier emits them (#6495, #7160).
 ///
-/// Why: the single source of truth [`managed_shell_assignments`] and
+/// Why: the single source of truth [`configured_shell_assignments`] and
 /// [`apply_default_when_unset`] both drive off, so a third variable is a
 /// one-line addition here rather than a change repeated at every launch site
 /// this module has callers in.
-/// Test: `managed_shell_assignments_joins_both_operands_in_order`.
+/// Test: `configured_shell_assignments_assign_the_renderer_in_both_directions`.
 const MANAGED_DEFAULTS: &[ManagedDefault] = &[
     ManagedDefault {
         env_var: ALT_SCREEN_ENV_VAR,
@@ -204,35 +255,12 @@ const MANAGED_DEFAULTS: &[ManagedDefault] = &[
     },
 ];
 
-/// The `env` operand text carrying every managed default, space-joined in
-/// [`MANAGED_DEFAULTS`] order — what a shell-command launch line splices in
-/// ahead of `claude` (#6495 alternate-screen, #7160 mouse capture).
-///
-/// Why: every shell-string builder previously spliced in
-/// [`ALT_SCREEN_SHELL_ASSIGNMENT`] alone; adding the mouse default without a
-/// second call at every one of those sites would silently miss one the next
-/// time a variable is added. One function, driven by the table, is the single
-/// place a launch line's defaulted-env text is assembled.
-/// What: each entry's `shell_assignment`, joined with a single space — the
-/// same separator every builder already places between the scrub flags and
-/// the assignment, and between one assignment and the next (see
-/// [`crate::core::model_inject::build_claude_command_with`]'s per-assignment
-/// `cmd.push(' ')`).
-/// Test: `managed_shell_assignments_joins_both_operands_in_order`.
-pub fn managed_shell_assignments() -> String {
-    MANAGED_DEFAULTS
-        .iter()
-        .map(|d| d.shell_assignment)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Provision every managed default (#6495, #7160) on a `claude`
 /// [`std::process::Command`].
 ///
 /// Why: the exec launch paths (the bare-`tm` in-place relaunch, `tm run`) build
-/// a `Command` with no shell in between, so [`managed_shell_assignments`] and
-/// its `${NAME-default}` expansion cannot apply to them — but they inherit the
+/// a `Command` with no shell in between, so [`configured_shell_assignments`]
+/// and its `${NAME-default}` expansion cannot apply to them — but they inherit the
 /// same pane environment and need the same defaults and the same operator
 /// precedence, decided independently per variable.
 /// What: delegates to [`apply_default_when_unset`] with a real-environment
@@ -330,17 +358,6 @@ mod tests {
         );
     }
 
-    /// #7160: one function must carry both operands, in table order, so a
-    /// caller that splices its result in ahead of `claude` gets both defaults
-    /// from a single call site.
-    #[test]
-    fn managed_shell_assignments_joins_both_operands_in_order() {
-        assert_eq!(
-            managed_shell_assignments(),
-            format!("{ALT_SCREEN_SHELL_ASSIGNMENT} {MOUSE_SHELL_ASSIGNMENT}")
-        );
-    }
-
     /// Read the explicit overrides a `Command` carries: `get_envs` reports a set
     /// value as `(key, Some(value))` and an `env_remove` as `(key, None)`.
     fn override_for(cmd: &std::process::Command, name: &str) -> Option<Option<String>> {
@@ -430,9 +447,29 @@ mod tests {
         );
     }
 
+    /// #8405: `false` forces the classic renderer, so a tmux server that
+    /// inherited `=0` cannot put `claude` on the fullscreen one.
     #[test]
-    fn configured_env_is_empty_when_disabled() {
-        assert!(configured_env(false).is_empty());
+    fn configured_env_forces_the_classic_renderer_when_disabled() {
+        assert_eq!(
+            configured_env(false),
+            vec![(ALT_SCREEN_ENV_VAR.to_owned(), "1".to_owned())]
+        );
+    }
+
+    /// #8405: the shell operand is a plain assignment in both directions —
+    /// never the `${NAME-1}` form a pane-exported `=0` could override — and
+    /// the mouse default keeps its yielding form.
+    #[test]
+    fn configured_shell_assignments_assign_the_renderer_in_both_directions() {
+        assert_eq!(
+            configured_shell_assignments(true),
+            format!("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 {MOUSE_SHELL_ASSIGNMENT}")
+        );
+        assert_eq!(
+            configured_shell_assignments(false),
+            format!("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 {MOUSE_SHELL_ASSIGNMENT}")
+        );
     }
 
     fn write_config(root: &std::path::Path, yaml: &str) {

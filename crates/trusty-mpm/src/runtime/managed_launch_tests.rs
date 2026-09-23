@@ -370,16 +370,17 @@ fn every_launch_path_carries_the_configured_fullscreen_renderer() {
     }
 }
 
-/// #8405: `alternate_screen: false` (the default) adds no assignment, so
-/// #6495's yield-to-the-pane default stays in charge.
+/// #8405: `alternate_screen: false` (the default) assigns the classic
+/// renderer explicitly, so a tmux server that inherited `=0` cannot put
+/// `claude` on the fullscreen one. At fcfd38e71 the spec carried nothing here.
 #[test]
-fn no_launch_path_assigns_the_renderer_when_alternate_screen_is_off() {
+fn every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off() {
     let cwd = PathBuf::from("/work");
     let launch = bare_launch(&cwd, &[]);
     for spec in [spawn_spec(&launch), attach_spec(&launch, "short1")] {
         assert_eq!(
             value_of(&spec.env_set, crate::core::alt_screen::ALT_SCREEN_ENV_VAR),
-            None
+            Some(crate::core::alt_screen::ALT_SCREEN_DEFAULT)
         );
     }
 }

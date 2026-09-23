@@ -199,6 +199,39 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     );
 }
 
+/// #8405 fail-open check: an unreadable `config.yaml` fails `tm session start`
+/// with an error naming `tmux.alternate_screen`, before `prepare_session` or the
+/// daemon POST run, rather than launching on the default renderer.
+#[tokio::test]
+async fn session_start_in_place_fails_closed_on_an_unreadable_config() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
+    let state = fw.crate_config_root();
+    std::fs::create_dir_all(&state).expect("mkdir state root");
+    std::fs::write(
+        state.join("config.yaml"),
+        "tmux:\n  alternate_screen: [broken\n",
+    )
+    .expect("write config");
+
+    let err = start_session_in_place(
+        &reqwest::Client::new(),
+        UNREACHABLE_URL,
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+    )
+    .await
+    .expect_err("a malformed config must fail the launch");
+
+    assert!(err.to_string().contains("alternate_screen"), "{err}");
+    assert!(
+        !target.path().join(".trusty-mpm").exists(),
+        "the config read must fail before any side effect"
+    );
+}
+
 /// Start a minimal in-process HTTP server that captures the JSON body of the
 /// first `POST /api/v1/sessions/managed` it receives, then answers with a
 /// well-formed `ManagedSpawnResponse` so the client-side deserialization in

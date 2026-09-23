@@ -128,13 +128,17 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         // #7422: the probe reads the env prefix only; a scoped MCP file would
         // add flags it does not inspect and a path that does not exist.
         None,
+        false,
     );
+    // #8405: the `false` renderer argument above and below is immaterial — the
+    // probe reads the `-u` scrub, which no renderer value changes.
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command();
-    let client_line = crate::core::model_inject::build_client_session_command(Some(
-        std::path::Path::new("/probe/prompt.txt"),
-    ));
+    let inplace_line = crate::core::model_inject::build_inplace_session_command(false);
+    let client_line = crate::core::model_inject::build_client_session_command(
+        Some(std::path::Path::new("/probe/prompt.txt")),
+        false,
+    );
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
     // #7422: `None` for the composed MCP file — this probe checks env scrubbing

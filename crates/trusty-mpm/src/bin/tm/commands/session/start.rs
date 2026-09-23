@@ -156,6 +156,15 @@ async fn start_session_in_place(
     // `$HOME` — a write every sibling test in this binary would observe.
     home: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    // #8405: config decides the renderer, read from the same named root as the
+    // rest of this launch; an unreadable config fails before any side effect.
+    let alternate_screen =
+        trusty_mpm::core::alt_screen::configured_alternate_screen_at(&fw.crate_config_root())
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "cannot resolve tmux.alternate_screen for this launch (#8405): {err}"
+                )
+            })?;
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
@@ -280,7 +289,7 @@ async fn start_session_in_place(
             // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
             // launch line that silently saved no transcript.
             let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-                &trusty_mpm::core::model_inject::build_inplace_session_command(),
+                &trusty_mpm::core::model_inject::build_inplace_session_command(alternate_screen),
             );
             let send = trusty_mpm::core::tmux::send_line(
                 None,

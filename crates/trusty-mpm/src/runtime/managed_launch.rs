@@ -101,8 +101,8 @@ pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
 /// here: they must yield per-variable to a value the pane already exports, which
 /// [`LaunchSpec::to_command`] expresses with
 /// [`crate::core::alt_screen::apply_default_to_command`] — the exec-path twin of
-/// the `${NAME-1}` shell operand. The configured `alternate_screen: true`
-/// override (#8405) is not a default and is added by [`ManagedLaunch::base`].
+/// the `${NAME-1}` shell operand. The config-decided renderer (#8405) is not a
+/// default and is added by [`ManagedLaunch::base`].
 /// What: `(name, value)` pairs, in the order above.
 /// Test: `env_set_enables_todo_tools_unconditionally`,
 /// `env_set_disables_auto_memory_when_trusty_memory_answers`,
@@ -176,7 +176,7 @@ impl ManagedLaunch<'_> {
     /// `alternate_screen` (#8405).
     /// Test: `attach_and_resume_share_an_identical_environment`,
     /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
-    /// `no_launch_path_assigns_the_renderer_when_alternate_screen_is_off`.
+    /// `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`.
     fn base(&self) -> LaunchSpec {
         let mut env_set = managed_env_set(
             self.config_dir,

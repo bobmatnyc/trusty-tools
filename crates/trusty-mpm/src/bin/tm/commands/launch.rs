@@ -117,6 +117,12 @@ pub(crate) async fn launch(
     worktree: bool,
     launch_dir: super::managed_workspace::LaunchDir,
 ) -> anyhow::Result<()> {
+    // #8405: config decides the renderer; an unreadable config fails the
+    // launch here, before any side effect, rather than launching on a default.
+    let alternate_screen =
+        trusty_mpm::core::alt_screen::configured_alternate_screen().map_err(|err| {
+            anyhow::anyhow!("cannot resolve tmux.alternate_screen for this launch (#8405): {err}")
+        })?;
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
@@ -375,6 +381,7 @@ pub(crate) async fn launch(
             // cannot carry as arguments.
             &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
             scoped_mcp.as_deref(),
+            alternate_screen,
         ),
     );
 
@@ -489,6 +496,12 @@ pub(crate) async fn connect(
     url: &str,
     dir: Option<String>,
 ) -> anyhow::Result<()> {
+    // #8405: config decides the renderer; an unreadable config fails the
+    // launch here, before any side effect, rather than launching on a default.
+    let alternate_screen =
+        trusty_mpm::core::alt_screen::configured_alternate_screen().map_err(|err| {
+            anyhow::anyhow!("cannot resolve tmux.alternate_screen for this launch (#8405): {err}")
+        })?;
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
     let path = path.canonicalize().unwrap_or(path);
@@ -650,6 +663,7 @@ pub(crate) async fn connect(
                 // #4181: the per-project MCP pins.
                 &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
                 scoped_mcp.as_deref(),
+                alternate_screen,
             ));
         let send = trusty_mpm::core::tmux::send_line(
             None,
@@ -696,6 +710,7 @@ pub(crate) fn connect_claude_cmd(
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
     scoped_mcp: Option<&std::path::Path>,
+    alternate_screen: bool,
 ) -> String {
     trusty_mpm::core::model_inject::build_claude_command(
         None,
@@ -705,6 +720,8 @@ pub(crate) fn connect_claude_cmd(
         // #7422: the composed default-deny MCP file, already written by the
         // caller; `None` only when the config dir did not relocate.
         scoped_mcp,
+        // #8405: the config-decided renderer the caller resolved.
+        alternate_screen,
     )
 }
 
