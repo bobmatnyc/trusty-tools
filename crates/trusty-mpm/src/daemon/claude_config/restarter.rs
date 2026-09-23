@@ -146,6 +146,7 @@ mod tests {
     #[test]
     fn restart_target_falls_back_to_session_for_legacy_caller() {
         let target = restart_target("trusty-mpm-xyz", None, false).expect("session target");
-        assert_eq!(target.as_target(), "trusty-mpm-xyz");
+        // #8443: a session-only target renders exact, never bare.
+        assert_eq!(target.as_target(), "=trusty-mpm-xyz:");
     }
 }

@@ -4,7 +4,8 @@
 //! `has-session` said the missing session was live, the plan chose a restart,
 //! and the daemon's bare `kill-session -t tm-cto` destroyed `tm-cto-reports`.
 //! Every test here runs on a private `-L` tmux server and skips when tmux is
-//! not installed.
+//! not installed. `#[serial]` because the `has-session` and `kill-session`
+//! spawns pass the #5784 `$HOME` guard, which `#[serial]` tests reassign.
 
 use super::{ResumeAction, plan_resume, session_runtime_live_with_bin};
 use crate::formatters::banner::tmux_has_session_with_bin;
@@ -43,6 +44,7 @@ fn identity(server: &PrivateTmuxServer, session: &str) -> Option<String> {
     ])
 }
 
+#[serial_test::serial]
 #[test]
 fn tmux_has_session_ignores_a_prefix_sibling() {
     let Some((server, sibling, missing)) = sibling_fixture("has") else {
@@ -60,6 +62,7 @@ fn tmux_has_session_ignores_a_prefix_sibling() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn session_runtime_live_never_reports_a_prefix_sibling() {
     let Some((server, sibling, missing)) = sibling_fixture("rtlive") else {
@@ -73,6 +76,7 @@ fn session_runtime_live_never_reports_a_prefix_sibling() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn resume_of_a_missing_session_never_touches_a_prefix_sibling() {
     let Some((server, sibling, missing)) = sibling_fixture("plan") else {
@@ -86,6 +90,10 @@ fn resume_of_a_missing_session_never_touches_a_prefix_sibling() {
     );
 
     // The exact probes `resume_session` runs, in its order.
+    assert!(
+        tmux_has_session_with_bin(&shim, sibling.name()),
+        "fixture precondition: the probe reaches the private server"
+    );
     let tmux_live = tmux_has_session_with_bin(&shim, &missing);
     let runtime_live = !tmux_live || session_runtime_live_with_bin(&shim, &missing);
     assert!(!tmux_live, "the plan must see '{missing}' as absent");

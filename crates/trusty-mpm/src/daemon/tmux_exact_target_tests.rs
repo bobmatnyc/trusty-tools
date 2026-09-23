@@ -4,6 +4,11 @@
 //! `<X>-suffix` and no `<X>`. Before #8443 every target was a bare name, and
 //! tmux prefix-matched `<X>` onto `<X>-suffix`: `kill-session -t tm-cto`
 //! killed `tm-cto-reports`. Skips when tmux is not installed.
+//!
+//! `#[serial]`: the driver's spawn guard (#5784) refuses tmux while another
+//! test has `$HOME` reassigned, and those tests are `#[serial]` too. Each
+//! refusal-shaped failure is asserted to be tmux's own "can't find" reply, so
+//! a guard refusal can never pass as an exact-target miss.
 
 use super::TmuxDriver;
 use crate::core::tmux::TmuxTarget;
@@ -44,6 +49,18 @@ fn pane_identity(server: &PrivateTmuxServer, session: &str) -> Option<String> {
     ])
 }
 
+/// Assert `result` failed because tmux found no such session — not because
+/// the spawn guard refused to run tmux at all.
+fn assert_tmux_miss<T: std::fmt::Debug>(what: &str, result: crate::core::Result<T>) {
+    let err = result.expect_err(what);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("can't find"),
+        "{what}: expected tmux's own 'can't find' reply, got: {msg}"
+    );
+}
+
+#[serial_test::serial]
 #[test]
 fn kill_session_leaves_a_prefix_sibling_alive() {
     let Some((server, sibling, missing, driver)) = sibling_fixture("kill") else {
@@ -55,11 +72,9 @@ fn kill_session_leaves_a_prefix_sibling_alive() {
         "fixture precondition: the sibling is live"
     );
 
-    let result = driver.kill_session(&missing);
-
-    assert!(
-        result.is_err(),
-        "killing the missing session '{missing}' must fail, not succeed on a sibling"
+    assert_tmux_miss(
+        "killing the missing session must fail, not succeed on a sibling",
+        driver.kill_session(&missing),
     );
     assert!(
         ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), sibling.name()),
@@ -69,6 +84,7 @@ fn kill_session_leaves_a_prefix_sibling_alive() {
     assert_eq!(pane_identity(&server, sibling.name()), before);
 }
 
+#[serial_test::serial]
 #[test]
 fn send_and_capture_never_reach_a_prefix_sibling() {
     // `_server` is held (not `_`) so the private server outlives the sibling.
@@ -77,18 +93,19 @@ fn send_and_capture_never_reach_a_prefix_sibling() {
     };
     let marker = "marker-8443-must-not-land";
 
-    let sent = driver.send_line(&TmuxTarget::session(&missing), &format!("echo {marker}"));
-    let captured = driver.capture(&TmuxTarget::session(&missing), Some(50));
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    driver
+        .capture(&TmuxTarget::session(sibling.name()), Some(5))
+        .expect("fixture precondition: the driver reaches the private server");
 
-    assert!(
-        sent.is_err(),
-        "send-keys to the missing '{missing}' must fail"
+    assert_tmux_miss(
+        "send-keys to the missing session must fail",
+        driver.send_line(&TmuxTarget::session(&missing), &format!("echo {marker}")),
     );
-    assert!(
-        captured.is_err(),
-        "capture-pane of the missing '{missing}' must fail, got {captured:?}"
+    assert_tmux_miss(
+        "capture-pane of the missing session must fail",
+        driver.capture(&TmuxTarget::session(&missing), Some(50)),
     );
+    std::thread::sleep(std::time::Duration::from_millis(300));
     let sibling_screen = driver
         .capture(&TmuxTarget::session(sibling.name()), Some(50))
         .expect("the sibling itself is capturable by its exact name");
