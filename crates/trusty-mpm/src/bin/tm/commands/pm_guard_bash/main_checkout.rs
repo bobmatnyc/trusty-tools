@@ -924,30 +924,24 @@ pub(super) fn git_verb_target_dir_with_tail(
             }
             continue;
         }
-        let Some(subcommand) = shell_lex::git_subcommand(trimmed) else {
+        // #8439: every token that could be the subcommand. One when the global
+        // options resolve; every non-option token after an unknown one, so
+        // `git --shallow-file status checkout -- f` is judged as `checkout`.
+        let Some((argv, candidates)) = shell_lex::git_subcommand_candidates(trimmed) else {
             continue;
         };
-        let Some(argv) = shlex::split(trimmed) else {
-            continue;
-        };
-        // The subcommand token's position, so the tail can be classified.
-        // `git_subcommand` already skipped the global flags to resolve the
-        // name, and a global flag VALUE that happens to equal the subcommand
-        // name (`git -C reset reset --hard`) would find the earlier token —
-        // the same "realistic invocations use at most one `-C`" simplification
-        // `git_dash_c_override` documents.
-        let Some(idx) = argv.iter().position(|t| *t == subcommand) else {
-            continue;
-        };
-        let tail = &argv[idx + 1..];
-        if !matches(&subcommand, tail) {
-            continue;
+        for idx in candidates {
+            let subcommand = &argv[idx];
+            let tail = &argv[idx + 1..];
+            if !matches(subcommand, tail) {
+                continue;
+            }
+            let base = match git_dash_c_override(&argv, idx) {
+                Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
+                None => effective_cwd.clone(),
+            };
+            return Some((subcommand.clone(), base, tail.to_vec()));
         }
-        let base = match git_dash_c_override(&argv, idx) {
-            Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
-            None => effective_cwd.clone(),
-        };
-        return Some((subcommand, base, tail.to_vec()));
     }
     None
 }
@@ -1325,6 +1319,26 @@ mod tests {
             !reason.contains("which is a project's main checkout"),
             "the guard must not assert what it could not establish: {reason}"
         );
+    }
+
+    /// #8439: an unknown git global option cannot hide a destructive verb —
+    /// `git --shallow-file status checkout -- f` restored a file past this rule.
+    #[test]
+    fn destructive_sees_past_an_unknown_git_global_option() {
+        let checkout = main_checkout_dir();
+        for command in [
+            "git --shallow-file status checkout -- Cargo.toml",
+            "git --attr-source status checkout -- Cargo.toml",
+            "git --shallow-file log reset --hard",
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(command, checkout.path()).is_some(),
+                "must deny: {command}"
+            );
+        }
+        assert!(!command_is_a_lone_commit(
+            "git --shallow-file x commit -m wip"
+        ));
     }
 
     /// The half of #7100 that must NOT change: a `-C` path spelled out to a

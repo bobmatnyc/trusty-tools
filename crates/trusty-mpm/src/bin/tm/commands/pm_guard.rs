@@ -213,9 +213,9 @@ use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
-    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
-    print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
+    evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
+    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -427,6 +427,15 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         if let Some(reason) = unclassifiable_command(command) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
             println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
+        // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
+        // and ahead of Guards 1/4, because the caller it binds is always an agent.
+        if let Some(reason) =
+            evaluate_read_only_dispatch_command(command, DispatchIdentity::from_payload(&payload))
+        {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
         }
         // #7497 joins #3955 here: same placement, same reason. `evaluate_worktree_add`

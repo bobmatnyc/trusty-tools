@@ -1042,6 +1042,18 @@ mod tests {
         }
     }
 
+    /// #8439: an unknown git global option cannot hide the removal.
+    #[test]
+    fn denies_a_remove_behind_an_unknown_git_global_option() {
+        let reason = deny_reason(evaluate_worktree_remove_command(
+            "git --shallow-file x worktree remove /repo/.claude/worktrees/agent-x",
+            true,
+            engineer(),
+            Path::new("/repo"),
+        ));
+        assert_eq!(reason, WORKTREE_REMOVE_DENY_REASON);
+    }
+
     #[test]
     fn resolves_the_removal_target_against_a_dash_c_directory() {
         let target = recheck_target(evaluate_worktree_remove_command(
