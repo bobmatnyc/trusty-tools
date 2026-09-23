@@ -17,7 +17,9 @@
 //! Test: `a_recheck_slower_than_the_deadline_denies_and_names_the_pending_check`,
 //! `a_late_start_still_denies_inside_the_remaining_budget`,
 //! `a_recheck_inside_the_deadline_returns_its_own_verdict`,
-//! `a_recheck_that_panics_denies`.
+//! `a_recheck_that_panics_denies`,
+//! `a_silent_owner_query_denies_inside_the_remaining_budget` (#8082),
+//! `the_removal_deadlines_fit_inside_the_registered_hook_timeout` (#8082).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
@@ -69,10 +71,12 @@ pub(crate) fn remaining(budget: Duration, started: Instant) -> Duration {
 /// HEAD-move rule's fail-open reader: an unreachable daemon establishes nothing
 /// about who holds this tree. Keyed on the TARGET, not the caller's cwd — the
 /// tree being deleted is the one whose owner matters.
-/// What: the owner query, then [`evaluate_removal_rechecks_within`] with
-/// whatever budget process start, startup and the query left.
+/// What: the owner query, itself bounded by the budget left at process start
+/// (#8082), then [`evaluate_removal_rechecks_within`] with whatever budget
+/// startup and the query left.
 /// Test: as the module doc; the owner arm in
-/// `denies_worktree_remove_from_version_control_when_the_owner_query_fails`.
+/// `denies_worktree_remove_from_version_control_when_the_owner_query_fails`;
+/// the bounded query in `a_silent_owner_query_denies_inside_the_remaining_budget`.
 pub(crate) async fn removal_recheck_deny(
     url: &str,
     session_id: &str,
@@ -80,8 +84,15 @@ pub(crate) async fn removal_recheck_deny(
     payload: &Value,
     started: Instant,
 ) -> Option<String> {
-    let live =
-        pm_guard_dispatch::live_shared_tree_writers_or_deny(url, session_id, target, payload).await;
+    // #8082: the owner query is bounded by what is left of the budget, not only
+    // by its own 2.5 s client timeouts — a late start plus a silent daemon
+    // otherwise decided after the deadline. Expiry denies, naming `sole-owner`.
+    let query =
+        pm_guard_dispatch::live_shared_tree_writers_or_deny(url, session_id, target, payload);
+    let owner_budget = remaining(REMOVAL_GUARD_BUDGET, started);
+    let Ok(live) = tokio::time::timeout(owner_budget, query).await else {
+        return Some(out_of_time(CHECK_SOLE_OWNER, target, owner_budget));
+    };
     let left = remaining(REMOVAL_GUARD_BUDGET, started);
     evaluate_removal_rechecks_within(target, live, GitAndGhProbe, left)
 }

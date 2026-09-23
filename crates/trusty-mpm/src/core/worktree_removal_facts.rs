@@ -154,7 +154,7 @@ use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
 };
 use crate::session_manager::worktree_repo_slug::{
-    DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
+    first_merged, merged_pr_search_repos, repo_slug_for,
 };
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
@@ -671,65 +671,16 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // merged. `None` — nothing configured, or git could not be asked —
         // means `origin`, so every failure branch here lands on the pre-#7850
         // verdict rather than on a guess.
-        let remote = push_remote_for_branch(dir, branch);
-        let repo = repo_slug_for_remote(dir, remote.as_deref().unwrap_or(DEFAULT_REMOTE))?;
-        // #5850: the registry pin is keyed by the project's `origin`. Reuse
-        // `repo` when it IS origin; a fork push remote names another repository,
-        // so read origin's slug for that case only. Unreadable origin denies.
-        let pin_origin = match remote.as_deref() {
-            None | Some(DEFAULT_REMOTE) => repo.clone(),
-            Some(_) => repo_slug_for(dir)?,
-        };
-        // #6623: the same per-project `github:` binding an interactive `tm`
-        // resolves. The hook inherits the operator's shell environment in the
-        // common case, but not when Claude Code is launched from a GUI, and a
-        // lookup that fails auth must not read as "no merged PR".
-        // #6867: through the same gate the reclaim survey uses — this call has
-        // the identical hang shape, and a `dir` whose `gh` has wedged must stop
-        // being polled here too. Its own key: the argv asks a DIFFERENT
-        // question (merged only) from `pr_state_for_branch`'s, so the two must
-        // never share a reply. #7057: the repository is part of that key —
-        // two directories resolving to different repositories do not have the
-        // same answer for the same branch name.
-        let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
-            .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
-                // #5850: a registry pin this process cannot honour is a REFUSAL,
-                // not a licence to ask GitHub as the machine's global account.
-                let gh_env = resolve_daemon_gh_env(dir, &pin_origin)?;
-                let mut cmd = gh_pr_list_command(dir, &gh_env, &repo);
-                cmd.arg("--head").arg(branch);
-                cmd.args(MERGED_PR_ARGS);
-                crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
-            })
-            .map_err(|f| format!("{f} (repository searched: {repo})"))?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
-            format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
-        })?;
-        // #7275 round 2: the first row's base is the one the policy judges this
-        // worktree's content against. A row without one leaves it empty, which
-        // denies at the call site rather than falling back to a guess.
-        let base_ref = rows
-            .first()
-            .and_then(|r| r.get("baseRefName"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        // #7958: the same row's own head commit. Absent leaves it empty, which
-        // denies on that route rather than matching a HEAD against nothing.
-        let head_sha = rows
-            .first()
-            .and_then(|r| r.get("headRefOid"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        Ok(MergedPrLookup {
-            count: rows.len(),
-            repo,
-            base_ref,
-            head_sha,
-        })
+        // #8403: `origin` first — repository identity comes from its URL —
+        // then the push remote as a second place to look, never instead.
+        // Either URL unreadable denies; see `merged_pr_search_repos_with`.
+        let repos = merged_pr_search_repos(dir, branch)?;
+        let pin_origin = repos.first().cloned().unwrap_or_default();
+        first_merged(
+            &repos,
+            |repo| merged_pull_requests_in(dir, branch, repo, &pin_origin),
+            |lookup: &MergedPrLookup| lookup.count > 0,
+        )
     }
 
     fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
@@ -771,6 +722,67 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
             &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
         )
     }
+}
+
+/// One repository's MERGED pull requests for `branch` (#8403: split out so
+/// the caller can search `origin` and the push remote in turn).
+fn merged_pull_requests_in(
+    dir: &Path,
+    branch: &str,
+    repo: &str,
+    pin_origin: &str,
+) -> Result<MergedPrLookup, String> {
+    let repo = repo.to_string();
+    // #6623: the same per-project `github:` binding an interactive `tm`
+    // resolves. The hook inherits the operator's shell environment in the
+    // common case, but not when Claude Code is launched from a GUI, and a
+    // lookup that fails auth must not read as "no merged PR".
+    // #6867: through the same gate the reclaim survey uses — this call has
+    // the identical hang shape, and a `dir` whose `gh` has wedged must stop
+    // being polled here too. Its own key: the argv asks a DIFFERENT
+    // question (merged only) from `pr_state_for_branch`'s, so the two must
+    // never share a reply. #7057: the repository is part of that key —
+    // two directories resolving to different repositories do not have the
+    // same answer for the same branch name.
+    let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
+        .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
+            // #5850: a registry pin this process cannot honour is a REFUSAL,
+            // not a licence to ask GitHub as the machine's global account.
+            let gh_env = resolve_daemon_gh_env(dir, pin_origin)?;
+            let mut cmd = gh_pr_list_command(dir, &gh_env, &repo);
+            cmd.arg("--head").arg(branch);
+            cmd.args(MERGED_PR_ARGS);
+            crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
+        })
+        .map_err(|f| format!("{f} (repository searched: {repo})"))?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
+        format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
+    })?;
+    // #7275 round 2: the first row's base is the one the policy judges this
+    // worktree's content against. A row without one leaves it empty, which
+    // denies at the call site rather than falling back to a guess.
+    let base_ref = rows
+        .first()
+        .and_then(|r| r.get("baseRefName"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // #7958: the same row's own head commit. Absent leaves it empty, which
+    // denies on that route rather than matching a HEAD against nothing.
+    let head_sha = rows
+        .first()
+        .and_then(|r| r.get("headRefOid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Ok(MergedPrLookup {
+        count: rows.len(),
+        repo,
+        base_ref,
+        head_sha,
+    })
 }
 
 // #7275 round 2: `base_ref_for` is gone. It resolved `origin/HEAD` (falling back
