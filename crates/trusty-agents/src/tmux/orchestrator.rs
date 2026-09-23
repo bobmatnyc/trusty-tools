@@ -102,15 +102,6 @@ impl TmuxOrchestrator {
         }
     }
 
-    /// `-t` target for a pane-typed verb: a `%N` pane id stays bare, anything
-    /// else is `=<session>:<pane>`, and no pane is `=<session>:` (#8443).
-    fn pane_target(session: &str, pane: Option<&str>) -> String {
-        match pane {
-            Some(p) => exact_pane_target(session, p),
-            None => exact_window_target(session),
-        }
-    }
-
     /// Run a tmux command and return the raw Output.
     fn run_tmux(&self, args: &[&str]) -> Result<Output> {
         trace!(args = ?args, "running tmux command");
@@ -383,7 +374,11 @@ impl TmuxOrchestrator {
             }
         }
 
-        let target = Self::pane_target(session, pane);
+        // #8443: `%N` stays bare, else `=<session>:<pane>` / `=<session>:`.
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         let n = lines.unwrap_or(50);
         let lines_arg = format!("-{}", n);
@@ -400,7 +395,10 @@ impl TmuxOrchestrator {
             return Err(TmuxError::SessionNotFound(session.to_string()));
         }
 
-        let target = Self::pane_target(session, pane);
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         self.run_tmux_checked(&["send-keys", "-t", &target, keys])?;
         Ok(())
@@ -420,7 +418,10 @@ impl TmuxOrchestrator {
             return Err(TmuxError::SessionNotFound(session.to_string()));
         }
 
-        let target = Self::pane_target(session, pane);
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         // First: send text literally (no key-name interpretation).
         self.run_tmux_checked(&["send-keys", "-t", &target, "-l", text])?;

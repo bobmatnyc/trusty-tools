@@ -505,12 +505,12 @@ mod tests {
             name: "tmpm-red-owl".into(),
             state: "Provisioning".into(),
             runtime: "claude-code".into(),
-            attach_cmd: "tmux attach -t tmpm-red-owl".into(),
+            attach_cmd: "tmux attach -t '=tmpm-red-owl'".into(),
         };
         let out = render_cli(&r);
         assert_eq!(
             out,
-            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t tmpm-red-owl"
+            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t '=tmpm-red-owl'"
         );
     }
 
@@ -551,9 +551,9 @@ mod tests {
         assert_eq!(
             render_cli(&CommandResult::ManagedAttachCmd {
                 id: "m-1".into(),
-                attach_cmd: "tmux attach -t tmpm-red-owl".into()
+                attach_cmd: "tmux attach -t '=tmpm-red-owl'".into()
             }),
-            "tmux attach -t tmpm-red-owl"
+            "tmux attach -t '=tmpm-red-owl'"
         );
     }
 

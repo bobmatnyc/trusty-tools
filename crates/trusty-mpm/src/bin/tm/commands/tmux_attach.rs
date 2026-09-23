@@ -482,8 +482,8 @@ fn print_fail_closed_hint(name: &str) {
          silently retarget an unrelated terminal)."
     );
     eprintln!(
-        "tm: attach from a fresh shell (outside any tmux client) with: tmux attach-session -t \
-         {name}"
+        "tm: attach from a fresh shell (outside any tmux client) with: \
+         tmux attach-session -t '={name}'"
     );
 }
 
@@ -582,8 +582,8 @@ fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
     if !status.success() {
         anyhow::bail!(
             "tmux switch-client exited with failure — the target session '{name}' may be \
-             attached on a different tmux server; try `tmux -L <socket> switch-client -t \
-             {name}` or detach the other client first"
+             attached on a different tmux server; try \
+             `tmux -L <socket> switch-client -t '={name}'` or detach the other client first"
         );
     }
     Ok(AttachOutcome::Switched)

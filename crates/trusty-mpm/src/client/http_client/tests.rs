@@ -784,13 +784,13 @@ fn managed_spawn_response_deserializes() {
         "name": "tmpm-x",
         "state": "running",
         "created_at": "2026-06-19T00:00:00Z",
-        "attach_cmd": "tmux attach-session -t tmpm-x",
+        "attach_cmd": "tmux attach-session -t '=tmpm-x'",
         "runtime": "claude-code",
     });
     let r: ManagedSpawnResponse = serde_json::from_value(json).unwrap();
     assert_eq!(r.id, "id-1");
     assert_eq!(r.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-x'");
     assert_eq!(r.runtime, "claude-code");
 
     // An absent `created_at` deserializes to `None`, while `attach_cmd` and
@@ -838,7 +838,7 @@ fn managed_adopt_response_deserializes() {
         "state": "active",
         "cwd": "/Users/op/work/proj",
         "runtime": "claude-code",
-        "attach_cmd": "tmux attach-session -t tmpm-hand-started",
+        "attach_cmd": "tmux attach-session -t '=tmpm-hand-started'",
     });
     let r: ManagedAdoptResponse = serde_json::from_value(json).unwrap();
     assert_eq!(r.id, "id-9");
@@ -846,7 +846,7 @@ fn managed_adopt_response_deserializes() {
     assert_eq!(r.state, "active");
     assert_eq!(r.cwd, "/Users/op/work/proj");
     assert_eq!(r.runtime, "claude-code");
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-hand-started");
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-hand-started'");
 
     // A lean response (only id/name/state) still deserializes; the defaulted
     // string fields fall back to empty.
@@ -882,10 +882,11 @@ fn managed_send_and_answer_round_trip() {
 
 #[test]
 fn managed_attach_cmd_response_deserializes() {
-    let r: ManagedAttachCmdResponse =
-        serde_json::from_value(serde_json::json!({"attach_cmd": "tmux attach-session -t tmpm-x"}))
-            .unwrap();
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+    let r: ManagedAttachCmdResponse = serde_json::from_value(
+        serde_json::json!({"attach_cmd": "tmux attach-session -t '=tmpm-x'"}),
+    )
+    .unwrap();
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-x'");
 }
 
 #[test]
