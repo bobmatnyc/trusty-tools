@@ -5,6 +5,9 @@
 
 use super::*;
 
+/// A canned answer from one fake subprocess.
+type Answer = Result<CmdOut, String>;
+
 fn ok(stdout: &str) -> Result<CmdOut, String> {
     Ok(CmdOut {
         success: true,
@@ -94,7 +97,7 @@ fn no_server_passes() {
 /// `Unknown` with its reason — never `Ok`.
 #[test]
 fn probe_errors_are_unknown() {
-    let cases: Vec<(&str, Result<CmdOut, String>, Result<CmdOut, String>)> = vec![
+    let cases: Vec<(&str, Answer, Answer)> = vec![
         (
             "tmux",
             Err("No such file or directory".to_owned()),
