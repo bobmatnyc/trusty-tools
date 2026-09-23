@@ -481,25 +481,41 @@ pub fn sample_capacity_readings() -> CapacityReadings {
         });
     let mut sampler = trusty_common::host_metrics::HostSampler::new();
     let memory = sampler.sample().memory;
-    // A `total_bytes` of zero is `sysinfo` reporting that it could not read the
-    // machine's memory at all — the ONLY way this read fails, and the shape the
-    // `builder-cap-memory-read-failure` surface exists for. Treating the
-    // accompanying `available_bytes` of zero as a real reading would refuse
-    // every builder on a machine that is not actually short of memory.
-    let available_bytes = if memory.total_bytes == 0 {
-        Err(ReadFailure {
-            surface: FailClosedSurface::Memory,
-            detail: "sysinfo reported a total memory of 0 bytes".to_string(),
-            errno: None,
-        })
-    } else {
-        Ok(memory.available_bytes)
-    };
+    let available_bytes = memory_reading(memory.total_bytes, memory.available_bytes);
     CapacityReadings {
         load_avg_1min,
         available_bytes,
         logical_cores: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
     }
+}
+
+/// Turn one `sysinfo` memory sample into an available-bytes reading.
+///
+/// Why: `sysinfo` reports a figure it could not compute as `0`, not as an
+/// error. A zero total is the machine's memory being unreadable; a zero
+/// available beside a real total is the same failure for the available
+/// figure — observed on macOS while `vm_stat` showed free pages (#8410). Either
+/// zero read as a measurement would refuse every builder on a machine that is
+/// not short of memory, so both fail closed on the
+/// `builder-cap-memory-read-failure` surface instead.
+/// What: `Ok(available)` when both figures are non-zero; otherwise a
+/// [`ReadFailure`] on [`FailClosedSurface::Memory`] naming which figure was 0.
+/// Test: `a_zero_memory_figure_is_unavailable_not_a_reading`,
+/// `live_readings_are_plausible_on_this_host`.
+fn memory_reading(total_bytes: u64, available_bytes: u64) -> Result<u64, ReadFailure> {
+    let zero_figure = if total_bytes == 0 {
+        "total"
+    } else if available_bytes == 0 {
+        // #8410: a zero available beside a real total is unavailable, not empty.
+        "available"
+    } else {
+        return Ok(available_bytes);
+    };
+    Err(ReadFailure {
+        surface: FailClosedSurface::Memory,
+        detail: format!("sysinfo reported {zero_figure} memory of 0 bytes"),
+        errno: None,
+    })
 }
 
 #[cfg(test)]
@@ -789,11 +805,59 @@ mod tests {
             .load_avg_1min
             .expect("a unix host exposes a 1-minute load average");
         assert!(load.is_finite() && load >= 0.0, "implausible load {load}");
-        let available = readings
-            .available_bytes
-            .expect("a host running this suite can report its memory");
-        assert!(available > 0, "a running host has some available memory");
+        // #8410: sysinfo can report 0 available on a live macOS host. That is
+        // the documented "unavailable" reading, never a panic; any OTHER
+        // failure, and any real reading, is still judged.
+        match readings.available_bytes {
+            Ok(available) => {
+                assert!(available > 0, "a running host has some available memory");
+            }
+            Err(failure) => {
+                assert_eq!(failure.surface, FailClosedSurface::Memory, "{failure:?}");
+                // Review follow-up on #8410: a live host's TOTAL memory is
+                // never 0, so only the "available" branch is plausible here —
+                // a zero TOTAL reading is a bug, not a benign flake, and must
+                // still fail this test.
+                assert!(
+                    failure.detail.ends_with("available memory of 0 bytes"),
+                    "only a zero available figure may make memory unavailable on a live host: \
+                     {failure:?}"
+                );
+            }
+        }
         assert!(readings.logical_cores >= 1);
+    }
+
+    /// REGRESSION (#8410): a zero figure from sysinfo is "unavailable", which
+    /// fails closed to the ceiling — never a measured 0 that refuses builders.
+    #[test]
+    fn a_zero_memory_figure_is_unavailable_not_a_reading() {
+        assert_eq!(
+            memory_reading(64 * 1024 * MB, 8 * 1024 * MB),
+            Ok(8 * 1024 * MB)
+        );
+        for (total, available, figure) in [(64 * 1024 * MB, 0, "available"), (0, 0, "total")] {
+            let failure = memory_reading(total, available).expect_err("a zero figure");
+            assert_eq!(failure.surface, FailClosedSurface::Memory);
+            assert!(failure.detail.contains(figure), "{failure:?}");
+            let readings = CapacityReadings {
+                available_bytes: Err(failure),
+                ..quiet_readings()
+            };
+            let capacity = resolve_capacity(
+                &readings,
+                &BuildersConfig::default(),
+                3,
+                0,
+                &mut QuietWindow::default(),
+                at(0),
+            );
+            assert_eq!(capacity.n_effective, 3, "{:?}", capacity.reason);
+            assert_eq!(
+                capacity.reason.fail_closed_surface(),
+                Some(FailClosedSurface::Memory)
+            );
+        }
     }
 
     #[test]

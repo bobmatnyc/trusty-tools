@@ -40,6 +40,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tm` only acts on `$TMUX_PANE` when it is an immutable `%N` pane id (#8443).
 - The `tm-session-resume` skill now realigns to the recorded window by its immutable `@N` id instead of a bare `session:index` target (#8443).
 - The attach command the daemon returns (`attach_cmd`) and the hints `tm` prints are now `tmux attach-session -t '=<name>'`, quoted so zsh does not read the leading `=` as a command-path expansion (#8443).
+- `tm doctor`'s `launchd_process_type` row description no longer restates the `com.trusty.mpm` / `com.trusty.mpm.supervisor` launchd labels as literals; it now points at `trusty_common::launchd_labels::MPM` and `MPM_SUPERVISOR`, the registry that owns them (#4919, #8415).
 
 ### Changed
 

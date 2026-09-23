@@ -65,7 +65,8 @@
 //! `a_head_sha_matching_the_merged_prs_own_head_grants_despite_a_stale_upstream` (#7958),
 //! `a_head_that_is_not_the_merged_prs_head_still_denies_when_ahead`,
 //! `an_unanswerable_head_sha_never_grants_an_ahead_worktree`,
-//! `a_merged_pr_carrying_no_head_sha_never_grants_an_ahead_worktree`
+//! `a_merged_pr_carrying_no_head_sha_never_grants_an_ahead_worktree`,
+//! `version_control_reaches_the_rechecks_for_a_sibling_layout_worktree` (#8413)
 //! below; `pm_guard_denies_worktree_remove_from_native_subagent` and
 //! `pm_guard_allows_worktree_remove_from_pm` run the binary end to end in
 //! `tests/tm_hook_pm_guard.rs`.
@@ -73,7 +74,7 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::dispatch_isolation::permitted_in_shared_checkout;
-use trusty_mpm::core::project_aliases::is_worktree_path;
+use trusty_mpm::core::project_aliases::{is_sibling_worktree_path, is_worktree_path};
 
 use super::main_checkout::git_verb_target_dir_with_tail;
 use super::worktree_remove_rechecks::{
@@ -241,12 +242,17 @@ pub(crate) fn evaluate_worktree_remove_command(
             ),
         ));
     }
-    if !is_worktree_path(&target) {
+    // #8413: the `<repo>-worktrees/<tree>` sibling layout is in scope too, but
+    // only for a LINKED worktree (`.git` is a file) — a main checkout that
+    // merely sits under a `*-worktrees` directory stays out of reach.
+    let sibling = is_sibling_worktree_path(&target) && target.join(".git").is_file();
+    if !is_worktree_path(&target) && !sibling {
         return WorktreeRemoveVerdict::Deny(recheck_deny(
             CHECK_WORKTREE_SCOPE,
             &target,
-            "the target is not under a harness worktree root (`.claude/worktrees/` or \
-             `.worktrees/`), and the grant reaches no other directory.",
+            "the target is not under a harness worktree root (`.claude/worktrees/`, \
+             `.worktrees/`, or a linked worktree in a `<repo>-worktrees/` sibling), and the \
+             grant reaches no other directory.",
         ));
     }
     WorktreeRemoveVerdict::ReCheck { target }
@@ -1231,6 +1237,41 @@ mod tests {
             true,
             version_control(),
             Path::new("/repo"),
+        ));
+        assert!(reason.contains(CHECK_WORKTREE_SCOPE), "{reason}");
+    }
+
+    /// 🔴 REGRESSION (#8413): a linked worktree in the harness's
+    /// `<repo>-worktrees/<tree>` sibling layout reaches the re-checks. Denied
+    /// at `worktree-scope` on origin/main. The adjacent case — a MAIN checkout
+    /// (`.git` directory) under a `*-worktrees` directory — still denies.
+    #[test]
+    fn version_control_reaches_the_rechecks_for_a_sibling_layout_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let linked = tmp.path().join("proj-worktrees").join("agent-a1");
+        std::fs::create_dir_all(&linked).expect("mkdir linked");
+        std::fs::write(
+            linked.join(".git"),
+            "gitdir: /proj/.git/worktrees/agent-a1\n",
+        )
+        .expect("write .git file");
+        let command = format!("git worktree remove {}", linked.display());
+        let target = recheck_target(evaluate_worktree_remove_command(
+            &command,
+            true,
+            version_control(),
+            tmp.path(),
+        ));
+        assert_eq!(target, linked);
+
+        let main = tmp.path().join("old-worktrees").join("proj");
+        std::fs::create_dir_all(main.join(".git")).expect("mkdir main .git");
+        let command = format!("git worktree remove {}", main.display());
+        let reason = deny_reason(evaluate_worktree_remove_command(
+            &command,
+            true,
+            version_control(),
+            tmp.path(),
         ));
         assert!(reason.contains(CHECK_WORKTREE_SCOPE), "{reason}");
     }
