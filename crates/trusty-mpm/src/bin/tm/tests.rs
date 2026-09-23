@@ -2213,6 +2213,133 @@ fn cli_parses_issue_audit_single_and_window() {
     );
 }
 
+/// #8447: `tm issue epic create --from <plan>` carries the filing inputs a plan
+/// document cannot supply — milestone, component, project, session.
+#[test]
+fn cli_parses_issue_epic_create() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "docs/research/tm-epic-cli/epic-plan.md",
+        "--milestone",
+        "Issue management",
+        "--component",
+        "trusty-mpm",
+        "--project",
+        "3",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    from,
+                    milestone,
+                    component,
+                    phase_type,
+                    project,
+                    session,
+                    tracker,
+                    dry_run,
+                }),
+            ..
+        } => {
+            assert_eq!(
+                from.to_string_lossy(),
+                "docs/research/tm-epic-cli/epic-plan.md"
+            );
+            assert_eq!(milestone.as_deref(), Some("Issue management"));
+            assert_eq!(component, vec!["trusty-mpm".to_string()]);
+            assert_eq!(phase_type, "enhancement", "the default type label");
+            assert_eq!(project, Some(3));
+            assert!(session.is_none());
+            assert!(tracker.is_none());
+            assert!(dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+}
+
+/// #8447: `--component` is repeatable, and `--tracker` resumes an interrupted
+/// run into an existing tracker.
+#[test]
+fn cli_parses_issue_epic_create_repeatable_components() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "plan.md",
+        "--milestone",
+        "Backlog · mpm/core",
+        "--component",
+        "trusty-mpm",
+        "--component",
+        "trusty-common",
+        "--phase-type",
+        "refactor",
+        "--session",
+        "tm-trusty-tools-15",
+        "--tracker",
+        "8445",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    component,
+                    phase_type,
+                    session,
+                    tracker,
+                    dry_run,
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(
+                component,
+                vec!["trusty-mpm".to_string(), "trusty-common".to_string()]
+            );
+            assert_eq!(phase_type, "refactor");
+            assert_eq!(session.as_deref(), Some("tm-trusty-tools-15"));
+            assert_eq!(tracker, Some(8445));
+            assert!(!dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+    // `--from` names the schema the whole verb reads; it is not optional.
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "create"]).is_err(),
+        "--from must be required"
+    );
+}
+
+/// #8447: `tm issue epic sync <epic#>` takes the tracker positionally.
+#[test]
+fn cli_parses_issue_epic_sync() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Sync { epic: 8445 }),
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync"]).is_err(),
+        "the tracker number must be required"
+    );
+}
+
 #[test]
 fn cli_parses_watch_poll_minimal() {
     // Why: the minimal `tm watch poll <project>` must parse with safety defaults

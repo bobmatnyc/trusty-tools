@@ -21,6 +21,7 @@
 
 pub(crate) mod audit;
 pub(crate) mod config;
+pub(crate) mod epic;
 pub(crate) mod ops;
 pub(crate) mod seed_ticketing;
 pub(crate) mod standard;
@@ -182,6 +183,11 @@ fn dispatch<S: TicketSystem>(
             since,
         } => {
             audit::run(&ticketing, gh_env, runner, issue, recent, since)?;
+        }
+        // #8447: the epic verbs reach `gh` and `git` through their own narrow
+        // `EpicBackend` seam (D7), so they need the identity, not the model.
+        IssueCmd::Epic(epic_cmd) => {
+            epic::run(epic_cmd, gh_env)?;
         }
         IssueCmd::Repair { issue, config } => {
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;

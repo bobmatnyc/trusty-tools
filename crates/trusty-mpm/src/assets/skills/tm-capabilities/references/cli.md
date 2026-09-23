@@ -47,6 +47,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
   - `audit` — Verify a filed issue carries a project, a milestone, and a component label (#7097)
   - `current` — Report an issue's current state, derived from its labels
+  - `epic` — File and maintain an epic tracker and its phase issues (#8447)
+    - `create` — File an epic tracker and its phase issues from a committed plan document
+    - `sync` — Regenerate a tracker's `phases` block from its live child issues
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
