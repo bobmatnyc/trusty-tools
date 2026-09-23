@@ -175,6 +175,7 @@ fn req(dry_run: bool) -> CleanupRequest {
         repo: Some("bobmatnyc/trusty-tools".to_string()),
         repo_root: root(),
         dry_run,
+        head_only: false,
     }
 }
 
@@ -525,6 +526,119 @@ async fn cleanup_clean_path_removes_everything() {
     );
     assert!(joined.contains("git worktree prune"), "{joined}");
     assert!(joined.contains("git fetch --prune origin"), "{joined}");
+}
+
+/// #8301: a second, unnamed worktree on its own `worktree-agent-*` branch whose
+/// tip is the merged head commit — the shape the wide rule sweeps.
+const OTHER_TREE: &str = "/repo/.claude/worktrees/agent-cc33";
+
+/// A `git` fake listing the head tree plus [`OTHER_TREE`] (#8301).
+fn git_two_trees() -> Scripted {
+    let listing = format!(
+        "{}worktree {OTHER_TREE}\nHEAD {HEAD_OID}\nbranch refs/heads/{AGENT_BRANCH_PREFIX}cc33\n\n",
+        worktree_listing()
+    );
+    let branches = format!("{}{AGENT_BRANCH_PREFIX}cc33 {HEAD_OID}\n", branch_listing());
+    Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on("git worktree list", &listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", &branches)
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "")
+}
+
+/// Assert the #8301 invariant: [`OTHER_TREE`] and its branch were not touched.
+fn assert_other_tree_untouched(joined: &str) {
+    assert!(
+        !joined.contains(&format!("git worktree remove {OTHER_TREE}")),
+        "an unnamed worktree must never be removed by a head-only cleanup: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git branch -D {AGENT_BRANCH_PREFIX}cc33")),
+        "an unnamed worktree's branch must never be deleted: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git branch -D {AGENT_BRANCH_PREFIX}aa11")),
+        "a head-only cleanup deletes the head branch and nothing else: {joined}"
+    );
+}
+
+/// 🔴 #8301: two worktrees; the merge-chained cleanup of one leaves the other
+/// and its branch intact, and names it in the report.
+#[tokio::test]
+async fn cleanup_8301_head_only_leaves_an_unnamed_tree_at_the_head_commit() {
+    let git = git_two_trees();
+    let req = CleanupRequest {
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "the PR's own head worktree is still removed: {joined}"
+    );
+    assert!(
+        joined.contains(&format!("git branch -D {BRANCH}")),
+        "{joined}"
+    );
+    assert_other_tree_untouched(&joined);
+    assert!(
+        report.render().contains(&format!(
+            "left in place, not this PR's head worktree: {OTHER_TREE}"
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+/// 🔴 #8301 error arm: when the head tree cannot be read, nothing is removed —
+/// neither the head tree nor the unnamed one.
+#[tokio::test]
+async fn cleanup_8301_an_unreadable_head_tree_removes_nothing() {
+    let git = git_two_trees();
+    let unreadable = |p: &Path| {
+        Some(DirtyWorktree {
+            path: p.to_path_buf(),
+            reason: "`git status` could not be run".to_string(),
+            dirty_files: 0,
+            unpushed_commits: 0,
+        })
+    };
+    let req = CleanupRequest {
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &unreadable,
+        &req,
+    )
+    .await;
+
+    assert!(report.failed(), "an unreadable tree must fail the run");
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "nothing may be removed when unsaved work cannot be ruled out: {joined}"
+    );
+    assert_other_tree_untouched(&joined);
 }
 
 /// 🔴 REGRESSION (#7275 round 2): a registry entry whose `repo` and

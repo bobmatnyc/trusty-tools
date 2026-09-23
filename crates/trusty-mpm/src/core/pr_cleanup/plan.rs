@@ -249,6 +249,35 @@ pub fn worktree_targets<'a>(
         .collect()
 }
 
+/// Split cleanup targets into the PR head's own trees and the rest (#8301).
+///
+/// Why: `tm pr merge` removed a worktree the caller never named because it sat
+/// on the merged head commit. A merge names exactly one branch, so a
+/// merge-chained cleanup removes only the tree that has that branch checked
+/// out; everything else [`worktree_targets`] matched is left for an explicit
+/// `tm pr cleanup <n>`.
+/// What: `(named, left)` — `named` holds the entries whose checked-out branch
+/// equals `head` exactly; `left` holds the rest. An empty `head` names nothing.
+/// Test: `cleanup_8301_head_only_leaves_an_unnamed_tree_at_the_head_commit`.
+pub fn split_head_only<'a>(
+    targets: Vec<&'a WorktreeEntry>,
+    head: &str,
+) -> (Vec<&'a WorktreeEntry>, Vec<&'a WorktreeEntry>) {
+    let head = head.trim();
+    targets
+        .into_iter()
+        .partition(|e| !head.is_empty() && e.branch.as_deref().map(str::trim) == Some(head))
+}
+
+/// The report line for trees a head-only cleanup did not touch (#8301).
+pub fn left_in_place(left: &[&WorktreeEntry], pr: u64) -> String {
+    let paths: Vec<String> = left.iter().map(|e| e.path.display().to_string()).collect();
+    format!(
+        "left in place, not this PR's head worktree: {} — `tm pr cleanup {pr}` reclaims them",
+        paths.join(", ")
+    )
+}
+
 /// The local branches this pull request owns, head and round-N siblings.
 ///
 /// Why: the sibling branch is the other half of what a round-2 fix leaves

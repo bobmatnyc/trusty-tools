@@ -126,6 +126,12 @@ pub struct CleanupRequest {
     pub repo_root: PathBuf,
     /// Print the plan and make no mutating call.
     pub dry_run: bool,
+    /// Remove only the PR's own head worktree and head branch (#8301).
+    ///
+    /// `tm pr merge` sets it: a merge names one PR, so trees that merely sit on
+    /// its head commit, round-N siblings and `worktree-agent-*` branches are
+    /// reported and left for an explicit `tm pr cleanup <n>`.
+    pub head_only: bool,
 }
 
 /// What one cleanup run did.
@@ -402,12 +408,20 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         }
     };
     let entries = plan::parse_worktree_list(&porcelain);
-    let targets = plan::worktree_targets(
+    let mut targets = plan::worktree_targets(
         &entries,
         &view.head_ref_name,
         &view.head_ref_oid,
         &req.repo_root,
     );
+    // #8301: a merge-chained run removes only the tree holding the head branch.
+    if req.head_only {
+        let (named, left) = plan::split_head_only(targets, &view.head_ref_name);
+        if !left.is_empty() {
+            lines.push(StepLine::ok(STEP, plan::left_in_place(&left, req.pr)));
+        }
+        targets = named;
+    }
     if targets.is_empty() {
         lines.push(StepLine::ok(
             STEP,
@@ -625,6 +639,14 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<
         Err(e) => return StepLine::failed(STEP, format!("{e:#}")),
     };
     let head = view.head_ref_name.trim();
+    // #8301: a merge-chained run deletes the head branch and nothing else.
+    if req.head_only {
+        let wanted = plan::pr_branches(&listing, head)
+            .into_iter()
+            .filter(|b| b == head)
+            .collect();
+        return delete_branches(git, req, wanted);
+    }
     // The head branch and its round-N siblings first, then every
     // `worktree-agent-*` branch still sitting on the merged head commit.
     let siblings = plan::pr_branches(&listing, head);
@@ -655,6 +677,13 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<
     if !refusals.is_empty() {
         return StepLine::failed(STEP, refusals.join("; "));
     }
+    delete_branches(git, req, wanted)
+}
+
+/// Step 4's deletion half: `git branch -D` each of `wanted`, stopping at the
+/// first failure.
+fn delete_branches<T: Git>(git: &T, req: &CleanupRequest, wanted: Vec<String>) -> StepLine {
+    const STEP: &str = "local-branch";
     if wanted.is_empty() {
         return StepLine::ok(STEP, "no local branch left to delete");
     }

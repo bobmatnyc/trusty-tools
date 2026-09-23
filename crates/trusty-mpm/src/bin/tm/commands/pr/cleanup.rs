@@ -120,6 +120,28 @@ pub(crate) async fn run(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<i32> {
+    run_scoped(args, client, url, false).await
+}
+
+/// One engine pass with the production `git`, landing and dirt probes.
+async fn run_engine(
+    gh: &RealGhRunner,
+    claims: &DaemonClaims,
+    req: &CleanupRequest,
+) -> trusty_mpm::core::pr_cleanup::CleanupReport {
+    // #7275: `RealLanding` is what decides a squash-merged branch is landed;
+    // `inspect_dirt`'s ahead-of-upstream count no longer refuses on its own.
+    trusty_mpm::core::pr_cleanup::run(gh, &RealGit, claims, &RealLanding, &inspect_dirt, req).await
+}
+
+/// [`run`], with the #8301 scope choice: `head_only` limits removal to the PR's
+/// own head worktree and branch, and prints the plan before removing anything.
+async fn run_scoped(
+    args: &PrCleanupArgs,
+    client: &reqwest::Client,
+    url: &str,
+    head_only: bool,
+) -> anyhow::Result<i32> {
     let gh = RealGhRunner::new()?;
     // Resolved, never left as the caller's `None`: the registry stamp below is
     // keyed by (repo, number), so a run that could not name its repository
@@ -133,19 +155,22 @@ pub(crate) async fn run(
         repo: Some(repo.clone()),
         repo_root: repo_root()?,
         dry_run: args.dry_run,
+        head_only,
     };
 
-    // #7275: `RealLanding` is what decides a squash-merged branch is landed;
-    // `inspect_dirt`'s ahead-of-upstream count no longer refuses on its own.
-    let report = trusty_mpm::core::pr_cleanup::run(
-        &gh,
-        &RealGit,
-        &claims,
-        &RealLanding,
-        &inspect_dirt,
-        &req,
-    )
-    .await;
+    // #8301: a merge-chained cleanup prints its plan before it removes anything.
+    if head_only && !req.dry_run {
+        let plan_req = CleanupRequest {
+            dry_run: true,
+            ..req.clone()
+        };
+        let plan = run_engine(&gh, &claims, &plan_req).await;
+        println!("cleanup plan for #{}:\n{}", req.pr, plan.render());
+        if plan.failed() {
+            return Ok(EXIT_BLOCKED);
+        }
+    }
+    let report = run_engine(&gh, &claims, &req).await;
     println!("{}", report.render());
     if report.failed() {
         return Ok(EXIT_BLOCKED);
@@ -168,11 +193,13 @@ pub(crate) async fn run(
 /// after merge confirmation", and a merge is "the most likely determiner of the
 /// obsolescence" of the worktree, branches and claim. Chaining it here is what
 /// makes the common path need no second command.
-/// What: forwards to [`run`] with the merged PR's number and `--repo`. The
-/// merge itself has already reported success, so a cleanup failure is reported
-/// on its own terms and returns its own nonzero code — the merge is not undone
-/// and is not re-reported as failed.
-/// Test: engine decisions in `core::pr_cleanup::tests`;
+/// What: forwards to [`run_scoped`] with the merged PR's number and `--repo`,
+/// scoped to the PR's own head worktree and branch (#8301) — other trees and
+/// branches the merge made obsolete are reported and left for `tm pr cleanup`.
+/// The merge itself has already reported success, so a cleanup failure is
+/// reported on its own terms and returns its own nonzero code — the merge is
+/// not undone and is not re-reported as failed.
+/// Test: `cleanup_8301_head_only_leaves_an_unnamed_tree_at_the_head_commit`;
 /// `cli_parses_pr_merge` pins the args this forwards.
 pub(crate) async fn after_merge(
     args: &crate::cli::PrMergeArgs,
@@ -184,5 +211,6 @@ pub(crate) async fn after_merge(
         repo: args.repo.clone(),
         dry_run: false,
     };
-    run(&cleanup, client, url).await
+    // #8301: a merge names one PR, so its cleanup removes only that PR's tree.
+    run_scoped(&cleanup, client, url, true).await
 }

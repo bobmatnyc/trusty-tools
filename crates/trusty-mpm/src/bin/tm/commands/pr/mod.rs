@@ -244,6 +244,15 @@ async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::R
             // the merge has not happened yet — the daemon's periodic sweep
             // picks that PR up when it does.
             if code == EXIT_OK && !args.auto {
+                // #8301: either flag means "delete no branch, remove no tree".
+                if args.no_cleanup || args.no_delete_branch {
+                    println!(
+                        "post-merge cleanup skipped — no worktree or local branch was touched; \
+                         run `tm pr cleanup {}` when ready",
+                        args.pr
+                    );
+                    return Ok(code);
+                }
                 return cleanup::after_merge(&args, client, url).await;
             }
             Ok(code)

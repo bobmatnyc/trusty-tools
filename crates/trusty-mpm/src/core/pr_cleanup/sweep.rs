@@ -114,6 +114,7 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
             repo: Some(entry.repo.clone()),
             repo_root: entry.repo_root.clone(),
             dry_run: false,
+            head_only: false,
         };
         let view = match super::view_pr(gh, &req) {
             Ok(v) => {
