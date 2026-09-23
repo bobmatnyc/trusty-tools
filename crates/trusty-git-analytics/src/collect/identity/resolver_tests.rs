@@ -95,24 +95,24 @@ fn all_aliases_registered() {
     assert_eq!(e, "alice@company.com");
 }
 
-/// Email local-part fuzzy: a short raw name like `"Bob M"` plus an
-/// email `<bob.matsuoka@co.com>` should resolve to `"Bob Matsuoka"`
+/// Email local-part fuzzy: a short raw name like `"Wesley N"` plus an
+/// email `<wesley.nakamura@co.com>` should resolve to `"Wesley Nakamura"`
 /// via the normalized fuzzy pass even when raw Jaro-Winkler on the
 /// short name falls below the strict 0.85 threshold.
 #[test]
 fn email_local_part_fuzzy_match() {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     map.insert(
-        "Bob Matsuoka".to_string(),
-        vec!["bob.matsuoka@duettoresearch.com".into()],
+        "Wesley Nakamura".to_string(),
+        vec!["wesley.nakamura@examplecorpresearch.com".into()],
     );
     let r = IdentityResolver::from_alias_map(&map);
 
     // Different email + truncated name — only the email local-part
-    // normalizes to "bob matsuoka" which matches the canonical name.
-    let (n, e) = r.resolve("Bob M", "bob.matsuoka@otherdomain.com");
-    assert_eq!(n, "Bob Matsuoka");
-    assert_eq!(e, "bob.matsuoka@duettoresearch.com");
+    // normalizes to "wesley nakamura" which matches the canonical name.
+    let (n, e) = r.resolve("Wesley N", "wesley.nakamura@otherdomain.com");
+    assert_eq!(n, "Wesley Nakamura");
+    assert_eq!(e, "wesley.nakamura@examplecorpresearch.com");
 }
 
 /// Email case must not affect lookup — `ALICE@COMPANY.COM` resolves
@@ -138,17 +138,17 @@ fn case_insensitive_email_lookup() {
 fn short_name_fuzzy() {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     map.insert(
-        "Bob Matsuoka".to_string(),
-        vec!["bob.matsuoka@co.com".into()],
+        "Wesley Nakamura".to_string(),
+        vec!["wesley.nakamura@co.com".into()],
     );
     let r = IdentityResolver::from_alias_map(&map);
 
-    // The unknown email forces fuzzy. "bob m" alone is too short for
-    // raw Jaro-Winkler to clear 0.85 against "bob matsuoka", but the
-    // local-part `bobm` normalizes and the normalized threshold (0.82)
+    // The unknown email forces fuzzy. "wesley n" alone is too short for
+    // raw Jaro-Winkler to clear 0.85 against "wesley nakamura", but the
+    // local-part `wesleyn` normalizes and the normalized threshold (0.82)
     // accepts the match.
-    let (n, _e) = r.resolve("Bob M", "bobm@unknown.test");
-    assert_eq!(n, "Bob Matsuoka");
+    let (n, _e) = r.resolve("Wesley N", "wesleyn@unknown.test");
+    assert_eq!(n, "Wesley Nakamura");
 }
 
 /// A completely unknown identity returns the raw input unchanged.
@@ -169,34 +169,34 @@ fn unknown_author_passthrough() {
 fn multiple_emails_same_person() {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     map.insert(
-        "Andre Ramos".to_string(),
+        "Victor Alarcon".to_string(),
         vec![
-            "andre.ramos@duettoresearch.com".into(),
-            "129991831+andreramosduetto@users.noreply.github.com".into(),
-            "andre@personal.dev".into(),
+            "victor.alarcon@examplecorpresearch.com".into(),
+            "583920174+victoralarconexample@users.noreply.github.com".into(),
+            "victor@personal.dev".into(),
         ],
     );
     let r = IdentityResolver::from_alias_map(&map);
 
-    let (n1, e1) = r.resolve("Andre Ramos", "andre.ramos@duettoresearch.com");
+    let (n1, e1) = r.resolve("Victor Alarcon", "victor.alarcon@examplecorpresearch.com");
     let (n2, e2) = r.resolve(
-        "andreramosduetto",
-        "129991831+andreramosduetto@users.noreply.github.com",
+        "victoralarconexample",
+        "583920174+victoralarconexample@users.noreply.github.com",
     );
-    let (n3, e3) = r.resolve("A. Ramos", "andre@personal.dev");
+    let (n3, e3) = r.resolve("V. Alarcon", "victor@personal.dev");
 
-    assert_eq!(n1, "Andre Ramos");
-    assert_eq!(n2, "Andre Ramos");
-    assert_eq!(n3, "Andre Ramos");
+    assert_eq!(n1, "Victor Alarcon");
+    assert_eq!(n2, "Victor Alarcon");
+    assert_eq!(n3, "Victor Alarcon");
     // Canonical email is the first email-looking alias for each.
-    assert_eq!(e1, "andre.ramos@duettoresearch.com");
-    assert_eq!(e2, "andre.ramos@duettoresearch.com");
-    assert_eq!(e3, "andre.ramos@duettoresearch.com");
+    assert_eq!(e1, "victor.alarcon@examplecorpresearch.com");
+    assert_eq!(e2, "victor.alarcon@examplecorpresearch.com");
+    assert_eq!(e3, "victor.alarcon@examplecorpresearch.com");
 }
 
 /// Verify resolution end-to-end through `Config::load` + external
 /// `aliases_file`, mirroring the shape of the deployed
-/// `configs/duetto-contractors.yaml` setup. This guards against
+/// `configs/examplecorp-contractors.yaml` setup. This guards against
 /// regressions in YAML schema, path resolution, or resolver wiring.
 ///
 /// The fixture is materialized into a `tempfile::TempDir` so the test is
@@ -207,29 +207,29 @@ fn multiple_emails_same_person() {
 /// remainder is coarser than a nanosecond, so the name is not actually
 /// unique. `TempDir` also cleans up on panic, which the manual path did not.
 #[test]
-fn duetto_contractors_config_resolves() {
+fn examplecorp_contractors_config_resolves() {
     let tmpdir = tempfile::TempDir::new().expect("create tmp");
     let tmp = tmpdir.path();
 
-    // Aliases file with a subset of the real Duetto contractor map,
+    // Aliases file with a subset of the real ExampleCorp contractor map,
     // including the cases the assertions below exercise (case-folding,
     // fuzzy match on email-local-part, non-email handle alias).
     let aliases_yaml = r#"
 developers:
-  - name: "Andre Ramos"
-    primary_email: "andre.ramos@duettoresearch.com"
+  - name: "Victor Alarcon"
+    primary_email: "victor.alarcon@examplecorpresearch.com"
     aliases:
-      - "129991831+andreramosduetto@users.noreply.github.com"
-  - name: "Akash Arora"
-    primary_email: "akash.arora@duettoresearch.com"
+      - "583920174+victoralarconexample@users.noreply.github.com"
+  - name: "Devraj Kapadia"
+    primary_email: "devraj.kapadia@examplecorpresearch.com"
     aliases:
-      - "Akash.Arora-c@duettoresearch.com"
-      - "akash-duetto"
-  - name: "Janga Vinod Kumar Reddy"
-    primary_email: "janga.reddy@duettoresearch.com"
+      - "Devraj.Kapadia-c@examplecorpresearch.com"
+      - "devraj-example"
+  - name: "Arun Deepak Kumar Nair"
+    primary_email: "arun.nair@examplecorpresearch.com"
     aliases:
-      - "jangareddy-duetto"
-      - "164324948+jangareddy-duetto@users.noreply.github.com"
+      - "arunnair-example"
+      - "728104553+arunnair-example@users.noreply.github.com"
 "#;
     let aliases_path = tmp.join("aliases.yaml");
     std::fs::write(&aliases_path, aliases_yaml).expect("write aliases");
@@ -238,29 +238,29 @@ developers:
         "version: \"1.0\"\naliases_file: \"{}\"\n",
         aliases_path.to_string_lossy()
     );
-    let config_path = tmp.join("duetto-contractors.yaml");
+    let config_path = tmp.join("examplecorp-contractors.yaml");
     std::fs::write(&config_path, config_yaml).expect("write config");
 
     let cfg =
-        crate::core::config::Config::load(&config_path).expect("load duetto-contractors yaml");
+        crate::core::config::Config::load(&config_path).expect("load examplecorp-contractors yaml");
     let r = IdentityResolver::from_config(&cfg);
 
     // Known mapping from the YAML (canonical email match).
-    let (n, _) = r.resolve("whoever", "andre.ramos@duettoresearch.com");
-    assert_eq!(n, "Andre Ramos");
+    let (n, _) = r.resolve("whoever", "victor.alarcon@examplecorpresearch.com");
+    assert_eq!(n, "Victor Alarcon");
 
     // Case-insensitive variant of an explicitly listed alias.
-    let (n, _) = r.resolve("whoever", "Akash.Arora-c@duettoresearch.com");
-    assert_eq!(n, "Akash Arora");
+    let (n, _) = r.resolve("whoever", "Devraj.Kapadia-c@examplecorpresearch.com");
+    assert_eq!(n, "Devraj Kapadia");
 
     // Non-email login handle alias.
-    let (n, _) = r.resolve("jangareddy-duetto", "noise@nowhere.test");
-    assert_eq!(n, "Janga Vinod Kumar Reddy");
+    let (n, _) = r.resolve("arunnair-example", "noise@nowhere.test");
+    assert_eq!(n, "Arun Deepak Kumar Nair");
 }
 
 #[test]
 fn normalize_for_fuzzy_basic() {
-    assert_eq!(normalize_for_fuzzy("Bob.Matsuoka"), "bob matsuoka");
+    assert_eq!(normalize_for_fuzzy("Wesley.Nakamura"), "wesley nakamura");
     assert_eq!(normalize_for_fuzzy("alice_smith-c"), "alice smith c");
     assert_eq!(normalize_for_fuzzy("  Foo   Bar  "), "foo bar");
 }
@@ -276,16 +276,22 @@ fn email_domain_matches_basic() {
     // Why: regression guard for the helper used by both the canonical-
     // email policy (#349) and the alias suggester (#347).
     assert!(email_domain_matches(
-        "a@DUETTORESEARCH.COM",
-        "duettoresearch.com"
+        "a@EXAMPLECORPRESEARCH.COM",
+        "examplecorpresearch.com"
     ));
     assert!(email_domain_matches(
-        "a@duettoresearch.com",
-        "@duettoresearch.com"
+        "a@examplecorpresearch.com",
+        "@examplecorpresearch.com"
     ));
-    assert!(!email_domain_matches("a@other.com", "duettoresearch.com"));
-    assert!(!email_domain_matches("invalid-email", "duettoresearch.com"));
-    assert!(!email_domain_matches("a@duettoresearch.com", ""));
+    assert!(!email_domain_matches(
+        "a@other.com",
+        "examplecorpresearch.com"
+    ));
+    assert!(!email_domain_matches(
+        "invalid-email",
+        "examplecorpresearch.com"
+    ));
+    assert!(!email_domain_matches("a@examplecorpresearch.com", ""));
 }
 
 #[test]
@@ -296,16 +302,16 @@ fn canonical_domain_prefers_org_email_for_team_member() {
     let team = TeamConfig {
         members: vec![TeamMember {
             name: "Alice Org".into(),
-            email: "alice@duettoresearch.com".into(),
+            email: "alice@examplecorpresearch.com".into(),
             aliases: vec!["alice@personal.com".into()],
         }],
         aliases: HashMap::new(),
-        canonical_domain: Some("duettoresearch.com".into()),
+        canonical_domain: Some("examplecorpresearch.com".into()),
     };
     let r = IdentityResolver::new(Some(&team));
     let (_, e) = r.resolve("Alice Org", "alice@personal.com");
-    assert_eq!(e, "alice@duettoresearch.com");
-    assert_eq!(r.canonical_domain(), Some("duettoresearch.com"));
+    assert_eq!(e, "alice@examplecorpresearch.com");
+    assert_eq!(r.canonical_domain(), Some("examplecorpresearch.com"));
 }
 
 /// (#6142 review) `tga aliases merge` deletes the source row and keeps the
@@ -404,20 +410,20 @@ fn canonical_domain_routes_new_personal_email_to_existing_org_row() {
     let team = TeamConfig {
         members: vec![],
         aliases: HashMap::new(),
-        canonical_domain: Some("duettoresearch.com".into()),
+        canonical_domain: Some("examplecorpresearch.com".into()),
     };
     let r = IdentityResolver::new(Some(&team));
     let db = Database::open_in_memory().expect("db");
     // Seed an existing identity at the org-domain address.
     let _ = r
-        .upsert_author(&db, "Bob Matsuoka", "bob@duettoresearch.com")
+        .upsert_author(&db, "Wesley Nakamura", "wesley@examplecorpresearch.com")
         .expect("seed");
 
     // Now the same person commits from a personal address. With the
     // canonical-domain policy this must collapse onto the existing row,
     // not insert a second one.
     let id = r
-        .upsert_author(&db, "Bob Matsuoka", "bob@personal.com")
+        .upsert_author(&db, "Wesley Nakamura", "wesley@personal.com")
         .expect("upsert");
     let stored_email: String = db
         .connection()
@@ -427,13 +433,13 @@ fn canonical_domain_routes_new_personal_email_to_existing_org_row() {
             |row| row.get(0),
         )
         .expect("lookup");
-    assert_eq!(stored_email, "bob@duettoresearch.com");
+    assert_eq!(stored_email, "wesley@examplecorpresearch.com");
 
-    // Exactly one row for "Bob Matsuoka".
+    // Exactly one row for "Wesley Nakamura".
     let count: i64 = db
         .connection()
         .query_row(
-            "SELECT COUNT(*) FROM authors WHERE canonical_name = 'Bob Matsuoka'",
+            "SELECT COUNT(*) FROM authors WHERE canonical_name = 'Wesley Nakamura'",
             [],
             |row| row.get(0),
         )
@@ -472,7 +478,10 @@ fn canonical_domain_absent_falls_back_to_first_seen_email() {
 fn email_domain_basic() {
     // Why: regression guard for the helper backing the Tier-3 domain gate
     // (#2253).
-    assert_eq!(email_domain("ops+snyk@Duetto.COM"), "duetto.com");
+    assert_eq!(
+        email_domain("ops+snyk@ExampleCorpResearch.COM"),
+        "examplecorpresearch.com"
+    );
     assert_eq!(email_domain("no-at-symbol"), "");
     // Only the last `@` delimits the domain.
     assert_eq!(email_domain("weird@name@example.org"), "example.org");
@@ -482,7 +491,7 @@ fn email_domain_basic() {
 /// NOT collapse into one identity via the Tier-3 fuzzy pass.
 ///
 /// Before the fix, Tier 3 scored Jaro-Winkler on the FULL email string, so
-/// `jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")`
+/// `jaro_winkler("ops+snyk@examplecorpresearch.com", "jenkins@examplecorpresearch.com")`
 /// = 0.857 ≥ 0.85 (the shared 18-char domain suffix alone cleared the bar),
 /// misattributing every Snyk-bot commit to "Jenkins CI". Comparing
 /// local-parts under a domain-equality gate keeps them distinct.
@@ -491,7 +500,7 @@ fn tier3_does_not_merge_bots_sharing_domain_suffix() {
     let team = TeamConfig {
         members: vec![TeamMember {
             name: "Jenkins CI".into(),
-            email: "jenkins@duettoresearch.com".into(),
+            email: "jenkins@examplecorpresearch.com".into(),
             aliases: vec![],
         }],
         aliases: HashMap::new(),
@@ -502,19 +511,21 @@ fn tier3_does_not_merge_bots_sharing_domain_suffix() {
     // Sanity: the pre-fix root cause really did clear the threshold on the
     // full-string comparison, so this test is guarding a real regression.
     assert!(
-        jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")
-            >= DEFAULT_SIMILARITY_THRESHOLD,
+        jaro_winkler(
+            "ops+snyk@examplecorpresearch.com",
+            "jenkins@examplecorpresearch.com"
+        ) >= DEFAULT_SIMILARITY_THRESHOLD,
         "precondition: full-string similarity should exceed the threshold"
     );
 
-    let (name, email) = r.resolve("Snyk Bot", "ops+snyk@duettoresearch.com");
+    let (name, email) = r.resolve("Jordan Sampleauthor", "ops+snyk@examplecorpresearch.com");
     assert_ne!(
         name, "Jenkins CI",
         "Snyk bot must not be misattributed to Jenkins CI (#2253)"
     );
     // The unrelated bot falls through unchanged.
-    assert_eq!(name, "Snyk Bot");
-    assert_eq!(email, "ops+snyk@duettoresearch.com");
+    assert_eq!(name, "Jordan Sampleauthor");
+    assert_eq!(email, "ops+snyk@examplecorpresearch.com");
 }
 
 /// The #2253 fix must not over-tighten: a genuine same-person match — same
@@ -546,35 +557,35 @@ fn tier3_still_matches_same_domain_near_identical_local_parts() {
 // `aliases_file` is supplied.
 // ---------------------------------------------------------------------------
 
-/// Roster excerpt from the production Duetto alias map (177 entries) — only the
+/// Roster excerpt from the production ExampleCorp alias map (177 entries) — only the
 /// members implicated in the #4251 misattributions, plus two entries whose
 /// explicit aliases must keep resolving through Tiers 1/2.
 const ISSUE_4251_ALIASES_YAML: &str = r#"
 developers:
-  - name: "Crislaine Tripoli"
-    primary_email: "crislaine.tripoli@duettoresearch.com"
+  - name: "Kristina Amberly"
+    primary_email: "kristina.amberly@examplecorpresearch.com"
     aliases: []
-  - name: "Ravi Pandey"
-    primary_email: "ravi.pandey@duettoresearch.com"
+  - name: "Milan Advani"
+    primary_email: "milan.advani@examplecorpresearch.com"
     aliases: []
-  - name: "Gaurav Sharma"
-    primary_email: "gaurav.sharma@duettoresearch.com"
+  - name: "Rohan Deshmukh"
+    primary_email: "rohan.deshmukh@examplecorpresearch.com"
     aliases: []
-  - name: "Joshua Lepage"
-    primary_email: "joshua.lepage@duettoresearch.com"
+  - name: "Jonathan Whitfield"
+    primary_email: "jonathan.whitfield@examplecorpresearch.com"
     aliases: []
-  - name: "Joshua McCartney"
-    primary_email: "joshua.mccartney@duettoresearch.com"
+  - name: "Jordan Mercer"
+    primary_email: "jordan.mercer@examplecorpresearch.com"
     aliases: []
-  - name: "Akash Arora"
-    primary_email: "akash.arora@duettoresearch.com"
+  - name: "Devraj Kapadia"
+    primary_email: "devraj.kapadia@examplecorpresearch.com"
     aliases:
-      - "Akash.Arora-c@duettoresearch.com"
-      - "akash-duetto"
-  - name: "Andre Ramos"
-    primary_email: "andre.ramos@duettoresearch.com"
+      - "Devraj.Kapadia-c@examplecorpresearch.com"
+      - "devraj-example"
+  - name: "Victor Alarcon"
+    primary_email: "victor.alarcon@examplecorpresearch.com"
     aliases:
-      - "129991831+andreramosduetto@users.noreply.github.com"
+      - "583920174+victoralarconexample@users.noreply.github.com"
 "#;
 
 /// The `(author_name, author_email)` pairs observed in production `tga.db` that
@@ -582,22 +593,30 @@ developers:
 /// wrongly collapsed onto.
 const ISSUE_4251_MISATTRIBUTIONS: &[(&str, &str, &str)] = &[
     (
-        "Cristian Dominguez",
-        "cristian.dominguez@duettoresearch.com",
-        "Crislaine Tripoli",
+        "Kristian Voss",
+        "kristian.voss@examplecorpresearch.com",
+        "Kristina Amberly",
     ),
     (
-        "Ravi Chandrasekaran",
-        "ravi.chandrasekaran@duettoresearch.com",
-        "Ravi Pandey",
+        "Milan Venkataraman",
+        "milan.venkataraman@examplecorpresearch.com",
+        "Milan Advani",
     ),
     (
-        "Gauri Saykar",
-        "gauri.saykar@duettoresearch.com",
-        "Gaurav Sharma",
+        "Rohana Deshkar",
+        "rohana.deshkar@examplecorpresearch.com",
+        "Rohan Deshmukh",
     ),
-    ("Josh Taylor", "josh@duettoresearch.com", "Joshua Lepage"),
-    ("Joseph Ku", "joseph.ku@duettoresearch.com", "Joshua Lepage"),
+    (
+        "Jonah Carver",
+        "jonah@examplecorpresearch.com",
+        "Jonathan Whitfield",
+    ),
+    (
+        "Jonah Wheeler",
+        "jonah.wheeler@examplecorpresearch.com",
+        "Jonathan Whitfield",
+    ),
 ];
 
 /// Materialize a `config.yaml` + external `aliases_file` pair into a private
@@ -645,17 +664,17 @@ fn resolver_from_aliases_file(extra_config_yaml: &str) -> (IdentityResolver, tem
 /// a substitute: it is derived from config, not from load success.
 fn assert_roster_loaded(r: &IdentityResolver) {
     assert_eq!(
-        r.resolve("whoever", "crislaine.tripoli@duettoresearch.com"),
+        r.resolve("whoever", "kristina.amberly@examplecorpresearch.com"),
         (
-            "Crislaine Tripoli".to_string(),
-            "crislaine.tripoli@duettoresearch.com".to_string()
+            "Kristina Amberly".to_string(),
+            "kristina.amberly@examplecorpresearch.com".to_string()
         ),
         "non-vacuity: the roster must actually be loaded, otherwise a \
          pass-through result proves nothing"
     );
     assert_eq!(
-        r.resolve("akash-duetto", "noise@nowhere.test").0,
-        "Akash Arora",
+        r.resolve("devraj-example", "noise@nowhere.test").0,
+        "Devraj Kapadia",
         "non-vacuity: declared login-handle aliases must be present"
     );
 }
@@ -721,27 +740,27 @@ fn aliases_file_gate_preserves_tier12_declared_resolutions() {
     let (r, _tmp) = resolver_from_aliases_file("");
 
     // Declared secondary email (the `-c` contractor variant) → canonical pair.
-    let (n, e) = r.resolve("whoever", "Akash.Arora-c@duettoresearch.com");
-    assert_eq!(n, "Akash Arora");
-    assert_eq!(e, "akash.arora@duettoresearch.com");
+    let (n, e) = r.resolve("whoever", "Devraj.Kapadia-c@examplecorpresearch.com");
+    assert_eq!(n, "Devraj Kapadia");
+    assert_eq!(e, "devraj.kapadia@examplecorpresearch.com");
 
     // Declared non-email login handle.
-    let (n, e) = r.resolve("akash-duetto", "noise@nowhere.test");
-    assert_eq!(n, "Akash Arora");
-    assert_eq!(e, "akash.arora@duettoresearch.com");
+    let (n, e) = r.resolve("devraj-example", "noise@nowhere.test");
+    assert_eq!(n, "Devraj Kapadia");
+    assert_eq!(e, "devraj.kapadia@examplecorpresearch.com");
 
     // Declared GitHub noreply alias.
     let (n, e) = r.resolve(
-        "andreramosduetto",
-        "129991831+andreramosduetto@users.noreply.github.com",
+        "victoralarconexample",
+        "583920174+victoralarconexample@users.noreply.github.com",
     );
-    assert_eq!(n, "Andre Ramos");
-    assert_eq!(e, "andre.ramos@duettoresearch.com");
+    assert_eq!(n, "Victor Alarcon");
+    assert_eq!(e, "victor.alarcon@examplecorpresearch.com");
 
     // Canonical email, case-folded.
-    let (n, e) = r.resolve("whoever", "CRISLAINE.TRIPOLI@DUETTORESEARCH.COM");
-    assert_eq!(n, "Crislaine Tripoli");
-    assert_eq!(e, "crislaine.tripoli@duettoresearch.com");
+    let (n, e) = r.resolve("whoever", "KRISTINA.AMBERLY@EXAMPLECORPRESEARCH.COM");
+    assert_eq!(n, "Kristina Amberly");
+    assert_eq!(e, "kristina.amberly@examplecorpresearch.com");
 }
 
 /// `fuzzy_identity_fallback: true` is the documented escape hatch: a project
@@ -756,11 +775,11 @@ fn explicit_opt_in_reenables_fuzzy_with_aliases_file() {
     );
     assert_roster_loaded(&r);
 
-    // With fuzzy back on, `Gauri Saykar` collapses onto `Gaurav Sharma` again —
+    // With fuzzy back on, `Rohana Deshkar` collapses onto `Rohan Deshmukh` again —
     // the exact defect #4251 reports, proving the flag is load-bearing and the
     // primary test above is not passing for some unrelated reason.
-    let (n, _) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
-    assert_eq!(n, "Gaurav Sharma");
+    let (n, _) = r.resolve("Rohana Deshkar", "rohana.deshkar@examplecorpresearch.com");
+    assert_eq!(n, "Rohan Deshmukh");
 }
 
 /// The non-vacuity control must actually reject a resolver that never loaded
@@ -780,13 +799,10 @@ fn non_vacuity_control_rejects_zero_member_resolver() {
     // Sanity: this resolver passes everything through, exactly like the racing
     // zero-member resolver did.
     assert_eq!(
-        r.resolve(
-            "Cristian Dominguez",
-            "cristian.dominguez@duettoresearch.com"
-        ),
+        r.resolve("Kristian Voss", "kristian.voss@examplecorpresearch.com"),
         (
-            "Cristian Dominguez".to_string(),
-            "cristian.dominguez@duettoresearch.com".to_string()
+            "Kristian Voss".to_string(),
+            "kristian.voss@examplecorpresearch.com".to_string()
         )
     );
     assert_roster_loaded(&r); // must panic
@@ -857,8 +873,8 @@ fn inline_developer_aliases_do_not_disable_fuzzy() {
     let yaml = r#"
 version: "1.0"
 developer_aliases:
-  "Gaurav Sharma":
-    - "gaurav.sharma@duettoresearch.com"
+  "Rohan Deshmukh":
+    - "rohan.deshmukh@examplecorpresearch.com"
 "#;
     let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
     assert!(
@@ -871,8 +887,8 @@ developer_aliases:
         "#4251 gates on aliases_file, not on any non-empty alias map"
     );
     // Historical fuzzy behaviour is intact for these deployments.
-    let (n, _) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
-    assert_eq!(n, "Gaurav Sharma");
+    let (n, _) = r.resolve("Rohana Deshkar", "rohana.deshkar@examplecorpresearch.com");
+    assert_eq!(n, "Rohan Deshmukh");
 }
 
 /// `fuzzy_identity_fallback: false` turns the fallback off even when no
@@ -883,15 +899,15 @@ fn explicit_opt_out_disables_fuzzy_without_aliases_file() {
 version: "1.0"
 fuzzy_identity_fallback: false
 developer_aliases:
-  "Gaurav Sharma":
-    - "gaurav.sharma@duettoresearch.com"
+  "Rohan Deshmukh":
+    - "rohan.deshmukh@examplecorpresearch.com"
 "#;
     let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
     let r = IdentityResolver::from_config(&cfg);
     assert!(!r.fuzzy_fallback());
-    let (n, e) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
-    assert_eq!(n, "Gauri Saykar");
-    assert_eq!(e, "gauri.saykar@duettoresearch.com");
+    let (n, e) = r.resolve("Rohana Deshkar", "rohana.deshkar@examplecorpresearch.com");
+    assert_eq!(n, "Rohana Deshkar");
+    assert_eq!(e, "rohana.deshkar@examplecorpresearch.com");
 }
 
 /// No `aliases_file` and no explicit flag → historical behaviour is preserved
@@ -902,14 +918,14 @@ fn no_aliases_file_keeps_fuzzy_enabled_by_default() {
     let yaml = r#"
 version: "1.0"
 developer_aliases:
-  "Bob Matsuoka":
-    - "bob.matsuoka@duettoresearch.com"
+  "Wesley Nakamura":
+    - "wesley.nakamura@examplecorpresearch.com"
 "#;
     let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
     let r = IdentityResolver::from_config(&cfg);
     assert!(r.fuzzy_fallback());
-    let (n, _) = r.resolve("Bob M", "bob.matsuoka@otherdomain.com");
-    assert_eq!(n, "Bob Matsuoka");
+    let (n, _) = r.resolve("Wesley N", "wesley.nakamura@otherdomain.com");
+    assert_eq!(n, "Wesley Nakamura");
 }
 
 /// The builder switch works for callers that never touch `Config`
@@ -940,7 +956,7 @@ fn issue_2253_domain_gate_intact_when_fuzzy_enabled() {
         members: vec![
             TeamMember {
                 name: "Jenkins CI".into(),
-                email: "jenkins@duettoresearch.com".into(),
+                email: "jenkins@examplecorpresearch.com".into(),
                 aliases: vec![],
             },
             TeamMember {
@@ -957,13 +973,15 @@ fn issue_2253_domain_gate_intact_when_fuzzy_enabled() {
 
     // Shared domain suffix alone must NOT merge two unrelated bots (#2253).
     assert!(
-        jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")
-            >= DEFAULT_SIMILARITY_THRESHOLD,
+        jaro_winkler(
+            "ops+snyk@examplecorpresearch.com",
+            "jenkins@examplecorpresearch.com"
+        ) >= DEFAULT_SIMILARITY_THRESHOLD,
         "precondition: full-string similarity clears the threshold"
     );
-    let (n, e) = r.resolve("Snyk Bot", "ops+snyk@duettoresearch.com");
-    assert_eq!(n, "Snyk Bot");
-    assert_eq!(e, "ops+snyk@duettoresearch.com");
+    let (n, e) = r.resolve("Jordan Sampleauthor", "ops+snyk@examplecorpresearch.com");
+    assert_eq!(n, "Jordan Sampleauthor");
+    assert_eq!(e, "ops+snyk@examplecorpresearch.com");
 
     // ...while a genuine same-domain, near-identical local-part still matches.
     let (n, e) = r.resolve("acoopr", "alice.coopr@acme.com");
@@ -976,14 +994,14 @@ fn canonical_domain_read_from_config() {
     // Why: confirms YAML deserialization wires the new key end-to-end.
     let yaml = r#"
 team:
-  canonical_domain: "duettoresearch.com"
+  canonical_domain: "examplecorpresearch.com"
   members:
     - name: "Alice"
-      email: "alice@duettoresearch.com"
+      email: "alice@examplecorpresearch.com"
 "#;
     let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).expect("parse");
     let r = IdentityResolver::from_config(&cfg);
-    assert_eq!(r.canonical_domain(), Some("duettoresearch.com"));
+    assert_eq!(r.canonical_domain(), Some("examplecorpresearch.com"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,12 +1018,12 @@ fn member_order_is_deterministic_across_rebuilds() {
     fn build() -> IdentityResolver {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for (name, email) in [
-            ("Joshua Lepage", "joshua.lepage@acme.com"),
-            ("Joshua Mccartney", "joshua.mccartney@acme.com"),
-            ("Joshua Renner", "joshua.renner@acme.com"),
-            ("Joshua Vance", "joshua.vance@acme.com"),
-            ("Joshua Whitlock", "joshua.whitlock@acme.com"),
-            ("Joshua Ackley", "joshua.ackley@acme.com"),
+            ("Alex Mockdata", "alex.mockdata@acme.com"),
+            ("Alex Placeholder", "alex.placeholder@acme.com"),
+            ("Alex Samplename", "alex.samplename@acme.com"),
+            ("Alex Stubvalue", "alex.stubvalue@acme.com"),
+            ("Alex Testfixture", "alex.testfixture@acme.com"),
+            ("Alex Dummyrecord", "alex.dummyrecord@acme.com"),
         ] {
             map.insert(name.to_string(), vec![email.to_string()]);
         }
@@ -1014,18 +1032,18 @@ fn member_order_is_deterministic_across_rebuilds() {
 
     // Sorted by (canonical_email, canonical_name), not by declaration order.
     let expected_members: Vec<(String, String)> = [
-        ("Joshua Ackley", "joshua.ackley@acme.com"),
-        ("Joshua Lepage", "joshua.lepage@acme.com"),
-        ("Joshua Mccartney", "joshua.mccartney@acme.com"),
-        ("Joshua Renner", "joshua.renner@acme.com"),
-        ("Joshua Vance", "joshua.vance@acme.com"),
-        ("Joshua Whitlock", "joshua.whitlock@acme.com"),
+        ("Alex Dummyrecord", "alex.dummyrecord@acme.com"),
+        ("Alex Mockdata", "alex.mockdata@acme.com"),
+        ("Alex Placeholder", "alex.placeholder@acme.com"),
+        ("Alex Samplename", "alex.samplename@acme.com"),
+        ("Alex Stubvalue", "alex.stubvalue@acme.com"),
+        ("Alex Testfixture", "alex.testfixture@acme.com"),
     ]
     .iter()
     .map(|(n, e)| ((*n).to_string(), (*e).to_string()))
     .collect();
 
-    let expected_resolution = build().resolve("josh", "josh@unaffiliated.test");
+    let expected_resolution = build().resolve("alex", "alex@unaffiliated.test");
     for i in 0..100 {
         let r = build();
         assert_eq!(
@@ -1033,7 +1051,7 @@ fn member_order_is_deterministic_across_rebuilds() {
             "members order differs on rebuild {i}"
         );
         assert_eq!(
-            r.resolve("josh", "josh@unaffiliated.test"),
+            r.resolve("alex", "alex@unaffiliated.test"),
             expected_resolution,
             "resolution differs on rebuild {i}"
         );
@@ -1062,10 +1080,10 @@ fn fuzzy_tie_breaks_on_stable_key() {
         }
     }
 
-    let a = ("Sam Taylor", "a.taylor@acme.com");
-    let b = ("Sam Taylor", "b.taylor@acme.com");
-    let inbound_name = "Sam Taylorr";
-    let inbound_email = "sam@unaffiliated.test";
+    let a = ("Chris Testperson", "a.testperson@acme.com");
+    let b = ("Chris Testperson", "b.testperson@acme.com");
+    let inbound_name = "Chris Testpersonn";
+    let inbound_email = "chris@unaffiliated.test";
 
     // Precondition: the two members score an EXACT tie for this inbound pair.
     // An exact tie is the trigger condition for the defect.
@@ -1080,9 +1098,9 @@ fn fuzzy_tie_breaks_on_stable_key() {
     for order in [[a, b], [b, a]] {
         let r = IdentityResolver::new(Some(&team(order)));
         let (n, e) = r.resolve(inbound_name, inbound_email);
-        assert_eq!(n, "Sam Taylor");
+        assert_eq!(n, "Chris Testperson");
         assert_eq!(
-            e, "a.taylor@acme.com",
+            e, "a.testperson@acme.com",
             "tie must go to the lowest (email, name) key; declared order was {order:?}"
         );
     }
