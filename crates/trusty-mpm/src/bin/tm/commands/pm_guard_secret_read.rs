@@ -1263,10 +1263,12 @@ const TERRAFORM_STATE_FLAGS: &[&str] = &["-state", "-state-out", "-backup"];
 /// segment, then requires the program to be `terraform`, its first non-flag
 /// argument to be a [`STATE_CONSUMING_TERRAFORM_SUBCOMMANDS`] entry, and every
 /// word in `named` to come from a [`TERRAFORM_STATE_FLAGS`] value (`-state=<p>`
-/// or `-state <p>`). A `-var-file=<file>` naming a secret beside it is not a
-/// state flag and still denies.
+/// or `-state <p>`). Every state flag value must itself be
+/// [`is_state_file_shaped`]. A `-var-file=<file>` naming a secret beside it is
+/// not a state flag and still denies.
 /// Test: `allows_terraform_apply_against_a_named_state_file`,
-/// `denies_terraform_forms_that_print_or_read_other_secrets`.
+/// `denies_terraform_forms_that_print_or_read_other_secrets`,
+/// `denies_a_state_flag_naming_a_non_state_file`.
 fn terraform_only_consumes_state(segment: &str, named: &[String]) -> bool {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return false;
@@ -1299,11 +1301,25 @@ fn terraform_only_consumes_state(segment: &str, named: &[String]) -> bool {
             _ => {}
         }
     }
+    // #8249: a state flag may name only a state file, or it launders a secret
+    // (`-state=<credentials>`) or copies state out (`-state-out=/tmp/x.txt`).
+    if !state_values.iter().all(|v| is_state_file_shaped(v)) {
+        return false;
+    }
     let consumed: Vec<String> = state_values
         .iter()
         .flat_map(|v| secret_files_named_in(v, Scan::Argv))
         .collect();
     named.iter().all(|n| consumed.iter().any(|c| c == n))
+}
+
+/// A `*.tfstate` / `*.tfstate.backup` basename, or `-` (`-backup=-`
+/// disables the backup) (#8249).
+fn is_state_file_shaped(value: &str) -> bool {
+    let base = value.rsplit('/').next().unwrap_or(value);
+    value == "-"
+        || (base.len() > ".tfstate".len() && base.ends_with(".tfstate"))
+        || (base.len() > ".tfstate.backup".len() && base.ends_with(".tfstate.backup"))
 }
 
 /// Whether the git call's arguments from `after` carry a
@@ -1603,6 +1619,35 @@ mod tests {
             "terraform apply -state=$(cat /repo/infra/terraform.tfstate)",
         ] {
             assert!(eval(command).is_some(), "{command}");
+        }
+    }
+
+    /// 🔴 REGRESSION (#8249 review, MEDIUM): a state flag launders any secret
+    /// through terraform, or copies state out to a readable file, unless its
+    /// value is state-file shaped. Allowed on the first cut. The secret paths
+    /// are assembled at runtime so no literal names one.
+    #[test]
+    fn denies_a_state_flag_naming_a_non_state_file() {
+        let state = "/repo/infra/terraform.tfstate";
+        for command in [
+            format!("terraform apply -state=~/.aws/{}", "credentials"),
+            format!(
+                "terraform apply -state={state} -state-out=~/.ssh/{}",
+                "id_rsa"
+            ),
+            format!(
+                "terraform plan -state={state} -backup=/repo/{}.production",
+                ".env"
+            ),
+            format!("terraform apply -state={state} -state-out=/tmp/leak.txt"),
+        ] {
+            assert!(eval(&command).is_some(), "{command}");
+        }
+        for command in [
+            "terraform apply -state=terraform.tfstate",
+            "terraform apply -state=/repo/infra/terraform.tfstate -backup=-",
+        ] {
+            assert_eq!(eval(command), None, "{command}");
         }
     }
 
