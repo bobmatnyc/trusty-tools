@@ -359,45 +359,52 @@ async fn flush_one_index_on_shutdown(
 
     // Fix #874 (2): derive paths inside a short read-lock scope, then drop
     // the guard before doing blocking I/O (redb flush + HNSW save).
-    // No concurrent writers exist once axum has drained gracefully, so this
-    // is safe — we're only reading index metadata, not modifying the indexer.
-    let is_colocated = crate::service::colocated_storage::has_colocated_storage(&handle.root_path);
-
-    // Resolve both paths before we do any I/O. If either path is unresolvable
-    // we skip with a warn (same as before, just earlier).
-    let chunks_path = if is_colocated {
-        // Colocated indexes write their corpus to redb only (no JSON fallback).
-        // Provide a dummy path — `flush_corpus_to_disk` won't use it when a
-        // `CorpusStore` is wired; the redb file lives in `.trusty-search/`.
-        handle.root_path.join(".trusty-search").join("chunks.json")
-    } else {
-        match crate::service::persistence::chunks_path(&id.0) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("shutdown: chunks path unresolvable for '{}': {e}", id.0);
-                return true;
-            }
+    // #8438: the targets come from the registry-named layout the indexer
+    // carries — never from whether `<root>/.trusty-search/` exists. The read
+    // is bounded by the remaining window so a wedged writer cannot hold
+    // shutdown past it.
+    let layout = match tokio::time::timeout(
+        budget.remaining(),
+        crate::service::storage_layout::layout_of(&handle),
+    )
+    .await
+    {
+        Ok(layout) => layout,
+        Err(_) => {
+            tracing::warn!(
+                "shutdown: skipping flush for '{}' — the indexer lock was not released \
+                 inside the termination window. On-disk state is from the last \
+                 incremental persist.",
+                id.0,
+            );
+            return false;
         }
     };
-    let hnsw_path = if is_colocated {
-        match crate::service::colocated_storage::colocated_hnsw_path(&handle.root_path) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "shutdown: colocated hnsw path unresolvable for '{}': {e}",
-                    id.0
-                );
-                return true;
+    use crate::service::storage_layout::{
+        is_write_refusal, StorageLayout, CHUNKS_JSON_FILE, HNSW_FILE,
+    };
+    let resolve =
+        |layout: StorageLayout, name: &str| match layout.file(&id.0, &handle.root_path, name) {
+            Ok(p) => Some(p),
+            Err(e) if is_write_refusal(&e) => {
+                tracing::error!("shutdown: {e:#} — flush skipped");
+                None
             }
-        }
-    } else {
-        match crate::service::persistence::hnsw_path(&id.0) {
-            Ok(p) => p,
             Err(e) => {
-                tracing::warn!("shutdown: hnsw path unresolvable for '{}': {e}", id.0);
-                return true;
+                tracing::warn!("shutdown: {name} path unresolvable for '{}': {e}", id.0);
+                None
             }
-        }
+        };
+    // #8438: HNSW first, so a refusal (guard, or a colocated root that no
+    // longer exists) skips the whole flush before anything is created.
+    let Some(hnsw_path) = resolve(layout, HNSW_FILE) else {
+        return true;
+    };
+    // #8438: `chunks.json` (written only when no `CorpusStore` is wired) is a
+    // data-dir-only artifact for every layout — the one reader,
+    // `JsonCorpusToRedbMigration`, looks nowhere else.
+    let Some(chunks_path) = resolve(StorageLayout::DataDir, CHUNKS_JSON_FILE) else {
+        return true;
     };
 
     // Issue #2922: size the deadline from this index's own on-disk snapshot
@@ -521,6 +528,10 @@ where
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shutdown_flush_8438_tests.rs"]
+mod shutdown_flush_8438_tests;
 
 #[cfg(test)]
 mod tests {

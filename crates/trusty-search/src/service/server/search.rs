@@ -442,17 +442,15 @@ pub(super) async fn unregister_index(
         }
     }
     let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
-    let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
+    let root_path_for_cleanup = removed_handle.as_ref().map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
     // forever for an id that is now absent from every store. Sampled BEFORE the
     // purge because a cold-parked or restore-failed index is not in the hot
     // registry — `removed` is false for exactly the ids this is meant to reap,
     // and the durable cleanup below must still run for them.
     let was_cold = state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id);
-    let cold_root = state
-        .cold_store
-        .get_persisted(&index_id)
-        .map(|e| e.root_path);
+    let cold_entry = state.cold_store.get_persisted(&index_id);
+    let cold_root = cold_entry.as_ref().map(|e| e.root_path.clone());
     state.cold_store.purge(&index_id);
     let root_path_for_cleanup = root_path_for_cleanup.or(cold_root);
     let in_memory_removed = removed_hot || was_cold;
@@ -484,6 +482,12 @@ pub(super) async fn unregister_index(
         }
     };
     let registry_only = registry_entry.is_some();
+    // #8438: the layout a cold-store entry or registry row names; a hot
+    // handle's indexer is consulted below, only once the delete has quiesced.
+    let entry_layout = cold_entry
+        .as_ref()
+        .or(registry_entry.as_ref())
+        .map(crate::service::storage_layout::StorageLayout::for_entry);
     let root_path_for_cleanup = root_path_for_cleanup.or(registry_entry.map(|e| e.root_path));
     // A registry read that failed leaves existence UNKNOWN; treating it as
     // "registered" keeps the answer a reportable failure rather than a 404.
@@ -517,7 +521,14 @@ pub(super) async fn unregister_index(
             // delete that timed out returned above without touching anything, so
             // no `remove_dir_all` can run under an active writer.
             debug_assert!(quiesced, "delete_data teardown runs only when quiesced");
-            match crate::service::persistence::remove_index_data_dir(id) {
+            // #8438: remove the directory the registry names — the colocated
+            // `<root>/.trusty-search/` included — and never the in-repo
+            // directory of a non-colocated index.
+            let layout = match removed_handle.as_ref() {
+                Some(h) => crate::service::storage_layout::layout_of(h).await,
+                None => entry_layout.unwrap_or_default(),
+            };
+            match layout.remove_storage(id, root_path_for_cleanup.as_deref()) {
                 // #3049: this is the only assignment of `data_deleted` —
                 // the response field can no longer disagree with the disk.
                 Ok(()) => data_deleted = true,
