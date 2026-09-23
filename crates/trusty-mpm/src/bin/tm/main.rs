@@ -209,6 +209,8 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 /// #2118 interception gate is unit tested in `commands::projects::tests`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // #7889: the pm-guard hook's decision deadline is measured from here.
+    let started = std::time::Instant::now();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -498,7 +500,7 @@ async fn main() -> anyhow::Result<()> {
             prompt_feedback,
         }) => {
             if pm_guard {
-                commands::pm_guard::pm_guard(&url).await
+                commands::pm_guard::pm_guard(&url, started).await
             // #6887: a separate hook mode, not a pm-guard variant.
             } else if divert_check {
                 commands::divert_check::divert_check().await

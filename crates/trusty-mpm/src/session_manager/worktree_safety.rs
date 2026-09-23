@@ -943,7 +943,7 @@ fn landing_bases(path: &Path) -> Vec<String> {
 /// Test: `inspect_dirt_reports_unpushed_session_branch_when_head_moved`,
 /// `inspect_dirt_reports_unpushed_bare_leaf_branch_when_head_moved`,
 /// `inspect_dirt_does_not_double_count_the_checked_out_session_branch`.
-fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
+pub(crate) fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
     let Some(leaf) = path.file_name().and_then(|n| n.to_str()) else {
         return Ok(0);
     };

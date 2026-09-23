@@ -174,7 +174,7 @@ const IGNORED_STATUS_ARGS: &[&str] = &[
 /// `inspect_dirt_reports_nested_bare_repo_holding_the_only_copy`,
 /// `inspect_dirt_reports_high_value_gitignored_env_file`,
 /// `inspect_dirt_allows_clean_nested_worktree`.
-pub(super) fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
+pub(crate) fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
     let canonical = match std::fs::canonicalize(candidate) {
         Ok(c) => c,
         Err(e) => {

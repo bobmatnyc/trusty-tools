@@ -35,6 +35,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+// #7889: gate 5's landed-content admission lives next door so this file stays
+// under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
+pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
+use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict};
+
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
 use super::worktree_reclaim_gh::{
@@ -717,6 +722,48 @@ pub(crate) fn classify(
     owners: &SessionOwners,
     keep_list: &KeepList,
 ) -> ReclaimVerdict {
+    // #7889: gate 5's landed-content admission is OPT-IN, because the predicate
+    // behind it fetches. Every caller that does not offer one keeps the
+    // pre-#7889 refusal verbatim.
+    classify_with_landed_content(
+        path,
+        admission,
+        claim,
+        pr,
+        probe_dirt,
+        agent_state,
+        owners,
+        keep_list,
+        None,
+    )
+}
+
+/// [`classify`], with gate 5's landed-content admission supplied (#7889).
+///
+/// Why: the admission runs `git fetch` and `git merge-tree`, so it cannot be
+/// reached implicitly by every surveyor — the doctor's unattended, read-only
+/// pass must not fetch. Parameterised rather than made unconditional, and
+/// spelled as a second entry point rather than a ninth argument on the first,
+/// so the forty existing call sites keep their exact behaviour and their exact
+/// shape.
+/// What: as [`classify`], plus `landed_content`. See [`no_pr_verdict`] for what
+/// gate 5 does with it.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_classify_refuses_a_tree_holding_residue`,
+/// `worktree_7889_classify_refuses_when_the_admission_is_unavailable`,
+/// `worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_with_landed_content(
+    path: &Path,
+    admission: Admission,
+    claim: &ClaimState,
+    pr: &BranchPrState,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    agent_state: AgentStateProbe<'_>,
+    owners: &SessionOwners,
+    keep_list: &KeepList,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimVerdict {
     // Gate 0 (#6927): the operator's own standing veto outranks every answer
     // the gates below could compute, so it is asked first — see DOC-73 §16.4.
     if let Some(kept) = keep_list.keeps(path) {
@@ -798,11 +845,13 @@ pub(crate) fn classify(
                 format!("PR #{pr} was closed without merging"),
             );
         }
+        // #7889: the one refusal that is permanent for a tree holding nothing.
+        // A donor branch fast-forwarded onto a sibling's head and squash-merged
+        // under that name can never acquire a pull request of its own, so this
+        // arm asks the landed-content question before it refuses. Owner ruling
+        // 2026-09-22; the same predicate the ADR-0057 guard runs.
         BranchPrState::NoPr => {
-            return ReclaimVerdict::blocked(
-                ReclaimGate::PrState,
-                "no pull request found for this branch",
-            );
+            return no_pr_verdict(path, probe_dirt, landed_content);
         }
         BranchPrState::Unknown => {
             return ReclaimVerdict::blocked(
@@ -824,13 +873,9 @@ pub(crate) fn classify(
     // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
     // unpushed source. This is the last gate and it fails toward dirty.
-    if let Some(dirt) = probe_dirt(path) {
-        return ReclaimVerdict::blocked(
-            ReclaimGate::UnsavedWork,
-            format!("holds unsaved work: {}", dirt.reason),
-        );
-    }
-    ReclaimVerdict::Reclaimable { pr: merged_pr }
+    // #7889: commits-only dirt reaches the landing admission — see
+    // `merged_pr_verdict`.
+    merged_pr_verdict(path, merged_pr, probe_dirt, landed_content)
 }
 
 /// One surveyed worktree and everything the survey learned about it (#2919).

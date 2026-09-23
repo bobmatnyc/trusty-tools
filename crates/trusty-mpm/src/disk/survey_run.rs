@@ -476,7 +476,10 @@ fn row(
     owning_session: Option<String>,
 ) -> DiskWorktree {
     let (gate, reason) = match verdict {
-        ReclaimVerdict::Reclaimable { .. } => (None, None),
+        // #7889: both kinds of landing evidence report no blocking gate.
+        ReclaimVerdict::Reclaimable { .. } | ReclaimVerdict::ReclaimableLandedContent { .. } => {
+            (None, None)
+        }
         ReclaimVerdict::Blocked { gate, reason }
         | ReclaimVerdict::BlockedByAgent { gate, reason } => (Some(*gate), Some(reason.clone())),
     };

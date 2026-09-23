@@ -19,6 +19,10 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use super::*;
+// #7889: the sweep itself now calls `classify_with_landed_content`; these tests
+// exercise the eight-argument entry point, which is the pre-#7889 behaviour.
+use crate::session_manager::worktree_reclaim::classify;
+
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_reclaim_claim::{ClaimLiveness, WorkspaceClaim};
@@ -116,11 +120,15 @@ fn worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused() {
             &no_keeps(),
         );
         assert!(!v.is_reclaimable(), "{label}: survey classified {v:?}");
-        let reason =
-            recheck_before_delete(&wt, &no_keeps(), Some(&claims), &merged(7652), &no_agents)
-                .unwrap_or_else(|| {
-                    panic!("{label}: the pre-delete re-check permitted the removal")
-                });
+        let reason = recheck_before_delete(
+            &wt,
+            &no_keeps(),
+            Some(&claims),
+            &merged(7652),
+            &no_agents,
+            None,
+        )
+        .unwrap_or_else(|| panic!("{label}: the pre-delete re-check permitted the removal"));
         assert!(reason.contains("nothing attributes"), "{label}: {reason}");
     }
 }
@@ -170,8 +178,15 @@ fn worktree_7652_gate_4c_survives_a_caller_claim_on_the_same_checkout() {
         &no_keeps(),
     );
     assert!(!v.is_reclaimable(), "the survey classified {v:?}");
-    let reason = recheck_before_delete(&wt, &no_keeps(), Some(&claims), &merged(7652), &no_agents)
-        .expect("the pre-delete re-check permitted the removal");
+    let reason = recheck_before_delete(
+        &wt,
+        &no_keeps(),
+        Some(&claims),
+        &merged(7652),
+        &no_agents,
+        None,
+    )
+    .expect("the pre-delete re-check permitted the removal");
     assert!(reason.contains("nothing attributes"), "{reason}");
     assert!(reason.contains("tm-foreign-7652"), "{reason}");
 }
@@ -210,7 +225,7 @@ fn recheck_refuses_when_the_live_set_cannot_be_read() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("unreadable-2919");
     land(&path);
-    let reason = recheck_before_delete(&path, &no_keeps(), None, &merged(1), &no_agents)
+    let reason = recheck_before_delete(&path, &no_keeps(), None, &merged(1), &no_agents, None)
         .expect("an unreadable live set must refuse");
     assert!(reason.contains("could not be re-read"), "{reason}");
 }
@@ -229,6 +244,7 @@ fn recheck_refuses_a_worktree_a_session_claims_now() {
         )])),
         &merged(1),
         &no_agents,
+        None,
     )
     .expect("a claimed worktree must refuse");
     assert!(reason.contains("claims this workspace now"), "{reason}");
@@ -253,7 +269,14 @@ fn recheck_permits_a_worktree_claimed_only_by_the_calling_session() {
         owners: Default::default(),
     };
     assert_eq!(
-        recheck_before_delete(&path, &no_keeps(), Some(&claims), &merged(1), &no_agents),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&claims),
+            &merged(1),
+            &no_agents,
+            None
+        ),
         None,
         "the caller's own claim on the enclosing workspace must not refuse"
     );
@@ -270,13 +293,27 @@ fn recheck_refuses_a_worktree_locked_after_the_survey() {
     let path = fx.add_worktree("locked-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-            .is_none(),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &merged(1),
+            &no_agents,
+            None
+        )
+        .is_none(),
         "precondition: the worktree is reclaimable before the lock"
     );
     fx.lock_worktree(&path);
-    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-        .expect("a locked worktree must refuse");
+    let reason = recheck_before_delete(
+        &path,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+        None,
+    )
+    .expect("a locked worktree must refuse");
     assert!(reason.contains("git-locked"), "{reason}");
 }
 
@@ -287,9 +324,15 @@ fn recheck_refuses_a_path_git_no_longer_lists() {
     let fx = GitWorktreeFixture::new();
     let plain = fx.repo.join("not-a-worktree");
     std::fs::create_dir_all(&plain).expect("mkdir");
-    let reason =
-        recheck_before_delete(&plain, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-            .expect("an unlisted path must refuse");
+    let reason = recheck_before_delete(
+        &plain,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+        None,
+    )
+    .expect("an unlisted path must refuse");
     assert!(reason.contains("no longer lists"), "{reason}");
 }
 
@@ -304,6 +347,7 @@ fn recheck_refuses_when_git_cannot_be_queried() {
         Some(&nobody()),
         &merged(1),
         &no_agents,
+        None,
     )
     .expect("an unqueryable path must refuse");
     assert!(reason.contains("could not be queried"), "{reason}");
@@ -321,8 +365,15 @@ fn recheck_refuses_a_worktree_that_lost_its_ownership_marker() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join("elsewhere");
     let path = fx.add_worktree_at(&parent, "unowned-2919");
-    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-        .expect("an unowned worktree must refuse");
+    let reason = recheck_before_delete(
+        &path,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+        None,
+    )
+    .expect("an unowned worktree must refuse");
     assert!(reason.contains("ownership marker"), "{reason}");
 }
 
@@ -337,8 +388,15 @@ fn recheck_refuses_when_the_pr_is_no_longer_merged() {
         BranchPrState::NoPr,
         BranchPrState::Unknown,
     ] {
-        let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &state, &no_agents)
-            .unwrap_or_else(|| panic!("{state:?} must refuse"));
+        let reason = recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &state,
+            &no_agents,
+            None,
+        )
+        .unwrap_or_else(|| panic!("{state:?} must refuse"));
         assert!(reason.contains("no longer a merge"), "{reason}");
     }
 }
@@ -349,13 +407,27 @@ fn recheck_refuses_a_worktree_dirtied_after_the_survey() {
     let path = fx.add_worktree("dirtied-2919");
     land(&path);
     assert!(
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-            .is_none(),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &merged(1),
+            &no_agents,
+            None
+        )
+        .is_none(),
         "precondition: clean before the write"
     );
     std::fs::write(path.join("appeared.rs"), "fn main() {}\n").expect("write");
-    let reason = recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-        .expect("a dirtied worktree must refuse");
+    let reason = recheck_before_delete(
+        &path,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+        None,
+    )
+    .expect("a dirtied worktree must refuse");
     assert!(reason.contains("unsaved work"), "{reason}");
 }
 
@@ -370,14 +442,27 @@ fn recheck_refuses_a_worktree_an_agent_claimed_after_the_survey() {
     let path = fx.add_worktree("agent-race-5661");
     land(&path);
     assert!(
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-            .is_none(),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &merged(1),
+            &no_agents,
+            None
+        )
+        .is_none(),
         "precondition: permitted before the agent claims it"
     );
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-arrived-mid-sweep");
-    let reason =
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &agent_live)
-            .expect("a tree an agent claimed mid-sweep must refuse");
+    let reason = recheck_before_delete(
+        &path,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(1),
+        &agent_live,
+        None,
+    )
+    .expect("a tree an agent claimed mid-sweep must refuse");
     assert!(reason.contains("agent-arrived-mid-sweep"), "{reason}");
 }
 
@@ -508,7 +593,14 @@ fn recheck_permits_a_clean_merged_owned_worktree() {
     let path = fx.add_worktree("permitted-2919");
     land(&path);
     assert_eq!(
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &merged(1),
+            &no_agents,
+            None
+        ),
         None
     );
 }
@@ -1217,13 +1309,21 @@ fn recheck_refuses_a_worktree_keep_listed_after_the_survey() {
     land(&path);
     // Permitted by every other re-check — only the keep-list refuses it.
     assert!(
-        recheck_before_delete(&path, &no_keeps(), Some(&nobody()), &merged(1), &no_agents)
-            .is_none(),
+        recheck_before_delete(
+            &path,
+            &no_keeps(),
+            Some(&nobody()),
+            &merged(1),
+            &no_agents,
+            None
+        )
+        .is_none(),
         "the fixture must otherwise be deletable, or this test proves nothing"
     );
     let keeps = KeepList::from_patterns(&[path.to_string_lossy().to_string()]);
-    let reason = recheck_before_delete(&path, &keeps, Some(&nobody()), &merged(1), &no_agents)
-        .expect("a keep-listed worktree must be refused at the delete");
+    let reason =
+        recheck_before_delete(&path, &keeps, Some(&nobody()), &merged(1), &no_agents, None)
+            .expect("a keep-listed worktree must be refused at the delete");
     assert!(
         reason.contains("keep-list"),
         "the refusal must name the operator's own decision: {reason}"
@@ -1238,8 +1338,15 @@ fn recheck_refuses_when_the_keep_list_cannot_be_read() {
     let path = fx.add_worktree("recheck-unreadable-6927");
     land(&path);
     let broken = KeepList::unreadable("config YAML error at /x/config.yaml: bad");
-    let reason = recheck_before_delete(&path, &broken, Some(&nobody()), &merged(1), &no_agents)
-        .expect("an unreadable keep-list must refuse the delete");
+    let reason = recheck_before_delete(
+        &path,
+        &broken,
+        Some(&nobody()),
+        &merged(1),
+        &no_agents,
+        None,
+    )
+    .expect("an unreadable keep-list must refuse the delete");
     assert!(
         reason.contains("could not be read"),
         "the refusal must say the config is broken: {reason}"
@@ -1452,6 +1559,7 @@ fn recheck_refuses_the_repositorys_main_checkout() {
         Some(&nobody()),
         &merged(7505),
         &no_agents,
+        None,
     )
     .unwrap_or_else(|| panic!("{} is the main checkout and must refuse", fx.repo.display()));
     assert!(

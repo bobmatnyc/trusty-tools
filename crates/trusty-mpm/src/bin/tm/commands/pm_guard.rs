@@ -213,9 +213,9 @@ use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add,
-    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, unclassifiable_command,
+    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
+    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
+    print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -334,7 +334,7 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// `pm_guard_denies_an_empty_stdin_payload` and its siblings
 /// (`tests/tm_hook_pm_guard_stdin_7975.rs`); the pure policy by this module's
 /// unit tests.
-pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
+pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
     // Guard 2: universal opt-out for CI / build shells that can't edit
     // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
     // reordering from this function's original shape — see the code-critic
@@ -649,28 +649,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 return Ok(());
             }
             WorktreeRemoveVerdict::ReCheck { target } => {
-                // The same directory-keyed route ADR-0048 decision 10's
-                // HEAD-move rule uses, so both rules read one answer built one
-                // way. Keyed on the TARGET, not the caller's cwd: the tree
-                // being deleted is the one whose owner matters, and the
-                // `version-control` agent's own record sits at the checkout it
-                // was dispatched into.
-                //
-                // `_or_deny`, NOT the fail-open reader the HEAD-move rule uses:
-                // an unreachable or silent daemon establishes nothing about who
-                // holds this tree, and an empty vec from such a reply would let
-                // the removal proceed over another agent's live work.
-                let live = pm_guard_dispatch::live_shared_tree_writers_or_deny(
-                    url, session_id, &target, &payload,
-                )
-                .await;
-                if let Some(reason) = evaluate_removal_rechecks(
-                    &target,
-                    live.as_deref().map_err(String::as_str),
-                    &trusty_mpm::core::worktree_removal_facts::GitAndGhProbe,
-                ) {
-                    audit_denied_tool(url, session_id, tool_name, &reason).await;
-                    println!("{}", build_pretooluse_deny_response(&reason));
+                // The daemon owner query (`_or_deny`, keyed on the TARGET) and
+                // every re-check run under one deadline that DENIES on expiry.
+                // #7889: the deny is printed before the audit, and the audit is
+                // bounded, so neither can push the decision past the hook's 5 s.
+                let deny = removal_recheck_deny(url, session_id, &target, &payload, started);
+                if let Some(reason) = deny.await {
+                    print_deny_then_audit(url, session_id, tool_name, &reason, started).await;
                     return Ok(());
                 }
             }

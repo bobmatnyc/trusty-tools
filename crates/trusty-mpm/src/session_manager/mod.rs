@@ -68,7 +68,7 @@ pub(crate) mod worktree_liveness;
 // #6927: the operator's standing "never propose these" list, applied as
 // `worktree_reclaim::classify`'s first gate.
 pub(crate) mod worktree_keep_list;
-mod worktree_nested;
+pub(crate) mod worktree_nested;
 pub(crate) mod worktree_ownership;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;
@@ -104,6 +104,8 @@ mod worktree_reclaim_owner_liveness_tests;
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: gate 5's landed-content admission and its pre-delete re-check.
+pub(crate) mod worktree_reclaim_landed;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;
