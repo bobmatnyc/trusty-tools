@@ -684,8 +684,8 @@ pub(crate) async fn run_doctor_with_claims(
     // #8415: a tmux server inherits the launchd class of the job that started
     // it; `Background` pinned every tm session to priority 4. Read-only.
     checks.push(
-        super::doctor_launchd_process_type::check_launchd_process_type(
-            &super::doctor_launchd_process_type::launch_agents_home(&home),
+        super::doctor_launchd_process_type::check_launchd_process_type_in(
+            &super::doctor_launchd_process_type::launch_agents_dir(&home),
         ),
     );
     checks.push(super::doctor_tmux_priority::check_tmux_priority());

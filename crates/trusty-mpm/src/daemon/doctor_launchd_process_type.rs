@@ -220,31 +220,48 @@ pub(crate) fn build_process_type_check(readings: &[PlistReading]) -> DoctorCheck
     DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, message)
 }
 
-/// The home whose `Library/LaunchAgents` [`check_launchd_process_type`] reads.
+/// Environment variable naming the LaunchAgents directory the row reads.
 ///
 /// Why (#8415, owner rule 2026-09-23): no test may read the operator's real
-/// `~/Library/LaunchAgents`. Every `run_doctor` unit test would otherwise read
-/// it through this row, so a test build points the row at an empty temp path.
-/// What: `home` in a normal build; `<temp>/tm-doctor-test-no-launch-agents`
-/// under `cfg(test)`.
-/// Test: `test_builds_never_read_the_real_launch_agents`.
-pub(crate) fn launch_agents_home(home: &Path) -> PathBuf {
-    if cfg!(test) {
-        std::env::temp_dir().join("tm-doctor-test-no-launch-agents")
-    } else {
-        home.to_path_buf()
+/// `~/Library/LaunchAgents`, even read-only. The `tm` bin's tests build this
+/// library without `cfg(test)`, so they need an override they can set.
+pub const LAUNCH_AGENTS_DIR_ENV: &str = "TRUSTY_MPM_LAUNCH_AGENTS_DIR";
+
+/// The LaunchAgents directory `run_doctor` reads for this row.
+///
+/// What: [`LAUNCH_AGENTS_DIR_ENV`] when set and non-empty; otherwise an empty
+/// temp path under `cfg(test)`; otherwise `<home>/Library/LaunchAgents`, the
+/// production default.
+/// Test: `launch_agents_dir_honours_the_env_override`,
+/// `test_builds_never_read_the_real_launch_agents`.
+pub(crate) fn launch_agents_dir(home: &Path) -> PathBuf {
+    launch_agents_dir_from(home, std::env::var_os(LAUNCH_AGENTS_DIR_ENV))
+}
+
+/// [`launch_agents_dir`] with the override passed in, so tests need not
+/// mutate the process environment.
+pub(crate) fn launch_agents_dir_from(home: &Path, env: Option<std::ffi::OsString>) -> PathBuf {
+    match env {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ if cfg!(test) => std::env::temp_dir().join("tm-doctor-test-no-launch-agents"),
+        _ => home.join("Library").join("LaunchAgents"),
     }
 }
 
 /// Read the tmux-hosting tm plists under `home` and build the row.
 ///
-/// Why: `home` is a parameter so tests read a temp directory, never the real
-/// `~/Library/LaunchAgents`.
-/// What: reads `<home>/Library/LaunchAgents/<label>.plist` for the daemon and
-/// supervisor labels, then delegates to [`build_process_type_check`].
 /// Test: `check_reads_plists_under_the_given_home`.
+#[cfg(test)]
 pub(crate) fn check_launchd_process_type(home: &Path) -> DoctorCheck {
-    let agents = home.join("Library").join("LaunchAgents");
+    check_launchd_process_type_in(&home.join("Library").join("LaunchAgents"))
+}
+
+/// Read `<agents>/<label>.plist` for the daemon and supervisor labels and
+/// build the row with [`build_process_type_check`].
+///
+/// Test: `check_reads_plists_under_the_given_home`,
+/// `launch_agents_dir_honours_the_env_override`.
+pub(crate) fn check_launchd_process_type_in(agents: &Path) -> DoctorCheck {
     let readings: Vec<PlistReading> = [MPM, MPM_SUPERVISOR]
         .into_iter()
         .map(|label| {

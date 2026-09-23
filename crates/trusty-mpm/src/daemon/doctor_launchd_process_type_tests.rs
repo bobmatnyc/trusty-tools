@@ -233,13 +233,31 @@ fn remedy_quotes_a_path_with_a_space() {
 #[test]
 fn test_builds_never_read_the_real_launch_agents() {
     let real = PathBuf::from("/Users/operator");
-    let redirected = launch_agents_home(&real);
-    assert_ne!(redirected, real);
-    assert!(
-        redirected.starts_with(std::env::temp_dir()),
-        "{redirected:?}"
-    );
-    let row = check_launchd_process_type(&redirected);
+    let dir = launch_agents_dir_from(&real, None);
+    assert!(!dir.starts_with(&real), "{dir:?}");
+    assert!(dir.starts_with(std::env::temp_dir()), "{dir:?}");
+    let row = check_launchd_process_type_in(&dir);
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
-    assert!(row.message.contains("no tm LaunchAgent"), "{}", row.message);
+}
+
+/// #8415: `TRUSTY_MPM_LAUNCH_AGENTS_DIR` points the row at another directory,
+/// and an empty value is ignored.
+#[test]
+fn launch_agents_dir_honours_the_env_override() {
+    let home = home_with(&[]);
+    let agents = home.path().join("elsewhere");
+    std::fs::create_dir_all(&agents).expect("mkdir");
+    std::fs::write(
+        agents.join(format!("{MPM_SUPERVISOR}.plist")),
+        PRE_8415_SUPERVISOR,
+    )
+    .expect("write plist");
+    let dir = launch_agents_dir_from(Path::new("/Users/operator"), Some(agents.clone().into()));
+    assert_eq!(dir, agents);
+    let row = check_launchd_process_type_in(&dir);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert_ne!(
+        launch_agents_dir_from(Path::new("/Users/operator"), Some("".into())),
+        agents
+    );
 }

@@ -46,7 +46,7 @@ pub mod doctor_credential_reach;
 mod doctor_startup_context;
 // #8415: the launchd `ProcessType` of the tm jobs that start tmux servers.
 // Declared here for the same cap reason as the rows above.
-mod doctor_launchd_process_type;
+pub mod doctor_launchd_process_type;
 // #8415: the observed priority of the RUNNING tmux server, which a plist fix
 // does not lift until the server restarts.
 mod doctor_tmux_priority;
