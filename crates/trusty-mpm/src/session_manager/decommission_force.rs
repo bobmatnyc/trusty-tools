@@ -107,7 +107,9 @@ const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
 /// renamed, conflicted, or an unreadable diff — is not excused.
 /// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`,
 /// `force_decommission_keeps_an_edited_tracked_claude_md`,
-/// `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`.
+/// `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
+/// `force_decommission_removes_a_tree_with_an_untracked_scaffold_gitignore`,
+/// `force_decommission_keeps_an_untracked_gitignore_with_a_user_line`.
 pub(crate) fn is_provisioning_entry(ws: &Path, line: &str) -> bool {
     let (Some(status), Some(path)) = (line.get(..3), line.get(3..)) else {
         return false;
@@ -139,7 +141,10 @@ fn is_provisioning_gitignore_line(line: &str) -> bool {
 ///
 /// What: `git diff -U0` of the working tree against the index. Every `+` line
 /// must pass [`is_provisioning_gitignore_line`]; any `-` line, any line that is
-/// not a diff header, or a diff that cannot be read answers `false`.
+/// not a diff header, or a diff that cannot be read answers `false`. Headers
+/// are recognised only before the first `@@` hunk.
+/// Test: `gitignore_body_line_shaped_like_a_header_is_not_excused`,
+/// `force_decommission_keeps_the_tree_when_the_gitignore_diff_cannot_be_read`.
 fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
     let args = [
         "diff",
@@ -154,14 +159,25 @@ fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
         return false;
     };
     let mut added = 0usize;
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if line.starts_with("diff --git ")
-            || line.starts_with("index ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("@@ ")
-            || line.starts_with("\\ ")
-        {
+        // #7660: `---`/`+++` are headers only before the first hunk; inside
+        // one, `+++ x` is the added line `++ x`.
+        if !in_hunk {
+            if line.starts_with("@@ ") {
+                in_hunk = true;
+                continue;
+            }
+            if line.starts_with("diff --git ")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+            {
+                continue;
+            }
+            return false;
+        }
+        if line.starts_with("@@ ") || line.starts_with("\\ ") {
             continue;
         }
         match line.strip_prefix('+') {
