@@ -10,6 +10,6 @@
 /** `tmux attach-session -t '=<name>'`, normalized and quoted for a POSIX shell. */
 export function shellAttachCommand(name: string): string {
   const normalized = name.replace(/^=/, '').replace(/[:.]/g, '_');
-  const quoted = `=${normalized}`.replace(/'/g, "'\\''");
-  return `tmux attach-session -t '${quoted}'`;
+  const quoted = normalized.replace(/'/g, "'\\''");
+  return `tmux attach-session -t '=${quoted}'`;
 }
