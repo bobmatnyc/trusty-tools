@@ -2,11 +2,13 @@
 > epic/tracker pattern, committed so the pattern's source survives. It is NOT
 > the runtime source of truth: the bundled `tm-epic` skill
 > (`crates/trusty-mpm/src/assets/skills/tm-epic.md`) governs, and divergence
-> between this document and the skill is expected, not a defect. Two known
-> divergences: the skill titles a tracker `[EPIC N] <outcome>` (N is its own
-> issue number), not `[EPIC] <outcome>`; and the skill's tracker body adds a
-> `followups:start`/`followups:end` block this document does not have. The body
-> below is verbatim — change the skill, never this text. Refs [#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376).
+> between this document and the skill is expected, not a defect. One known
+> divergence remains: the skill's tracker body adds a
+> `followups:start`/`followups:end` block this document does not have. The
+> tracker title was corrected here to `[EPIC <epic#>]` so the naming matches
+> the skill and `TICKETING.md`; that is the one edit made to the original text,
+> and everything else below is verbatim. Change the skill, not this document.
+> Refs [#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376).
 
 # Tracker + phase issue pattern
 
@@ -30,11 +32,11 @@ Link them as native GitHub sub-issues, not a markdown task list. The link surviv
 ## Naming
 
 ```
-[EPIC] <the outcome, in plain words>
+[EPIC <epic#>] <the outcome, in plain words>
 [EPIC_<epic#> PHASE_<n>] <what this phase does>
 ```
 
-`<epic#>` is the tracker's issue number. Create the tracker first and read its number back; phase issues cannot go in the same batch.
+`<epic#>` is the tracker's own issue number, so creation is two-step: file the tracker titled `[EPIC] <outcome>`, read its number back, then edit the number into the title. Phase issues cannot go in the same batch as the tracker.
 
 ## Four rules
 
