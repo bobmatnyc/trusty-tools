@@ -76,8 +76,8 @@ fn background_supervisor_plist_fails() {
 #[test]
 fn deploy_supervisor_template_passes_the_row() {
     assert_eq!(
-        process_type_of(DEPLOY_SUPERVISOR).as_deref(),
-        Some(EXPECTED_PROCESS_TYPE),
+        process_type_of(DEPLOY_SUPERVISOR),
+        Ok(Some(EXPECTED_PROCESS_TYPE.to_owned())),
         "{DEPLOY_SUPERVISOR}"
     );
     let home = home_with(&[(MPM_SUPERVISOR, DEPLOY_SUPERVISOR.as_bytes())]);
@@ -127,8 +127,8 @@ fn binary_plist_is_unknown() {
 fn process_type_of_ignores_commented_keys() {
     let xml = "<dict><!-- <key>ProcessType</key><string>Background</string> -->\
                <key>ProcessType</key><string>Interactive</string></dict>";
-    assert_eq!(process_type_of(xml).as_deref(), Some("Interactive"));
-    assert_eq!(process_type_of(KEYLESS_DAEMON), None);
+    assert_eq!(process_type_of(xml), Ok(Some("Interactive".to_owned())));
+    assert_eq!(process_type_of(KEYLESS_DAEMON), Ok(None));
 }
 
 #[test]
@@ -170,4 +170,60 @@ fn check_reads_plists_under_the_given_home() {
         "the warn must ride along: {}",
         row.message
     );
+}
+
+/// #8415: `<string/>`, a non-string value, or anything between the key and
+/// its `<string>` cannot be judged — Unknown, never a guessed value.
+#[test]
+fn process_type_of_rejects_malformed_values() {
+    for xml in [
+        "<dict><key>ProcessType</key><string/></dict>",
+        "<dict><key>ProcessType</key><integer>1</integer></dict>",
+        "<dict><key>ProcessType</key><key>Other</key><string>Interactive</string></dict>",
+        "<dict><key>ProcessType</key><string>Interactive</dict>",
+    ] {
+        assert!(process_type_of(xml).is_err(), "{xml}");
+    }
+    let home = home_with(&[(
+        MPM_SUPERVISOR,
+        b"<dict><key>ProcessType</key><string/></dict>".as_slice(),
+    )]);
+    let row = check_launchd_process_type(home.path());
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert_eq!(
+        process_type_of("<key>ProcessType</key>\n\t  <string> Interactive </string>"),
+        Ok(Some("Interactive".to_owned())),
+        "whitespace between key and value is allowed"
+    );
+}
+
+/// #8415: CoreFoundation keeps the last of duplicated keys; so does the row.
+#[test]
+fn process_type_of_takes_the_last_duplicate_key() {
+    let xml = "<dict><key>ProcessType</key><string>Interactive</string>\
+               <key>ProcessType</key><string>Background</string></dict>";
+    assert_eq!(process_type_of(xml), Ok(Some("Background".to_owned())));
+}
+
+/// #8415: the printed commands must survive a path with a space in it.
+#[test]
+fn remedy_quotes_a_path_with_a_space() {
+    let row = build_process_type_check(&[PlistReading {
+        label: MPM_SUPERVISOR,
+        path: PathBuf::from("/Users/a b/Library/LaunchAgents/x.plist"),
+        reading: declared(Some("Background")),
+    }]);
+    assert!(
+        row.message
+            .contains("-string Interactive '/Users/a b/Library/LaunchAgents/x.plist'"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.message
+            .contains("launchctl bootout gui/$(id -u) '/Users/a b/Library/LaunchAgents/x.plist'"),
+        "{}",
+        row.message
+    );
+    assert_eq!(shell_quote(Path::new("/it's")), "'/it'\\''s'");
 }

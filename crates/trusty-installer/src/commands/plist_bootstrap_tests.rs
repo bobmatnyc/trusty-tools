@@ -607,18 +607,25 @@ fn supervisor_plist_runs_interactive_not_background() {
 }
 
 /// REGRESSION (#8415): an existing install whose plist still says
-/// `Background` is rewritten when `tctl install` next replaces the supervisor.
-/// What: seeds the pre-#8415 plist (unprobeable registered binary, so the
-/// downgrade guard proceeds), runs the install, and reads back the file.
+/// `Background` is rewritten on upgrade, in the production shape: the plist
+/// registers the SAME path `install_one` just overwrote, so the "registered"
+/// and candidate versions are one binary read twice. The guard used to call
+/// that an equal-version reinstall and refuse, keeping `Background`.
+/// What: a real fake `tm` at `tm_path` (1.7.1), a stale plist registered at
+/// that path, one install; asserts the plist now declares `Interactive`.
 /// Test: This is the test.
 #[test]
+#[cfg(unix)]
 fn install_mpm_supervisor_for_rewrites_a_background_plist() {
+    let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     let stub = StubLaunchctl::new();
+    let tm_path = tmp.path().join(".cargo").join("bin").join("tm");
+    write_fake_tm(&tm_path, "trusty-mpm 1.7.1");
     let agents_dir = tmp.path().join("Library").join("LaunchAgents");
     std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
     let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
-    let stale = fill_template(&tmp.path().to_string_lossy(), "/nonexistent/old-tm-8415").replace(
+    let stale = fill_template(&tmp.path().to_string_lossy(), &tm_path.to_string_lossy()).replace(
         "<string>Interactive</string>",
         "<string>Background</string>",
     );
@@ -630,9 +637,10 @@ fn install_mpm_supervisor_for_rewrites_a_background_plist() {
         launchctl: &stub,
     };
 
-    install_mpm_supervisor_for(&target, false, &tmp.path().join("new-tm"))
-        .expect("the rewrite must succeed");
+    let verdict =
+        classify_supervisor_bootstrap(install_mpm_supervisor_for(&target, false, &tm_path));
 
+    assert_eq!(verdict, SupervisorBootstrapVerdict::Installed);
     let written = std::fs::read_to_string(&plist_path).expect("read rewritten plist");
     assert_eq!(process_type(&written), Some("Interactive"), "{written}");
     assert_eq!(
@@ -722,4 +730,135 @@ fn classify_supervisor_bootstrap_keeps_refusal_informational() {
         classify_supervisor_bootstrap(Ok(())),
         SupervisorBootstrapVerdict::Installed
     );
+}
+
+/// #8415: on a platform without launchd the install must not claim a
+/// bootstrap, and must not fail either.
+/// Test: This is the test.
+#[test]
+fn skipped_supervisor_bootstrap_claims_no_bootstrap() {
+    let skipped = SupervisorBootstrapVerdict::Skipped("launchd is macOS-only".to_owned());
+    assert!(!skipped.is_failure());
+    assert!(
+        !skipped.note().contains("bootstrapped"),
+        "{}",
+        skipped.note()
+    );
+    assert!(skipped.note().contains("skipped"), "{}", skipped.note());
+    if !cfg!(target_os = "macos") {
+        let v = supervisor_bootstrap_verdict(false, std::path::Path::new("/nonexistent/tm"));
+        assert!(matches!(v, SupervisorBootstrapVerdict::Skipped(_)), "{v:?}");
+    }
+}
+
+/// #8415: the rewrite decision, over every branch.
+/// Test: This is the test.
+#[test]
+fn decide_supervisor_rewrite_table() {
+    let base = RewriteInputs {
+        existing: "stale",
+        filled: "fresh",
+        registered_is_candidate: false,
+        current: Some("1.7.1"),
+        candidate: Some("1.7.1"),
+        force: false,
+    };
+    let proceed = DowngradeDecision::Proceed;
+    let refuse = DowngradeDecision::Refuse;
+    let cases = [
+        (
+            "same path, equal version",
+            RewriteInputs {
+                registered_is_candidate: true,
+                ..base
+            },
+            proceed,
+        ),
+        ("equal version, stale plist", base, proceed),
+        (
+            "equal version, identical plist",
+            RewriteInputs {
+                existing: "fresh",
+                ..base
+            },
+            refuse,
+        ),
+        (
+            "newer candidate",
+            RewriteInputs {
+                candidate: Some("1.8.0"),
+                ..base
+            },
+            proceed,
+        ),
+        (
+            "true downgrade, stale plist",
+            RewriteInputs {
+                candidate: Some("1.7.0"),
+                ..base
+            },
+            refuse,
+        ),
+        (
+            "true downgrade, forced",
+            RewriteInputs {
+                candidate: Some("1.7.0"),
+                force: true,
+                ..base
+            },
+            proceed,
+        ),
+        (
+            "true downgrade, same path",
+            RewriteInputs {
+                candidate: Some("1.7.0"),
+                registered_is_candidate: true,
+                ..base
+            },
+            proceed,
+        ),
+    ];
+    for (name, inputs, want) in cases {
+        assert_eq!(decide_supervisor_rewrite(&inputs), want, "{name}");
+    }
+}
+
+/// REGRESSION (#8415): a true downgrade — a DIFFERENT registered binary that
+/// is newer — is still refused, even though the plist on disk is stale, and
+/// the plist is left untouched.
+/// Test: This is the test.
+#[test]
+#[cfg(unix)]
+fn install_mpm_supervisor_for_refuses_a_true_downgrade_with_a_stale_plist() {
+    let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stub = StubLaunchctl::new();
+    let registered = tmp.path().join("registered").join("tm");
+    write_fake_tm(&registered, "trusty-mpm 1.8.0");
+    let candidate = tmp.path().join("candidate").join("tm");
+    write_fake_tm(&candidate, "trusty-mpm 1.7.1");
+    let agents_dir = tmp.path().join("Library").join("LaunchAgents");
+    std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
+    let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
+    let stale = fill_template(&tmp.path().to_string_lossy(), &registered.to_string_lossy())
+        .replace(
+            "<string>Interactive</string>",
+            "<string>Background</string>",
+        );
+    std::fs::write(&plist_path, &stale).expect("seed stale plist");
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let verdict =
+        classify_supervisor_bootstrap(install_mpm_supervisor_for(&target, false, &candidate));
+
+    assert!(
+        matches!(verdict, SupervisorBootstrapVerdict::Refused(_)),
+        "{verdict:?}"
+    );
+    assert!(stub.calls().is_empty(), "{:?}", stub.calls());
+    assert_eq!(std::fs::read_to_string(&plist_path).expect("read"), stale);
 }

@@ -10,9 +10,12 @@
 //! What: [`probe_tmux_priority`] asks tmux for its server PID
 //! (`display-message -p '#{pid}'`) and `ps` for that PID's priority, through an
 //! injected [`Runner`] so every branch is testable without a live tmux.
-//! [`build_tmux_priority_check`] folds the result: below
-//! [`CLAMP_THRESHOLD`] fails, at or above passes, no server passes, and any
-//! read that did not succeed is `Unknown` — never `Ok`.
+//! [`build_tmux_priority_check`] folds the result: below [`CLAMP_THRESHOLD`]
+//! fails, from there up to [`INTERACTIVE_PRIORITY`] warns (launchd `Standard`
+//! throttling), at or above passes, no server passes, and any read that did
+//! not succeed is `Unknown` — never `Ok`. The probe runs on macOS only: procps
+//! `ps -o pri` on Linux prints `39 - kernel_prio`, a different scale, so there
+//! the row reports not-applicable instead of judging a number it cannot read.
 //!
 //! Test: `doctor_tmux_priority_tests.rs`.
 
@@ -25,8 +28,12 @@ pub(crate) const CHECK_NAME: &str = "tmux_priority";
 ///
 /// Why: an interactive shell runs at 31 and a launchd job with the default
 /// `Standard` class at 20; a `Background` job and everything it spawns sits at
-/// 4 (#8415). Anything below 20 is in the throttled band.
+/// 4 (#8415). Anything below 20 is in the background band.
 pub(crate) const CLAMP_THRESHOLD: i32 = 20;
+
+/// Darwin priority of an unthrottled interactive process; below it, down to
+/// [`CLAMP_THRESHOLD`], the server runs under launchd `Standard` throttling.
+pub(crate) const INTERACTIVE_PRIORITY: i32 = 31;
 
 /// What one subprocess returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,10 +132,10 @@ pub(crate) fn probe_tmux_priority(tmux_bin: &str, run: Runner<'_>) -> TmuxPriori
 /// Fold a probe result into the row.
 ///
 /// What: `Observed` below [`CLAMP_THRESHOLD`] → `Fail`, naming the PID, the
-/// priority and the remedy; at or above → `Ok`; `NoServer` → `Ok`;
-/// `Unreadable` → `Unknown` with the reason.
-/// Test: `clamped_server_fails`, `normal_server_passes`, `no_server_passes`,
-/// `probe_errors_are_unknown`.
+/// priority and the remedy; below [`INTERACTIVE_PRIORITY`] → `Warn`; at or
+/// above → `Ok`; `NoServer` → `Ok`; `Unreadable` → `Unknown` with the reason.
+/// Test: `clamped_server_fails`, `standard_throttled_server_warns`,
+/// `normal_server_passes`, `no_server_passes`, `probe_errors_are_unknown`.
 pub(crate) fn build_tmux_priority_check(probe: &TmuxPriority) -> DoctorCheck {
     match probe {
         TmuxPriority::NoServer => DoctorCheck::new(
@@ -150,12 +157,25 @@ pub(crate) fn build_tmux_priority_check(probe: &TmuxPriority) -> DoctorCheck {
                 ),
             )
         }
+        TmuxPriority::Observed { pid, priority } if *priority < INTERACTIVE_PRIORITY => {
+            DoctorCheck::new(
+                CHECK_NAME,
+                CheckStatus::Warn,
+                format!(
+                    "tmux server PID {pid} runs at Darwin priority {priority}, below the \
+                     interactive {INTERACTIVE_PRIORITY}: it runs under launchd `Standard` \
+                     throttling, as the job that started it does. See the \
+                     `launchd_process_type` row for the plist to set to `Interactive`, then \
+                     restart the tmux server (`tmux kill-server`; resume sessions with `tm`)."
+                ),
+            )
+        }
         TmuxPriority::Observed { pid, priority } => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
             format!(
                 "tmux server PID {pid} runs at Darwin priority {priority} \
-                 (threshold {CLAMP_THRESHOLD})"
+                 (interactive: {INTERACTIVE_PRIORITY})"
             ),
         ),
         TmuxPriority::Unreadable(why) => DoctorCheck::new(
@@ -179,13 +199,37 @@ fn run_real(program: &str, args: &[&str]) -> Result<CmdOut, String> {
     })
 }
 
+/// Build the row for a platform: probe on macOS, not-applicable elsewhere.
+///
+/// Why: `ps -o pri` is a Darwin priority only on macOS; procps prints
+/// `39 - kernel_prio`, so a nice-0 Linux server would read 19 and fail with
+/// launchd advice for a host that has no launchd.
+/// What: `probe` runs only when `is_macos`; otherwise the row is `Ok` with
+/// "not applicable on this platform".
+/// Test: `other_platforms_are_not_applicable`.
+pub(crate) fn tmux_priority_row(
+    is_macos: bool,
+    probe: impl FnOnce() -> TmuxPriority,
+) -> DoctorCheck {
+    if !is_macos {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            "not applicable on this platform (the priority scale is Darwin's)",
+        );
+    }
+    build_tmux_priority_check(&probe())
+}
+
 /// Probe the live tmux server and build the row. Read-only.
 ///
 /// Test: the pure halves are covered in `doctor_tmux_priority_tests.rs`; this
 /// wiring by `run_doctor_produces_sixty_checks`.
 pub(crate) fn check_tmux_priority() -> DoctorCheck {
-    let bin = crate::core::tmux::resolve_tmux_binary_or_bare();
-    build_tmux_priority_check(&probe_tmux_priority(&bin, &run_real))
+    tmux_priority_row(cfg!(target_os = "macos"), || {
+        let bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+        probe_tmux_priority(&bin, &run_real)
+    })
 }
 
 #[cfg(test)]

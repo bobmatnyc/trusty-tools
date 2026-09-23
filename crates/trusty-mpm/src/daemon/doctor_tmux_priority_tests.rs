@@ -64,10 +64,27 @@ fn clamped_server_fails() {
     }
 }
 
-/// `Standard` (20) is the threshold and passes; an interactive 31 passes.
+/// #8415: 20 to 30 is launchd `Standard` throttling — warn, pointing at the
+/// plist row.
+#[test]
+fn standard_throttled_server_warns() {
+    for priority in ["20", "30"] {
+        let (_, row) = row_for(ok("20245\n"), ok(priority));
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(row.message.contains("PID 20245"), "{}", row.message);
+        assert!(
+            row.message.contains("launchd_process_type"),
+            "{}",
+            row.message
+        );
+        assert!(row.message.contains("Standard"), "{}", row.message);
+    }
+}
+
+/// An interactive 31, and anything above, passes.
 #[test]
 fn normal_server_passes() {
-    for priority in ["20", "31"] {
+    for priority in ["31", "47"] {
         let (probe, row) = row_for(ok("20245\n"), ok(priority));
         assert_eq!(
             probe,
@@ -129,4 +146,21 @@ fn probe_errors_are_unknown() {
         );
         assert!(row.message.contains(reason), "{reason}: {}", row.message);
     }
+}
+
+/// #8415: off macOS the row never probes and never judges.
+#[test]
+fn other_platforms_are_not_applicable() {
+    let row = tmux_priority_row(false, || panic!("the probe must not run off macOS"));
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(
+        row.message.contains("not applicable on this platform"),
+        "{}",
+        row.message
+    );
+    let row = tmux_priority_row(true, || TmuxPriority::Observed {
+        pid: 7,
+        priority: 4,
+    });
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
 }

@@ -5,9 +5,10 @@
 //! and every PM session and `cargo` gate inside it, ran at Darwin priority 4 on
 //! efficiency cores with throttled I/O. `taskpolicy -B` cannot lift that clamp
 //! from user space. The installer template now says `Interactive`, but a plist
-//! already on disk keeps its old value: `cargo install` never rewrites it, and
-//! `tctl install`'s downgrade guard refuses an equal-version reinstall. This row
-//! is how an existing install learns its plist is stale.
+//! already on disk keeps its old value until something rewrites it: `tctl
+//! install` does when it next replaces the supervisor, but `cargo install`
+//! never touches a plist, and the `com.trusty.mpm` daemon plist has no
+//! generator at all. This row is how such an install learns its plist is stale.
 //!
 //! What: [`check_launchd_process_type`] reads the `com.trusty.mpm` daemon and
 //! `com.trusty.mpm.supervisor` plists — the two tm jobs that start tmux
@@ -68,10 +69,17 @@ pub(crate) struct PlistReading {
 ///
 /// Why: XML comments are stripped first, so a comment that quotes the key
 /// (the deploy template carries one) is never mistaken for the key itself.
-/// What: finds `<key>ProcessType</key>` outside comments and returns the text
-/// of the next `<string>` element; `None` when either is missing.
-/// Test: `process_type_of_ignores_commented_keys`.
-pub(crate) fn process_type_of(xml: &str) -> Option<String> {
+/// A duplicated key resolves to the LAST occurrence, as CoreFoundation's
+/// parser does, so the row judges the value launchd actually loads.
+/// What: `Ok(None)` when the key is absent; `Ok(Some(v))` when the last
+/// `<key>ProcessType</key>` is followed — after whitespace only — by
+/// `<string>v</string>`; `Err` for `<string/>`, a non-string value, or any
+/// other token between key and value, which the row reports as Unknown.
+/// Test: `process_type_of_ignores_commented_keys`,
+/// `process_type_of_rejects_malformed_values`,
+/// `process_type_of_takes_the_last_duplicate_key`.
+pub(crate) fn process_type_of(xml: &str) -> Result<Option<String>, String> {
+    const KEY: &str = "<key>ProcessType</key>";
     let mut text = String::with_capacity(xml.len());
     let mut rest = xml;
     while let Some(open) = rest.find("<!--") {
@@ -82,10 +90,23 @@ pub(crate) fn process_type_of(xml: &str) -> Option<String> {
         };
     }
     text.push_str(rest);
-    let after_key = &text[text.find("<key>ProcessType</key>")? + "<key>ProcessType</key>".len()..];
-    let start = after_key.find("<string>")? + "<string>".len();
-    let end = after_key[start..].find("</string>")? + start;
-    Some(after_key[start..end].trim().to_owned())
+    let Some(at) = text.rfind(KEY) else {
+        return Ok(None);
+    };
+    let after = text[at + KEY.len()..].trim_start();
+    if after.starts_with("<string/>") {
+        return Err("ProcessType is an empty <string/>".to_owned());
+    }
+    let Some(body) = after.strip_prefix("<string>") else {
+        let token: String = after.chars().take(24).collect();
+        return Err(format!(
+            "ProcessType is not followed by a <string>: {token:?}"
+        ));
+    };
+    match body.find("</string>") {
+        Some(end) => Ok(Some(body[..end].trim().to_owned())),
+        None => Err("ProcessType <string> is not closed".to_owned()),
+    }
 }
 
 /// Read one plist file into a [`ProcessTypeReading`].
@@ -101,15 +122,25 @@ pub(crate) fn read_plist(path: &Path) -> ProcessTypeReading {
             "binary plist; convert with `plutil -convert xml1 <plist>`".to_owned(),
         ),
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(xml) => ProcessTypeReading::Declared(process_type_of(&xml)),
+            Ok(xml) => match process_type_of(&xml) {
+                Ok(value) => ProcessTypeReading::Declared(value),
+                Err(why) => ProcessTypeReading::Unjudged(why),
+            },
             Err(_) => ProcessTypeReading::Unjudged("not UTF-8 text".to_owned()),
         },
     }
 }
 
-/// The remedy for one stale plist, with its real path.
+/// Single-quote `path` for a POSIX shell, escaping any embedded `'`.
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+/// The remedy for one stale plist, with its real path quoted for the shell.
+///
+/// Test: `remedy_quotes_a_path_with_a_space`.
 fn remedy(path: &Path) -> String {
-    let p = path.display();
+    let p = shell_quote(path);
     format!(
         "`plutil -replace ProcessType -string {EXPECTED_PROCESS_TYPE} {p}`, then \
          `launchctl bootout gui/$(id -u) {p}` and `launchctl bootstrap gui/$(id -u) {p}`"
