@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [1.7.0] — 2026-09-23
 
+This release lowers the tmux scrollback limit from 100,000 lines to 10,000. The lower limit removes the keystroke lag in tm sessions ([#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
+
 ### Breaking
 
 - This 1.x release breaks the trusty-mpm library API against 1.6.3 and ships under an owner-approved override of the semver gate ([#8372](https://github.com/bobmatnyc/trusty-tools/issues/8372)). The `tm` binary's behaviour is unaffected. The list below is every break `scripts/check_semver.sh --crate trusty-mpm` reports, grouped by the issue that introduced it.

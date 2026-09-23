@@ -673,6 +673,13 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // verdict rather than on a guess.
         let remote = push_remote_for_branch(dir, branch);
         let repo = repo_slug_for_remote(dir, remote.as_deref().unwrap_or(DEFAULT_REMOTE))?;
+        // #5850: the registry pin is keyed by the project's `origin`. Reuse
+        // `repo` when it IS origin; a fork push remote names another repository,
+        // so read origin's slug for that case only. Unreadable origin denies.
+        let pin_origin = match remote.as_deref() {
+            None | Some(DEFAULT_REMOTE) => repo.clone(),
+            Some(_) => repo_slug_for(dir)?,
+        };
         // #6623: the same per-project `github:` binding an interactive `tm`
         // resolves. The hook inherits the operator's shell environment in the
         // common case, but not when Claude Code is launched from a GUI, and a
@@ -686,7 +693,10 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // same answer for the same branch name.
         let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
             .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
-                let mut cmd = gh_pr_list_command(dir, &resolve_daemon_gh_env(dir), &repo);
+                // #5850: a registry pin this process cannot honour is a REFUSAL,
+                // not a licence to ask GitHub as the machine's global account.
+                let gh_env = resolve_daemon_gh_env(dir, &pin_origin)?;
+                let mut cmd = gh_pr_list_command(dir, &gh_env, &repo);
                 cmd.arg("--head").arg(branch);
                 cmd.args(MERGED_PR_ARGS);
                 crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)

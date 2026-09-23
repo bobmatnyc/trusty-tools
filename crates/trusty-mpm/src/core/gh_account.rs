@@ -521,9 +521,12 @@ pub struct GhSpawnEnv {
 /// unparseable file or one naming no github.com account. This proves the dir
 /// NAMES an account, not that the credential resolves to it — that stronger
 /// assertion is #5849's.
+/// #5850: `pub(crate)` so `core::gh_account_registry` applies the SAME
+/// predicate to a registry pin the daemon resolves; a second copy would drift.
 /// Test: `config_dir_without_credential_still_pins_and_warns`,
-/// `config_dir_with_credential_has_no_warning`.
-fn config_dir_has_credential(dir: &Path) -> bool {
+/// `config_dir_with_credential_has_no_warning`,
+/// `a_pinned_config_dir_without_a_credential_fails_closed`.
+pub(crate) fn config_dir_has_credential(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("hosts.yml"))
         .ok()
         .and_then(|text| parse_gh_account_status_from_hosts_yml(&text))
@@ -770,7 +773,7 @@ pub struct PinnedGhIdentity {
     pub config_dir: Option<PathBuf>,
 }
 
-/// Look up the pinned `gh` identity for the first registered project whose
+/// Look up the pinned `gh` identity among the registered projects whose
 /// `repo_url` matches `origin` — the pure(ish), registry-backed matching
 /// step [`resolve_gh_account_env_for_registry`] delegates to, isolated so it
 /// is directly testable against a real (temp-dir-backed) `ProjectRegistry`
@@ -782,27 +785,41 @@ pub struct PinnedGhIdentity {
 /// pair: returning only the account is what forced the caller down the
 /// non-discriminating `gh auth token -u` path.
 /// What: `None` when no project matches, or when the matched project pins
-/// NEITHER key (nothing to inject, no regression).
+/// NEITHER key (nothing to inject, no regression). #5850: every matching record
+/// is considered through [`crate::core::gh_account_registry::select_pin`], the
+/// daemon's own rule. Records that pin different identities yield `None` with a
+/// `warn`: this path is fail-open by contract, where the daemon refuses.
 /// Test: `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`,
 /// `resolve_gh_account_env_for_registry_no_match_is_none`,
 /// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`,
-/// `find_pinned_gh_identity_reads_config_dir`.
+/// `find_pinned_gh_identity_reads_config_dir`,
+/// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
+/// `find_pinned_gh_identity_refuses_disagreeing_pins`.
 async fn find_pinned_gh_identity(
     registry: &crate::project::ProjectRegistry,
     origin: &str,
 ) -> Option<PinnedGhIdentity> {
+    use crate::core::gh_account_registry::{RegistryPin, select_pin};
     let projects = registry.list().await.ok()?;
-    let project = projects
+    // #5850: every matching record, chosen by the same rule the daemon uses —
+    // `list` is `HashMap`-ordered, so a first match was an arbitrary one.
+    let candidates = projects
         .iter()
-        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))?;
+        .filter(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
+        .map(|p| (p.name.clone(), RegistryPin::from_project(p)))
+        .collect();
+    let pin = match select_pin(candidates) {
+        Ok(pin) => pin?,
+        Err(reason) => {
+            tracing::warn!(origin, "{reason}; spawning without a pinned gh identity");
+            return None;
+        }
+    };
     // #5851: `github.config_dir` already exists on the record and is persisted;
     // it was simply never read here.
     let pinned = PinnedGhIdentity {
-        account: project.gh_account.clone(),
-        config_dir: project
-            .github
-            .as_ref()
-            .and_then(|cfg| cfg.config_dir.clone()),
+        account: pin.account,
+        config_dir: pin.github.and_then(|cfg| cfg.config_dir),
     };
     (pinned != PinnedGhIdentity::default()).then_some(pinned)
 }

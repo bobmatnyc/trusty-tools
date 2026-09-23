@@ -351,7 +351,7 @@ impl PrIndex {
             // #6623: resolved once per registry root — the daemon's own gh
             // identity, since launchd hands it neither `GH_TOKEN` nor
             // `GH_CONFIG_DIR`.
-            let gh_env = resolve_daemon_gh_env(registry_root);
+            let gh_env = resolve_daemon_gh_env(registry_root, &repo)?;
             let identity = gh_env.describe();
             let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
             cmd.args(["--state", "all", "--limit"])
@@ -570,7 +570,7 @@ pub(crate) fn pr_state_for_branch_within(
         // #6623: same resolution as the bulk index — this call has its own
         // working directory and must not rely on the daemon's bare launchd
         // environment either.
-        let gh_env = resolve_daemon_gh_env(registry_root);
+        let gh_env = resolve_daemon_gh_env(registry_root, &repo)?;
         let identity = gh_env.describe();
         let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
         cmd.args(["--head", branch, "--state", "all", "--limit"])
