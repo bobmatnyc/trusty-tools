@@ -1,2 +1,0 @@
-Fixed
-- The `tm-epic` `manual-procedure.md` skill reference no longer regenerates the tracker's `phases:` block with `awk -v tbl="$(cat ...)"`, which threw `newline in string` and silently produced empty stdout on stock macOS/BSD `awk`, wiping the epic's body once `gh issue edit --body-file` accepted the empty file. The recipe now uses a `perl -e` whole-file substitution, adds an explicit non-empty-and-both-markers guard before pushing, and saves the pre-edit body to `body.orig` first ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
