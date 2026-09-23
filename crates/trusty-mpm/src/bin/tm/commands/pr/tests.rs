@@ -3217,3 +3217,28 @@ fn pr_8431_other_create_failures_still_fail() {
         assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
     }
 }
+
+/// Review follow-up on #8431: recovery covers ONLY the convention label. A
+/// missing `ws/<session>` label — seeded before create per #7513 — still
+/// fails `tm pr open` loudly, never silently dropped, even though it is one
+/// of the plan's own `create_labels()`.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_missing_workstream_label_still_fails_loudly() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let stderr = "could not add label: 'ws/tm-test-01' not found";
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", stderr),
+    ]);
+    let err = open::run(&gh, &args, &FakePreflight::ok()).expect_err("still a failure");
+    assert!(format!("{err:#}").contains(stderr), "{err:#}");
+    let creates = gh
+        .seen()
+        .iter()
+        .filter(|c| c.starts_with("pr create") || c.starts_with("label create trusty"))
+        .count();
+    assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
+}

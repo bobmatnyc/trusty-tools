@@ -6,14 +6,17 @@
 //! was one. The `ws/<session>` label is seeded before the create (#7513); the
 //! convention label is not, because seeding it with `--force` would restyle a
 //! label a project already owns.
-//! What: [`create`] runs the create and, ONLY on that missing-label refusal,
-//! creates the label without `--force` (a label that does not exist has no
-//! styling to overwrite) and retries; when the label cannot be created it
-//! drops that one `--label` and retries with a warning. Every other failure is
-//! returned untouched for the caller to report.
+//! What: [`create`] runs the create and, ONLY on a missing-label refusal
+//! naming the convention label, creates it without `--force` (a label that
+//! does not exist has no styling to overwrite) and retries; when it cannot be
+//! created, that one `--label` is dropped and the create retried with a
+//! warning. A missing-label refusal naming any other label — including
+//! `ws/<session>`, seeded before create per #7513 — is returned untouched,
+//! same as every other failure, so `tm pr open` still fails loudly on it.
 //! Test: `pr_8431_a_missing_convention_label_is_created_and_the_create_retried`,
 //! `pr_8431_a_label_that_cannot_be_created_is_dropped_with_a_warning`,
-//! `pr_8431_other_create_failures_still_fail`.
+//! `pr_8431_other_create_failures_still_fail`,
+//! `pr_8431_a_missing_workstream_label_still_fails_loudly`.
 
 use trusty_mpm::core::policy_labels;
 
@@ -59,11 +62,19 @@ pub(crate) fn create<R: GhRunner>(
         let Some(name) = missing_label(&out.stderr).map(str::to_owned) else {
             return Ok((out, dropped));
         };
+        // #8431 review follow-up: recovery (create-then-retry, or
+        // drop-and-retry) covers ONLY the convention label. Any other
+        // missing label — including `ws/<session>`, seeded before create per
+        // #7513 — still fails the create as before; #7513's "fail loudly"
+        // guarantee depends on that.
+        if name != policy_labels::CONVENTION_LABEL {
+            return Ok((out, dropped));
+        }
         let Some(at) = pending.iter().position(|l| *l == name) else {
             return Ok((out, dropped));
         };
         pending.remove(at);
-        if name == policy_labels::CONVENTION_LABEL && seed_convention_label(gh, repo) {
+        if seed_convention_label(gh, repo) {
             continue;
         }
         eprintln!(
