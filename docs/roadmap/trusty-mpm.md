@@ -42,6 +42,12 @@ only. 2.0.0 follows.
 
 ## Next
 
+### 1.7.2
+
+trusty-mpm 1.7.2 — bug fixes after 1.7.1. The release line is 1.7.1 (in flight) → 1.7.2 (bug fixes) → 2.0.0 (supervisor and channels platform).
+
+0 of 45 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/96)
+
 ### 2.0.0
 
 trusty-mpm 2.0.0 adds a supervisor: one session that watches all of your projects, handles what it can, and asks you about the rest. You create it with a single request, and it comes with its own instructions and writing style, made for watching and reporting instead of for running coding work. Each project can be given its own chat channel, starting with Slack, so the supervisor can send you a question and take your answer there. Incoming messages go through a routing table that refuses anything not explicitly allowed, and a message can only answer a question the supervisor actually asked. One supervisor serves every project, so the same question never reaches you twice.
