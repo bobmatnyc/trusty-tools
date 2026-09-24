@@ -924,10 +924,12 @@ fn git_ok(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// A pushed repository with a tracked `.gitignore`, under a kept temp root.
-/// Returns `(root, repo)`.
-fn pushed_repo_7660() -> (std::path::PathBuf, std::path::PathBuf) {
-    let root = std::fs::canonicalize(tempfile::tempdir().expect("tmp").keep()).expect("canon");
+/// A pushed repository with a tracked `.gitignore`, under a temp root.
+/// Returns `(guard, root, repo)`; the caller holds `guard` for the test's
+/// lifetime, and dropping it deletes the root (#7660 critic round 3).
+fn pushed_repo_7660() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = std::fs::canonicalize(tmp.path()).expect("canon");
     let (remote, repo) = (root.join("remote.git"), root.join("repo"));
     std::fs::create_dir_all(&remote).expect("mkdir remote");
     std::fs::create_dir_all(&repo).expect("mkdir repo");
@@ -949,7 +951,28 @@ fn pushed_repo_7660() -> (std::path::PathBuf, std::path::PathBuf) {
     );
     git_ok(&repo, &["push", "origin", "main"]);
     git_ok(&repo, &["fetch", "origin"]);
-    (root, repo)
+    (tmp, root, repo)
+}
+
+/// Write `wt`'s ownership marker where tm writes it since #8511 — `git
+/// rev-parse --git-path trusty-mpm-worktree`, outside the working tree. The
+/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
+/// git for the same path.
+fn mark_owned_7660(wt: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "trusty-mpm-worktree",
+        ])
+        .output()
+        .expect("run git rev-parse");
+    assert!(out.status.success(), "git rev-parse --git-path failed");
+    let marker = String::from_utf8(out.stdout).expect("utf8 path");
+    std::fs::write(marker.trim(), b"").expect("write the admin-dir marker");
 }
 
 /// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
@@ -994,12 +1017,15 @@ async fn serve_session_on_7660(root: &std::path::Path, ws: &std::path::Path) -> 
     (format!("http://{addr}"), id.to_string())
 }
 
+/// What a spawned #7660 daemon test holds: `(url, session id, workspace path,
+/// temp-root guard)`.
+type Served7660 = (String, String, std::path::PathBuf, tempfile::TempDir);
+
 /// A real daemon holding one in-project session whose `.worktrees/<name>` tree
-/// tm created (it carries the ownership sentinel `create_session_worktree`
-/// writes) and carries exactly tm's provisioning dirt (#7660). Returns
-/// `(url, session id, worktree path)`.
-async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path::PathBuf) {
-    let (root, repo) = pushed_repo_7660();
+/// tm created (it carries the admin-dir ownership marker provisioning writes)
+/// and carries exactly tm's provisioning dirt (#7660).
+async fn spawn_daemon_with_provisioned_worktree() -> Served7660 {
+    let (tmp, root, repo) = pushed_repo_7660();
     let wt = repo.join(".worktrees").join("decom-7660");
     git_ok(
         &repo,
@@ -1011,20 +1037,20 @@ async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path:
             wt.to_str().expect("utf8"),
         ],
     );
-    std::fs::write(wt.join(".trusty-mpm-worktree"), b"").expect("sentinel");
+    mark_owned_7660(&wt);
     provision_dirt_7660(&wt);
     let (url, id) = serve_session_on_7660(&root, &wt).await;
-    (url, id, wt)
+    (url, id, wt, tmp)
 }
 
 /// A real daemon holding one launch-on-main session: its workspace IS the
 /// repository's main checkout, dirty only from tm's provisioning — the live
-/// 1.7.2 shape (#7660). Returns `(url, session id, checkout path)`.
-async fn spawn_daemon_on_the_main_checkout() -> (String, String, std::path::PathBuf) {
-    let (root, repo) = pushed_repo_7660();
+/// 1.7.2 shape (#7660).
+async fn spawn_daemon_on_the_main_checkout() -> Served7660 {
+    let (tmp, root, repo) = pushed_repo_7660();
     provision_dirt_7660(&repo);
     let (url, id) = serve_session_on_7660(&root, &repo).await;
-    (url, id, repo)
+    (url, id, repo, tmp)
 }
 
 /// 🔴 #7660 critic MEDIUM-3, end to end: without `--force` the provisioned
@@ -1032,7 +1058,7 @@ async fn spawn_daemon_on_the_main_checkout() -> (String, String, std::path::Path
 /// the daemon's reason — the non-zero exit a script sees.
 #[tokio::test]
 async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
-    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
     let err = super::session_decommission_routed(&client, &url, &id, false)
@@ -1051,7 +1077,7 @@ async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
 /// #7660 end to end: `--force` removes a tree dirty only from provisioning.
 #[tokio::test]
 async fn session_decommission_routed_force_removes_a_provisioning_only_worktree() {
-    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
     super::session_decommission_routed(&client, &url, &id, true)
@@ -1065,7 +1091,7 @@ async fn session_decommission_routed_force_removes_a_provisioning_only_worktree(
 /// real user change keeps it, exits non-zero, and names the file.
 #[tokio::test]
 async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
-    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
     let client = reqwest::Client::new();
 
@@ -1083,7 +1109,7 @@ async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
 /// why. Fails on the 1.7.2 fix, which exited 0 with no reason.
 #[tokio::test]
 async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force() {
-    let (url, id, repo) = spawn_daemon_on_the_main_checkout().await;
+    let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
     let err = super::session_decommission_routed(&client, &url, &id, true)
@@ -1102,7 +1128,7 @@ async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force(
 /// no reason.
 #[tokio::test]
 async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
-    let (url, id, repo) = spawn_daemon_on_the_main_checkout().await;
+    let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
     let outcome = super::super::managed_route::executor(&client, &url)
@@ -1121,7 +1147,7 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
 
     // The CLI entry point itself exits 0 on a second decommission of a
     // fresh launch-on-main session.
-    let (url, id, repo2) = spawn_daemon_on_the_main_checkout().await;
+    let (url, id, repo2, _tmp2) = spawn_daemon_on_the_main_checkout().await;
     super::session_decommission_routed(&client, &url, &id, false)
         .await
         .expect("a by-design keep exits 0");

@@ -341,6 +341,8 @@ pub struct StoreHealthPayload {
 /// session had an owned workspace.
 /// Test: `decommission_workspace_removed_reflects_ownership` in managed_routes tests.
 #[derive(Debug, Serialize)]
+// #7660 owner ruling 2026-09-24: a later field is not a semver break.
+#[non_exhaustive]
 pub struct DecommissionResponse {
     /// Flat session summary (post-tombstone: state=decommissioned, workspace_path=None).
     #[serde(flatten)]
@@ -355,10 +357,12 @@ pub struct DecommissionResponse {
     /// Used by the CLI to locate the base git repo and run `git worktree prune`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path_was: Option<String>,
-    /// #7660: why a workspace decommission could have removed was kept — the
-    /// dirty-tree guard, the containment guard, or a failed removal. Absent
-    /// when it was removed, already gone, or never tm's to remove. The CLI
-    /// exits non-zero when this is present.
+    /// #7660: why decommission kept a workspace — the dirty-tree guard, a
+    /// refused `--force`, the containment guard, or a failed removal. Under
+    /// `--force` it also carries the keep of a workspace tm never removes (a
+    /// main checkout, a local-path or adopted directory). Absent when the
+    /// workspace was removed or already gone, and for a plain decommission's
+    /// by-design keep. The CLI exits non-zero when this is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_kept_reason: Option<String>,
     /// #7660: why a plain decommission kept a workspace tm never removes.

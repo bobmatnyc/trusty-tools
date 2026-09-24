@@ -13,10 +13,12 @@
 //! ([`is_provisioning_entry`]). Unpushed commits, any other modified or
 //! untracked file, an edit to a tracked provisioning path, nested-repository
 //! work, and every check that cannot complete still keep the workspace.
-//! `--force` acts only on a linked worktree tm provably created that nothing
-//! locks ([`force_blocker`]); a workspace tm never removes — the shared main
-//! checkout a launch-on-main session runs in — is kept with a named reason
-//! ([`unowned_kept_reason`]) so the CLI exits non-zero (#7660 round 2).
+//! When its excuse is needed, `--force` acts only on a linked worktree tm
+//! provably created that nothing locks ([`force_blocker`]); on a clean tree it
+//! is never stricter than no flag. A workspace tm never removes — the shared
+//! main checkout a launch-on-main session runs in — is kept with a named
+//! reason ([`unowned_kept_reason`]): a by-design note without `--force`, and a
+//! refusal that makes the CLI exit non-zero only under `--force`.
 //! Test: `force_decommission_removes_a_provisioning_only_worktree`,
 //! `force_decommission_keeps_an_edited_tracked_claude_md`,
 //! `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
@@ -34,7 +36,10 @@ use super::decommission::{
     remove_session_worktree_guarded,
 };
 use super::record::{ManagedSessionId, SessionRecord};
-use super::worktree_safety::{DirtyWorktree, inspect_dirt, inspect_dirt_excusing};
+use super::worktree_ownership_location::{
+    OwnerReadError, admin_sentinel_path, legacy_sentinel_path, read_sentinel_owner_strict,
+};
+use super::worktree_safety::{inspect_dirt, inspect_dirt_excusing};
 
 /// The paths tm's own provisioning writes into a workspace (#7660).
 ///
@@ -69,8 +74,11 @@ pub enum ProvisioningDirt {
 /// so the CLI could neither exit non-zero nor name what blocked the removal.
 /// What: the tombstoned record, whether the directory was removed, and — only
 /// when decommission had a removal candidate and kept it — the reason.
+/// `#[non_exhaustive]` (owner ruling 2026-09-24): a field added later is not
+/// a semver break; only this crate constructs it.
 /// Test: `decommission_reports_why_it_kept_a_provisioned_worktree`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DecommissionReport {
     /// The tombstoned record.
     pub record: SessionRecord,
@@ -201,9 +209,10 @@ fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
 ///
 /// Why: see the module doc. Moved out of `decommission_with_root_checked`
 /// unchanged except for the `policy` excuse and the returned reason.
-/// What: runs [`inspect_dirt`] — or, under [`ProvisioningDirt::Discard`],
-/// [`inspect_dirt_excusing`] with [`is_provisioning_entry`] — on a blocking
-/// thread, after [`force_blocker`] under `Discard`. Any dirt, a blocker, a
+/// What: runs [`keep_reason`] on a blocking thread — [`inspect_dirt`], and
+/// only when that finds dirt under [`ProvisioningDirt::Discard`],
+/// [`force_blocker`] then [`inspect_dirt_excusing`] with
+/// [`is_provisioning_entry`]. Any dirt, a blocker, a
 /// panicked check or a failed check keeps the worktree and returns the reason;
 /// a clean answer removes it through [`remove_session_worktree_guarded`]. Under
 /// `Discard` its guard re-asks the same questions immediately before
@@ -276,26 +285,23 @@ pub(super) async fn remove_in_project_worktree(
 /// Why `ws` must be kept under `policy`, or `None` when it may be removed
 /// (#7660).
 ///
-/// What: under [`ProvisioningDirt::Discard`], [`force_blocker`] runs first —
-/// `--force` acts only on a worktree tm provably created and nothing locks.
-/// Then the dirt `policy` does not excuse keeps it, named file by file.
+/// What: a tree the plain dirt check passes may be removed under either
+/// policy — `--force` is never stricter than no flag (#7660 critic round 3).
+/// Only when `--force`'s excuse is needed does [`force_blocker`] run: it acts
+/// only on a worktree tm provably created and nothing locks. Then the dirt
+/// `policy` does not excuse keeps it, named file by file.
+/// Test: `force_decommission_is_never_stricter_than_plain_on_a_clean_tree`,
+/// `force_decommission_keeps_a_worktree_without_the_sentinel`.
 fn keep_reason(ws: &Path, policy: ProvisioningDirt) -> Option<String> {
-    if policy == ProvisioningDirt::Discard
-        && let Some(blocker) = force_blocker(ws)
-    {
+    let plain = inspect_dirt(ws)?;
+    if policy == ProvisioningDirt::Refuse {
+        return Some(kept_for_dirt(ws, &plain.reason, policy));
+    }
+    if let Some(blocker) = force_blocker(ws) {
         return Some(format!("--force declined: {blocker}; nothing was removed"));
     }
-    dirt_under(ws, policy).map(|d| kept_for_dirt(ws, &d.reason, policy))
-}
-
-/// The dirt `policy` does not excuse, or `None` when `ws` may be removed.
-fn dirt_under(ws: &Path, policy: ProvisioningDirt) -> Option<DirtyWorktree> {
-    match policy {
-        ProvisioningDirt::Refuse => inspect_dirt(ws),
-        ProvisioningDirt::Discard => {
-            inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
-        }
-    }
+    inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
+        .map(|d| kept_for_dirt(ws, &d.reason, policy))
 }
 
 /// The operator-facing reason a dirty worktree was kept (#7660).
@@ -326,7 +332,7 @@ const NAMED_ENTRIES_CAP: usize = 10;
 /// Why: "1 uncommitted/untracked file(s)" tells an operator THAT `--force`
 /// refused, not what to look at.
 /// What: display only — the keep/remove decision was already made by
-/// [`dirt_under`], so a failed read here only drops the list. Lists the
+/// [`keep_reason`], so a failed read here only drops the list. Lists the
 /// per-file porcelain entries [`is_provisioning_entry`] does not excuse under
 /// `Discard` (every entry under `Refuse`), skipping the ownership sentinel and
 /// `.trusty-mpm/`, which the dirty-tree guard accounts for itself.
@@ -375,40 +381,64 @@ fn blocking_entries(ws: &Path, policy: ProvisioningDirt) -> String {
 /// session — never on a repository's main checkout, a tree tm cannot vouch for,
 /// or one a `git worktree lock` protects.
 /// What: three probes, each failing closed with a named reason: (1) the
-/// ownership sentinel [`WORKTREE_SENTINEL_FILE`] that `create_session_worktree`
-/// writes is present; (2) `git rev-parse` reports `ws` as its own worktree root
-/// whose git dir differs from the common dir — a linked worktree, not a main
-/// checkout; (3) that git dir holds no `locked` file ([`lock_blocker`]).
+/// ownership marker is present ([`ownership_blocker`]); (2) `git rev-parse`
+/// reports `ws` as its own worktree root whose git dir differs from the common
+/// dir — a linked worktree, not a main checkout; (3) that git dir holds no
+/// `locked` file ([`lock_blocker`]).
 /// Test: `force_decommission_keeps_a_worktree_without_the_sentinel`,
-/// `force_decommission_keeps_a_worktree_whose_sentinel_cannot_be_read`,
 /// `force_decommission_keeps_a_main_checkout_under_the_worktrees_dir`,
 /// `force_decommission_keeps_a_worktree_git_cannot_resolve`,
 /// `force_decommission_keeps_a_locked_worktree`,
 /// `lock_blocker_fails_closed_when_the_lock_state_cannot_be_read`.
 pub(crate) fn force_blocker(ws: &Path) -> Option<String> {
-    let sentinel = ws.join(WORKTREE_SENTINEL_FILE);
-    match std::fs::symlink_metadata(&sentinel) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => {
-            return Some(format!(
-                "cannot prove tm created it: {WORKTREE_SENTINEL_FILE} is not a regular file"
-            ));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Some(format!(
-                "cannot prove tm created it: it carries no ownership sentinel \
-                 ({WORKTREE_SENTINEL_FILE})"
-            ));
-        }
-        Err(e) => {
-            return Some(format!(
-                "cannot prove tm created it: its ownership sentinel could not be read: {e}"
-            ));
-        }
+    if let Some(reason) = ownership_blocker(ws) {
+        return Some(format!("cannot prove tm created it: {reason}"));
     }
     match linked_worktree_git_dir(ws) {
         Ok(git_dir) => lock_blocker(&git_dir),
         Err(reason) => Some(reason),
+    }
+}
+
+/// Why `ws`'s ownership marker proves nothing, or `None` when it proves tm
+/// created the tree (#7660 critic round 3, #8511).
+///
+/// Why: since #8511 provisioning writes the marker into the git admin dir
+/// only, so a check of the legacy in-tree path alone refused nearly every
+/// tm-created worktree.
+/// What: any marker location — legacy or admin — that exists as anything but
+/// a regular file blocks, because [`read_sentinel_owner_strict`] follows
+/// symlinks. Then that strict reader decides: a marker (even an owner-less
+/// one) passes; no marker, an unreadable one, a corrupt one, or an
+/// unresolvable `.git` blocks.
+/// Test: `force_decommission_honours_an_admin_dir_marker`,
+/// `force_decommission_honours_a_legacy_in_tree_marker`,
+/// `force_decommission_keeps_a_worktree_whose_marker_is_a_symlink`,
+/// `force_decommission_keeps_a_worktree_whose_marker_is_corrupt`,
+/// `force_decommission_keeps_a_worktree_whose_sentinel_cannot_be_read`.
+fn ownership_blocker(ws: &Path) -> Option<String> {
+    for marker in std::iter::once(legacy_sentinel_path(ws)).chain(admin_sentinel_path(ws)) {
+        if std::fs::symlink_metadata(&marker).is_ok_and(|meta| !meta.is_file()) {
+            return Some(format!(
+                "its ownership sentinel {} is not a regular file",
+                marker.display()
+            ));
+        }
+    }
+    match read_sentinel_owner_strict(ws) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(format!(
+            "it carries no ownership sentinel (neither in its git admin dir nor as \
+             {WORKTREE_SENTINEL_FILE})"
+        )),
+        Err(OwnerReadError::Unreadable { path, reason }) => Some(format!(
+            "its ownership sentinel could not be read ({}): {reason}",
+            path.display()
+        )),
+        Err(OwnerReadError::Corrupt { path, reason }) => Some(format!(
+            "its ownership sentinel {} is corrupt: {reason}",
+            path.display()
+        )),
     }
 }
 
