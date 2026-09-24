@@ -620,10 +620,10 @@ const SPAWN_ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
 /// An Enterprise Server repository whose registry record pins only an account.
 const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
 
-/// The account-only `bob-duetto` pin.
+/// The account-only `octo-pinned` pin.
 fn account_only_pin() -> super::PinnedGhIdentity {
     super::PinnedGhIdentity {
-        account: Some("bob-duetto".into()),
+        account: Some("octo-pinned".into()),
         config_dir: None,
     }
 }
@@ -654,12 +654,12 @@ fn spawn_with(
     .expect("the spawn env never errs")
 }
 
-/// A github.com candidate dir whose `-u bob-duetto` token authenticates as
+/// A github.com candidate dir whose `-u octo-pinned` token authenticates as
 /// `who`; `who: Err` is a failed `GET /user`.
 fn github_spawn(who: Result<&str, &str>) -> super::GhSpawnEnv {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&dir, "github.com", "bob-duetto", Ok("tok-bob"));
+    let probe = TableProbe::default().answer(&dir, "github.com", "octo-pinned", Ok("tok-bob"));
     let check = TableCheck::default().answer("https://api.github.com", "tok-bob", who);
     spawn_with(SPAWN_ORIGIN, &dir, &probe, &check)
 }
@@ -669,13 +669,13 @@ fn github_spawn(who: Result<&str, &str>) -> super::GhSpawnEnv {
 /// Test: itself.
 #[test]
 fn an_account_only_spawn_pin_gets_the_proven_token() {
-    let env = github_spawn(Ok("bob-duetto"));
+    let env = github_spawn(Ok("octo-pinned"));
     assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob");
     assert_eq!(
         value_of(&env.vars, "GH_ENTERPRISE_TOKEN"),
         super::REFUSED_GH_TOKEN
     );
-    assert_eq!(value_of(&env.vars, "GH_USER"), "bob-duetto");
+    assert_eq!(value_of(&env.vars, "GH_USER"), "octo-pinned");
     assert!(
         !env.vars.iter().any(|(k, _)| k == GH_CONFIG_DIR),
         "{:?}",
@@ -691,7 +691,7 @@ fn an_account_only_spawn_pin_gets_the_proven_token() {
 #[test]
 fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
     let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, |_| {
-        Err("/x: the token gh returned for 'bob-duetto' authenticates as 'bobmatnyc'".into())
+        Err("/x: the token gh returned for 'octo-pinned' authenticates as 'octo-other'".into())
     })
     .expect("a pinned account must never resolve to no identity")
     .expect("the refusal rides the env, not an error");
@@ -700,9 +700,9 @@ fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
     }
     let warning = env.warning.expect("the refusal must be logged");
     assert!(
-        warning.contains("authenticates as 'bobmatnyc'")
+        warning.contains("authenticates as 'octo-other'")
             && warning.contains(&format!(
-                "tm projects register <name> --repo-url {SPAWN_ORIGIN} --gh-account bob-duetto \
+                "tm projects register <name> --repo-url {SPAWN_ORIGIN} --gh-account octo-pinned \
                  --gh-config-dir <dir>"
             )),
         "got: {warning}"
@@ -714,9 +714,9 @@ fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
 #[test]
 fn a_config_dir_spawn_pin_never_asks_to_prove() {
     let dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(dir.path(), "bob-duetto");
+    write_hosts_yml(dir.path(), "octo-pinned");
     let pinned = super::PinnedGhIdentity {
-        account: Some("bob-duetto".into()),
+        account: Some("octo-pinned".into()),
         config_dir: Some(dir.path().to_path_buf()),
     };
     let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
@@ -735,11 +735,11 @@ fn a_config_dir_spawn_pin_never_asks_to_prove() {
 /// Test: itself.
 #[test]
 fn a_spawn_pin_refuses_a_token_for_another_account() {
-    let env = github_spawn(Ok("bobmatnyc"));
+    let env = github_spawn(Ok("octo-other"));
     assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
     let warning = env.warning.expect("the refusal must be logged");
     assert!(
-        warning.contains("authenticates as 'bobmatnyc'") && !warning.contains("tok-"),
+        warning.contains("authenticates as 'octo-other'") && !warning.contains("tok-"),
         "got: {warning}"
     );
 }
@@ -765,9 +765,9 @@ fn a_spawn_pin_refuses_when_the_user_check_fails() {
 fn a_ghes_spawn_pin_puts_the_token_in_gh_enterprise_token() {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&dir, "ghe.corp", "bob-duetto", Ok("tok-ghe"));
+    let probe = TableProbe::default().answer(&dir, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
     let check =
-        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("bob-duetto"));
+        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("octo-pinned"));
     let env = spawn_with(GHES_ORIGIN, &dir, &probe, &check);
     assert_eq!(value_of(&env.vars, "GH_ENTERPRISE_TOKEN"), "tok-ghe");
     assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
@@ -781,7 +781,7 @@ fn a_ghes_spawn_pin_puts_the_token_in_gh_enterprise_token() {
 fn a_ghes_spawn_pin_refusal_blanks_both_token_vars() {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&dir, "ghe.corp", "bob-duetto", Ok("tok-ghe"));
+    let probe = TableProbe::default().answer(&dir, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
     let check = TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("other"));
     let env = spawn_with(GHES_ORIGIN, &dir, &probe, &check);
     for var in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
@@ -807,7 +807,7 @@ async fn a_panicked_spawn_env_task_fails_closed() {
     for var in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
         assert_eq!(value_of(&vars, var), super::REFUSED_GH_TOKEN, "{var}");
     }
-    assert_eq!(value_of(&vars, "GH_USER"), "bob-duetto");
+    assert_eq!(value_of(&vars, "GH_USER"), "octo-pinned");
 }
 
 /// A `tracing` writer that appends every formatted line to a shared buffer.
@@ -856,12 +856,12 @@ fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
 /// Test: itself.
 #[test]
 fn spawn_env_debug_redacts_every_token() {
-    let env = github_spawn(Ok("bob-duetto"));
+    let env = github_spawn(Ok("octo-pinned"));
     assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob");
     let shown = format!("{env:?}");
     assert!(!shown.contains("tok-bob"), "shown: {shown}");
     assert!(
-        shown.contains("GH_USER") && shown.contains("bob-duetto"),
+        shown.contains("GH_USER") && shown.contains("octo-pinned"),
         "shown: {shown}"
     );
 }
@@ -883,8 +883,9 @@ fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
 
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&dir, "github.com", "bob-duetto", Ok("tok-bob"));
-    let check = TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("bob-duetto"));
+    let probe = TableProbe::default().answer(&dir, "github.com", "octo-pinned", Ok("tok-bob"));
+    let check =
+        TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("octo-pinned"));
     let sources = crate::core::gh_account_dir::AccountDirSources {
         own_config_dir: Some(dir.clone()),
         ..Default::default()
@@ -895,12 +896,12 @@ fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
         check: &check,
         cache: None,
     };
-    let proven = super::spawn_proof(&prover, "bob-duetto", aliased, &aliases)
+    let proven = super::spawn_proof(&prover, "octo-pinned", aliased, &aliases)
         .expect("the aliased origin proves on github.com");
     assert_eq!(proven.host, "github.com");
 
     let unresolved = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
-    let err = super::spawn_proof(&prover, "bob-duetto", aliased, &unresolved)
+    let err = super::spawn_proof(&prover, "octo-pinned", aliased, &unresolved)
         .expect_err("an alias nothing renames names no host");
     assert!(err.contains("'github-duetto'"), "got: {err}");
     assert_eq!(probe.calls().len(), 1, "the refusal never runs gh");
@@ -912,18 +913,18 @@ fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
 /// Test: itself.
 #[test]
 fn a_spawn_pin_logs_no_token_in_any_arm() {
-    let (vars, log) = logged_spawn(Ok("bob-duetto"));
+    let (vars, log) = logged_spawn(Ok("octo-pinned"));
     assert_eq!(value_of(&vars, "GH_TOKEN"), "tok-bob");
     assert!(!log.contains("tok-"), "a token reached the log: {log}");
 
     for who in [
-        Ok("bobmatnyc"),
+        Ok("octo-other"),
         Err("GET https://api.github.com/user answered HTTP 401"),
     ] {
         let (vars, log) = logged_spawn(who);
         assert_eq!(value_of(&vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
         assert!(
-            log.contains("pinned to gh account 'bob-duetto'"),
+            log.contains("pinned to gh account 'octo-pinned'"),
             "the refusal must be logged: {log}"
         );
         assert!(!log.contains("tok-"), "a token reached the log: {log}");

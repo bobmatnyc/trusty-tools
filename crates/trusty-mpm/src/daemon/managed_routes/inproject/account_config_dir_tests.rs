@@ -41,9 +41,9 @@ fn ensure_account_config_dir_places_it_under_gh_accounts() {
     let state_root = std::path::Path::new("/tmp/tm-state");
     // #8510: the path helper moved to core, where the account-dir borrow uses it.
     assert_eq!(
-        crate::core::gh_account_dir::tm_account_dir(state_root, "bob-duetto"),
+        crate::core::gh_account_dir::tm_account_dir(state_root, "octo-pinned"),
         Ok(std::path::PathBuf::from(
-            "/tmp/tm-state/gh-accounts/bob-duetto"
+            "/tmp/tm-state/gh-accounts/octo-pinned"
         ))
     );
 }
@@ -177,7 +177,7 @@ fn ensure_account_config_dir_tolerates_a_missing_config_yml() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned")
         .expect("no config.yml must not be an error");
 }
 
@@ -189,7 +189,7 @@ fn ensure_account_config_dir_writes_the_config_version() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yml")).unwrap(),
         "version: \"1\"\n"
@@ -210,7 +210,7 @@ fn ensure_account_config_dir_adds_the_version_to_a_copied_config() {
         Some("git_protocol: ssh\n"),
     );
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yml")).unwrap(),
         "version: \"1\"\ngit_protocol: ssh\n"
@@ -228,13 +228,13 @@ fn ensure_account_config_dir_adds_the_version_to_a_copied_config() {
 fn ensure_account_config_dir_adds_the_version_to_a_reused_dir() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let state_root = tmp.path().join("state");
-    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    let dir = state_root.join("gh-accounts").join("octo-pinned");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hosts.yml"), "old-hosts").unwrap();
     std::fs::write(dir.join("config.yml"), "git_protocol: ssh\n").unwrap();
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yml")).unwrap(),
         "version: \"1\"\ngit_protocol: ssh\n"
@@ -375,14 +375,14 @@ fn ensure_account_config_dir_refuses_a_symlinked_config_yml() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    let dir = state_root.join("gh-accounts").join("octo-pinned");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hosts.yml"), "built").unwrap();
     let real_target = tmp.path().join("operator-config.yml");
     std::fs::write(&real_target, "git_protocol: ssh\n").unwrap();
     std::os::unix::fs::symlink(&real_target, dir.join("config.yml")).expect("create symlink");
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned")
         .expect_err("a pre-planted symlinked config.yml must be refused");
     assert!(err.contains("symlink"), "{err}");
     assert_eq!(

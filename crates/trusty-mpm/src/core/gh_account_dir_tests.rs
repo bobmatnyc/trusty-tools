@@ -135,11 +135,11 @@ fn the_second_candidate_is_used_when_the_first_fails() {
         .answer(
             &first,
             "github.com",
-            "bob-duetto",
+            "octo-pinned",
             Err("exit status 1: no token"),
         )
-        .answer(&second, "github.com", "bob-duetto", Ok("tok-2"));
-    let check = TableCheck::default().answer("https://api.github.com", "tok-2", Ok("bob-duetto"));
+        .answer(&second, "github.com", "octo-pinned", Ok("tok-2"));
+    let check = TableCheck::default().answer("https://api.github.com", "tok-2", Ok("octo-pinned"));
     let prover = AccountProver {
         sources: &sources(Some(&first), Some(&second)),
         probe: &probe,
@@ -147,7 +147,7 @@ fn the_second_candidate_is_used_when_the_first_fails() {
         cache: None,
     };
     let proven = prover
-        .prove("bob-duetto", ORIGIN)
+        .prove("octo-pinned", ORIGIN)
         .expect("the second must prove");
     assert_eq!(proven, ProvenToken::for_test("github.com", "tok-2"));
     assert_eq!(probe.calls().len(), 2, "both candidates are asked");
@@ -161,19 +161,23 @@ fn the_second_candidate_is_used_when_the_first_fails() {
 fn a_token_for_another_account_is_refused() {
     let root = tempfile::tempdir().expect("tempdir");
     let own = migrated_dir(root.path());
-    std::fs::write(own.join("hosts.yml"), "github.com:\n    user: bob-duetto\n").expect("hosts");
-    let probe = TableProbe::default().answer(&own, "github.com", "bob-duetto", Ok("tok-global"));
+    std::fs::write(
+        own.join("hosts.yml"),
+        "github.com:\n    user: octo-pinned\n",
+    )
+    .expect("hosts");
+    let probe = TableProbe::default().answer(&own, "github.com", "octo-pinned", Ok("tok-global"));
     let check =
-        TableCheck::default().answer("https://api.github.com", "tok-global", Ok("bobmatnyc"));
+        TableCheck::default().answer("https://api.github.com", "tok-global", Ok("octo-other"));
     let err = refusal(prove_account_token(
         &sources(None, Some(&own)),
-        "bob-duetto",
+        "octo-pinned",
         ORIGIN,
         &probe,
         &check,
     ));
     assert!(
-        err.contains("authenticates as 'bobmatnyc'") && !err.contains("tok-"),
+        err.contains("authenticates as 'octo-other'") && !err.contains("tok-"),
         "got: {err}"
     );
 }
@@ -184,11 +188,11 @@ fn a_token_for_another_account_is_refused() {
 fn a_login_differing_only_in_case_is_proven() {
     let root = tempfile::tempdir().expect("tempdir");
     let own = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&own, "github.com", "bob-duetto", Ok("tok-b"));
-    let check = TableCheck::default().answer("https://api.github.com", "tok-b", Ok("Bob-Duetto"));
+    let probe = TableProbe::default().answer(&own, "github.com", "octo-pinned", Ok("tok-b"));
+    let check = TableCheck::default().answer("https://api.github.com", "tok-b", Ok("Octo-Pinned"));
     prove_account_token(
         &sources(None, Some(&own)),
-        "bob-duetto",
+        "octo-pinned",
         ORIGIN,
         &probe,
         &check,
@@ -209,11 +213,11 @@ fn a_failed_user_check_is_not_proof() {
     ] {
         let root = tempfile::tempdir().expect("tempdir");
         let own = migrated_dir(root.path());
-        let probe = TableProbe::default().answer(&own, "github.com", "bob-duetto", Ok("tok-b"));
+        let probe = TableProbe::default().answer(&own, "github.com", "octo-pinned", Ok("tok-b"));
         let check = TableCheck::default().answer("https://api.github.com", "tok-b", Err(failure));
         let err = refusal(prove_account_token(
             &sources(None, Some(&own)),
-            "bob-duetto",
+            "octo-pinned",
             ORIGIN,
             &probe,
             &check,
@@ -233,10 +237,10 @@ fn a_failed_user_check_is_not_proof() {
 fn a_candidate_without_a_config_version_is_refused_before_gh_runs() {
     let root = tempfile::tempdir().expect("tempdir");
     std::fs::write(root.path().join("config.yml"), "git_protocol: https\n").expect("config");
-    let probe = TableProbe::default().answer(root.path(), "github.com", "bob-duetto", Ok("tok"));
+    let probe = TableProbe::default().answer(root.path(), "github.com", "octo-pinned", Ok("tok"));
     let err = refusal(prove_account_token(
         &sources(None, Some(root.path())),
-        "bob-duetto",
+        "octo-pinned",
         ORIGIN,
         &probe,
         &TableCheck::default(),
@@ -260,7 +264,7 @@ fn a_candidate_without_a_config_yml_is_refused_before_gh_runs() {
     let probe = TableProbe::default();
     let err = refusal(prove_account_token(
         &sources(Some(root.path()), None),
-        "bob-duetto",
+        "octo-pinned",
         ORIGIN,
         &probe,
         &TableCheck::default(),
@@ -292,12 +296,12 @@ fn a_candidate_with_an_unknown_config_version_is_refused() {
 fn the_user_check_is_sent_to_the_hosts_api() {
     let root = tempfile::tempdir().expect("tempdir");
     let own = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&own, "ghe.corp", "bob-duetto", Ok("tok-ghe"));
+    let probe = TableProbe::default().answer(&own, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
     let check =
-        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("bob-duetto"));
+        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("octo-pinned"));
     let proven = prove_account_token(
         &sources(None, Some(&own)),
-        "bob-duetto",
+        "octo-pinned",
         "https://ghe.corp/duettoresearch/jev-matching",
         &probe,
         &check,
@@ -306,7 +310,7 @@ fn the_user_check_is_sent_to_the_hosts_api() {
     assert_eq!(proven.host, "ghe.corp");
     assert_eq!(
         probe.calls(),
-        vec![(own, "ghe.corp".to_string(), "bob-duetto".to_string())]
+        vec![(own, "ghe.corp".to_string(), "octo-pinned".to_string())]
     );
     assert_eq!(
         check.calls(),
@@ -321,7 +325,7 @@ fn an_origin_with_no_host_is_refused() {
     let probe = TableProbe::default();
     let err = refusal(prove_account_token(
         &AccountDirSources::default(),
-        "bob-duetto",
+        "octo-pinned",
         "local-checkout",
         &probe,
         &TableCheck::default(),
@@ -358,11 +362,11 @@ fn api_base_url_and_token_var_follow_the_host_class() {
 fn parse_user_login_accepts_only_a_200_with_a_login() {
     let url = "https://api.github.com/user";
     assert_eq!(
-        parse_user_login(url, 200, r#"{"login":"bob-duetto","id":1}"#),
-        Ok("bob-duetto".to_string())
+        parse_user_login(url, 200, r#"{"login":"octo-pinned","id":1}"#),
+        Ok("octo-pinned".to_string())
     );
     for (status, body) in [
-        (401, r#"{"login":"bob-duetto"}"#),
+        (401, r#"{"login":"octo-pinned"}"#),
         (301, ""),
         (200, "<html>tok-secret</html>"),
         (200, r#"{"login":""}"#),
@@ -379,7 +383,7 @@ fn parse_user_login_accepts_only_a_200_with_a_login() {
 fn a_dir_named_twice_is_probed_once() {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let candidates = sources(Some(&dir), Some(&dir)).candidates("bob-duetto");
+    let candidates = sources(Some(&dir), Some(&dir)).candidates("octo-pinned");
     assert_eq!(candidates, vec![Ok(dir)]);
 }
 
@@ -413,7 +417,7 @@ fn the_production_seams_never_run_in_a_unit_test() {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
     let err = CliTokenProbe
-        .token(&dir, "github.com", "bob-duetto")
+        .token(&dir, "github.com", "octo-pinned")
         .expect_err("no gh in a unit test");
     assert!(err.contains("never runs gh"), "{err}");
     let err = HttpUserCheck

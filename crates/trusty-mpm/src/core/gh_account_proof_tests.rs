@@ -26,12 +26,12 @@ use crate::core::gh_account_dir::gh_account_dir_tests::{
 /// An Enterprise Server repository.
 const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
 
-/// A probe and check that prove `tok-bob` for `bob-duetto` under `dir` on
+/// A probe and check that prove `tok-bob` for `octo-pinned` under `dir` on
 /// github.com, and answer nothing else.
 fn proving(dir: &std::path::Path) -> (TableProbe, TableCheck) {
     (
-        TableProbe::default().answer(dir, "github.com", "bob-duetto", Ok("tok-bob")),
-        TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("bob-duetto")),
+        TableProbe::default().answer(dir, "github.com", "octo-pinned", Ok("tok-bob")),
+        TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("octo-pinned")),
     )
 }
 
@@ -61,10 +61,10 @@ fn a_remembered_proof_is_reused_within_its_ttl() {
         cache: Some(&cache),
     };
     let t0 = Instant::now();
-    let first = prover.prove_at("bob-duetto", ORIGIN, t0).expect("proves");
+    let first = prover.prove_at("octo-pinned", ORIGIN, t0).expect("proves");
     let again = prover
         .prove_at(
-            "Bob-Duetto",
+            "Octo-Pinned",
             ORIGIN,
             t0 + PROOF_TTL - Duration::from_secs(1),
         )
@@ -91,13 +91,13 @@ fn a_remembered_proof_never_serves_another_login_or_host() {
         cache: Some(&cache),
     };
     let t0 = Instant::now();
-    prover.prove_at("bob-duetto", ORIGIN, t0).expect("proves");
+    prover.prove_at("octo-pinned", ORIGIN, t0).expect("proves");
 
     prover
         .prove_at("alice", ORIGIN, t0)
         .expect_err("alice has no token here");
     prover
-        .prove_at("bob-duetto", GHES_ORIGIN, t0)
+        .prove_at("octo-pinned", GHES_ORIGIN, t0)
         .expect_err("no token is scripted for ghe.corp");
     let asked: Vec<(String, String)> = probe
         .calls()
@@ -107,9 +107,9 @@ fn a_remembered_proof_never_serves_another_login_or_host() {
     assert_eq!(
         asked,
         [
-            ("github.com".to_string(), "bob-duetto".to_string()),
+            ("github.com".to_string(), "octo-pinned".to_string()),
             ("github.com".to_string(), "alice".to_string()),
-            ("ghe.corp".to_string(), "bob-duetto".to_string()),
+            ("ghe.corp".to_string(), "octo-pinned".to_string()),
         ]
     );
 }
@@ -130,9 +130,9 @@ fn an_expired_proof_is_proven_again() {
         cache: Some(&cache),
     };
     let t0 = Instant::now();
-    prover.prove_at("bob-duetto", ORIGIN, t0).expect("proves");
+    prover.prove_at("octo-pinned", ORIGIN, t0).expect("proves");
     prover
-        .prove_at("bob-duetto", ORIGIN, t0 + PROOF_TTL)
+        .prove_at("octo-pinned", ORIGIN, t0 + PROOF_TTL)
         .expect("proves again");
     assert_eq!(probe.calls().len(), 2);
     assert_eq!(check.calls().len(), 2);
@@ -145,8 +145,8 @@ fn an_expired_proof_is_proven_again() {
 fn a_refusal_is_never_remembered() {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
-    let probe = TableProbe::default().answer(&dir, "github.com", "bob-duetto", Ok("tok-g"));
-    let check = TableCheck::default().answer("https://api.github.com", "tok-g", Ok("bobmatnyc"));
+    let probe = TableProbe::default().answer(&dir, "github.com", "octo-pinned", Ok("tok-g"));
+    let check = TableCheck::default().answer("https://api.github.com", "tok-g", Ok("octo-other"));
     let cache = ProofCache::new(PROOF_TTL);
     let sources = only(&dir);
     let prover = AccountProver {
@@ -158,7 +158,7 @@ fn a_refusal_is_never_remembered() {
     let t0 = Instant::now();
     for _ in 0..2 {
         prover
-            .prove_at("bob-duetto", ORIGIN, t0)
+            .prove_at("octo-pinned", ORIGIN, t0)
             .expect_err("another account's token is refused");
     }
     assert_eq!(probe.calls().len(), 2, "a refusal must not be remembered");
@@ -283,12 +283,12 @@ fn a_matching_login_is_read_and_the_token_is_sent() {
             stream,
             "200 OK",
             "Content-Type: application/json\r\n",
-            r#"{"login":"Bob-Duetto"}"#,
+            r#"{"login":"Octo-Pinned"}"#,
         );
     });
     let login = send_user_request(user_client().no_proxy(), &url, "tok-x").expect("200");
     let head = server.join().expect("server").to_ascii_lowercase();
-    assert!(login.eq_ignore_ascii_case("bob-duetto"), "{login}");
+    assert!(login.eq_ignore_ascii_case("octo-pinned"), "{login}");
     assert!(head.starts_with("get /user http/1.1"), "{head}");
     assert!(head.contains("authorization: token tok-x\r\n"), "{head}");
 }
