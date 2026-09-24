@@ -104,7 +104,13 @@ name = "trusty-mpm"
 # the bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
 # consumer surface, no library dependents); the change is a security-hardening
 # fix with no signature break.
-version = "1.7.3"
+# 1.7.4 (Refs #8563): patch — 1.7.3 is already published on crates.io and
+# this PR edits `src/**` (scoped launchd secrets fix), so the "PR version
+# bump vs crates.io" check requires the bump. Patch: trusty-mpm is excluded
+# from the semver gate (binary-only consumer surface, no library
+# dependents); the change is a security-hardening fix with no signature
+# break. Ships alone per owner ruling.
+version = "1.7.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
