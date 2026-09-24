@@ -11,7 +11,8 @@
 //!   `merge-base`, `ls-remote`, with no option that writes a file or runs a
 //!   program (`--output`, `-O`/`--open-files-in-pager`, `-u`/`--upload-pack`,
 //!   `--exec`, `--ext-diff`, `--textconv`, `--show-signature`, a `%G…`
-//!   format placeholder or `%(signature…)` atom, and any
+//!   format placeholder with or without a `+`/`-`/space modifier, a branch
+//!   format naming `signature`, and any
 //!   abbreviation git would expand to one of them). Every literal is checked,
 //!   including those after `--`: git reads `--` as the VALUE of a preceding
 //!   `-e`, so `git grep -e -- -O` still parses `-O` (#8439 round 2). A
@@ -157,7 +158,8 @@ fn read(sub: &str, tail: &[Arg]) -> Verdict {
             .is_some_and(|prev| prev.starts_with('-') && prev != "--");
         if sub == "ls-remote" || after_option {
             return Err(format!(
-                "a `for` variable as the value of a `git {sub}` option or remote"
+                "a `for` variable as the value of a `git {sub}` option or remote (to pass a \
+                 loop path to git, put it after `--`: `git {sub} <options> -- \"$f\"`)"
             ));
         }
     }
@@ -168,7 +170,9 @@ fn read(sub: &str, tail: &[Arg]) -> Verdict {
         }
         // #8439 round 2 audit: a `%G…` pretty-format placeholder verifies the
         // commit signature, which runs `gpg.program` like `--show-signature`.
-        if t.contains("%G") {
+        // Round 3 critic: git takes one `+`, `-` or space between `%` and the
+        // placeholder (`%-G?`, `% G?`, `%+GS`); more are refused too.
+        if signature_placeholder(t) {
             return Err("a `%G` format placeholder, which runs the signature verifier".into());
         }
         let long = t
@@ -195,11 +199,12 @@ fn branch(tail: &[Arg]) -> Verdict {
         .iter()
         .any(|a| matches!(a.text(), Some("--list" | "-l")));
     let mut i = 0;
-    // #8439 round 2 audit: `%(signature…)` in `--format` runs the verifier.
+    // #8439 round 2 audit: `%(signature…)` in `--format` runs the verifier;
+    // round 3: `%(*signature)` too, so any mention of `signature` is refused.
     if tail
         .iter()
         .filter_map(Arg::text)
-        .any(|t| t.contains("%(signature"))
+        .any(|t| t.contains("signature"))
     {
         return Err("a `%(signature)` format atom, which runs the signature verifier".into());
     }
@@ -233,4 +238,19 @@ fn worktree(tail: &[Arg]) -> Verdict {
         return Err("`git worktree` in a form other than `list`".into());
     }
     Ok(())
+}
+
+/// Does `t` hold a `%G…` pretty-format placeholder (#8439)?
+///
+/// Why: `%G?`, `%GS`, `%GK` and the rest verify the commit signature, which
+/// runs `gpg.program`. Git accepts one `+`, `-` or space after the `%`.
+/// What: true when some `%` is followed, after any run of `+`/`-`/space, by
+/// `G`. Over-refuses `%%G`, a literal `%` before `G`.
+/// Test: `read_only_allow_tests::git_options_after_a_double_dash_are_still_judged`.
+fn signature_placeholder(t: &str) -> bool {
+    t.match_indices('%').any(|(k, _)| {
+        t[k + 1..]
+            .trim_start_matches(['+', '-', ' '])
+            .starts_with('G')
+    })
 }

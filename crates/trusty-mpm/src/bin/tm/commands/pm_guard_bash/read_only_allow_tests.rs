@@ -371,6 +371,12 @@ fn git_options_after_a_double_dash_are_still_judged() {
             "git log --format=%G?",
             "git show -s '--pretty=format:%GS'",
             "git branch --format='%(signature)'",
+            "git branch --format='%(*signature)'",
+            "git log -1 '--format=%-G?'",
+            "git log -1 '--format=% G?'",
+            "git show -s --pretty=tformat:%+GS HEAD",
+            "git log '--format=%+G?'",
+            "git log --pretty 'format:%-GK'",
         ],
     );
     check(
