@@ -1,2 +1,0 @@
-Changed
-- Every refusal `tm hook --pm-guard` prints now starts with `tm pm-guard: `, so a tm refusal can be told apart from one the Claude Code harness produces (for example its "too complex to verify that it stays inside the worktree" refusal, which is not prefixed). Scripts that match the start of a pm-guard `permissionDecisionReason` must allow for the prefix. `tm hook --divert-check` refusals and the daemon audit record's `pm_guard_reason` are unchanged (#8546).
