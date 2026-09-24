@@ -6,6 +6,146 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [8.0.0] — 2026-09-24
+
+### Added
+
+- `commits.ai_detection_method` records which signal family produced each
+  `is_ai_assisted` verdict — `trailer`, `message`, or `email` — and is NULL for
+  a commit no marker claimed (#4418). Consumers can now cut the trailer-matched
+  subset, the one they can re-derive from commit messages themselves, out of
+  the AI-assisted total instead of reading the total as if it already were that
+  subset. The column is nullable and additive: `is_ai_assisted` and `ai_tool`
+  keep their existing semantics, and an older `tga` reading the database is
+  unaffected. Migration v29 adds the column; `DETECTOR_VERSION` moves to 2, so
+  the next `tga collect` repopulates every stored row, and
+  `tga backfill ai-detection-commits` writes it too.
+- The weekly report and `weekly_activity.csv` gain `ai_trailer_count`,
+  `ai_message_count` and `ai_email_count`, which partition `ai_assisted_count`
+  by that same signal family (#4418). Appended after the existing columns, so a
+  consumer reading by column index is unaffected.
+- `tga audit` reads its lookback window from a new `audit.window_weeks` config
+  field, defaulting to 52 weeks when nothing declares one. `--weeks` still wins,
+  and the collect, classify, and pr-metrics stages are handed one resolved value
+  rather than each applying its own fallback. Previously the window was reachable
+  only through `--weeks`, so `trusty-audit` — which spawns `tga audit` without
+  it — collected unbounded history (#5482).
+- `tga aliases suggest --review-file <PATH>` writes the near-miss identity pairs —
+  the ones scoring below `--confidence` but at or above 0.50, which the normal
+  output never shows — to a tab-separated file with both addresses, the reason, the
+  confidence, and a `confirmed` column the operator sets to `yes`. Stdout still
+  carries only the at-or-above-threshold suggestions, and no file is written unless
+  the flag is given (#6993).
+- `tga linear sync` and `tga linear freshness`: bulk-ingest a Linear team's
+  full issue set (paginated, incremental by cursor) into `linear_issues` and
+  the source-agnostic `work_items` corpus, and report the last successful
+  sync per team. Previously Linear issues were only ever resolved one at a
+  time, from a commit message reference — an engagement registered with only
+  a Linear board had no path to ticket-linked metrics.
+- `LinearIssue` (and the `linear_issues` table) now carry `created_at`,
+  `updated_at`, `started_at`, `completed_at`, and `canceled_at`, making
+  lead-time-from-ticket computable for a Linear-only engagement.
+- `tga audit`'s one-shot sweep now runs `linear sync` alongside `jira sync`,
+  so an engagement registered with only `[boards.linear]` produces
+  ticket-linked metrics from the standard sweep, not only a separate manual
+  `tga linear sync` invocation.
+- The bulk sync's per-page reads now retry a 429/503 with backoff (reusing
+  the same retry budget `tga jira sync` uses) instead of discarding an
+  in-progress backfill, and the page walk is bounded so a server that never
+  stops paginating cannot hang it. `store_linear_issues` now writes a page's
+  rows in one transaction instead of one autocommit per row.
+
+### Fixed
+
+- `compute_dora()` now reads `fact_deployments` (`environment='production',
+  status='success'`, filtered to the report period) for deployment frequency
+  and lead time, instead of always counting merged PRs as a deploy proxy
+  (#212). A repo with real production deploy history previously reported
+  `deployment_frequency: 0.0` and `performance_level: "low"` identically to a
+  repo with none, because `compute_dora()` never queried the table. The
+  merged-PR/cycle-time proxy is still used, unchanged, when `fact_deployments`
+  has zero rows for the period.
+- Deployment frequency and lead time now carry independent provenance:
+  `DoraMetrics` gains `deployment_frequency_source`
+  (`"fact_deployments"` | `"pr_merge_proxy"` |
+  `"pr_merge_proxy_query_failed"`) and `lead_time_source`
+  (`"measured"` | `"proxy"` | `"unmeasurable"`). `lead_time_hours` is now
+  `Option<f64>` — `None`/`null` when neither a linked deploy nor merged-PR
+  data can produce a value, never a `0.0` presented as measured. A
+  `fact_deployments` query failure (e.g. a pre-migration DB missing the
+  table) is now logged and tagged `"pr_merge_proxy_query_failed"`, distinct
+  from a table that exists with zero in-period rows. All four fields are
+  serialized in `dora_summary.json` and `weekly_dora_metrics.csv`.
+- `tga pr-metrics` no longer returns success on a header-only CSV. The artifact is
+  still written, then the command fails with a message naming which case produced
+  it: an empty `pull_requests` table (pointing at `github.fetch_prs`, #211, and a
+  missing non-interactive git credential, #6244), a lookback window that excluded
+  every stored PR, or rows that were read and aggregated to nothing. Every
+  repository of a 56-repo bundle shipped an empty `pr-metrics.csv` and the run
+  reported success; `audit::run_full_sweep` records this as a stage failure, so it
+  reaches the report's Gaps & Caveats without aborting the sweep (#6796).
+- A pull request whose author login is empty — GitHub's answer for a deleted
+  account — is counted under an `(unknown)` bucket instead of being skipped, so it
+  no longer vanishes from the opened, merged, and cycle-time totals (#6796).
+- Alias suggestion reaches two near-miss identity splits it used to pass over in
+  silence: a display name that matches only once punctuation and whitespace are
+  normalised (`ada.lovelace` beside `Ada Lovelace`, confidence 0.90), and a legacy GitHub
+  noreply address carrying no `<id>+` prefix (`login@users.noreply.github.com`).
+  Both are HIGH-confidence, so the authorship report raises
+  `identity_merge_risk` instead of understating bus factor and top-author share.
+  Nothing is merged without an operator confirming it, and two distinct people
+  whose names merely resemble each other are still never paired.
+- `tga jira sync` posts to `/rest/api/3/search/jql`. Atlassian removed
+  `/rest/api/3/search` and answers it with HTTP 410 (CHANGE-2046), so every
+  sync against a Jira Cloud site left `fact_ticket_transitions` and
+  `fact_jira_comment_detail` empty and wrote no cursor. The replacement
+  endpoint paginates by an opaque `nextPageToken` instead of `startAt`,
+  reports no `total`, takes `expand` as a comma-delimited string rather than
+  an array, and may return a page shorter than the requested `maxResults`
+  while more pages remain — so both search walks now end on the absent token
+  and never on page length (#6812).
+- **Breaking:** the public `collect::jira::paging` API paginates by token, which
+  is why this release is 8.0.0 and not a patch. `PageRequest.start_at: u64` is
+  replaced by `next_page_token: Option<String>`, and `KeysetPager::record_page`
+  takes the server's continuation token in place of the requested page size
+  (#6812).
+- A period-review finding can again decline `suggestion`, `confidence`, `file` and `severity`. Strict-mode normalization on the wire forces every declared property into `required`, so `period_findings_schema` now declares those four as nullable type unions (`["string", "null"]`, `["number", "null"]`, and a `severity` enum carrying `null`) and the system prompt tells the model to answer `null` rather than guess. `PeriodFindingWire` holds them as `Option<T>`: a present `"severity": null` used to fail deserialization on a `#[serde(default)]` `String` and take the whole period's findings down the parse-error path, and now lands on the same fallback an absent key already took. Without this, a model with no severity to report had to invent one, which the profile report presented as a real observation. Refs #7082
+- `tga audit`'s report now names the "GitHub pull requests" collection leg as
+  not attempted when `github.fetch_prs` is off (or no `github:` block exists)
+  against repositories whose `origin` remote is GitHub-hosted (#7132). Before
+  this, a config that never enabled `github.fetch_prs` left `pull_requests`
+  empty with the `collect` stage reporting `Succeeded` and nothing in the
+  Gaps & Caveats section explaining why — indistinguishable, on the page, from
+  an org with no PR history at all.
+- `tga audit`'s Gaps & Caveats data-handling line now runs the real
+  data-retention attestation #5218 shipped, instead of unconditionally
+  quoting the pre-#5218 placeholder saying an attestation is "pending
+  (#5218)" (#7140). Every DD report generated after `tga` 7.1.0 carried that
+  stale sentence even though #5218 had already shipped. The line now states a
+  clean scan's table/column coverage, names finding counts when the scan
+  turns up a content-bearing column or a diff-shaped row, and — only if the
+  scan itself cannot run — says so and why, still stating tga's schema-level
+  no-file-content claim rather than falling silent.
+- Resolved the three remaining broken rustdoc intra-doc links in `collect::linear::client` and `collect::linear::sync` — the `unchecked_transaction`/`Connection::transaction` mentions are now plain backticks (external crate item), and `build_jql` now carries a link-reference definition to `crate::collect::jira::sync::build_jql` (#7188).
+
+### Changed
+
+- `tga tui` now builds against ratatui 0.30 and crossterm 0.29, up from 0.29 and 0.28, following the workspace pins that #2872 bumped to drop the vulnerable transitive `lru 0.12.5`. No tga source changed — ratatui 0.30's facade re-exports the types the TUI names.
+- The fallback contributor-profile narrative now counts distinct recurring issues rather than tagged occurrences, so one issue seen in three periods reads as 1 recurring issue instead of 3 (#5490).
+- Both contributor-profiling model passes — the per-period review and the
+  narrative synthesis — now send their JSON Schema on
+  `trusty_common::inference::ChatRequest.response_schema`, so a provider that
+  supports structured output constrains the answer instead of being asked in
+  prose to follow the schema. On a provider that cannot honour it (Bedrock's
+  Converse API has no such parameter), the schema is still rendered into the
+  system turn as before, so `tga profile --model bedrock/…` keeps working
+  (#5588).
+- `tga audit` passes `--allow-degraded` to `trusty-review report`, so a run whose
+  analyze lane assessed nothing still produces a bundle that states the fact
+  rather than producing no bundle at all. The flag is offered only to a renderer
+  at 0.35.0 or newer — tga resolves `trusty-review` from PATH, and an older copy
+  rejects an unknown flag with a usage error (#6811).
+
 ## [7.1.0] — 2026-09-04
 
 ### Fixed
