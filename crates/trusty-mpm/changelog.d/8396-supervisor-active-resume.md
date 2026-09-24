@@ -1,2 +1,0 @@
-Fixed
-- The supervisor's auto-resume sweep no longer marks a session errored when the resume is refused because the session is already `active`. A stale `Stopped` read racing a resume that already succeeded now logs and moves on: the record stays `active`, nothing is appended to its task, and no failure is counted. Every other resume error, including a refusal for any other state, is still marked errored and counted (#8396).
