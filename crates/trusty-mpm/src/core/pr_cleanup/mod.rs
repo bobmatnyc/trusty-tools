@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `pr` | `gh pr view <n> --json state,headRefName,headRefOid,mergeCommit` | the state is not `MERGED` |
 //! | `remote-branch` | deletes `origin/<head>` when `git ls-remote` still lists it | the delete errors |
-//! | `worktree` | ends any session claim, then `git worktree remove` each tree holding the head | a tree holds unsaved work, or the claim store cannot be read |
+//! | `worktree` | ends any session claim, then `git worktree remove` each tree holding the head | a tree holds unsaved work, the claim store cannot be read, the listing names no tree, or the checkout cleanup runs in holds the head (#8489) |
 //!
 //! **"Unsaved work" is not an ahead-of-upstream count (#7275 round 3).** Every
 //! merge here is a squash, so a landed branch's commits are never ancestors of
@@ -38,7 +38,7 @@
 //! and a claim is record-only — so [`recheck`] re-reads the tree immediately
 //! before `git worktree remove` and refuses on any difference. The claims end
 //! only after that re-read passes (#8301).
-//! | `local-branch` | `git branch -D` the head branch and each `worktree-agent-*` at the head commit | a delete errors |
+//! | `local-branch` | `git branch -D` the head branch and each `worktree-agent-*` at the head commit that no remaining worktree holds | a delete errors, a worktree still holds one of them (named, never attempted), or step 3 could not read the listing (#8489) |
 //! | `prune` | `git worktree prune`, then `git fetch --prune origin` | either errors |
 //!
 //! Two properties are load-bearing. `git branch -D` is defensible only because
@@ -268,13 +268,14 @@ pub(crate) async fn run_with<G: Gh, T: Git, C: ClaimEnder>(
     };
 
     lines.push(step_remote_branch(git, req, &view));
-    step_worktrees(
+    let standing = step_worktrees(
         git, claims, ownership, landing, probe_dirt, req, &merged, &mut lines,
     )
     .await;
     // The head branch cannot be deleted while a worktree still has it checked
-    // out, so branch deletion always follows the removals above.
-    lines.push(step_local_branches(git, req, &merged));
+    // out, so branch deletion always follows the removals above — and #8489:
+    // skips every branch a tree the removals left standing still holds.
+    lines.push(step_local_branches(git, req, &merged, standing.as_deref()));
     lines.push(step_prune(git, req));
 
     let report = CleanupReport { pr: req.pr, lines };
@@ -345,6 +346,10 @@ struct MergedPr<'a> {
 }
 
 /// Step 3: end each claim, then remove each worktree holding the merged head.
+///
+/// Returns every listed tree still standing afterwards — step 4 never deletes
+/// a branch one of them holds (#8489) — or `None` when the listing was not read.
+/// Under `dry_run` a tree that would be removed counts as removed.
 // #8301: `ownership` is the eighth argument; it travels with `claims`.
 #[allow(clippy::too_many_arguments)]
 async fn step_worktrees<T: Git, C: ClaimEnder>(
@@ -356,17 +361,42 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
     req: &CleanupRequest,
     merged: &MergedPr<'_>,
     lines: &mut Vec<StepLine>,
-) {
+) -> Option<Vec<plan::WorktreeEntry>> {
     let view = merged.view;
     const STEP: &str = "worktree";
     let porcelain = match run_git(git, req, &["worktree", "list", "--porcelain"]) {
         Ok(s) => s,
         Err(e) => {
             lines.push(StepLine::failed(STEP, format!("{e:#}")));
-            return;
+            return None;
         }
     };
     let entries = plan::parse_worktree_list(&porcelain);
+    // #8489: an empty listing is a lookup that failed, never "none holds it".
+    if entries.is_empty() {
+        lines.push(StepLine::failed(
+            STEP,
+            plan::inconclusive_listing(&view.head_ref_name),
+        ));
+        return None;
+    }
+    // #8489: the checkout cleanup runs in is never a target, but it is still a
+    // holder — name it, so the report never says no worktree holds the head.
+    let mut kept = plan::holders_run_from(
+        &entries,
+        &view.head_ref_name,
+        &view.head_ref_oid,
+        &req.repo_root,
+    );
+    // #8489 round 2: a merge-chained run keeps only an exact-head holder, the
+    // same rule `split_head_only` applies to targets (#8301).
+    if req.head_only {
+        kept = plan::split_head_only(kept, &view.head_ref_name).0;
+    }
+    for k in &kept {
+        let line = plan::kept_run_from(k, req.pr, req.head_only);
+        lines.push(StepLine::failed(STEP, line));
+    }
     let mut targets = plan::worktree_targets(
         &entries,
         &view.head_ref_name,
@@ -381,17 +411,21 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         }
         // #8301: the trees left in place DO hold the head — never say none does.
         if named.is_empty() && !left.is_empty() {
-            return;
+            return Some(entries);
         }
         targets = named;
     }
     if targets.is_empty() {
-        lines.push(StepLine::ok(
-            STEP,
-            format!("no worktree holds {}", view.head_ref_name),
-        ));
-        return;
+        // #8489: only true when the checkout cleanup runs in holds it neither.
+        if kept.is_empty() {
+            lines.push(StepLine::ok(
+                STEP,
+                format!("no worktree holds {}", view.head_ref_name),
+            ));
+        }
+        return Some(entries);
     }
+    let mut removed = Vec::new();
     for t in targets {
         // A round-N sibling carries no merged pull request of its own, so its
         // content is what proves the merge made it obsolete. The head branch,
@@ -407,20 +441,29 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
             ));
             continue;
         }
-        lines.push(
-            remove::remove_one(
-                git,
-                claims,
-                ownership,
-                landing,
-                probe_dirt,
-                req,
-                &merged.merge,
-                t,
-            )
-            .await,
-        );
+        let line = remove::remove_one(
+            git,
+            claims,
+            ownership,
+            landing,
+            probe_dirt,
+            req,
+            &merged.merge,
+            t,
+        )
+        .await;
+        // `remove_one` answers ok only when the tree is gone (or would be).
+        if !line.is_failure() {
+            removed.push(t.path.clone());
+        }
+        lines.push(line);
     }
+    Some(
+        entries
+            .into_iter()
+            .filter(|e| !removed.contains(&e.path))
+            .collect(),
+    )
 }
 
 /// Is this worktree the PR's own head — by branch name, or by sitting on the
@@ -441,8 +484,20 @@ fn owned(parts: &[&str]) -> Vec<String> {
 }
 
 /// Step 4: delete the local head branch and every agent branch at its tip.
-fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<'_>) -> StepLine {
+///
+/// `standing` is step 3's answer: the trees still listed after its removals,
+/// or `None` when it could not read the listing — then no branch is deleted,
+/// because none can be shown free of a worktree (#8489).
+fn step_local_branches<T: Git>(
+    git: &T,
+    req: &CleanupRequest,
+    merged: &MergedPr<'_>,
+    standing: Option<&[plan::WorktreeEntry]>,
+) -> StepLine {
     const STEP: &str = "local-branch";
+    let Some(standing) = standing else {
+        return StepLine::failed(STEP, plan::HOLDERS_UNKNOWN);
+    };
     let view = merged.view;
     let listing = match run_git(
         git,
@@ -459,7 +514,7 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<
             .into_iter()
             .filter(|b| b == head)
             .collect();
-        return delete_branches(git, req, wanted);
+        return delete_branches(git, req, wanted, standing);
     }
     // The head branch and its round-N siblings first, then every
     // `worktree-agent-*` branch still sitting on the merged head commit.
@@ -491,35 +546,61 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<
     if !refusals.is_empty() {
         return StepLine::failed(STEP, refusals.join("; "));
     }
-    delete_branches(git, req, wanted)
+    delete_branches(git, req, wanted, standing)
 }
 
-/// Step 4's deletion half: `git branch -D` each of `wanted`, stopping at the
-/// first failure.
-fn delete_branches<T: Git>(git: &T, req: &CleanupRequest, wanted: Vec<String>) -> StepLine {
+/// Step 4's deletion half: `git branch -D` each of `wanted` that no tree in
+/// `standing` holds, and name the holder of each one kept.
+///
+/// Why (#8489): git refuses `-D` on a branch a worktree has checked out, and
+/// the first refusal used to end the loop, leaving every later branch behind.
+/// What: a held branch is never attempted and fails the step with its holder
+/// named; a failed delete is reported and the loop moves on.
+/// Test: `cleanup_8489_local_branch_skips_the_held_head_and_deletes_the_rest`.
+fn delete_branches<T: Git>(
+    git: &T,
+    req: &CleanupRequest,
+    wanted: Vec<String>,
+    standing: &[plan::WorktreeEntry],
+) -> StepLine {
     const STEP: &str = "local-branch";
     if wanted.is_empty() {
         return StepLine::ok(STEP, "no local branch left to delete");
     }
-    if req.dry_run {
-        return StepLine::ok(STEP, format!("would delete {}", wanted.join(", ")));
-    }
-    let mut deleted = Vec::new();
-    for b in &wanted {
-        // `-D`, not `-d`: the squash merge means git sees this branch as
-        // unmerged. Step 1 already proved otherwise.
-        if let Err(e) = run_git(git, req, &["branch", "-D", b]) {
-            return StepLine::failed(
-                STEP,
-                format!(
-                    "deleted [{}]; `git branch -D {b}` failed: {e:#}",
-                    deleted.join(", ")
-                ),
-            );
+    let (mut free, mut problems) = (Vec::new(), Vec::new());
+    for b in wanted {
+        match plan::holder_of(standing, &b) {
+            Some(holder) => problems.push(plan::kept_branch(&b, holder)),
+            None => free.push(b),
         }
-        deleted.push(b.clone());
     }
-    StepLine::ok(STEP, format!("deleted {}", deleted.join(", ")))
+    let mut parts = Vec::new();
+    if req.dry_run {
+        if !free.is_empty() {
+            parts.push(format!("would delete {}", free.join(", ")));
+        }
+    } else {
+        let mut deleted = Vec::new();
+        for b in free {
+            // `-D`, not `-d`: the squash merge means git sees this branch as
+            // unmerged. Step 1 already proved otherwise.
+            match run_git(git, req, &["branch", "-D", &b]) {
+                Ok(_) => deleted.push(b),
+                Err(e) => problems.push(format!("`git branch -D {b}` failed: {e:#}")),
+            }
+        }
+        if !deleted.is_empty() {
+            parts.push(format!("deleted {}", deleted.join(", ")));
+        }
+    }
+    let failed = !problems.is_empty();
+    parts.extend(problems);
+    let detail = parts.join("; ");
+    if failed {
+        StepLine::failed(STEP, detail)
+    } else {
+        StepLine::ok(STEP, detail)
+    }
 }
 
 /// Step 5: prune git's worktree records and the stale remote refs.

@@ -38,6 +38,8 @@ struct Scripted {
     routes: Vec<(String, CmdOut)>,
     /// Every argv this fake was asked to run, joined, in order.
     seen: RefCell<Vec<String>>,
+    /// #8489: trees a routed `git worktree remove` succeeded on.
+    removed: RefCell<Vec<PathBuf>>,
 }
 
 impl Scripted {
@@ -45,6 +47,7 @@ impl Scripted {
         Self {
             routes: Vec::new(),
             seen: RefCell::new(Vec::new()),
+            removed: RefCell::new(Vec::new()),
         }
     }
 
@@ -133,7 +136,48 @@ impl Git for Scripted {
             self.seen.borrow_mut().push(joined);
             return self.head_of(dir);
         }
-        self.answer(&joined)
+        // #8489: real git refuses `-D` on a branch a remaining worktree holds.
+        if let [verb, flag, branch] = args
+            && verb == "branch"
+            && flag == "-D"
+            && let Some(holder) = self.holder_of(branch)
+        {
+            self.seen.borrow_mut().push(joined);
+            return Ok(CmdOut {
+                success: false,
+                stdout: String::new(),
+                stderr: format!(
+                    "error: cannot delete branch '{branch}' used by worktree at '{}'",
+                    holder.display()
+                ),
+            });
+        }
+        let out = self.answer(&joined)?;
+        if out.success
+            && let [verb, sub, path] = args
+            && verb == "worktree"
+            && sub == "remove"
+        {
+            self.removed.borrow_mut().push(PathBuf::from(path));
+        }
+        Ok(out)
+    }
+}
+
+impl Scripted {
+    /// The listed, not-yet-removed tree that has `branch` checked out (#8489).
+    fn holder_of(&self, branch: &str) -> Option<PathBuf> {
+        let listing = self
+            .routes
+            .iter()
+            .find(|(needle, out)| needle.contains("worktree list") && out.success)
+            .map(|(_, out)| out.stdout.clone())
+            .unwrap_or_default();
+        let removed = self.removed.borrow();
+        parse_worktree_list(&listing)
+            .into_iter()
+            .find(|e| e.branch.as_deref() == Some(branch) && !removed.contains(&e.path))
+            .map(|e| e.path)
     }
 }
 
@@ -2428,4 +2472,343 @@ async fn a_dry_run_leaves_the_harness_marker_in_place() {
         marker.exists(),
         "a dry run must leave the tree exactly as it found it"
     );
+}
+
+// ── #8489: never "no worktree holds X" while one does ───────────────────
+
+/// A full `git` fake whose worktree listing is `listing` (#8489).
+fn git_listing(listing: &str) -> Scripted {
+    git_listing_with(listing, &branch_listing())
+}
+
+/// [`git_listing`] with its own `git branch` listing. Its `-D` refuses a
+/// branch a remaining listed tree holds, as real git does (#8489 round 2).
+fn git_listing_with(listing: &str, branches: &str) -> Scripted {
+    Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on("git worktree list", listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", branches)
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "")
+}
+
+/// Assert the #8489 invariant on a rendered report: the worktree step names
+/// `holder` as kept and never claims that no worktree holds the head.
+fn assert_holder_named(rendered: &str, holder: &str) {
+    assert!(
+        !rendered.contains("no worktree holds"),
+        "a tree holds {BRANCH}; the report must not say none does:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "worktree: FAILED — {holder}: holds {BRANCH} and was kept"
+        )),
+        "the holder must be named with the reason it was kept:\n{rendered}"
+    );
+    // #8489 round 3: `git switch main` fails in an agent tree; `--detach` works.
+    assert!(
+        rendered.contains(&format!(
+            "run `git switch --detach` in it, then `git branch -D {BRANCH}`; or run \
+             `tm pr cleanup 7275` from the main checkout"
+        )),
+        "the recovery must name a switch that works in any worktree:\n{rendered}"
+    );
+}
+
+/// 🔴 #8489: `tm pr cleanup` run from the harness tree that holds the head —
+/// the shape `tm pr open` records when it runs there. That tree is never a
+/// target, and the report used to say no worktree held the branch.
+#[tokio::test]
+async fn cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head() {
+    let git = git_listing(&worktree_listing());
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(TREE),
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert_holder_named(&report.render(), TREE);
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "the checkout cleanup runs in is never removed: {joined}"
+    );
+}
+
+/// 🔴 #8489 error arm: a listing that names no tree at all was not read, and
+/// must never be reported as "no worktree holds X".
+#[tokio::test]
+async fn cleanup_8489_an_empty_worktree_listing_is_inconclusive() {
+    let git = git_listing("");
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(report.failed(), "{rendered}");
+    assert!(!rendered.contains("no worktree holds"), "{rendered}");
+    assert!(
+        rendered.contains("worktree: FAILED — `git worktree list --porcelain` named no worktree")
+            && rendered.contains("inconclusive"),
+        "{rendered}"
+    );
+}
+
+/// 🔴 #8489: git lists the tree by its real path while the caller spells it
+/// through a symlink. Compared as strings, the running checkout became a
+/// removal target; it is the same directory and is kept and named.
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("agent-real");
+    std::fs::create_dir_all(&real).expect("tree");
+    let link = tmp.path().join("agent-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let shown = real.display().to_string();
+
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {shown}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let git = git_listing(&listing);
+    let req = CleanupRequest {
+        repo_root: link,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert_holder_named(&report.render(), &shown);
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "a symlinked spelling of the running checkout is still that checkout: {joined}"
+    );
+}
+
+// ── #8489 round 2: step 4 never attempts a branch a worktree holds ───────
+
+/// A synthetic harness tree cleanup is run from.
+const RUN_TREE: &str = "/repo/.claude/worktrees/agent-run";
+
+/// Did the run issue exactly `git branch -D <branch>`?
+fn deleted(git: &Scripted, branch: &str) -> bool {
+    let argv = format!("git branch -D {branch}");
+    git.calls().contains(&argv)
+}
+
+/// 🔴 #8489 round 2 (critic HIGH 1): run from the tree holding the head, step 4
+/// issued `git branch -D <head>`, git refused it, and the refusal stopped the
+/// loop before `worktree-agent-aa11` was deleted.
+#[tokio::test]
+async fn cleanup_8489_local_branch_skips_the_held_head_and_deletes_the_rest() {
+    let git = git_listing(&worktree_listing());
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(TREE),
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    let rendered = report.render();
+    let joined = git.calls().join("\n");
+    assert!(
+        !deleted(&git, BRANCH),
+        "a held branch is never attempted: {joined}"
+    );
+    assert!(
+        deleted(&git, &format!("{AGENT_BRANCH_PREFIX}aa11")),
+        "the unheld agent branch is still deleted: {joined}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "local-branch: FAILED — deleted {AGENT_BRANCH_PREFIX}aa11; kept {BRANCH}: the \
+             worktree at {TREE} has it checked out"
+        )),
+        "{rendered}"
+    );
+}
+
+/// 🔴 #8489 round 2 (critic HIGH 2, the #8487 shape): the running checkout sits
+/// on a `worktree-agent-*` branch at the merged head. It was not named, the
+/// step said no worktree held the head, and step 4 hit "used by worktree".
+#[tokio::test]
+async fn cleanup_8489_a_running_checkout_on_an_agent_branch_at_the_head_is_kept() {
+    let agent = format!("{AGENT_BRANCH_PREFIX}run");
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {RUN_TREE}\nHEAD {HEAD_OID}\nbranch refs/heads/{agent}\n\n"
+    );
+    let branches = format!(
+        "main 1111111111111111111111111111111111111111\n{BRANCH} {HEAD_OID}\n{agent} {HEAD_OID}\n"
+    );
+    let git = git_listing_with(&listing, &branches);
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(RUN_TREE),
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(!rendered.contains("no worktree holds"), "{rendered}");
+    assert!(
+        rendered.contains(&format!(
+            "worktree: FAILED — {RUN_TREE}: holds {agent} and was kept"
+        )),
+        "{rendered}"
+    );
+    assert!(!deleted(&git, &agent), "{}", git.calls().join("\n"));
+    assert!(deleted(&git, BRANCH), "{}", git.calls().join("\n"));
+    assert!(
+        rendered.contains(&format!("kept {agent}: the worktree at {RUN_TREE}")),
+        "{rendered}"
+    );
+}
+
+/// 🔴 #8489 round 2 (critic MEDIUM 3): a merge-chained run from a checkout on
+/// the round sibling `<head>-r2` never deletes that sibling, so the checkout is
+/// no reason to fail — only an exact-head holder is kept, as `split_head_only`.
+#[tokio::test]
+async fn cleanup_8489_head_only_ignores_a_running_checkout_on_a_sibling() {
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {TREE}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n\
+         worktree {RUN_TREE}\nHEAD 3333333333333333333333333333333333333333\n\
+         branch refs/heads/{BRANCH}-r2\n\n"
+    );
+    let git = git_listing(&listing);
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(RUN_TREE),
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(!report.failed(), "{rendered}");
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "{joined}"
+    );
+    assert!(deleted(&git, BRANCH), "{joined}");
+    assert!(!joined.contains(&format!("{BRANCH}-r2")), "{joined}");
+}
+
+/// #8489 round 2 (critic MEDIUM 3): a merge-chained run's recovery for a kept
+/// head holder stays inside its scope — never the wider `tm pr cleanup <n>`.
+#[tokio::test]
+async fn cleanup_8489_head_only_recovery_stays_in_scope() {
+    let git = git_listing(&worktree_listing());
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(TREE),
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(
+        rendered.contains(&format!(
+            "run `git switch --detach` in it, then `git branch -D {BRANCH}` — this merge's \
+             cleanup reaches only {BRANCH}"
+        )),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("tm pr cleanup"), "{rendered}");
+    assert!(!deleted(&git, BRANCH), "{}", git.calls().join("\n"));
+}
+
+/// #8489 round 2 (critic LOW 5): `git worktree list` exits nonzero. Step 3
+/// fails, and step 4 deletes nothing, because no branch is shown unheld.
+#[tokio::test]
+async fn cleanup_8489_a_failed_worktree_listing_deletes_no_branch() {
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on_fail("git worktree list", "fatal: not a git repository")
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(report.failed(), "{rendered}");
+    assert!(!rendered.contains("no worktree holds"), "{rendered}");
+    assert!(
+        rendered.contains("worktree: FAILED — ")
+            && rendered.contains("local-branch: FAILED — no branch deleted"),
+        "{rendered}"
+    );
+    let joined = git.calls().join("\n");
+    assert!(!joined.contains("git branch -D"), "{joined}");
 }
