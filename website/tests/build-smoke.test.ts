@@ -560,11 +560,27 @@ describe('production build', () => {
 
 	it('renders real landing-page content, not a shell', () => {
 		expect(landingPage).toContain('trusty-search');
-		expect(landingPage).toContain('Seven flagship tools');
+		expect(landingPage).toContain('Five flagship tools');
 		expect(landingPage).toContain('brew tap bobmatnyc/trusty');
 		for (const tool of TOOLS) {
 			expect(landingPage, tool.slug).toContain(`/tools/${tool.slug}`);
 		}
+	});
+
+	/**
+	 * #8507: tga and trusty-audit moved to their own site, not yet live. The
+	 * note must name the destination as plain text (no clickable link to a
+	 * domain that currently fails TLS) and link the repository instead.
+	 */
+	it('notes where tga and trusty-audit moved, linking the repository', () => {
+		const text = visibleText(landingPage);
+		expect(text).toContain('tga.trustytools.dev');
+		expect(landingPage, 'a live link to the not-yet-live domain').not.toContain(
+			'href="https://tga.trustytools.dev'
+		);
+		expect(landingPage, 'link to the repository').toContain(
+			'href="https://github.com/bobmatnyc/trusty-git-analytics"'
+		);
 	});
 
 	it('sets the theme class before first paint', () => {

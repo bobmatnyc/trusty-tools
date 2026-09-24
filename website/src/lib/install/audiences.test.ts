@@ -16,7 +16,7 @@ import { STABLE_SET } from '../site';
 /**
  * Why: a published install command that does not work is the worst failure
  * this site has, and prose review does not catch it — `tctl install
- * trusty-code` reads exactly like the seven lines above it and fails with an
+ * trusty-code` reads exactly like the six lines above it and fails with an
  * unknown-member error. The macOS permission is the same class of defect with
  * a worse blast radius: telling a reader to grant `tm` the disk-wide category
  * would be a security regression, not a typo (#5110).
