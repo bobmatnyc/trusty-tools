@@ -52,6 +52,23 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     HomeGuard(prior)
 }
 
+/// A scratch `$HOME` whose trusty-mpm config sets `disk.max_usage_pct: <pct>`.
+///
+/// Why (#7497): `create_session_worktree` gates on the REAL volume against the
+/// threshold read from `$HOME`, so an unpinned test's verdict tracks how full
+/// the host disk is and whichever `$HOME` a neighbour test left behind.
+fn disk_threshold_home(pct: u8) -> tempfile::TempDir {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {pct}\n"),
+    )
+    .expect("write config");
+    home
+}
+
 /// Minimal `ManagedTmuxDriver` test double scoped to this module.
 ///
 /// Why (issue #1931): [`find_reusable_inproject_session`] only needs
@@ -380,7 +397,12 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
 /// worktree directory actually exists on disk.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
+    // #7497: pin the disk threshold so the host volume cannot refuse the
+    // worktree this test exists to name.
+    let home = disk_threshold_home(100);
+    let _home = set_home(home.path());
     let data_root = tempfile::TempDir::new().expect("tmp data root");
     let state = std::sync::Arc::new(
         crate::daemon::state::DaemonState::with_root_isolated_managed(
