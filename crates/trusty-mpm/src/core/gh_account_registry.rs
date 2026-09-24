@@ -375,6 +375,7 @@ fn disagreement(a: &str, b: &str, how: &str) -> String {
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
 /// `an_account_only_pin_fails_closed_naming_the_account`,
 /// `an_account_only_pin_uses_a_token_proven_under_the_static_dir`,
+/// `an_account_only_pin_refuses_when_the_user_check_fails`,
 /// `an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token`,
 /// `an_account_only_pin_refuses_a_gh_host_other_than_the_proven_one`,
 /// `a_pinned_config_dir_is_never_replaced_by_a_borrowed_one`,

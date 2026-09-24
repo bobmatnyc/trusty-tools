@@ -849,6 +849,39 @@ fn an_account_only_pin_refuses_a_token_for_another_account() {
     );
 }
 
+/// 🔴 #8510 network identity check: when `GET /user` cannot confirm the token
+/// (timeout, HTTP error), the daemon lookup refuses. It never falls through to
+/// the static tier (`Ok(None)`) and never uses the candidate dir.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_when_the_user_check_fails() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_account_only_registry(registry_dir.path(), "bob-duetto");
+    let probe =
+        TableProbe::default().answer(&static_dir, "github.com", "bob-duetto", Ok("tok-bob"));
+    let failure = "GET https://api.github.com/user did not answer in time";
+    let check = TableCheck::default().answer("https://api.github.com", "tok-bob", Err(failure));
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("an unconfirmed token must refuse, not fall through");
+    assert!(
+        err.contains("could not be proven") && err.contains(failure) && !err.contains("tok-"),
+        "got: {err}"
+    );
+    assert_eq!(
+        check.calls(),
+        vec![("https://api.github.com".to_string(), "tok-bob".to_string())],
+        "the refusal must follow a network check of the candidate's token"
+    );
+}
+
 /// 🔴 FAIL-CLOSED: a candidate dir that does not exist refuses by name.
 /// Test: itself.
 #[test]
