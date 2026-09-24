@@ -22,7 +22,7 @@
 //! visible text and appends the padding outside the escape.
 //!
 //! #8506: a row whose state has a color (active, stopped, dead, attached,
-//! provisioning) is painted whole in it instead; the column hues remain only on
+//! provisioning, decommissioned) is painted whole in it instead; the column hues remain only on
 //! a row whose state maps to no color.
 //!
 //! Test: `format_tombstone_row_*`, `format_state_column_*`, `truncate_*`,

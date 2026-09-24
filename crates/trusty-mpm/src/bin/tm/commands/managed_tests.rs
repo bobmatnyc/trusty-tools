@@ -1199,11 +1199,11 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
     }
 }
 
-/// Slot-7 `tm-trusty-tools-01` in `decommissioned`, a state with no row color
-/// (#8506), so the per-column hues are what the row carries.
+/// Slot-7 `tm-trusty-tools-01` in an unrecognised state, which has no row
+/// color (#8506), so the per-column hues are what the row carries.
 fn uncolored_state_session() -> trusty_mpm::client::ManagedSessionSummary {
     let mut s = ls_session("tm-trusty-tools-01", 7);
-    s.state = "decommissioned".into();
+    s.state = "some-future-state".into();
     s
 }
 
@@ -1439,7 +1439,9 @@ fn state_color_cases() -> Vec<(
         (with("stopped", |s| s.unresumable = true), Some("31")),
         (with("active", |s| s.attached = true), Some("1;36")),
         (with("provisioning", |_| {}), Some("34")),
-        (with("decommissioned", |_| {}), None),
+        // #8506 owner ruling: decommissioned is dim/gray.
+        (with("decommissioned", |_| {}), Some("2")),
+        (with("some-future-state", |_| {}), None),
     ]
 }
 

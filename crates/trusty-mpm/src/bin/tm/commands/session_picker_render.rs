@@ -41,9 +41,9 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// against each variant.
 /// What: `Green` (active, not attached), `AttachedCyan` (a client is
 /// attached — bold cyan, deliberately distinct from plain `Green`), `Yellow`
-/// (stopped), `Red` (errored, dead, deleted), `Blue` (provisioning), `Plain`
+/// (stopped), `Red` (errored, dead, deleted), `Blue` (provisioning), `Dim`
+/// (decommissioned — gray/faint; also the `ID` column hue), `Plain`
 /// (unrecognised/future state — never fails closed into a misleading color).
-/// `Dim` is the `ID` column hue; #8506 moved `stopped` off it to `Yellow`.
 ///
 /// `Magenta` and `Cyan` are COLUMN hues rather than state hues — the `tm ls`
 /// table colors its `NUM` and `NAME` columns through the same [`colorize`]
@@ -102,14 +102,14 @@ pub(crate) fn colorize(text: &str, color: StateColor, use_color: bool) -> String
 /// Resolve the color for a session's displayed state word.
 ///
 /// Why: centralizes the owner's mapping — active=green, stopped=yellow,
-/// dead=red (#8506, replacing #3730's stopped=dim) — plus the two extra states
-/// #3730 colored: attached (bold cyan) and provisioning, moved from yellow to
-/// blue so it no longer shares stopped's hue.
+/// dead=red, decommissioned=dim (#8506, replacing #3730's stopped=dim) — plus
+/// the two extra states #3730 colored: attached (bold cyan) and provisioning,
+/// moved from yellow to blue so it no longer shares stopped's hue.
 /// What: `attached` wins over every `state` value (a client is connected
 /// RIGHT NOW, the strongest signal); otherwise `"active"` → `Green`,
 /// `"stopped"` → `Yellow`, `"errored"` → `Red`, `"provisioning"` → `Blue`,
-/// anything else → `Plain` (never guesses a color for a state this mapping
-/// doesn't recognise — `decommissioned` included).
+/// `"decommissioned"` → `Dim`, anything else → `Plain` (never guesses a color
+/// for a state this mapping doesn't recognise).
 /// Test: `state_color_attached_wins_over_active`, `state_color_maps_known_states`,
 /// `state_color_unknown_state_is_plain`.
 pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
@@ -118,11 +118,13 @@ pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
     }
     match state {
         "active" => StateColor::Green,
-        // #8506: owner mapping — stopped=yellow, dead=red; provisioning moves
-        // to blue so it no longer reads as stopped.
+        // #8506: owner mapping — stopped=yellow, dead=red, decommissioned=dim
+        // (#3730's gray); provisioning moves to blue so it no longer reads as
+        // stopped.
         "stopped" => StateColor::Yellow,
         "errored" => DEAD_COLOR,
         "provisioning" => StateColor::Blue,
+        "decommissioned" => StateColor::Dim,
         _ => StateColor::Plain,
     }
 }

@@ -335,7 +335,8 @@ fn state_color_maps_known_states() {
     assert_eq!(state_color("stopped", false), StateColor::Yellow);
     assert_eq!(state_color("errored", false), StateColor::Red);
     assert_eq!(state_color("provisioning", false), StateColor::Blue);
-    assert_eq!(state_color("decommissioned", false), StateColor::Plain);
+    // #8506 owner ruling: decommissioned is dim/gray, never uncolored or red.
+    assert_eq!(state_color("decommissioned", false), StateColor::Dim);
 }
 
 /// Why (#8506): one row mapping feeds the static table, the TUI and the
@@ -348,7 +349,7 @@ fn session_color_maps_every_state() {
         ("stopped", StateColor::Yellow),
         ("errored", StateColor::Red),
         ("provisioning", StateColor::Blue),
-        ("decommissioned", StateColor::Plain),
+        ("decommissioned", StateColor::Dim),
         ("deleted", StateColor::Plain),
         ("some-future-state", StateColor::Plain),
     ];

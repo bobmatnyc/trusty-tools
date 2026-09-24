@@ -2377,7 +2377,7 @@ fn state_color_fleet() -> Vec<ManagedSessionSummary> {
 fn row_foregrounds(
     sessions: &[ManagedSessionSummary],
     state: &mut TuiState,
-) -> Vec<(String, ratatui::style::Color)> {
+) -> Vec<(String, ratatui::style::Color, ratatui::style::Modifier)> {
     let (w, h) = (200, 30);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
     terminal
@@ -2394,34 +2394,39 @@ fn row_foregrounds(
                         .map(|byte| (line[..byte].chars().count() as u16, y))
                 })
                 .unwrap_or_else(|| panic!("{} not drawn", s.name));
-            (s.name.clone(), buffer[(x, y)].fg)
+            let cell = &buffer[(x, y)];
+            (s.name.clone(), cell.fg, cell.modifier)
         })
         .collect()
 }
 
 /// Why (#8506): the TUI redesign (#7248) kept only attached (cyan) and
 /// unresumable (red), so an active and a stopped row drew identically. The
-/// owner's mapping is active=green, stopped=yellow, dead=red.
+/// owner's mapping is active=green, stopped=yellow, dead=red, and (owner
+/// ruling) decommissioned=dim.
 /// Test: this test.
 #[test]
 fn render_paints_each_row_in_its_state_color() {
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     let sessions = state_color_fleet();
     let mut state = TuiState::new(None, None);
     state.sync(&sessions);
     let got = row_foregrounds(&sessions, &mut state);
     let want = [
-        ("tm-active-01", Color::Green),
-        ("tm-stopped-02", Color::Yellow),
-        ("tm-errored-03", Color::Red),
-        ("tm-dead-04", Color::Red),
-        ("tm-attached-05", Color::Cyan),
-        ("tm-provisioning-06", Color::Blue),
-        ("tm-decommissioned-07", Color::Reset),
+        ("tm-active-01", Color::Green, Modifier::empty()),
+        ("tm-stopped-02", Color::Yellow, Modifier::empty()),
+        ("tm-errored-03", Color::Red, Modifier::empty()),
+        ("tm-dead-04", Color::Red, Modifier::empty()),
+        ("tm-attached-05", Color::Cyan, Modifier::BOLD),
+        ("tm-provisioning-06", Color::Blue, Modifier::empty()),
+        ("tm-decommissioned-07", Color::Reset, Modifier::DIM),
     ];
-    for (name, color) in want {
-        let fg = got.iter().find(|(n, _)| n == name).map(|(_, fg)| *fg);
-        assert_eq!(fg, Some(color), "row {name}");
+    for (name, color, modifier) in want {
+        let cell = got
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, fg, m)| (*fg, *m));
+        assert_eq!(cell, Some((color, modifier)), "row {name}");
     }
 }
 
@@ -2430,11 +2435,12 @@ fn render_paints_each_row_in_its_state_color() {
 /// Test: this test.
 #[test]
 fn render_draws_no_state_color_when_color_is_off() {
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     let sessions = state_color_fleet();
     let mut state = TuiState::new(None, None).with_color(false);
     state.sync(&sessions);
-    for (name, fg) in row_foregrounds(&sessions, &mut state).into_iter().skip(1) {
+    for (name, fg, modifier) in row_foregrounds(&sessions, &mut state).into_iter().skip(1) {
         assert_eq!(fg, Color::Reset, "row {name} must be uncolored");
+        assert_eq!(modifier, Modifier::empty(), "row {name} must be unstyled");
     }
 }
