@@ -33,6 +33,28 @@ fn tail_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// Does the resolver hold an `OPENROUTER_API_KEY` for the classifier?
+///
+/// Why (#8236): this read used plain `std::env::var`, so once the key moved out
+/// of the LaunchAgent plist into the credential store, a daemon restart hid
+/// `classification` while the classifier itself — which resolves through the
+/// store — still ran.
+/// What: calls `resolve` (production: [`crate::secret_source::resolve_secret`],
+/// bounded by `STORE_READ_TIMEOUT`) on a blocking thread, so a slow store holds
+/// no runtime worker. A panicked resolver counts as absent — fail-closed.
+/// Test: `classifier_key_is_found_in_the_store_when_the_env_lacks_it`,
+/// `classifier_key_absent_everywhere_is_false`.
+async fn classifier_key_present<F>(resolve: F) -> bool
+where
+    F: FnOnce(&str) -> Option<String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        resolve(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_some()
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Response body for GET /api/v1/sessions/managed/{id}/activity.
 ///
 /// Why: the calling agentic process needs the full activity picture without
@@ -178,7 +200,9 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         }
     };
 
-    let api_key_present = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_ok();
+    // #8236: resolve through the shared resolver, not `std::env::var`, so a key
+    // migrated out of the LaunchAgent plist into the store still surfaces here.
+    let api_key_present = classifier_key_present(crate::secret_source::resolve_secret).await;
     let classification = if api_key_present {
         Some(format!("{:?}", result.verdict.state).to_lowercase())
     } else {
@@ -202,4 +226,46 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         pending_decision: record.pending_decision,
         proposed_default: record.proposed_default,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use trusty_common::credential_registry::provider_for_env_var;
+    use trusty_common::credentials::{KeyStore, MemoryKeyStore};
+
+    use super::classifier_key_present;
+
+    /// A resolver whose env tier is empty and whose store tier is `store`.
+    ///
+    /// Why: the host running the tests may export `OPENROUTER_API_KEY`, and the
+    /// tests must neither read nor mutate the real environment or store. This
+    /// stands in for `resolve_secret` with its env tier pinned absent.
+    fn store_only_resolver(
+        store: Arc<MemoryKeyStore>,
+    ) -> impl FnOnce(&str) -> Option<String> + Send + 'static {
+        move |var: &str| store.get(provider_for_env_var(var)?)
+    }
+
+    /// Why (#8236): a key migrated from the plist into the store must still
+    /// surface `classification` after a restart that dropped it from the env.
+    /// Test: this test.
+    #[tokio::test]
+    async fn classifier_key_is_found_in_the_store_when_the_env_lacks_it() {
+        let store = Arc::new(MemoryKeyStore::new());
+        store
+            .set("openrouter", "sk-test-not-real")
+            .expect("memory store accepts a write");
+
+        assert!(classifier_key_present(store_only_resolver(store)).await);
+    }
+
+    /// Why: absent from every tier means no `classification` — fail-closed.
+    /// Test: this test.
+    #[tokio::test]
+    async fn classifier_key_absent_everywhere_is_false() {
+        let store = Arc::new(MemoryKeyStore::new());
+        assert!(!classifier_key_present(store_only_resolver(store)).await);
+    }
 }

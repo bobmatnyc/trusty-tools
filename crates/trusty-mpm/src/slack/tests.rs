@@ -2,11 +2,11 @@
 //!
 //! Why: the adapter's correctness-critical pieces — Socket-Mode envelope parsing,
 //! the bot-message guard (no reply loops), the rolling-history cap, the action
-//! footer, and dotenv token resolution — are all pure and must be tested without
-//! a live Slack socket or the daemon (the live WebSocket loop is deferred to a
-//! real Slack app; see the PR body).
-//! What: covers `parse_envelope`, `ack_frame`, `record_chat_turn`,
-//! `action_footer`, and `resolve_token`.
+//! footer — are all pure and must be tested without a live Slack socket or the
+//! daemon (the live WebSocket loop is deferred to a real Slack app; see the PR
+//! body).
+//! What: covers `parse_envelope`, `ack_frame`, `record_chat_turn`, and
+//! `action_footer`.
 //! Test: this IS the test module.
 
 use super::*;
@@ -375,29 +375,9 @@ fn action_footer_absent_when_empty() {
     assert_eq!(action_footer(Some(&empty)), None);
 }
 
-#[test]
-fn resolve_token_reads_dotenv() {
-    use std::io::Write;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join(".env.local");
-    let mut f = std::fs::File::create(&path).expect("create dotenv");
-    writeln!(f, "# a comment").unwrap();
-    writeln!(f, "SLACK_BOT_TOKEN=\"xoxb-secret\"").unwrap();
-    drop(f);
-
-    // read_dotenv_key is the testable core (resolve_token reads from the cwd).
-    assert_eq!(
-        read_dotenv_key(&path, "SLACK_BOT_TOKEN").as_deref(),
-        Some("xoxb-secret")
-    );
-    assert_eq!(read_dotenv_key(&path, "MISSING"), None);
-}
-
-#[test]
-fn resolve_token_missing_is_none() {
-    let missing = std::path::Path::new("/nonexistent/.env.local");
-    assert_eq!(read_dotenv_key(missing, "SLACK_BOT_TOKEN"), None);
-}
+// #8236: `resolve_token` delegates to `crate::secret_source::resolve_secret`;
+// its arms are pinned hermetically in `secret_source_tests.rs`, so the dotenv
+// parser tests that lived here went with the parser.
 
 #[test]
 fn pid_file_path_is_under_framework_root() {

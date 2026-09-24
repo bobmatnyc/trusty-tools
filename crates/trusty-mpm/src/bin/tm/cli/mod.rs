@@ -1551,9 +1551,9 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
-/// The `writes` group holds the three whose destructive half DEFAULTS TO A
-/// PREVIEW (`--fix`, `--fix-skills`, `--quarantine-mcp`) so `--yes` can promote
-/// any of them without naming each.
+/// The `writes` group holds the flags whose destructive half DEFAULTS TO A
+/// PREVIEW (`--fix`, `--fix-skills`, `--fix-agents`, `--fix-launchd-secrets`,
+/// `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1567,7 +1567,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "fix_skills", "fix_agents", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1653,6 +1653,18 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_agents: bool,
 
+    /// Run ONLY the LaunchAgent credential strip (`launchd_secrets`). DRY RUN
+    /// unless `--yes`.
+    ///
+    /// Why (#8236): `--fix` runs every repair class machine-wide, so there was
+    /// no way to fix one credential exposure without the other writes.
+    /// What: migrates each registry-mapped plist credential into the store,
+    /// confirms it by byte-equal read-back, strips only the confirmed keys,
+    /// then tightens a stripped plist wider than `0600` to `0600`. Prints key
+    /// names and outcomes, never a value. No other repair runs.
+    #[arg(long)]
+    pub fix_launchd_secrets: bool,
+
     /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
     ///
     /// Why (#4948): doctor checks were pull-only, so findings persisted
@@ -1689,7 +1701,8 @@ pub struct DoctorFlags {
     /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
     /// itself while writing the other half made the printed "dry run" untrue.
     /// What: promotes `--fix`, BOTH `--fix-skills` halves, `--fix-agents`
-    /// (#6649) and `--quarantine-mcp` from a dry run to an applied run.
+    /// (#6649), `--fix-launchd-secrets` (#8236) and `--quarantine-mcp` from a
+    /// dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

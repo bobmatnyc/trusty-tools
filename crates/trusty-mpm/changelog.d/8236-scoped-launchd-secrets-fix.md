@@ -1,0 +1,2 @@
+Added
+- `tm doctor --fix-launchd-secrets` runs only the LaunchAgent credential strip (#8236): migrate each registry-mapped plist credential into the store, confirm it by read-back, remove only the confirmed keys, then tighten a stripped plist wider than `0600` to `0600`. No other repair runs. A dry run unless `--yes`. Output names keys and outcomes, never a value; a chmod that fails reports the step as failed.
