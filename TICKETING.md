@@ -105,11 +105,15 @@ filing; never hand-type a title neither source printed.
 comment in the same dispatch. An issue holds many labels and exactly one
 milestone, so a workstream parked there evicts the real slot.
 
-## Bugfix release milestones
+## Release milestones (odd = bugfix, even = feature)
 
-Each crate with open `bug`-labelled issues has one milestone: `<crate> <version> · bugfix` (owner convention 2026-09-24). The `<version>` is the next odd patch above the crate's current version in `Cargo.toml`. An even patch goes up by 1; an odd patch goes up by 2. Examples: 1.7.2 → 1.7.3, 0.52.1 → 0.52.3, 0.13.9 → 0.13.11. The milestone description reads "Bugfix release: consolidates open bugs for <crate> (owner convention 2026-09-24)."
+Each crate maintains two types of patch-release milestones (owner convention 2026-09-24):
 
-A bug moves into the bugfix milestone only when it has no milestone or sits in a `Backlog · …` milestone. A bug already in any other milestone (epic, feature release, cross-harness) stays there; it is listed as HELD for the owner. An odd-patch release ships from its bugfix milestone.
+**Bugfix milestones** use the next odd patch: `<crate> <version> · bugfix`. The `<version>` is the next odd patch above the crate's current `Cargo.toml` version — an even patch goes up by 1, and an odd patch goes up by 2. Examples: 1.7.2 → 1.7.3, 0.52.1 → 0.52.3. A `bug` label moves into the bugfix milestone only when it has no milestone or sits in a `Backlog · …` milestone. A bug already in any other milestone (epic, feature release, cross-harness) stays there and is listed as HELD for the owner. An odd-patch release ships from its bugfix milestone.
+
+**Feature milestones** use the next even patch: `<crate> <version> · feature`. Examples: trusty-search 0.54.3 → 0.54.4, trusty-code 1.7.2 → 1.7.4. Feature and enhancement issues go here.
+
+**Rollover rule (PM default):** when an odd-patch release ships, bugs still open in its bugfix milestone move to the next odd patch's bugfix milestone.
 
 ## Projects
 
