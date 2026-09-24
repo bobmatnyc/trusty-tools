@@ -56,16 +56,31 @@
 
 use std::ffi::OsStr;
 
+/// Write a mode-0755 `#!/bin/sh` fake binary that prints `version_line`.
+///
+/// #3782: a `/bin/sh` child writes the bytes and exits before this returns, so
+/// no writable fd to `path` ever exists in this process for a sibling test's
+/// fork to inherit — the inherited fd is what made the later exec fail with
+/// ETXTBSY. Same helper as the lib's `test_support::write_exec_script`, which
+/// an integration target cannot reach.
 #[cfg(unix)]
 fn write_versioned_binary(path: &std::path::Path, version_line: &str) {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
-        .expect("write fake binary");
-    let mut perms = std::fs::metadata(path)
-        .expect("stat fake binary")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("chmod fake binary");
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"printf '%s' "$1" > "$2""#)
+        .arg("sh")
+        .arg(format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
+        .arg(path)
+        .status()
+        .expect("spawn /bin/sh to write the fake binary");
+    assert!(
+        status.success(),
+        "writing {} failed: {status}",
+        path.display()
+    );
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake binary");
 }
 
 /// THE #3554 regression shape, end to end: an isolated home directory that

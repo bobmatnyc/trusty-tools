@@ -252,16 +252,14 @@ pub async fn detect_all(
 mod tests {
     use super::*;
 
+    // #3782: written from a child process so no sibling fork inherits a
+    // writable fd to it (ETXTBSY on the later exec).
     #[cfg(unix)]
     fn write_versioned_binary(path: &Path, version_line: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
-            .expect("write fake binary");
-        let mut perms = std::fs::metadata(path)
-            .expect("stat fake binary")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).expect("chmod fake binary");
+        crate::commands::test_support::write_exec_script(
+            path,
+            &format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"),
+        );
     }
 
     // ── classify (pure) ─────────────────────────────────────────────────
@@ -379,19 +377,10 @@ mod tests {
         std::fs::create_dir_all(&early_dir).expect("mkdir early");
         // Sleeps well past the 10s health-gate timeout, then would exit 0 —
         // the test must never wait for that exit.
-        std::fs::write(
-            early_dir.join("tm"),
+        crate::commands::test_support::write_exec_script(
+            &early_dir.join("tm"),
             "#!/bin/sh\nsleep 30\necho 'trusty-mpm 9.9.9'\nexit 0\n",
-        )
-        .expect("write hanging fake binary");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(early_dir.join("tm"))
-                .expect("stat")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(early_dir.join("tm"), perms).expect("chmod");
-        }
+        );
 
         let install_dir = tmp.path().join("local-bin");
         std::fs::create_dir_all(&install_dir).expect("mkdir install");
