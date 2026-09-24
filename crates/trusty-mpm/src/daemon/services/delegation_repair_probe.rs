@@ -13,9 +13,11 @@
 //! # Fail direction
 //!
 //! Closed. Every step that cannot answer — `lsof` missing or blind, git unable
-//! to list the worktrees, a lock pid whose liveness or start time cannot be
-//! read — is [`LiveEvidence::Undeterminable`], and the repair refuses on it with
-//! the step's own words (ADR-0045).
+//! to list the worktrees of a tree that has a `.git` at or above it, a lock pid
+//! whose liveness or start time cannot be read — is
+//! [`LiveEvidence::Undeterminable`], and the repair refuses on it with the
+//! step's own words (ADR-0045). A tree with no `.git` anywhere above it holds
+//! no harness lock, so git failing there is not an unanswered step.
 //!
 //! # Stated gap: a record with no tree of its own
 //!
@@ -102,10 +104,12 @@ pub(crate) fn probe_live_evidence(d: &Delegation) -> LiveEvidence {
 /// A held harness lock naming `d`'s agent, for a record with no tree of its
 /// own (#8257).
 ///
-/// What: `Clear` without an agent id or a `cwd`, or when `cwd` no longer
-/// exists; otherwise the lock evidence over every worktree `cwd`'s repository
-/// registers whose harness lock names `agent-<agent_id>`.
-/// Test: `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`.
+/// What: `Clear` without an agent id or a `cwd`, when `cwd` no longer exists,
+/// or when `cwd` sits outside any repository; otherwise the lock evidence over
+/// every worktree `cwd`'s repository registers whose harness lock names
+/// `agent-<agent_id>`.
+/// Test: `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`,
+/// `a_record_whose_cwd_is_gone_is_repairable_8257`.
 fn agent_lock_evidence(d: &Delegation) -> LiveEvidence {
     let (Some(agent_id), Some(cwd)) = (d.agent_id.as_deref(), d.cwd.as_deref()) else {
         return LiveEvidence::Clear;
@@ -144,19 +148,25 @@ fn own_tree(d: &Delegation) -> Option<&Path> {
 /// that `pick` selects, if any.
 ///
 /// What: `Ok(None)` when git lists the worktrees and the picked one is absent,
-/// unlocked, or locked by an operator rather than the harness. `Err` when git
-/// cannot list them — "not a worktree" and "git failed" are one answer there,
-/// and the second must refuse.
+/// unlocked, or locked by an operator rather than the harness, or when git
+/// cannot list them and [`outside_any_repository`] finds no `.git` at or above
+/// `anchor`. `Err` for every other git failure.
+/// Test: `a_record_whose_cwd_is_outside_any_repository_is_repairable_8257`,
+/// `a_record_whose_repository_git_cannot_read_still_refuses_8257`.
 fn harness_lock_in(
     anchor: &Path,
     pick: impl Fn(&RegisteredWorktree) -> bool,
 ) -> Result<Option<String>, String> {
-    let registered = list_registered_worktrees(anchor).ok_or_else(|| {
-        format!(
+    let Some(registered) = list_registered_worktrees(anchor) else {
+        // #8257 critic R2: no repository, no harness lock — nothing to read.
+        if outside_any_repository(anchor)? {
+            return Ok(None);
+        }
+        return Err(format!(
             "git could not list the worktrees registered for {}, so no harness lock was read",
             anchor.display()
-        )
-    })?;
+        ));
+    };
     let reason = registered
         .into_iter()
         .filter(|w| w.locked && pick(w))
@@ -165,6 +175,30 @@ fn harness_lock_in(
         Some(reason) => lock_holder_evidence(&reason, pid_liveness, process_start_epoch),
         None => Ok(None),
     }
+}
+
+/// Is there positively no git repository at or above `anchor`? (#8257)
+///
+/// Why: git's exit 128 "not a git repository" is also what it prints for a
+/// real repository whose `.git` it cannot read, so git's answer alone cannot
+/// tell "no repository" from "a repository git failed on". A `.git` entry is
+/// what git discovery looks for, and its absence on every ancestor settles it.
+/// What: `Ok(true)` when neither the canonical `anchor` nor any ancestor has a
+/// `.git` entry (directory or gitfile); `Ok(false)` when one does; `Err` when
+/// `anchor` cannot be canonicalized or an ancestor's `.git` cannot be stat'd
+/// for any reason other than its absence.
+fn outside_any_repository(anchor: &Path) -> Result<bool, String> {
+    let canonical = std::fs::canonicalize(anchor)
+        .map_err(|e| format!("could not canonicalize {}: {e}", anchor.display()))?;
+    for dir in canonical.ancestors() {
+        let dot_git = dir.join(".git");
+        match std::fs::symlink_metadata(&dot_git) {
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not stat {}: {e}", dot_git.display())),
+        }
+    }
+    Ok(true)
 }
 
 /// Is the pid a harness lock names still the process that wrote it? (#8257)

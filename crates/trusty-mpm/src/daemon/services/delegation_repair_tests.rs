@@ -717,6 +717,84 @@ fn the_owner_is_refused_while_a_harness_lock_names_its_agent_8257() {
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
 }
 
+/// A gone owner's `Running` record naming `agent_id`, dispatched from `cwd`.
+fn gone_owned_in(agent_id: &str, cwd: &std::path::Path) -> Arc<DaemonState> {
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    let mut d = delegation(session, agent_id, DelegationStatus::Running);
+    d.cwd = Some(cwd.to_path_buf());
+    state.upsert_delegation(d);
+    state
+}
+
+// #8257 critic R2: outside any repository no harness lock can exist, so git's
+// "not a git repository" exit 128 must not refuse the repair.
+#[test]
+fn a_record_whose_cwd_is_outside_any_repository_is_repairable_8257() {
+    use crate::session_manager::worktree_registry::list_registered_worktrees;
+
+    let dir = tempfile::tempdir().expect("non-git cwd");
+    assert!(
+        list_registered_worktrees(dir.path()).is_none(),
+        "precondition: git cannot list worktrees for {}",
+        dir.path().display()
+    );
+    for force in [false, true] {
+        let state = gone_owned_in("a-nongit", dir.path());
+        assert_eq!(
+            repair_delegation(&state, "a-nongit", force),
+            RepairOutcome::Ended { records: 1 },
+            "force={force}"
+        );
+    }
+}
+
+// #8257 critic R2: a real repository git cannot read is not "no repository" —
+// git says "not a git repository" here too, and the repair still refuses.
+#[cfg(unix)]
+#[test]
+fn a_record_whose_repository_git_cannot_read_still_refuses_8257() {
+    use crate::session_manager::worktree_registry::list_registered_worktrees;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("repo cwd");
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(dir.path())
+        .status()
+        .expect("git init");
+    assert!(init.success());
+    let git_dir = dir.path().join(".git");
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let listed = list_registered_worktrees(dir.path());
+    let state = gone_owned_in("a-unreadable", dir.path());
+    let outcome = repair_delegation(&state, "a-unreadable", true);
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    assert!(
+        listed.is_none(),
+        "precondition: git fails on an unreadable .git"
+    );
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("git could not list"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 critic R2: a cwd that no longer exists reads `Clear`, as it did before.
+#[test]
+fn a_record_whose_cwd_is_gone_is_repairable_8257() {
+    let dir = tempfile::tempdir().expect("parent");
+    let state = gone_owned_in("a-gone-cwd", &dir.path().join("removed"));
+    assert_eq!(
+        repair_delegation(&state, "a-gone-cwd", true),
+        RepairOutcome::Ended { records: 1 }
+    );
+}
+
 #[test]
 fn decide_reports_already_ended() {
     assert_eq!(
