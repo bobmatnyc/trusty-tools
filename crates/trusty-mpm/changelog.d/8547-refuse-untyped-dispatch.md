@@ -1,0 +1,2 @@
+Changed
+- `tm hook --pm-guard` now refuses an `Agent` or `Task` dispatch from a main checkout whose `subagent_type` is missing, is not a string, is empty, or names an agent this `tm` does not ship, instead of granting it a worktree on a guess. The refusal names the missing or unknown type and the two fixes: set `subagent_type` to a roster agent, or declare `isolation: "worktree"` for a custom agent. A project with `agent_worktree = false` is unaffected (#8547).

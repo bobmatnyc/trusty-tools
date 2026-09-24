@@ -735,8 +735,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
-                audit_denied_tool(url, session_id, tool_name, reason).await;
-                println!("{}", build_pm_guard_deny_response(reason));
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pm_guard_deny_response(&reason));
             }
             // #5814: this project declared `agent_worktree = false`, so the
             // dispatch keeps the checkout and is told the workflow that replaces
