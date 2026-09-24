@@ -828,9 +828,9 @@ impl std::io::Write for LogBuffer {
     }
 }
 
-/// Run a github.com spawn whose token authenticates as `who` through the
-/// production logger under a capturing subscriber; return the injected vars
-/// and every log line.
+/// Run a github.com spawn whose token authenticates as `who` — resolution,
+/// proof and the production logger alike — under a capturing subscriber;
+/// return the injected vars and every log line.
 fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
     let buffer = LogBuffer::default();
     let writer = buffer.clone();
@@ -839,9 +839,10 @@ fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
         .with_ansi(false)
         .with_max_level(tracing::Level::TRACE)
         .finish();
-    let env = github_spawn(who);
+    // #8510 r6: the spawn itself runs under the subscriber, so a token logged
+    // while proving it is captured, not only what `log_spawn_env` writes.
     let vars = tracing::subscriber::with_default(subscriber, || {
-        super::log_spawn_env(Some(Ok(env)), Path::new("/work/jev-matching"))
+        super::log_spawn_env(Some(Ok(github_spawn(who))), Path::new("/work/jev-matching"))
     });
     let bytes = buffer
         .0

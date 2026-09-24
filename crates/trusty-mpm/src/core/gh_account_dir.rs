@@ -159,12 +159,14 @@ pub(crate) fn refuse_unmigrated_config(dir: &Path) -> Result<(), String> {
 /// the `--account` clone path runs `gh` in it. Writing the version keeps gh's
 /// migration from ever running there.
 /// What: writes `version: "1"` as the whole file when `config.yml` is absent,
-/// or as a new first line when the file declares no `version`; a file that
-/// already declares one is left untouched. Refuses a symlinked `config.yml`.
-/// The file is written `0600`.
+/// or as the first key ([`with_config_version`]) when the file declares no
+/// `version`; a file that already declares one is left untouched. Refuses a
+/// symlinked `config.yml`, and a file the added key would not leave as one
+/// document declaring `version: "1"`. The file is written `0600`.
 /// Test: `ensure_account_config_dir_writes_the_config_version`,
 /// `ensure_account_config_dir_adds_the_version_to_a_copied_config`,
-/// `ensure_account_config_dir_adds_the_version_to_a_reused_dir`.
+/// `ensure_account_config_dir_adds_the_version_to_a_reused_dir`,
+/// `ensure_config_version_keeps_a_leading_document_marker`.
 pub(crate) fn ensure_config_version(dir: &Path) -> Result<(), String> {
     let path = dir.join("config.yml");
     if is_symlink(&path) {
@@ -181,7 +183,15 @@ pub(crate) fn ensure_config_version(dir: &Path) -> Result<(), String> {
     if declared_version(&existing).is_some() {
         return Ok(());
     }
-    let text = format!("version: \"{GH_CONFIG_VERSION}\"\n{existing}");
+    let text = with_config_version(&existing);
+    // #8510 r6: never write a file gh or the migration guard would misread.
+    if declared_version(&text).as_deref() != Some(GH_CONFIG_VERSION) {
+        return Err(format!(
+            "{} cannot be given `version: \"{GH_CONFIG_VERSION}\"` as one YAML document — \
+             refusing to rewrite it",
+            path.display()
+        ));
+    }
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
@@ -190,6 +200,34 @@ pub(crate) fn ensure_config_version(dir: &Path) -> Result<(), String> {
             .map_err(|e| format!("cannot set permissions on {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// `text` with `version: "1"` added as its first key (#8510 r6).
+///
+/// Why: above a leading `---` marker the line opens a second YAML document,
+/// so gh reads only the version and loses the operator's settings.
+/// What: when the first line that is not blank, a comment or a `%` directive
+/// is a `---` marker, the version goes on the line after it; otherwise it
+/// goes first.
+/// Test: `ensure_config_version_keeps_a_leading_document_marker`.
+fn with_config_version(text: &str) -> String {
+    let version = format!("version: \"{GH_CONFIG_VERSION}\"\n");
+    let mut head = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('%') {
+            head += line.len();
+            continue;
+        }
+        let after_marker = line.strip_prefix("---").map(str::trim);
+        if after_marker.is_some_and(|rest| rest.is_empty() || rest.starts_with('#')) {
+            let (before, rest) = text.split_at(head + line.len());
+            let newline = if before.ends_with('\n') { "" } else { "\n" };
+            return format!("{before}{newline}{version}{rest}");
+        }
+        break;
+    }
+    format!("{version}{text}")
 }
 
 /// The config dirs an account-only pin may ask for a candidate token (#8510).

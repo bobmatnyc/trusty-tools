@@ -507,13 +507,13 @@ fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -
         String::new()
     } else {
         format!(
-            " No candidate token is proven to be '{account}''s: {}.",
+            " No candidate token is proven to belong to '{account}': {}.",
             failures.join("; ")
         )
     };
     format!(
         "this repository is pinned to gh account '{account}' with no `github.config_dir`, \
-         and a gh token is used for it only once `GET /user` proves it is '{account}''s \
+         and a gh token is used for it only once `GET /user` proves it belongs to '{account}' \
          (#5851) — refusing to probe it as whichever account is globally active.{checked} \
          Pin a gh config dir logged in as '{account}': `tm projects register {name} \
          --repo-url {url} --gh-account {account} --gh-config-dir <dir>` (#8510)."

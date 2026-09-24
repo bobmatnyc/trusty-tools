@@ -844,12 +844,21 @@ fn an_account_only_pin_refuses_a_token_for_another_account() {
             && !err.contains("tok-"),
         "got: {err}"
     );
-    assert!(
-        err.contains(&format!(
-            "tm projects register jev-matching --repo-url {ORIGIN} --gh-account octo-pinned \
-             --gh-config-dir <dir>"
-        )),
-        "the refusal must name the fix command; got: {err}"
+    // #8510 r6: the whole rendered text, so a quoting slip such as
+    // `'octo-pinned''s` cannot pass unseen.
+    let shown = static_dir.display();
+    assert_eq!(
+        err,
+        format!(
+            "this repository is pinned to gh account 'octo-pinned' with no \
+             `github.config_dir`, and a gh token is used for it only once `GET /user` proves \
+             it belongs to 'octo-pinned' (#5851) — refusing to probe it as whichever account \
+             is globally active. No candidate token is proven to belong to 'octo-pinned': \
+             {shown}: the token gh returned for 'octo-pinned' authenticates as 'octo-other'. \
+             Pin a gh config dir logged in as 'octo-pinned': `tm projects register \
+             jev-matching --repo-url {ORIGIN} --gh-account octo-pinned --gh-config-dir \
+             <dir>` (#8510)."
+        )
     );
 }
 

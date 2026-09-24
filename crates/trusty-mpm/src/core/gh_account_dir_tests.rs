@@ -11,7 +11,9 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crate::core::gh_account_dir::{AccountDirSources, refuse_unmigrated_config};
+use crate::core::gh_account_dir::{
+    AccountDirSources, ensure_config_version, refuse_unmigrated_config,
+};
 use crate::core::gh_account_proof::{
     AccountProver, CliTokenProbe, GhTokenProbe, GhUserCheck, HttpUserCheck, ProvenToken,
     api_base_url, identity_token_vars, parse_user_login, prove_account_token, token_var_for,
@@ -424,4 +426,29 @@ fn the_production_seams_never_run_in_a_unit_test() {
         .login("https://api.github.com", "tok")
         .expect_err("no network in a unit test");
     assert!(err.contains("never calls the GitHub API"), "{err}");
+}
+
+/// 🔴 #8510 r6: a `config.yml` that opens with a `---` document marker gains
+/// `version` inside that document. Prepending it above the marker made two
+/// documents: gh read only the first, and the migration guard refused the dir.
+/// Test: itself.
+#[test]
+fn ensure_config_version_keeps_a_leading_document_marker() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("config.yml");
+    std::fs::write(
+        &path,
+        "# operator settings\n---\ngit_protocol: ssh\neditor: vim\n",
+    )
+    .expect("config");
+    ensure_config_version(root.path()).expect("the version must be added");
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(
+        text,
+        "# operator settings\n---\nversion: \"1\"\ngit_protocol: ssh\neditor: vim\n"
+    );
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("one YAML document");
+    assert_eq!(doc["git_protocol"].as_str(), Some("ssh"), "{text}");
+    assert_eq!(doc["editor"].as_str(), Some("vim"), "{text}");
+    refuse_unmigrated_config(root.path()).expect("the rewritten dir must pass the guard");
 }
