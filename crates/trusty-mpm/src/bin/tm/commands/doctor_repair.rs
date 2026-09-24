@@ -34,30 +34,78 @@ use crate::cli::DoctorFlags;
 /// requires its own flag, and they run after the report so the operator sees
 /// the diagnosis above the remediation. They are local-filesystem operations,
 /// independent of where the daemon that produced the report is reachable.
-/// What: `--prune-stale-skills`, then `--fix-skills`, then `--fix` — the
-/// unified driver last, so an operator who passed both skill flags sees the
-/// narrow section first and the full list second rather than an order that
-/// implies the second run did nothing.
+/// What: runs [`post_report_actions`] in order — the unified `--fix` driver
+/// after the narrow flags, so an operator who passed both sees the narrow
+/// section first and the full list second rather than an order that implies
+/// the second run did nothing.
 /// Test: `cli_parses_doctor_fix`, `cli_parses_doctor_fix_skills` pin the flags;
-/// the actions' own modules carry the behaviour tests.
+/// `the_scoped_launchd_flag_selects_exactly_one_repair` pins the dispatch; the
+/// actions' own modules carry the behaviour tests.
 pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
-    if flags.prune_stale_skills {
-        prune_stale_skills_locally();
+    for action in post_report_actions(flags) {
+        match action {
+            PostReportAction::PruneStaleSkills => prune_stale_skills_locally(),
+            PostReportAction::FixSkills => {
+                super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
+            }
+            // #6649: the agent mirror of `--fix-skills`, and like it never run
+            // by `--fix` — `--fix` still never deletes.
+            PostReportAction::FixAgents => super::doctor_fix_agents::fix_agents_locally(flags.yes),
+            // #8236: the credential strip alone, never the other repair classes.
+            PostReportAction::FixLaunchdSecrets => {
+                super::doctor_fix_launchd_secrets::fix_launchd_secrets_locally(flags.yes);
+            }
+            PostReportAction::Fix => run_repairs(flags.yes, flags.include_frozen),
+            PostReportAction::QuarantineMcp => {
+                if let Some(target) = &flags.quarantine_mcp {
+                    quarantine_one_mcp(target, flags.yes);
+                }
+            }
+        }
     }
-    if flags.fix_skills {
-        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen, flags.yes);
-    }
-    // #6649: the agent mirror of `--fix-skills`, and like it never run by
-    // `--fix` — `--fix` still never deletes.
-    if flags.fix_agents {
-        super::doctor_fix_agents::fix_agents_locally(flags.yes);
-    }
-    if flags.fix {
-        run_repairs(flags.yes, flags.include_frozen);
-    }
-    if let Some(target) = &flags.quarantine_mcp {
-        quarantine_one_mcp(target, flags.yes);
-    }
+}
+
+/// One post-report action `tm doctor` can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostReportAction {
+    /// `--prune-stale-skills`.
+    PruneStaleSkills,
+    /// `--fix-skills`.
+    FixSkills,
+    /// `--fix-agents`.
+    FixAgents,
+    /// `--fix-launchd-secrets` (#8236).
+    FixLaunchdSecrets,
+    /// `--fix` — every repair class.
+    Fix,
+    /// `--quarantine-mcp <PATH>`.
+    QuarantineMcp,
+}
+
+/// The actions `flags` selects, in the order they run.
+///
+/// Why (#8236): a pure selection is what lets a test prove the scoped flag
+/// runs one repair and never the `--fix` sweep, without running either.
+/// What: one entry per set flag, in dispatch order.
+/// Test: `the_scoped_launchd_flag_selects_exactly_one_repair`.
+fn post_report_actions(flags: &DoctorFlags) -> Vec<PostReportAction> {
+    [
+        (flags.prune_stale_skills, PostReportAction::PruneStaleSkills),
+        (flags.fix_skills, PostReportAction::FixSkills),
+        (flags.fix_agents, PostReportAction::FixAgents),
+        (
+            flags.fix_launchd_secrets,
+            PostReportAction::FixLaunchdSecrets,
+        ),
+        (flags.fix, PostReportAction::Fix),
+        (
+            flags.quarantine_mcp.is_some(),
+            PostReportAction::QuarantineMcp,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(on, action)| on.then_some(action))
+    .collect()
 }
 
 /// `--quarantine-mcp <PATH>` action — rename ONE named stray `.mcp.json` aside.
@@ -557,6 +605,42 @@ mod tests {
             !hint.contains("--fix"),
             "a quarantine preview must never point at --fix, which would not touch the \
              named file: {hint}"
+        );
+    }
+
+    /// Parse `tm doctor <args>` into its flags.
+    fn doctor_flags(args: &[&str]) -> DoctorFlags {
+        use clap::Parser;
+        let argv = ["tm", "doctor"].iter().chain(args).copied();
+        match crate::cli::Cli::try_parse_from(argv)
+            .expect("parses")
+            .command
+        {
+            Some(crate::cli::Command::Doctor { flags }) => flags,
+            _ => panic!("expected the doctor command"),
+        }
+    }
+
+    /// #8236: the scoped flag must run the credential strip and nothing else —
+    /// in particular never the machine-wide `--fix` sweep — with or without
+    /// `--yes`, and `--fix` must not gain it as a second, separate run.
+    #[test]
+    fn the_scoped_launchd_flag_selects_exactly_one_repair() {
+        for args in [
+            &["--fix-launchd-secrets"][..],
+            &["--fix-launchd-secrets", "--yes"][..],
+        ] {
+            let flags = doctor_flags(args);
+            assert_eq!(
+                post_report_actions(&flags),
+                vec![PostReportAction::FixLaunchdSecrets],
+                "{args:?}"
+            );
+            assert_eq!(flags.yes, args.contains(&"--yes"));
+        }
+        assert_eq!(
+            post_report_actions(&doctor_flags(&["--fix", "--yes"])),
+            vec![PostReportAction::Fix]
         );
     }
 

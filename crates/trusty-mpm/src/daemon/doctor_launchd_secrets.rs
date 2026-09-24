@@ -410,7 +410,8 @@ fn build_row(findings: &[PlistFinding]) -> DoctorCheck {
             CheckStatus::Warn,
             format!(
                 "no plaintext credential found, but {} plist(s) are readable beyond their \
-                 owner ({}); `chmod 600` them so the next mistake is not a disclosure",
+                 owner ({}); run `tm doctor --fix-launchd-secrets --yes` (or `chmod 600` them) \
+                 so the next mistake is not a disclosure",
                 wide.len(),
                 wide.join("; ")
             ),
@@ -448,7 +449,7 @@ fn fail_message(exposed: &[&PlistFinding], unreadable: &[String]) -> String {
         String::new()
     } else {
         format!(
-            ". `tm doctor --fix` will NOT remove {} — no credential provider is registered \
+            ". `tm doctor --fix-launchd-secrets` will NOT remove {} — no credential provider is registered \
              for it, so there is nowhere to migrate the value and stripping it would break \
              the feature it configures; move it out by hand",
             unmapped.join(", ")
@@ -466,9 +467,10 @@ fn fail_message(exposed: &[&PlistFinding], unreadable: &[String]) -> String {
 
     format!(
         "a LaunchAgent plist holds a plaintext credential — the file is user-readable and \
-         lands in every backup: {detail}. Run `tm doctor --fix --yes` to migrate each \
-         registered credential into the credential store and remove it from the plist, then \
-         ROTATE those credentials: removing a value does not un-expose it{caveat}{unjudged}"
+         lands in every backup: {detail}. Run `tm doctor --fix-launchd-secrets --yes` to \
+         migrate each registered credential into the credential store, remove it from the \
+         plist and tighten the plist to 0600, then ROTATE those credentials: removing a value \
+         does not un-expose it{caveat}{unjudged}"
     )
 }
 

@@ -41,6 +41,8 @@ pub(crate) mod doctor_builder_cap;
 pub(crate) mod doctor_daemon_row;
 // #6649: `--fix-agents`, the agent mirror of `--fix-skills`.
 pub(crate) mod doctor_fix_agents;
+// #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
+pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
