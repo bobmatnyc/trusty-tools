@@ -314,6 +314,7 @@ const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"
 /// The operator-facing reason a dirty worktree was kept (#7660).
 ///
 /// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
+/// `decommission_refusal_warning_names_a_single_untracked_file`,
 /// `decommission_refusal_omits_the_warning_without_untracked_claude_files`.
 fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
     let files = PROVISIONING_FILES.join(", ");
@@ -405,13 +406,15 @@ fn force_discard_warning(entries: &[String]) -> String {
         .into_iter()
         .filter(|file| entries.iter().any(|line| line == &format!("?? {file}")))
         .collect();
-    if named.is_empty() {
-        return String::new();
-    }
+    // #7660: an English list — "A" or "A and B" — with a matching pronoun.
+    let (list, pronoun) = match named.as_slice() {
+        [] => return String::new(),
+        [one] => ((*one).to_string(), "it"),
+        [init @ .., last] => (format!("{} and {last}", init.join(", ")), "them"),
+    };
     format!(
-        ". WARNING: --force deletes the untracked {} with the worktree, including any edits \
-         made to them; copy out anything you added there first",
-        named.join(", ")
+        ". WARNING: --force deletes the untracked {list} with the worktree, including any edits \
+         made to {pronoun}; copy out anything you added there first"
     )
 }
 

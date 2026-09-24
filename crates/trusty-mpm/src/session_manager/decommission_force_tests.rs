@@ -162,9 +162,31 @@ async fn decommission_refusal_warns_force_discards_untracked_claude_md_edits() {
     assert!(!verdict.removed && wt.exists());
     let reason = verdict.kept_reason.expect("a kept workspace must say why");
     assert!(
-        reason.contains(
-            "WARNING: --force deletes the untracked .claude/settings.json, CLAUDE.md with the \
-             worktree, including any edits made to them"
+        reason.ends_with(
+            "unpushed commits. WARNING: --force deletes the untracked .claude/settings.json \
+             and CLAUDE.md with the worktree, including any edits made to them; copy out \
+             anything you added there first"
+        ),
+        "reason: {reason}"
+    );
+}
+
+/// #7660: one untracked content-unchecked file is named alone, with a
+/// singular pronoun — never a list with a dangling comma.
+#[tokio::test]
+async fn decommission_refusal_warning_names_a_single_untracked_file() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-refuse-warn-one-7660");
+    std::fs::remove_file(wt.join(".claude/settings.json")).expect("drop settings.json");
+
+    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
+
+    assert!(!verdict.removed && wt.exists());
+    let reason = verdict.kept_reason.expect("a kept workspace must say why");
+    assert!(
+        reason.ends_with(
+            "unpushed commits. WARNING: --force deletes the untracked CLAUDE.md with the \
+             worktree, including any edits made to it; copy out anything you added there first"
         ),
         "reason: {reason}"
     );
