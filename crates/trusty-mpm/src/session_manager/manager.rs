@@ -989,6 +989,7 @@ impl SessionManager {
         // on disk (#2250 — workspace_path and cwd previously were NOT, so a
         // stale/removed worktree silently rooted the recreated pane at $HOME).
         // Errors loudly via WorkspaceMissing when none of the three remain.
+        // #8551: a recorded workspace that is gone refuses; no fallback to cwd.
         let workdir = resume_workdir::resolve_existing_workdir(id, &record)
             .await?
             .to_string_lossy()
