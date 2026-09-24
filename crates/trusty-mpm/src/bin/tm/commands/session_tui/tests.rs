@@ -2343,3 +2343,104 @@ fn new_session_entry_path_step_accepts_a_clone_url() {
     );
     assert!(!err.contains("is not a git checkout"), "{err}");
 }
+
+// ── #8506: whole-row state colors ───────────────────────────────────────────
+
+/// A fleet with one row per state the owner's mapping names, behind a first
+/// row that takes the selection highlight so every row under test is drawn in
+/// its own style.
+fn state_color_fleet() -> Vec<ManagedSessionSummary> {
+    let selected = session("tm-selected-00", "active", 1);
+    let active = session("tm-active-01", "active", 2);
+    let stopped = session("tm-stopped-02", "stopped", 3);
+    let errored = session("tm-errored-03", "errored", 4);
+    let mut dead = session("tm-dead-04", "stopped", 5);
+    dead.unresumable = true;
+    let mut attached = session("tm-attached-05", "active", 6);
+    attached.attached = true;
+    let provisioning = session("tm-provisioning-06", "provisioning", 7);
+    let decommissioned = session("tm-decommissioned-07", "decommissioned", 8);
+    vec![
+        selected,
+        active,
+        stopped,
+        errored,
+        dead,
+        attached,
+        provisioning,
+        decommissioned,
+    ]
+}
+
+/// Draw `sessions` and return, per row, the foreground color of the first
+/// cell of its name.
+fn row_foregrounds(
+    sessions: &[ManagedSessionSummary],
+    state: &mut TuiState,
+) -> Vec<(String, ratatui::style::Color, ratatui::style::Modifier)> {
+    let (w, h) = (200, 30);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+    terminal
+        .draw(|frame| render::render(frame, sessions, state))
+        .expect("render must not panic");
+    let buffer = terminal.backend().buffer().clone();
+    sessions
+        .iter()
+        .map(|s| {
+            let (x, y) = (0..h)
+                .find_map(|y| {
+                    let line: String = (0..w).map(|x| buffer[(x, y)].symbol()).collect();
+                    line.find(&s.name)
+                        .map(|byte| (line[..byte].chars().count() as u16, y))
+                })
+                .unwrap_or_else(|| panic!("{} not drawn", s.name));
+            let cell = &buffer[(x, y)];
+            (s.name.clone(), cell.fg, cell.modifier)
+        })
+        .collect()
+}
+
+/// Why (#8506): the TUI redesign (#7248) kept only attached (cyan) and
+/// unresumable (red), so an active and a stopped row drew identically. The
+/// owner's mapping is active=green, stopped=yellow, dead=red, and (owner
+/// ruling) decommissioned=dim.
+/// Test: this test.
+#[test]
+fn render_paints_each_row_in_its_state_color() {
+    use ratatui::style::{Color, Modifier};
+    let sessions = state_color_fleet();
+    let mut state = TuiState::new(None, None);
+    state.sync(&sessions);
+    let got = row_foregrounds(&sessions, &mut state);
+    let want = [
+        ("tm-active-01", Color::Green, Modifier::empty()),
+        ("tm-stopped-02", Color::Yellow, Modifier::empty()),
+        ("tm-errored-03", Color::Red, Modifier::empty()),
+        ("tm-dead-04", Color::Red, Modifier::empty()),
+        ("tm-attached-05", Color::Cyan, Modifier::BOLD),
+        ("tm-provisioning-06", Color::Blue, Modifier::empty()),
+        ("tm-decommissioned-07", Color::Reset, Modifier::DIM),
+    ];
+    for (name, color, modifier) in want {
+        let cell = got
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, fg, m)| (*fg, *m));
+        assert_eq!(cell, Some((color, modifier)), "row {name}");
+    }
+}
+
+/// Why (#8506): `NO_COLOR` must turn the state colors off in the TUI as it does
+/// in the static table; the gate is injected through `TuiState::with_color`.
+/// Test: this test.
+#[test]
+fn render_draws_no_state_color_when_color_is_off() {
+    use ratatui::style::{Color, Modifier};
+    let sessions = state_color_fleet();
+    let mut state = TuiState::new(None, None).with_color(false);
+    state.sync(&sessions);
+    for (name, fg, modifier) in row_foregrounds(&sessions, &mut state).into_iter().skip(1) {
+        assert_eq!(fg, Color::Reset, "row {name} must be uncolored");
+        assert_eq!(modifier, Modifier::empty(), "row {name} must be unstyled");
+    }
+}

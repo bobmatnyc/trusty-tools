@@ -1199,6 +1199,14 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
     }
 }
 
+/// Slot-7 `tm-trusty-tools-01` in an unrecognised state, which has no row
+/// color (#8506), so the per-column hues are what the row carries.
+fn uncolored_state_session() -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = ls_session("tm-trusty-tools-01", 7);
+    s.state = "some-future-state".into();
+    s
+}
+
 /// Strip every ANSI SGR escape, leaving the text a terminal actually draws.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
@@ -1227,7 +1235,8 @@ fn strip_ansi(s: &str) -> String {
 /// Test: this test.
 #[test]
 fn ls_row_colors_num_and_name_in_distinct_hues() {
-    let row = format_ls_row(&ls_session("tm-trusty-tools-01", 7), true, 14, None);
+    // #8506: the column hues remain only on a row whose state has no color.
+    let row = format_ls_row(&uncolored_state_session(), true, 14, None);
     assert!(
         row.starts_with("\u{1b}[35m7\u{1b}[0m"),
         "NUM colored: {row:?}"
@@ -1311,7 +1320,7 @@ fn ls_row_alignment_matches_with_and_without_color() {
 /// Test: this test.
 #[test]
 fn ls_row_colors_id_column_dimmed() {
-    let s = ls_session("tm-trusty-tools-01", 7);
+    let s = uncolored_state_session();
     let row = format_ls_row(&s, true, 14, None);
     assert!(
         row.contains(&format!("\u{1b}[2m{}\u{1b}[0m", s.id)),
@@ -1409,6 +1418,87 @@ fn ls_table_columns_align_when_a_row_carries_an_annotation() {
             "padding must be measured on visible text, not the ANSI-wrapped string"
         );
     }
+}
+
+/// One `tm ls` row per state the #8506 mapping distinguishes, with the SGR
+/// parameter the whole row must be painted in (`None` = no row color).
+fn state_color_cases() -> Vec<(
+    trusty_mpm::client::ManagedSessionSummary,
+    Option<&'static str>,
+)> {
+    let with = |state: &str, edit: fn(&mut trusty_mpm::client::ManagedSessionSummary)| {
+        let mut s = ls_session("tm-trusty-tools-01", 7);
+        s.state = state.into();
+        edit(&mut s);
+        s
+    };
+    vec![
+        (with("active", |_| {}), Some("32")),
+        (with("stopped", |_| {}), Some("33")),
+        (with("errored", |_| {}), Some("31")),
+        (with("stopped", |s| s.unresumable = true), Some("31")),
+        (with("active", |s| s.attached = true), Some("1;36")),
+        (with("provisioning", |_| {}), Some("34")),
+        // #8506 owner ruling: decommissioned is dim/gray.
+        (with("decommissioned", |_| {}), Some("2")),
+        (with("some-future-state", |_| {}), None),
+    ]
+}
+
+/// Why (#8506): the owner asked for each `tm ls` row to be colored by its
+/// state — active green, stopped yellow, dead red — and the table colored only
+/// three columns, identically for every state.
+/// What: asserts each mapped row is exactly one escape pair around the plain
+/// row, so the whole row (not a cell) carries the color and the padding inside
+/// is untouched; an unmapped state keeps the column hues instead; the
+/// `-- deleted --` tombstone row is painted red.
+/// Test: this test.
+#[test]
+fn ls_rows_are_painted_whole_in_their_state_color() {
+    for (s, param) in state_color_cases() {
+        let plain = format_ls_row(&s, false, 14, None);
+        let colored = format_ls_row(&s, true, 14, None);
+        match param {
+            Some(p) => assert_eq!(
+                colored,
+                format!("\u{1b}[{p}m{plain}\u{1b}[0m"),
+                "state {:?} (unresumable={}, attached={})",
+                s.state,
+                s.unresumable,
+                s.attached
+            ),
+            None => assert!(
+                colored.starts_with("\u{1b}[35m7\u{1b}[0m"),
+                "an unmapped state keeps the NUM column hue: {colored:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        format_tombstone_row(7, true),
+        format!("\u{1b}[31m{}\u{1b}[0m", format_tombstone_row(7, false)),
+        "a tombstone row is painted red"
+    );
+}
+
+/// Why (#8506): a pipe, `NO_COLOR`, and every script must see the table bytes
+/// they saw before rows had colors, and a colored row must not shift a column.
+/// What: for every state, the `use_color == false` row carries no escape, and
+/// stripping the escapes from the colored row reproduces it byte-for-byte —
+/// which also proves the visible width is unchanged.
+/// Test: this test.
+#[test]
+fn ls_row_state_colors_never_reach_a_plain_table() {
+    for (s, _) in state_color_cases() {
+        let plain = format_ls_row(&s, false, 14, None);
+        assert!(!plain.contains('\u{1b}'), "no escapes: {plain:?}");
+        assert_eq!(
+            strip_ansi(&format_ls_row(&s, true, 14, None)),
+            plain,
+            "state {:?}: color must change bytes only inside the escapes",
+            s.state
+        );
+    }
+    assert!(!format_tombstone_row(7, false).contains('\u{1b}'));
 }
 
 /// Why (#7424): `tm session ls` is where an operator sees what each session
