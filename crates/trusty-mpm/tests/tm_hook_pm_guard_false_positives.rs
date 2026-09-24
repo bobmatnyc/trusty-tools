@@ -69,7 +69,9 @@ fn run_pm_guard(stdin_json: &str, home: &std::path::Path) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// A `PreToolUse` Bash payload carrying `command`.

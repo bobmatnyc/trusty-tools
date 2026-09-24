@@ -160,7 +160,8 @@ fn spawn_pm_guard(
 }
 
 /// Collect a child started by [`spawn_pm_guard`], asserting the fail-open
-/// contract (`exit 0`, always) and returning its stdout.
+/// contract (`exit 0`, always) and that any refusal carries the `tm pm-guard:`
+/// prefix (#8546), and returning its stdout.
 fn finish_pm_guard(child: std::process::Child) -> String {
     let output = child
         .wait_with_output()
@@ -171,7 +172,9 @@ fn finish_pm_guard(child: std::process::Child) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// Parse the stdout into a JSON value and assert it is a `deny` decision.
@@ -1373,8 +1376,8 @@ fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
     // the PM halts orchestration; a false allow reproduces prior behaviour.
     //
     // #5708: pinned outside any checkout because these payloads carry no
-    // `subagent_type` and are therefore also UNTYPED dispatches, which ADR-0048
-    // deliberately isolates in a main checkout rather than failing open. The two
+    // `subagent_type` and are therefore also UNTYPED dispatches, which a main
+    // checkout refuses rather than failing open (ADR-0048, #8547). The two
     // rules disagree by design; this one is asserted where only it can fire.
     for payload in [
         r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
@@ -4438,21 +4441,72 @@ fn pm_guard_warns_when_a_granted_worktree_is_not_recorded() {
 }
 
 #[test]
-fn pm_guard_grants_a_worktree_to_an_unknown_agent_in_a_main_checkout() {
+fn pm_guard_refuses_an_untyped_or_unknown_dispatch_in_a_main_checkout() {
     // The deliberate divergence from #4480's fail-open: a custom or renamed
-    // agent is indeterminate, and in a main checkout indeterminate resolves
-    // toward isolation. This is the agent that kept writing to the shared tree.
+    // agent is indeterminate, and in a main checkout indeterminate is REFUSED
+    // (#8547) — neither admitted nor isolated on a guess.
     let (_dir, repo) = main_checkout_fixture();
-    for input in [
-        r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
-        r#"{"prompt":"an untyped dispatch"}"#,
+    for (input, names) in [
+        (
+            r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
+            "`some-project-custom-agent`",
+        ),
+        (r#"{"prompt":"an untyped dispatch"}"#, "no `subagent_type`"),
+        (r#"{"subagent_type":7,"prompt":"x"}"#, "not an agent name"),
     ] {
         let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        assert_denied(&stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with("tm pm-guard: Dispatch refused in a main checkout (#8547)"),
+            "{input}: {reason}"
+        );
+        assert!(reason.contains(names), "{input} must be named: {reason}");
+    }
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_a_deployed_agent_it_does_not_bundle() {
+    // #8547 review: a name deployed into a roster tier is known, so the real
+    // binary isolates it rather than refusing it as unknown.
+    let (_dir, repo) = main_checkout_fixture();
+    let agents = repo.join(".claude/agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::fs::write(
+        agents.join("fixture-deployed-ops.md"),
+        "---\nname: fixture-deployed-ops\nrole: ops\n---\n\n# Ops\n",
+    )
+    .expect("write agent");
+    let input = r#"{"subagent_type":"fixture-deployed-ops","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "{stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_never_refuses_a_harness_builtin_agent() {
+    // #8547 review: Claude Code's built-ins ship in no bundle and no tier. The
+    // reader runs in place; the writers are isolated; none is refused.
+    let (_dir, repo) = main_checkout_fixture();
+    let reader = r#"{"subagent_type":"claude-code-guide","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", reader, &repo, ""), &[]);
+    assert_eq!(stdout.trim(), "", "claude-code-guide only reads: {stdout}");
+    for agent in ["general-purpose", "claude", "statusline-setup"] {
+        let input = format!(r#"{{"subagent_type":"{agent}","prompt":"go"}}"#);
+        let stdout = run_pm_guard(&tool_payload_at("Agent", &input, &repo, ""), &[]);
         let value: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
         assert_eq!(
             value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
-            "{input} must be isolated rather than trusted"
+            "{agent}: {stdout}"
         );
     }
 }

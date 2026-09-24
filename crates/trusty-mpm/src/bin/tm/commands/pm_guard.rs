@@ -227,7 +227,7 @@ use crate::commands::pm_guard_fanout;
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 pub(crate) use crate::commands::pm_guard_response::{
-    build_pretooluse_context_response, build_pretooluse_deny_response,
+    build_pm_guard_deny_response, build_pretooluse_context_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use crate::commands::pm_guard_secret_read;
@@ -426,7 +426,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // keeps a rule added later from inheriting the same hole.
         if let Some(reason) = unclassifiable_command(command) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+            println!("{}", build_pm_guard_deny_response(reason));
             return Ok(());
         }
         // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
@@ -435,14 +435,14 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             evaluate_read_only_dispatch_command(command, DispatchIdentity::from_payload(&payload))
         {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // #7497 joins #3955 here: same placement, same reason. `evaluate_worktree_add`
         // runs the temp-root denylist and the `disk.max_usage_pct` threshold.
         if let Some(reason) = evaluate_worktree_add(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (issue #4031) — the same placement, and for the same
@@ -461,7 +461,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // rule entirely — `git worktree remove` and `git branch -D`).
         if let Some(reason) = evaluate_destructive_delete_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+            println!("{}", build_pm_guard_deny_response(reason));
             return Ok(());
         }
         // ABSOLUTE guard (issue #7122) — the same placement, and for the same
@@ -476,7 +476,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // gitignore-verified `untracked_sync` channel).
         if let Some(reason) = evaluate_secret_file_copy_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0037) — the same placement, and for the same
@@ -489,7 +489,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // nothing wider) and for why no daemon is consulted.
         if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048, amended by
@@ -508,7 +508,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         match evaluate_main_checkout_commit_command(command, &hook_cwd) {
             Some(CommitVerdict::Deny(reason)) => {
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             Some(CommitVerdict::DocsOnly { root, dirs }) => {
@@ -520,7 +520,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 if !live.is_empty() {
                     let reason = docs_commit_deny_reason(&root, &live);
                     audit_denied_tool(url, session_id, tool_name, &reason).await;
-                    println!("{}", build_pretooluse_deny_response(&reason));
+                    println!("{}", build_pm_guard_deny_response(&reason));
                     return Ok(());
                 }
             }
@@ -552,7 +552,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             if !live.is_empty() {
                 let reason = head_move_deny_reason(&verb, &root, &live);
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
         }
@@ -569,7 +569,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // classifier it reads, and the key-name-only `grep` it still allows.
     if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input) {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -585,7 +585,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         pm_guard_write_boundary::evaluate_main_checkout_write(tool_name, tool_input, &hook_cwd)
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -603,7 +603,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
 
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
-        println!("{}", build_pretooluse_deny_response(reason));
+        println!("{}", build_pm_guard_deny_response(reason));
         return Ok(());
     }
 
@@ -620,7 +620,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         &hook_cwd,
     ) {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -654,7 +654,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             WorktreeRemoveVerdict::Allow => {}
             WorktreeRemoveVerdict::Deny(reason) => {
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             WorktreeRemoveVerdict::ReCheck { target } => {
@@ -713,7 +713,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 {
                     Some(reason) => {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
-                        println!("{}", build_pretooluse_deny_response(&reason));
+                        println!("{}", build_pm_guard_deny_response(&reason));
                     }
                     // #6892: a granted worktree answers WHERE this agent writes,
                     // not whether the machine has room for another build. The
@@ -735,8 +735,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
-                audit_denied_tool(url, session_id, tool_name, reason).await;
-                println!("{}", build_pretooluse_deny_response(reason));
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pm_guard_deny_response(&reason));
             }
             // #5814: this project declared `agent_worktree = false`, so the
             // dispatch keeps the checkout and is told the workflow that replaces
@@ -752,7 +752,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 {
                     Some(reason) => {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
-                        println!("{}", build_pretooluse_deny_response(&reason));
+                        println!("{}", build_pm_guard_deny_response(&reason));
                     }
                     // #6892: as the Rewrite arm above — the machine cap is a
                     // separate question from where the agent writes, and this is
@@ -792,7 +792,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -826,7 +826,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         {
             pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
@@ -865,7 +865,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             {
                 let reason = agent_cost::stop_reason(tokens, cost_config.max_tokens);
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             BudgetStatus::Warning => {
@@ -914,7 +914,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             let status = pm_guard_deny_by_default::persona_status(url).await;
             if status.should_deny() {
                 audit_denied_tool(url, session_id, tool_name, PERSONA_DENY_REASON).await;
-                println!("{}", build_pretooluse_deny_response(PERSONA_DENY_REASON));
+                println!("{}", build_pm_guard_deny_response(PERSONA_DENY_REASON));
                 return Ok(());
             }
         }
@@ -969,7 +969,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                      Delegate further changes to {hint} via the Task/Agent tool."
                 );
                 audit_denied_tool(url, session_id, tool_name, &exhausted_reason).await;
-                println!("{}", build_pretooluse_deny_response(&exhausted_reason));
+                println!("{}", build_pm_guard_deny_response(&exhausted_reason));
                 Ok(())
             }
         };
@@ -981,7 +981,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // and fires solely on the rare deny path, so the common ALLOW path adds
     // zero latency to every tool invocation.
     audit_denied_tool(url, session_id, tool_name, reason).await;
-    println!("{}", build_pretooluse_deny_response(reason));
+    println!("{}", build_pm_guard_deny_response(reason));
     Ok(())
 }
 
