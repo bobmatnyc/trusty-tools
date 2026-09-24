@@ -136,9 +136,12 @@ pub(crate) fn blocking_records(cwd: &Path, records: &[DelegationRecordView]) -> 
         })
         .collect();
     format!(
+        // #8257 owner ruling: the owning session may clear its own record, so
+        // the rule names that exception rather than read as an absolute refusal.
         " Blocking record(s): {}. The repair refuses while a live process holds the agent's \
          tree, or while its session is live, no stop has arrived and the record is under 6 h \
-         old; {list} lists every record here (#8257).",
+         old — unless that owning session runs the repair itself; {list} lists every record \
+         here (#8257).",
         clauses.join("; ")
     )
 }
@@ -219,6 +222,11 @@ mod tests {
         );
         assert!(
             text.contains("`tm repair delegation --list /repo`"),
+            "{text}"
+        );
+        // #8257 owner ruling: the owning session is told it may clear its own.
+        assert!(
+            text.contains("unless that owning session runs the repair itself"),
             "{text}"
         );
     }
