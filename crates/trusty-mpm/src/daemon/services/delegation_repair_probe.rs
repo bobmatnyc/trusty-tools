@@ -43,7 +43,8 @@ use crate::session_manager::worktree_registry::{
 pub(crate) enum LiveEvidence {
     /// Every probe ran and none found the agent.
     Clear,
-    /// A live process holds the record's tree; the text names it.
+    /// The tree could not be shown free: a live process holds it, or the cwd
+    /// probe could not complete. The text says which (#8257 critic R6).
     Held(String),
     /// A probe could not answer; the text names the step.
     Undeterminable(String),
@@ -66,6 +67,21 @@ const START_TOLERANCE_SECS: i64 = 2;
 /// Test: `repair_refuses_while_a_live_process_holds_the_tree_8257`,
 /// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`.
 pub(crate) fn probe_live_evidence(d: &Delegation) -> LiveEvidence {
+    probe_live_evidence_with(
+        d,
+        crate::session_manager::worktree_liveness::process_holding,
+    )
+}
+
+/// [`probe_live_evidence`] with the cwd probe injected (#8257 critic R6).
+///
+/// Why: the probe-failure arm needs a test, and a missing `lsof` cannot be
+/// staged on a machine that has one.
+/// Test: `a_cwd_probe_that_cannot_run_refuses_without_claiming_a_holder_8257`.
+pub(crate) fn probe_live_evidence_with(
+    d: &Delegation,
+    process_holding: impl Fn(&Path) -> Option<String>,
+) -> LiveEvidence {
     let Some(tree) = own_tree(d) else {
         // #8257 owner ruling: no cwd probe here (the stated gap), but a held
         // harness lock naming this agent anywhere in the repo still refuses.
@@ -84,7 +100,7 @@ pub(crate) fn probe_live_evidence(d: &Delegation) -> LiveEvidence {
     }
     // `process_holding` folds "found one" and "could not look" into one
     // `Some(reason)`; both refuse, and its reason says which it was.
-    if let Some(reason) = crate::session_manager::worktree_liveness::process_holding(tree) {
+    if let Some(reason) = process_holding(tree) {
         return LiveEvidence::Held(reason);
     }
     let canonical = match std::fs::canonicalize(tree) {

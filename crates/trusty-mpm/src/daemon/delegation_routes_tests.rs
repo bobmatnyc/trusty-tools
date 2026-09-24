@@ -1854,3 +1854,19 @@ async fn repair_route_ignores_an_owner_id_the_caller_supplies_8257() {
         "no caller-supplied owner id may clear the record"
     );
 }
+
+// #8257 critic R6 Fail-Open Check: the repair runs off the runtime worker, and
+// a task that dies before answering is a refusal, never a success.
+#[tokio::test]
+async fn a_repair_task_that_panics_is_a_refusal_8257() {
+    use crate::daemon::services::delegation_repair::RepairOutcome;
+
+    let outcome = repair_off_worker(|| panic!("synthetic repair panic")).await;
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("failed before it answered"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

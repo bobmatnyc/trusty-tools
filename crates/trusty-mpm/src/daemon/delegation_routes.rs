@@ -215,10 +215,39 @@ pub async fn repair_delegation_by_id_route(
         })?;
     let (force, caller) = force_and_caller(&headers, body);
     Ok(Json(
-        crate::daemon::services::delegation_repair::repair_delegation_by_id(
-            &state, id, force, &caller,
-        ),
+        repair_off_worker(move || {
+            crate::daemon::services::delegation_repair::repair_delegation_by_id(
+                &state, id, force, &caller,
+            )
+        })
+        .await,
     ))
+}
+
+/// Run one repair on tokio's blocking pool (#8257 critic R6).
+///
+/// Why: the repair's OS probe runs a system-wide `lsof` with no timeout, plus
+/// `git worktree list` and `sysinfo`. On a runtime worker a hung `lsof` pins
+/// that worker, and a starved runtime makes `tm hook` deny dispatches that
+/// should pass. Same shape as `agent_worktree_reap::reap_and_record`.
+/// What: the repair's own outcome; a join failure (a panic or a cancelled
+/// task) is a `Refused` naming the failure, never a success.
+/// Test: `a_repair_task_that_panics_is_a_refusal_8257`.
+async fn repair_off_worker(
+    repair: impl FnOnce() -> crate::daemon::services::delegation_repair::RepairOutcome + Send + 'static,
+) -> crate::daemon::services::delegation_repair::RepairOutcome {
+    tokio::task::spawn_blocking(repair)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("delegation: repair task failed before answering: {e} (#8257)");
+            crate::daemon::services::delegation_repair::RepairOutcome::Refused {
+                reason: format!(
+                    "the repair task failed before it answered ({e}), so its result is \
+                     unknown — `tm repair delegation --list` shows which records are still \
+                     live (#8257)"
+                ),
+            }
+        })
 }
 
 /// The body's `force` flag and the caller-session header of a repair (#8257).
@@ -285,9 +314,12 @@ pub async fn repair_delegation_as_route(
 ) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
     let (force, caller) = force_and_caller(&headers, body);
     Json(
-        crate::daemon::services::delegation_repair::repair_delegation_as(
-            &state, &agent_id, force, &caller,
-        ),
+        repair_off_worker(move || {
+            crate::daemon::services::delegation_repair::repair_delegation_as(
+                &state, &agent_id, force, &caller,
+            )
+        })
+        .await,
     )
 }
 

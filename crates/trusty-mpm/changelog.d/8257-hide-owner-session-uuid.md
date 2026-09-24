@@ -1,0 +1,2 @@
+Security
+- No refusal a caller reads — the repair's refusal, the shared-checkout dispatch deny and its JSON, the builder-cap deny, or the `tm repair delegation --list` output — carries the owning session's UUID, which a denied caller could replay as `CLAUDE_CODE_SESSION_ID`. The owner is named by its tmux name when that name is not itself a session id; each owner-check refusal logs one WARN line carrying the owner's UUID for the operator. The caller session is still asserted by the caller; authenticating it by process id is planned for 1.7.4 (#8257).

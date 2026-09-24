@@ -340,12 +340,84 @@ fn repair_refuses_while_a_live_process_holds_the_tree_8257() {
     let _ = child.wait();
 
     match outcome {
+        // #8257 critic R6: the pid proves the probe ran and found the child; a
+        // missing `lsof` refuses too, but never names this pid.
         RepairOutcome::Refused { reason } => {
-            assert!(reason.contains("live process"), "{reason}");
+            assert!(reason.contains(&format!("pid {}", child.id())), "{reason}");
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 critic R6 Fail-Open Check: a cwd probe that could not run still
+// refuses, and the refusal does not claim a live process was found.
+#[test]
+fn a_cwd_probe_that_cannot_run_refuses_without_claiming_a_holder_8257() {
+    use super::super::delegation_repair_probe::probe_live_evidence_with;
+    let tree = tempfile::tempdir().expect("tree");
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    let mut d = delegation(session, "agent-blind", DelegationStatus::Running);
+    d.cwd = Some(std::path::PathBuf::from("/repo"));
+    d.worktree_path = Some(tree.path().to_path_buf());
+    state.upsert_delegation(d);
+
+    let outcome = repair_matching(
+        &state,
+        |d| d.agent_id.as_deref() == Some("agent-blind"),
+        true,
+        &no_caller(),
+        |d| {
+            probe_live_evidence_with(d, |_| {
+                Some("could not run `lsof` to check for live processes: not found".to_string())
+            })
+        },
+    );
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("could not be shown free"), "{reason}");
+            assert!(reason.contains("could not run `lsof`"), "{reason}");
+            assert!(!reason.contains("still holds"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 critic R6: the repair's audit stamp must outlive the next sweep. The
+// sweep keeps a terminal record for the retention window after `ended_at`, so
+// a repair that left `ended_at` unset aged the record from its creation, and a
+// record stuck longer than the window was evicted with its stamp.
+#[test]
+fn a_repaired_record_keeps_its_stamp_through_the_next_sweep_8257() {
+    use crate::daemon::state::sessions::DELEGATION_RETENTION_SECS;
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    let mut d = delegation(session, "agent-old", DelegationStatus::Running);
+    let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+    d.created_at = two_hours_ago;
+    d.started_at = Some(two_hours_ago);
+    state.upsert_delegation(d);
+
+    let outcome = repair_matching(
+        &state,
+        |d| d.agent_id.as_deref() == Some("agent-old"),
+        false,
+        &no_caller(),
+        |_| LiveEvidence::Clear,
+    );
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+    state.sweep_delegations();
+
+    let kept = state.all_delegations();
+    assert_eq!(kept.len(), 1, "the sweep evicted the repaired record");
+    let stamp = kept[0].repair.as_ref().expect("the repair stamp survives");
+    // The window is measured from the repair, and still ends.
+    let window = chrono::Duration::seconds(DELEGATION_RETENTION_SECS);
+    state.sweep_delegations_at(stamp.at + window - chrono::Duration::minutes(1));
+    assert_eq!(state.all_delegations().len(), 1);
+    state.sweep_delegations_at(stamp.at + window + chrono::Duration::minutes(1));
+    assert!(state.all_delegations().is_empty());
 }
 
 // #8257 Fail-Open Check: a probe that cannot answer refuses, naming the step.
@@ -531,7 +603,7 @@ fn the_owner_is_refused_while_the_agent_shows_live_8257() {
 
     match outcome {
         RepairOutcome::Refused { reason } => {
-            assert!(reason.contains("a live process still holds"), "{reason}");
+            assert!(reason.contains("could not be shown free"), "{reason}");
             assert!(reason.contains("pid 4242"), "{reason}");
         }
         other => panic!("expected a refusal, got {other:?}"),

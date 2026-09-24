@@ -409,7 +409,7 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller, owner: &str) -> Result<(
 /// it probes each open
 /// record and refuses — naming the record and the probe's words — on any
 /// [`LiveEvidence`] that is not `Clear`, the owner included. Only then does it
-/// write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled) and a
+/// write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled), `ended_at` and a
 /// [`DelegationRepair`] naming the caller and the basis, and logs one WARN line
 /// per cleared record. An owner-check refusal logs one WARN line carrying the
 /// owner's UUID, which its refusal text omits (#8257 owner ruling). Nothing is
@@ -419,7 +419,9 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller, owner: &str) -> Result<(
 /// `the_owner_is_refused_while_the_agent_shows_live_8257`,
 /// `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`,
 /// `a_forced_clear_is_logged_8257`, `an_unknown_owner_outranks_a_gone_one_8257`,
-/// `an_owner_refusal_logs_the_owner_uuid_8257`.
+/// `an_owner_refusal_logs_the_owner_uuid_8257`,
+/// `a_repaired_record_keeps_its_stamp_through_the_next_sweep_8257`,
+/// `a_cwd_probe_that_cannot_run_refuses_without_claiming_a_holder_8257`.
 pub(crate) fn repair_matching(
     state: &Arc<DaemonState>,
     matches: impl Fn(&Delegation) -> bool,
@@ -491,7 +493,11 @@ pub(crate) fn repair_matching(
     for (d, _) in &open {
         let reason = match probe(d) {
             LiveEvidence::Clear => continue,
-            LiveEvidence::Held(why) => format!("a live process still holds its tree: {why}"),
+            // #8257 critic R6: `Held` also carries a cwd probe that could not
+            // run, so the text claims only what both cases prove.
+            LiveEvidence::Held(why) => {
+                format!("its tree could not be shown free of live processes: {why}")
+            }
             LiveEvidence::Undeterminable(why) => format!(
                 "the live-agent probe could not answer, and an unanswered probe is not proof \
                  the agent is gone (ADR-0045): {why}"
@@ -516,6 +522,10 @@ pub(crate) fn repair_matching(
                 return;
             }
             rec.status = crate::core::agent::DelegationStatus::Cancelled;
+            // #8257 critic R6: the sweep ages a terminal record from
+            // `ended_at`; unset, it aged from creation and a record stuck past
+            // the retention window was evicted with this stamp.
+            rec.ended_at = Some(now);
             rec.repair = Some(DelegationRepair {
                 by_session,
                 reason: (*basis).to_string(),
