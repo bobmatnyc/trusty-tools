@@ -18,25 +18,31 @@ const PLIST_VALUE: &str = "sk-test-not-real";
 /// A synthetic, DIFFERENT value an operator already stored (a rotated key).
 const STORED_VALUE: &str = "sk-test-rotated-not-real";
 
-/// A temp `$HOME` holding one trusty plist with `PLIST_VALUE`.
-fn home_with_plist() -> (tempfile::TempDir, PathBuf) {
-    let home = tempfile::tempdir().expect("tempdir");
-    let dir = home.path().join("Library/LaunchAgents");
+/// Write `com.trusty.<label>.plist` holding `OPENROUTER_API_KEY = value`.
+fn plist_at(home: &Path, label: &str, value: &str) -> PathBuf {
+    let dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&dir).expect("mkdir");
-    let path = dir.join("com.trusty.mpm.plist");
+    let path = dir.join(format!("com.trusty.{label}.plist"));
     let body = format!(
         "<plist version=\"1.0\">\n<dict>\n  \
-         <key>Label</key>\n  <string>com.trusty.mpm</string>\n  \
+         <key>Label</key>\n  <string>com.trusty.{label}</string>\n  \
          <key>EnvironmentVariables</key>\n  <dict>\n    \
-         <key>OPENROUTER_API_KEY</key>\n    <string>{PLIST_VALUE}</string>\n    \
+         <key>OPENROUTER_API_KEY</key>\n    <string>{value}</string>\n    \
          <key>RUST_LOG</key>\n    <string>info</string>\n  \
          </dict>\n</dict>\n</plist>\n"
     );
     std::fs::write(&path, body).expect("write plist");
+    path
+}
+
+/// A temp `$HOME` holding one trusty plist with `PLIST_VALUE`.
+fn home_with_plist() -> (tempfile::TempDir, PathBuf) {
+    let home = tempfile::tempdir().expect("tempdir");
+    let path = plist_at(home.path(), "mpm", PLIST_VALUE);
     (home, path)
 }
 
-/// A store that counts writes and can fail every read.
+/// A store that counts writes and can fail every read or every write.
 struct CountingStore {
     /// Where accepted writes land.
     inner: MemoryKeyStore,
@@ -44,6 +50,8 @@ struct CountingStore {
     sets: AtomicUsize,
     /// When true, every `try_get` fails.
     fail_reads: bool,
+    /// When true, every `set` fails (after counting).
+    fail_writes: bool,
 }
 
 impl CountingStore {
@@ -52,6 +60,16 @@ impl CountingStore {
             inner: MemoryKeyStore::new(),
             sets: AtomicUsize::new(0),
             fail_reads,
+            fail_writes: false,
+        }
+    }
+
+    /// `FileKeyStore` over a corrupt `credentials.toml`: `try_get` reports the
+    /// key absent, and `set` fails because it parses the file first.
+    fn corrupt_file() -> Self {
+        Self {
+            fail_writes: true,
+            ..Self::new(false)
         }
     }
 
@@ -72,6 +90,12 @@ impl KeyStore for CountingStore {
     }
     fn set(&self, provider: &str, value: &str) -> Result<(), KeyStoreError> {
         self.sets.fetch_add(1, Ordering::SeqCst);
+        if self.fail_writes {
+            return Err(KeyStoreError::Io {
+                path: PathBuf::from("corrupt-store.toml"),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt"),
+            });
+        }
         self.inner.set(provider, value)
     }
     fn unset(&self, provider: &str) -> Result<(), KeyStoreError> {
@@ -212,5 +236,116 @@ fn the_applied_step_names_the_reload_commands() {
         what.contains("`launchctl kickstart -k` does NOT reload"),
         "{what}"
     );
+    assert_no_value(&steps);
+}
+
+/// Why (#8563): `FileKeyStore::try_get` reports an unreadable or corrupt
+/// credentials file as absent, so the pre-check says "write". The apply's
+/// `set` then fails on the same file, and the key must stay in the plist.
+/// Test: this test.
+#[test]
+fn a_corrupt_file_store_refuses_the_write_and_keeps_the_key() {
+    let (home, path) = home_with_plist();
+    let before = read(&path);
+    let store = Arc::new(CountingStore::corrupt_file());
+
+    let plan = repair_with_store(home.path(), RepairMode::DryRun, store.clone());
+    assert_eq!(plan[0].status, StepStatus::Planned, "{plan:?}");
+    assert!(
+        plan[0]
+            .what
+            .contains("a planned write can still be refused"),
+        "the plan must warn that the write may be refused: {}",
+        plan[0].what
+    );
+    assert_eq!(store.sets(), 0, "the dry run never writes");
+
+    let steps = repair_with_store(home.path(), RepairMode::Apply, store.clone());
+    let rendered = format!("{:?}", steps[0]);
+    assert!(
+        matches!(steps[0].status, StepStatus::Failed(_)),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("the store refused the write"),
+        "{rendered}"
+    );
+    assert_eq!(store.sets(), 1, "the write was attempted once");
+    assert_eq!(read(&path), before, "a key that was not stored stays");
+    assert_no_value(&plan);
+    assert_no_value(&steps);
+}
+
+/// Why (#8563): the apply writes the first plist's value, then refuses the
+/// second plist's different value. The dry run has to plan the same thing,
+/// not check both against the store as it stood before the run.
+/// Test: this test.
+#[test]
+fn the_plan_refuses_a_second_plist_with_a_different_value() {
+    let home = tempfile::tempdir().expect("tempdir");
+    plist_at(home.path(), "a", PLIST_VALUE);
+    let second = plist_at(home.path(), "b", STORED_VALUE);
+    let store = Arc::new(CountingStore::new(false));
+
+    let plan = repair_with_store(home.path(), RepairMode::DryRun, store.clone());
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert_eq!(plan[0].status, StepStatus::Planned, "{plan:?}");
+    let rendered = format!("{:?}", plan[1]);
+    assert!(
+        matches!(plan[1].status, StepStatus::Refused(_)),
+        "the plan must refuse the second plist: {rendered}"
+    );
+    assert!(
+        rendered.contains("the store already holds a different openrouter credential"),
+        "{rendered}"
+    );
+    assert_eq!(store.sets(), 0, "the dry run never writes");
+    assert_no_value(&plan);
+
+    // The apply does what the plan said: first imported, second left in place.
+    let before = read(&second);
+    let steps = repair_with_store(home.path(), RepairMode::Apply, store.clone());
+    assert_eq!(steps[0].status, StepStatus::Applied { backup: None });
+    assert!(
+        matches!(steps[1].status, StepStatus::Failed(_)),
+        "{steps:?}"
+    );
+    assert_eq!(read(&second), before);
+    assert_eq!(store.get("openrouter").as_deref(), Some(PLIST_VALUE));
+    assert_no_value(&steps);
+}
+
+/// Why (#8563): a second plist holding the value the first one will write
+/// counts as imported with no write of its own, in the plan and the apply.
+/// Test: this test.
+#[test]
+fn the_plan_imports_a_second_plist_with_an_equal_value() {
+    let home = tempfile::tempdir().expect("tempdir");
+    plist_at(home.path(), "a", PLIST_VALUE);
+    plist_at(home.path(), "b", PLIST_VALUE);
+    let store = Arc::new(CountingStore::new(false));
+
+    let plan = repair_with_store(home.path(), RepairMode::DryRun, store.clone());
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert!(
+        plan.iter().all(|s| s.status == StepStatus::Planned),
+        "{plan:?}"
+    );
+    assert!(plan[0].what.contains("a planned write"), "{}", plan[0].what);
+    assert!(
+        !plan[1].what.contains("a planned write"),
+        "the second plist needs no write: {}",
+        plan[1].what
+    );
+    assert_no_value(&plan);
+
+    let steps = repair_with_store(home.path(), RepairMode::Apply, store.clone());
+    assert!(
+        steps
+            .iter()
+            .all(|s| s.status == StepStatus::Applied { backup: None }),
+        "{steps:?}"
+    );
+    assert_eq!(store.sets(), 1, "only the first plist writes");
     assert_no_value(&steps);
 }

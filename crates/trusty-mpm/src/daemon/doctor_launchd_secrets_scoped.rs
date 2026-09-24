@@ -28,7 +28,7 @@ use std::sync::Arc;
 use trusty_common::credentials::{KeyStore, default_store};
 
 use super::doctor_launchd_secrets::{CHECK_NAME, PlistFinding, scan_launch_agents};
-use super::doctor_launchd_secrets_repair::{listing_failed, repair_one};
+use super::doctor_launchd_secrets_repair::{PlannedImports, listing_failed, repair_one};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 
 /// The owner-only mode a trusty plist should carry.
@@ -68,12 +68,13 @@ fn scoped_with(
         Ok(findings) => findings,
         Err(e) => return vec![listing_failed(home, &e)],
     };
+    let mut planned = PlannedImports::default();
     findings
         .iter()
         .filter_map(|finding| {
             let strip = finding
                 .actionable()
-                .then(|| repair_one(finding, mode, store));
+                .then(|| repair_one(finding, mode, store, &mut planned));
             tighten(finding, strip, mode, chmod, stat)
         })
         .collect()

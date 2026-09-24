@@ -13,14 +13,18 @@
 //!    read-back counts as imported. An equal value counts as imported with no
 //!    write. A DIFFERENT value is never overwritten (#8563): it may be a key
 //!    the operator already rotated, and the plist copy is the old one. A store
-//!    that cannot be read fails closed — no write, no strip.
+//!    read error the backend reports fails closed before the write. The file
+//!    store reports a corrupt file as absent, so the write is attempted and
+//!    refused; either way a key that was not stored is never stripped.
 //! 3. Remove exactly the imported keys, with an ATOMIC write (temp file beside
 //!    the target, then rename, mode preserved), so an interrupted repair cannot
 //!    leave a truncated plist that launchd refuses to load.
 //! 4. Anything not imported — an unregistered key, a conflicting store value, a
 //!    store that refused, a read-back that disagreed — stays in the file, and
-//!    the step says so. The dry run runs the same store pre-check read-only, so
-//!    its plan names the same keys.
+//!    the step says so. The dry run runs the same store pre-check read-only,
+//!    carrying the values it plans to write across every plist in the run, so
+//!    its plan names the same keys — except a write the store refuses only at
+//!    apply time, which the plan's text warns about.
 //!
 //! **No backup is taken**, unlike every other `--fix` repair. A backup of a
 //! plist holding a credential is a second user-readable copy of that
@@ -36,13 +40,16 @@
 //!
 //! Test: `doctor_launchd_secrets_tests.rs`, `doctor_launchd_secrets_repair_tests.rs`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use trusty_common::atomic_file::write_atomic;
 use trusty_common::credential_registry::provider_for_env_var;
 use trusty_common::credentials::{KeyStore, default_store};
-use trusty_common::launchd_secrets::{PlistCredentialEntry, credential_entries, scrub_plist_keys};
+use trusty_common::launchd_secrets::{
+    PlistCredentialEntry, PlistSecret, credential_entries, scrub_plist_keys,
+};
 
 use super::doctor_launchd_secrets::{CHECK_NAME, PlistFinding, scan_launch_agents};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
@@ -68,6 +75,7 @@ use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 /// `repair_is_idempotent`, `a_different_store_value_is_never_overwritten`,
 /// `an_equal_store_value_is_imported_without_a_write`,
 /// `a_store_read_error_before_the_write_fails_closed`,
+/// `a_corrupt_file_store_refuses_the_write_and_keeps_the_key`,
 /// `the_applied_step_names_the_reload_commands`.
 pub fn repair_launchd_plist_secrets(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
     repair_with_store(home, mode, Arc::from(default_store()))
@@ -89,12 +97,24 @@ pub(crate) fn repair_with_store(
         Err(e) => return vec![listing_failed(home, &e)],
     };
 
+    let mut planned = PlannedImports::default();
     findings
         .iter()
         .filter(|f| f.actionable())
-        .map(|f| repair_one(f, mode, store.as_ref()))
+        .map(|f| repair_one(f, mode, store.as_ref(), &mut planned))
         .collect()
 }
+
+/// The provider values a dry run has already planned to write in this run.
+///
+/// Why (#8563): the apply writes the first plist's value, so a second plist
+/// holding the same provider is checked against THAT value, not the store as
+/// it stood before the run. A dry run that ignored its own earlier plan would
+/// plan both writes while the apply refuses the second.
+/// What: provider → planned value, filled only by a dry run. No `Debug`, so the
+/// values it holds cannot be formatted.
+#[derive(Default)]
+pub(crate) struct PlannedImports(HashMap<&'static str, PlistSecret>);
 
 /// The one step reported when `~/Library/LaunchAgents` cannot be listed.
 pub(crate) fn listing_failed(home: &Path, e: &std::io::Error) -> RepairStep {
@@ -111,14 +131,19 @@ pub(crate) fn listing_failed(home: &Path, e: &std::io::Error) -> RepairStep {
 /// Why: the unreadable arm, the unmapped-only arm and the rewrite arm each have
 /// to produce a step, so an operator running `--fix` sees the file that could
 /// NOT be fixed beside the ones that were.
-/// What: the dry run reads the plist and runs the store pre-check read-only, so
-/// a key the apply would leave in place is named in the plan too. A step whose
-/// plist is (or would be) rewritten carries the reload commands.
-/// Test: as [`repair_launchd_plist_secrets`].
+/// What: the dry run reads the plist and runs the store pre-check read-only,
+/// against the store plus the writes `planned` already holds from earlier
+/// plists in the same run, so a key the apply would leave in place is named in
+/// the plan too. A step whose plist is (or would be) rewritten carries the
+/// reload commands.
+/// Test: as [`repair_launchd_plist_secrets`], and
+/// `the_plan_refuses_a_second_plist_with_a_different_value`,
+/// `the_plan_imports_a_second_plist_with_an_equal_value`.
 pub(crate) fn repair_one(
     finding: &PlistFinding,
     mode: RepairMode,
     store: &dyn KeyStore,
+    planned: &mut PlannedImports,
 ) -> RepairStep {
     let mut what = describe(finding);
     let step = |what: String, status| RepairStep {
@@ -166,19 +191,22 @@ pub(crate) fn repair_one(
 
     if mode == RepairMode::DryRun {
         // #8563: the plan runs the same pre-check the apply does, read-only.
-        let (importable, blocked) = plan_all(&entries, store);
-        if importable == 0 {
+        let plan = plan_all(&entries, store, planned);
+        if plan.importable == 0 {
             return step(
                 what,
                 StepStatus::Refused(format!(
                     "nothing would be imported into the credential store, so the plist would \
                      be left untouched: {}",
-                    blocked.join("; ")
+                    plan.blocked.join("; ")
                 )),
             );
         }
-        if !blocked.is_empty() {
-            what.push_str(&format!("; leaves in place: {}", blocked.join("; ")));
+        if !plan.blocked.is_empty() {
+            what.push_str(&format!("; leaves in place: {}", plan.blocked.join("; ")));
+        }
+        if plan.writes > 0 {
+            what.push_str(WRITE_CAVEAT);
         }
         what.push_str(&reload_note(&finding.path));
         return step(what, StepStatus::Planned);
@@ -242,11 +270,16 @@ enum Precheck {
 /// and report success. Reading first is the only way to know.
 /// What: an unregistered key or an empty entry is blocked; an absent (or empty)
 /// store value means write; an equal one means already stored; a different one
-/// is blocked and left in place; a read error is blocked (fail-closed). Every
-/// reason names the key, the provider and an error kind — never a value.
+/// is blocked and left in place. A read error the backend REPORTS is blocked
+/// before any write (fail-closed). The file store does not report one: its
+/// `try_get` turns an unreadable or corrupt `credentials.toml` into "absent",
+/// so this says write, the dry run plans it, and the apply's `set` then fails
+/// on the same file — [`import_all`] keeps that key in the plist. Every reason
+/// names the key, the provider and an error kind — never a value.
 /// Test: `a_different_store_value_is_never_overwritten`,
 /// `an_equal_store_value_is_imported_without_a_write`,
-/// `a_store_read_error_before_the_write_fails_closed`.
+/// `a_store_read_error_before_the_write_fails_closed`,
+/// `a_corrupt_file_store_refuses_the_write_and_keeps_the_key`.
 fn precheck(entry: &PlistCredentialEntry, store: &dyn KeyStore) -> Precheck {
     let key = &entry.key;
     let Some(provider) = provider_for_env_var(key) else {
@@ -261,9 +294,7 @@ fn precheck(entry: &PlistCredentialEntry, store: &dyn KeyStore) -> Precheck {
         Ok(None) => Precheck::Write(provider),
         Ok(Some(existing)) if existing.is_empty() => Precheck::Write(provider),
         Ok(Some(existing)) if existing == entry.value.expose() => Precheck::AlreadyStored,
-        Ok(Some(_)) => Precheck::Blocked(format!(
-            "{key}: the store already holds a different {provider} credential; left in place"
-        )),
+        Ok(Some(_)) => Precheck::Blocked(different_value(key, provider)),
         Err(e) => Precheck::Blocked(format!(
             "{key}: the store could not be read before the write ({}); nothing was written",
             kind_of(&e)
@@ -271,18 +302,66 @@ fn precheck(entry: &PlistCredentialEntry, store: &dyn KeyStore) -> Precheck {
     }
 }
 
-/// The dry run's view: how many entries would be imported, and why the rest
-/// would stay.
-fn plan_all(entries: &[PlistCredentialEntry], store: &dyn KeyStore) -> (usize, Vec<String>) {
-    let mut importable = 0;
-    let mut blocked = Vec::new();
+/// What a planned write can still meet at apply time (#8563).
+///
+/// Why: the file store reports an unreadable or corrupt `credentials.toml` as
+/// absent, so the dry run plans a write that the apply's `set` then refuses.
+const WRITE_CAVEAT: &str = "; a store read error the backend reports stops a write before it \
+     happens, but the file store reports a corrupt credentials file as absent, so a planned \
+     write can still be refused at apply time — a key the apply could not store is never \
+     stripped";
+
+/// The reason a key stays when its provider already holds another value.
+fn different_value(key: &str, provider: &str) -> String {
+    format!("{key}: the store already holds a different {provider} credential; left in place")
+}
+
+/// The dry run's view of one plist.
+#[derive(Default)]
+struct Plan {
+    /// Entries the apply would import (a write, or an equal stored value).
+    importable: usize,
+    /// How many of those need a store write.
+    writes: usize,
+    /// One value-free reason per entry that would stay.
+    blocked: Vec<String>,
+}
+
+/// The dry run's view: what would be imported, and why the rest would stay.
+///
+/// Why (#8563): the apply writes as it goes, so a later entry — in this plist
+/// or a later one — is checked against the values written before it.
+/// What: a provider already in `planned` is judged against the planned value
+/// (equal → imported with no write, different → left in place); any other
+/// entry goes through [`precheck`]. Each planned write is added to `planned`.
+/// Test: `the_plan_refuses_a_second_plist_with_a_different_value`,
+/// `the_plan_imports_a_second_plist_with_an_equal_value`.
+fn plan_all(
+    entries: &[PlistCredentialEntry],
+    store: &dyn KeyStore,
+    planned: &mut PlannedImports,
+) -> Plan {
+    let mut plan = Plan::default();
     for entry in entries {
-        match precheck(entry, store) {
-            Precheck::Write(_) | Precheck::AlreadyStored => importable += 1,
-            Precheck::Blocked(why) => blocked.push(why),
+        let earlier = provider_for_env_var(&entry.key)
+            .filter(|_| !entry.value.is_empty())
+            .and_then(|p| planned.0.get(p).map(|value| (p, value)));
+        let decision = match earlier {
+            Some((_, value)) if *value == entry.value => Precheck::AlreadyStored,
+            Some((provider, _)) => Precheck::Blocked(different_value(&entry.key, provider)),
+            None => precheck(entry, store),
+        };
+        match decision {
+            Precheck::Write(provider) => {
+                planned.0.insert(provider, entry.value.clone());
+                plan.writes += 1;
+                plan.importable += 1;
+            }
+            Precheck::AlreadyStored => plan.importable += 1,
+            Precheck::Blocked(why) => plan.blocked.push(why),
         }
     }
-    (importable, blocked)
+    plan
 }
 
 /// Import every registry-mapped entry the pre-check allows, confirming each

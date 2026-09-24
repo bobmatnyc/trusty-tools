@@ -1658,10 +1658,17 @@ pub struct DoctorFlags {
     ///
     /// Why (#8236): `--fix` runs every repair class machine-wide, so there was
     /// no way to fix one credential exposure without the other writes.
-    /// What: migrates each registry-mapped plist credential into the store,
-    /// confirms it by byte-equal read-back, strips only the confirmed keys,
-    /// then tightens a stripped plist wider than `0600` to `0600`. Prints key
-    /// names and outcomes, never a value. No other repair runs.
+    /// What: migrates each registry-mapped plist credential into the store
+    /// when the store holds nothing for it, confirms it by byte-equal
+    /// read-back, and strips only the confirmed keys. A store that already
+    /// holds the same value counts as imported with no write; a store that
+    /// holds a DIFFERENT value is never overwritten, and that key stays in the
+    /// plist. Then tightens every regular-file `com.trusty.*.plist` wider than
+    /// `0600` to `0600`, including one that holds no credential; a symlink is
+    /// never touched. Writes nothing without `--yes`. Prints key names and
+    /// outcomes, never a value. No other repair runs. A running daemon keeps
+    /// its old environment until `launchctl bootout` and `launchctl bootstrap`
+    /// reload the unit; `launchctl kickstart -k` does not.
     #[arg(long)]
     pub fix_launchd_secrets: bool,
 
