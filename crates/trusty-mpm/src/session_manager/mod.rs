@@ -73,6 +73,8 @@ pub(crate) mod worktree_liveness;
 // `worktree_reclaim::classify`'s first gate.
 pub(crate) mod worktree_keep_list;
 pub(crate) mod worktree_nested;
+// #7771, #8301: the session-safe ownership rule prune and `tm pr cleanup` share.
+pub(crate) mod worktree_owner_gate;
 pub(crate) mod worktree_ownership;
 // #8511: the marker's git-admin-dir location, its migration, and the fleet pass.
 pub mod worktree_marker_migration;

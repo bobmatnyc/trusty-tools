@@ -223,3 +223,56 @@ fn record_merge_scope_warns_on_a_registry_an_older_writer_rewrote() {
     );
     assert_eq!(reg.entries()[0].scope, CleanupScope::Deferred);
 }
+
+/// #8301 critic: the daemon reports a claim under another spelling of the tree
+/// (a symlink, or macOS's `/private` prefix); `DaemonClaims` still finds it.
+///
+/// Fails at 4b1f480af: the byte comparison missed the holder, so the CLI's
+/// ownership gate never judged the claim.
+#[tokio::test]
+async fn daemon_claims_match_a_workspace_spelled_through_a_symlink() {
+    use trusty_mpm::core::pr_cleanup::ClaimEnder;
+    let ws = tempfile::tempdir().expect("workspace dir");
+    let tree = ws.path().join("tree");
+    std::fs::create_dir(&tree).expect("create the tree");
+    let alias = ws.path().join("alias");
+    std::os::unix::fs::symlink(&tree, &alias).expect("symlink the tree");
+    let body = serde_json::json!({
+        "sessions": [{
+            "id": "sess-8301-alias",
+            "name": "sess-8301-alias",
+            "state": "active",
+            "persisted_state": "active",
+            "workspace_path": alias.to_string_lossy(),
+            "cwd": alias.to_string_lossy(),
+            "created_at": "2026-09-24T00:00:00Z",
+            "unresumable": false,
+            "slot": 1,
+            "deleted": false,
+        }]
+    });
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed",
+        axum::routing::get(move || {
+            let body = body.clone();
+            async move { axum::Json(body) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("bound addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let claims = super::DaemonClaims {
+        client: trusty_mpm::client::DaemonClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}"),
+        ),
+    };
+
+    let holders = claims.claims_on(&tree).await.expect("claims on the tree");
+    server.abort();
+    assert_eq!(holders, ["sess-8301-alias"]);
+}

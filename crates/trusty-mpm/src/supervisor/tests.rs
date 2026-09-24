@@ -1574,3 +1574,50 @@ async fn a_non_state_resume_error_is_still_recorded() {
         after.task
     );
 }
+
+/// #8301 critic: a claim recorded under another spelling of the tree — a
+/// symlink, or macOS's `/private` prefix — is still that tree's claim. A path
+/// that cannot be resolved falls back to the raw comparison and keeps its
+/// holder too.
+///
+/// Fails at 4b1f480af: the byte comparison missed the symlinked holder, so the
+/// sweep never saw the claim it had to judge.
+#[tokio::test]
+async fn session_claims_match_a_workspace_spelled_through_a_symlink() {
+    use crate::core::pr_cleanup::ClaimEnder;
+    use crate::supervisor::pr_cleanup_tick::SessionClaims;
+    let dir = TempDir::new().expect("store dir");
+    let ws = TempDir::new().expect("workspace dir");
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let tree = ws.path().join("tree");
+    std::fs::create_dir(&tree).expect("create the tree");
+    let alias = ws.path().join("alias");
+    std::os::unix::fs::symlink(&tree, &alias).expect("symlink the tree");
+    let gone = ws.path().join("gone");
+    let mut via_alias = rec(ManagedSessionState::Active, None);
+    via_alias.workspace_path = Some(alias);
+    let mut on_gone = rec(ManagedSessionState::Active, None);
+    on_gone.workspace_path = Some(gone.clone());
+    let (alias_id, gone_id) = (via_alias.id.to_string(), on_gone.id.to_string());
+    {
+        let mut store = mgr.store.write().await;
+        store
+            .upsert(via_alias)
+            .await
+            .expect("upsert the alias record");
+        store.upsert(on_gone).await.expect("upsert the gone record");
+    }
+    let claims = SessionClaims::new(&mgr);
+
+    let on_tree = claims.claims_on(&tree).await.expect("claims on the tree");
+    assert_eq!(on_tree, [alias_id], "the symlinked spelling holds the tree");
+    let on_missing = claims
+        .claims_on(&gone)
+        .await
+        .expect("claims on a gone path");
+    assert_eq!(
+        on_missing,
+        [gone_id],
+        "an unresolvable path keeps its holder"
+    );
+}

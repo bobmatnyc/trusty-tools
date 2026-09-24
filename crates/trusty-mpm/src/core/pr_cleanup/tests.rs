@@ -6,13 +6,26 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+use super::CleanupRequest;
 use super::driver::{ClaimEnder, CmdOut, Gh, Git, Landing};
 use super::plan::{
     AGENT_BRANCH_PREFIX, MergeCommit, PrView, StepLine, StepStatus, agent_branches_at,
     merge_refusal, parse_worktree_list, worktree_targets,
 };
 use super::registry::{CleanupRegistry, OpenedPr};
-use super::{CleanupRequest, run};
+use super::{ClaimOwnership, CleanupReport, DirtProbe, HolderState, run_with};
+
+/// #8301: every test runs with its claim double as the ownership answer.
+async fn run<G: Gh, T: Git, C: ClaimEnder + ClaimOwnership>(
+    gh: &G,
+    git: &T,
+    claims: &C,
+    landing: &dyn Landing,
+    probe_dirt: DirtProbe<'_>,
+    req: &CleanupRequest,
+) -> CleanupReport {
+    run_with(gh, git, claims, landing, probe_dirt, req, claims).await
+}
 use crate::session_manager::DirtyWorktree;
 use crate::session_manager::worktree_reclaim::BranchPrState;
 use crate::session_manager::worktree_reclaim_pr_match::worktree_reclaim_pr_match_tests::FakeProbe;
@@ -130,32 +143,107 @@ struct FakeClaims {
     holders: Vec<String>,
     /// Ids passed to `end_claim`, in order.
     ended: std::sync::Mutex<Vec<String>>,
+    /// #8301: holders reported as LIVE foreign sessions; every other one ended.
+    live: Vec<String>,
+    /// #8301: the ownership gate's refusal, or `None` to permit.
+    refuse: Option<String>,
+    /// #8301: when non-empty, each path's own holders; unlisted paths are
+    /// unclaimed. Empty means every path answers `holders`.
+    per_path: Vec<(PathBuf, Vec<String>)>,
+    /// #8301: `claims_on` answers popped in order before the fallback above.
+    claims_script: std::sync::Mutex<std::collections::VecDeque<Result<Vec<String>, String>>>,
+    /// #8301: `tree_gate` answers popped in order before `refuse`.
+    gate_script: std::sync::Mutex<std::collections::VecDeque<Result<(), String>>>,
+    /// #7771: `release_stale_lock`'s refusal, or `None` to release.
+    lock_refuse: Option<String>,
+    /// #7771: paths `release_stale_lock` was asked about, in order.
+    released: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 impl FakeClaims {
     fn none() -> Self {
-        Self {
-            holders: Vec::new(),
-            ended: std::sync::Mutex::new(Vec::new()),
-        }
+        Self::held(&[])
     }
 
     fn held_by(id: &str) -> Self {
+        Self::held(&[id])
+    }
+
+    fn held(ids: &[&str]) -> Self {
         Self {
-            holders: vec![id.to_string()],
+            holders: ids.iter().map(|s| (*s).to_string()).collect(),
             ended: std::sync::Mutex::new(Vec::new()),
+            live: Vec::new(),
+            refuse: None,
+            per_path: Vec::new(),
+            claims_script: Default::default(),
+            gate_script: Default::default(),
+            lock_refuse: None,
+            released: Default::default(),
         }
+    }
+
+    /// #8301: script the next `claims_on` answers.
+    fn claims_then(self, answers: Vec<Result<Vec<String>, String>>) -> Self {
+        *self.claims_script.lock().expect("claims script") = answers.into();
+        self
+    }
+
+    /// #8301: script the next `tree_gate` answers.
+    fn gate_then(self, answers: Vec<Result<(), String>>) -> Self {
+        *self.gate_script.lock().expect("gate script") = answers.into();
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl ClaimEnder for FakeClaims {
-    async fn claims_on(&self, _path: &Path) -> anyhow::Result<Vec<String>> {
-        Ok(self.holders.clone())
+    async fn claims_on(&self, path: &Path) -> anyhow::Result<Vec<String>> {
+        if let Some(next) = self
+            .claims_script
+            .lock()
+            .expect("claims script")
+            .pop_front()
+        {
+            return next.map_err(|e| anyhow::anyhow!(e));
+        }
+        if self.per_path.is_empty() {
+            return Ok(self.holders.clone());
+        }
+        Ok(self
+            .per_path
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default())
     }
     async fn end_claim(&self, id: &str) -> anyhow::Result<()> {
         self.ended.lock().expect("claims lock").push(id.to_string());
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ClaimOwnership for FakeClaims {
+    async fn holder_state(&self, id: &str) -> HolderState {
+        if self.live.iter().any(|l| l == id) {
+            HolderState::Live
+        } else {
+            HolderState::Ended
+        }
+    }
+    async fn tree_gate(&self, _path: &Path) -> Result<(), String> {
+        if let Some(next) = self.gate_script.lock().expect("gate script").pop_front() {
+            return next;
+        }
+        self.refuse.clone().map_or(Ok(()), Err)
+    }
+    async fn release_stale_lock(&self, path: &Path) -> Result<(), String> {
+        self.released
+            .lock()
+            .expect("released lock")
+            .push(path.to_path_buf());
+        self.lock_refuse.clone().map_or(Ok(()), Err)
     }
 }
 
@@ -805,6 +893,369 @@ async fn cleanup_ends_a_session_claim_before_removing_the_worktree() {
     assert!(
         git.calls().iter().any(|c| c.contains("worktree remove")),
         "the claim must not block the removal: {:?}",
+        git.calls()
+    );
+}
+
+/// #8301: session X's cleanup must not end session Y's live claim, and keeps
+/// the tree with a reason naming Y.
+///
+/// Fails before #8301: both claims are ended and the tree is removed.
+#[tokio::test]
+async fn cleanup_keeps_a_tree_another_live_session_claims() {
+    let gh = gh_merged();
+    let git = git_full();
+    let mut claims = FakeClaims::held(&["tm-caller-01", "tm-other-02"]);
+    claims.live = vec!["tm-other-02".to_string()];
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("tm-other-02"),
+        "the kept tree names the live session: {}",
+        report.render()
+    );
+    assert!(
+        claims.ended.lock().expect("claims lock").is_empty(),
+        "no claim is ended when one holder is live and foreign"
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
+    );
+}
+
+/// #8301: the #7771 ownership gate refuses BEFORE any claim is ended.
+///
+/// Fails before #8301: the claim is ended and the tree removed.
+#[tokio::test]
+async fn cleanup_keeps_a_tree_the_ownership_gate_refuses() {
+    let gh = gh_merged();
+    let git = git_full();
+    let mut claims = FakeClaims::held_by("tm-bobmatnyc-01");
+    claims.refuse = Some("its owner file names session Y, which is live".to_string());
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("which is live"),
+        "{}",
+        report.render()
+    );
+    assert!(claims.ended.lock().expect("claims lock").is_empty());
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
+    );
+}
+
+/// #8301: the default claim store cannot run the gate, so it keeps the tree.
+#[tokio::test]
+async fn cleanup_default_ownership_gate_fails_closed() {
+    struct Bare;
+    #[async_trait::async_trait]
+    impl ClaimEnder for Bare {
+        async fn claims_on(&self, _path: &Path) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn end_claim(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    // The trait's own defaults: nothing overridden.
+    impl ClaimOwnership for Bare {}
+    let git = git_full();
+    let report = run(
+        &gh_merged(),
+        &git,
+        &Bare,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+    assert!(report.failed(), "{}", report.render());
+    assert!(!git.calls().iter().any(|c| c.contains("worktree remove")));
+}
+
+/// 🔴 #8301: two sessions each hold a tree on the merged head. Session X's
+/// cleanup removes X's tree and ends X's claim only; session Y's tree and
+/// claim are left intact, and the report names Y.
+#[tokio::test]
+async fn cleanup_8301_two_sessions_each_keep_their_own_tree() {
+    let git = git_two_trees();
+    let mut claims = FakeClaims::none();
+    claims.per_path = vec![
+        (PathBuf::from(TREE), vec!["tm-caller-01".to_string()]),
+        (PathBuf::from(OTHER_TREE), vec!["tm-other-02".to_string()]),
+    ];
+    claims.live = vec!["tm-other-02".to_string()];
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "the caller's own tree is removed: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git worktree remove {OTHER_TREE}")),
+        "another live session's tree is never removed: {joined}"
+    );
+    assert_eq!(
+        claims.ended.lock().expect("claims lock").as_slice(),
+        ["tm-caller-01"],
+        "only the caller's claim is ended"
+    );
+    let rendered = report.render();
+    assert!(
+        rendered.contains(&format!("{OTHER_TREE} kept")) && rendered.contains("tm-other-02"),
+        "the kept tree names its live owner: {rendered}"
+    );
+}
+
+/// 🔴 #8301 error arm: the ownership gate is judged again right before the
+/// removal. A tree that the gate refuses at that point (an agent resumed in it,
+/// re-locking it under a live pid) keeps its lock and stays on disk.
+///
+/// Fails at a4a5d16c6: the first answer's stale-lock verdict unlocks and removes.
+#[tokio::test]
+async fn cleanup_8301_rejudges_ownership_before_removing() {
+    let git = git_full().on("git worktree unlock", "");
+    let claims = FakeClaims::held_by("tm-bobmatnyc-01").gate_then(vec![
+        Ok(()),
+        Err("git still reports the harness's agent-lifetime lock".to_string()),
+    ]);
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("pre-removal check"),
+        "{}",
+        report.render()
+    );
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree unlock"),
+        "a lock judged live now is never released: {joined}"
+    );
+    assert!(
+        claims.released.lock().expect("released lock").is_empty(),
+        "a refused tree's lock is never judged for release"
+    );
+    assert!(!joined.contains("git worktree remove"), "{joined}");
+}
+
+/// 🔴 #7771 critic: the lock is judged again at the moment it would be
+/// released. A lock re-taken under a live pid since the gate keeps the tree,
+/// its lock and its claim.
+///
+/// Fails with the release judgement removed from `remove_one`: the claim is
+/// ended and `git worktree remove` runs. At a3ffce106 the gate's second lock
+/// read turned a live lock into "no unlock needed".
+#[tokio::test]
+async fn cleanup_8301_a_lock_judged_live_at_release_keeps_the_tree_and_its_claim() {
+    let git = git_full();
+    let mut claims = FakeClaims::held_by("tm-bobmatnyc-01");
+    claims.lock_refuse = Some("pid 4242 runs with the start time it recorded".to_string());
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("judged again at release"),
+        "{}",
+        report.render()
+    );
+    assert!(claims.ended.lock().expect("claims lock").is_empty());
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
+    );
+}
+
+/// #7771: a claim store that cannot judge the lock keeps the tree (ADR-0045).
+#[tokio::test]
+async fn cleanup_default_lock_release_fails_closed() {
+    struct NoLockJudge;
+    #[async_trait::async_trait]
+    impl ClaimEnder for NoLockJudge {
+        async fn claims_on(&self, _path: &Path) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn end_claim(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    // Permits the tree; `release_stale_lock` keeps the trait's default.
+    #[async_trait::async_trait]
+    impl ClaimOwnership for NoLockJudge {
+        async fn tree_gate(&self, _path: &Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let git = git_full();
+    let report = run(
+        &gh_merged(),
+        &git,
+        &NoLockJudge,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("cannot judge the lock"),
+        "{}",
+        report.render()
+    );
+    assert!(!git.calls().iter().any(|c| c.contains("worktree remove")));
+}
+
+/// 🔴 #8301 critic: a tree the pre-removal check refuses stays on disk, so its
+/// claim must stay too — no claim is ended unless the tree is removed.
+///
+/// Fails at 4b1f480af: the claim was tombstoned before the check refused.
+#[tokio::test]
+async fn cleanup_8301_a_refused_pre_removal_check_ends_no_claim() {
+    let git = git_full();
+    let claims = FakeClaims::held_by("tm-bobmatnyc-01").gate_then(vec![
+        Ok(()),
+        Err("its owner file names session Y, which is live".to_string()),
+    ]);
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("pre-removal check"),
+        "{}",
+        report.render()
+    );
+    assert!(
+        claims.ended.lock().expect("claims lock").is_empty(),
+        "a kept tree keeps its claim"
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
+    );
+}
+
+/// 🔴 #8301 error arm: a live session that claims the tree while cleanup runs
+/// keeps it, and its claim is not ended.
+///
+/// Fails at a4a5d16c6: the claim list is never re-read, so the tree is removed.
+#[tokio::test]
+async fn cleanup_8301_a_claim_taken_during_cleanup_keeps_the_tree() {
+    let git = git_full();
+    let mut claims =
+        FakeClaims::none().claims_then(vec![Ok(Vec::new()), Ok(vec!["tm-other-02".to_string()])]);
+    claims.live = vec!["tm-other-02".to_string()];
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("tm-other-02"),
+        "{}",
+        report.render()
+    );
+    assert!(claims.ended.lock().expect("claims lock").is_empty());
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
+    );
+}
+
+/// 🔴 #8301 error arm: claims that cannot be re-read before the removal keep
+/// the tree (ADR-0045).
+///
+/// Fails at a4a5d16c6: the claim list is never re-read, so the tree is removed.
+#[tokio::test]
+async fn cleanup_8301_unreadable_claims_at_the_recheck_keep_the_tree() {
+    let git = git_full();
+    let claims = FakeClaims::none().claims_then(vec![
+        Ok(Vec::new()),
+        Err("the daemon stopped answering".to_string()),
+    ]);
+    let report = run(
+        &gh_merged(),
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("could not be re-read"),
+        "{}",
+        report.render()
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
         git.calls()
     );
 }
@@ -1567,6 +2018,8 @@ async fn cleanup_refuses_a_tree_that_changed_while_cleanup_was_checking_it() {
         "work written during the window is never deleted: {:?}",
         git.calls()
     );
+    // #8301 critic: the tree stays, so its claim stays.
+    assert!(claims.ended.lock().expect("claims lock").is_empty());
 }
 
 // ── the registry ─────────────────────────────────────────────────────────

@@ -198,7 +198,7 @@ pub(crate) fn is_session_worktree_with(
 /// Test: `removal_permitted_admits_all_three_tiers`,
 /// `removal_permitted_refuses_a_user_directory`,
 /// `tm_provisioned_matches_the_removers_own_predicate`,
-/// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
+/// `worktree_7771_a_hand_made_tree_is_reclaimed`.
 pub(crate) fn removal_permitted(path: &Path) -> bool {
     // #8511: the marker may live in the git admin dir.
     super::worktree_ownership_location::sentinel_present(path)

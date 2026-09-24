@@ -31,11 +31,13 @@ use crate::cli::PrCleanupArgs;
 /// `SessionManager::decommission_record_only` directly. Routing both halves
 /// through [`DaemonClient`] keeps the CLI on the crate's single managed-session
 /// HTTP client rather than hand-building requests.
-/// What: `claims_on` filters the managed-session list by `workspace_path`;
-/// `end_claim` posts the record-only decommission. A daemon that cannot be
-/// reached surfaces as an `Err`, which the engine reports as a FAILED worktree
-/// step — an unanswerable claim question never advances toward a delete.
-/// Test: the engine-side behaviour is
+/// What: `claims_on` keeps each managed session whose `workspace_path` names
+/// the same tree (`identifies_same_path`); `end_claim` posts the record-only
+/// decommission. A daemon that cannot be reached surfaces as an `Err`, which
+/// the engine reports as a FAILED worktree step — an unanswerable claim
+/// question never advances toward a delete.
+/// Test: `daemon_claims_match_a_workspace_spelled_through_a_symlink`; the
+/// engine-side behaviour is
 /// `cleanup_fails_the_worktree_step_when_claims_cannot_be_read`.
 struct DaemonClaims {
     /// The managed-session client, bound to the daemon's base URL.
@@ -46,12 +48,14 @@ struct DaemonClaims {
 impl ClaimEnder for DaemonClaims {
     async fn claims_on(&self, path: &Path) -> anyhow::Result<Vec<String>> {
         let sessions = self.client.list_managed_sessions().await?;
+        // #8301 critic: a symlinked or `/private`-prefixed spelling is still
+        // this tree's claim.
         Ok(sessions
             .into_iter()
             .filter(|s| {
                 s.workspace_path
                     .as_deref()
-                    .is_some_and(|w| Path::new(w) == path)
+                    .is_some_and(|w| trusty_common::identifies_same_path(Path::new(w), path))
             })
             .map(|s| s.id)
             .collect())

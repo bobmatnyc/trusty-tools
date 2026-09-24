@@ -280,7 +280,7 @@ const NOT_IMPLEMENTED: &str =
 /// What: `git rev-list --count HEAD --not --remotes=origin`.
 /// Test: `local_only_commits_counts_only_what_no_origin_ref_has` in
 /// `crate::session_manager::worktree_safety_tests`.
-const LOCAL_ONLY_COMMITS_ARGS: &[&str] =
+pub(crate) const LOCAL_ONLY_COMMITS_ARGS: &[&str] =
     &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"];
 
 /// How long the admission's `git fetch --prune` may run (#7914, critic round 1).

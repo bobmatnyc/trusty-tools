@@ -224,7 +224,8 @@ fn classify_blocks_non_admitted_worktree() {
             !v.is_reclaimable(),
             "{admission:?} must never be reclaimable, even with a merged PR"
         );
-        assert_eq!(reason(&v), admission.reason());
+        // #7771: a harness lock appends why its holder still counts.
+        assert!(reason(&v).starts_with(admission.reason()), "{}", reason(&v));
     }
 }
 
@@ -910,7 +911,8 @@ fn classify_allows_a_finished_agents_merged_worktree() {
     // without bound and the sweep stops doing its job.
     let fx = GitWorktreeFixture::new();
     let path = agent_store_worktree(&fx, "finished-agent-5661");
-    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-that-finished");
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-that-finished");
+    // #7771 (d): the dispatching session must be provably ended too.
     let v = classify(
         &path,
         Admission::Admitted,
@@ -918,7 +920,7 @@ fn classify_allows_a_finished_agents_merged_worktree() {
         &merged(103),
         &inspect_dirt,
         &agent_ended,
-        &SessionOwners::default(),
+        &GitWorktreeFixture::parent_ended(&owner),
         &KeepList::default(),
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 103 });
@@ -926,15 +928,18 @@ fn classify_allows_a_finished_agents_merged_worktree() {
 
 #[test]
 fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
-    // A sentinel file whose content names no owner could be a truncated agent
-    // claim, so inside the agent store it refuses — with the MOST permissive
-    // registry answer, which proves the refusal comes from the unreadable file
-    // and not from the liveness probe. Both spellings of unreadable are covered:
-    // content that does not parse, and a file the process cannot open at all.
+    // #7771, #8511: an owner file that exists but cannot be read or parsed
+    // could be a truncated claim, so the strict reader refuses it — with no
+    // harness lock and the MOST permissive registry answer, which proves the
+    // refusal comes from the owner file alone. Both spellings of unreadable are
+    // covered: content that does not parse, and a file the process cannot open.
+    //
+    // Fails before the strict-reader switch: the tolerant reader folded both
+    // into "names nobody", and the unlocked tree was reclaimed.
     let fx = GitWorktreeFixture::new();
     let garbled = agent_store_worktree(&fx, "garbled-sentinel-5661");
-    std::fs::write(
-        garbled.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+    crate::session_manager::worktree_ownership_location::write_sentinel_bytes(
+        &garbled,
         b"{not json",
     )
     .expect("write a malformed sentinel");
@@ -949,7 +954,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "malformed sentinel: {v:?}");
-    assert!(reason(&v).contains("names no owner"), "{}", reason(&v));
+    assert!(reason(&v).contains("does not parse"), "{}", reason(&v));
 
     let denied = agent_store_worktree(&fx, "denied-sentinel-5661");
     // #8511: the agent marker is written to the git admin dir.
@@ -969,6 +974,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "unreadable sentinel: {v:?}");
+    assert!(reason(&v).contains("cannot be read"), "{}", reason(&v));
 }
 
 #[test]
@@ -1428,33 +1434,259 @@ fn tm_provisioned_matches_the_removers_own_predicate() {
 /// so #6556's own lost-`PostToolUse` population lands here with no attribution
 /// at all.
 ///
-/// Fails before this round: `classify` returns `Reclaimable { pr: 759 }`.
+/// #7771 superseded the #6561 refusal: a hand-made tree (`git worktree add`,
+/// no owner file) that is merged, clean and unlocked, with no process in it,
+/// is reclaimed — the shape of `semver-accept-trusty-mpm-1.7.2`.
+///
+/// Fails before #7771: refused with "names no owner inside the harness
+/// agent-worktree store".
 #[test]
-fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
+fn worktree_7771_a_hand_made_tree_is_reclaimed() {
     let fx = GitWorktreeFixture::new();
-    let path = fx.add_worktree_at(
-        &fx.repo.join(".claude").join("worktrees"),
-        "agent-6561unattributed",
-    );
-    // No sentinel of any kind: nothing attributes this tree to an agent and
-    // nothing says whether one is still working in it. Merged and clean, so
-    // gates 5 and 6 both pass and only the ownership gate stands.
+    let path = agent_store_worktree(&fx, "semver-accept-7771");
     let v = classify_no_agent(
         &path,
         Admission::Admitted,
         &claim(false),
         &merged(759),
+        &inspect_dirt,
+    );
+    assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 759 });
+}
+
+/// #7771: the same hand-made tree holding a commit no remote has is kept.
+#[test]
+fn worktree_7771_a_hand_made_tree_with_an_unpushed_commit_is_kept() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "handmade-7771unpushed");
+    std::fs::write(path.join("novel.txt"), "unsaved\n").expect("write");
+    for args in [
+        &["add", "novel.txt"][..],
+        &["commit", "-q", "-m", "novel"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .current_dir(&path)
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(ok.success());
+    }
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(759),
+        &inspect_dirt,
+    );
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(reason(&v).contains("unpushed"), "{}", reason(&v));
+}
+
+/// #7771 (f): every commit on an origin ref, no pull request, clean, no owner
+/// file — reclaimed. A detached HEAD at a published commit is the same case.
+///
+/// Fails against 576135c5a: refused with "no pull request found" and, for the
+/// detached tree, "could not be determined".
+#[test]
+fn worktree_7771_a_published_tree_with_no_pr_is_reclaimed() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "published-7771");
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::NoPr,
+        &inspect_dirt,
+    );
+    assert!(v.is_reclaimable(), "{v:?}");
+    let detached = agent_store_worktree(&fx, "published-7771-detached");
+    detach(&detached);
+    let v = classify_no_agent(
+        &detached,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::Unknown,
+        &inspect_dirt,
+    );
+    assert!(v.is_reclaimable(), "{v:?}");
+}
+
+/// `git checkout --detach` in `path`.
+fn detach(path: &Path) {
+    let ok = std::process::Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "-q", "--detach"])
+        .status()
+        .expect("git");
+    assert!(ok.success());
+}
+
+/// #7771 (f): one commit on no origin ref keeps the tree.
+///
+/// Fails against 576135c5a: its published first half is refused there.
+#[test]
+fn worktree_7771_a_commit_on_no_origin_ref_is_kept() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "unpublished-7771");
+    // The published half first, so this test fails where (f) is absent.
+    let before = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::NoPr,
+        &inspect_dirt,
+    );
+    assert!(before.is_reclaimable(), "{before:?}");
+    GitWorktreeFixture::commit_unpushed(&path);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::NoPr,
+        &inspect_dirt,
+    );
+    assert!(!v.is_reclaimable(), "{v:?}");
+}
+
+/// #7771 (f) never outranks (d): a published tree whose owner file names
+/// another LIVE session is kept; the same tree once that session ended is
+/// reclaimed.
+///
+/// Fails against 576135c5a: the ended-owner half is refused, no PR found.
+#[test]
+fn worktree_7771_a_published_tree_of_a_live_foreign_session_is_kept() {
+    use crate::session_manager::worktree_reclaim_claim::ClaimLiveness;
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "published-foreign-7771");
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(&path, "published-foreign-7771");
+    let parent = owner.parent_session_id.0.to_string();
+    let verdict = |liveness| {
+        classify(
+            &path,
+            Admission::Admitted,
+            &claim(false),
+            &BranchPrState::NoPr,
+            &inspect_dirt,
+            &no_agents,
+            &SessionOwners::observed([(parent.clone(), liveness)]),
+            &KeepList::default(),
+        )
+    };
+    let live = verdict(ClaimLiveness::Live);
+    assert!(!live.is_reclaimable(), "{live:?}");
+    assert!(reason(&live).contains("is live"), "{}", reason(&live));
+    assert!(verdict(ClaimLiveness::SessionGone).is_reclaimable());
+}
+
+/// #7771 item 3: a detached HEAD holding unpublished work is refused without
+/// blaming `gh`, and the refusal names the detached HEAD.
+///
+/// Fails against 1ed820971 (the text was fixed in 576135c5a).
+#[test]
+fn worktree_7771_a_detached_unknown_state_does_not_blame_gh() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "detached-unpublished-7771");
+    detach(&path);
+    GitWorktreeFixture::commit_unpushed(&path);
+    let v = classify_no_agent(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &BranchPrState::Unknown,
         &clean,
     );
-    assert!(
-        !v.is_reclaimable(),
-        "an unattributed agent-store tree must never be deleted on merged+clean alone: {v:?}"
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(reason(&v).contains("detached HEAD"), "{}", reason(&v));
+    assert!(!reason(&v).contains("gh"), "{}", reason(&v));
+}
+
+/// #7771 (a): a harness lock whose pid is gone, or reused, is released at
+/// gate 1; a lock naming this running process is still held.
+///
+/// Fails before #7771: every harness lock refused at gate 1.
+#[test]
+fn worktree_7771_a_stale_harness_lock_is_released() {
+    let fx = GitWorktreeFixture::new();
+    let dead = agent_store_worktree(&fx, "agent-7771deadlock");
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let gone = child.id();
+    child.wait().expect("reap");
+    fx.harness_lock_worktree_with_pid(&dead, "agent-7771deadlock", gone);
+    let reused = agent_store_worktree(&fx, "agent-7771reused");
+    fx.harness_lock_worktree_with_reason(
+        &reused,
+        &format!(
+            "claude agent agent-7771reused (pid {} start Mon Sep  1 20:33:51 2025)",
+            std::process::id()
+        ),
     );
-    assert!(
-        reason(&v).contains("names no owner"),
-        "and the refusal must be the ownership one, naming why: {}",
-        reason(&v)
+    for path in [&dead, &reused] {
+        let v = classify_no_agent(
+            path,
+            Admission::HarnessAgentLock,
+            &claim(false),
+            &merged(761),
+            &clean,
+        );
+        assert_eq!(
+            v,
+            ReclaimVerdict::Reclaimable { pr: 761 },
+            "{}",
+            path.display()
+        );
+    }
+    let live = agent_store_worktree(&fx, "agent-7771livelock");
+    fx.harness_lock_worktree(&live, "agent-7771livelock");
+    let v = classify_no_agent(
+        &live,
+        Admission::HarnessAgentLock,
+        &claim(false),
+        &merged(761),
+        &clean,
     );
+    assert!(matches!(v, ReclaimVerdict::BlockedByAgent { .. }), "{v:?}");
+}
+
+/// #7771 (d), the cross-session scenario: an agent tree whose owner file names
+/// ANOTHER live session is kept by prune; the caller's own and an ended
+/// session's are reclaimed.
+///
+/// Fails before #7771: the released lock alone reclaimed all three.
+#[test]
+fn worktree_7771_the_owner_files_session_decides() {
+    use crate::session_manager::worktree_reclaim_claim::ClaimLiveness;
+    let fx = GitWorktreeFixture::new();
+    let mut verdicts = Vec::new();
+    for (name, liveness, caller) in [
+        ("agent-7771other", ClaimLiveness::Live, false),
+        ("agent-7771mine", ClaimLiveness::Live, true),
+        ("agent-7771ended", ClaimLiveness::SessionGone, false),
+    ] {
+        let path = agent_store_worktree(&fx, name);
+        let owner = GitWorktreeFixture::stamp_agent_sentinel(&path, name);
+        let claude = owner.parent_session_id.0.to_string();
+        let owners = SessionOwners::observed([("managed-x".to_string(), liveness)])
+            .with_aliases([(claude, "managed-x".to_string())])
+            .with_caller(caller.then(|| "managed-x".to_string()));
+        verdicts.push(classify(
+            &path,
+            Admission::Admitted,
+            &claim(false),
+            &merged(762),
+            &clean,
+            &no_agents,
+            &owners,
+            &KeepList::default(),
+        ));
+    }
+    assert!(!verdicts[0].is_reclaimable(), "{:?}", verdicts[0]);
+    assert!(
+        reason(&verdicts[0]).contains("is live"),
+        "{}",
+        reason(&verdicts[0])
+    );
+    assert_eq!(verdicts[1], ReclaimVerdict::Reclaimable { pr: 762 });
+    assert_eq!(verdicts[2], ReclaimVerdict::Reclaimable { pr: 762 });
 }
 
 /// A merged, clean agent tree the HARNESS HAS RELEASED is reclaimable even
@@ -1473,15 +1705,19 @@ fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
 fn classify_allows_a_merged_agent_tree_the_harness_released() {
     let fx = GitWorktreeFixture::new();
     let path = agent_store_worktree(&fx, "agent-6561released");
-    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561released");
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-6561released");
     // No `harness_lock_worktree` call: the harness released this tree when its
-    // agent ended, which is what `git worktree list` now reports.
-    let v = classify_no_agent(
+    // agent ended, which is what `git worktree list` now reports. #7771 (d):
+    // its dispatching session is provably ended.
+    let v = classify(
         &path,
         Admission::Admitted,
         &claim(false),
         &merged(759),
         &clean,
+        &no_agents,
+        &GitWorktreeFixture::parent_ended(&owner),
+        &KeepList::default(),
     );
     assert_eq!(
         v,
@@ -1530,7 +1766,8 @@ fn classify_discloses_a_harness_locked_agent_tree_as_agent_owned() {
         matches!(v, ReclaimVerdict::BlockedByAgent { .. }),
         "a harness lock must be disclosed as an agent refusal, not an operator one: {v:?}"
     );
-    assert_eq!(reason(&v), Admission::HarnessAgentLock.reason());
+    // #7771: the lock's own verdict rides after the admission reason.
+    assert!(reason(&v).starts_with(Admission::HarnessAgentLock.reason()));
 }
 
 /// The #4091 dirty-work guard, asserted on the agent store specifically: unsaved
@@ -1557,9 +1794,11 @@ fn a_dirty_agent_store_worktree_is_still_refused() {
 }
 
 /// The #5661 refusal for the spelling it was written against — a sentinel FILE
-/// that exists but names no owner. Kept beside the sentinel-LESS case above so
-/// the two spellings are pinned to the same verdict; the first cut of #6561
-/// split them and admitted one.
+/// that exists but does not parse. #7771 reclaims a tree with NO owner file,
+/// so this pins the other spelling to a refusal: the strict reader (#8511)
+/// keeps it with no harness lock in play.
+///
+/// Fails before the strict-reader switch: reclaimed as `Reclaimable { pr: 759 }`.
 #[test]
 fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
     let fx = GitWorktreeFixture::new();
@@ -1567,11 +1806,8 @@ fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
         &fx.repo.join(".claude").join("worktrees"),
         "agent-6561garbage",
     );
-    std::fs::write(
-        path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
-        b"{not json",
-    )
-    .expect("write garbage sentinel");
+    crate::session_manager::worktree_ownership_location::write_sentinel_bytes(&path, b"{not json")
+        .expect("write garbage sentinel");
     let v = classify_no_agent(
         &path,
         Admission::Admitted,
@@ -1581,8 +1817,8 @@ fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
     );
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(
-        reason(&v).contains("names no owner"),
-        "the #5661 reason must still be the one given: {}",
+        reason(&v).contains("does not parse"),
+        "the refusal names the unparsable owner file: {}",
         reason(&v)
     );
 }
@@ -2115,7 +2351,8 @@ fn worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session() {
     let held = agent_store_worktree(&fx, "agent-7652held");
     GitWorktreeFixture::stamp_reclaimable_sentinel(&held);
     fx.harness_lock_worktree(&held, "agent-7652held");
-    let refusal = session_ownership_blocks(&held, &owners)
+    // #7771: gate 4 now owns every agent-store tree, the lock included.
+    let refusal = agent_ownership_blocks(&held, &no_agents, &owners)
         .expect("a held harness lock must refuse although the sentinel's session ended");
     assert!(refusal.contains("agent-lifetime lock"), "{refusal}");
     // Through `classify` too, with gate 1 admitting — a lock taken after the scan.
@@ -2129,11 +2366,12 @@ fn worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session() {
         &owners,
         &KeepList::default(),
     );
+    // #7771: refused at gate 4, the agent-store owner, as an agent refusal.
     assert!(
         matches!(
             v,
-            ReclaimVerdict::Blocked {
-                gate: ReclaimGate::SessionOwnership,
+            ReclaimVerdict::BlockedByAgent {
+                gate: ReclaimGate::AgentOwnership,
                 ..
             }
         ),
@@ -2144,5 +2382,8 @@ fn worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session() {
     // session is the answer again.
     let released = agent_store_worktree(&fx, "agent-7652released");
     GitWorktreeFixture::stamp_reclaimable_sentinel(&released);
-    assert_eq!(session_ownership_blocks(&released, &owners), None);
+    assert_eq!(
+        agent_ownership_blocks(&released, &agent_ended, &owners),
+        None
+    );
 }
