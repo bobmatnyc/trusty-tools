@@ -266,32 +266,86 @@ fn same_tree(a: &Path, b: &Path) -> bool {
 /// Why: [`worktree_targets`] never returns the checkout the git commands run
 /// in, and the worktree step then reported "no worktree holds X" while that
 /// checkout still had X checked out — so `git branch -D` failed one step later.
-/// What: every entry naming `repo_root` whose checked-out branch belongs to
-/// the PR under [`is_pr_branch`].
+/// What: every entry naming `repo_root` whose checked-out branch is one step 4
+/// deletes — a branch belonging to the PR under [`is_pr_branch`], or a
+/// [`AGENT_BRANCH_PREFIX`] branch sitting on `head_oid` (#8489 round 2).
 /// Test: `cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head`,
-/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`.
+/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`,
+/// `cleanup_8489_a_running_checkout_on_an_agent_branch_at_the_head_is_kept`.
 pub(crate) fn holders_run_from<'a>(
     entries: &'a [WorktreeEntry],
     branch: &str,
+    head_oid: &str,
     repo_root: &Path,
 ) -> Vec<&'a WorktreeEntry> {
+    let oid = head_oid.trim();
     entries
         .iter()
         .filter(|e| same_tree(&e.path, repo_root))
-        .filter(|e| e.branch.as_deref().is_some_and(|b| is_pr_branch(branch, b)))
+        .filter(|e| {
+            e.branch.as_deref().is_some_and(|b| {
+                is_pr_branch(branch, b)
+                    || (b.starts_with(AGENT_BRANCH_PREFIX)
+                        && !oid.is_empty()
+                        && e.head.eq_ignore_ascii_case(oid))
+            })
+        })
         .collect()
 }
 
 /// The report line for a holder [`holders_run_from`] found (#8489).
-pub(crate) fn kept_run_from(entry: &WorktreeEntry, pr: u64) -> String {
+///
+/// `head_only` keeps the recovery inside a merge-chained run's scope (#8301):
+/// that run reaches only the head branch, so it never points at the wider
+/// `tm pr cleanup <n>`.
+/// Test: `cleanup_8489_head_only_recovery_stays_in_scope`.
+pub(crate) fn kept_run_from(entry: &WorktreeEntry, pr: u64, head_only: bool) -> String {
     let branch = entry.branch.as_deref().unwrap_or_default();
+    let recovery = if head_only {
+        format!(
+            "switch it off {branch}, then run `git branch -D {branch}` — this merge's cleanup \
+             reaches only {branch}"
+        )
+    } else {
+        format!("switch it off {branch}, or run `tm pr cleanup {pr}` from the main checkout")
+    };
     format!(
         "{}: holds {branch} and was kept — cleanup runs its git commands in this checkout and \
-         never removes it; switch it off {branch}, or run `tm pr cleanup {pr}` from the main \
-         checkout",
+         never removes it; {recovery}",
         entry.path.display()
     )
 }
+
+/// The standing worktree that has `branch` checked out, if any (#8489).
+///
+/// Why: git refuses `git branch -D` on a branch any worktree holds, and the
+/// refusal used to stop step 4 before the branches after it were deleted.
+/// What: the first entry of `standing` whose branch equals `branch`.
+/// Test: `cleanup_8489_local_branch_skips_the_held_head_and_deletes_the_rest`.
+pub(crate) fn holder_of<'a>(
+    standing: &'a [WorktreeEntry],
+    branch: &str,
+) -> Option<&'a WorktreeEntry> {
+    let branch = branch.trim();
+    standing
+        .iter()
+        .find(|e| e.branch.as_deref().map(str::trim) == Some(branch))
+}
+
+/// The step-4 report text for a branch [`holder_of`] found held (#8489).
+pub(crate) fn kept_branch(branch: &str, holder: &WorktreeEntry) -> String {
+    format!(
+        "kept {branch}: the worktree at {} has it checked out, and git refuses to delete a \
+         branch a worktree holds",
+        holder.path.display()
+    )
+}
+
+/// The step-4 report text when step 3 could not read the worktree listing.
+///
+/// Test: `cleanup_8489_a_failed_worktree_listing_deletes_no_branch`.
+pub(crate) const HOLDERS_UNKNOWN: &str = "no branch deleted — the worktree listing was not read, \
+     so which branches a worktree holds is unknown (#8489)";
 
 /// The report line for a worktree listing that named no tree at all (#8489).
 ///
