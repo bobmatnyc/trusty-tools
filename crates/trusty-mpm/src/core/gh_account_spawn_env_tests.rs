@@ -610,3 +610,87 @@ async fn registered_project_pinning_nothing_injects_nothing() {
     let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
     assert!(vars.is_empty(), "vars: {vars:?}");
 }
+
+// ── #8510: an account-only spawn pin never falls back to "no identity" ─────
+
+/// A repository whose registry record pins only an account.
+const SPAWN_ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
+
+/// An account-only pin spawns inside the dir the verifier proved.
+/// Test: itself.
+#[test]
+fn an_account_only_spawn_pin_uses_the_verified_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(dir.path(), "bob-duetto");
+    let pinned = super::PinnedGhIdentity {
+        account: Some("bob-duetto".into()),
+        config_dir: None,
+    };
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |login| {
+        assert_eq!(login, "bob-duetto");
+        Ok(dir.path().to_path_buf())
+    })
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs");
+    assert_eq!(
+        value_of(&env.vars, "GH_CONFIG_DIR"),
+        dir.path().to_string_lossy()
+    );
+    assert!(
+        !env.vars.iter().any(|(k, _)| k == "GH_TOKEN"),
+        "a verified dir must not be outranked by a token: {:?}",
+        env.vars
+    );
+}
+
+/// 🔴 #8510: an account-only pin that no dir verifies must NOT spawn with no
+/// identity (the global account). It gets a token that authenticates as
+/// nobody, and a warning naming the reason and the fix.
+/// Test: itself.
+#[test]
+fn an_account_only_spawn_pin_with_no_verified_dir_fails_closed() {
+    let pinned = super::PinnedGhIdentity {
+        account: Some("bob-duetto".into()),
+        config_dir: None,
+    };
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
+        Err("/x/hosts.yml is active on github.com as 'bobmatnyc'".into())
+    })
+    .expect("a pinned account must never resolve to no identity")
+    .expect("the refusal rides the env, not an error");
+    assert_eq!(
+        value_of(&env.vars, "GH_TOKEN"),
+        super::REFUSED_GH_TOKEN,
+        "the session's gh must fail closed"
+    );
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(
+        warning.contains("is active on github.com as 'bobmatnyc'")
+            && warning.contains(&format!(
+                "tm projects register <name> --repo-url {SPAWN_ORIGIN} --gh-account bob-duetto \
+                 --gh-config-dir <dir>"
+            )),
+        "got: {warning}"
+    );
+}
+
+/// A pinned `config_dir` is used as-is; the borrow verifier is never asked.
+/// Test: itself.
+#[test]
+fn a_config_dir_spawn_pin_never_asks_to_verify() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(dir.path(), "bob-duetto");
+    let pinned = super::PinnedGhIdentity {
+        account: Some("bob-duetto".into()),
+        config_dir: Some(dir.path().to_path_buf()),
+    };
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
+        panic!("a pinned config_dir must not be replaced by a borrowed one")
+    })
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs");
+    assert_eq!(
+        value_of(&env.vars, "GH_CONFIG_DIR"),
+        dir.path().to_string_lossy()
+    );
+}

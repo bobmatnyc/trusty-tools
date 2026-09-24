@@ -39,9 +39,12 @@ fn fake_operator_gh_config_dir(
 #[test]
 fn ensure_account_config_dir_places_it_under_gh_accounts() {
     let state_root = std::path::Path::new("/tmp/tm-state");
+    // #8510: the path helper moved to core, where the account-dir borrow uses it.
     assert_eq!(
-        account_config_dir(state_root, "bob-duetto"),
-        std::path::PathBuf::from("/tmp/tm-state/gh-accounts/bob-duetto")
+        crate::core::gh_account_dir::tm_account_dir(state_root, "bob-duetto"),
+        Ok(std::path::PathBuf::from(
+            "/tmp/tm-state/gh-accounts/bob-duetto"
+        ))
     );
 }
 

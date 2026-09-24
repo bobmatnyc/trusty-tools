@@ -20,7 +20,8 @@
 
 use std::path::Path;
 
-use super::{AccountDirSources, pinned_gh_env_in, pinned_gh_env_with};
+use super::{pinned_gh_env_in, pinned_gh_env_with};
+use crate::core::gh_account_dir::{AccountDirSources, GhTokenProbe};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::ProjectRegistry;
 use crate::project::record::Project;
@@ -710,12 +711,57 @@ fn write_hosts_yml_listing(config_dir: &Path, active: &str, listed: &[&str]) {
 
 /// A registry whose one record pins `account` with no `github:` binding.
 fn write_account_only_registry(registry_dir: &Path, account: &str) {
+    write_pin_registry(registry_dir, ORIGIN, account, "null");
+}
+
+/// A registry whose one record for `origin` pins `account` plus `github`
+/// (raw JSON).
+fn write_pin_registry(registry_dir: &Path, origin: &str, account: &str, github: &str) {
     write_registry(
         registry_dir,
         &format!(
-            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"{account}","github":null}}}}}}"#
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{origin}","default_branch":"main","gh_account":"{account}","github":{github}}}}}}}"#
         ),
     );
+}
+
+/// Scripted `gh auth token` answers (#8510): `active` for the plain lookup,
+/// `own` for `-u <login>`. No real `gh`, no keyring.
+struct ScriptedProbe {
+    active: Result<&'static str, &'static str>,
+    own: Result<&'static str, &'static str>,
+}
+
+impl GhTokenProbe for ScriptedProbe {
+    fn token(&self, _dir: &Path, _host: &str, login: Option<&str>) -> Result<String, String> {
+        let answer = if login.is_some() {
+            self.own
+        } else {
+            self.active
+        };
+        answer.map(str::to_string).map_err(str::to_string)
+    }
+}
+
+/// A dir whose active credential IS the login's own keyring token.
+const AGREEING: ScriptedProbe = ScriptedProbe {
+    active: Ok("tok-bob-duetto"),
+    own: Ok("tok-bob-duetto"),
+};
+
+/// Resolve the account-only `bob-duetto` pin against one static dir that
+/// `hosts.yml` names correctly, with `probe` answering for its keyring.
+fn refusal_with_probe(probe: &ScriptedProbe) -> String {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(static_dir.path(), "bob-duetto");
+    write_account_only_registry(registry_dir.path(), "bob-duetto");
+    let sources = AccountDirSources {
+        static_config_dir: Some(static_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, probe)
+        .expect_err("a dir gh does not prove must refuse")
 }
 
 /// Resolve the account-only `bob-duetto` pin against one static candidate dir
@@ -728,7 +774,7 @@ fn refusal_with_static_dir(static_dir: &Path) -> String {
         static_config_dir: Some(static_dir.to_path_buf()),
         state_root: Some(state_root.path().to_path_buf()),
     };
-    pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources)
+    pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
         .expect_err("an unverified candidate must refuse, never guess")
 }
 
@@ -758,7 +804,7 @@ async fn an_account_only_pin_borrows_a_static_dir_whose_active_user_matches() {
         state_root: Some(state_root.path().to_path_buf()),
     };
 
-    let env = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources)
+    let env = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
         .expect("a verified static dir must resolve the account-only pin")
         .expect("the pin must yield an identity");
     assert_eq!(
@@ -785,7 +831,7 @@ fn an_account_only_pin_falls_back_to_tms_own_account_dir() {
         static_config_dir: None,
         state_root: Some(state_root.path().to_path_buf()),
     };
-    let env = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources)
+    let env = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
         .expect("a verified tm account dir must resolve")
         .expect("the pin must yield an identity");
     assert_eq!(
@@ -803,7 +849,7 @@ fn an_account_only_pin_refuses_a_static_dir_active_as_another_account() {
     write_hosts_yml(static_dir.path(), "bobmatnyc");
     let err = refusal_with_static_dir(static_dir.path());
     assert!(
-        err.contains("is active as 'bobmatnyc'") && err.contains("refusing to probe"),
+        err.contains("is active on github.com as 'bobmatnyc'") && err.contains("refusing to probe"),
         "got: {err}"
     );
     assert!(
@@ -824,7 +870,7 @@ fn an_account_only_pin_refuses_a_dir_listing_it_but_active_as_another() {
     write_hosts_yml_listing(static_dir.path(), "bobmatnyc", &["bob-duetto", "bobmatnyc"]);
     let err = refusal_with_static_dir(static_dir.path());
     assert!(
-        err.contains("lists 'bob-duetto' but is active as 'bobmatnyc'"),
+        err.contains("lists 'bob-duetto' but is active on github.com as 'bobmatnyc'"),
         "got: {err}"
     );
 }
@@ -901,7 +947,7 @@ fn an_account_only_pin_never_resolves_from_the_repository_owner() {
         static_config_dir: None,
         state_root: Some(state_root.path().to_path_buf()),
     };
-    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources)
+    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
         .expect_err("the owner's dir must never stand in for the pinned account");
     assert!(
         err.contains("gh-accounts/bob-duetto does not exist"),
@@ -921,12 +967,9 @@ fn an_account_only_pin_refuses_an_unsafe_login_segment() {
         static_config_dir: None,
         state_root: Some(state_root.path().to_path_buf()),
     };
-    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources)
+    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
         .expect_err("an unsafe login must refuse");
-    assert!(
-        err.contains("not a valid gh-accounts path segment"),
-        "got: {err}"
-    );
+    assert!(err.contains("is not a valid account login"), "got: {err}");
 }
 
 /// The static candidate is this origin's own `projects[].github` binding; the
@@ -958,4 +1001,204 @@ fn account_dir_sources_take_only_this_origins_static_binding() {
     assert_eq!(matched.state_root.as_deref(), Some(root.as_path()));
     let other = AccountDirSources::for_origin(&config, "https://github.com/acme/widget", root);
     assert_eq!(other.static_config_dir, None);
+}
+
+/// 🔴 #8510 HIGH: `hosts.yml` names the pin, but `-u <login>` finds no token of
+/// its own: `gh` would fall back to the keyring's unkeyed slot, another
+/// account's credential. Refuse, and never echo a token.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_dir_whose_login_has_no_token() {
+    let err = refusal_with_probe(&ScriptedProbe {
+        active: Ok("tok-global"),
+        own: Err("exit status 1: no oauth token found for github.com account bob-duetto"),
+    });
+    assert!(
+        err.contains("-u bob-duetto` failed") && !err.contains("tok-"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 #8510 HIGH: both lookups succeed but return different tokens — the
+/// active credential is not the login's. The reason names neither token.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_dir_whose_tokens_differ() {
+    let err = refusal_with_probe(&ScriptedProbe {
+        active: Ok("tok-global"),
+        own: Ok("tok-bob-duetto"),
+    });
+    assert!(
+        err.contains("is not 'bob-duetto''s own keyring token") && !err.contains("tok-"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 #8510 HIGH: no active token at all refuses.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_dir_with_no_active_token() {
+    let err = refusal_with_probe(&ScriptedProbe {
+        active: Err("exit status 1: no oauth token found for github.com"),
+        own: Ok("tok-bob-duetto"),
+    });
+    assert!(
+        err.contains("`gh auth token --hostname github.com` failed"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 #8510: the active user is read for the ORIGIN's host. `github.com` names
+/// the pin, but the repository lives on `ghe.corp`, where another is active.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_checks_the_origins_host_not_github_com() {
+    let ghe_origin = "https://ghe.corp/duettoresearch/jev-matching";
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        static_dir.path().join("hosts.yml"),
+        "github.com:\n    user: bob-duetto\nghe.corp:\n    user: bobmatnyc\n",
+    )
+    .expect("hosts.yml");
+    write_pin_registry(registry_dir.path(), ghe_origin, "bob-duetto", "null");
+    let sources = AccountDirSources {
+        static_config_dir: Some(static_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let err = pinned_gh_env_with(registry_dir.path(), ghe_origin, &sources, &AGREEING)
+        .expect_err("another account active on the origin's host must refuse");
+    assert!(
+        err.contains("is active on ghe.corp as 'bobmatnyc'"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: an origin whose host cannot be read borrows nothing.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_an_origin_with_no_host() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(static_dir.path(), "bob-duetto");
+    write_pin_registry(registry_dir.path(), "local-checkout", "bob-duetto", "null");
+    let sources = AccountDirSources {
+        static_config_dir: Some(static_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let err = pinned_gh_env_with(registry_dir.path(), "local-checkout", &sources, &AGREEING)
+        .expect_err("no host, no borrow");
+    assert!(
+        err.contains("cannot tell which gh host serves it"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 A pinned `config_dir` is never replaced by a borrowed one, even when a
+/// borrowable dir would verify.
+/// Test: itself.
+#[test]
+fn a_pinned_config_dir_is_never_replaced_by_a_borrowed_one() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let pinned_dir = tempfile::tempdir().expect("tempdir");
+    let borrow_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(pinned_dir.path(), "bob-duetto");
+    write_hosts_yml(borrow_dir.path(), "bob-duetto");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "bob-duetto",
+        &format!(r#"{{"config_dir":"{}"}}"#, pinned_dir.path().display()),
+    );
+    let sources = AccountDirSources {
+        static_config_dir: Some(borrow_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let env = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
+        .expect("a pinned dir resolves")
+        .expect("the pin yields an identity");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        pinned_dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 A `token_env` pin whose variable is unset refuses with the token_env
+/// reason; it never borrows a config dir instead.
+/// Test: itself.
+#[test]
+fn a_token_env_pin_never_borrows_a_config_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let borrow_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(borrow_dir.path(), "bob-duetto");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "bob-duetto",
+        r#"{"token_env":"TM_8510_NEVER_SET_TOKEN_VAR"}"#,
+    );
+    let sources = AccountDirSources {
+        static_config_dir: Some(borrow_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
+        .expect_err("an unset token_env must refuse, never borrow");
+    assert!(
+        err.contains("`github.token_env` 'TM_8510_NEVER_SET_TOKEN_VAR'"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 A record whose `gh_account` and `github.account` differ refuses by name.
+/// Test: itself.
+#[test]
+fn a_record_naming_two_accounts_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(dir.path(), "bob-duetto");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "bob-duetto",
+        &format!(
+            r#"{{"account":"bobmatnyc","config_dir":"{}"}}"#,
+            dir.path().display()
+        ),
+    );
+    let err = pinned_gh_env_with(
+        registry_dir.path(),
+        ORIGIN,
+        &AccountDirSources::default(),
+        &AGREEING,
+    )
+    .expect_err("two accounts on one record must refuse");
+    assert!(
+        err.contains("gh_account 'bob-duetto' but its `github.account` is 'bobmatnyc'"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a symlinked `gh-accounts/<login>` dir is never borrowed.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn an_account_only_pin_refuses_a_symlinked_tm_account_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let state_root = tempfile::tempdir().expect("tempdir");
+    let real = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(real.path(), "bob-duetto");
+    std::fs::create_dir_all(state_root.path().join("gh-accounts")).expect("gh-accounts");
+    std::os::unix::fs::symlink(
+        real.path(),
+        state_root.path().join("gh-accounts").join("bob-duetto"),
+    )
+    .expect("symlink");
+    write_account_only_registry(registry_dir.path(), "bob-duetto");
+    let sources = AccountDirSources {
+        static_config_dir: None,
+        state_root: Some(state_root.path().to_path_buf()),
+    };
+    let err = pinned_gh_env_with(registry_dir.path(), ORIGIN, &sources, &AGREEING)
+        .expect_err("a symlinked account dir must refuse");
+    assert!(err.contains("is a symlink"), "got: {err}");
 }

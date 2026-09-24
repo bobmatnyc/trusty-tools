@@ -57,6 +57,9 @@ const GH_STRIPPED_ENV: &[&str] = &[
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GH_REPO",
+    // #8510: an inherited host points `gh` at a host no binding chose;
+    // a binding's own `GH_HOST` is re-applied after the strip.
+    "GH_HOST",
 ];
 
 /// The `--json` field set every `gh pr list` call in this module requests.
@@ -270,15 +273,21 @@ pub(crate) fn resolve_daemon_gh_env_in(
     let origin = slug_as_url(origin);
     let config = TrustyToolsConfig::load();
     // #8510: an account-only registry pin may borrow the static binding's dir
-    // or tm's own `gh-accounts/<login>` — only if that dir is active as it.
-    let sources = crate::core::gh_account_registry::AccountDirSources::for_origin(
+    // or tm's own `gh-accounts/<login>` — only once `gh` proves it selects it.
+    let sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
         &config,
         &origin,
         crate::core::paths::FrameworkPaths::default().root,
     );
+    let probe = crate::core::gh_account_dir::CliTokenProbe;
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
-    match crate::core::gh_account_registry::pinned_gh_env_with(registry_dir, &origin, &sources) {
+    match crate::core::gh_account_registry::pinned_gh_env_with(
+        registry_dir,
+        &origin,
+        &sources,
+        &probe,
+    ) {
         Ok(Some(env)) => return Ok(env),
         Ok(None) => {}
         Err(reason) => return Err(GhFailure::new(reason)),

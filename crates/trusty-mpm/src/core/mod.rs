@@ -148,6 +148,8 @@ pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+// #8510: proves a gh config dir selects a pinned account before it is borrowed.
+pub(crate) mod gh_account_dir;
 // #5850: the ProjectRegistry half of `gh_account`, read synchronously for a
 // daemon-side checkout. `pub(crate)` throughout — nothing outside this crate
 // resolves a pin from a bare directory.

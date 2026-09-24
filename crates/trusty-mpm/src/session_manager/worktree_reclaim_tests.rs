@@ -1200,7 +1200,8 @@ fn gh_command_strips_repository_redirecting_env() {
         .filter(|(_, v)| v.is_none())
         .filter_map(|(k, _)| k.to_str())
         .collect();
-    for key in ["GIT_DIR", "GIT_WORK_TREE", "GH_REPO"] {
+    // #8510: GH_HOST too — an inherited host must not retarget the lookup.
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GH_REPO", "GH_HOST"] {
         assert!(
             removed.contains(&key),
             "{key} must be stripped: {removed:?}"
