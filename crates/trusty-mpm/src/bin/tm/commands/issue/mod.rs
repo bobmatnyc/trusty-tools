@@ -198,24 +198,15 @@ fn dispatch<S: TicketSystem>(
         IssueCmd::SeedConfig { force } => {
             seed_config(force)?;
         }
-        // #7097: reads only — no `gh` write. #8448: the epic set rows render
-        // the State cell with the model's status prefix, so the model is
-        // loaded the way `transition` loads it.
+        // #7097: reads only — no `gh` write, and no state-model load for a
+        // window. #8448: only the single-issue path loads the model, for the
+        // epic rows' status prefix.
         IssueCmd::Audit {
             issue,
             recent,
             since,
         } => {
-            let (model, _source) = load_model_with_source(None, lifecycle)?;
-            audit::run(
-                &ticketing,
-                gh_env,
-                runner,
-                issue,
-                recent,
-                since,
-                &model.label_config.status_prefix,
-            )?;
+            audit::run(&ticketing, gh_env, runner, issue, recent, since, lifecycle)?;
         }
         // #8447: the epic verbs reach `gh` and `git` through their own narrow
         // `EpicBackend` seam (D7), so they need the identity; #8448: `create`

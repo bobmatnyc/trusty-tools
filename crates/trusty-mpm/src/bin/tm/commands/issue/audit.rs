@@ -35,13 +35,18 @@
 //!
 //! Test: `single_issue_output_is_the_per_requirement_report`,
 //! `a_failing_audit_exits_nonzero`, `a_window_prints_the_summary_table`,
-//! `an_empty_window_is_not_a_failure`, `widen_adds_a_crate_described_label`,
-//! `widen_ignores_a_non_crate_label`, `widen_on_gh_failure_keeps_the_set`, and
-//! `cli_parses_issue_audit_*` in `tests.rs`.
+//! `an_empty_window_is_not_a_failure`, `a_window_audit_never_loads_the_state_model`,
+//! `widen_adds_a_crate_described_label`, `widen_ignores_a_non_crate_label`,
+//! `widen_on_gh_failure_keeps_the_set`, and `cli_parses_issue_audit_*` in
+//! `tests.rs`.
+
+use std::path::Path;
 
 use trusty_mpm::core::component_labels::ComponentLabels;
 use trusty_mpm::core::gh_identity::GhEnv;
-use trusty_mpm::core::issue_audit::{IssueAudit, audit_issue, render_audit, render_summary};
+use trusty_mpm::core::issue_audit::{
+    AuditRow, IssueAudit, IssueFacts, audit_issue, render_audit, render_summary,
+};
 use trusty_mpm::core::issue_audit_gh::{AuditWindow, list_open_issues, view_issue};
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
@@ -49,6 +54,7 @@ use anyhow::Context as _;
 
 use crate::commands::issue::epic::audit_rows::epic_rows;
 use crate::commands::issue::epic::backend::GhEpicBackend;
+use crate::commands::issue::epic::status_prefix;
 use crate::commands::ticket::labels::gh_list_repo_labels;
 use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
 
@@ -69,8 +75,9 @@ const CRATE_LABEL_DESCRIPTION_PREFIX: &str = "Crate:";
 /// guessing a default window. `gh` runs in the current directory, which is what
 /// selects the repository — and, since #7123, also what selects the crate
 /// labels that satisfy the owning-component rule (widened per the module doc).
-/// `status_prefix` is the state model's lifecycle-label prefix the epic rows
-/// render the State cell with (#8448).
+/// `lifecycle` is the configured state-model path; the model is loaded only
+/// on the single-issue path, where the epic rows render the State cell with
+/// its status prefix (#8448).
 /// Test: see the module doc; the pure halves are unit-tested in the library.
 pub(crate) fn run(
     ticketing: &ResolvedTicketing,
@@ -79,7 +86,7 @@ pub(crate) fn run(
     issue: Option<u64>,
     recent: Option<usize>,
     since: Option<String>,
-    status_prefix: &str,
+    lifecycle: Option<&Path>,
 ) -> anyhow::Result<()> {
     // #7123: the accepted component labels are the audited repository's own
     // crate labels, not just the ones the harness seeds.
@@ -88,33 +95,75 @@ pub(crate) fn run(
     // #7182: widen from the live `gh` label set, which is right even when the
     // Cargo.toml read above was not (see the module doc).
     let components = widen_with_live_crate_labels(components, runner);
-    let audits = match (issue, recent, since) {
+    let view = |number: u64| view_issue(number, None, gh_env);
+    let list = |window: &AuditWindow| list_open_issues(window, None, gh_env);
+    // #8448: a tracker gets the set-level rows — block currency and phase
+    // linkage — computed against its live children. An issue with no phases
+    // block gets none; a read that fails fails the audit rather than printing
+    // PASS over an unenumerated set. The state model is loaded here, not by
+    // the dispatcher, so a windowed run stays #7097's model-free read.
+    let epic_backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
+    let epic_rows_for = |number: u64| {
+        let prefix = status_prefix(lifecycle)?;
+        epic_rows(&epic_backend, number, &prefix)
+            .with_context(|| format!("epic rows for #{number}"))
+    };
+    let reads = AuditReads {
+        view: &view,
+        list: &list,
+        epic_rows_for: &epic_rows_for,
+    };
+    let audits = collect_audits(issue, recent, since, ticketing, &components, &reads)?;
+    print!("{}", render_report(&audits));
+    exit_result(&audits)
+}
+
+/// The three reads [`collect_audits`] can make, behind closures.
+///
+/// Why: `run` reaches `gh` and the state model directly; naming the reads
+/// lets a test prove which mode makes which of them (#8448).
+struct AuditReads<'a> {
+    /// One issue's facts — the single-issue mode.
+    view: &'a dyn Fn(u64) -> anyhow::Result<IssueFacts>,
+    /// A window's OPEN issues — the `--recent`/`--since` modes.
+    list: &'a dyn Fn(&AuditWindow) -> anyhow::Result<Vec<IssueFacts>>,
+    /// The epic set-level rows for one issue, model load included.
+    epic_rows_for: &'a dyn Fn(u64) -> anyhow::Result<Vec<AuditRow>>,
+}
+
+/// The audited set for the selected mode.
+///
+/// Why: the mode decision is kept apart from the `gh` reads and the
+/// state-model load so a test can pin what each mode touches — a windowed
+/// run never reaches `epic_rows_for`, so a broken or missing lifecycle model
+/// fails only a single-issue audit (#8448, review LOW).
+/// What: `issue` → one `view`, then `epic_rows_for` appended to its rows;
+/// `recent`/`since` → one `list`; none of the three → an error naming them
+/// rather than a guessed default window.
+/// Test: `a_window_audit_never_loads_the_state_model`.
+fn collect_audits(
+    issue: Option<u64>,
+    recent: Option<usize>,
+    since: Option<String>,
+    ticketing: &ResolvedTicketing,
+    components: &ComponentLabels,
+    reads: &AuditReads<'_>,
+) -> anyhow::Result<Vec<IssueAudit>> {
+    match (issue, recent, since) {
         (Some(number), _, _) => {
-            let facts = view_issue(number, None, gh_env)?;
-            let mut audit = audit_issue(&facts, ticketing, &components);
-            // #8448: a tracker gets the set-level rows — block currency and
-            // phase linkage — computed against its live children. An issue
-            // with no phases block gets none; a read that fails fails the
-            // audit rather than printing PASS over an unenumerated set.
-            let epic_backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
-            audit.rows.extend(
-                epic_rows(&epic_backend, number, status_prefix)
-                    .with_context(|| format!("epic rows for #{number}"))?,
-            );
-            vec![audit]
+            let facts = (reads.view)(number)?;
+            let mut audit = audit_issue(&facts, ticketing, components);
+            audit.rows.extend((reads.epic_rows_for)(number)?);
+            Ok(vec![audit])
         }
-        (None, Some(n), _) => {
-            audit_window(&AuditWindow::Recent(n), ticketing, &components, gh_env)?
-        }
+        (None, Some(n), _) => audit_window(&AuditWindow::Recent(n), ticketing, components, reads),
         (None, None, Some(date)) => {
-            audit_window(&AuditWindow::Since(date), ticketing, &components, gh_env)?
+            audit_window(&AuditWindow::Since(date), ticketing, components, reads)
         }
         (None, None, None) => anyhow::bail!(
             "name an issue number, or pass --recent <n> / --since <YYYY-MM-DD> to audit a window"
         ),
-    };
-    print!("{}", render_report(&audits));
-    exit_result(&audits)
+    }
 }
 
 /// Widen `components` with every live `gh` label whose description names a
@@ -153,9 +202,9 @@ fn audit_window(
     window: &AuditWindow,
     ticketing: &ResolvedTicketing,
     components: &ComponentLabels,
-    gh_env: &GhEnv,
+    reads: &AuditReads<'_>,
 ) -> anyhow::Result<Vec<IssueAudit>> {
-    Ok(list_open_issues(window, None, gh_env)?
+    Ok((reads.list)(window)?
         .iter()
         .map(|f| audit_issue(f, ticketing, components))
         .collect())
@@ -201,8 +250,9 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::commands::issue::config::load_model_in;
     use crate::commands::ticket::runner::CommandOutput;
-    use trusty_mpm::core::issue_audit::IssueFacts;
+    use trusty_mpm::core::issue_audit::Verdict;
     use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, resolve_ticketing};
 
     fn standard() -> ResolvedTicketing {
@@ -350,6 +400,41 @@ mod tests {
     fn a_passing_audit_exits_zero() {
         let audits = vec![audit_issue(&facts(COMPLIANT), &standard(), &components())];
         assert!(exit_result(&audits).is_ok());
+    }
+
+    /// #8448 (review LOW): `--recent`/`--since` renders no epic row, so it
+    /// must not load the lifecycle model — #7097's read stays model-free. The
+    /// same unloadable model fails the single-issue path, where the rows land.
+    #[test]
+    fn a_window_audit_never_loads_the_state_model() {
+        let missing = Path::new("/nonexistent/issue-state.yaml");
+        let load = || -> anyhow::Result<String> {
+            let (model, _source) = load_model_in(Path::new("/nonexistent"), Some(missing), None)?;
+            Ok(model.label_config.status_prefix)
+        };
+        assert!(load().is_err(), "the fixture model path must be unloadable");
+        let view = |_: u64| Ok(facts(COMPLIANT));
+        let list = |_: &AuditWindow| Ok(vec![facts(COMPLIANT), facts(NO_PROJECT)]);
+        let epic_rows_for = |_: u64| -> anyhow::Result<Vec<AuditRow>> {
+            let prefix = load()?;
+            Ok(vec![AuditRow::new("phase linkage", Verdict::Info, prefix)])
+        };
+        let reads = AuditReads {
+            view: &view,
+            list: &list,
+            epic_rows_for: &epic_rows_for,
+        };
+
+        let window = collect_audits(None, Some(5), None, &standard(), &components(), &reads)
+            .expect("a windowed audit never reads the model");
+        assert_eq!(window.len(), 2, "{window:?}");
+
+        let err = collect_audits(Some(7093), None, None, &standard(), &components(), &reads)
+            .expect_err("the single-issue path is the one that loads the model");
+        assert!(
+            format!("{err:#}").contains("failed to read issue-state config"),
+            "{err:#}"
+        );
     }
 
     #[test]

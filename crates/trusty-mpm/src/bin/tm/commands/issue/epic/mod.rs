@@ -151,10 +151,11 @@ pub(crate) fn run(
 /// it differs per project (`status:` here, `unicorn:` in the crate default) —
 /// so it is read from the same model `tm issue transition` resolves, never
 /// hardcoded. The epic verbs carry no `--config` flag, so the flag slot is
-/// `None` and discovery runs from the working directory upward.
+/// `None` and discovery runs from the working directory upward. `tm issue
+/// audit` shares it for the epic rows, loading only on that path (#8448).
 /// Test: `phases_table_uses_the_configured_status_prefix` covers the renderer;
 /// the load itself is `load_model_in`'s.
-fn status_prefix(lifecycle: Option<&Path>) -> anyhow::Result<String> {
+pub(crate) fn status_prefix(lifecycle: Option<&Path>) -> anyhow::Result<String> {
     let (model, _source) = load_model_with_source(None, lifecycle)?;
     Ok(model.label_config.status_prefix)
 }

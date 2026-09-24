@@ -2500,6 +2500,37 @@ fn audit_rows_fail_when_search_omits_a_linked_phase() {
     assert_eq!(backend.calls("phase_titled_issues"), 1);
 }
 
+/// #8448 (review MEDIUM): with no linked phase there is nothing to cross-check
+/// the search against — an empty result and a lagging one are the same bytes —
+/// so the row is INFO, not a PASS it cannot back. An unlinked phase-titled
+/// issue the search does return still FAILs.
+#[test]
+fn audit_rows_report_info_when_no_linked_phase_cross_checks_the_search() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    sync::sync(&backend, 100, STATUS).expect("an empty block is current");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let linkage = row(&rows, REQ_PHASE_LINKAGE);
+    assert_eq!(linkage.verdict, Verdict::Info, "{linkage:?}");
+    assert!(
+        linkage.detail.contains("cannot be cross-checked"),
+        "{}",
+        linkage.detail
+    );
+    assert_eq!(row(&rows, REQ_PHASES_BLOCK).verdict, Verdict::Pass);
+
+    // The same tracker once the search returns an unlinked phase: FAIL wins.
+    backend.seed_tracker(102, &render::phase_title(100, 2, "orphan"), "body");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let linkage = row(&rows, REQ_PHASE_LINKAGE);
+    assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
+    assert!(
+        linkage.detail.contains("--add-sub-issue 102"),
+        "{}",
+        linkage.detail
+    );
+}
+
 /// AC4: a stale block is a FAIL carrying the exact repair wording.
 #[test]
 fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {

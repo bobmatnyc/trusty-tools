@@ -45,8 +45,12 @@ there fails the command and names the tracker to `sync` by hand — the label
 has already moved. `tm issue audit <epic#>` adds two set-level rows: the block
 matches its children, and every `[EPIC_<epic#> PHASE_…]`-titled issue is a
 native sub-issue. The linkage row reads GitHub's title search, which lags a
-just-created issue; when it omits a linked phase the row FAILs with
-`search index returned N of M known phases — re-run in a minute`, never PASS.
+just-created issue; a search that omits a linked phase FAILs with
+`search index returned N of M known phases — re-run in a minute`, and PASS
+reports how many linked phases the search saw. That is all the row proves: a
+lag confined to an unlinked phase newer than every linked one looks like the
+absence of such a phase, and with no linked phase at all the row is INFO —
+nothing to cross-check against.
 
 ## The gate test
 

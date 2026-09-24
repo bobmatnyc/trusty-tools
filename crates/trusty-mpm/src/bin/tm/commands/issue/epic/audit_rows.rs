@@ -10,19 +10,25 @@
 //! comparison, regenerated through the same renderer `sync` writes with, and
 //! the linkage check over the enumerated phase-titled candidates.
 //!
-//! # The linkage row cannot PASS on a lagging search
+//! # What the linkage row proves about a lagging search
 //!
 //! The candidates come from GitHub's search index, which lags a just-created
-//! issue — and the workflow audits right after `create`. A short result would
-//! let an unlinked phase pass, so the row first checks the search against what
-//! it already knows: every linked child whose title names this tracker must be
-//! among the candidates. Any that is not makes the row FAIL with the shortfall
-//! and a re-run hint, never PASS.
+//! issue — and the workflow audits right after `create`. The row cross-checks
+//! the result against the one consistent source it has, the linked children:
+//! a search that omits a linked child whose title names this tracker FAILs
+//! with the shortfall and a re-run hint. That is all it proves. A lag confined
+//! to an unlinked phase newer than every linked one looks exactly like the
+//! absence of such a phase, so it is not detected. PASS therefore reports how
+//! many linked phases the search saw; with no linked phase at all there is
+//! nothing to cross-check against, so the row is INFO rather than a PASS it
+//! cannot back (#8448, review MEDIUM). An unlinked phase-titled issue the
+//! search does return FAILs in every case.
 //!
 //! Test: `audit_rows_pass_a_tracker_whose_block_matches`,
 //! `audit_rows_fail_a_stale_phases_block_with_the_sync_command`,
 //! `audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue`,
 //! `audit_rows_fail_when_search_omits_a_linked_phase`,
+//! `audit_rows_report_info_when_no_linked_phase_cross_checks_the_search`,
 //! `audit_rows_are_empty_for_a_non_tracker`,
 //! `audit_rows_fail_a_body_whose_markers_cannot_be_rewritten`.
 
@@ -49,8 +55,11 @@ pub(crate) const REQ_PHASE_LINKAGE: &str = "phase linkage";
 /// refuses is a FAIL naming the refusal); then lists every issue titled
 /// `[EPIC_<tracker> PHASE_…]`, FAILs when the search omitted a linked phase
 /// (the index has not caught up), and FAILs on each candidate that is not in
-/// the child set, with the `gh` call that links it. Any backend failure is
-/// propagated — an audit that could not enumerate must not print PASS.
+/// the child set, with the `gh` call that links it. With no failure the row
+/// is PASS naming how many linked phases the search saw, or INFO when no
+/// phase is linked and the result therefore cannot be cross-checked. Any
+/// backend failure is propagated — an audit that could not enumerate must not
+/// print PASS.
 /// Test: see the module doc.
 pub(crate) fn epic_rows<B: EpicBackend>(
     backend: &B,
@@ -116,14 +125,23 @@ pub(crate) fn epic_rows<B: EpicBackend>(
             "search index returned {seen_known} of {known} known phases — re-run in a minute"
         ));
     }
-    let linkage_row = if failures.is_empty() {
+    let linkage_row = if !failures.is_empty() {
+        AuditRow::new(REQ_PHASE_LINKAGE, Verdict::Fail, failures.join("; "))
+    } else if known == 0 {
+        // #8448 (review MEDIUM): with nothing linked, an empty search result
+        // and a lagging one are the same bytes — the row cannot claim PASS.
+        AuditRow::new(
+            REQ_PHASE_LINKAGE,
+            Verdict::Info,
+            "no phase is linked, so the search result cannot be cross-checked — an unlinked \
+             phase the index has not returned yet is invisible here",
+        )
+    } else {
         AuditRow::new(
             REQ_PHASE_LINKAGE,
             Verdict::Pass,
             format!("{known} of {known} linked phases seen by search"),
         )
-    } else {
-        AuditRow::new(REQ_PHASE_LINKAGE, Verdict::Fail, failures.join("; "))
     };
     Ok(vec![block_row, linkage_row])
 }
