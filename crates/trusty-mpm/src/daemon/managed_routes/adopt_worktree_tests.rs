@@ -288,7 +288,15 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
     // This test process is unambiguously running.
     let (_fixture, tree) = harness_locked_tree("agent-still-working", std::process::id());
     let state = Arc::new(DaemonState::new());
-    let before = std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel");
+    // #8511: read through the location module — the marker may have moved to
+    // the git admin dir, which is not a write by the refused adoption.
+    let marker = |t: &std::path::Path| {
+        crate::session_manager::worktree_ownership_location::read_sentinel_bytes_strict(t)
+            .ok()
+            .flatten()
+            .map(|(_, bytes)| bytes)
+    };
+    let before = marker(&tree).expect("read sentinel");
 
     let outcome = adopt_worktree_core(
         &state,
@@ -304,7 +312,7 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
         "a lock naming a RUNNING pid must not permit adoption"
     );
     assert_eq!(
-        std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel"),
+        marker(&tree).expect("read sentinel"),
         before,
         "a refusal must write nothing"
     );

@@ -1,0 +1,4 @@
+Fixed
+- The worktree ownership marker is now written to the git admin dir (`git rev-parse --git-path trusty-mpm-worktree`) instead of the working tree, so agent and session trees stay clean: plain `git worktree remove` and Claude Code's cleanup no longer refuse them, and `git add -A` can no longer commit the marker (#8511, #8368).
+- Readers check the admin-dir marker first and the legacy in-tree `.trusty-mpm-worktree` second; a legacy-only marker is copied, verified byte for byte, and only then removed, so a failed move never loses ownership.
+- Project registration, base-clone provisioning and daemon startup add `.trusty-mpm-worktree` and `.trusty-mpm/` to the repository's shared `info/exclude` (`.trusty-mpm/` only when nothing under it is tracked). `tm doctor --fix` previews, and `--fix --yes` applies, the same exclude entries and marker moves across every registered project.

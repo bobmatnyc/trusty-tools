@@ -100,6 +100,8 @@ pub fn register_project_op(state: &Arc<DaemonState>, path: PathBuf) -> ProjectIn
     // an existing repo" case `ensure_base_clone`'s equivalent write does not
     // cover — best-effort and non-fatal; `path` need not even be a git repo.
     crate::core::git_maintenance::disable_and_log(&path);
+    // #8511: exclude the harness files and move legacy markers out of the trees.
+    crate::session_manager::worktree_marker_migration::prepare_checkout(&path);
     let info = state.register_project(path.clone());
     // #7588: same store, same framework root, same function as registry B.
     let store_dir = crate::project::registry_data_dir_under(state.framework_root());

@@ -278,6 +278,7 @@ pub async fn serve_with_shutdown(
     // cadence and the spawn all live in the service module, which keeps this file
     // under its SLOC cap and keeps the policy next to the loop it governs.
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    project_adoption::spawn_startup_marker_migration(&state); // #8511
 
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
     // default host spawns nothing. A malformed section is reported here and

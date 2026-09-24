@@ -271,6 +271,9 @@ pub(super) fn workspace_needs_protection(
     }
     super::decommission::is_session_worktree_with(p, names)
         || probe(&p.join(super::decommission::WORKTREE_SENTINEL_FILE)).unwrap_or(true)
+        // #8511: the marker may live in the git admin dir instead.
+        || super::worktree_ownership_location::admin_sentinel_path(p)
+            .is_some_and(|admin| probe(&admin).unwrap_or(true))
 }
 
 /// Two-observation gate before a candidate may be acted on destructively.

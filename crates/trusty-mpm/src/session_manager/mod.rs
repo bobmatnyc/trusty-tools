@@ -74,6 +74,9 @@ pub(crate) mod worktree_liveness;
 pub(crate) mod worktree_keep_list;
 pub(crate) mod worktree_nested;
 pub(crate) mod worktree_ownership;
+// #8511: the marker's git-admin-dir location, its migration, and the fleet pass.
+pub mod worktree_marker_migration;
+pub(crate) mod worktree_ownership_location;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;
 // #6561: the `gh` runner `worktree_reclaim` calls, which reports WHY a lookup
@@ -151,6 +154,10 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8511: the marker-location behaviour, through the pre-existing ownership API.
+#[cfg(test)]
+mod worktree_marker_behaviour_tests;
 
 #[cfg(test)]
 mod delete_tests;
