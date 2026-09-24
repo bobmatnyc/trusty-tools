@@ -239,6 +239,38 @@ fn unknown_when_downloader_replaced_the_cargo_install() {
     assert!(msg.contains("#4964"), "message: {msg}");
 }
 
+/// #8482: the same arm must not claim the binary is fresh.
+///
+/// Why: this message read "The binary is NOT stale" on the strength of a semver
+/// comparison against cargo's registry ledger — and said it while the running
+/// 1.7.0 lagged the source tree by nine hours and the daemon kept deploying
+/// pre-fix skill assets. A check that confidently denies a live defect is worse
+/// than one that stays quiet, so the claim is narrowed to what the comparison
+/// actually reads and defers the source-tree question to `bundled_asset_lag`.
+/// Reverting the message text fails here.
+/// Test: this test.
+#[test]
+fn ledger_stale_message_claims_no_source_tree_freshness() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    let (_status, msg) = provenance_report(
+        "tm",
+        "1.4.0",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert!(
+        !msg.contains("NOT stale"),
+        "the row must not assert freshness it never checked: {msg}"
+    );
+    assert!(
+        msg.contains("bundled_asset_lag"),
+        "the row must name where the source-tree question is answered: {msg}"
+    );
+    assert!(msg.contains("#8482"), "message: {msg}");
+}
+
 /// The verdict must not change merely because #4964 moves the destination.
 ///
 /// Why: the same downloader-placed file reports `Unknown` today from

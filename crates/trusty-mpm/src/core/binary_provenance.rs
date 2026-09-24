@@ -429,6 +429,7 @@ pub(crate) fn classify_version_skew(ledger_version: &str, running_version: &str)
 /// leaves the operator's `tm doctor` output unchanged; `Fail` for
 /// [`VersionSkew::RunningStale`] and [`VersionSkew::Unordered`].
 /// Test: `unknown_when_downloader_replaced_the_cargo_install`,
+/// `ledger_stale_message_claims_no_source_tree_freshness`,
 /// `fails_on_version_disagreement`, `fails_when_versions_cannot_be_ordered`,
 /// `downloader_placed_binary_is_unknown_in_either_directory`.
 fn version_skew_verdict(
@@ -445,6 +446,11 @@ fn version_skew_verdict(
         describe(&record.source)
     );
     match classify_version_skew(&record.version, running_version) {
+        // #8482: this arm used to assert "the binary is NOT stale" on the
+        // strength of a semver comparison against the registry ledger alone. It
+        // said exactly that while the running 1.7.0 lagged the source tree by
+        // nine hours and kept deploying pre-fix skill assets. The claim is now
+        // scoped to what was compared, and points at the row that can answer.
         VersionSkew::LedgerStale => (
             CheckStatus::Unknown,
             format!(
@@ -453,10 +459,12 @@ fn version_skew_verdict(
                  describe the binary on disk. Usually that means a writer keeping no cargo \
                  metadata placed it (the prebuilt installer `tctl install` / `tctl upgrade`, a \
                  package manager, or a manual copy), but `cargo install --no-track --force` and \
-                 an install interrupted before it saved its tracker leave the same state. The \
-                 binary is NOT stale; what cannot be verified from here is where it came from, \
-                 and `cargo install --list` will keep reporting \
-                 {}{where_from} (issues #4033, #4964, ADR-0021)",
+                 an install interrupted before it saved its tracker leave the same state. This \
+                 comparison orders two RELEASE labels and reads no source tree, so it says \
+                 nothing about whether the binary's compiled-in assets lag the repo — the \
+                 `bundled_asset_lag` row answers that where it applies (#8482). What cannot be \
+                 verified from here is where the binary came from, and `cargo install --list` \
+                 will keep reporting {}{where_from} (issues #4033, #4964, #8482, ADR-0021)",
                 installed.display(),
                 record.version,
             ),

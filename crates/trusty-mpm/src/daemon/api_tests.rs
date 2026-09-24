@@ -1397,6 +1397,9 @@ async fn doctor_endpoint_returns_report() {
         // #7965: each background sweep's kill switch and last pass duration.
         "background_sweeps",
         "binary_provenance",
+        // #8482: the binary's own embedded skill assets against `origin/main` —
+        // the row above reads a registry ledger, never the source tree.
+        "bundled_asset_lag",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
