@@ -472,19 +472,17 @@ fn install_mpm_supervisor_for_surfaces_bootstrap_failure() {
 /// `version_line` on `--version` and exits 0 — a real, probeable binary
 /// (unlike the "unprobeable" tests above, which deliberately point at
 /// nonexistent paths).
+// #3782: written from a child process so no sibling fork inherits a writable
+// fd to it (ETXTBSY on the later exec).
 #[cfg(unix)]
 fn write_fake_tm(path: &std::path::Path, version_line: &str) {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("mkdir fake tm parent");
     }
-    std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
-        .expect("write fake tm binary");
-    let mut perms = std::fs::metadata(path)
-        .expect("stat fake tm binary")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("chmod fake tm binary");
+    crate::commands::test_support::write_exec_script(
+        path,
+        &format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"),
+    );
 }
 
 /// THE #3554 regression, at the `install_mpm_supervisor_for` level: the

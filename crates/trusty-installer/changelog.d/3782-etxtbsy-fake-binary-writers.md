@@ -1,0 +1,2 @@
+Fixed
+- Test-only: the fake binaries that the `shadow_check`, `probe`, `plist_bootstrap` and `path_shadow_e2e` tests execute are now written by a short-lived `/bin/sh` child. The test process never holds a writable fd to them, so a sibling test's fork can no longer inherit one and make the later exec fail with `Text file busy` (os error 26). No change to shipped behavior ([#3782](https://github.com/bobmatnyc/trusty-tools/issues/3782), class epic [#3451](https://github.com/bobmatnyc/trusty-tools/issues/3451))
