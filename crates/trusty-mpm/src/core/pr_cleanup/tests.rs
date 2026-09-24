@@ -175,6 +175,7 @@ fn req(dry_run: bool) -> CleanupRequest {
         repo: Some("bobmatnyc/trusty-tools".to_string()),
         repo_root: root(),
         dry_run,
+        head_only: false,
     }
 }
 
@@ -525,6 +526,119 @@ async fn cleanup_clean_path_removes_everything() {
     );
     assert!(joined.contains("git worktree prune"), "{joined}");
     assert!(joined.contains("git fetch --prune origin"), "{joined}");
+}
+
+/// #8301: a second, unnamed worktree on its own `worktree-agent-*` branch whose
+/// tip is the merged head commit — the shape the wide rule sweeps.
+const OTHER_TREE: &str = "/repo/.claude/worktrees/agent-cc33";
+
+/// A `git` fake listing the head tree plus [`OTHER_TREE`] (#8301).
+fn git_two_trees() -> Scripted {
+    let listing = format!(
+        "{}worktree {OTHER_TREE}\nHEAD {HEAD_OID}\nbranch refs/heads/{AGENT_BRANCH_PREFIX}cc33\n\n",
+        worktree_listing()
+    );
+    let branches = format!("{}{AGENT_BRANCH_PREFIX}cc33 {HEAD_OID}\n", branch_listing());
+    Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on("git worktree list", &listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", &branches)
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "")
+}
+
+/// Assert the #8301 invariant: [`OTHER_TREE`] and its branch were not touched.
+fn assert_other_tree_untouched(joined: &str) {
+    assert!(
+        !joined.contains(&format!("git worktree remove {OTHER_TREE}")),
+        "an unnamed worktree must never be removed by a head-only cleanup: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git branch -D {AGENT_BRANCH_PREFIX}cc33")),
+        "an unnamed worktree's branch must never be deleted: {joined}"
+    );
+    assert!(
+        !joined.contains(&format!("git branch -D {AGENT_BRANCH_PREFIX}aa11")),
+        "a head-only cleanup deletes the head branch and nothing else: {joined}"
+    );
+}
+
+/// 🔴 #8301: two worktrees; the merge-chained cleanup of one leaves the other
+/// and its branch intact, and names it in the report.
+#[tokio::test]
+async fn cleanup_8301_head_only_leaves_an_unnamed_tree_at_the_head_commit() {
+    let git = git_two_trees();
+    let req = CleanupRequest {
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "the PR's own head worktree is still removed: {joined}"
+    );
+    assert!(
+        joined.contains(&format!("git branch -D {BRANCH}")),
+        "{joined}"
+    );
+    assert_other_tree_untouched(&joined);
+    assert!(
+        report.render().contains(&format!(
+            "left in place, not this PR's head worktree: {OTHER_TREE}"
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+/// 🔴 #8301 error arm: when the head tree cannot be read, nothing is removed —
+/// neither the head tree nor the unnamed one.
+#[tokio::test]
+async fn cleanup_8301_an_unreadable_head_tree_removes_nothing() {
+    let git = git_two_trees();
+    let unreadable = |p: &Path| {
+        Some(DirtyWorktree {
+            path: p.to_path_buf(),
+            reason: "`git status` could not be run".to_string(),
+            dirty_files: 0,
+            unpushed_commits: 0,
+        })
+    };
+    let req = CleanupRequest {
+        head_only: true,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &unreadable,
+        &req,
+    )
+    .await;
+
+    assert!(report.failed(), "an unreadable tree must fail the run");
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "nothing may be removed when unsaved work cannot be ruled out: {joined}"
+    );
+    assert_other_tree_untouched(&joined);
 }
 
 /// 🔴 REGRESSION (#7275 round 2): a registry entry whose `repo` and
@@ -1464,6 +1578,7 @@ fn entry(pr: u64, cleaned: bool) -> OpenedPr {
         repo_root: root(),
         opened_at: chrono::Utc::now(),
         cleaned_at: cleaned.then(chrono::Utc::now),
+        scope: Default::default(),
     }
 }
 
@@ -1532,6 +1647,140 @@ fn registry_unreadable_file_reads_as_empty() {
         reg.entries().is_empty(),
         "a corrupt registry makes the sweep idle, never guess"
     );
+}
+
+/// 🔴 #8301 round 2: concurrent read-modify-write never loses an update — a
+/// sweep's `mark_cleaned` racing a merge's `record_scope` must keep both.
+/// Fails before the lock, where a writer that read first wrote a stale copy.
+#[test]
+fn registry_concurrent_writers_lose_no_update() {
+    const N: u64 = 24;
+    for round in 0..4 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = CleanupRegistry::under_root(dir.path());
+        for pr in 0..N {
+            reg.record_open(entry(pr, false)).expect("seed");
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N as usize));
+        let handles: Vec<_> = (0..N)
+            .map(|pr| {
+                let (reg, barrier) = (reg.clone(), std::sync::Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if pr % 2 == 0 {
+                        reg.mark_cleaned("bobmatnyc/trusty-tools", pr, chrono::Utc::now())
+                    } else {
+                        reg.record_scope(
+                            "bobmatnyc/trusty-tools",
+                            pr,
+                            super::CleanupScope::Deferred,
+                        )
+                        .map(|_| ())
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join").expect("write");
+        }
+        let entries = reg.entries();
+        assert_eq!(entries.len(), N as usize, "round {round}");
+        for e in &entries {
+            if e.pr % 2 == 0 {
+                assert!(
+                    e.cleaned_at.is_some(),
+                    "round {round}: #{} lost its stamp",
+                    e.pr
+                );
+            } else {
+                assert_eq!(
+                    e.scope,
+                    super::CleanupScope::Deferred,
+                    "round {round}: #{} lost its deferral",
+                    e.pr
+                );
+            }
+        }
+    }
+}
+
+/// #8301 round 2: the repo slug matches case-insensitively, as GitHub does.
+#[test]
+fn registry_record_scope_matches_the_repo_case_insensitively() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    reg.record_open(entry(7275, false)).expect("record");
+
+    let hit = reg
+        .record_scope(
+            "BobMatNYC/Trusty-Tools",
+            7275,
+            super::CleanupScope::Deferred,
+        )
+        .expect("write");
+
+    assert!(hit, "a differently cased slug names the same repository");
+    assert!(reg.pending().is_empty());
+}
+
+/// 🔴 #8301 round 2: an older writer's rewrite — no `format` stamp beside the
+/// scope-aware marker — is detected, and a scope-aware write clears it.
+#[test]
+fn registry_detects_a_rewrite_by_an_older_writer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    reg.record_open(entry(7275, false)).expect("record");
+    assert!(
+        !reg.rewritten_by_older_writer(),
+        "a scope-aware write is not a downgrade"
+    );
+
+    // What an older daemon's `mark_cleaned` writes: no `format`, no `scope`.
+    std::fs::write(
+        reg.path(),
+        "{\"entries\":[{\"pr\":7275,\"repo\":\"bobmatnyc/trusty-tools\",\
+         \"repo_root\":\"/repo\",\"opened_at\":\"2026-09-23T00:00:00Z\"}]}",
+    )
+    .expect("older write");
+    assert!(reg.rewritten_by_older_writer());
+
+    reg.mark_cleaned("bobmatnyc/trusty-tools", 7275, chrono::Utc::now())
+        .expect("scope-aware write");
+    assert!(!reg.rewritten_by_older_writer());
+}
+
+/// 🔴 #8301 round 3: a registry that does not parse is never replaced by a
+/// write — the write errors and the bytes stay exactly as they were. Fails
+/// if `update` treats a malformed file as empty.
+#[test]
+fn registry_write_refuses_to_replace_a_malformed_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    let garbage = b"{ this is not json".to_vec();
+    std::fs::write(reg.path(), &garbage).expect("write garbage");
+
+    let outcome = reg.record_scope(
+        "bobmatnyc/trusty-tools",
+        7275,
+        super::CleanupScope::Deferred,
+    );
+
+    assert!(outcome.is_err(), "a malformed registry must fail the write");
+    assert_eq!(
+        std::fs::read(reg.path()).expect("read back"),
+        garbage,
+        "the file must be left byte-for-byte"
+    );
+}
+
+/// A pre-#8301 registry file, never touched by a scope-aware writer, is not a
+/// downgrade: no marker exists.
+#[test]
+fn registry_an_old_file_alone_is_not_a_downgrade() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = CleanupRegistry::under_root(dir.path());
+    std::fs::write(reg.path(), "{\"entries\":[]}").expect("old file");
+    assert!(!reg.rewritten_by_older_writer());
 }
 
 // ── #7185: the harness marker git counts and this engine's gate does not ─────

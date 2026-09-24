@@ -2523,6 +2523,7 @@ fn merge_args() -> PrMergeArgs {
         pr: 42,
         auto: false,
         no_delete_branch: false,
+        no_cleanup: false,
         repo: None,
     }
 }
@@ -2749,6 +2750,7 @@ fn merge_argv_honours_auto_and_no_delete_branch() {
         pr: 42,
         auto: true,
         no_delete_branch: true,
+        no_cleanup: false,
         repo: Some("o/r".to_string()),
     };
     assert_eq!(merge::run(&gh, &args).expect("runs"), super::EXIT_OK);
@@ -2917,6 +2919,7 @@ fn pr_7945_no_delete_branch_never_downgrades_a_failure() {
         pr: 42,
         auto: false,
         no_delete_branch: true,
+        no_cleanup: false,
         repo: None,
     };
     let err = merge::run(&gh, &args).expect_err("no delete was asked for, so none can have failed");

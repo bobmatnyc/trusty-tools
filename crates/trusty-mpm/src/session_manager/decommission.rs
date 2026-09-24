@@ -20,13 +20,14 @@ use tracing::{info, warn};
 
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 
+use super::decommission_force::{DecommissionReport, ProvisioningDirt, remove_in_project_worktree};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
 use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_protection;
 use super::worktree_registry;
-use super::worktree_safety::{DirtyWorktree, inspect_dirt, worktree_remove_command};
+use super::worktree_safety::worktree_remove_command;
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
 /// per-session git worktree (#1845 item 5).
@@ -884,7 +885,35 @@ impl SessionManager {
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
     ) -> Result<(SessionRecord, bool), ManagedError> {
-        self.decommission_with_root_checked(id, managed_root, caller, true)
+        self.decommission_with_root_checked(
+            id,
+            managed_root,
+            caller,
+            true,
+            ProvisioningDirt::Refuse,
+        )
+        .await
+        .map(|r| (r.record, r.workspace_removed))
+    }
+
+    /// [`decommission`](Self::decommission), reporting why a workspace was
+    /// kept and honouring `--force` (#7660).
+    ///
+    /// Why: the CLI must exit non-zero when decommission declines to remove
+    /// the workspace, and name the blocker; the tuple every other caller uses
+    /// cannot carry that.
+    /// What: the same teardown, with `dirt_policy` passed to the in-project
+    /// removal step and the [`DecommissionReport`] returned whole.
+    /// Test: `decommission_reports_why_it_kept_a_provisioned_worktree`,
+    /// `force_decommission_removes_a_provisioning_only_worktree`.
+    pub async fn decommission_reporting(
+        &self,
+        id: &ManagedSessionId,
+        caller: Option<ManagedSessionId>,
+        dirt_policy: ProvisioningDirt,
+    ) -> Result<DecommissionReport, ManagedError> {
+        let managed_root = workspace_root(&TrustyToolsConfig::load());
+        self.decommission_with_root_checked(id, &managed_root, caller, true, dirt_policy)
             .await
     }
 
@@ -921,8 +950,15 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
-        self.decommission_with_root_checked(id, &managed_root, None, false)
-            .await
+        self.decommission_with_root_checked(
+            id,
+            &managed_root,
+            None,
+            false,
+            ProvisioningDirt::Refuse,
+        )
+        .await
+        .map(|r| (r.record, r.workspace_removed))
     }
 
     /// The shared body behind [`decommission_with_root`](Self::decommission_with_root)
@@ -937,7 +973,8 @@ impl SessionManager {
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
         check_foreign_claim: bool,
-    ) -> Result<(SessionRecord, bool), ManagedError> {
+        dirt_policy: ProvisioningDirt,
+    ) -> Result<DecommissionReport, ManagedError> {
         let mut record = self.get(id).await?;
 
         // #3649 owner gate: only applies when a SESSION identifies itself as
@@ -997,6 +1034,7 @@ impl SessionManager {
         // provisioned it. Track whether remove_dir_all ACTUALLY RAN (not
         // inferred from filesystem).
         let mut workspace_removed = false;
+        let mut kept_reason: Option<String> = None;
         if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never bulk-delete.
@@ -1005,76 +1043,11 @@ impl SessionManager {
                 // the git ref is also pruned.  The base clone directory is NEVER
                 // touched — only the leaf worktree path.
                 if is_session_worktree(ws) {
-                    // Data-safety gate (#4091-style, decommission-side): before
-                    // this, `remove_session_worktree` ran `git worktree remove
-                    // --force` (falling back to `fs::remove_dir_all`)
-                    // unconditionally, with NO dirty check at all — a live
-                    // data-loss path for `tm sessions prune --state stopped`
-                    // (which calls `decommission` per matching record). Reuse
-                    // the same `worktree_safety::inspect_dirt` check the
-                    // orphan-worktree sweep (`prune_orphaned_worktrees`)
-                    // already uses: refuse (and report) a candidate holding
-                    // uncommitted/untracked work or unpushed commits. Runs on
-                    // spawn_blocking since it shells out to git, same as the
-                    // removal itself; a panicked check is treated as dirty
-                    // (fail-safe) rather than a green light to delete.
-                    let ws_for_check = ws.clone();
-                    let dirt = tokio::task::spawn_blocking(move || inspect_dirt(&ws_for_check))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Some(DirtyWorktree::new(
-                                ws,
-                                format!("dirty-check task panicked: {e}"),
-                                0,
-                                0,
-                            ))
-                        });
-
-                    if let Some(dirt) = dirt {
-                        warn!(
-                            id = %id,
-                            workspace = %ws.display(),
-                            reason = %dirt.reason,
-                            "decommission: refusing to remove worktree — it holds \
-                             unsaved work; leaving it on disk (the record below is \
-                             still tombstoned)"
-                        );
-                        // workspace_removed stays false — nothing was deleted.
-                    } else {
-                        // Item 4 (#1845): wrap the blocking `git worktree remove`
-                        // call in spawn_blocking + tokio::time::timeout so a hung
-                        // git process cannot stall the async executor indefinitely.
-                        let ws_clone = ws.clone();
-                        // #7885: name the route in the audit line.
-                        let join = tokio::task::spawn_blocking(move || {
-                            remove_session_worktree(
-                                &ws_clone,
-                                "session decommission: the session ended and its tree is clean",
-                            )
-                        });
-                        let outcome =
-                            match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
-                                Ok(Ok(outcome)) => outcome,
-                                Ok(Err(e)) => {
-                                    WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
-                                }
-                                Err(_elapsed) => WorktreeRemoval::Kept(format!(
-                                    "git worktree remove did not finish within {}s; the \
-                                     worktree may require manual cleanup",
-                                    GIT_WORKTREE_REMOVE_TIMEOUT.as_secs()
-                                )),
-                            };
-                        // #4732: the reason now comes back FROM the remover
-                        // rather than being buried in a log line inside it.
-                        workspace_removed = outcome.removed();
-                        if let Some(reason) = outcome.reason() {
-                            warn!(
-                                id = %id,
-                                workspace = %ws.display(),
-                                "decommission: worktree left on disk — {reason}"
-                            );
-                        }
-                    }
+                    // #4091/#4344 dirty gate, and #7660's --force excuse and
+                    // kept reason: see `decommission_force`.
+                    let verdict = remove_in_project_worktree(id, ws, dirt_policy).await;
+                    workspace_removed = verdict.removed;
+                    kept_reason = verdict.kept_reason;
                 } else {
                     warn!(
                         id = %id,
@@ -1103,6 +1076,11 @@ impl SessionManager {
                     // Only paths that exist but are OUTSIDE the managed root
                     // (or are otherwise unsafe) reach this warning.
                     if !is_safe_to_remove(ws, managed_root) {
+                        // #7660: a declined removal carries its reason.
+                        kept_reason = Some(format!(
+                            "the path is outside the managed root {}",
+                            managed_root.display()
+                        ));
                         warn!(
                             id = %id,
                             workspace = %ws.display(),
@@ -1201,7 +1179,11 @@ impl SessionManager {
         // cache tracks live records, not every session the daemon has served.
         self.residency_cache_evict(id).await;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
-        Ok((record, workspace_removed))
+        Ok(DecommissionReport {
+            record,
+            workspace_removed,
+            workspace_kept_reason: kept_reason,
+        })
     }
 
     /// Mark a session's workspace as SM-owned (provisioned by clone) or unowned.

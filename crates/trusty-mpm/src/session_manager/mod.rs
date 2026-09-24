@@ -11,6 +11,8 @@
 pub mod adopt;
 pub mod create;
 pub mod decommission;
+// #7660: the in-project removal step, `--force` policy and kept reason.
+pub mod decommission_force;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
@@ -62,6 +64,8 @@ pub mod workspace_guard;
 // #6497: the explicit ownership transfer for a tree whose owner is provably
 // dead — the compliant alternative to rebuilding the branch by hand.
 pub(crate) mod worktree_adopt;
+// #8318: frees an adopted tree's branch and a dead agent's harness lock.
+pub(crate) mod worktree_adopt_release;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;

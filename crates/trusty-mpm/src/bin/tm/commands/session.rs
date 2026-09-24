@@ -507,6 +507,11 @@ pub(crate) async fn session(
         SessionAction::Rename { arg1, arg2 } => {
             crate::commands::rename::session_rename(client, url, arg1, arg2).await?
         }
+        // #7660: decommission prints the daemon's verdict itself so a kept
+        // workspace exits non-zero with the reason.
+        SessionAction::Decommission { id, force } => {
+            crate::commands::managed::session_decommission_routed(client, url, &id, force).await?
+        }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
         action @ (SessionAction::ManagedStop { .. }
