@@ -1692,10 +1692,14 @@ async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
     state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
     let d = type_matched_record(&state, session);
 
-    let Json(outcome) =
-        repair_delegation_by_id_route(State(state.clone()), Path(d.id.0.to_string()), None)
-            .await
-            .expect("a well-formed id");
+    let Json(outcome) = repair_delegation_by_id_route(
+        State(state.clone()),
+        Path(d.id.0.to_string()),
+        axum::http::HeaderMap::new(),
+        None,
+    )
+    .await
+    .expect("a well-formed id");
 
     assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
     assert_eq!(
@@ -1712,5 +1716,107 @@ async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
         .agents
         .is_empty(),
         "the repaired record no longer blocks a dispatch"
+    );
+}
+
+// #8257 owner ruling, over the wire: the caller-session header lets the owning
+// session clear its own live record; any other session's header does not.
+#[tokio::test]
+async fn repair_route_lets_the_owning_session_clear_its_record_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairOutcome};
+
+    let (state, _dir, session) = hermetic();
+    state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
+    let mut d = Delegation::observed(session, "version-control", "task", Some("toolu_o".into()));
+    d.agent_id = Some("a0wner".to_string());
+    state.upsert_delegation(d);
+    let as_session = |s: SessionId| {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            CALLER_SESSION_HEADER,
+            s.0.to_string().parse().expect("header value"),
+        );
+        h
+    };
+
+    let Json(stranger) = repair_delegation_as_route(
+        State(state.clone()),
+        Path("a0wner".to_string()),
+        as_session(SessionId::new()),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(stranger, RepairOutcome::Refused { .. }),
+        "{stranger:?}"
+    );
+
+    let Json(owner) = repair_delegation_as_route(
+        State(state.clone()),
+        Path("a0wner".to_string()),
+        as_session(session),
+        None,
+    )
+    .await;
+    assert_eq!(owner, RepairOutcome::Ended { records: 1 });
+}
+
+// #8257 owner ruling: ownership is never taken from caller-supplied content. A
+// different session that names the owner's id in the request body — the wire
+// form a CLI argument would take — is still refused, as is a request that
+// names the owner in the body and carries no caller session at all.
+#[tokio::test]
+async fn repair_route_ignores_an_owner_id_the_caller_supplies_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::{
+        CALLER_SESSION_HEADER, RepairDelegationRequest, RepairOutcome,
+    };
+
+    let (state, _dir, owner) = hermetic();
+    state.register_session(Session::new(owner, "/repo", ControlModel::Tmux, None));
+    let mut d = Delegation::observed(owner, "version-control", "task", Some("toolu_c".into()));
+    d.agent_id = Some("a0wnclaim".to_string());
+    state.upsert_delegation(d);
+    let body = || {
+        let raw = serde_json::json!({
+            "force": false,
+            "session": owner.0.to_string(),
+            "caller_session": owner.0.to_string(),
+            "owner": owner.0.to_string(),
+        });
+        Some(Json(
+            serde_json::from_value::<RepairDelegationRequest>(raw).expect("request body"),
+        ))
+    };
+    let mut stranger = axum::http::HeaderMap::new();
+    stranger.insert(
+        CALLER_SESSION_HEADER,
+        SessionId::new()
+            .0
+            .to_string()
+            .parse()
+            .expect("header value"),
+    );
+
+    for headers in [stranger, axum::http::HeaderMap::new()] {
+        let Json(outcome) = repair_delegation_as_route(
+            State(state.clone()),
+            Path("a0wnclaim".to_string()),
+            headers,
+            body(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RepairOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
+    }
+    assert!(
+        state
+            .all_delegations()
+            .iter()
+            .all(|d| !d.status.is_terminal()),
+        "no caller-supplied owner id may clear the record"
     );
 }

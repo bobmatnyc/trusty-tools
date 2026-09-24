@@ -60,6 +60,15 @@
 //! Every would-be write then passes
 //! [`super::delegation_repair_probe::probe_live_evidence`], which refuses on a
 //! live process in the agent's tree and on any probe that cannot answer.
+//!
+//! # #8257 owner ruling (2026-09-24)
+//!
+//! The one exception to "a live owner refuses": the OWNING session may clear
+//! its own record. The caller is read from [`CALLER_SESSION_HEADER`], which
+//! `tm` fills from the harness's `CLAUDE_CODE_SESSION_ID` — never from a CLI
+//! argument or the request body. A caller that cannot be established refuses
+//! ([`owner_attests`]); live evidence from the probe still refuses the owner;
+//! every clear is logged and stamped on the record as a [`DelegationRepair`].
 //! Test: `delegation_repair_tests`.
 
 use std::sync::Arc;
@@ -67,7 +76,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::delegation_repair_probe::{LiveEvidence, probe_live_evidence};
-use crate::core::agent::{Delegation, DelegationId};
+use crate::core::agent::{Delegation, DelegationId, DelegationRepair};
 use crate::core::session::{SessionId, SessionStatus};
 use crate::daemon::state::DaemonState;
 use crate::daemon::state::sessions::RUNNING_STALE_AFTER_SECS;
@@ -135,6 +144,56 @@ pub struct RepairDelegationRequest {
     #[serde(default)]
     pub force: bool,
 }
+
+/// The header carrying the calling harness session (#8257 owner ruling).
+///
+/// Why a header, not a body field: the request body is a public struct, and
+/// the caller identity is transport metadata `tm` fills from the harness's
+/// `CLAUDE_CODE_SESSION_ID` — never from a CLI argument.
+pub const CALLER_SESSION_HEADER: &str = "x-tm-caller-session";
+
+/// Who asked for the repair (#8257 owner ruling).
+///
+/// Why: the owning session may clear its own live record on its own word, so
+/// the gate must know whether the caller IS that session — and "could not
+/// tell" must refuse rather than read as "someone else".
+/// What: an established session id, or the reason none could be established.
+/// Test: `an_unestablished_caller_is_refused_on_a_live_record_8257`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairCaller {
+    /// The calling harness session.
+    Session(SessionId),
+    /// No caller session could be established; the text says why.
+    Unestablished(String),
+}
+
+impl RepairCaller {
+    /// Read the caller from the request's [`CALLER_SESSION_HEADER`] value.
+    pub fn from_request(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Self::Unestablished(
+                "the request named no caller session — `tm` sends the harness's \
+                 CLAUDE_CODE_SESSION_ID, which was unset in the calling process"
+                    .to_string(),
+            ),
+            Some(s) => uuid::Uuid::parse_str(s)
+                .map(|u| Self::Session(SessionId(u)))
+                .unwrap_or_else(|_| {
+                    Self::Unestablished(format!("the caller session `{s}` is not a session id"))
+                }),
+        }
+    }
+
+    fn session(&self) -> Option<SessionId> {
+        match self {
+            Self::Session(s) => Some(*s),
+            Self::Unestablished(_) => None,
+        }
+    }
+}
+
+/// The audit basis written on a record its owning session cleared (#8257).
+pub const OWNER_ATTESTED: &str = "owner-attested finished (#8257)";
 
 /// The whole gate, as a pure function of the counts and the owner's liveness.
 ///
@@ -220,10 +279,25 @@ pub(crate) fn owner_liveness(state: &Arc<DaemonState>, session: SessionId) -> Ow
 /// `repair_force_ends_a_record_whose_owner_is_unknown_7602`,
 /// `repair_reports_no_record_for_an_unknown_agent_7602`.
 pub fn repair_delegation(state: &Arc<DaemonState>, agent_id: &str, force: bool) -> RepairOutcome {
+    repair_delegation_as(state, agent_id, force, &no_caller())
+}
+
+/// [`repair_delegation`] on behalf of `caller` (#8257 owner ruling).
+///
+/// What: the route's entry point — `caller` is what lets the owning session
+/// clear its own live record.
+/// Test: `the_owning_session_clears_its_own_live_record_8257`.
+pub fn repair_delegation_as(
+    state: &Arc<DaemonState>,
+    agent_id: &str,
+    force: bool,
+    caller: &RepairCaller,
+) -> RepairOutcome {
     repair_matching(
         state,
         |d| d.agent_id.as_deref() == Some(agent_id),
         force,
+        caller,
         probe_live_evidence,
     )
 }
@@ -233,15 +307,22 @@ pub fn repair_delegation(state: &Arc<DaemonState>, agent_id: &str, force: bool) 
 /// Why: a record a stop matched by agent type has no `agent_id`, so
 /// [`repair_delegation`] could never name it — the unrepairable record #8257
 /// reports. Its delegation id is always known; the dispatch deny prints it.
-/// What: [`repair_matching`] over the single record with that id.
+/// What: [`repair_matching`] over the single record with that id, on behalf of
+/// `caller`.
 /// Test: `repair_by_delegation_id_ends_a_record_with_no_agent_id_8257`,
 /// `a_type_matched_record_of_a_live_session_becomes_repairable_8257`.
 pub fn repair_delegation_by_id(
     state: &Arc<DaemonState>,
     id: DelegationId,
     force: bool,
+    caller: &RepairCaller,
 ) -> RepairOutcome {
-    repair_matching(state, |d| d.id == id, force, probe_live_evidence)
+    repair_matching(state, |d| d.id == id, force, caller, probe_live_evidence)
+}
+
+/// The caller of a direct, in-process repair: none established.
+fn no_caller() -> RepairCaller {
+    RepairCaller::Unestablished("no caller session was supplied to this repair".to_string())
 }
 
 /// A record's owner liveness, as far as it still speaks for the AGENT (#8257).
@@ -268,27 +349,66 @@ pub(crate) fn record_liveness(
     }
 }
 
+/// Resolve a record whose agent may still run: only its owner may end it
+/// (#8257 owner ruling).
+///
+/// What: `Ok(())` when `caller` is the record's own session — the owner
+/// attests the agent finished. Otherwise `Err` with the refusal: a different
+/// session is told only the owner (named) can clear it before the stop or the
+/// 6 h mark; an unestablished caller is told why none could be established.
+/// Test: `the_owning_session_clears_its_own_live_record_8257`,
+/// `a_non_owning_session_is_refused_on_a_live_record_8257`,
+/// `an_unestablished_caller_is_refused_on_a_live_record_8257`.
+fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
+    let owner = d.session.0;
+    let head = format!(
+        "{} record {} is owned by session {owner}, which is still Active; no stop has arrived \
+         and the record is under the 6 h stale threshold, so the agent may still be running",
+        d.agent, d.id.0
+    );
+    match caller {
+        RepairCaller::Session(s) if *s == d.session => Ok(()),
+        RepairCaller::Session(s) => Err(format!(
+            "{head}. Only the owning session {owner} can clear it before a stop arrives or the \
+             record reaches 6 h; this repair came from session {} (#8257)",
+            s.0
+        )),
+        RepairCaller::Unestablished(why) => Err(format!(
+            "{head}. Only the owning session {owner} can clear it before a stop arrives or the \
+             record reaches 6 h, and the calling session could not be established: {why} \
+             (#8257)"
+        )),
+    }
+}
+
 /// The repair over every record `matches` selects, with the OS probe injected.
 ///
 /// Why: the probe is the one part a test cannot drive through the real OS on
 /// demand — a probe that FAILS in particular — so it is a parameter here and
 /// the public entry points pass [`probe_live_evidence`].
-/// What: tallies the matched records, resolves the strictest
-/// [`record_liveness`] across them (any live owner wins), and runs [`decide`].
-/// On `Ended` it probes each open record and refuses — naming the record and
-/// the probe's words — on any [`LiveEvidence`] that is not `Clear`. Only then
-/// does it write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled)
-/// to those records. Nothing is written on any other outcome.
+/// What: tallies the matched records and resolves each one's
+/// [`record_liveness`]. A still-`Live` record ends only when [`owner_attests`]
+/// — otherwise the call refuses with its words. The rest resolve the strictest
+/// liveness across them and run [`decide`]. On `Ended` it probes each open
+/// record and refuses — naming the record and the probe's words — on any
+/// [`LiveEvidence`] that is not `Clear`, the owner included. Only then does it
+/// write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled) and a
+/// [`DelegationRepair`] naming the caller and the basis, and logs one WARN line
+/// per cleared record. Nothing is written or logged on any other outcome.
 /// Test: `repair_refuses_while_a_live_process_holds_the_tree_8257`,
-/// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`.
+/// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`,
+/// `the_owner_is_refused_while_the_agent_shows_live_8257`,
+/// `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`,
+/// `a_forced_clear_is_logged_8257`.
 pub(crate) fn repair_matching(
     state: &Arc<DaemonState>,
     matches: impl Fn(&Delegation) -> bool,
     force: bool,
+    caller: &RepairCaller,
     probe: impl Fn(&Delegation) -> LiveEvidence,
 ) -> RepairOutcome {
     let now = chrono::Utc::now();
-    let mut open: Vec<Delegation> = Vec::new();
+    let mut open: Vec<(Delegation, &str)> = Vec::new();
     let mut terminal = 0usize;
     let mut owner = None;
     for d in state.all_delegations() {
@@ -299,14 +419,27 @@ pub(crate) fn repair_matching(
             terminal += 1;
             continue;
         }
-        // Any live owner decides the whole call: the strictest answer wins.
-        let liveness = record_liveness(owner_liveness(state, d.session), &d, now);
+        let (liveness, basis) = match record_liveness(owner_liveness(state, d.session), &d, now) {
+            // #8257 owner ruling: the owning session's word ends its own record.
+            OwnerLiveness::Live => match owner_attests(&d, caller) {
+                Ok(()) => (OwnerLiveness::Gone, OWNER_ATTESTED),
+                Err(reason) => return RepairOutcome::Refused { reason },
+            },
+            OwnerLiveness::Gone => (
+                OwnerLiveness::Gone,
+                "operator-ended: owner gone, agent stopped, or past 6 h (#7602, #8257)",
+            ),
+            OwnerLiveness::Unknown => (
+                OwnerLiveness::Unknown,
+                "operator-forced: owner undeterminable (#7602)",
+            ),
+        };
+        // The strictest answer across the records decides the whole call.
         owner = Some(match (owner, liveness) {
-            (Some(OwnerLiveness::Live), _) | (_, OwnerLiveness::Live) => OwnerLiveness::Live,
             (Some(OwnerLiveness::Gone), _) | (_, OwnerLiveness::Gone) => OwnerLiveness::Gone,
             _ => OwnerLiveness::Unknown,
         });
-        open.push(d);
+        open.push((d, basis));
     }
 
     let outcome = decide(
@@ -319,7 +452,7 @@ pub(crate) fn repair_matching(
         return outcome;
     }
     // #8257: the registry says the records may end; the OS must agree first.
-    for d in &open {
+    for (d, _) in &open {
         let reason = match probe(d) {
             LiveEvidence::Clear => continue,
             LiveEvidence::Held(why) => format!("a live process still holds its tree: {why}"),
@@ -337,15 +470,38 @@ pub(crate) fn repair_matching(
             ),
         };
     }
-    // #7602: Cancelled, never Completed — the agent did not report finishing,
-    // an operator ended the record because nothing else could.
-    let ids: Vec<DelegationId> = open.iter().map(|d| d.id).collect();
-    let ended = state.cancel_stuck_delegations(&ids);
-    tracing::warn!(
-        ended,
-        forced = force,
-        "delegation: operator-repaired a stuck record — status Cancelled (#7602, #8257)"
-    );
+    // #7602: Cancelled, never Completed. #8257: the record says who ended it
+    // and on what basis; a record a real stop ended meanwhile is left alone.
+    let by_session = caller.session();
+    for (d, basis) in &open {
+        let mut cleared = false;
+        state.mutate_delegation(d.id, |rec| {
+            if rec.status.is_terminal() {
+                return;
+            }
+            rec.status = crate::core::agent::DelegationStatus::Cancelled;
+            rec.repair = Some(DelegationRepair {
+                by_session,
+                reason: (*basis).to_string(),
+                at: now,
+            });
+            cleared = true;
+        });
+        // #8257 owner ruling: every clear — owner-attested or forced — is
+        // logged, one line per record, naming the caller and the basis.
+        if cleared {
+            tracing::warn!(
+                delegation_id = %d.id.0,
+                agent = %d.agent,
+                agent_id = d.agent_id.as_deref().unwrap_or("none"),
+                owner_session = %d.session.0,
+                by_session = by_session.map_or_else(|| "unestablished".to_string(), |s| s.0.to_string()),
+                basis = *basis,
+                forced = force,
+                "delegation: repair cleared a record — status Cancelled (#7602, #8257)"
+            );
+        }
+    }
     outcome
 }
 

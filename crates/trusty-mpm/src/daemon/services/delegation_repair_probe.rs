@@ -25,15 +25,15 @@
 //! probe, so the probe carries no information about this agent and is not run.
 //! For that record the live-pid evidence is the owning session's own tracked
 //! pid, which `delegation_repair::owner_liveness` reads before this module is
-//! reached.
+//! reached, plus any held harness lock that names the agent.
 //! Test: `delegation_repair_tests`.
 
 use std::path::Path;
 
 use crate::core::agent::Delegation;
 use crate::session_manager::worktree_registry::{
-    harness_lock_pid_in_reason, is_harness_agent_lock_reason, list_registered_worktrees,
-    pid_liveness,
+    RegisteredWorktree, harness_lock_pid_in_reason, is_harness_agent_lock_reason,
+    list_registered_worktrees, pid_liveness,
 };
 
 /// What the OS says about one record's agent.
@@ -65,7 +65,9 @@ const START_TOLERANCE_SECS: i64 = 2;
 /// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`.
 pub(crate) fn probe_live_evidence(d: &Delegation) -> LiveEvidence {
     let Some(tree) = own_tree(d) else {
-        return LiveEvidence::Clear;
+        // #8257 owner ruling: no cwd probe here (the stated gap), but a held
+        // harness lock naming this agent anywhere in the repo still refuses.
+        return agent_lock_evidence(d);
     };
     match std::fs::symlink_metadata(tree) {
         // A tree that is gone has nobody standing in it.
@@ -83,7 +85,48 @@ pub(crate) fn probe_live_evidence(d: &Delegation) -> LiveEvidence {
     if let Some(reason) = crate::session_manager::worktree_liveness::process_holding(tree) {
         return LiveEvidence::Held(reason);
     }
-    match harness_lock_evidence(tree) {
+    let canonical = match std::fs::canonicalize(tree) {
+        Ok(p) => p,
+        Err(e) => {
+            return LiveEvidence::Undeterminable(format!(
+                "could not canonicalize {}: {e}",
+                tree.display()
+            ));
+        }
+    };
+    as_evidence(harness_lock_in(tree, |w| {
+        std::fs::canonicalize(&w.path).unwrap_or_else(|_| w.path.clone()) == canonical
+    }))
+}
+
+/// A held harness lock naming `d`'s agent, for a record with no tree of its
+/// own (#8257).
+///
+/// What: `Clear` without an agent id or a `cwd`, or when `cwd` no longer
+/// exists; otherwise the lock evidence over every worktree `cwd`'s repository
+/// registers whose harness lock names `agent-<agent_id>`.
+/// Test: `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`.
+fn agent_lock_evidence(d: &Delegation) -> LiveEvidence {
+    let (Some(agent_id), Some(cwd)) = (d.agent_id.as_deref(), d.cwd.as_deref()) else {
+        return LiveEvidence::Clear;
+    };
+    if let Err(e) = std::fs::symlink_metadata(cwd) {
+        return match e.kind() {
+            std::io::ErrorKind::NotFound => LiveEvidence::Clear,
+            _ => LiveEvidence::Undeterminable(format!("could not stat {}: {e}", cwd.display())),
+        };
+    }
+    let token = format!("agent-{agent_id}");
+    as_evidence(harness_lock_in(cwd, |w| {
+        w.lock_reason
+            .as_deref()
+            .is_some_and(|r| r.split_whitespace().any(|t| t == token))
+    }))
+}
+
+/// Fold a lock read into the evidence the repair acts on.
+fn as_evidence(read: Result<Option<String>, String>) -> LiveEvidence {
+    match read {
         Ok(None) => LiveEvidence::Clear,
         Ok(Some(reason)) => LiveEvidence::Held(reason),
         Err(reason) => LiveEvidence::Undeterminable(reason),
@@ -97,27 +140,27 @@ fn own_tree(d: &Delegation) -> Option<&Path> {
     (d.cwd.as_deref() != Some(tree)).then_some(tree)
 }
 
-/// Read the harness lock git holds on `tree`, if any.
+/// Read the harness lock of the first worktree `anchor`'s repository registers
+/// that `pick` selects, if any.
 ///
-/// What: `Ok(None)` when git lists the worktrees and `tree` is unregistered,
+/// What: `Ok(None)` when git lists the worktrees and the picked one is absent,
 /// unlocked, or locked by an operator rather than the harness. `Err` when git
 /// cannot list them — "not a worktree" and "git failed" are one answer there,
 /// and the second must refuse.
-fn harness_lock_evidence(tree: &Path) -> Result<Option<String>, String> {
-    let registered = list_registered_worktrees(tree).ok_or_else(|| {
+fn harness_lock_in(
+    anchor: &Path,
+    pick: impl Fn(&RegisteredWorktree) -> bool,
+) -> Result<Option<String>, String> {
+    let registered = list_registered_worktrees(anchor).ok_or_else(|| {
         format!(
-            "git could not list the worktrees registered for {}, so its harness lock is unread",
-            tree.display()
+            "git could not list the worktrees registered for {}, so no harness lock was read",
+            anchor.display()
         )
     })?;
-    let canonical = std::fs::canonicalize(tree)
-        .map_err(|e| format!("could not canonicalize {}: {e}", tree.display()))?;
     let reason = registered
         .into_iter()
-        .find(|w| std::fs::canonicalize(&w.path).unwrap_or_else(|_| w.path.clone()) == canonical)
-        .filter(|w| w.locked)
-        .and_then(|w| w.lock_reason)
-        .filter(|r| is_harness_agent_lock_reason(r));
+        .filter(|w| w.locked && pick(w))
+        .find_map(|w| w.lock_reason.filter(|r| is_harness_agent_lock_reason(r)));
     match reason {
         Some(reason) => lock_holder_evidence(&reason, pid_liveness, process_start_epoch),
         None => Ok(None),

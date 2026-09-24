@@ -545,36 +545,6 @@ impl DaemonState {
         staled
     }
 
-    /// Terminalize each still-non-terminal delegation in `ids` (#7602, #8257).
-    ///
-    /// Why: the operator repair verb's only write. It is separate from
-    /// [`Self::stale_delegations_of_dead_session`] because the two record
-    /// DIFFERENT facts: that sweep says "the owner is gone, tracking gave up"
-    /// and writes the non-terminal [`DelegationStatus::Stale`], which the
-    /// reclaim gate still reads as live; this says "an operator ended a record
-    /// nothing else could end" and writes a terminal status, which is what
-    /// actually releases the agent's worktree.
-    ///
-    /// What: [`DelegationStatus::Cancelled`] — never `Completed`, which would
-    /// claim the agent finished. The gate deciding whether this may run at all
-    /// is [`crate::daemon::services::delegation_repair::decide`]; this function
-    /// performs the write and nothing else. #8257: keyed on record ids, so a
-    /// record with no `agent_id` is reachable; one a real stop terminalized
-    /// while the repair probed is skipped rather than overwritten.
-    /// Test: `repair_ends_a_stuck_record_of_a_dead_owner_7602`.
-    pub(crate) fn cancel_stuck_delegations(&self, ids: &[DelegationId]) -> usize {
-        let mut ended = 0;
-        for mut entry in self.delegations.iter_mut() {
-            let d = entry.value_mut();
-            if !ids.contains(&d.id) || d.status.is_terminal() {
-                continue;
-            }
-            d.status = DelegationStatus::Cancelled;
-            ended += 1;
-        }
-        ended
-    }
-
     /// Gather the tmux names tracked by BOTH session registries.
     ///
     /// Why: the orphan-GC's safety hinges on "absent from BOTH registries". The

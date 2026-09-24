@@ -159,7 +159,7 @@ pub fn router() -> Router<Arc<DaemonState>> {
         // — the whole case is a record whose session the daemon has lost.
         .route(
             "/api/v1/delegations/{agent_id}/repair",
-            post(repair_delegation_route),
+            post(repair_delegation_as_route),
         )
         // #8257: the same repair addressed by delegation id — the only address
         // a record matched by agent type ever has — and the read-only listing.
@@ -205,6 +205,7 @@ pub async fn list_delegations_route(
 pub async fn repair_delegation_by_id_route(
     State(state): State<Arc<DaemonState>>,
     Path(delegation_id): Path<String>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Result<Json<crate::daemon::services::delegation_repair::RepairOutcome>, DaemonError> {
     let id = uuid::Uuid::parse_str(&delegation_id)
@@ -212,10 +213,33 @@ pub async fn repair_delegation_by_id_route(
         .map_err(|_| {
             DaemonError::InvalidRequest(format!("malformed delegation id: {delegation_id}"))
         })?;
-    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    let (force, caller) = force_and_caller(&headers, body);
     Ok(Json(
-        crate::daemon::services::delegation_repair::repair_delegation_by_id(&state, id, force),
+        crate::daemon::services::delegation_repair::repair_delegation_by_id(
+            &state, id, force, &caller,
+        ),
     ))
+}
+
+/// The body's `force` flag and the caller-session header of a repair (#8257).
+fn force_and_caller(
+    headers: &axum::http::HeaderMap,
+    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
+) -> (
+    bool,
+    crate::daemon::services::delegation_repair::RepairCaller,
+) {
+    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairCaller};
+    let force = body.is_some_and(|Json(b)| b.force);
+    let raw = headers.get(CALLER_SESSION_HEADER).map(|v| v.to_str());
+    let caller = match raw {
+        Some(Err(_)) => RepairCaller::Unestablished(format!(
+            "the {CALLER_SESSION_HEADER} header is not valid text"
+        )),
+        Some(Ok(s)) => RepairCaller::from_request(Some(s)),
+        None => RepairCaller::from_request(None),
+    };
+    (force, caller)
 }
 
 /// `POST /api/v1/delegations/{agent_id}/repair` (#7602).
@@ -236,8 +260,35 @@ pub async fn repair_delegation_route(
     Path(agent_id): Path<String>,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
-    let force = body.map(|Json(b)| b.force).unwrap_or(false);
-    Json(crate::daemon::services::delegation_repair::repair_delegation(&state, &agent_id, force))
+    // #8257: no headers, so no caller session — the owner path never opens.
+    repair_delegation_as_route(
+        State(state),
+        Path(agent_id),
+        axum::http::HeaderMap::new(),
+        body,
+    )
+    .await
+}
+
+/// [`repair_delegation_route`] reading the caller-session header (#8257).
+///
+/// Why: the owner ruling lets the owning session clear its own live record,
+/// so the router registers this form; the header-less one keeps its public
+/// signature and simply never establishes a caller.
+/// Test: `repair_route_lets_the_owning_session_clear_its_record_8257`,
+/// `repair_route_ignores_an_owner_id_the_caller_supplies_8257`.
+pub async fn repair_delegation_as_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(agent_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
+) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
+    let (force, caller) = force_and_caller(&headers, body);
+    Json(
+        crate::daemon::services::delegation_repair::repair_delegation_as(
+            &state, &agent_id, force, &caller,
+        ),
+    )
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/granted-worktree` (#5769).

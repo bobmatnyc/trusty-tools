@@ -91,8 +91,10 @@ pub(crate) async fn dispatch(
 /// outcome. `no_record` and `refused` both exit nonzero — the first because the
 /// operator named an agent nothing knows, which is a fact they must see rather
 /// than a success; the second because the gate declined.
-/// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`;
-/// the outcomes themselves in `delegation_repair_tests.rs`.
+/// #8257: the caller session travels in a header read from the environment.
+/// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`,
+/// `cli_rejects_a_caller_session_argument_8257`; the outcomes themselves in
+/// `delegation_repair_tests.rs`.
 async fn repair_delegation(
     client: &reqwest::Client,
     route: &str,
@@ -100,12 +102,19 @@ async fn repair_delegation(
     force: bool,
 ) -> anyhow::Result<()> {
     // #8257: `route` is the agent-id or the delegation-id endpoint; `target`
-    // names which in every line printed below.
-    let resp = client
+    // names which in every line printed below. The caller session is the
+    // harness-exported CLAUDE_CODE_SESSION_ID — never a CLI argument — so an
+    // owning session can clear its own live record (#8257 owner ruling).
+    let mut req = client
         .post(route)
-        .json(&serde_json::json!({ "force": force }))
-        .send()
-        .await?;
+        .json(&serde_json::json!({ "force": force }));
+    if let Some(session) = trusty_mpm::core::savings::claude_code_session_id() {
+        req = req.header(
+            trusty_mpm::daemon::services::delegation_repair::CALLER_SESSION_HEADER,
+            session,
+        );
+    }
+    let resp = req.send().await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {

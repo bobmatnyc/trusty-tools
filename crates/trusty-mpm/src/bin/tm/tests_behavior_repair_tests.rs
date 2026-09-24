@@ -157,6 +157,33 @@ fn cli_parses_repair_delegation_by_id_and_list_8257() {
     );
 }
 
+/// Why (#8257 owner ruling): the owning session may clear its own record, and
+/// the daemon learns the caller only from the harness's
+/// `CLAUDE_CODE_SESSION_ID`. An argument naming a session would let any caller
+/// claim to be the owner.
+/// What: every spelling a caller might use to name a session is rejected.
+/// Test: this test; the daemon side is
+/// `repair_route_ignores_an_owner_id_the_caller_supplies_8257`.
+#[test]
+fn cli_rejects_a_caller_session_argument_8257() {
+    let owner = "64237d1c-0aa4-4090-bd14-d3c273da7e95";
+    for extra in [
+        vec!["--session", owner],
+        vec!["--session-id", owner],
+        vec!["--caller-session", owner],
+        vec!["--owner", owner],
+        vec![owner],
+    ] {
+        let mut argv = vec!["trusty-mpm", "repair", "delegation", "a0wner"];
+        argv.extend(extra.iter().copied());
+        assert!(
+            Cli::try_parse_from(&argv).is_err(),
+            "`{}` must not parse: no argument names the caller session",
+            argv.join(" ")
+        );
+    }
+}
+
 #[test]
 fn cli_parses_repair_delegation_force() {
     let cli = Cli::try_parse_from([

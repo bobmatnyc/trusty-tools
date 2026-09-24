@@ -244,7 +244,7 @@ fn repair_by_delegation_id_ends_a_record_with_no_agent_id_8257() {
     state.upsert_delegation(d.clone());
 
     assert_eq!(
-        repair_delegation_by_id(&state, d.id, false),
+        repair_delegation_by_id(&state, d.id, false, &no_caller()),
         RepairOutcome::Ended { records: 1 }
     );
     assert_eq!(
@@ -262,7 +262,7 @@ fn a_type_matched_record_of_a_live_session_becomes_repairable_8257() {
     state.upsert_delegation(d.clone());
 
     assert_eq!(
-        repair_delegation_by_id(&state, d.id, false),
+        repair_delegation_by_id(&state, d.id, false, &no_caller()),
         RepairOutcome::Ended { records: 1 }
     );
 }
@@ -306,6 +306,7 @@ fn repair_refuses_when_the_live_agent_probe_cannot_answer_8257() {
         &state,
         |d| d.agent_id.as_deref() == Some("agent-x"),
         true,
+        &no_caller(),
         |_| LiveEvidence::Undeterminable("lsof exited 1".to_string()),
     );
 
@@ -354,6 +355,207 @@ fn lock_holder_evidence_reads_each_arm_8257() {
         "no start time to match"
     );
     assert!(lock_holder_evidence("claude agent agent-a1", |_| Some(true), at).is_err());
+}
+
+/// A live session owning one young `Running` record naming `agent_id`.
+fn live_owned(agent_id: &str) -> (Arc<DaemonState>, SessionId) {
+    let (state, session) = state_with(Some(SessionStatus::Active));
+    state.upsert_delegation(delegation(session, agent_id, DelegationStatus::Running));
+    (state, session)
+}
+
+/// Run `body` under a thread-local capture subscriber; return its rendered lines.
+fn captured<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // #4931: raise the process-global MAX_LEVEL a thread-local default cannot.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let out = tracing::subscriber::with_default(subscriber, body);
+    (out, buffer.tail(64))
+}
+
+/// The captured lines that record a repair clearing a record.
+fn clear_lines(lines: &[String]) -> Vec<&String> {
+    lines
+        .iter()
+        .filter(|l| l.contains("repair cleared a record"))
+        .collect()
+}
+
+// #8257 owner ruling: the owning session may clear its own live record once
+// the probe finds no live agent; the record and the log say who and why.
+#[test]
+fn the_owning_session_clears_its_own_live_record_8257() {
+    let (state, session) = live_owned("a-own");
+
+    let (outcome, lines) =
+        captured(|| repair_delegation_as(&state, "a-own", false, &RepairCaller::Session(session)));
+
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+    let d = &state.all_delegations()[0];
+    assert_eq!(d.status, DelegationStatus::Cancelled);
+    let repair = d
+        .repair
+        .as_ref()
+        .expect("the repair is stamped on the record");
+    assert_eq!(repair.by_session, Some(session));
+    assert_eq!(repair.reason, "owner-attested finished (#8257)");
+
+    let logged = clear_lines(&lines);
+    assert_eq!(logged.len(), 1, "one clear line per record: {lines:#?}");
+    let line = logged[0];
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains(&d.id.0.to_string()), "{line}");
+    assert!(
+        line.contains(&format!("by_session={}", session.0)),
+        "{line}"
+    );
+    assert!(line.contains("owner-attested finished"), "{line}");
+    assert!(line.contains("forced=false"), "{line}");
+}
+
+// #8257 owner ruling: live evidence binds the owner too — a probe that sees
+// the agent alive refuses, writes nothing, and logs no clear.
+#[test]
+fn the_owner_is_refused_while_the_agent_shows_live_8257() {
+    let (state, session) = live_owned("a-alive");
+
+    let (outcome, lines) = captured(|| {
+        repair_matching(
+            &state,
+            |d| d.agent_id.as_deref() == Some("a-alive"),
+            false,
+            &RepairCaller::Session(session),
+            |_| LiveEvidence::Held("pid 4242 has its cwd in the tree".to_string()),
+        )
+    });
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("a live process still holds"), "{reason}");
+            assert!(reason.contains("pid 4242"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let d = &state.all_delegations()[0];
+    assert_eq!(d.status, DelegationStatus::Running);
+    assert!(d.repair.is_none(), "a refusal stamps nothing");
+    assert!(clear_lines(&lines).is_empty(), "{lines:#?}");
+}
+
+// #8257 owner ruling: a `--force` clear is logged like an owner's, naming the
+// unestablished caller and the forced basis.
+#[test]
+fn a_forced_clear_is_logged_8257() {
+    let (state, session) = state_with(None);
+    state.upsert_delegation(delegation(session, "a-forced", DelegationStatus::Running));
+
+    let (outcome, lines) = captured(|| repair_delegation(&state, "a-forced", true));
+
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+    let logged = clear_lines(&lines);
+    assert_eq!(logged.len(), 1, "{lines:#?}");
+    assert!(logged[0].contains("forced=true"), "{}", logged[0]);
+    assert!(
+        logged[0].contains("by_session=unestablished"),
+        "{}",
+        logged[0]
+    );
+    assert!(logged[0].contains("operator-forced"), "{}", logged[0]);
+}
+
+#[test]
+fn a_non_owning_session_is_refused_on_a_live_record_8257() {
+    let (state, owner) = live_owned("a-other");
+    let stranger = SessionId::new();
+
+    let outcome = repair_delegation_as(&state, "a-other", true, &RepairCaller::Session(stranger));
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(
+                reason.contains(&format!("Only the owning session {}", owner.0)),
+                "{reason}"
+            );
+            assert!(reason.contains(&stranger.0.to_string()), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257: a caller whose session cannot be established is refused, naming why —
+// never read as the owner and never as "someone else".
+#[test]
+fn an_unestablished_caller_is_refused_on_a_live_record_8257() {
+    let (state, _owner) = live_owned("a-anon");
+    for (raw, want) in [
+        (None, "CLAUDE_CODE_SESSION_ID"),
+        (Some("not-a-uuid"), "is not a session id"),
+    ] {
+        let outcome =
+            repair_delegation_as(&state, "a-anon", true, &RepairCaller::from_request(raw));
+        match outcome {
+            RepairOutcome::Refused { reason } => {
+                assert!(reason.contains("could not be established"), "{reason}");
+                assert!(reason.contains(want), "{reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 owner ruling: live evidence still binds the owner. A harness lock
+// naming the agent, whose pid runs with the lock's start time, refuses.
+#[test]
+fn the_owner_is_refused_while_a_harness_lock_names_its_agent_8257() {
+    use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+
+    let fixture = GitWorktreeFixture::new();
+    let wt = fixture.add_worktree("agent-a1b2c3");
+    let pid = std::process::id();
+    let started = {
+        let spid = sysinfo::Pid::from_u32(pid);
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[spid]), true);
+        let secs = sys.process(spid).expect("this process").start_time();
+        chrono::DateTime::from_timestamp(i64::try_from(secs).expect("epoch"), 0)
+            .expect("timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%a %b %e %H:%M:%S %Y")
+            .to_string()
+    };
+    let lock = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fixture.repo)
+        .args(["worktree", "lock", "--reason"])
+        .arg(format!(
+            "claude agent agent-a1b2c3 (pid {pid} start {started})"
+        ))
+        .arg(&wt)
+        .status()
+        .expect("git worktree lock");
+    assert!(lock.success());
+
+    let (state, session) = state_with(Some(SessionStatus::Active));
+    let mut d = delegation(session, "a1b2c3", DelegationStatus::Running);
+    d.cwd = Some(fixture.repo.clone());
+    state.upsert_delegation(d);
+
+    let outcome = repair_delegation_as(&state, "a1b2c3", true, &RepairCaller::Session(session));
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("harness lock pid"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
 }
 
 #[test]
