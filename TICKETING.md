@@ -105,6 +105,12 @@ filing; never hand-type a title neither source printed.
 comment in the same dispatch. An issue holds many labels and exactly one
 milestone, so a workstream parked there evicts the real slot.
 
+## Bugfix release milestones
+
+Each crate with open `bug`-labelled issues has one milestone: `<crate> <version> · bugfix` (owner convention 2026-09-24). The `<version>` is the next odd patch above the crate's current version in `Cargo.toml`. An even patch goes up by 1; an odd patch goes up by 2. Examples: 1.7.2 → 1.7.3, 0.52.1 → 0.52.3, 0.13.9 → 0.13.11. The milestone description reads "Bugfix release: consolidates open bugs for <crate> (owner convention 2026-09-24)."
+
+A bug moves into the bugfix milestone only when it has no milestone or sits in a `Backlog · …` milestone. A bug already in any other milestone (epic, feature release, cross-harness) stays there; it is listed as HELD for the owner. An odd-patch release ships from its bugfix milestone.
+
 ## Projects
 
 Live projects, by number, owner `bobmatnyc`:
