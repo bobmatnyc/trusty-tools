@@ -16,7 +16,12 @@
 //! `an_empty_replacement_leaves_the_markers_adjacent_and_never_wipes_the_body`,
 //! `render_escapes_a_pipe_in_a_phase_title`,
 //! `tracker_body_links_the_plan_by_sha`, `phase_title_carries_both_numbers`,
-//! `next_phase_number_never_reuses_a_deleted_number`.
+//! `next_phase_number_never_reuses_a_deleted_number`,
+//! `state_cell_reads_closed_for_a_closed_child`,
+//! `state_cell_reads_the_status_label_of_an_open_child`,
+//! `state_cell_reads_open_for_an_unlabelled_open_child`,
+//! `phases_table_uses_the_configured_status_prefix`,
+//! `outcomes_of_folds_wrapped_continuation_lines`.
 
 use std::fmt::Write as _;
 
@@ -39,6 +44,10 @@ pub(crate) const FOLLOWUPS_END: &str = "<!-- followups:end -->";
 /// The phases table's two header rows.
 const PHASES_HEADER: &str =
     "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|";
+/// The deferred table's two header rows — what `defer` seeds into an empty
+/// block, and what `tracker_body` writes when the plan defers nothing.
+pub(crate) const DEFERRED_HEADER: &str =
+    "| Item | Why deferred | Where it went |\n|------|--------------|---------------|";
 
 /// Why a body cannot be rewritten.
 ///
@@ -145,6 +154,33 @@ pub(crate) fn replace_block(
     Ok(out)
 }
 
+/// The lines between two marker lines, exclusive, under the same refusal set
+/// as [`replace_block`].
+///
+/// Why: `defer` AMENDS its block rather than regenerating it, so it needs the
+/// current rows back before it can append one — and it must refuse on exactly
+/// the bodies `replace_block` refuses, or the read would succeed on a body the
+/// write then rejects.
+/// What: the segments strictly between the sole `start` and the sole `end`,
+/// joined verbatim, with no trailing newline.
+/// Test: `defer_appends_exactly_one_row`.
+pub(crate) fn block_content(
+    body: &str,
+    start: &'static str,
+    end: &'static str,
+) -> Result<String, BlockError> {
+    let segments: Vec<&str> = body.split_inclusive('\n').collect();
+    let start_idx = sole_index(&segments, start)?;
+    let end_idx = sole_index(&segments, end)?;
+    if end_idx < start_idx {
+        return Err(BlockError::Inverted { start, end });
+    }
+    Ok(segments[start_idx + 1..end_idx]
+        .concat()
+        .trim_end_matches('\n')
+        .to_string())
+}
+
 /// The index of the one segment equal to `marker`, or the matching refusal.
 fn sole_index(segments: &[&str], marker: &'static str) -> Result<usize, BlockError> {
     let hits: Vec<usize> = segments
@@ -208,6 +244,18 @@ pub(crate) fn phase_number_of(title: &str) -> Option<u64> {
     digits.trim().parse().ok()
 }
 
+/// The tracker number embedded in a phase title, if it carries one.
+///
+/// Why: when a transition's tracker sync cannot even read the phase's parent,
+/// the failure still has to name the tracker that is now stale, and the title
+/// is the one place that number is available without a further call (#8448).
+/// Test: `transition_hook_names_the_tracker_when_the_parent_read_fails`.
+pub(crate) fn epic_number_of(title: &str) -> Option<u64> {
+    let rest = title.trim().strip_prefix("[EPIC_")?;
+    let (digits, _) = rest.split_once(" PHASE_")?;
+    digits.trim().parse().ok()
+}
+
 /// The text after a child's `[EPIC_<n> PHASE_<m>] ` prefix.
 ///
 /// Why: `create` decides whether a plan phase already exists by comparing this
@@ -254,12 +302,13 @@ pub(crate) fn plan_permalink(repo: &str, sha: &str, path: &str) -> String {
 /// block — a row hand-edited inside the old block is discarded by construction
 /// rather than merged.
 /// What: the two header rows plus one row per child, ordered by phase number,
-/// each carrying the child's number, its lowercased state, and the `## Gate`
-/// section of its body collapsed to one line. A `|` in any cell is escaped so
-/// it cannot split the row.
+/// each carrying the child's number, its [`state_cell`] under `status_prefix`,
+/// and the `## Gate` section of its body collapsed to one line. A `|` in any
+/// cell is escaped so it cannot split the row.
 /// Test: `render_replaces_the_whole_phases_block`,
-/// `render_escapes_a_pipe_in_a_phase_title`.
-pub(crate) fn phases_table(children: &[ChildIssue]) -> String {
+/// `render_escapes_a_pipe_in_a_phase_title`,
+/// `phases_table_uses_the_configured_status_prefix`.
+pub(crate) fn phases_table(children: &[ChildIssue], status_prefix: &str) -> String {
     let mut rows: Vec<(u64, &ChildIssue)> = children
         .iter()
         .filter_map(|c| phase_number_of(&c.title).map(|n| (n, c)))
@@ -273,16 +322,111 @@ pub(crate) fn phases_table(children: &[ChildIssue]) -> String {
             "\n| {number} | {} | #{} | {} | {} |",
             cell(&phase_what(&child.title)),
             child.number,
-            cell(&child.state.to_lowercase()),
+            cell(&state_cell(child, status_prefix)),
             cell(&gate_of(&child.body))
         );
     }
     out
 }
 
+/// The State column for one child (AC6 of #8448, owner ruling 2026-09-24).
+///
+/// Why: GitHub's `OPEN`/`CLOSED` is two states, and the lifecycle between them
+/// lives in the status label — a table that showed only `open` for a phase
+/// already `coded` restated the sub-issue list GitHub renders anyway. The
+/// prefix is the model's `label_config.status_prefix` (`status:` in this repo,
+/// `unicorn:` in the crate default), never a constant: a hardcoded `status:`
+/// read `open` for every phase of a project on the default model.
+/// What: `closed` for a closed child, whatever labels it still wears. For an
+/// open child, the value of its `<status_prefix>*` label without the prefix;
+/// several such labels (a `tm issue repair` case) are joined with `/` in sorted
+/// order so the cell is deterministic; none at all reads `open`.
+/// Test: `state_cell_reads_closed_for_a_closed_child`,
+/// `state_cell_reads_the_status_label_of_an_open_child`,
+/// `state_cell_reads_open_for_an_unlabelled_open_child`,
+/// `phases_table_uses_the_configured_status_prefix`.
+pub(crate) fn state_cell(child: &ChildIssue, status_prefix: &str) -> String {
+    if child.state.eq_ignore_ascii_case("CLOSED") {
+        return "closed".to_string();
+    }
+    // #8448: the prefix comes from the state model in force, not a constant.
+    let mut states: Vec<&str> = child
+        .labels
+        .iter()
+        .filter_map(|l| l.strip_prefix(status_prefix))
+        .filter(|s| !s.is_empty())
+        .collect();
+    states.sort_unstable();
+    states.dedup();
+    if states.is_empty() {
+        "open".to_string()
+    } else {
+        states.join("/")
+    }
+}
+
 /// Escape a table cell so its content cannot split the row.
-fn cell(text: &str) -> String {
+pub(crate) fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
+}
+
+/// The outcomes a tracker body declares: `(id, text)` for each `- **O<n>** …`
+/// line under `## Outcomes`.
+///
+/// Why: `close` posts one line per outcome, so the outcomes are read back from
+/// the tracker rather than from the plan document — a tracker whose outcomes
+/// were edited on the issue closes against the edited set.
+/// What: scans the lines under `## Outcomes` up to the next `## ` heading and
+/// keeps those shaped `- **O<digits>** <text>`; the id is `O<digits>`. A
+/// wrapped outcome — the shape the live #8445 body has, with every line after
+/// the first indented — is folded into one text, single-space joined; the fold
+/// stops at a blank line, a new `- ` item, or a heading.
+/// Test: `close_posts_one_line_per_declared_outcome`,
+/// `close_refuses_a_tracker_that_declares_no_outcomes`,
+/// `outcomes_of_folds_wrapped_continuation_lines`.
+pub(crate) fn outcomes_of(body: &str) -> Vec<(String, String)> {
+    let mut inside = false;
+    let mut out: Vec<(String, String)> = Vec::new();
+    // Whether the last pushed outcome is still open for continuation lines.
+    let mut folding = false;
+    for line in body.lines() {
+        if line.trim_end() == "## Outcomes" {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            folding = false;
+            continue;
+        }
+        // #8448: a continuation line of a wrapped outcome, not a new item.
+        if folding && !trimmed.starts_with("- ") && line.starts_with(char::is_whitespace) {
+            if let Some((_, text)) = out.last_mut() {
+                text.push(' ');
+                text.push_str(trimmed);
+            }
+            continue;
+        }
+        folding = false;
+        let Some(rest) = trimmed.strip_prefix("- **O") else {
+            continue;
+        };
+        let Some((digits, text)) = rest.split_once("**") else {
+            continue;
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        out.push((format!("O{digits}"), text.trim().to_string()));
+        folding = true;
+    }
+    out
 }
 
 /// The one-line gate a phase issue's `## Gate` section declares.
@@ -351,9 +495,7 @@ pub(crate) fn tracker_body(plan: &EpicPlan, plan_url: &str) -> String {
     );
     let _ = writeln!(out, "\n## Deferred\n\n{DEFERRED_START}");
     if plan.deferred.is_empty() {
-        out.push_str(
-            "| Item | Why deferred | Where it went |\n|------|--------------|---------------|\n",
-        );
+        let _ = writeln!(out, "{DEFERRED_HEADER}");
     } else {
         push_block(&mut out, &plan.deferred);
     }

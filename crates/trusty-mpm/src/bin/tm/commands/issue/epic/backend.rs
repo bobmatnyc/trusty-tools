@@ -22,7 +22,11 @@
 //! `gh_backend_finds_a_placeholder_titled_tracker`,
 //! `gh_backend_reads_an_issues_comment_bodies`,
 //! `gh_backend_refuses_a_full_page_rather_than_reporting_no_tracker`,
-//! `gh_backend_reports_an_absent_plan_doc_as_none` in `tests.rs`.
+//! `gh_backend_reports_an_absent_plan_doc_as_none`,
+//! `gh_backend_reads_a_childs_labels_with_its_body`,
+//! `gh_backend_reads_a_parent_and_its_absence`,
+//! `gh_backend_refuses_a_parent_read_with_no_parent_key`,
+//! `gh_backend_refuses_a_full_phase_title_page` in `tests.rs`.
 
 use serde::Deserialize;
 
@@ -68,9 +72,11 @@ pub(crate) struct NewIssue {
 ///
 /// Why: the `phases` block is rendered from live child state, so the row's
 /// number, state and gate all come from the child itself.
-/// What: the number, title, `OPEN`/`CLOSED` state, and body (whose `## Gate`
-/// section fills the table's Gate column).
-/// Test: `gh_backend_parses_the_sub_issue_connection`.
+/// What: the number, title, `OPEN`/`CLOSED` state, label names (whose
+/// `status:*` member fills the State column, #8448) and body (whose `## Gate`
+/// section fills the Gate column).
+/// Test: `gh_backend_parses_the_sub_issue_connection`,
+/// `gh_backend_reads_a_childs_labels_with_its_body`.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildIssue {
     /// The child's issue number.
@@ -79,8 +85,25 @@ pub(crate) struct ChildIssue {
     pub(crate) title: String,
     /// `OPEN` or `CLOSED`, as gh reports it.
     pub(crate) state: String,
+    /// The child's label names; the `status:*` one is its lifecycle state.
+    pub(crate) labels: Vec<String>,
     /// The child's body, read for its `## Gate` section.
     pub(crate) body: String,
+}
+
+/// An issue whose title names an epic's phases, wherever it sits.
+///
+/// Why: `tm issue audit` checks that every `[EPIC_<n> PHASE_<m>]`-titled issue
+/// is a native sub-issue of tracker `n`. The candidates come from a title
+/// search, so this is the number and title only — linkage is decided by
+/// comparing against the tracker's own sub-issue set, never trusted from here.
+/// Test: `audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhaseCandidate {
+    /// The issue number.
+    pub(crate) number: u64,
+    /// The issue title.
+    pub(crate) title: String,
 }
 
 /// Everything `tm issue epic` asks of GitHub and git.
@@ -90,7 +113,7 @@ pub(crate) struct ChildIssue {
 /// only its third call is the only way to test that an interrupted run leaves
 /// no placeholder title and that a failed body write changes nothing.
 /// What: two `git` reads that establish the plan document's publish state, and
-/// eight `gh` operations. Contract for every implementor: a call that did not
+/// eleven `gh` operations. Contract for every implementor: a call that did not
 /// do what it says returns `Err`. No method may report success on an empty
 /// result — [`EpicBackend::set_body`] in particular must refuse an empty body,
 /// which is the failure that wiped
@@ -152,6 +175,23 @@ pub(crate) trait EpicBackend {
 
     /// Post a comment on an issue.
     fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()>;
+
+    /// The number of the issue `issue` is a native sub-issue of, if any.
+    ///
+    /// Contract: `Ok(None)` means the issue itself was read and reports no
+    /// parent. A read that did not reach the issue is `Err` (#8448 AC1 — the
+    /// transition hook cannot tell "no tracker" from "could not look").
+    fn parent(&self, issue: u64) -> anyhow::Result<Option<u64>>;
+
+    /// Close an issue.
+    fn close_issue(&self, issue: u64) -> anyhow::Result<()>;
+
+    /// Every issue, open or closed, whose title names a phase of `epic`.
+    ///
+    /// Contract: the result is the enumerated candidate set; an implementation
+    /// that cannot rule out a truncated listing returns `Err`, never a short
+    /// `Ok` — a missing candidate would let an unlinked phase pass the audit.
+    fn phase_titled_issues(&self, epic: u64) -> anyhow::Result<Vec<PhaseCandidate>>;
 }
 
 /// A tracker the lookup matched, and which of the two title forms it wore.
@@ -222,6 +262,62 @@ struct BodyOnly {
     body: String,
 }
 
+/// `{"body": "...", "labels": [{"name": "..."}]}` — the per-child read.
+///
+/// #8448: one call serves both columns; the label list rides on the body read
+/// `children` already makes, so the State column costs no extra round trip.
+#[derive(Debug, Deserialize)]
+struct BodyAndLabels {
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    labels: Vec<LabelName>,
+}
+
+/// One `{"name": "..."}` label object.
+#[derive(Debug, Deserialize)]
+struct LabelName {
+    #[serde(default)]
+    name: String,
+}
+
+/// `{"parent": {"number": N} | null}` — the single-field parent read.
+///
+/// #8448: the key is REQUIRED. A real `--json parent` answer always carries it
+/// (`null` when there is no parent), so a document without it is not that
+/// answer — and reading it as "no parent" would make the transition hook skip
+/// a sync. serde treats a bare `Option` field as implicitly optional even
+/// without `#[serde(default)]`; routing it through `deserialize_with` is what
+/// turns the missing key into an error.
+/// Test: `gh_backend_refuses_a_parent_read_with_no_parent_key`,
+/// `gh_backend_reads_a_parent_and_its_absence`.
+#[derive(Debug, Deserialize)]
+struct ParentOnly {
+    #[serde(deserialize_with = "required_nullable")]
+    parent: Option<ParentRef>,
+}
+
+/// Deserialize a key that must be present but may be `null`.
+///
+/// Why: serde's derive skips a missing `Option` field silently unless the
+/// field carries `deserialize_with`, and `parent: null` and no `parent` key
+/// mean different things here — see [`ParentOnly`].
+/// Test: `gh_backend_refuses_a_parent_read_with_no_parent_key`.
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// The `number` of a parent object.
+#[derive(Debug, Deserialize)]
+struct ParentRef {
+    #[serde(default)]
+    number: u64,
+}
+
 /// `{"comments": [{"body": "..."}]}` — the same field `core::issue_audit`
 /// already fetches for its `no-milestone:` / `no-component-label:` hatches.
 #[derive(Debug, Deserialize)]
@@ -257,6 +353,12 @@ impl<R: CommandRunner> GhEpicBackend<R> {
     /// Construct a backend over the given runner.
     pub(crate) fn new(runner: R) -> Self {
         Self { runner }
+    }
+
+    /// Borrow the runner so a test can assert what reached `gh`.
+    #[cfg(test)]
+    pub(crate) fn runner(&self) -> &R {
+        &self.runner
     }
 
     /// Every sub-issue of `tracker`, through the paginated REST endpoint.
@@ -417,12 +519,20 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
         for node in nodes {
             // Fail-closed: a child whose body cannot be read would render a
             // blank Gate column, and the Gate is what justifies the pattern.
-            let body = self.body(node.number)?;
+            let n = node.number.to_string();
+            let out = self
+                .runner
+                .run("gh", &["issue", "view", &n, "--json", "body,labels"])?;
+            let text = out.ok_or_stderr("gh issue view --json body,labels")?;
+            let detail: BodyAndLabels = serde_json::from_str(&text).map_err(|e| {
+                anyhow::anyhow!("failed to parse `gh issue view` for child #{n}: {e}")
+            })?;
             children.push(ChildIssue {
                 number: node.number,
                 title: node.title,
                 state: node.state,
-                body,
+                labels: detail.labels.into_iter().map(|l| l.name).collect(),
+                body: detail.body,
             });
         }
         Ok(children)
@@ -545,6 +655,68 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
             .run("gh", &["issue", "comment", &n, "--body", body])?
             .ok_or_stderr("gh issue comment")?;
         Ok(())
+    }
+
+    fn parent(&self, issue: u64) -> anyhow::Result<Option<u64>> {
+        let n = issue.to_string();
+        let out = self
+            .runner
+            .run("gh", &["issue", "view", &n, "--json", "parent"])?;
+        let text = out.ok_or_stderr("gh issue view --json parent")?;
+        let parsed: ParentOnly = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("failed to parse the parent of #{issue}: {e}"))?;
+        Ok(parsed.parent.map(|p| p.number).filter(|n| *n != 0))
+    }
+
+    fn close_issue(&self, issue: u64) -> anyhow::Result<()> {
+        let n = issue.to_string();
+        self.runner
+            .run("gh", &["issue", "close", &n])?
+            .ok_or_stderr("gh issue close")?;
+        Ok(())
+    }
+
+    fn phase_titled_issues(&self, epic: u64) -> anyhow::Result<Vec<PhaseCandidate>> {
+        // #8448: the audit's set row asks "is every phase-titled issue linked?",
+        // and the candidates can sit anywhere in the repository, so a title
+        // search is the only bounded enumeration. `in:title "<prefix>"` was
+        // verified against gh 2.96 to return exactly the `[EPIC_<n> PHASE_…]`
+        // issues. The index is eventually consistent, so the row's PASS says
+        // how many candidates it saw; a FULL page is an error rather than a
+        // verdict, for the same reason `find_tracker` refuses one.
+        let query = format!("in:title \"EPIC_{epic} PHASE_\"");
+        let out = self.runner.run(
+            "gh",
+            &[
+                "issue",
+                "list",
+                "--state",
+                "all",
+                "--limit",
+                TRACKER_LIST_LIMIT,
+                "--search",
+                &query,
+                "--json",
+                "number,title",
+            ],
+        )?;
+        let text = out.ok_or_stderr("gh issue list --search")?;
+        let rows: Vec<IssueRow> = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("failed to parse `gh issue list` JSON: {e}"))?;
+        if rows.len() >= TRACKER_LIST_LIMIT_N {
+            anyhow::bail!(
+                "`gh issue list` returned a full page of {TRACKER_LIST_LIMIT_N} issues titled \
+                 for epic #{epic}, so a phase may have been cut off — cannot prove every \
+                 phase-titled issue is linked"
+            );
+        }
+        Ok(rows
+            .into_iter()
+            .map(|r| PhaseCandidate {
+                number: r.number,
+                title: r.title,
+            })
+            .collect())
     }
 }
 

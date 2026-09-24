@@ -221,7 +221,7 @@ Every issue body and every comment ends with the attribution line below.
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
 | `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>` |
 | `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |
-| `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed |
+| `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed, a phase's status label changes (`tm issue transition` on a phase regenerates the block itself, #8448) |
 | `research_docs_path` | `docs/research/<effort>/` — trackers link to the doc; no issue body carries findings |
 | `component_unit` | Cargo crate (`crates/<name>/`) |
 | `followups.budget_per_phase` | `2` |
@@ -259,9 +259,11 @@ the next starts. No gate means no tracker; one issue with a task list costs less
   amended deliberately. **Nothing outside the markers is ever touched.**
 - The `Gate` column is what justifies using the pattern at all. An empty
   Ordering section means the work did not need it.
-- Four update triggers, and only these: a phase opens, a phase closes, a phase
-  blocks or unblocks, an item is deferred or a deferred item lands. Not on PR
-  open, merge, commit, or review.
+- Five update triggers, and only these: a phase opens, a phase closes, a phase
+  blocks or unblocks, an item is deferred or a deferred item lands, a phase's
+  `status:*` label changes (the block's State cell shows it; `tm issue
+  transition` on a phase regenerates the block as a side effect, #8448). Not
+  on PR open, merge, commit, or review.
 - Phase numbers are assigned once, never renumbered, never reused. A phase
   inserted later between 2 and 3 is `PHASE_6`; the table says where it runs.
 - The tracker closes when every phase is closed and each outcome is verified,

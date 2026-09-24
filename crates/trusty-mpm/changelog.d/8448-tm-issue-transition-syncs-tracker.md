@@ -1,0 +1,3 @@
+Changed
+- `tm issue transition` on a `[EPIC_<n> PHASE_<m>]`-titled issue regenerates its parent tracker's `phases` block after the label moves — a no-op transition included, so re-running the command after a killed or failed sync repairs the tracker instead of exiting 0 over a stale one (the sync writes nothing when the block is already current). A failed regeneration fails the command and names the stale tracker and the `tm issue epic sync <n>` repair; a non-phase title costs no extra call, and a phase with no parent costs one parent read and no tracker read or write (#8448).
+- `tm issue audit`, `tm issue epic create` and `tm issue epic sync` load the issue state model the way `tm issue transition` does, for its `label_config.status_prefix` (#8448).
