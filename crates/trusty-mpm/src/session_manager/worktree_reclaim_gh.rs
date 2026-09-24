@@ -272,22 +272,22 @@ pub(crate) fn resolve_daemon_gh_env_in(
 ) -> Result<GhEnv, GhFailure> {
     let origin = slug_as_url(origin);
     let config = TrustyToolsConfig::load();
-    // #8510: an account-only registry pin may borrow the static binding's dir
-    // or tm's own `gh-accounts/<login>` — only once `gh` proves it selects it.
+    // #8510: an account-only registry pin uses a candidate token only once
+    // `GET /user` proves it is the pinned account's.
     let sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
         &config,
         &origin,
         crate::core::paths::FrameworkPaths::default().root,
+        crate::core::gh_account::gh_config_dir(),
     );
-    let probe = crate::core::gh_account_dir::CliTokenProbe;
+    let prover = crate::core::gh_account_proof::AccountProver {
+        sources: &sources,
+        probe: &crate::core::gh_account_proof::CliTokenProbe,
+        check: &crate::core::gh_account_proof::HttpUserCheck,
+    };
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
-    match crate::core::gh_account_registry::pinned_gh_env_with(
-        registry_dir,
-        &origin,
-        &sources,
-        &probe,
-    ) {
+    match crate::core::gh_account_registry::pinned_gh_env_with(registry_dir, &origin, &prover) {
         Ok(Some(env)) => return Ok(env),
         Ok(None) => {}
         Err(reason) => return Err(GhFailure::new(reason)),

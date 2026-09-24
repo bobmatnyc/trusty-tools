@@ -163,6 +163,15 @@ pub struct GhEnv {
 }
 
 impl GhEnv {
+    /// A binding that sets `vars` and clears every other inherited identity
+    /// var, for an identity no `GithubConfig` expresses — a token `GET /user`
+    /// proved (#8510).
+    /// Test: `an_account_only_pin_uses_a_token_proven_under_the_static_dir`.
+    pub(crate) fn from_identity_vars(vars: Vec<(String, String)>) -> Self {
+        let unset = inherited_identity_to_clear(&vars);
+        Self { vars, unset }
+    }
+
     /// Borrow the resolved `(name, value)` overrides.
     ///
     /// Why: callers iterate these to call `Command::env`; tests iterate them
@@ -228,9 +237,10 @@ impl GhEnv {
     /// nothing distinguished "used no config dir at all" from "used the wrong
     /// one". `GH_TOKEN`'s VALUE must never appear in a diagnostic string.
     /// What: `"no github: binding resolved …"` for an empty `GhEnv`, else the
-    /// resolved `VAR=value` pairs joined by `, `, with `GH_TOKEN`'s value
+    /// resolved `VAR=value` pairs joined by `, `, with every `*TOKEN` value
     /// redacted.
-    /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`.
+    /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`,
+    /// `describe_redacts_an_enterprise_token`.
     pub fn describe(&self) -> String {
         if self.is_empty() {
             return "no github: binding resolved — gh inherits the daemon's ambient \
@@ -242,7 +252,8 @@ impl GhEnv {
         self.vars
             .iter()
             .map(|(k, v)| {
-                if k == ENV_GH_TOKEN {
+                // #8510: `GH_ENTERPRISE_TOKEN` carries a token too.
+                if k.ends_with("TOKEN") {
                     format!("{k}=<redacted>")
                 } else {
                     format!("{k}={v}")

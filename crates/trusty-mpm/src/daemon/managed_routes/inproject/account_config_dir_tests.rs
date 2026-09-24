@@ -159,13 +159,13 @@ fn ensure_account_config_dir_copies_config_yml_when_present() {
     let operator_dir = fake_operator_gh_config_dir(
         tmp.path(),
         TWO_ACCOUNT_HOSTS_YML,
-        Some("git_protocol: ssh\n"),
+        Some("version: \"1\"\ngit_protocol: ssh\n"),
     );
 
     let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yml")).unwrap(),
-        "git_protocol: ssh\n"
+        "version: \"1\"\ngit_protocol: ssh\n"
     );
 }
 
@@ -177,9 +177,72 @@ fn ensure_account_config_dir_tolerates_a_missing_config_yml() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
         .expect("no config.yml must not be an error");
-    assert!(!dir.join("config.yml").exists());
+}
+
+/// 🔴 #8510 HIGH: with no operator `config.yml`, the built dir still declares
+/// `version: "1"`, so gh never migrates it.
+#[test]
+fn ensure_account_config_dir_writes_the_config_version() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("config.yml")).unwrap(),
+        "version: \"1\"\n"
+    );
+    crate::core::gh_account_dir::refuse_unmigrated_config(&dir)
+        .expect("the built dir must pass the migration guard");
+}
+
+/// 🔴 #8510 HIGH: a copied operator `config.yml` with no `version` gains one;
+/// the rest of the operator's settings are kept.
+#[test]
+fn ensure_account_config_dir_adds_the_version_to_a_copied_config() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(
+        tmp.path(),
+        TWO_ACCOUNT_HOSTS_YML,
+        Some("git_protocol: ssh\n"),
+    );
+
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("config.yml")).unwrap(),
+        "version: \"1\"\ngit_protocol: ssh\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(operator_dir.join("config.yml")).unwrap(),
+        "git_protocol: ssh\n",
+        "the operator's own config.yml is never touched"
+    );
+}
+
+/// 🔴 #8510 HIGH: a dir built before the version was written gains it on
+/// reuse; its `hosts.yml` stays untouched.
+#[test]
+fn ensure_account_config_dir_adds_the_version_to_a_reused_dir() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hosts.yml"), "old-hosts").unwrap();
+    std::fs::write(dir.join("config.yml"), "git_protocol: ssh\n").unwrap();
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("config.yml")).unwrap(),
+        "version: \"1\"\ngit_protocol: ssh\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("hosts.yml")).unwrap(),
+        "old-hosts"
+    );
 }
 
 /// The exact `hosts.yml` this module writes round-trips through the real
@@ -302,6 +365,30 @@ fn ensure_account_config_dir_refuses_a_symlinked_hosts_yml() {
     let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
         .expect_err("a pre-planted symlinked hosts.yml must be refused");
     assert!(err.contains("symlink"), "{err}");
+}
+
+/// #8510: the version write must never follow a planted `config.yml` link.
+#[test]
+#[cfg(unix)]
+fn ensure_account_config_dir_refuses_a_symlinked_config_yml() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("state");
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+
+    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hosts.yml"), "built").unwrap();
+    let real_target = tmp.path().join("operator-config.yml");
+    std::fs::write(&real_target, "git_protocol: ssh\n").unwrap();
+    std::os::unix::fs::symlink(&real_target, dir.join("config.yml")).expect("create symlink");
+
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+        .expect_err("a pre-planted symlinked config.yml must be refused");
+    assert!(err.contains("symlink"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&real_target).unwrap(),
+        "git_protocol: ssh\n"
+    );
 }
 
 // -----------------------------------------------------------------------

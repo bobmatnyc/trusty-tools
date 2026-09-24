@@ -1,25 +1,22 @@
-//! Which `gh` config dir may stand in for an account-only pin (#8510).
+//! The gh config dirs an account-only pin may ask for a token (#8510).
 //!
 //! Why: a registry record can pin `gh_account` with no `github.config_dir`.
 //! #8416 put the registry ahead of the static config, so every such record
-//! refused merged-PR lookups even when a dir that selects the account exists.
-//! A dir may stand in only when it provably selects the pinned account: the
-//! `user:` line in `hosts.yml` is not proof, because `gh` falls back to the
-//! keyring's unkeyed slot for a user with no token of its own (#8510 critic,
-//! gh 2.98.0). #5851 is why the account name alone is never trusted.
+//! refused merged-PR lookups even when a config dir holding the account's
+//! token exists. A dir is only a place to ASK `gh` for a candidate token; the
+//! proof that the token is the pinned account's is a `GET /user`
+//! ([`crate::core::gh_account_proof`]). #5851 is why a name is never trusted.
 //!
-//! What: [`AccountDirSources`] lists the candidates, in order: the static
-//! config's per-origin `github.config_dir`, then tm's own
-//! `<state_root>/gh-accounts/<login>`. A candidate is borrowed only when
-//! (1) its `hosts.yml` names the pin as the ACTIVE `user:` for the origin's
-//! host, and (2) under that dir, with every token variable removed,
-//! `gh auth token --hostname <host>` and `gh auth token --hostname <host> -u
-//! <login>` both succeed and print the SAME token. Both checks are local: the
-//! file read and the keyring lookup, never a network call. The repository
-//! owner never selects the account. Every failure is a named reason that never
-//! contains a token.
+//! What: [`AccountDirSources`] lists the candidate dirs, in order: the static
+//! config's per-origin `github.config_dir`, tm's own `<state_root>/
+//! gh-accounts/<login>`, then the daemon's own gh config dir.
+//! [`refuse_unmigrated_config`] refuses a dir before `gh` ever runs in it when
+//! its `config.yml` does not declare `version: "1"`: on such a dir gh 2.98.0
+//! runs its multi-account migration, which can copy the active account's token
+//! into another account's keyring slot. [`ensure_config_version`] is the
+//! writer-side half, for tm's own dirs.
 //!
-//! Test: the `an_account_only_pin_*` arms in `gh_account_registry_tests`.
+//! Test: `gh_account_dir_tests`, `gh_account_registry_tests`.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +26,10 @@ use crate::project::record::repo_url_matches;
 /// Directory under the tm state root holding one `gh` config dir per account
 /// (#7166); the daemon's `account_config_dir` bootstrap names it from here.
 pub(crate) const GH_ACCOUNTS_DIR_NAME: &str = "gh-accounts";
+
+/// The `version` a gh config dir's `config.yml` must declare before tm runs
+/// `gh` in it (#8510). gh migrates a config that lacks it.
+pub(crate) const GH_CONFIG_VERSION: &str = "1";
 
 /// Reject a `login` that would escape or corrupt the
 /// `<state_root>/gh-accounts/<login>` join (#7166 review follow-up MEDIUM).
@@ -67,14 +68,16 @@ fn is_symlink(path: &Path) -> bool {
 
 /// tm's own `<state_root>/gh-accounts/<login>` dir, refused when unsafe.
 ///
-/// Why: the daemon's bootstrap and the #8510 borrow must apply the same
-/// refusals to the same path; a second copy would drift.
+/// Why: the daemon's bootstrap and the #8510 candidate list must apply the
+/// same refusals to the same path; a second copy would drift.
 /// What: [`reject_unsafe_login_segment`], then the join, then a refusal when
-/// the dir or its `hosts.yml` is a symlink. `is_file()` follows a link, so a
-/// symlinked `hosts.yml` would otherwise pass as "already built".
+/// the dir, its `hosts.yml` or its `config.yml` is a symlink. `is_file()`
+/// follows a link, so a symlinked file would otherwise pass as "already built",
+/// and a write through it would land outside the dir.
 /// Test: `ensure_account_config_dir_places_it_under_gh_accounts`,
 /// `ensure_account_config_dir_refuses_a_symlinked_dir`,
 /// `ensure_account_config_dir_refuses_a_symlinked_hosts_yml`,
+/// `ensure_account_config_dir_refuses_a_symlinked_config_yml`,
 /// `an_account_only_pin_refuses_a_symlinked_tm_account_dir`.
 pub(crate) fn tm_account_dir(state_root: &Path, login: &str) -> Result<PathBuf, String> {
     reject_unsafe_login_segment(login)?;
@@ -86,74 +89,117 @@ pub(crate) fn tm_account_dir(state_root: &Path, login: &str) -> Result<PathBuf, 
             dir.display()
         ));
     }
-    let hosts_yml = dir.join("hosts.yml");
-    if is_symlink(&hosts_yml) {
-        return Err(format!(
-            "{} is a symlink — refusing to use it as a per-account gh config file; remove it \
-             and retry",
-            hosts_yml.display()
-        ));
+    for file in ["hosts.yml", "config.yml"] {
+        let path = dir.join(file);
+        if is_symlink(&path) {
+            return Err(format!(
+                "{} is a symlink — refusing to use it as a per-account gh config file; remove \
+                 it and retry",
+                path.display()
+            ));
+        }
     }
     Ok(dir)
 }
 
-/// Asks `gh` which token it would use under a config dir (#8510).
-///
-/// Why: whether a dir selects an account is decided by `gh`'s keyring lookup,
-/// which a test cannot run hermetically. The trait is the seam: production
-/// runs `gh`, tests script the answers.
-/// What: `token` returns the token `gh auth token --hostname <host>` prints
-/// with `GH_CONFIG_DIR=<dir>` and every token variable removed, plus
-/// `-u <login>` when `login` is set. An `Err` must never contain a token.
-/// Test: `an_account_only_pin_refuses_a_dir_whose_login_has_no_token`.
-pub(crate) trait GhTokenProbe {
-    /// The token `gh` resolves under `dir` for `host`, optionally for `login`.
-    fn token(&self, dir: &Path, host: &str, login: Option<&str>) -> Result<String, String>;
-}
-
-/// The production [`GhTokenProbe`]: runs the real `gh auth token`.
-///
-/// Why: `gh auth token` reads the config dir and the keyring only; it makes no
-/// network call. It is bounded all the same, because a wedged `securityd`
-/// hangs it (#6867).
-/// What: [`crate::session_manager::worktree_reclaim_gh::gh_command`] rooted at
-/// `dir` with `GH_CONFIG_DIR=dir` and every inherited identity variable
-/// removed, bounded by [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`]. The
-/// failure reason carries `gh`'s exit code and stderr, never its stdout.
-/// Test: none directly (a real `gh` and keyring); the decisions it feeds are
-/// covered through scripted probes in `gh_account_registry_tests`.
-pub(crate) struct CliTokenProbe;
-
-impl GhTokenProbe for CliTokenProbe {
-    fn token(&self, dir: &Path, host: &str, login: Option<&str>) -> Result<String, String> {
-        use crate::session_manager::worktree_reclaim_gh::{gh_command, run_with_timeout};
-        let cfg = crate::core::trusty_tools_config::GithubConfig {
-            config_dir: Some(dir.to_path_buf()),
-            ..Default::default()
-        };
-        let env =
-            crate::core::gh_identity::resolve_gh_env(Some(&cfg)).map_err(|e| e.to_string())?;
-        let mut cmd = gh_command(dir, &env);
-        cmd.args(["auth", "token", "--hostname", host]);
-        if let Some(login) = login {
-            cmd.args(["-u", login]);
-        }
-        let token = run_with_timeout(cmd, crate::core::gh_account::GH_ENFORCE_TIMEOUT)
-            .map_err(|failure| failure.to_string())?;
-        let token = token.trim();
-        if token.is_empty() {
-            return Err("printed no token".to_string());
-        }
-        Ok(token.to_string())
+/// The top-level `version` a `config.yml` text declares, if any.
+fn declared_version(text: &str) -> Option<String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+    match doc.get("version")? {
+        serde_yaml::Value::String(s) => Some(s.trim().to_string()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
-/// The config dirs an account-only pin may borrow (#8510).
+/// Refuse a dir `gh` would migrate, BEFORE `gh` runs in it (#8510 HIGH).
 ///
-/// Why: see the module docs. Each candidate is verified before it is used.
+/// Why: on gh 2.98.0, any `gh` command under a config dir whose `config.yml`
+/// lacks `version` runs the multi-account migration. That migration copied the
+/// active account's token into another account's keyring slot and damaged the
+/// operator's credentials. A read-only lookup must never trigger it.
+/// What: `Ok(())` only when `<dir>/config.yml` is a regular file (not a
+/// symlink) whose top-level `version` is [`GH_CONFIG_VERSION`]. A missing,
+/// unreadable or unparsable file, a missing `version`, or any other version is
+/// a named refusal.
+/// Test: `a_candidate_without_a_config_version_is_refused_before_gh_runs`,
+/// `a_candidate_without_a_config_yml_is_refused_before_gh_runs`,
+/// `a_candidate_with_an_unknown_config_version_is_refused`.
+pub(crate) fn refuse_unmigrated_config(dir: &Path) -> Result<(), String> {
+    let path = dir.join("config.yml");
+    let refuse = |why: String| {
+        Err(format!(
+            "{why}, so gh would run its config migration there, which can overwrite a keyring \
+             slot — tm never runs gh against it"
+        ))
+    };
+    if is_symlink(&path) {
+        return refuse(format!("{} is a symlink", path.display()));
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return refuse(format!("{} could not be read ({e})", path.display())),
+    };
+    match declared_version(&text) {
+        Some(v) if v == GH_CONFIG_VERSION => Ok(()),
+        Some(v) => refuse(format!(
+            "{} declares version '{v}', not '{GH_CONFIG_VERSION}'",
+            path.display()
+        )),
+        None => refuse(format!(
+            "{} declares no `version: \"{GH_CONFIG_VERSION}\"`",
+            path.display()
+        )),
+    }
+}
+
+/// Make tm's own account dir declare `version: "1"` in `config.yml` (#8510).
+///
+/// Why: a tm-built dir with no `version` is exactly the dir gh migrates, and
+/// the `--account` clone path runs `gh` in it. Writing the version keeps gh's
+/// migration from ever running there.
+/// What: writes `version: "1"` as the whole file when `config.yml` is absent,
+/// or as a new first line when the file declares no `version`; a file that
+/// already declares one is left untouched. Refuses a symlinked `config.yml`.
+/// The file is written `0600`.
+/// Test: `ensure_account_config_dir_writes_the_config_version`,
+/// `ensure_account_config_dir_adds_the_version_to_a_copied_config`,
+/// `ensure_account_config_dir_adds_the_version_to_a_reused_dir`.
+pub(crate) fn ensure_config_version(dir: &Path) -> Result<(), String> {
+    let path = dir.join("config.yml");
+    if is_symlink(&path) {
+        return Err(format!(
+            "{} is a symlink — refusing to write through it",
+            path.display()
+        ));
+    }
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    if declared_version(&existing).is_some() {
+        return Ok(());
+    }
+    let text = format!("version: \"{GH_CONFIG_VERSION}\"\n{existing}");
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot set permissions on {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The config dirs an account-only pin may ask for a candidate token (#8510).
+///
+/// Why: see the module docs. A dir is never proof; every token it yields is
+/// checked with `GET /user` before use.
 /// What: the static config's per-project `config_dir` for this origin (the
-/// global binding is not "for this origin"), then tm's `<state_root>/
-/// gh-accounts/<login>`. `Default` names neither: the pre-#8510 refusal.
+/// global binding is not "for this origin"), tm's `<state_root>/gh-accounts/
+/// <login>`, then the daemon's own gh config dir. `Default` names none: the
+/// pre-#8510 refusal.
 /// Test: `account_dir_sources_take_only_this_origins_static_binding`.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AccountDirSources {
@@ -161,15 +207,19 @@ pub(crate) struct AccountDirSources {
     pub(crate) static_config_dir: Option<PathBuf>,
     /// tm's state root, whose `gh-accounts/<login>` is the second candidate.
     pub(crate) state_root: Option<PathBuf>,
+    /// The daemon's own gh config dir, asked with `-u <login>`.
+    pub(crate) own_config_dir: Option<PathBuf>,
 }
 
 impl AccountDirSources {
-    /// The candidates for `origin`: its static binding and tm's own account dirs.
+    /// The candidates for `origin`: its static binding, tm's own account dirs,
+    /// and the daemon's own gh config dir.
     /// Test: `account_dir_sources_take_only_this_origins_static_binding`.
     pub(crate) fn for_origin(
         config: &TrustyToolsConfig,
         origin: &str,
         state_root: PathBuf,
+        own_config_dir: Option<PathBuf>,
     ) -> Self {
         let static_config_dir = config
             .projects
@@ -180,181 +230,36 @@ impl AccountDirSources {
         Self {
             static_config_dir,
             state_root: Some(state_root),
+            own_config_dir,
         }
     }
 
-    /// The first candidate that provably selects `login` on `origin`'s host,
-    /// else every candidate's reason for refusal.
-    ///
-    /// What: the host comes from `origin`; an origin with no parsable host
-    /// refuses. A candidate must pass [`verify_active_user`] and then
-    /// [`verify_token_selects`].
-    /// Test: `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`,
-    /// `an_account_only_pin_falls_back_to_tms_own_account_dir`,
-    /// `an_account_only_pin_refuses_an_origin_with_no_host`.
-    pub(crate) fn verified_dir(
-        &self,
-        login: &str,
-        origin: &str,
-        probe: &dyn GhTokenProbe,
-    ) -> Result<PathBuf, Vec<String>> {
-        let host = origin_host(origin).map_err(|e| vec![e])?;
-        let mut candidates: Vec<Result<PathBuf, String>> =
-            self.static_config_dir.iter().cloned().map(Ok).collect();
-        if let Some(root) = &self.state_root {
-            candidates.push(tm_account_dir(root, login));
-        }
-        let mut reasons = Vec::new();
-        for candidate in candidates {
-            let verified = candidate.and_then(|dir| {
-                verify_active_user(&dir, login, &host)?;
-                verify_token_selects(&dir, login, &host, probe)?;
-                Ok(dir)
-            });
-            match verified {
-                Ok(dir) => return Ok(dir),
-                Err(reason) => reasons.push(reason),
+    /// Every candidate dir for `login`, in order, each either a path to probe
+    /// or the reason it cannot be one. A path named twice is probed once.
+    /// Test: `a_dir_named_twice_is_probed_once`.
+    pub(crate) fn candidates(&self, login: &str) -> Vec<Result<PathBuf, String>> {
+        let mut out: Vec<Result<PathBuf, String>> = Vec::new();
+        let mut push = |candidate: Result<PathBuf, String>| {
+            if let Ok(dir) = &candidate
+                && out.iter().any(|c| c.as_ref() == Ok(dir))
+            {
+                return;
             }
+            out.push(candidate);
+        };
+        if let Some(dir) = &self.static_config_dir {
+            push(Ok(dir.clone()));
         }
-        Err(reasons)
-    }
-}
-
-/// Does `dir`'s local `hosts.yml` name `login` as the ACTIVE user for `host`?
-///
-/// Why: only the active `user:` is who `gh` acts as under `GH_CONFIG_DIR=dir`,
-/// and only for the host the repository lives on (#7057 carries
-/// non-github.com hosts). A dir that merely lists the account would probe as
-/// someone else.
-/// What: `Ok(())` on a case-insensitive match (GitHub logins are); otherwise
-/// `Err` naming the dir and the failure — missing dir, unreadable or
-/// unparsable `hosts.yml`, no active user for `host`, or a different one.
-/// Test: `an_account_only_pin_refuses_a_static_dir_active_as_another_account`,
-/// `an_account_only_pin_refuses_a_dir_listing_it_but_active_as_another`,
-/// `an_account_only_pin_refuses_a_missing_candidate_dir`,
-/// `an_account_only_pin_refuses_an_unreadable_hosts_yml`,
-/// `an_account_only_pin_refuses_a_malformed_hosts_yml`,
-/// `an_account_only_pin_refuses_a_hosts_yml_with_no_active_user`,
-/// `an_account_only_pin_checks_the_origins_host_not_github_com`,
-/// `an_account_only_pin_never_resolves_from_the_repository_owner`.
-fn verify_active_user(dir: &Path, login: &str, host: &str) -> Result<(), String> {
-    if !dir.is_dir() {
-        return Err(format!("{} does not exist", dir.display()));
-    }
-    let hosts = dir.join("hosts.yml");
-    let text = std::fs::read_to_string(&hosts)
-        .map_err(|e| format!("{} could not be read ({e})", hosts.display()))?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text)
-        .map_err(|e| format!("{} did not parse ({e})", hosts.display()))?;
-    let entry = doc.get(host);
-    let active = entry
-        .and_then(|h| h.get("user"))
-        .and_then(serde_yaml::Value::as_str)
-        .map(str::trim)
-        .filter(|u| !u.is_empty());
-    match active {
-        Some(user) if user.eq_ignore_ascii_case(login) => Ok(()),
-        Some(user) => {
-            let lists = entry
-                .and_then(|h| h.get("users"))
-                .and_then(serde_yaml::Value::as_mapping)
-                .is_some_and(|users| {
-                    users
-                        .keys()
-                        .filter_map(serde_yaml::Value::as_str)
-                        .any(|k| k.trim().eq_ignore_ascii_case(login))
-                });
-            let how = if lists {
-                format!("lists '{login}' but is active on {host} as")
-            } else {
-                format!("is active on {host} as")
-            };
-            Err(format!("{} {how} '{user}'", hosts.display()))
+        if let Some(root) = &self.state_root {
+            push(tm_account_dir(root, login));
         }
-        None => Err(format!("{} names no active {host} user", hosts.display())),
+        if let Some(dir) = &self.own_config_dir {
+            push(Ok(dir.clone()));
+        }
+        out
     }
 }
 
-/// Does `gh` under `dir` actually use `login`'s own keyring token for `host`?
-///
-/// Why: the #8510 HIGH. `gh` falls back to the keyring's unkeyed slot when the
-/// active user has no token of its own, so a correct `user:` line still probes
-/// as whichever account owns that slot. `-u <login>` exits non-zero for a login
-/// with no token, and a match between the two answers proves the active
-/// credential IS the login's.
-/// What: `Ok(())` when both lookups succeed and return the same token. The two
-/// tokens are compared in memory and dropped; no reason ever includes one.
-/// Test: `an_account_only_pin_refuses_a_dir_whose_login_has_no_token`,
-/// `an_account_only_pin_refuses_a_dir_whose_tokens_differ`,
-/// `an_account_only_pin_refuses_a_dir_with_no_active_token`.
-fn verify_token_selects(
-    dir: &Path,
-    login: &str,
-    host: &str,
-    probe: &dyn GhTokenProbe,
-) -> Result<(), String> {
-    let shown = dir.display();
-    let active = probe
-        .token(dir, host, None)
-        .map_err(|e| format!("{shown}: `gh auth token --hostname {host}` failed ({e})"))?;
-    let own = probe.token(dir, host, Some(login)).map_err(|e| {
-        format!("{shown}: `gh auth token --hostname {host} -u {login}` failed ({e})")
-    })?;
-    if active != own {
-        return Err(format!(
-            "{shown}: gh's active {host} token is not '{login}''s own keyring token (it falls \
-             back to another account's credential)"
-        ));
-    }
-    Ok(())
-}
-
-/// The lowercased gh host `origin` lives on, or why it cannot be told.
-/// Test: `an_account_only_pin_refuses_an_origin_with_no_host`.
-fn origin_host(origin: &str) -> Result<String, String> {
-    trusty_common::github_path::parse_remote_url(origin)
-        .map(|remote| remote.host.to_ascii_lowercase())
-        .map_err(|e| format!("cannot tell which gh host serves it ({e})"))
-}
-
-/// The spawn fallback: `login`'s own `-u` token, once proven (#8510, PM ruling).
-///
-/// Why: gh 2.98.0 honours `gh auth token -u <login>` and exits 1 for a login
-/// with no token. The #5851 danger is a `gh` that IGNORES `-u` and prints the
-/// active account's token — and that case is detectable locally.
-/// What: under `own_config_dir` (the daemon's own gh config) with every token
-/// variable removed, `-u <login>` must exit 0 with a token. That token is
-/// proven when `login` is the active `user:` for the origin's host there, or
-/// when it DIFFERS from the plain `gh auth token --hostname <host>` answer
-/// (so `-u` selected another slot). Equal tokens for a non-active login mean
-/// `gh` ignored `-u`: refused. Tokens are compared in memory; no reason ever
-/// contains one. Spawn-only: the merged-PR lookup stays dir-only.
-/// Test: `a_spawn_pin_uses_a_u_token_that_differs_from_the_active_one`,
-/// `a_spawn_pin_uses_the_token_when_the_login_is_active`,
-/// `a_spawn_pin_refuses_a_u_token_equal_to_another_accounts`,
-/// `a_spawn_pin_refuses_when_u_exits_non_zero`,
-/// `a_spawn_pin_logs_no_token_in_any_arm`.
-pub(crate) fn proven_login_token(
-    own_config_dir: &Path,
-    login: &str,
-    origin: &str,
-    probe: &dyn GhTokenProbe,
-) -> Result<String, String> {
-    let host = origin_host(origin)?;
-    let own = probe
-        .token(own_config_dir, &host, Some(login))
-        .map_err(|e| format!("`gh auth token --hostname {host} -u {login}` failed ({e})"))?;
-    if verify_active_user(own_config_dir, login, &host).is_ok() {
-        return Ok(own);
-    }
-    let active = probe
-        .token(own_config_dir, &host, None)
-        .map_err(|e| format!("`gh auth token --hostname {host}` failed ({e}), so `-u {login}` cannot be told apart from the active account"))?;
-    if active == own {
-        return Err(format!(
-            "`gh auth token -u {login}` returned the active {host} account's token, so gh \
-             ignored `-u` (#5851)"
-        ));
-    }
-    Ok(own)
-}
+#[cfg(test)]
+#[path = "gh_account_dir_tests.rs"]
+pub(crate) mod gh_account_dir_tests;

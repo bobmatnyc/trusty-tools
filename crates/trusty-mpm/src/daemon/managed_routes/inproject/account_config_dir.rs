@@ -89,8 +89,13 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
 /// `config.yml` when the operator has one (absent is not an error — `gh`
 /// tolerates a config dir with no `config.yml`), and writes a fresh
 /// `hosts.yml` naming ONLY the canonical spelling of `login` (no token —
-/// `gh`'s credential store keys by login independently of this file).
+/// `gh`'s credential store keys by login independently of this file). Both
+/// paths leave `config.yml` declaring `version: "1"` (#8510), via
+/// [`crate::core::gh_account_dir::ensure_config_version`].
 /// Test: `ensure_account_config_dir_builds_from_operator_hosts_yml`,
+/// `ensure_account_config_dir_writes_the_config_version`,
+/// `ensure_account_config_dir_adds_the_version_to_a_copied_config`,
+/// `ensure_account_config_dir_adds_the_version_to_a_reused_dir`,
 /// `ensure_account_config_dir_refuses_an_unknown_login`,
 /// `ensure_account_config_dir_reuses_an_existing_dir_untouched`,
 /// `ensure_account_config_dir_copies_config_yml_when_present`,
@@ -106,6 +111,9 @@ pub(super) fn ensure_account_config_dir(
     let dir = crate::core::gh_account_dir::tm_account_dir(state_root, login)?;
     let hosts_yml_path = dir.join("hosts.yml");
     if hosts_yml_path.is_file() {
+        // #8510: a dir built before the version was written would make gh
+        // migrate it; `hosts.yml` itself stays untouched.
+        crate::core::gh_account_dir::ensure_config_version(&dir)?;
         return Ok(dir);
     }
 
@@ -153,6 +161,9 @@ pub(super) fn ensure_account_config_dir(
         })?;
         set_private_file_permissions(&copied_config_path)?;
     }
+    // #8510: gh migrates a config dir whose `config.yml` has no `version`, and
+    // that migration can overwrite a keyring slot. Always declare it.
+    crate::core::gh_account_dir::ensure_config_version(&dir)?;
 
     let hosts_yml = render_single_account_hosts_yml(&canonical);
     std::fs::write(&hosts_yml_path, hosts_yml)

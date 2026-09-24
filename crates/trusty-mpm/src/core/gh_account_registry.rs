@@ -32,13 +32,12 @@
 //! the survey already surfaces, so the operator reads the pinned account's name
 //! instead of a bare "no pull request found".
 //!
-//! An account pinned WITHOUT a `config_dir` never mints a token, for the #5851
-//! reason: `gh auth token -u <account>` does not discriminate between logged-in
-//! accounts on a keyring-backed host, so it would return the globally-active
-//! account's credential — the very substitution this module exists to prevent.
-//! #8510: such a pin borrows a candidate config dir only when
-//! [`crate::core::gh_account_dir`] proves the dir selects the pinned account,
-//! and fails closed when none does. The repository owner never picks the account.
+//! An account pinned WITHOUT a `config_dir` never trusts a token by name, for
+//! the #5851 reason: `gh auth token -u <account>` can return the
+//! globally-active account's credential — the very substitution this module
+//! exists to prevent. #8510: such a pin uses a candidate token only once
+//! [`crate::core::gh_account_proof`] proves it with `GET /user`, and fails
+//! closed when none is proven. The repository owner never picks the account.
 //!
 //! ## Cost
 //!
@@ -57,7 +56,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::core::gh_account_dir::{AccountDirSources, GhTokenProbe};
+#[cfg(test)]
+use crate::core::gh_account_dir::AccountDirSources;
+use crate::core::gh_account_proof::AccountProver;
 use crate::core::gh_identity::{self, GhEnv, GhIdentityError};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::record::{Project, repo_url_matches};
@@ -108,45 +109,33 @@ struct RegistrySnapshot {
 /// `an_unset_token_env_pin_fails_closed`.
 #[cfg(test)]
 pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Option<GhEnv>, String> {
-    // No candidates, so the probe is never asked.
-    let probe = crate::core::gh_account_dir::CliTokenProbe;
-    pinned_gh_env_with(registry_dir, origin, &AccountDirSources::default(), &probe)
+    // No candidates, so neither seam is ever asked.
+    let prover = AccountProver {
+        sources: &AccountDirSources::default(),
+        probe: &crate::core::gh_account_proof::CliTokenProbe,
+        check: &crate::core::gh_account_proof::HttpUserCheck,
+    };
+    pinned_gh_env_with(registry_dir, origin, &prover)
 }
 
-/// `pinned_gh_env_in` with the config dirs an account-only pin may borrow.
+/// `pinned_gh_env_in` with where an account-only pin finds a candidate token
+/// and how it proves it (#8510).
 ///
-/// Why (#8510): the production call site knows the static config and tm's
-/// state root; tests pass fixture dirs so no `$HOME` state leaks in.
+/// Why: the production call site knows the static config, tm's state root and
+/// the daemon's own gh config; tests pass fixture dirs and table fakes, so no
+/// `$HOME` state, `gh` run or network call leaks in.
 /// What: the same outcomes as `pinned_gh_env_in`, except an account-only pin
-/// resolves to the first `sources` dir that `probe` proves selects the account.
-/// Test: `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`.
+/// resolves to the first token `prover` proves with `GET /user`.
+/// Test: `an_account_only_pin_uses_a_token_proven_under_the_static_dir`.
 pub(crate) fn pinned_gh_env_with(
     registry_dir: &Path,
     origin: &str,
-    sources: &AccountDirSources,
-    probe: &dyn GhTokenProbe,
+    prover: &AccountProver<'_>,
 ) -> Result<Option<GhEnv>, String> {
     match read_pin(registry_dir, origin)? {
         None => Ok(None),
-        Some(pin) => resolve_pin(
-            &pin,
-            &Borrow {
-                origin,
-                sources,
-                probe,
-            },
-        ),
+        Some(pin) => resolve_pin(&pin, origin, prover),
     }
-}
-
-/// What an account-only pin may borrow, and how each candidate is proven (#8510).
-struct Borrow<'a> {
-    /// The repository, whose host the candidate must be active on.
-    origin: &'a str,
-    /// The candidate config dirs.
-    sources: &'a AccountDirSources,
-    /// Asks `gh` which token a candidate dir selects.
-    probe: &'a dyn GhTokenProbe,
 }
 
 /// What a registered project pins, or `None` when nothing matches.
@@ -376,18 +365,25 @@ fn disagreement(a: &str, b: &str, how: &str) -> String {
 /// What: `Ok(Some(env))` for a usable binding, `Ok(None)` when the resolved env
 /// sets neither `GH_CONFIG_DIR` nor `GH_TOKEN` (a host-only binding), `Err`
 /// otherwise. A record whose `gh_account` and `github.account` name different
-/// logins refuses. An account-only pin (no `config_dir`, no `token_env`) first
-/// borrows the dir [`AccountDirSources::verified_dir`] proves (#8510).
+/// logins refuses. An account-only pin (no `config_dir`, no `token_env`)
+/// resolves to the token `prover` proves with `GET /user`, in the token
+/// variables for its host class, or refuses naming each candidate's failure
+/// (#8510).
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
 /// `a_host_only_binding_is_not_a_pin`,
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
 /// `an_account_only_pin_fails_closed_naming_the_account`,
-/// `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`,
+/// `an_account_only_pin_uses_a_token_proven_under_the_static_dir`,
+/// `an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token`,
 /// `a_pinned_config_dir_is_never_replaced_by_a_borrowed_one`,
 /// `a_token_env_pin_never_borrows_a_config_dir`,
 /// `a_record_naming_two_accounts_fails_closed`,
 /// `an_unset_token_env_pin_fails_closed`.
-fn resolve_pin(pin: &RegistryPin, borrow: &Borrow<'_>) -> Result<Option<GhEnv>, String> {
+fn resolve_pin(
+    pin: &RegistryPin,
+    origin: &str,
+    prover: &AccountProver<'_>,
+) -> Result<Option<GhEnv>, String> {
     // #8510: `gh_account` wins `login()`, so a different `github.account` on
     // the same record would be silently ignored. Two answers is no answer.
     if let (Some(account), Some(bound)) = (
@@ -412,35 +408,31 @@ fn resolve_pin(pin: &RegistryPin, borrow: &Borrow<'_>) -> Result<Option<GhEnv>, 
     if cfg.account.is_none() {
         cfg.account = pin.account.clone();
     }
-    // #8510: ONLY an account-only pin borrows, and only a dir proven to select
-    // that account — never one picked from the repository owner.
-    let mut borrow_failures = Vec::new();
-    let mut borrowed = false;
+    // #8510: ONLY an account-only pin looks for a candidate token, and uses one
+    // only once `GET /user` proves it — never a dir, never the repo owner.
     if let Some(login) = pin.login()
         && selected_config_dir(&cfg).is_none()
         && named_token_env(&cfg).is_none()
     {
-        match borrow
-            .sources
-            .verified_dir(login, borrow.origin, borrow.probe)
-        {
-            Ok(dir) => {
-                cfg.config_dir = Some(dir);
-                borrowed = true;
+        return match prover.prove(login, origin) {
+            Ok(proven) => {
+                let mut vars = proven.identity_vars();
+                if let Some(host) = cfg.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+                    vars.push(("GH_HOST".to_string(), host.to_string()));
+                }
+                Ok(Some(GhEnv::from_identity_vars(vars)))
             }
-            Err(reasons) => borrow_failures = reasons,
-        }
+            Err(reasons) => Err(account_only_refusal(pin, login, &reasons)),
+        };
     }
     let env = match gh_identity::resolve_gh_env(Some(&cfg)) {
         Ok(env) => env,
-        // #5851: `gh auth token -u <account>` does not select an account on a
-        // keyring-backed host, so there is no safe way to honour this pin.
-        // #8510: an unset `token_env` falls through to `account` inside
+        // #5851/#8510: an unset `token_env` falls through to `account` inside
         // `resolve_gh_env`; name the binding the operator actually wrote.
         Err(GhIdentityError::AccountStrategyUnsupported(account)) => {
             return Err(match named_token_env(&cfg) {
                 Some(var) => unset_token_env_refusal(pin, var),
-                None => account_only_refusal(pin, &account, &borrow_failures),
+                None => account_only_refusal(pin, &account, &[]),
             });
         }
     };
@@ -461,9 +453,7 @@ fn resolve_pin(pin: &RegistryPin, borrow: &Borrow<'_>) -> Result<Option<GhEnv>, 
     {
         return Ok(None);
     }
-    // A borrowed dir already passed the stronger per-host token proof.
     if let Some(dir) = selected_config_dir(&cfg)
-        && !borrowed
         && !crate::core::gh_account::config_dir_has_credential(&dir)
     {
         let who = pin.who();
@@ -491,7 +481,7 @@ fn unset_token_env_refusal(pin: &RegistryPin, var: &str) -> String {
     )
 }
 
-/// The refusal for an account pin no candidate config dir verifies (#5851, #8510).
+/// The refusal for an account pin no candidate token proves (#5851, #8510).
 ///
 /// Why: the operator needs the one command that pins a dir for this record,
 /// and why each candidate was rejected, not a bare "refusing".
@@ -499,7 +489,7 @@ fn unset_token_env_refusal(pin: &RegistryPin, var: &str) -> String {
 /// `tm projects register <name> --repo-url <url> --gh-account <login>
 /// --gh-config-dir <dir>` with the record's own name and URL filled in.
 /// Test: `an_account_only_pin_fails_closed_naming_the_account`,
-/// `an_account_only_pin_refuses_a_static_dir_active_as_another_account`.
+/// `an_account_only_pin_refuses_a_token_for_another_account`.
 fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -> String {
     let (name, url) = pin
         .record
@@ -509,17 +499,16 @@ fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -
         String::new()
     } else {
         format!(
-            " No candidate gh config dir selects it: {}.",
+            " No candidate token is proven to be '{account}''s: {}.",
             failures.join("; ")
         )
     };
     format!(
         "this repository is pinned to gh account '{account}' with no `github.config_dir`, \
-         and `gh auth token -u {account}` does not discriminate between logged-in accounts \
-         on a keyring-backed host (#5851) — refusing to probe it as whichever account is \
-         globally active.{checked} Pin a gh config dir whose active user is '{account}': \
-         `tm projects register {name} --repo-url {url} --gh-account {account} \
-         --gh-config-dir <dir>` (#8510)."
+         and a gh token is used for it only once `GET /user` proves it is '{account}''s \
+         (#5851) — refusing to probe it as whichever account is globally active.{checked} \
+         Pin a gh config dir logged in as '{account}': `tm projects register {name} \
+         --repo-url {url} --gh-account {account} --gh-config-dir <dir>` (#8510)."
     )
 }
 
