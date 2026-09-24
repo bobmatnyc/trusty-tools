@@ -5045,8 +5045,9 @@ fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
 }
 
 /// Criterion 1, through the real binary: over the cap, the deny names every
-/// holder with its session and elapsed time, the cap, and the config key that
-/// sets it — not a generic string.
+/// holder with its elapsed time, the cap, and the config key that sets it —
+/// not a generic string. #8257 owner ruling: never the holder's session UUID,
+/// which the denied caller could replay as `CLAUDE_CODE_SESSION_ID`.
 #[test]
 fn pm_guard_denies_a_builder_when_the_machine_is_full() {
     let (url, _captured) = spawn_routed_mock_with_builder(
@@ -5062,10 +5063,14 @@ fn pm_guard_denies_a_builder_when_the_machine_is_full() {
         "{verdict}"
     );
     assert!(verdict.contains("rust-engineer"), "{verdict}");
-    assert!(
-        verdict.contains("11111111-1111-1111-1111-111111111111"),
-        "{verdict}"
-    );
+    for form in [
+        "11111111-1111-1111-1111-111111111111",
+        "11111111111111111111111111111111",
+        "22222222-2222-2222-2222-222222222222",
+        "22222222222222222222222222222222",
+    ] {
+        assert!(!verdict.contains(form), "{form} leaked: {verdict}");
+    }
     assert!(verdict.contains("running 12m"), "{verdict}");
     assert!(verdict.contains("local-ops"), "{verdict}");
     assert!(verdict.contains("capped at 2"), "{verdict}");

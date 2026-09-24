@@ -394,6 +394,27 @@ pub struct Delegation {
     /// possibly-live record on that clock (#2864 re-review).
     #[serde(default)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Who ended this record through `tm repair delegation`, and on what
+    /// basis (#8257). `None` for every record no operator repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<DelegationRepair>,
+}
+
+/// The audit entry a `tm repair delegation` write leaves on the record (#8257).
+///
+/// Why: the owner ruling lets a live session clear its own record on its own
+/// word, so the record must say whose word ended it and why.
+/// What: the caller's session when the daemon could establish one, the basis
+/// (e.g. `owner-attested finished (#8257)`), and when.
+/// Test: `the_owning_session_clears_its_own_live_record_8257`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationRepair {
+    /// The session that asked for the repair, when it was established.
+    pub by_session: Option<SessionId>,
+    /// Why the record was allowed to end.
+    pub reason: String,
+    /// When the repair was written (UTC).
+    pub at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Delegation {
@@ -429,6 +450,7 @@ impl Delegation {
             builder_slot_seed: None,
             started_at: None,
             ended_at: None,
+            repair: None,
         }
     }
 
@@ -474,6 +496,7 @@ impl Delegation {
             builder_slot_seed: None,
             started_at: Some(now),
             ended_at: None,
+            repair: None,
         }
     }
 }

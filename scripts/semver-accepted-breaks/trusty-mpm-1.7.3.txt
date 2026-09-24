@@ -1,9 +1,10 @@
 crate   trusty-mpm
 version 1.7.3
-reason  Owner ruling 2026-09-24 ("accepted breaks"): ship 1.7.3 through this accepted-breaks declaration rather than a major bump, per the same rationale as the 1.7.0 and 1.7.2 declarations. The break is the #7660 workspace_kept_by_design field on three public decommission structs, and #[non_exhaustive] on the same three structs (owner ruling 2026-09-24); the wire format is unchanged.
+reason  Owner ruling 2026-09-24 ("accepted breaks"): ship 1.7.3 through this accepted-breaks declaration rather than a major bump, per the same rationale as the 1.7.0 and 1.7.2 declarations. The breaks are the #7660 workspace_kept_by_design field on three public decommission structs, #[non_exhaustive] on the same three structs (owner ruling 2026-09-24), and the #8257 records field on SharedTreeWritersResponse; the wire format is unchanged for older readers.
 accept  constructible_struct_adds_field  DecommissionReport.workspace_kept_by_design
 accept  constructible_struct_adds_field  DecommissionResponse.workspace_kept_by_design
 accept  constructible_struct_adds_field  ManagedDecommissionOutcome.workspace_kept_by_design
+accept  constructible_struct_adds_field  SharedTreeWritersResponse.records
 accept  struct_marked_non_exhaustive  DecommissionReport
 accept  struct_marked_non_exhaustive  DecommissionResponse
 accept  struct_marked_non_exhaustive  ManagedDecommissionOutcome

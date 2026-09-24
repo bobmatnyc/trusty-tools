@@ -80,8 +80,8 @@ pub(crate) fn dispatch_claims_a_builder_slot(tool_name: &str, tool_input: Option
 /// Build the deny message for a dispatch the machine has no slot for.
 ///
 /// Why: a bare "denied" leaves the model guessing and it retries the identical
-/// call. The text names every current holder — agent, session, elapsed running
-/// time — so the reader can see whether a slot is about to free or whether one
+/// call. The text names every current holder — agent and elapsed running time,
+/// never its session's UUID (#8257 owner ruling) — so the reader can see whether a slot is about to free or whether one
 /// is wedged, states the cap and the key that sets it, and offers remedies that
 /// need nothing from the agents already running.
 /// What: a single-paragraph `permissionDecisionReason`. Built per call rather
@@ -206,29 +206,25 @@ fn capacity_note_in(body: &Value) -> CapacityNote {
 /// Why: the deny is built in the `tm` binary and the holders arrive as JSON, so
 /// the shape the message needs is not the daemon's struct. Keeping it here means
 /// the rendering is assertable without a daemon.
-/// What: the three fields the daemon reports. `elapsed_secs` is rendered as
-/// whole minutes, because a builder's age is only ever read at that resolution.
+/// What: the agent and elapsed time the daemon reports. `elapsed_secs` is
+/// rendered as whole minutes, because a builder's age is only ever read at that
+/// resolution. The holder's session is not read: its UUID is what a denied
+/// caller could replay as `CLAUDE_CODE_SESSION_ID` (#8257 owner ruling).
 /// Test: `deny_reason_names_every_holder_the_cap_and_the_config_key`,
-/// `holders_are_read_out_of_the_daemons_answer`.
+/// `holders_are_read_out_of_the_daemons_answer`,
+/// `denies_a_builder_when_the_machine_is_full`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HolderLine {
     /// The holding agent's name.
     pub(crate) agent: String,
-    /// The session that dispatched it.
-    pub(crate) session: String,
     /// How long it has been running, in seconds.
     pub(crate) elapsed_secs: i64,
 }
 
 impl HolderLine {
-    /// `agent (session <id>, running 12m)`.
+    /// `agent (running 12m)`.
     fn render(&self) -> String {
-        format!(
-            "{} (session {}, running {}m)",
-            self.agent,
-            self.session,
-            self.elapsed_secs / 60
-        )
+        format!("{} (running {}m)", self.agent, self.elapsed_secs / 60)
     }
 }
 
@@ -262,9 +258,8 @@ pub(crate) fn unverifiable_deny_reason(agent: &str, detail: &str) -> String {
 /// Why: the guard renders what the daemon reports rather than re-deriving it, so
 /// a holder the daemon counted is a holder the deny names.
 /// What: `holders[]` rows with an `agent`; a row missing one is skipped rather
-/// than rendered as an empty name. `session` and `elapsed_secs` default to a
-/// placeholder and `0` — a daemon too old to send them still produces a usable
-/// message.
+/// than rendered as an empty name. `elapsed_secs` defaults to `0` — a daemon
+/// too old to send it still produces a usable message.
 /// Test: `holders_are_read_out_of_the_daemons_answer`.
 fn holders_in(body: &Value) -> Vec<HolderLine> {
     body.get("holders")
@@ -274,11 +269,6 @@ fn holders_in(body: &Value) -> Vec<HolderLine> {
                 .filter_map(|row| {
                     Some(HolderLine {
                         agent: row.get("agent").and_then(Value::as_str)?.to_string(),
-                        session: row
-                            .get("session")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown")
-                            .to_string(),
                         elapsed_secs: row
                             .get("elapsed_secs")
                             .and_then(Value::as_i64)
@@ -652,12 +642,10 @@ mod tests {
         vec![
             HolderLine {
                 agent: "rust-engineer".to_string(),
-                session: "sess-a".to_string(),
                 elapsed_secs: 754,
             },
             HolderLine {
                 agent: "local-ops".to_string(),
-                session: "sess-b".to_string(),
                 elapsed_secs: 61,
             },
         ]
@@ -731,13 +719,9 @@ mod tests {
     #[test]
     fn deny_reason_names_every_holder_the_cap_and_the_config_key() {
         let reason = deny_reason("python-engineer", 2, &holders(), &CapacityNote::default());
-        // Every holder, with agent, session and elapsed time.
-        assert!(reason.contains("rust-engineer"), "{reason}");
-        assert!(reason.contains("sess-a"), "{reason}");
-        assert!(reason.contains("running 12m"), "{reason}");
-        assert!(reason.contains("local-ops"), "{reason}");
-        assert!(reason.contains("sess-b"), "{reason}");
-        assert!(reason.contains("running 1m"), "{reason}");
+        // Every holder, with agent and elapsed time.
+        assert!(reason.contains("rust-engineer (running 12m)"), "{reason}");
+        assert!(reason.contains("local-ops (running 1m)"), "{reason}");
         // The cap and the key that sets it.
         assert!(reason.contains("capped at 2"), "{reason}");
         assert!(reason.contains("builders.max_concurrent"), "{reason}");
@@ -1174,7 +1158,7 @@ mod tests {
         let url = spawn_mock_answering(
             "200 OK",
             r#"{"claimed":false,"cap":2,"holders":[
-                {"agent":"rust-engineer","session":"sess-a","elapsed_secs":600},
+                {"agent":"rust-engineer","session":"5f0e2c1a-1111-4222-8333-944445555666","elapsed_secs":600},
                 {"agent":"local-ops","session":"sess-b","elapsed_secs":120}]}"#,
         );
         let reason = evaluate_builder_against(&url)
@@ -1182,6 +1166,15 @@ mod tests {
             .expect("a full machine denies");
         assert!(reason.contains("rust-engineer"), "{reason}");
         assert!(reason.contains("local-ops"), "{reason}");
+        // #8257 owner ruling: the holder's session UUID, in either form, is a
+        // value the denied caller could replay as its own identity.
+        for form in [
+            "5f0e2c1a-1111-4222-8333-944445555666",
+            "5f0e2c1a111142228333944445555666",
+            "sess-b",
+        ] {
+            assert!(!reason.contains(form), "{form} leaked: {reason}");
+        }
         assert!(reason.contains("capped at 2"), "{reason}");
         assert!(reason.contains("builders.max_concurrent"), "{reason}");
     }

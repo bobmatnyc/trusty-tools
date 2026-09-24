@@ -127,49 +127,10 @@ use trusty_mpm::core::dispatch_isolation::{
 };
 
 use crate::commands::hook_payload::build_hook_payload;
-
-/// Build the deny message for a blocked concurrent dispatch.
-///
-/// Why: a bare "denied" leaves the model guessing and it retries the identical
-/// call. The text has to name what is already running and say why git will not
-/// catch the collision (the reader's prior is that it would). It offers exactly
-/// ONE remedy — declare isolation — because that is the only one that always
-/// works: `RUNNING_STALE_AFTER_SECS` is six hours, so a crashed subagent that
-/// never emits `SubagentStop` holds its directory for that whole window, and
-/// "wait for it to report back" would be advice to wait for something that may
-/// never happen. Built per call rather than kept as a constant because naming
-/// the actual sibling agent is most of its value.
-///
-/// #5649: the incident showed that single remedy can itself be unavailable, so
-/// the message now names a second one — serialize. Serializing and waiting are
-/// not the same offer: serializing means dispatching one file-mutating agent at
-/// a time GOING FORWARD, which needs nothing from the agent already running, so
-/// it always works. Waiting blocks on an agent that may never return, and stays
-/// excluded for exactly the reason above.
-/// What: a single-paragraph `permissionDecisionReason`.
-/// Test: `denies_a_second_concurrent_unisolated_engineer`,
-/// `deny_reason_offers_only_remedies_that_always_work`.
-fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
-    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names.dedup();
-    let running = names.join(", ");
-    format!(
-        "Concurrent shared-worktree dispatch denied (#4480): {running} is already running in \
-         {} without a worktree of its own — possibly dispatched by a different session standing \
-         in the same directory (ADR-0048) — and this {agent} dispatch would put a second \
-         file-mutating agent on the same git HEAD. Git does not catch this — a `git checkout -b` \
-         refuses only when a tracked file differs between both branches AND has an uncommitted \
-         change, so untracked files and edits the two branches agree on transfer onto the wrong \
-         branch silently, with no error at any step. Re-dispatch this agent with \
-         `isolation: \"worktree\"` so it gets its own tree. If isolation is unavailable here, \
-         serialize instead: dispatch one file-mutating agent at a time from now on. Do not \
-         hand-roll a `git worktree add` in the prompt — this guard reads the declared \
-         isolation parameter, never the prompt, so a self-made worktree still counts as \
-         sharing this HEAD (#5649).",
-        cwd.display()
-    )
-}
+// #8257: the writer-deny text lives beside this module, which is over cap.
+use crate::commands::pm_guard_dispatch_deny::{
+    blocking_records, deny_reason, granted_deny_reason, records_in,
+};
 
 /// Classify one dispatch against the set of agents already writing in this tree.
 ///
@@ -370,13 +331,13 @@ async fn claim_shared_tree_on(
         SharedTreeReply::Answered(body) => {
             let live = writers_in(&body);
             warn_on_answer(&body, &live);
-            SharedTreeClaim::Writers(live)
+            SharedTreeClaim::Writers(live, records_in(&body))
         }
         // #5923: no daemon to ask, so the guard cannot function here at all —
         // allow, but never silently.
         SharedTreeReply::Unavailable(detail) => {
             warn_guard_unavailable(&detail);
-            SharedTreeClaim::Writers(Vec::new())
+            SharedTreeClaim::Writers(Vec::new(), Vec::new())
         }
         SharedTreeReply::Unanswered(detail) => SharedTreeClaim::Unknown(detail),
     }
@@ -392,8 +353,12 @@ async fn claim_shared_tree_on(
 /// Test: `claim_is_unknown_when_the_daemon_times_out`,
 /// `claim_is_unknown_when_the_daemon_answers_500`.
 pub(crate) enum SharedTreeClaim {
-    /// The daemon answered: these agents are already writing here.
-    Writers(Vec<String>),
+    /// The daemon answered: these agents are already writing here, and (#8257)
+    /// the records behind them, for the deny text.
+    Writers(
+        Vec<String>,
+        Vec<trusty_mpm::daemon::services::delegation_records::DelegationRecordView>,
+    ),
     /// A running daemon did not answer, so whether a writer is registered here
     /// is unknown.
     Unknown(String),
@@ -639,8 +604,11 @@ pub(crate) async fn evaluate_granted_worktree(
     )
     .await
     {
-        SharedTreeClaim::Writers(live) if live.is_empty() => None,
-        SharedTreeClaim::Writers(live) => Some(granted_deny_reason(agent, cwd, &live)),
+        SharedTreeClaim::Writers(live, _) if live.is_empty() => None,
+        // #8257: the deny names each blocking record and how to clear it.
+        SharedTreeClaim::Writers(live, records) => {
+            Some(granted_deny_reason(agent, cwd, &live) + &blocking_records(cwd, &records))
+        }
         SharedTreeClaim::Unknown(detail) => Some(unanswered_grant_deny_reason(agent, cwd, &detail)),
     }
 }
@@ -673,48 +641,6 @@ fn warn_on_unrecorded_grant(body: &Value, live: &[String], cwd: &Path) {
          it. Granting anyway: this path fails open by design.",
         cwd.display()
     );
-}
-
-/// Build the deny message for a granted dispatch the checkout is not free for.
-///
-/// Why: [`deny_reason`]'s remedy is "re-dispatch with `isolation: \"worktree\"`",
-/// which reads as self-contradictory here — the guard had already built exactly
-/// that rewrite and then declined to emit it. The reason this path denies is
-/// different from #4480's: the isolation is available, but the guard cannot rely
-/// on the harness applying its `updatedInput` rewrite, and while another writer
-/// holds the checkout an unapplied rewrite is the reported harm rather than a
-/// hypothetical one.
-///
-/// The reorder this text belongs to also widens what a stale record blocks. A
-/// record nothing ever closed used to block only an unisolated dispatch;
-/// it now blocks every dispatch of a writer — and `Unknown` is a writer — from
-/// this checkout, for the six hours of `RUNNING_STALE_AFTER_SECS`. The two
-/// operator escape hatches still lift it, so that is friction rather than a
-/// lockout, and the message names the possibility so a reader can recognise it.
-/// What: names ADR-0048, the sibling the daemon reports, the directory, and the
-/// three ways forward — dispatch with explicit isolation, serialize, or report a
-/// record believed stale.
-/// Test: `granted_deny_reason_does_not_offer_the_isolation_it_already_built`.
-fn granted_deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
-    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names.dedup();
-    format!(
-        "Dispatch denied in a shared main checkout (ADR-0048): {} is a project's main checkout, \
-         and the daemon's delegation records name {} as running there with no worktree of its \
-         own — possibly dispatched by a different session standing in the same directory. This \
-         {agent} dispatch was granted a worktree of its own, but that grant is a rewrite of the \
-         dispatch's arguments and this guard cannot confirm the harness applied it; if it did \
-         not, a second file-mutating agent joins the same git HEAD, which is the reported \
-         failure — a commit landing on another workstream's branch, with no error at any step. \
-         Re-issue this dispatch with `isolation: \"worktree\"` declared explicitly, which needs \
-         no rewrite to be applied. If isolation is unavailable here, serialize instead: dispatch \
-         one file-mutating agent at a time. If you believe that record is stale — the agent \
-         finished without its stop signal reaching the daemon — say so rather than retrying, \
-         since nothing here can tell a finished agent from a running one.",
-        cwd.display(),
-        names.join(", ")
-    )
 }
 
 /// Build the deny message for a grant the daemon left unanswered (#5923).
@@ -1038,8 +964,10 @@ pub(crate) async fn evaluate_with_cwd(
     }
     let cwd = cwd?;
     match claim_shared_tree(url, session_id, &cwd, payload).await {
-        SharedTreeClaim::Writers(live) => {
+        // #8257: the deny names each blocking record and how to clear it.
+        SharedTreeClaim::Writers(live, records) => {
             evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
+                .map(|reason| reason + &blocking_records(&cwd, &records))
         }
         // #5923: a running daemon that did not answer leaves the question open,
         // and admitting on an open question is the fail-open this closes.
@@ -1079,72 +1007,6 @@ mod tests {
             assert!(reason.contains("python-engineer"), "{reason}");
             assert!(reason.contains("/repo"), "{reason}");
             assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
-        }
-    }
-
-    #[test]
-    fn deny_reason_offers_only_remedies_that_always_work() {
-        // `RUNNING_STALE_AFTER_SECS` is six hours, so a crashed subagent that
-        // never emits `SubagentStop` holds its directory for that whole window.
-        // Telling the PM to wait for it would be advice to wait for something
-        // that may never arrive; declaring isolation works immediately.
-        //
-        // #5649: serialize joins isolation as a second offered remedy, because
-        // the incident showed isolation can itself be unavailable. Serializing
-        // constrains only FUTURE dispatches and so needs nothing from the agent
-        // already running — waiting stays banned for the reason above.
-        let reason = deny_reason(
-            "rust-engineer",
-            Path::new("/repo"),
-            &["python-engineer".to_string()],
-        );
-        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
-        assert!(
-            reason.contains("serialize"),
-            "the deny must offer the serialize fallback for when isolation is unavailable: \
-             {reason}"
-        );
-        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
-            assert!(
-                !reason.contains(banned),
-                "the deny must not advise waiting on an agent that may never report \
-                 (found {banned:?}): {reason}"
-            );
-        }
-    }
-
-    #[test]
-    fn granted_deny_reason_does_not_offer_the_isolation_it_already_built() {
-        // #5769: this path denies a dispatch the guard had ALREADY rewritten to
-        // carry `isolation: "worktree"`. Reusing #4480's text told the reader to
-        // do the thing the guard had just done and declined to emit, which reads
-        // as arbitrary and gets retried identically.
-        let reason = granted_deny_reason(
-            "rust-engineer",
-            Path::new("/repo/main"),
-            &["python-engineer".to_string(), "python-engineer".to_string()],
-        );
-        assert!(reason.contains("ADR-0048"), "{reason}");
-        assert!(reason.contains("/repo/main"), "{reason}");
-        // The sibling is named once, and attributed rather than asserted.
-        assert_eq!(reason.matches("python-engineer").count(), 1, "{reason}");
-        assert!(
-            reason.contains("the daemon's delegation records name"),
-            "{reason}"
-        );
-        // It must say WHY a grant is not enough here — the rewrite may not be
-        // applied — rather than offering the grant back as the remedy.
-        assert!(
-            reason.contains("cannot confirm the harness applied it"),
-            "{reason}"
-        );
-        assert!(reason.contains("declared explicitly"), "{reason}");
-        assert!(reason.contains("serialize"), "{reason}");
-        // A stale record is the friction case the reorder widened; naming it is
-        // what lets a reader recognise it instead of retrying.
-        assert!(reason.contains("stale"), "{reason}");
-        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
-            assert!(!reason.contains(banned), "found {banned:?}: {reason}");
         }
     }
 
@@ -1290,22 +1152,6 @@ mod tests {
     }
 
     #[test]
-    fn deny_reason_dedupes_concurrent_siblings() {
-        // Two concurrent `rust-engineer`s are the realistic shape; the message
-        // must read as one name, not a repeated list.
-        let reason = deny_reason(
-            "rust-engineer",
-            Path::new("/repo"),
-            &["rust-engineer".to_string(), "rust-engineer".to_string()],
-        );
-        assert_eq!(
-            reason.matches("rust-engineer is already").count(),
-            1,
-            "{reason}"
-        );
-    }
-
-    #[test]
     fn resolve_dispatch_cwd_falls_back_to_the_payload() {
         // The process directory is the primary source; the payload covers the
         // case where `current_dir()` failed.
@@ -1400,7 +1246,7 @@ mod tests {
     /// allows — so it must be loud rather than compared as equal.
     fn writers_of(claim: SharedTreeClaim) -> Vec<String> {
         match claim {
-            SharedTreeClaim::Writers(live) => live,
+            SharedTreeClaim::Writers(live, _) => live,
             SharedTreeClaim::Unknown(detail) => {
                 panic!("expected an answered claim, got Unknown({detail})")
             }
