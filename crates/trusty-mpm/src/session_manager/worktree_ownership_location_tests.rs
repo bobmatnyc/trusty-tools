@@ -400,3 +400,50 @@ fn identical_bytes_from_a_concurrent_migration_settle_cleanly() {
         "a temp copy was left behind"
     );
 }
+
+/// Round 3 finding (#8511): a dangling `gitdir:` never clears, so the
+/// tolerant `read_sentinel_owner` path and every candidate in the orphan
+/// sweep hit `AdminLocation::Unresolvable` on every read. A `warn!` there
+/// reproduces #4323's 208k-lines/day per-candidate log; the per-read event
+/// must stay below WARN no matter how many times the tree is read.
+#[test]
+fn repeated_reads_of_an_unresolvable_gitdir_emit_no_warning() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let fx = GitWorktreeFixture::new();
+    let parked = fx.repos_root.join("elsewhere");
+    let wt = fx.add_worktree_at(&parked, "dangling-gitdir-repeat");
+    write_sentinel_bytes(&wt, &agent_payload("dangling-gitdir-repeat")).expect("write");
+    let dot_git = wt.join(".git");
+    let gone = fx.repos_root.join("moved").join(".git").join("worktrees");
+    std::fs::write(
+        &dot_git,
+        format!(
+            "gitdir: {}\n",
+            gone.join("dangling-gitdir-repeat").display()
+        ),
+    )
+    .expect("rewrite .git");
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..5 {
+            assert!(matches!(
+                read_sentinel_owner_strict(&wt),
+                Err(OwnerReadError::Unreadable { .. })
+            ));
+            assert_eq!(
+                crate::session_manager::worktree_ownership::read_sentinel_owner(&wt),
+                SentinelOwner::Unknown
+            );
+        }
+    });
+    let lines = buffer.tail(64);
+    assert!(
+        !lines.iter().any(|l| l.contains("WARN")),
+        "a per-read WARN fires on an unresolvable gitdir: {lines:?}"
+    );
+}

@@ -247,8 +247,15 @@ fn read_both_with(worktree: &Path, between: &dyn Fn()) -> Found {
         AdminLocation::NotGit => return legacy_read.map(|b| b.map(|b| (legacy, b))),
         AdminLocation::At(admin) => admin,
         // Round 2 finding 1: the admin marker, which wins, cannot be looked for.
+        // Round 3 finding (#8511): this runs on every read of a dangling
+        // `gitdir:` — the tolerant `read_sentinel_owner` path and every
+        // candidate in the ~60s orphan sweep — so it stays at `debug!`, not
+        // `warn!`. `migrate_with` still logs a per-tree `warn!` once per pass
+        // (see its `MarkerMigration::Failed` arm); the returned
+        // `Err(Unreadable{reason})` already carries the reason for any caller
+        // that wants to report it once.
         AdminLocation::Unresolvable(reason) => {
-            tracing::warn!(
+            tracing::debug!(
                 worktree = %worktree.display(),
                 "ownership marker: the git admin dir cannot be resolved ({reason}); owner unknown (#8511)"
             );
