@@ -20,6 +20,16 @@ github.com:
     user: bob-duetto
 ";
 
+/// `TWO_ACCOUNT_HOSTS_YML` with synthetic logins, for the #8510 tests.
+const SYNTHETIC_HOSTS_YML: &str = "\
+github.com:
+    git_protocol: https
+    users:
+        octo-other:
+        octo-pinned:
+    user: octo-pinned
+";
+
 /// Build a fake operator gh config dir (`hosts.yml` + optional `config.yml`)
 /// under `root`, returning its path.
 fn fake_operator_gh_config_dir(
@@ -175,7 +185,7 @@ fn ensure_account_config_dir_copies_config_yml_when_present() {
 fn ensure_account_config_dir_tolerates_a_missing_config_yml() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let state_root = tmp.path().join("state");
-    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), SYNTHETIC_HOSTS_YML, None);
 
     ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned")
         .expect("no config.yml must not be an error");
@@ -187,7 +197,7 @@ fn ensure_account_config_dir_tolerates_a_missing_config_yml() {
 fn ensure_account_config_dir_writes_the_config_version() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let state_root = tmp.path().join("state");
-    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), SYNTHETIC_HOSTS_YML, None);
 
     let dir = ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
@@ -204,11 +214,8 @@ fn ensure_account_config_dir_writes_the_config_version() {
 fn ensure_account_config_dir_adds_the_version_to_a_copied_config() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let state_root = tmp.path().join("state");
-    let operator_dir = fake_operator_gh_config_dir(
-        tmp.path(),
-        TWO_ACCOUNT_HOSTS_YML,
-        Some("git_protocol: ssh\n"),
-    );
+    let operator_dir =
+        fake_operator_gh_config_dir(tmp.path(), SYNTHETIC_HOSTS_YML, Some("git_protocol: ssh\n"));
 
     let dir = ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
@@ -232,7 +239,7 @@ fn ensure_account_config_dir_adds_the_version_to_a_reused_dir() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hosts.yml"), "old-hosts").unwrap();
     std::fs::write(dir.join("config.yml"), "git_protocol: ssh\n").unwrap();
-    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), SYNTHETIC_HOSTS_YML, None);
 
     ensure_account_config_dir(&state_root, &operator_dir, "octo-pinned").unwrap();
     assert_eq!(
@@ -373,7 +380,7 @@ fn ensure_account_config_dir_refuses_a_symlinked_hosts_yml() {
 fn ensure_account_config_dir_refuses_a_symlinked_config_yml() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let state_root = tmp.path().join("state");
-    let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
+    let operator_dir = fake_operator_gh_config_dir(tmp.path(), SYNTHETIC_HOSTS_YML, None);
 
     let dir = state_root.join("gh-accounts").join("octo-pinned");
     std::fs::create_dir_all(&dir).unwrap();
