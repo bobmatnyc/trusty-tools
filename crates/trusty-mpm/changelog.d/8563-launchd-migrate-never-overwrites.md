@@ -1,0 +1,4 @@
+Fixed
+- `tm doctor --fix` no longer overwrites a credential already in the store when it migrates a LaunchAgent plist value (#8563). A store holding the same value counts as imported with no write; a store holding a different value (for example a key the operator already rotated) is left alone, and that plist key stays in place with the reason printed. A store that cannot be read before the write fails closed: no write, no strip. The dry run runs the same check and names the same keys.
+- A step that rewrites a plist now says the running daemon keeps its old environment until `launchctl bootout gui/$(id -u)/<label>` and `launchctl bootstrap gui/$(id -u) <plist>` run, and that `launchctl kickstart -k` does not reload it (#8563).
+- The `launchd_secrets` row points at `tm doctor --fix-launchd-secrets --yes` instead of the machine-wide `tm doctor --fix --yes` (#8563).

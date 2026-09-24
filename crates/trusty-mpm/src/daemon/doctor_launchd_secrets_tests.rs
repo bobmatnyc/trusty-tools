@@ -251,6 +251,13 @@ fn row_fails_and_names_the_key_not_the_value() {
         row.message
     );
     assert!(row.message.contains("ROTATE"), "{}", row.message);
+    // #8563: point at the scoped repair, not the machine-wide `--fix` sweep.
+    assert!(
+        row.message
+            .contains("Run `tm doctor --fix-launchd-secrets --yes`"),
+        "{}",
+        row.message
+    );
     assert_value_never_echoed(&row.message);
 }
 

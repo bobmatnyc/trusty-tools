@@ -7,7 +7,8 @@
 //! Test: `activity_no_key_returns_raw_pane` in tests/session_manager_mvp.rs;
 //! `handler_activity_cache_hit`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Path as AxumPath, State},
@@ -15,6 +16,7 @@ use axum::{
 };
 use serde::Serialize;
 use tracing::warn;
+use trusty_common::credentials::{SecretResolveError, resolve_env_var_bounded};
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
@@ -33,26 +35,81 @@ fn tail_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Does the resolver hold an `OPENROUTER_API_KEY` for the classifier?
+/// How long one answer to "is the classifier key present?" is reused.
 ///
-/// Why (#8236): this read used plain `std::env::var`, so once the key moved out
-/// of the LaunchAgent plist into the credential store, a daemon restart hid
-/// `classification` while the classifier itself — which resolves through the
-/// store — still ran.
-/// What: calls `resolve` (production: [`crate::secret_source::resolve_secret`],
-/// bounded by `STORE_READ_TIMEOUT`) on a blocking thread, so a slow store holds
-/// no runtime worker. A panicked resolver counts as absent — fail-closed.
-/// Test: `classifier_key_is_found_in_the_store_when_the_env_lacks_it`,
-/// `classifier_key_absent_everywhere_is_false`.
-async fn classifier_key_present<F>(resolve: F) -> bool
-where
-    F: FnOnce(&str) -> Option<String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        resolve(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_some()
-    })
-    .await
-    .unwrap_or(false)
+/// Why (#8563): the TUI polls `/activity` every second. A key added to the
+/// store shows up within this window; nothing asks the store more often.
+const KEY_PRESENCE_TTL: Duration = Duration::from_secs(30);
+
+/// The daemon-wide presence cache behind `classification`.
+static KEY_PRESENCE: KeyPresence = KeyPresence::new(KEY_PRESENCE_TTL);
+
+/// A TTL-cached answer to "does the resolver hold an `OPENROUTER_API_KEY`?".
+///
+/// Why (#8236, #8563): the route read plain `std::env::var`, so a key moved out
+/// of the LaunchAgent plist into the store hid `classification`. Resolving on
+/// every request instead cost one store read per poll and, on a host with no
+/// key, one ERROR line per poll. Cached presence was chosen over deriving the
+/// field from the classifier: the monitor caches a missing-key outcome as a
+/// plain `Unknown` verdict, and carrying the signal would add a field to the
+/// public `ActivityCheckResult` — a semver break in a security patch.
+/// What: an answer younger than `ttl` is reused; otherwise [`Self::present`]
+/// runs the probe on a blocking thread and records it.
+/// Test: `an_absent_key_logs_nothing_on_repeated_requests`,
+/// `classifier_key_is_found_in_the_store_when_the_env_lacks_it`.
+struct KeyPresence {
+    /// How long an answer stays fresh.
+    ttl: Duration,
+    /// When the last answer was taken, and what it was.
+    slot: Mutex<Option<(Instant, bool)>>,
+}
+
+impl KeyPresence {
+    const fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// The recorded answer, when it is younger than `ttl` at `now`.
+    fn cached(&self, now: Instant) -> Option<bool> {
+        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.filter(|(at, _)| now.saturating_duration_since(*at) < self.ttl)
+            .map(|(_, present)| present)
+    }
+
+    /// The cached answer, or `probe`'s, run on a blocking thread so a slow
+    /// store holds no runtime worker. A panicked probe counts as absent.
+    async fn present<F>(&self, probe: F) -> bool
+    where
+        F: FnOnce() -> bool + Send + 'static,
+    {
+        if let Some(present) = self.cached(Instant::now()) {
+            return present;
+        }
+        // The request's subscriber follows the probe onto the blocking thread.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let present = tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatch, probe)
+        })
+        .await
+        .unwrap_or(false);
+        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), present));
+        present
+    }
+}
+
+/// Does `resolve` find the classifier key? Never logs.
+///
+/// Why (#8563): an absent key is the normal state of a host without
+/// OpenRouter, not an error; [`crate::secret_source::resolve_secret`] logs it
+/// at ERROR, so this reads through the non-logging resolver instead.
+/// Test: `an_absent_key_logs_nothing_on_repeated_requests`.
+fn classifier_key_resolves(
+    resolve: impl FnOnce(&str) -> Result<String, SecretResolveError>,
+) -> bool {
+    resolve(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_ok()
 }
 
 /// Response body for GET /api/v1/sessions/managed/{id}/activity.
@@ -202,7 +259,10 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
 
     // #8236: resolve through the shared resolver, not `std::env::var`, so a key
     // migrated out of the LaunchAgent plist into the store still surfaces here.
-    let api_key_present = classifier_key_present(crate::secret_source::resolve_secret).await;
+    // #8563: cached for `KEY_PRESENCE_TTL`, and never logged per request.
+    let api_key_present = KEY_PRESENCE
+        .present(|| classifier_key_resolves(resolve_env_var_bounded))
+        .await;
     let classification = if api_key_present {
         Some(format!("{:?}", result.verdict.state).to_lowercase())
     } else {
@@ -231,21 +291,41 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
     use trusty_common::credential_registry::provider_for_env_var;
     use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 
-    use super::classifier_key_present;
+    use super::*;
 
     /// A resolver whose env tier is empty and whose store tier is `store`.
     ///
     /// Why: the host running the tests may export `OPENROUTER_API_KEY`, and the
     /// tests must neither read nor mutate the real environment or store. This
-    /// stands in for `resolve_secret` with its env tier pinned absent.
+    /// stands in for `resolve_env_var_bounded` with its env tier pinned absent.
     fn store_only_resolver(
         store: Arc<MemoryKeyStore>,
-    ) -> impl FnOnce(&str) -> Option<String> + Send + 'static {
-        move |var: &str| store.get(provider_for_env_var(var)?)
+    ) -> impl FnOnce(&str) -> Result<String, SecretResolveError> + Send + 'static {
+        move |var: &str| {
+            provider_for_env_var(var)
+                .and_then(|p| store.get(p))
+                .ok_or_else(|| SecretResolveError::Absent {
+                    var: var.to_string(),
+                })
+        }
+    }
+
+    /// Counts every WARN-or-worse event.
+    struct CountWarnings(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> Layer<S> for CountWarnings {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() <= tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Why (#8236): a key migrated from the plist into the store must still
@@ -257,15 +337,43 @@ mod tests {
         store
             .set("openrouter", "sk-test-not-real")
             .expect("memory store accepts a write");
+        let presence = KeyPresence::new(KEY_PRESENCE_TTL);
 
-        assert!(classifier_key_present(store_only_resolver(store)).await);
+        let resolve = store_only_resolver(store);
+        assert!(presence.present(|| classifier_key_resolves(resolve)).await);
     }
 
-    /// Why: absent from every tier means no `classification` — fail-closed.
+    /// Why (#8563): the TUI polls `/activity` every second. On a host without
+    /// the key, each poll resolved the key again and logged an ERROR. Repeated
+    /// requests must reach the store once per TTL and log nothing.
     /// Test: this test.
     #[tokio::test]
-    async fn classifier_key_absent_everywhere_is_false() {
+    async fn an_absent_key_logs_nothing_on_repeated_requests() {
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CountWarnings(Arc::clone(&warnings))),
+        );
         let store = Arc::new(MemoryKeyStore::new());
-        assert!(!classifier_key_present(store_only_resolver(store)).await);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let presence = KeyPresence::new(KEY_PRESENCE_TTL);
+
+        for _ in 0..5 {
+            let (store, probes) = (Arc::clone(&store), Arc::clone(&probes));
+            let present = presence
+                .present(move || {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    classifier_key_resolves(store_only_resolver(store))
+                })
+                .await;
+            assert!(!present, "an absent key is absent");
+        }
+
+        assert_eq!(probes.load(Ordering::SeqCst), 1, "one probe per TTL");
+        assert_eq!(warnings.load(Ordering::SeqCst), 0, "no per-request log");
+        assert_eq!(
+            presence.cached(Instant::now() + KEY_PRESENCE_TTL),
+            None,
+            "the answer expires, so a key added later is seen"
+        );
     }
 }

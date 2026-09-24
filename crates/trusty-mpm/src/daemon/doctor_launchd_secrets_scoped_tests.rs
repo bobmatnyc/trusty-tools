@@ -11,8 +11,6 @@ use std::sync::Arc;
 use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 
 use super::*;
-use crate::daemon::doctor_launchd_secrets::CHECK_NAME;
-use crate::daemon::doctor_launchd_secrets_repair::repair_with_store;
 
 /// The synthetic credential. Not a key; the point is that it never surfaces.
 const FAKE_KEY: &str = "sk-test-not-real";
@@ -43,12 +41,7 @@ fn run(
     store: Arc<MemoryKeyStore>,
     chmod: &dyn Fn(&Path, u32) -> std::io::Result<()>,
 ) -> Vec<RepairStep> {
-    tighten_modes(
-        repair_with_store(home, mode, store),
-        mode,
-        chmod,
-        &read_mode,
-    )
+    scoped_with(home, mode, store.as_ref(), chmod, &read_mode)
 }
 
 /// Assert no rendered step carries the value or its vendor prefix.
@@ -170,4 +163,132 @@ fn scoped_repair_output_never_carries_a_value() {
         );
         assert_no_value(&steps);
     }
+}
+
+/// Write `body` as `<home>/Library/LaunchAgents/<name>` at `mode`.
+fn install_at(home: &Path, name: &str, body: &str, mode: u32) -> PathBuf {
+    let path = home.join("Library/LaunchAgents").join(name);
+    std::fs::write(&path, body).expect("write plist");
+    set_mode(&path, mode).expect("chmod fixture");
+    path
+}
+
+/// Why (#8563): a plist the strip only partly cleaned still holds a
+/// credential, so it must be tightened too — the old `_ => {}` arm left it at
+/// `0644` while the dry run promised `0600`. The dry run and the apply name the
+/// same tightening.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_partial_strip_still_tightens_the_plist() {
+    let (home, _) = home_with_plist(0o600);
+    let path = install_at(
+        home.path(),
+        "com.trusty.mpm.plist",
+        &format!(
+            "<plist>\n<dict>\n<key>EnvironmentVariables</key>\n<dict>\n\
+             <key>OPENROUTER_API_KEY</key>\n<string>{FAKE_KEY}</string>\n\
+             <key>AWS_SECRET_ACCESS_KEY</key>\n<string>fake</string>\n</dict>\n</dict>\n</plist>\n"
+        ),
+        0o644,
+    );
+    let store = Arc::new(MemoryKeyStore::new());
+
+    let planned = run(home.path(), RepairMode::DryRun, store.clone(), &set_mode);
+    assert_eq!(planned[0].status, StepStatus::Planned);
+    assert!(
+        planned[0]
+            .what
+            .contains("leaves in place: AWS_SECRET_ACCESS_KEY"),
+        "{}",
+        planned[0].what
+    );
+    assert!(
+        planned[0].what.contains("then tighten mode 0644 to 0600"),
+        "{}",
+        planned[0].what
+    );
+    assert_eq!(read_mode(&path), Some(0o644), "a dry run must not chmod");
+
+    let steps = run(home.path(), RepairMode::Apply, store, &set_mode);
+    assert!(
+        matches!(&steps[0].status, StepStatus::Failed(why) if why.contains("AWS_SECRET_ACCESS_KEY")),
+        "a partial strip is reported as partial: {:?}",
+        steps[0].status
+    );
+    assert!(
+        steps[0].what.contains("tightened mode 0644 to 0600"),
+        "{}",
+        steps[0].what
+    );
+    assert_eq!(read_mode(&path), Some(0o600));
+    let after = std::fs::read_to_string(&path).expect("read");
+    assert!(after.contains("AWS_SECRET_ACCESS_KEY") && !after.contains("OPENROUTER_API_KEY"));
+    assert_no_value(&steps);
+}
+
+/// Why (#8563): the row WARNs on any wide trusty plist, credential or not —
+/// the supervisor plist on the owner's machine is one — so the scoped fix
+/// tightens those too, or the row never clears.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_wide_plist_without_a_credential_is_tightened() {
+    let home = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(home.path().join("Library/LaunchAgents")).expect("mkdir");
+    let path = install_at(
+        home.path(),
+        "com.trusty.supervisor.plist",
+        "<plist>\n<dict>\n<key>Label</key>\n<string>com.trusty.supervisor</string>\n\
+         </dict>\n</plist>\n",
+        0o644,
+    );
+    let store = Arc::new(MemoryKeyStore::new());
+
+    let planned = run(home.path(), RepairMode::DryRun, store.clone(), &set_mode);
+    assert_eq!(planned.len(), 1, "{planned:?}");
+    assert_eq!(planned[0].status, StepStatus::Planned);
+    assert!(planned[0].what.contains("then tighten mode 0644 to 0600"));
+    assert_eq!(read_mode(&path), Some(0o644), "a dry run must not chmod");
+
+    let steps = run(home.path(), RepairMode::Apply, store.clone(), &set_mode);
+    assert_eq!(steps[0].status, StepStatus::Applied { backup: None });
+    assert_eq!(read_mode(&path), Some(0o600));
+    assert!(
+        run(home.path(), RepairMode::Apply, store, &set_mode).is_empty(),
+        "a second run has nothing to do"
+    );
+}
+
+/// Why (#8563): `chmod` follows a symlink, so tightening one would change a
+/// file outside `~/Library/LaunchAgents`. The scan already refuses to judge a
+/// link; the tightening must leave it alone too.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_plist_is_never_chmodded() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = home.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let target = home.path().join("elsewhere.plist");
+    std::fs::write(&target, "<plist><dict/></plist>\n").expect("write target");
+    set_mode(&target, 0o644).expect("chmod target");
+    std::os::unix::fs::symlink(&target, dir.join("com.trusty.mpm.plist")).expect("symlink");
+
+    let steps = run(
+        home.path(),
+        RepairMode::Apply,
+        Arc::new(MemoryKeyStore::new()),
+        &set_mode,
+    );
+
+    assert!(
+        steps.iter().all(|s| !s.what.contains("tightened")),
+        "{steps:?}"
+    );
+    assert_eq!(
+        read_mode(&target),
+        Some(0o644),
+        "the link target was chmodded"
+    );
 }
