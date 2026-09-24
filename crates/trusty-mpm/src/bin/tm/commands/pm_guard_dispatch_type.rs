@@ -12,7 +12,9 @@
 //! 1. a bundled agent, or a harness built-in
 //!    ([`agent_known_without_roster`]);
 //! 2. an agent in any directory [`deployed_agent_dirs`] names — the same tiers
-//!    the PM's delegation roster reads — matched on the exact `name:`.
+//!    the PM's delegation roster reads — matched on the exact `name:`;
+//! 3. an agent in `<dir>/.claude/agents` for any `<dir>` between `cwd` and its
+//!    main checkout root ([`ancestor_project_tiers`]).
 //!
 //! Otherwise it returns deny text naming the defect and the fix, which depends
 //! on whether the dispatch tool can carry `isolation` at all.
@@ -31,8 +33,19 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use trusty_mpm::core::delegation_authority::{deployed_agent_dirs, scan_agents_reporting};
+#[cfg(doc)]
+use trusty_mpm::core::delegation_authority::deployed_agent_dirs;
+use trusty_mpm::core::delegation_authority::scan_agents_reporting;
 use trusty_mpm::core::dispatch_isolation::agent_known_without_roster;
+use trusty_mpm::core::project_aliases::main_checkout_root;
+
+/// Resolves the roster tiers for a directory — [`deployed_agent_dirs`] in
+/// production, a tempdir-rooted list in tests.
+///
+/// Why: `deployed_agent_dirs` reads `CLAUDE_CONFIG_DIR` and `$HOME`, and the
+/// `tm` bin target bans tests from writing either (`env_isolation_tests`), so a
+/// hermetic test injects the tiers instead.
+pub(crate) type DeployedTiers<'a> = &'a dyn Fn(&Path) -> Vec<PathBuf>;
 
 /// Deny text for a dispatch whose `subagent_type` names no known agent, or
 /// `None` when it names one.
@@ -40,21 +53,46 @@ use trusty_mpm::core::dispatch_isolation::agent_known_without_roster;
 /// Why: see the module doc. `accepts_isolation` is `false` for `Task`, which has
 /// no `isolation` parameter, so its refusal must point at the `Agent` tool
 /// instead of telling it to declare a field it cannot carry.
-/// What: resolves the deployed tiers from `cwd` and defers to
+/// What: resolves `deployed(cwd)` plus [`ancestor_project_tiers`] and defers to
 /// [`undetermined_type_refusal_in`].
-/// Test: `a_deployed_agent_is_known`, `a_name_found_nowhere_is_refused`.
+/// Test: `a_deployed_agent_is_known`, `a_name_found_nowhere_is_refused`,
+/// `a_project_agent_is_known_from_a_subdirectory_of_the_checkout`.
 pub(crate) fn undetermined_type_refusal(
     tool_input: Option<&Value>,
     cwd: &Path,
     accepts_isolation: bool,
+    deployed: DeployedTiers<'_>,
 ) -> Option<String> {
-    undetermined_type_refusal_in(tool_input, &deployed_agent_dirs(cwd), accepts_isolation)
+    let mut tiers = deployed(cwd);
+    tiers.extend(ancestor_project_tiers(cwd));
+    undetermined_type_refusal_in(tool_input, &tiers, accepts_isolation)
+}
+
+/// `<dir>/.claude/agents` for every strict ancestor of `cwd` up to and
+/// including its main checkout root.
+///
+/// Why (#8547 review): the session's Bash `cd` persists and the guard accepts
+/// any subdirectory of a checkout, while `deployed_agent_dirs(cwd)` reads only
+/// `<cwd>/.claude/agents`. A project agent was refused after `cd crates/x`.
+/// Walking up also covers a project root nested below the git root.
+/// What: empty when `cwd` is not in a main checkout. Stops at the root and never
+/// names a directory above it. Lexical, like [`main_checkout_root`].
+/// Test: `a_project_agent_is_known_from_a_subdirectory_of_the_checkout`,
+/// `an_agent_defined_above_the_checkout_root_is_refused`.
+fn ancestor_project_tiers(cwd: &Path) -> Vec<PathBuf> {
+    let Some(root) = main_checkout_root(cwd) else {
+        return Vec::new();
+    };
+    cwd.ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(&root))
+        .map(|dir| dir.join(".claude").join("agents"))
+        .collect()
 }
 
 /// [`undetermined_type_refusal`] over an explicit tier list.
 ///
-/// Why: the shipped entry point reads `CLAUDE_CONFIG_DIR` and the home
-/// directory; the fail-open cases need tiers a test controls.
+/// Why: the fail-open cases need an exact tier list a test controls.
 /// What: `None` when `subagent_type` is a known name; otherwise the deny text.
 /// Tiers are only read when the name is not bundled or built in.
 /// Test: `an_unreadable_tier_does_not_hide_the_other_tiers`,
@@ -139,6 +177,10 @@ fn deny_reason(detail: &str, accepts_isolation: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::pm_guard_worktree_grant::{WorktreeGrant, evaluate_worktree_grant_with};
+    use crate::test_support::hermetic_temp_dir;
+    use tempfile::TempDir;
+    use trusty_mpm::core::delegation_authority::deployed_agent_dirs_from;
 
     fn typed(agent: &str) -> Value {
         serde_json::json!({"subagent_type": agent, "prompt": "go"})
@@ -187,21 +229,113 @@ mod tests {
         let _ = path;
     }
 
+    /// Roster tiers rooted in `machine` rather than `CLAUDE_CONFIG_DIR` and
+    /// `$HOME`, which this target's tests may not write.
+    fn hermetic_tiers(machine: &Path) -> impl Fn(&Path) -> Vec<PathBuf> + '_ {
+        move |project| {
+            deployed_agent_dirs_from(project, Some(machine), &machine.join("home-agents"))
+        }
+    }
+
+    /// Define the agent `name` in `<dir>/.claude/agents`.
+    fn define_agent(dir: &Path, name: &str) {
+        let agents = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents).expect("mkdir agents");
+        let body = format!("---\nname: {name}\n---\n# x\n");
+        std::fs::write(agents.join(format!("{name}.md")), body).expect("write agent");
+    }
+
+    /// `<tmp>/repo` as a main checkout holding `sub/deeper`, plus an absent
+    /// `<tmp>/machine` for the managed and home tiers.
+    fn checkout() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = hermetic_temp_dir();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+        std::fs::create_dir_all(root.join("sub/deeper")).expect("mkdir sub/deeper");
+        let machine = tmp.path().join("machine");
+        (tmp, root, machine)
+    }
+
+    /// What `evaluate_worktree_grant` decides for `agent` from `cwd`.
+    fn decide(agent: &str, cwd: &Path, machine: &Path) -> Option<WorktreeGrant> {
+        evaluate_worktree_grant_with("Agent", Some(&typed(agent)), cwd, &hermetic_tiers(machine))
+    }
+
     #[test]
     fn a_deployed_agent_is_known() {
         // The critic's case: `ops` lives only in a deployed tier.
-        let project = tempfile::tempdir().expect("tempdir");
-        let agents = project.path().join(".claude/agents");
-        std::fs::create_dir_all(&agents).expect("mkdir");
-        std::fs::write(
-            agents.join("fixture-ops.md"),
-            "---\nname: fixture-ops\n---\n# x\n",
-        )
-        .expect("write agent");
+        let (_tmp, root, machine) = checkout();
+        define_agent(&root, "fixture-ops");
         let sent = typed("fixture-ops");
+        let tiers = hermetic_tiers(&machine);
         assert_eq!(
-            undetermined_type_refusal(Some(&sent), project.path(), true),
+            undetermined_type_refusal(Some(&sent), &root, true, &tiers),
             None
+        );
+    }
+
+    #[test]
+    fn a_project_agent_is_known_from_a_subdirectory_of_the_checkout() {
+        // #8547 review: the session's `cd` persists, so a project agent must stay
+        // known below the checkout root, including a nested project root (`sub`).
+        let (_tmp, root, machine) = checkout();
+        define_agent(&root, "fixture-root-agent");
+        define_agent(&root.join("sub"), "fixture-sub-agent");
+        for cwd in [root.join("sub"), root.join("sub/deeper")] {
+            for agent in ["fixture-root-agent", "fixture-sub-agent"] {
+                match decide(agent, &cwd, &machine) {
+                    Some(WorktreeGrant::Rewrite(updated)) => {
+                        assert_eq!(updated["isolation"], "worktree", "{agent}");
+                    }
+                    other => panic!("{agent} from {} got {other:?}", cwd.display()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_agent_defined_above_the_checkout_root_is_refused() {
+        // The walk stops at the checkout root and never reads above it.
+        let (tmp, root, machine) = checkout();
+        define_agent(tmp.path(), "fixture-above-root");
+        for cwd in [root.clone(), root.join("sub/deeper")] {
+            match decide("fixture-above-root", &cwd, &machine) {
+                Some(WorktreeGrant::Deny(reason)) => {
+                    assert!(reason.contains("`fixture-above-root`"), "{reason}");
+                }
+                other => panic!("from {} got {other:?}", cwd.display()),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unreadable_directory_on_the_walk_is_named_in_the_refusal() {
+        // Fail-open check: an unreadable intermediate tier never admits its own
+        // names and never hides the root's; the refusal names it.
+        let (_tmp, root, machine) = checkout();
+        define_agent(&root, "fixture-root-agent");
+        define_agent(&root.join("sub"), "fixture-sub-hidden");
+        let sub_agents = root.join("sub/.claude/agents");
+        if !deny_read(&sub_agents) {
+            restore(&sub_agents);
+            eprintln!("skipping: cannot deny read on this platform/privilege level");
+            return;
+        }
+        let deeper = root.join("sub/deeper");
+        let hidden = decide("fixture-sub-hidden", &deeper, &machine);
+        let visible = decide("fixture-root-agent", &deeper, &machine);
+        restore(&sub_agents);
+        let Some(WorktreeGrant::Deny(reason)) = hidden else {
+            panic!("an unreadable definition must not admit the name, got {hidden:?}");
+        };
+        assert!(reason.contains("roster is incomplete"), "{reason}");
+        assert!(
+            reason.contains(&sub_agents.display().to_string()),
+            "{reason}"
+        );
+        assert!(
+            matches!(visible, Some(WorktreeGrant::Rewrite(_))),
+            "{visible:?}"
         );
     }
 

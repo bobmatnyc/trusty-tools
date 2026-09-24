@@ -45,8 +45,9 @@
 //! rather than a hypothetical one. Since #8547 they are REFUSED rather than
 //! isolated: a dispatch with no usable type bypasses the roster and every
 //! guardrail keyed on an agent name, and a guessed worktree hid that from the
-//! PM. A name is known when it is bundled, deployed in any roster tier, or a
-//! Claude Code built-in; only a name none of those define is refused. The
+//! PM. A name is known when it is bundled, deployed in any roster tier or in a
+//! project `.claude/agents` between the cwd and the checkout root, or a Claude
+//! Code built-in; only a name none of those define is refused. The
 //! refusal names the missing or unknown type and the two fixes — a known name,
 //! or an explicit `isolation: "worktree"` on the `Agent` tool, which this rule
 //! leaves alone — see `pm_guard_dispatch_type`.
@@ -71,13 +72,14 @@ use std::path::Path;
 
 use serde_json::Value;
 use trusty_mpm::core::agent::is_subagent_dispatch_tool;
+use trusty_mpm::core::delegation_authority::deployed_agent_dirs;
 use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, requires_own_worktree_in_main_checkout,
 };
 use trusty_mpm::core::project_aliases::is_main_checkout;
 use trusty_mpm::project::dispatched_agent_worktree_enabled;
 
-use crate::commands::pm_guard_dispatch_type::undetermined_type_refusal;
+use crate::commands::pm_guard_dispatch_type::{DeployedTiers, undetermined_type_refusal};
 
 /// The `isolation` value granted to a dispatch that needs its own tree.
 ///
@@ -159,6 +161,20 @@ pub(crate) fn evaluate_worktree_grant(
     tool_input: Option<&Value>,
     cwd: &Path,
 ) -> Option<WorktreeGrant> {
+    evaluate_worktree_grant_with(tool_name, tool_input, cwd, &deployed_agent_dirs)
+}
+
+/// [`evaluate_worktree_grant`] with the roster tiers injected.
+///
+/// Why: `deployed_agent_dirs` reads `CLAUDE_CONFIG_DIR` and `$HOME`, which a
+/// test in this target may not write; a hermetic test passes its own tiers.
+/// Test: `a_project_agent_is_known_from_a_subdirectory_of_the_checkout`.
+pub(crate) fn evaluate_worktree_grant_with(
+    tool_name: &str,
+    tool_input: Option<&Value>,
+    cwd: &Path,
+    deployed: DeployedTiers<'_>,
+) -> Option<WorktreeGrant> {
     if !is_subagent_dispatch_tool(tool_name) {
         return None;
     }
@@ -176,7 +192,7 @@ pub(crate) fn evaluate_worktree_grant(
     }
     let accepts_isolation = tool_name == ISOLATION_AWARE_DISPATCH_TOOL;
     // #8547: refuse, never isolate, a dispatch whose type is missing or unknown.
-    if let Some(reason) = undetermined_type_refusal(tool_input, cwd, accepts_isolation) {
+    if let Some(reason) = undetermined_type_refusal(tool_input, cwd, accepts_isolation, deployed) {
         return Some(WorktreeGrant::Deny(reason));
     }
     if !accepts_isolation {
