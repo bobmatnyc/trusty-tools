@@ -1,12 +1,12 @@
 <script lang="ts">
 	/**
-	 * Why: nine products, nine install sequences, and a large shared middle.
-	 * Printing all nine at once buries the four lines a given reader needs;
+	 * Why: eight products, eight install sequences, and a large shared middle.
+	 * Printing all eight at once buries the four lines a given reader needs;
 	 * printing the shared setup inside each one repeats the tctl bootstrap and
-	 * the API-key section nine times, and a repeated instruction is one that
-	 * gets edited in eight places out of nine.
+	 * the API-key section eight times, and a repeated instruction is one that
+	 * gets edited in seven places out of eight.
 	 *
-	 * What: the shared prerequisites once, then an ARIA tablist over the nine
+	 * What: the shared prerequisites once, then an ARIA tablist over the eight
 	 * audiences with one panel each. Every panel is rendered into the
 	 * prerendered HTML and hidden with the `hidden` attribute rather than
 	 * mounted on selection, so the page ships every command as static HTML and
@@ -57,7 +57,7 @@
 		Shared prerequisites
 	</h2>
 	<p class="mt-4 max-w-3xl text-foundry-secondary">
-		Set up only what your product's roster names. Nothing here is needed by all nine, and every
+		Set up only what your product's roster names. Nothing here is needed by all eight, and every
 		audience below says which of these it wants and how badly.
 	</p>
 	<div class="mt-8 grid gap-4 sm:grid-cols-2">

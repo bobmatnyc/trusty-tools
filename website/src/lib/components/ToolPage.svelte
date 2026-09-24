@@ -7,9 +7,10 @@
 	 * `children` snippet, because the copy is the point.
 	 *
 	 * What: chrome only, all of it derived from the tool's `$lib/tools` record.
-	 * Six of the seven pages fill `children` with markdown rendered by
-	 * `$lib/flagship/content`; trusty-audit fills it with Svelte, because its
-	 * copy embeds live `CopyButton` components.
+	 * Every current flagship fills `children` with markdown rendered by
+	 * `$lib/flagship/content`. A page whose copy needs live Svelte (embedded
+	 * `CopyButton` components, say) can fill `children` directly instead —
+	 * trusty-audit did, before it moved to its own site in #8507.
 	 *
 	 * Test: `tests/build-smoke.test.ts` walks every emitted `tools/*.html`
 	 * and asserts it loads no third-party subresource.

@@ -8,10 +8,10 @@
 	 * is choosing between two tools, not reading about one.
 	 *
 	 * What: the whole migration page. Not built on `ToolPage.svelte`, for the
-	 * same reason `/tools/trusty-git-analytics/audit` is not: that component
-	 * derives its `<h1>`, source link, and single install line from a `Tool`
-	 * record, and this page is about a move between two projects rather than
-	 * about a crate. The chrome below matches it by hand.
+	 * same reason `/install` is not: that component derives its `<h1>`, source
+	 * link, and single install line from a `Tool` record, and this page is
+	 * about a move between two projects rather than about a crate. The chrome
+	 * below matches it by hand.
 	 *
 	 * Sourcing rule, inherited from `$lib/tools`: every claim was checked
 	 * against repository source, never against a README sentence.

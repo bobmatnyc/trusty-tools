@@ -236,8 +236,10 @@
 		@apply inline-block rounded-sm border border-foundry-border-strong px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-foundry-secondary;
 	}
 
-	/* Severity modifiers for the tga audit page's RED/AMBER/GREEN stamps. The
-	   badge is 11px text, so its foreground owes the 4.5:1 AA minimum for
+	/* Severity modifiers for a RED/AMBER/GREEN stamp — introduced for the
+	   `tga audit` page (#5415), which moved to its own site in #8507; the
+	   modifiers stay generic for reuse. The badge is 11px text, so its
+	   foreground owes the 4.5:1 AA minimum for
 	   normal text, not the 3:1 non-text one.
 
 	   Red and green carry the semantic token in the TEXT because both clear
@@ -257,7 +259,7 @@
 	   indexOf, so quoting it verbatim moves the slice's start onto this
 	   comment and drags these rules into it.
 
-	   Test: `tokens.test.ts`, "the tga audit severity badges" — it recomputes
+	   Test: `tokens.test.ts`, "the severity badges" — it recomputes
 	   every ratio above from the canonical tokens and asserts the threshold
 	   each rule depends on, so a token edit fails there rather than quietly
 	   falsifying this comment. */

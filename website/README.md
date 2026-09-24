@@ -202,24 +202,25 @@ tracks replacing copy-paste distribution of Foundry assets with a real package.
 
 ## The flagship tool pages
 
-`/tools/<slug>` serves seven pages. Six render their prose from markdown; one
-is still Svelte.
+`/tools/<slug>` serves five pages, all rendering their prose from markdown.
+`tga` and `trusty-audit` had the sixth and seventh — `trusty-audit`'s was the
+one still Svelte, its copy embedding live `CopyButton` components next to the
+commands an operator has to run — until both moved to their own site in
+#8507.
 
-| To change                          | Edit                                         |
-| ---------------------------------- | -------------------------------------------- |
-| What a flagship page SAYS          | `src/content/tools/<slug>.md`                |
-| Its tagline, lede, or fact cards   | `src/lib/tools.ts`                           |
-| The hero, install block, or footer | `src/lib/components/ToolPage.svelte`         |
-| The `/tools/trusty-audit` page     | `src/routes/tools/trusty-audit/+page.svelte` |
+| To change                          | Edit                                 |
+| ---------------------------------- | ------------------------------------ |
+| What a flagship page SAYS          | `src/content/tools/<slug>.md`        |
+| Its tagline, lede, or fact cards   | `src/lib/tools.ts`                   |
+| The hero, install block, or footer | `src/lib/components/ToolPage.svelte` |
 
 A crate README is not a source for any of them — nothing in the build reads one.
 
-One route serves all six: `src/routes/tools/[slug]/`, whose `entries` are the
+One route serves all five: `src/routes/tools/[slug]/`, whose `entries` are the
 markdown files themselves, so adding `src/content/tools/<slug>.md` for a slug
-already in `TOOLS` is the whole of adding a page. `trusty-audit` keeps its own
-static route, which takes precedence over `[slug]`; its copy embeds live
-`CopyButton` components next to the commands an operator has to run, and
-markdown cannot express those.
+already in `TOOLS` is the whole of adding a page. A page whose copy needs live
+Svelte can still take its own static route instead, which takes precedence
+over `[slug]` — markdown cannot express an embedded component.
 
 `src/lib/flagship/content.ts` does the rendering, through the **same**
 remark/rehype pipeline as the documentation reader below — so a table, a fenced
