@@ -140,17 +140,18 @@ pub enum ManagedError {
     #[error("session name error: {0}")]
     SessionName(#[from] SessionNameError),
 
-    /// No fallback candidate for a session's workdir exists on disk during
-    /// `resume` (#2250).
+    /// A session's resume workdir is gone during `resume` (#2250, #8551).
     ///
     /// Why: prior to #2250, `resume()`'s recreate branch handed
     /// `workspace_path` straight to tmux with no existence check — a
     /// removed/stale worktree silently rooted the recreated pane at `$HOME`,
     /// discarding the project-tier `.claude/` skills/persona/MCP config that
-    /// lives only under the real workspace. All three fallback candidates
-    /// (`last_cwd`, `workspace_path`, `cwd`) are now existence-checked by
-    /// [`super::resume_workdir::resolve_existing_workdir`]; when NONE exist,
-    /// failing loudly here beats silently spawning a pane at `$HOME`.
+    /// lives only under the real workspace.
+    /// [`super::resume_workdir::resolve_existing_workdir`] now existence-checks
+    /// every candidate. A recorded `workspace_path` decides alone: when it is
+    /// gone this error fires even if `cwd` exists (#8551). `cwd` is a candidate
+    /// only when no workspace is recorded. Failing loudly beats silently
+    /// spawning a pane at `$HOME` or in the main checkout.
     /// What: `(session_id, path)` — `path` is the most-informative candidate
     /// considered (`workspace_path` if set, else `cwd`), surfaced in the error
     /// message so the operator knows exactly which directory vanished.
@@ -893,10 +894,10 @@ impl SessionManager {
     /// supervisor) inherited that destructiveness, dropping the operator into a
     /// freshly recreated pane instead of the one they were already looking at.
     /// What: validates the session is `Stopped` or `Errored`, resolves the
-    /// workdir via [`resume_workdir::resolve_existing_workdir`] (#2250 —
-    /// existence-checks `last_cwd` → `workspace_path` → `cwd` in order,
-    /// erroring with [`ManagedError::WorkspaceMissing`] rather than handing a
-    /// stale/removed path to tmux when none remain), then branches on
+    /// workdir via [`resume_workdir::resolve_existing_workdir`] (#2250, #8551 —
+    /// a recorded workspace decides alone and `cwd` is a candidate only when
+    /// none is recorded; erroring with [`ManagedError::WorkspaceMissing`]
+    /// rather than handing a stale/removed path to tmux), then branches on
     /// [`ManagedTmuxDriver::session_exists_checked`] — a probe that cannot
     /// reach tmux refuses the resume rather than falling into the destructive
     /// recreate branch below (#5859): if the tmux SESSION is STILL
@@ -989,6 +990,7 @@ impl SessionManager {
         // on disk (#2250 — workspace_path and cwd previously were NOT, so a
         // stale/removed worktree silently rooted the recreated pane at $HOME).
         // Errors loudly via WorkspaceMissing when none of the three remain.
+        // #8551: a recorded workspace that is gone refuses; no fallback to cwd.
         let workdir = resume_workdir::resolve_existing_workdir(id, &record)
             .await?
             .to_string_lossy()

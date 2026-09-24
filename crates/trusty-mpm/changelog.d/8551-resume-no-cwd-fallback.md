@@ -1,0 +1,3 @@
+Fixed
+- Resuming a managed session whose recorded worktree is gone now refuses with the missing path named, instead of starting the session in its original `cwd`, which can be the main checkout (#8551). The refusal is the existing HTTP 422 `workspace_missing` answer, so `tm` prints the `tm session delete <id> --force` remedy. A workspace path that cannot be checked for any reason other than "not found" also refuses, naming the path. A session launched with no worktree recorded still resumes in its `cwd`.
+- Session listings flag a stopped session whose recorded worktree is gone as unresumable, matching the refusal above. A worktree path that cannot be checked still counts as present (#8551).
