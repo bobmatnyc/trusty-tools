@@ -1,5 +1,0 @@
-Added
-- `tm repair delegation --list [DIR]` lists the live delegation records for a directory, read-only, marking the ones that block a dispatch. A DIR that no longer exists is resolved to the absolute path a record carries; a DIR that cannot be resolved for another reason is an error, not an empty listing (#8257).
-- `tm repair delegation --delegation-id <id>` reaches a record that never learned an agent id (#8257).
-- The session that owns a live, stop-less, under-6 h delegation record may clear it itself: `tm repair delegation` identifies the caller from the harness's `CLAUDE_CODE_SESSION_ID`, refuses any other session, refuses when no caller session can be established, and records the clearing session and the reason `owner-attested finished (#8257)` on the record. No CLI argument can name the caller session (#8257).
-- Every clear, owner-attested or `--force`, logs one WARN line per record naming the delegation id, agent, owning session, clearing session, basis and whether it was forced (#8257).

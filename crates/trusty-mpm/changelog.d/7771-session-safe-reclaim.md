@@ -1,6 +1,0 @@
-Fixed
-- `tm session prune-worktrees --merged-prs` no longer refuses every `.claude/worktrees/` tree that has no owner file. A hand-made `git worktree add` tree that is merged, clean, unlocked and has no process in it is reclaimed. A tree stays when a harness lock names a running pid with a matching start time, a live delegation names its agent, a process stands in it, or its owner file names a session that is neither the caller nor provably ended. Each kept tree names its reason. (#7771)
-- A tree whose every commit is on some `refs/remotes/origin/*` ref counts as landed with no pull request, so work published under a different remote branch name is reclaimed when it is clean and unowned. (#7771)
-- A harness lock whose pid is gone or was reused now counts as released; the sweep unlocks it immediately before removal. An operator lock still refuses. (#7771)
-- The reclaim and `tm pr cleanup` read a tree's owner file from the git admin dir or, before migration, from the tree itself. An owner file that exists but cannot be read or parsed, or a tree whose `.git` entry does not resolve, keeps the tree. (#7771, #8511)
-- A detached-HEAD tree whose pull-request state is unknown no longer reports "is `gh` installed and authenticated?". (#7771)
