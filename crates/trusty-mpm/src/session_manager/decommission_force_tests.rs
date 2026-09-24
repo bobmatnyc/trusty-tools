@@ -210,7 +210,10 @@ async fn force_decommission_removes_nothing_when_the_dirty_check_cannot_complete
 async fn force_decommission_honours_an_admin_dir_marker() {
     let fx = GitWorktreeFixture::new();
     let wt = provisioned_tree(&fx, "decom-admin-marker-7660");
-    assert!(admin_marker(&wt).is_file(), "premise: the admin marker exists");
+    assert!(
+        admin_marker(&wt).is_file(),
+        "premise: the admin marker exists"
+    );
     assert!(
         !wt.join(WORKTREE_SENTINEL_FILE).exists(),
         "premise: no legacy marker"
@@ -270,7 +273,11 @@ async fn force_decommission_is_never_stricter_than_plain_on_a_clean_tree() {
 
         let verdict = remove(&wt, policy).await;
 
-        assert!(verdict.removed, "{policy:?} kept: {:?}", verdict.kept_reason);
+        assert!(
+            verdict.removed,
+            "{policy:?} kept: {:?}",
+            verdict.kept_reason
+        );
         assert!(!wt.exists(), "{policy:?}: the tree must be gone");
     }
 }
@@ -436,7 +443,10 @@ async fn force_decommission_keeps_a_worktree_git_cannot_resolve() {
 
     let reason = kept_under_force(&wt).await;
 
-    assert!(reason.contains("cannot prove tm created it"), "reason: {reason}");
+    assert!(
+        reason.contains("cannot prove tm created it"),
+        "reason: {reason}"
+    );
     assert!(reason.contains("does not resolve"), "reason: {reason}");
 }
 
