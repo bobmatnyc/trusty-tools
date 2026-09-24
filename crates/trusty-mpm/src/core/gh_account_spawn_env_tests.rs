@@ -626,10 +626,15 @@ fn an_account_only_spawn_pin_uses_the_verified_dir() {
         account: Some("bob-duetto".into()),
         config_dir: None,
     };
-    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |login| {
-        assert_eq!(login, "bob-duetto");
-        Ok(dir.path().to_path_buf())
-    })
+    let env = super::pinned_spawn_env(
+        &pinned,
+        SPAWN_ORIGIN,
+        |login| {
+            assert_eq!(login, "bob-duetto");
+            Ok(dir.path().to_path_buf())
+        },
+        |_| panic!("a proven dir must win: `gh auth token -u` is never run"),
+    )
     .expect("a pin must produce an env")
     .expect("the spawn env never errs");
     assert_eq!(
@@ -653,9 +658,12 @@ fn an_account_only_spawn_pin_with_no_verified_dir_fails_closed() {
         account: Some("bob-duetto".into()),
         config_dir: None,
     };
-    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
-        Err("/x/hosts.yml is active on github.com as 'bobmatnyc'".into())
-    })
+    let env = super::pinned_spawn_env(
+        &pinned,
+        SPAWN_ORIGIN,
+        |_| Err("/x/hosts.yml is active on github.com as 'bobmatnyc'".into()),
+        |_| Err("`-u bob-duetto` failed".into()),
+    )
     .expect("a pinned account must never resolve to no identity")
     .expect("the refusal rides the env, not an error");
     assert_eq!(
@@ -684,13 +692,207 @@ fn a_config_dir_spawn_pin_never_asks_to_verify() {
         account: Some("bob-duetto".into()),
         config_dir: Some(dir.path().to_path_buf()),
     };
-    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
-        panic!("a pinned config_dir must not be replaced by a borrowed one")
-    })
+    let env = super::pinned_spawn_env(
+        &pinned,
+        SPAWN_ORIGIN,
+        |_| panic!("a pinned config_dir must not be replaced by a borrowed one"),
+        |_| panic!("a pinned config_dir never mints a token"),
+    )
     .expect("a pin must produce an env")
     .expect("the spawn env never errs");
     assert_eq!(
         value_of(&env.vars, "GH_CONFIG_DIR"),
         dir.path().to_string_lossy()
     );
+}
+
+/// Scripted `gh auth token` answers for the spawn fallback (#8510): `active`
+/// for the plain lookup, `own` for `-u <login>`.
+struct SpawnProbe {
+    active: Result<&'static str, &'static str>,
+    own: Result<&'static str, &'static str>,
+}
+
+impl crate::core::gh_account_dir::GhTokenProbe for SpawnProbe {
+    fn token(&self, _dir: &Path, _host: &str, login: Option<&str>) -> Result<String, String> {
+        let answer = if login.is_some() {
+            self.own
+        } else {
+            self.active
+        };
+        answer.map(str::to_string).map_err(str::to_string)
+    }
+}
+
+/// Spawn an account-only `bob-duetto` pin with no provable dir, where the
+/// daemon's own gh config names `active_user` and `probe` answers for it.
+fn spawn_via_u_token(active_user: &str, probe: &SpawnProbe) -> super::GhSpawnEnv {
+    let own_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(own_dir.path(), active_user);
+    let pinned = super::PinnedGhIdentity {
+        account: Some("bob-duetto".into()),
+        config_dir: None,
+    };
+    super::pinned_spawn_env(
+        &pinned,
+        SPAWN_ORIGIN,
+        |_| Err("no candidate dir is proven".into()),
+        |login| {
+            crate::core::gh_account_dir::proven_login_token(
+                own_dir.path(),
+                login,
+                SPAWN_ORIGIN,
+                probe,
+            )
+        },
+    )
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs")
+}
+
+/// `-u` returned a token that differs from the active one, so it selected the
+/// login's own slot: the session gets that token.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_uses_a_u_token_that_differs_from_the_active_one() {
+    let env = spawn_via_u_token(
+        "bobmatnyc",
+        &SpawnProbe {
+            active: Ok("tok-global"),
+            own: Ok("tok-bob-duetto"),
+        },
+    );
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob-duetto");
+    assert_eq!(value_of(&env.vars, "GH_USER"), "bob-duetto");
+    assert!(env.warning.is_none(), "{:?}", env.warning);
+}
+
+/// The login IS the active user, so any `-u` token is its own — even one
+/// equal to the plain lookup.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_uses_the_token_when_the_login_is_active() {
+    let env = spawn_via_u_token(
+        "bob-duetto",
+        &SpawnProbe {
+            active: Ok("tok-bob-duetto"),
+            own: Ok("tok-bob-duetto"),
+        },
+    );
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob-duetto");
+}
+
+/// 🔴 #5851: the login is not active and `-u` returned the active account's
+/// token, so gh ignored `-u`. Refuse with the nobody-token; name no token.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_refuses_a_u_token_equal_to_another_accounts() {
+    let env = spawn_via_u_token(
+        "bobmatnyc",
+        &SpawnProbe {
+            active: Ok("tok-global"),
+            own: Ok("tok-global"),
+        },
+    );
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(
+        warning.contains("ignored `-u`") && !warning.contains("tok-"),
+        "got: {warning}"
+    );
+}
+
+/// 🔴 `-u` exits non-zero (no token for the login): the nobody-token.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_refuses_when_u_exits_non_zero() {
+    let env = spawn_via_u_token(
+        "bobmatnyc",
+        &SpawnProbe {
+            active: Ok("tok-global"),
+            own: Err("exit status 1: no oauth token found for github.com account bob-duetto"),
+        },
+    );
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(
+        warning.contains("-u bob-duetto` failed") && !warning.contains("tok-"),
+        "got: {warning}"
+    );
+}
+
+/// A `tracing` writer that appends every formatted line to a shared buffer.
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run `probe`'s spawn env through the production logger under a capturing
+/// subscriber; return the injected vars and every log line.
+fn logged_spawn(active_user: &str, probe: &SpawnProbe) -> (Vec<(String, String)>, String) {
+    let buffer = LogBuffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let env = spawn_via_u_token(active_user, probe);
+    let vars = tracing::subscriber::with_default(subscriber, || {
+        super::log_spawn_env(Some(Ok(env)), Path::new("/work/jev-matching"))
+    });
+    let bytes = buffer
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    (vars, String::from_utf8(bytes).expect("utf-8 log"))
+}
+
+/// 🔴 #8510: no arm writes a token to the log — neither the injected `-u`
+/// token nor the active account's token `gh` returned when it ignored `-u`.
+/// The refusals still log their reason, so the capture is not vacuous.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_logs_no_token_in_any_arm() {
+    let (vars, log) = logged_spawn(
+        "bobmatnyc",
+        &SpawnProbe {
+            active: Ok("tok-global"),
+            own: Ok("tok-bob-duetto"),
+        },
+    );
+    assert_eq!(value_of(&vars, "GH_TOKEN"), "tok-bob-duetto");
+    assert!(!log.contains("tok-"), "a token reached the log: {log}");
+
+    for own in [
+        Ok("tok-global"),
+        Err("exit status 1: no oauth token found for github.com account bob-duetto"),
+    ] {
+        let (vars, log) = logged_spawn(
+            "bobmatnyc",
+            &SpawnProbe {
+                active: Ok("tok-global"),
+                own,
+            },
+        );
+        assert_eq!(value_of(&vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+        assert!(
+            log.contains("pinned to gh account 'bob-duetto'"),
+            "the refusal must be logged: {log}"
+        );
+        assert!(!log.contains("tok-"), "a token reached the log: {log}");
+    }
 }

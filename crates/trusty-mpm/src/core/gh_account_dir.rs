@@ -198,9 +198,7 @@ impl AccountDirSources {
         origin: &str,
         probe: &dyn GhTokenProbe,
     ) -> Result<PathBuf, Vec<String>> {
-        let host = trusty_common::github_path::parse_remote_url(origin)
-            .map(|remote| remote.host.to_ascii_lowercase())
-            .map_err(|e| vec![format!("cannot tell which gh host serves it ({e})")])?;
+        let host = origin_host(origin).map_err(|e| vec![e])?;
         let mut candidates: Vec<Result<PathBuf, String>> =
             self.static_config_dir.iter().cloned().map(Ok).collect();
         if let Some(root) = &self.state_root {
@@ -309,4 +307,54 @@ fn verify_token_selects(
         ));
     }
     Ok(())
+}
+
+/// The lowercased gh host `origin` lives on, or why it cannot be told.
+/// Test: `an_account_only_pin_refuses_an_origin_with_no_host`.
+fn origin_host(origin: &str) -> Result<String, String> {
+    trusty_common::github_path::parse_remote_url(origin)
+        .map(|remote| remote.host.to_ascii_lowercase())
+        .map_err(|e| format!("cannot tell which gh host serves it ({e})"))
+}
+
+/// The spawn fallback: `login`'s own `-u` token, once proven (#8510, PM ruling).
+///
+/// Why: gh 2.98.0 honours `gh auth token -u <login>` and exits 1 for a login
+/// with no token. The #5851 danger is a `gh` that IGNORES `-u` and prints the
+/// active account's token — and that case is detectable locally.
+/// What: under `own_config_dir` (the daemon's own gh config) with every token
+/// variable removed, `-u <login>` must exit 0 with a token. That token is
+/// proven when `login` is the active `user:` for the origin's host there, or
+/// when it DIFFERS from the plain `gh auth token --hostname <host>` answer
+/// (so `-u` selected another slot). Equal tokens for a non-active login mean
+/// `gh` ignored `-u`: refused. Tokens are compared in memory; no reason ever
+/// contains one. Spawn-only: the merged-PR lookup stays dir-only.
+/// Test: `a_spawn_pin_uses_a_u_token_that_differs_from_the_active_one`,
+/// `a_spawn_pin_uses_the_token_when_the_login_is_active`,
+/// `a_spawn_pin_refuses_a_u_token_equal_to_another_accounts`,
+/// `a_spawn_pin_refuses_when_u_exits_non_zero`,
+/// `a_spawn_pin_logs_no_token_in_any_arm`.
+pub(crate) fn proven_login_token(
+    own_config_dir: &Path,
+    login: &str,
+    origin: &str,
+    probe: &dyn GhTokenProbe,
+) -> Result<String, String> {
+    let host = origin_host(origin)?;
+    let own = probe
+        .token(own_config_dir, &host, Some(login))
+        .map_err(|e| format!("`gh auth token --hostname {host} -u {login}` failed ({e})"))?;
+    if verify_active_user(own_config_dir, login, &host).is_ok() {
+        return Ok(own);
+    }
+    let active = probe
+        .token(own_config_dir, &host, None)
+        .map_err(|e| format!("`gh auth token --hostname {host}` failed ({e}), so `-u {login}` cannot be told apart from the active account"))?;
+    if active == own {
+        return Err(format!(
+            "`gh auth token -u {login}` returned the active {host} account's token, so gh \
+             ignored `-u` (#5851)"
+        ));
+    }
+    Ok(own)
 }

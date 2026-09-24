@@ -694,8 +694,8 @@ pub fn resolve_gh_account_env(
 /// git origin, no project match, no `gh_account` pinned, a panicked blocking
 /// task, or a resolution failure all yield an EMPTY vec — never blocks or
 /// fails the spawn. A resolution failure is logged as a `tracing::warn!`
-/// here so every call site gets the warning for free. #8510: the one
-/// exception to "empty" is an account pin no dir verifies — see
+/// here so every call site gets the warning for free. #8510: an account pin
+/// with no proven dir or `-u` token is the one exception to "empty" — see
 /// [`pinned_spawn_env`], which fails that session's `gh` closed instead.
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`
 /// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
@@ -744,27 +744,53 @@ pub async fn resolve_gh_account_env_for_registry(
                 .verified_dir(login, &origin, &probe)
                 .map_err(|reasons| reasons.join("; "))
         };
-        match pinned_spawn_env(&pinned, &origin, verify_dir) {
-            None => Vec::new(),
-            Some(Ok(env)) => {
-                // #5851: the vars still apply — a pinned-but-empty config dir
-                // must fail closed, never fall back to the global account.
-                if let Some(warning) = env.warning {
-                    tracing::warn!(cwd = %cwd_for_log.display(), "{warning}");
-                }
-                env.vars
-            }
-            Some(Err(msg)) => {
-                tracing::warn!(
-                    cwd = %cwd_for_log.display(),
-                    "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
-                );
-                Vec::new()
-            }
-        }
+        // #8510: the fallback runs `gh` under the daemon's OWN config dir.
+        let mint_token = |login: &str| {
+            let own = gh_config_dir().ok_or("no gh config dir resolves for this process")?;
+            crate::core::gh_account_dir::proven_login_token(
+                &own,
+                login,
+                &origin,
+                &crate::core::gh_account_dir::CliTokenProbe,
+            )
+        };
+        log_spawn_env(
+            pinned_spawn_env(&pinned, &origin, verify_dir, mint_token),
+            &cwd_for_log,
+        )
     })
     .await
     .unwrap_or_default()
+}
+
+/// Log a resolved spawn env's diagnostic and return the vars to inject.
+///
+/// Why: the one place a spawn env reaches the log; #8510 injects a real
+/// `GH_TOKEN`, so this must log the warning or error text and never `vars`.
+/// What: `Some(Ok)` logs its `warning` (if any) and returns its vars — #5851:
+/// they still apply, so a pinned-but-empty dir fails closed. `Some(Err)` logs
+/// the failure and returns no vars; `None` returns no vars.
+/// Test: `a_spawn_pin_logs_no_token_in_any_arm`.
+pub(crate) fn log_spawn_env(
+    env: Option<Result<GhSpawnEnv, String>>,
+    cwd: &Path,
+) -> Vec<(String, String)> {
+    match env {
+        None => Vec::new(),
+        Some(Ok(env)) => {
+            if let Some(warning) = env.warning {
+                tracing::warn!(cwd = %cwd.display(), "{warning}");
+            }
+            env.vars
+        }
+        Some(Err(msg)) => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// The value [`refused_spawn_env`] injects as `GH_TOKEN` (#8510).
@@ -781,17 +807,23 @@ pub(crate) const REFUSED_GH_TOKEN: &str = "tm-refused-unverified-gh-account-pin"
 /// account was globally active. The spawn contract (#3025) never blocks a
 /// spawn, so a refusal here has to ride the env itself, the way #5851 already
 /// pins a credential-less config dir and lets `gh` fail inside it.
-/// What: a pinned `config_dir` wins, unchanged. An account-only pin uses the
-/// dir `verify_dir` returns; when none verifies, it returns
-/// [`refused_spawn_env`], so the session's `gh` fails closed and the caller
-/// logs why. `None` when nothing is pinned.
+/// What: a pinned `config_dir` wins, unchanged. An account-only pin uses, in
+/// order: the dir `verify_dir` returns; the `GH_TOKEN` `mint_token` proves
+/// (see [`crate::core::gh_account_dir::proven_login_token`]), with `GH_USER`;
+/// else [`refused_spawn_env`], so the session's `gh` fails closed and the
+/// caller logs why. `None` when nothing is pinned.
 /// Test: `an_account_only_spawn_pin_uses_the_verified_dir`,
 /// `an_account_only_spawn_pin_with_no_verified_dir_fails_closed`,
-/// `a_config_dir_spawn_pin_never_asks_to_verify`.
+/// `a_config_dir_spawn_pin_never_asks_to_verify`,
+/// `a_spawn_pin_uses_a_u_token_that_differs_from_the_active_one`,
+/// `a_spawn_pin_uses_the_token_when_the_login_is_active`,
+/// `a_spawn_pin_refuses_a_u_token_equal_to_another_accounts`,
+/// `a_spawn_pin_refuses_when_u_exits_non_zero`.
 pub(crate) fn pinned_spawn_env(
     pinned: &PinnedGhIdentity,
     origin: &str,
     verify_dir: impl FnOnce(&str) -> Result<PathBuf, String>,
+    mint_token: impl FnOnce(&str) -> Result<String, String>,
 ) -> Option<Result<GhSpawnEnv, String>> {
     let account = pinned
         .account
@@ -802,9 +834,23 @@ pub(crate) fn pinned_spawn_env(
         return resolve_gh_account_env(account, pinned.config_dir.as_deref());
     }
     let login = account?;
-    Some(Ok(match verify_dir(login) {
-        Ok(dir) => scoped_config_dir_env(&dir, Some(login)),
-        Err(reason) => refused_spawn_env(login, origin, &reason),
+    let dir_reason = match verify_dir(login) {
+        Ok(dir) => return Some(Ok(scoped_config_dir_env(&dir, Some(login)))),
+        Err(reason) => reason,
+    };
+    // #8510 (PM ruling): a `-u` token is used only once proven to be the
+    // login's own; the token is injected, never logged.
+    Some(Ok(match mint_token(login) {
+        Ok(token) => GhSpawnEnv {
+            vars: vec![
+                (GH_TOKEN_ENV_VAR.to_string(), token),
+                (GH_USER_ENV_VAR.to_string(), login.to_string()),
+            ],
+            warning: None,
+        },
+        Err(token_reason) => {
+            refused_spawn_env(login, origin, &format!("{dir_reason}; {token_reason}"))
+        }
     }))
 }
 
@@ -821,7 +867,8 @@ fn refused_spawn_env(login: &str, origin: &str, reason: &str) -> GhSpawnEnv {
         ],
         warning: Some(format!(
             "this project is pinned to gh account '{login}' with no `github.config_dir`, and \
-             no candidate gh config dir selects it ({reason}). The session's gh is given a \
+             neither a gh config dir nor a `-u` token is proven to be its own ({reason}). The \
+             session's gh is given a \
              token that authenticates as nobody, so it fails instead of acting as the \
              machine's global account (#8510). Fix: `tm projects register <name> --repo-url \
              {origin} --gh-account {login} --gh-config-dir <dir>`."
