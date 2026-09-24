@@ -20,7 +20,9 @@ use tracing::{info, warn};
 
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 
-use super::decommission_force::{DecommissionReport, ProvisioningDirt, remove_in_project_worktree};
+use super::decommission_force::{
+    DecommissionReport, ProvisioningDirt, remove_in_project_worktree, unowned_kept_reason,
+};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
@@ -1050,6 +1052,9 @@ impl SessionManager {
                     workspace_removed = verdict.removed;
                     kept_reason = verdict.kept_reason;
                 } else {
+                    // #7660: kept by design, and now said so — the CLI exits
+                    // non-zero naming it instead of reporting success.
+                    kept_reason = unowned_kept_reason(ws, dirt_policy);
                     warn!(
                         id = %id,
                         workspace = %ws.display(),

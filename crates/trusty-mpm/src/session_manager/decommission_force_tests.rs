@@ -148,6 +148,9 @@ async fn force_decommission_still_refuses_user_work() {
     assert!(!verdict.removed && wt.join("notes.rs").exists());
     let reason = verdict.kept_reason.expect("reason");
     assert!(reason.contains("never discards"), "reason: {reason}");
+    // #7660 round 2: the blocker is named, and the excused files are not.
+    assert!(reason.contains("?? notes.rs"), "reason: {reason}");
+    assert!(!reason.contains("?? CLAUDE.md"), "reason: {reason}");
 }
 
 /// `--force` never discards a commit that is on no remote.
@@ -242,6 +245,9 @@ async fn force_decommission_keeps_the_tree_when_the_gitignore_diff_cannot_be_rea
     );
     let verdict = remove(&wt, ProvisioningDirt::Discard).await;
     assert!(!verdict.removed && wt.exists(), "the tree must be kept");
+    // #7660 round 2: the status read failure itself is what kept it.
+    let reason = verdict.kept_reason.expect("a kept tree must say why");
+    assert!(reason.contains("dirty-check failed"), "reason: {reason}");
 }
 
 /// 🔴 #7660 round 2: inside a hunk, the added line `++ x` shows as `+++ x`;
@@ -260,4 +266,152 @@ fn gitignore_body_line_shaped_like_a_header_is_not_excused() {
     std::fs::write(wt.join(".gitignore"), &body).expect("append a header-shaped line");
 
     assert!(!is_provisioning_entry(&wt, " M .gitignore"));
+}
+
+/// The kept reason, asserting the tree stayed on disk.
+async fn kept_under_force(wt: &Path) -> String {
+    let verdict = remove(wt, ProvisioningDirt::Discard).await;
+    assert!(!verdict.removed, "the tree must be kept");
+    assert!(wt.exists(), "the tree must still be on disk");
+    verdict.kept_reason.expect("a kept tree must say why")
+}
+
+/// #7660 round 2: `--force` needs proof tm created the tree. A provisioning-
+/// dirty worktree with no ownership sentinel is kept. Fails on the 1.7.2 fix,
+/// which excused the dirt and removed it.
+#[tokio::test]
+async fn force_decommission_keeps_a_worktree_without_the_sentinel() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-no-sentinel-7660");
+    std::fs::remove_file(wt.join(WORKTREE_SENTINEL_FILE)).expect("drop sentinel");
+
+    let reason = kept_under_force(&wt).await;
+
+    assert!(reason.contains("no ownership sentinel"), "reason: {reason}");
+}
+
+/// #7660 round 2, FAIL-CLOSED: a sentinel whose existence cannot be read is
+/// no proof. Fails on the 1.7.2 fix, whose reason named no sentinel.
+#[tokio::test]
+async fn force_decommission_keeps_a_worktree_whose_sentinel_cannot_be_read() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-sentinel-unreadable-7660");
+
+    let reason = {
+        let _restore = deny_all(&wt);
+        kept_under_force(&wt).await
+    };
+
+    assert!(
+        reason.contains("sentinel could not be read"),
+        "reason: {reason}"
+    );
+}
+
+/// 🔴 #7660 round 2: a repository's MAIN checkout parked under `.worktrees/`,
+/// sentinel and provisioning dirt included, is never removed by `--force`.
+/// Fails on the 1.7.2 fix, which never asked what kind of checkout it was.
+#[tokio::test]
+async fn force_decommission_keeps_a_main_checkout_under_the_worktrees_dir() {
+    let fx = GitWorktreeFixture::new();
+    let main = fx.repo.join(".worktrees").join("standalone-7660");
+    std::fs::create_dir_all(&main).expect("mkdir standalone");
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main)
+        .args(["init", "--initial-branch=main"])
+        .output()
+        .expect("run git init");
+    assert!(init.status.success(), "git init failed");
+    std::fs::write(main.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+    std::fs::write(main.join("CLAUDE.md"), "# tm\n").expect("write CLAUDE.md");
+
+    let reason = kept_under_force(&main).await;
+
+    assert!(reason.contains("main checkout"), "reason: {reason}");
+    assert!(main.join("CLAUDE.md").exists());
+}
+
+/// #7660 round 2, FAIL-CLOSED: a worktree git cannot resolve (a `.git` file
+/// naming a missing admin dir) is kept, naming the failed proof.
+#[tokio::test]
+async fn force_decommission_keeps_a_worktree_git_cannot_resolve() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-unresolvable-7660");
+    std::fs::write(wt.join(".git"), "gitdir: /nonexistent/7660\n").expect("break .git");
+
+    let reason = kept_under_force(&wt).await;
+
+    assert!(
+        reason.contains("cannot prove it is a tm-created linked worktree"),
+        "reason: {reason}"
+    );
+}
+
+/// #7660 round 2: a `git worktree lock` keeps the tree, and the reason says
+/// it is locked.
+#[tokio::test]
+async fn force_decommission_keeps_a_locked_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-locked-7660");
+    fx.lock_worktree(&wt);
+
+    let reason = kept_under_force(&wt).await;
+
+    assert!(reason.contains("locked"), "reason: {reason}");
+}
+
+/// #7660 round 2, FAIL-CLOSED: a lock state that cannot be read (the git dir
+/// is unsearchable) is reported as a blocker, never as "unlocked".
+#[test]
+fn lock_blocker_fails_closed_when_the_lock_state_cannot_be_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let git_dir = dir.path().join("worktrees").join("wt");
+    std::fs::create_dir_all(&git_dir).expect("mkdir git dir");
+    assert_eq!(lock_blocker(&git_dir), None, "premise: no lock file");
+
+    let blocker = {
+        let _restore = deny_all(&git_dir);
+        lock_blocker(&git_dir)
+    };
+
+    let blocker = blocker.expect("an unreadable lock state must block");
+    assert!(
+        blocker.contains("lock state could not be read"),
+        "{blocker}"
+    );
+}
+
+/// #7660 round 2: a worktree already gone is neither removed nor kept, so
+/// the CLI does not report a refusal for it.
+#[tokio::test]
+async fn decommission_of_an_absent_worktree_reports_nothing_kept() {
+    let fx = GitWorktreeFixture::new();
+    let absent = fx.repo.join(".worktrees").join("gone-7660");
+
+    for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
+        let verdict = remove(&absent, policy).await;
+        assert!(verdict.kept_reason.is_none(), "{:?}", verdict.kept_reason);
+    }
+}
+
+/// #7660 round 2: the by-design reason names a main checkout, adds the
+/// `--force` note only under `--force`, and is absent when nothing is on disk.
+#[test]
+fn unowned_kept_reason_names_a_main_checkout() {
+    let fx = GitWorktreeFixture::new();
+
+    let plain = unowned_kept_reason(&fx.repo, ProvisioningDirt::Refuse).expect("kept");
+    assert!(plain.contains("main checkout"), "{plain}");
+    assert!(!plain.contains("--force"), "{plain}");
+    assert!(!plain.contains('\n'), "one line: {plain}");
+
+    let forced = unowned_kept_reason(&fx.repo, ProvisioningDirt::Discard).expect("kept");
+    assert!(forced.contains("--force does not apply"), "{forced}");
+
+    let absent = fx.repo.join("no-such-dir-7660");
+    assert_eq!(
+        unowned_kept_reason(&absent, ProvisioningDirt::Discard),
+        None
+    );
 }

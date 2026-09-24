@@ -1,0 +1,3 @@
+Fixed
+- `tm sessions decommission` now exits non-zero and names the reason whenever it keeps the workspace. A session on the project's shared main checkout (the default `tm sessions new` placement) is kept by design, and the command now says so in one line instead of exiting 0; `--force` never removes that checkout. Refs #7660
+- `tm sessions decommission --force` acts only on a linked worktree tm can prove it created (ownership sentinel present, not a main checkout, not `git worktree lock`ed). A probe that cannot answer keeps the workspace and names why. When other changes block removal, the reason lists the files. Refs #7660

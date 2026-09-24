@@ -924,12 +924,9 @@ fn git_ok(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// A real daemon holding one in-project session whose `.worktrees/<name>` tree
-/// carries exactly tm's provisioning dirt (#7660): the scaffolded `.gitignore`
-/// block on a tracked `.gitignore`, plus untracked settings files and
-/// `CLAUDE.md`. Returns `(url, session id, worktree path)`.
-async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path::PathBuf) {
-    use trusty_mpm::daemon::{api, state::DaemonState};
+/// A pushed repository with a tracked `.gitignore`, under a kept temp root.
+/// Returns `(root, repo)`.
+fn pushed_repo_7660() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = std::fs::canonicalize(tempfile::tempdir().expect("tmp").keep()).expect("canon");
     let (remote, repo) = (root.join("remote.git"), root.join("repo"));
     std::fs::create_dir_all(&remote).expect("mkdir remote");
@@ -952,23 +949,24 @@ async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path:
     );
     git_ok(&repo, &["push", "origin", "main"]);
     git_ok(&repo, &["fetch", "origin"]);
-    let wt = repo.join(".worktrees").join("decom-7660");
-    git_ok(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "session/decom-7660",
-            wt.to_str().expect("utf8"),
-        ],
-    );
-    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold");
-    std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
-    std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("settings");
-    std::fs::write(wt.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");
-    std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("CLAUDE.md");
+    (root, repo)
+}
 
+/// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
+/// `.gitignore` block, untracked settings files, and `CLAUDE.md`.
+fn provision_dirt_7660(ws: &std::path::Path) {
+    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(ws).expect("scaffold");
+    std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
+    std::fs::write(ws.join(".claude/settings.json"), "{}\n").expect("settings");
+    std::fs::write(ws.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");
+    std::fs::write(ws.join("CLAUDE.md"), "# tm\n").expect("CLAUDE.md");
+}
+
+/// A real daemon holding one session whose workspace is `ws`, recorded as
+/// not SM-owned — the shape both the in-project and the launch-on-main spawn
+/// paths write. Returns `(url, session id)`.
+async fn serve_session_on_7660(root: &std::path::Path, ws: &std::path::Path) -> (String, String) {
+    use trusty_mpm::daemon::{api, state::DaemonState};
     let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.join("sm")).await);
     let id = trusty_mpm::session_manager::ManagedSessionId::new();
     state
@@ -977,9 +975,9 @@ async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path:
         .create_with_id(
             id,
             "regression: #7660 decommission end to end".to_string(),
-            Some(wt.clone()),
+            Some(ws.to_path_buf()),
             None,
-            Some(wt.clone()),
+            Some(ws.to_path_buf()),
             None,
             None,
             trusty_mpm::runtime::RuntimeKind::default(),
@@ -993,7 +991,40 @@ async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path:
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(axum::serve(listener, api::router(state)).into_future());
-    (format!("http://{addr}"), id.to_string(), wt)
+    (format!("http://{addr}"), id.to_string())
+}
+
+/// A real daemon holding one in-project session whose `.worktrees/<name>` tree
+/// tm created (it carries the ownership sentinel `create_session_worktree`
+/// writes) and carries exactly tm's provisioning dirt (#7660). Returns
+/// `(url, session id, worktree path)`.
+async fn spawn_daemon_with_provisioned_worktree() -> (String, String, std::path::PathBuf) {
+    let (root, repo) = pushed_repo_7660();
+    let wt = repo.join(".worktrees").join("decom-7660");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "session/decom-7660",
+            wt.to_str().expect("utf8"),
+        ],
+    );
+    std::fs::write(wt.join(".trusty-mpm-worktree"), b"").expect("sentinel");
+    provision_dirt_7660(&wt);
+    let (url, id) = serve_session_on_7660(&root, &wt).await;
+    (url, id, wt)
+}
+
+/// A real daemon holding one launch-on-main session: its workspace IS the
+/// repository's main checkout, dirty only from tm's provisioning — the live
+/// 1.7.2 shape (#7660). Returns `(url, session id, checkout path)`.
+async fn spawn_daemon_on_the_main_checkout() -> (String, String, std::path::PathBuf) {
+    let (root, repo) = pushed_repo_7660();
+    provision_dirt_7660(&repo);
+    let (url, id) = serve_session_on_7660(&root, &repo).await;
+    (url, id, repo)
 }
 
 /// 🔴 #7660 critic MEDIUM-3, end to end: without `--force` the provisioned
@@ -1028,6 +1059,59 @@ async fn session_decommission_routed_force_removes_a_provisioning_only_worktree(
         .expect("--force removes a provisioning-only tree");
 
     assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// 🔴 #7660 round 2, end to end: `--force` on a tm-created worktree holding a
+/// real user change keeps it, exits non-zero, and names the file.
+#[tokio::test]
+async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
+    let (url, id, wt) = spawn_daemon_with_provisioned_worktree().await;
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect_err("user work must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("notes.rs"), "the file must be named: {msg}");
+    assert!(wt.join("notes.rs").exists(), "the user's file must survive");
+}
+
+/// 🔴 #7660 round 2, the live 1.7.2 failure: `--force` on a launch-on-main
+/// session never removes the shared main checkout, and exits non-zero naming
+/// why. Fails on the 1.7.2 fix, which exited 0 with no reason.
+#[tokio::test]
+async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force() {
+    let (url, id, repo) = spawn_daemon_on_the_main_checkout().await;
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect_err("a kept main checkout must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("main checkout"), "{msg}");
+    assert!(msg.contains("--force does not apply"), "{msg}");
+    assert!(repo.join(".git").is_dir(), "the main checkout must survive");
+    assert!(repo.join("CLAUDE.md").exists(), "nothing in it is removed");
+}
+
+/// #7660 round 2: a plain decommission that keeps the main checkout by design
+/// says why in one line, and still exits non-zero. Fails on the 1.7.2 fix.
+#[tokio::test]
+async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
+    let (url, id, repo) = spawn_daemon_on_the_main_checkout().await;
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, false)
+        .await
+        .expect_err("a kept workspace must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("kept by design"), "{msg}");
+    assert!(!msg.contains('\n'), "one line: {msg}");
+    assert!(repo.exists());
 }
 
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
