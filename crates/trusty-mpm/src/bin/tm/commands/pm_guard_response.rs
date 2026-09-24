@@ -162,6 +162,25 @@ mod tests {
         out
     }
 
+    /// The lines of `text` before its `#[cfg(test)] mod …` test module.
+    ///
+    /// A doc comment that merely mentions `#[cfg(test)]` does not end the
+    /// production section: the marker must stand alone on an unindented line
+    /// and be followed, past any other attributes, by a `mod` item.
+    fn production_lines(text: &str) -> Vec<&str> {
+        let lines: Vec<&str> = text.lines().collect();
+        let end = (0..lines.len())
+            .find(|&i| {
+                lines[i] == "#[cfg(test)]"
+                    && lines[i + 1..]
+                        .iter()
+                        .find(|l| !l.starts_with("#["))
+                        .is_some_and(|l| l.starts_with("mod "))
+            })
+            .unwrap_or(lines.len());
+        lines[..end].to_vec()
+    }
+
     #[test]
     fn pm_guard_modules_never_print_an_unprefixed_deny() {
         // #8546: a refusal added to the pm-guard hook through the generic
@@ -176,8 +195,7 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("read source");
-            let production = text.split("#[cfg(test)]").next().unwrap_or_default();
-            for (i, line) in production.lines().enumerate() {
+            for (i, line) in production_lines(&text).iter().enumerate() {
                 let code = line.trim_start();
                 if code.starts_with("//") {
                     continue;
