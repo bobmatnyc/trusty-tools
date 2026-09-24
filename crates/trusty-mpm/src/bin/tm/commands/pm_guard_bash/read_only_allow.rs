@@ -25,7 +25,11 @@
 //! the rule has no I/O arm to fail open through.
 //! Out of scope: the `Write`, `Edit` and `NotebookEdit` tools; what a user's
 //! own shell aliases and functions do; `cargo metadata`/`cargo tree` updating
-//! `Cargo.lock` or the cargo registry cache.
+//! `Cargo.lock` or the cargo registry cache; and a program run by
+//! configuration that already exists — git's `core.fsmonitor`,
+//! `diff.external`, textconv drivers, `gpg.program`, `core.pager`, and a
+//! `.cargo/config.toml` `rustc`/`rustc-wrapper` that cargo runs to read the
+//! host target.
 //! Test: `read_only_allow_tests` — `refuses_the_incident_plutil_extract_json_form`,
 //! `legitimate_reads_stay_allowed`, `critic_round_three_probes_are_refused`.
 
@@ -144,8 +148,12 @@ impl Parser<'_> {
     /// `for NAME in <words>; do <body> done`.
     fn for_shape(&mut self) -> Result<(), String> {
         let name = match self.toks.get(self.at) {
-            Some(Tok::Word(w)) if w.bare && w.lit().is_some_and(is_name) => w.text.clone(),
-            _ => return Err("a `for` loop without a plain variable name".into()),
+            // #8439 round 2: a fixed set of names, so a loop can never assign
+            // `HOME`, `PATH`, `IFS` or a zsh special such as `path`.
+            Some(Tok::Word(w)) if w.bare && w.lit().is_some_and(|t| LOOP_NAMES.contains(&t)) => {
+                w.text.clone()
+            }
+            _ => return Err("a `for` loop variable outside the guard's name list".into()),
         };
         self.at += 1;
         self.expect("in")?;
@@ -239,14 +247,14 @@ fn is_reserved(w: &Word) -> bool {
     w.bare && w.lit().is_some_and(|t| RESERVED.contains(&t))
 }
 
-/// A shell variable name.
-fn is_name(t: &str) -> bool {
-    let mut chars = t.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
+/// The names a `for` loop may bind (#8439 round 2).
+///
+/// Why: a loop assigns its variable, so `for HOME in /tmp` points git at
+/// another user config and `for PATH in …` or zsh's `path` changes which
+/// program runs. None of these names means anything to bash, zsh or a tool.
+const LOOP_NAMES: &[&str] = &[
+    "f", "file", "p", "plist", "d", "dir", "x", "i", "n", "line", "name", "item",
+];
 
 /// The deny text for a read-only dispatch's refused command (#8439).
 fn deny_reason(agent: &str, what: &str) -> String {

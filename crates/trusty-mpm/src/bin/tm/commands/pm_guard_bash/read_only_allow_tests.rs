@@ -351,3 +351,110 @@ fn git_reads_pass_and_everything_else_is_refused() {
         ],
     );
 }
+
+/// #8439 round 2 CRITICAL 1: git reads `--` as the value of `-e`, so the
+/// option scan never stops there; a pathspec spelled like an option is refused.
+#[test]
+fn git_options_after_a_double_dash_are_still_judged() {
+    check(
+        false,
+        &[
+            "git grep -e -- -O",
+            "git grep -e -- --open-files-in-pager",
+            "git grep -e -- -Ovim foo",
+            "git log -- --output=/tmp/x",
+            "git diff --ext-diff",
+            "git log --textconv -p",
+            "git show --show-signature",
+            "git log --show-sig",
+            "git ls-remote 'ext::sh -c x'",
+            "git log --format=%G?",
+            "git show -s '--pretty=format:%GS'",
+            "git branch --format='%(signature)'",
+        ],
+    );
+    check(
+        true,
+        &[
+            "git log -- -p",
+            "git grep -e -- -n",
+            "git diff -- crates",
+            "git log --no-ext-diff -p",
+        ],
+    );
+}
+
+/// #8439 round 2 CRITICAL 2: BSD `sed` takes the first operand as the script
+/// when no `-e` came first; the guard judges that order.
+#[test]
+fn sed_is_judged_in_the_order_bsd_sed_reads_it() {
+    check(
+        false,
+        &[
+            "for f in 1p; do sed -n \"$f\" -e 1p x.txt; done",
+            "sed -n 2p -e 1p two.txt",
+            "sed -n f.txt -e 1p",
+            "sed -n",
+            "sed -n 1p f.txt -i",
+            "for f in a.txt; do sed -n \"$f\"; done",
+        ],
+    );
+    check(
+        true,
+        &[
+            "sed -n -e 1p f.txt",
+            "sed -nE 1,3p f.txt g.txt",
+            "for f in a.txt; do sed -n 1p \"$f\"; done",
+        ],
+    );
+}
+
+/// #8439 round 2 CRITICAL 3: tmux format-expands `-S`/`-E`; values stay plain.
+#[test]
+fn tmux_values_cannot_carry_a_format() {
+    check(
+        false,
+        &[
+            "tmux capture-pane -p -S '#{e|+:1,1}'",
+            "tmux capture-pane -p -E '#(touch /tmp/x)'",
+            "tmux capture-pane -p -t '#{session_name}'",
+            "tmux capture-pane -p -S1x",
+            "tmux capture-pane -p -t 'a b'",
+            "tmux capture-pane -p -S",
+        ],
+    );
+    check(
+        true,
+        &[
+            "tmux capture-pane -p -S - -E -",
+            "tmux capture-pane -p -S-200 -t main:0.1",
+            "tmux capture-pane -pJ -t %3",
+        ],
+    );
+}
+
+/// #8439 round 2 MEDIUM/LOW: loop names are fixed; `tail` never follows.
+#[test]
+fn loop_names_are_fixed_and_tail_never_follows() {
+    check(
+        false,
+        &[
+            "for HOME in /tmp; do git status; done",
+            "for PATH in /tmp; do ls; done",
+            "for path in /tmp; do ls; done",
+            "for IFS in a; do ls; done",
+            "tail -f f.txt",
+            "tail -F f.txt",
+            "tail -5f f.txt",
+            "tail --fol f.txt",
+            "git log | tail -f",
+        ],
+    );
+    check(
+        true,
+        &[
+            "for file in a.txt; do ls \"$file\"; done",
+            "tail -n 5 f.txt",
+        ],
+    );
+}

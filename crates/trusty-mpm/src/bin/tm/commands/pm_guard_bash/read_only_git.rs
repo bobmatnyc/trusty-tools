@@ -10,7 +10,13 @@
 //! - `status`, `log`, `diff`, `show`, `grep`, `rev-parse`, `ls-files`,
 //!   `merge-base`, `ls-remote`, with no option that writes a file or runs a
 //!   program (`--output`, `-O`/`--open-files-in-pager`, `-u`/`--upload-pack`,
-//!   `--exec`, and any abbreviation git would expand to one of them);
+//!   `--exec`, `--ext-diff`, `--textconv`, `--show-signature`, a `%G…`
+//!   format placeholder or `%(signature…)` atom, and any
+//!   abbreviation git would expand to one of them). Every literal is checked,
+//!   including those after `--`: git reads `--` as the VALUE of a preceding
+//!   `-e`, so `git grep -e -- -O` still parses `-O` (#8439 round 2). A
+//!   pathspec spelled like a refused option is refused too. `ls-remote` also
+//!   refuses a `<transport>::` remote-helper URL;
 //! - `branch` with listing options only, and a pattern only after
 //!   `--list`/`-l`;
 //! - `worktree list [--porcelain|-v|--verbose|-z]`.
@@ -18,6 +24,9 @@
 //! `checkout`, `restore`, `switch`, `fetch` and every other subcommand are
 //! refused: each moves a ref or rewrites the tree, and `git checkout <name>`
 //! cannot be told from `git checkout <path>` without asking the filesystem.
+//! Out of scope: a program run by configuration that already exists —
+//! `core.fsmonitor`, `diff.external`, a textconv driver, `gpg.program`,
+//! `core.pager` — and `git status` refreshing `.git/index`.
 //! Test: `read_only_allow_tests::git_reads_pass_and_everything_else_is_refused`.
 
 use super::read_only_programs::Arg;
@@ -49,7 +58,15 @@ const READS: &[&str] = &[
 ///
 /// What: git's parse-options accepts any unambiguous prefix, so a long option
 /// is refused when its name is a prefix of one of these (`--out` → `--output`).
-const WRITING_LONG: &[&str] = &["output", "open-files-in-pager", "upload-pack", "exec"];
+const WRITING_LONG: &[&str] = &[
+    "output",
+    "open-files-in-pager",
+    "upload-pack",
+    "exec",
+    "ext-diff",
+    "textconv",
+    "show-signature",
+];
 
 /// `git branch` options that only list.
 const BRANCH_FLAGS: &[&str] = &[
@@ -125,9 +142,15 @@ pub(super) fn check_git(rest: &[Arg]) -> Verdict {
 
 /// A read subcommand without an option that writes or runs a program.
 fn read(sub: &str, tail: &[Arg]) -> Verdict {
+    // #8439 round 2: no stop at `--` — it may be an option's value.
     for t in tail.iter().filter_map(Arg::text) {
-        if t == "--" {
-            break;
+        if sub == "ls-remote" && t.contains("::") {
+            return Err("a `git ls-remote` remote-helper URL, which runs a program".into());
+        }
+        // #8439 round 2 audit: a `%G…` pretty-format placeholder verifies the
+        // commit signature, which runs `gpg.program` like `--show-signature`.
+        if t.contains("%G") {
+            return Err("a `%G` format placeholder, which runs the signature verifier".into());
         }
         let long = t
             .strip_prefix("--")
@@ -153,6 +176,14 @@ fn branch(tail: &[Arg]) -> Verdict {
         .iter()
         .any(|a| matches!(a.text(), Some("--list" | "-l")));
     let mut i = 0;
+    // #8439 round 2 audit: `%(signature…)` in `--format` runs the verifier.
+    if tail
+        .iter()
+        .filter_map(Arg::text)
+        .any(|t| t.contains("%(signature"))
+    {
+        return Err("a `%(signature)` format atom, which runs the signature verifier".into());
+    }
     while let Some(arg) = tail.get(i) {
         let t = arg.text().unwrap_or_default();
         let name = t.split('=').next().unwrap_or(t);

@@ -5,17 +5,18 @@
 //! from [`check_command`]'s table is refused, as is a path or quoted spelling
 //! of a listed one (`/usr/bin/sed`, `"s"ed`).
 //! What: [`check_command`] judges one simple command's argv. The table:
-//! - `cat`, `head`, `tail`, `wc`, `ls`, `grep`: any arguments — none of them
-//!   has an option that writes a file.
+//! - `cat`, `head`, `wc`, `ls`, `grep`: any arguments — none of them has an
+//!   option that writes a file (GNU and BSD alike).
+//! - `tail`: no long option and no `-f`/`-F`.
 //! - `rg`: any arguments but `--pre` and `--hostname-bin`, which run a program.
 //! - `find`: only the primaries in [`FIND_FLAGS`] / [`FIND_VALUED`]; `-exec`,
 //!   `-execdir`, `-ok`, `-delete`, `-fprint*` and `-fls` are absent.
-//! - `sed`: flags `-n`, `-E`, `-r` and `-e`; every script only prints
-//!   ([`sed_script_prints_only`]).
+//! - `sed`: flags `-n`, `-E`, `-r` and `-e` before the first operand, the
+//!   script literal, and every script print-only ([`sed_script_prints_only`]).
 //! - `plutil -p` and `plutil -lint [-s]` over file operands.
 //! - `defaults read [domain [key]]`; `launchctl print <target>`,
 //!   `launchctl list [label]`.
-//! - `tmux capture-pane` with `-p` and no `-b`.
+//! - `tmux capture-pane` with `-p`, no `-b`, and plain `-t`/`-S`/`-E` values.
 //! - `cargo metadata` / `cargo tree` without `--config` or `-Z`.
 //! - `git`: see [`super::read_only_git`].
 //! - `echo`, `pwd`.
@@ -57,7 +58,7 @@ type Verdict = Result<(), String>;
 const PIPE_READERS: &[&str] = &["cat", "head", "tail", "wc", "grep", "rg", "sed"];
 
 /// Programs with no option that writes, so any argument is accepted.
-const PLAIN_READERS: &[&str] = &["cat", "head", "tail", "wc", "ls", "grep"];
+const PLAIN_READERS: &[&str] = &["cat", "head", "wc", "ls", "grep"];
 
 /// Valueless `find` primaries and options that neither write nor execute.
 const FIND_FLAGS: &[&str] = &[
@@ -142,6 +143,7 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
     let rest = &args[1..];
     match program {
         p if PLAIN_READERS.contains(&p) => Ok(()),
+        "tail" => tail(rest),
         "rg" => rg(rest),
         "find" => find(rest),
         "sed" => sed(rest),
@@ -157,6 +159,21 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
             "`{program}`, which is not on the read-only allowlist"
         )),
     }
+}
+
+/// `tail` that does not follow (#8439 round 2).
+///
+/// What: no long option (GNU accepts `--f` for `--follow`) and no short
+/// cluster holding `f` or `F`; a following tail never exits.
+fn tail(rest: &[Arg]) -> Verdict {
+    let follows = rest
+        .iter()
+        .filter_map(Arg::text)
+        .any(|t| t.starts_with("--") || (t.starts_with('-') && t.contains(['f', 'F'])));
+    if follows {
+        return Err("`tail` with a long option or `-f`/`-F`".into());
+    }
+    Ok(())
 }
 
 /// `rg` without the options that run a program.
@@ -193,34 +210,45 @@ fn find(rest: &[Arg]) -> Verdict {
     Ok(())
 }
 
-/// `sed` whose every script only prints.
+/// `sed` whose every script only prints, in an order both parsers agree on.
+///
+/// Why (#8439 round 2): BSD `sed` stops reading options at the first operand
+/// and, with no `-e` yet, takes that operand as the script; GNU `sed` permutes
+/// and takes `-e` from anywhere. `sed -n "$s" -e 1p f` was allowed as a file
+/// `"$s"` plus the script `1p`, while macOS ran `"$s"` as the script.
+/// What: options first — `-n`/`-E`/`-r` clusters and `-e <literal script>`.
+/// With no `-e`, the first operand must be a literal script. Every word after
+/// the first operand must be an operand, so no option is read differently by
+/// the two parsers. Every script must pass [`sed_script_prints_only`].
+/// Test: `read_only_allow_tests::sed_is_judged_in_the_order_bsd_sed_reads_it`.
 fn sed(rest: &[Arg]) -> Verdict {
     let mut scripts = Vec::new();
     let mut i = 0;
-    while let Some(arg) = rest.get(i) {
-        match arg.text() {
-            Some("-e") => {
-                let script = rest.get(i + 1).and_then(Arg::text);
-                scripts.push(script.ok_or("`sed -e` without a literal script")?);
-                i += 2;
+    while let Some(t) = rest.get(i).and_then(Arg::text) {
+        if t == "-e" {
+            let script = rest.get(i + 1).and_then(Arg::text);
+            scripts.push(script.ok_or("`sed -e` without a literal script")?);
+            i += 2;
+        } else if t.starts_with('-') && t.len() > 1 {
+            if t.starts_with("--") || !t[1..].chars().all(|c| matches!(c, 'n' | 'E' | 'r')) {
+                return Err(format!(
+                    "`sed {t}`, which is not on the read-only allowlist"
+                ));
             }
-            Some(t) if t.starts_with('-') && t.len() > 1 => {
-                if t.starts_with("--") || !t[1..].chars().all(|c| matches!(c, 'n' | 'E' | 'r')) {
-                    return Err(format!(
-                        "`sed {t}`, which is not on the read-only allowlist"
-                    ));
-                }
-                i += 1;
-            }
-            Some(t) if scripts.is_empty() => {
-                scripts.push(t);
-                i += 1;
-            }
-            _ if arg.is_operand() => i += 1,
-            _ => return Err("a `sed` operand led by `-`".into()),
+            i += 1;
+        } else {
+            break;
         }
     }
-    if scripts.is_empty() || !scripts.iter().all(|s| sed_script_prints_only(s)) {
+    if scripts.is_empty() {
+        let script = rest.get(i).and_then(Arg::text);
+        scripts.push(script.ok_or("a `sed` script that is not a literal")?);
+        i += 1;
+    }
+    if !rest[i.min(rest.len())..].iter().all(Arg::is_operand) {
+        return Err("a `sed` option after its first operand".into());
+    }
+    if !scripts.iter().all(|s| sed_script_prints_only(s)) {
         return Err("a `sed` script that does more than print lines".into());
     }
     Ok(())
@@ -296,6 +324,13 @@ fn launchctl(rest: &[Arg]) -> Verdict {
 }
 
 /// `tmux capture-pane` that prints (`-p`) and fills no paste buffer.
+///
+/// Why (#8439 round 2): tmux format-expands `-S`/`-E`, and a format such as
+/// `#{e|…}` evaluates, while `#(…)` runs a shell command.
+/// What: valueless flags `-p -a -e -C -J -N -P -q -T -M`; `-S`/`-E` take only
+/// `-`, or digits with an optional leading `-`; `-t` takes only
+/// `[A-Za-z0-9_:.%$@-]`. No value may hold `#`.
+/// Test: `read_only_allow_tests::tmux_values_cannot_carry_a_format`.
 fn tmux(rest: &[Arg]) -> Verdict {
     if rest.first().and_then(Arg::text) != Some("capture-pane") {
         return Err("`tmux` in a form other than `capture-pane -p`".into());
@@ -316,11 +351,17 @@ fn tmux(rest: &[Arg]) -> Verdict {
                 'a' | 'e' | 'C' | 'J' | 'N' | 'P' | 'q' | 'T' | 'M' => {}
                 't' | 'S' | 'E' => {
                     // A valued flag takes the rest of the cluster, or the next word.
-                    if k + 1 == cluster.len() {
-                        rest.get(i)
-                            .and_then(Arg::text)
-                            .ok_or("`tmux -t/-S/-E` without a value")?;
+                    let value = if k + 1 == cluster.len() {
                         i += 1;
+                        rest.get(i - 1).and_then(Arg::text)
+                    } else {
+                        Some(&cluster[k + 1..])
+                    };
+                    let value = value.ok_or("`tmux -t/-S/-E` without a literal value")?;
+                    if !tmux_value_ok(c, value) {
+                        return Err(format!(
+                            "`tmux capture-pane -{c} {value}`, which tmux may expand"
+                        ));
                     }
                     break;
                 }
@@ -332,6 +373,18 @@ fn tmux(rest: &[Arg]) -> Verdict {
         return Err("`tmux capture-pane` without `-p`, which fills a paste buffer".into());
     }
     Ok(())
+}
+
+/// Is `value` a plain target (`-t`) or line number (`-S`/`-E`)?
+fn tmux_value_ok(flag: char, value: &str) -> bool {
+    if flag == 't' {
+        return !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_:.%$@-".contains(c));
+    }
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    value == "-" || (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// `cargo metadata` or `cargo tree` without a config override.
