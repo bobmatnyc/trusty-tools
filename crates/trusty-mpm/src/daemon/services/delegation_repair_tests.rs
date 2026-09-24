@@ -254,17 +254,71 @@ fn repair_by_delegation_id_ends_a_record_with_no_agent_id_8257() {
 }
 
 // #8257: the 2026-09-17 specimen — matched by type, owned by a live session.
-// The stop is evidence about the agent, so the live session no longer refuses.
+// A type-matched stop can name a running sibling (#6556) and leaves nothing for
+// the probe to check, so only the owning session may clear it.
 #[test]
-fn a_type_matched_record_of_a_live_session_becomes_repairable_8257() {
+fn a_type_matched_record_of_a_live_session_needs_its_owner_8257() {
     let (state, session) = state_with(Some(SessionStatus::Active));
     let d = type_matched(session);
     state.upsert_delegation(d.clone());
 
+    for caller in [no_caller(), RepairCaller::Session(SessionId::new())] {
+        match repair_delegation_by_id(&state, d.id, true, &caller) {
+            RepairOutcome::Refused { reason } => {
+                assert!(reason.contains("matched by agent type"), "{reason}");
+                assert!(
+                    reason.contains(&format!("Only the owning session {}", session.0)),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected a refusal for {caller:?}, got {other:?}"),
+        }
+        assert_eq!(state.all_delegations()[0].status, DelegationStatus::Stale);
+    }
+
     assert_eq!(
-        repair_delegation_by_id(&state, d.id, false, &no_caller()),
+        repair_delegation_by_id(&state, d.id, false, &RepairCaller::Session(session)),
         RepairOutcome::Ended { records: 1 }
     );
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Cancelled
+    );
+}
+
+// #8257: one record whose owner is gone and one whose owner the registry cannot
+// find. The undeterminable one decides the call, so it needs --force.
+#[test]
+fn an_unknown_owner_outranks_a_gone_one_8257() {
+    let (state, gone) = state_with(Some(SessionStatus::Stopped));
+    state.upsert_delegation(delegation(gone, "agent-pair", DelegationStatus::Running));
+    state.upsert_delegation(delegation(
+        SessionId::new(),
+        "agent-pair",
+        DelegationStatus::Running,
+    ));
+    let run = |force| {
+        repair_matching(
+            &state,
+            |d| d.agent_id.as_deref() == Some("agent-pair"),
+            force,
+            &no_caller(),
+            |_| LiveEvidence::Clear,
+        )
+    };
+
+    match run(false) {
+        RepairOutcome::Refused { reason } => assert!(reason.contains("--force"), "{reason}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(
+        state
+            .all_delegations()
+            .iter()
+            .all(|d| d.status == DelegationStatus::Running && d.repair.is_none()),
+        "a refusal writes nothing"
+    );
+    assert_eq!(run(true), RepairOutcome::Ended { records: 2 });
 }
 
 // #8257 Fail-Open Check: a process standing in the agent's own tree refuses
@@ -325,17 +379,12 @@ fn repair_refuses_when_the_live_agent_probe_cannot_answer_8257() {
 fn lock_holder_evidence_reads_each_arm_8257() {
     use super::super::delegation_repair_probe::lock_holder_evidence;
     let reason = "claude agent agent-a1 (pid 4242 start Mon Sep 14 15:30:46 2026)";
-    let started = {
-        use chrono::TimeZone;
-        let naive = chrono::NaiveDate::from_ymd_opt(2026, 9, 14)
-            .and_then(|d| d.and_hms_opt(15, 30, 46))
-            .expect("date");
-        chrono::Local
-            .from_local_datetime(&naive)
-            .earliest()
-            .expect("local")
-            .timestamp()
-    };
+    // The harness writes the stamp in UTC.
+    let started = chrono::NaiveDate::from_ymd_opt(2026, 9, 14)
+        .and_then(|d| d.and_hms_opt(15, 30, 46))
+        .expect("date")
+        .and_utc()
+        .timestamp();
     let at = move |_| Some(started);
 
     assert!(matches!(
@@ -344,9 +393,13 @@ fn lock_holder_evidence_reads_each_arm_8257() {
     ));
     assert_eq!(lock_holder_evidence(reason, |_| Some(false), at), Ok(None));
     assert_eq!(
-        lock_holder_evidence(reason, |_| Some(true), move |_| Some(started + 3600)),
+        lock_holder_evidence(reason, |_| Some(true), move |_| Some(started + 5000)),
         Ok(None),
         "a reused pid is not the lock's holder"
+    );
+    assert!(
+        lock_holder_evidence(reason, |_| Some(true), move |_| Some(started + 3600)).is_err(),
+        "a start one zone offset away is ambiguous, never dead"
     );
     assert!(lock_holder_evidence(reason, |_| None, at).is_err());
     assert!(lock_holder_evidence(reason, |_| Some(true), |_| None).is_err());
@@ -355,6 +408,50 @@ fn lock_holder_evidence_reads_each_arm_8257() {
         "no start time to match"
     );
     assert!(lock_holder_evidence("claude agent agent-a1", |_| Some(true), at).is_err());
+}
+
+// #8257: the harness writes the lock's start in UTC. On a machine whose zone is
+// not UTC, a live holder must still read live — whether the stamp is in UTC or
+// in the machine's zone — and a stamp in any other zone must read unknown.
+#[test]
+fn a_live_lock_reads_live_in_any_time_zone_8257() {
+    use super::super::delegation_repair_probe::lock_holder_evidence_in;
+    use chrono::{FixedOffset, TimeZone};
+    let started: i64 = 1_790_246_739; // Thu Sep 24 2026, 10:45:39 UTC
+    let stamp_in = |tz: &FixedOffset| {
+        let at = tz.timestamp_opt(started, 0).single().expect("epoch");
+        format!(
+            "claude agent agent-a1 (pid 4242 start {})",
+            at.format("%a %b %e %H:%M:%S %Y")
+        )
+    };
+    let utc = FixedOffset::east_opt(0).expect("utc");
+    for secs in [
+        -4 * 3600,
+        -5 * 3600,
+        5 * 3600 + 1800,
+        9 * 3600,
+        14 * 3600,
+        -12 * 3600,
+    ] {
+        let machine = FixedOffset::east_opt(secs).expect("offset");
+        for written in [&utc, &machine] {
+            let reason = stamp_in(written);
+            assert!(
+                matches!(
+                    lock_holder_evidence_in(&reason, |_| Some(true), |_| Some(started), &machine),
+                    Ok(Some(_))
+                ),
+                "machine {machine}, stamp {reason}: a live holder must read live"
+            );
+        }
+        let elsewhere = FixedOffset::east_opt(3 * 3600).expect("offset");
+        let reason = stamp_in(&elsewhere);
+        assert!(
+            lock_holder_evidence_in(&reason, |_| Some(true), |_| Some(started), &machine).is_err(),
+            "machine {machine}, stamp {reason}: another zone is unknown, never dead"
+        );
+    }
 }
 
 /// A live session owning one young `Running` record naming `agent_id`.
@@ -524,9 +621,9 @@ fn the_owner_is_refused_while_a_harness_lock_names_its_agent_8257() {
         let mut sys = sysinfo::System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[spid]), true);
         let secs = sys.process(spid).expect("this process").start_time();
+        // #8257: the harness writes this stamp in UTC.
         chrono::DateTime::from_timestamp(i64::try_from(secs).expect("epoch"), 0)
             .expect("timestamp")
-            .with_timezone(&chrono::Local)
             .format("%a %b %e %H:%M:%S %Y")
             .to_string()
     };

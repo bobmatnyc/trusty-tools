@@ -54,9 +54,11 @@
 //! # #8257: reaching every record, and asking the OS before writing
 //!
 //! A record a stop matched by agent type never learns an `agent_id`, so it is
-//! addressed by its delegation id ([`repair_delegation_by_id`]). Such a stop,
-//! or a record older than `RUNNING_STALE_AFTER_SECS`, is evidence about the
-//! AGENT, so a live owner session no longer refuses it ([`record_liveness`]).
+//! addressed by its delegation id ([`repair_delegation_by_id`]). A record older
+//! than `RUNNING_STALE_AFTER_SECS` is evidence about the AGENT, so a live owner
+//! session no longer refuses it ([`record_liveness`]). A type-matched stop is
+//! not: it can name a still-running sibling (#6556), so that record still
+//! needs its owner's word while the owner lives.
 //! Every would-be write then passes
 //! [`super::delegation_repair_probe::probe_live_evidence`], which refuses on a
 //! live process in the agent's tree and on any probe that cannot answer.
@@ -227,7 +229,7 @@ pub(crate) fn decide(
                      for the agent, and the record is younger than the 6 h stale threshold — so \
                      the agent may still be running, and ending its delegation would readmit a \
                      second writer onto a working tree it may still hold. It becomes repairable \
-                     once that session stops, once a stop for its agent type arrives, or at 6 h \
+                     once that session stops, when that session clears it itself, or at 6 h \
                      (#7602, #8257)"
                 .to_string(),
         },
@@ -310,7 +312,7 @@ pub fn repair_delegation_as(
 /// What: [`repair_matching`] over the single record with that id, on behalf of
 /// `caller`.
 /// Test: `repair_by_delegation_id_ends_a_record_with_no_agent_id_8257`,
-/// `a_type_matched_record_of_a_live_session_becomes_repairable_8257`.
+/// `a_type_matched_record_of_a_live_session_needs_its_owner_8257`.
 pub fn repair_delegation_by_id(
     state: &Arc<DaemonState>,
     id: DelegationId,
@@ -327,14 +329,14 @@ fn no_caller() -> RepairCaller {
 
 /// A record's owner liveness, as far as it still speaks for the AGENT (#8257).
 ///
-/// Why: a live session proves its agent MAY run only while nothing says the
-/// agent stopped. A stop matched by agent type (#6556) says it did, and a record
-/// past `RUNNING_STALE_AFTER_SECS` is past the budget the sweep already gives
-/// up at. Refusing those forever on the session's liveness is what left the
-/// 2026-09-17 record unrepairable.
-/// What: `Gone` for a type-matched stop or a record at or past the threshold;
-/// otherwise `owner` unchanged. The OS probe still runs before any write.
-/// Test: `a_type_matched_record_of_a_live_session_becomes_repairable_8257`,
+/// Why: a record past `RUNNING_STALE_AFTER_SECS` is past the budget the sweep
+/// already gives up at. A stop matched only by agent type is NOT evidence: it
+/// can name a still-running sibling (#6556), and the record carries no agent id
+/// or tree for the probe to check — so it stays on its owner's liveness, and a
+/// live owner's record ends only on that owner's word.
+/// What: `Gone` for a record at or past the threshold; otherwise `owner`
+/// unchanged. The OS probe still runs before any write.
+/// Test: `a_type_matched_record_of_a_live_session_needs_its_owner_8257`,
 /// `repair_refuses_while_the_owner_is_live_7602`.
 pub(crate) fn record_liveness(
     owner: OwnerLiveness,
@@ -342,11 +344,7 @@ pub(crate) fn record_liveness(
     now: chrono::DateTime<chrono::Utc>,
 ) -> OwnerLiveness {
     let aged_out = super::delegation_records::record_age_secs(d, now) >= RUNNING_STALE_AFTER_SECS;
-    if d.stale_by_agent_type || aged_out {
-        OwnerLiveness::Gone
-    } else {
-        owner
-    }
+    if aged_out { OwnerLiveness::Gone } else { owner }
 }
 
 /// Resolve a record whose agent may still run: only its owner may end it
@@ -361,22 +359,28 @@ pub(crate) fn record_liveness(
 /// `an_unestablished_caller_is_refused_on_a_live_record_8257`.
 fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
     let owner = d.session.0;
+    // #8257: a type-matched stop may belong to a sibling (#6556), so say so.
+    let stop = if d.stale_by_agent_type {
+        "the only stop that arrived was matched by agent type and may belong to a sibling"
+    } else {
+        "no stop has arrived"
+    };
     let head = format!(
-        "{} record {} is owned by session {owner}, which is still Active; no stop has arrived \
-         and the record is under the 6 h stale threshold, so the agent may still be running",
+        "{} record {} is owned by session {owner}, which is still Active; {stop} and the record \
+         is under the 6 h stale threshold, so the agent may still be running",
         d.agent, d.id.0
     );
     match caller {
         RepairCaller::Session(s) if *s == d.session => Ok(()),
         RepairCaller::Session(s) => Err(format!(
-            "{head}. Only the owning session {owner} can clear it before a stop arrives or the \
-             record reaches 6 h; this repair came from session {} (#8257)",
+            "{head}. Only the owning session {owner} can clear it before its agent's own stop \
+             arrives or the record reaches 6 h; this repair came from session {} (#8257)",
             s.0
         )),
         RepairCaller::Unestablished(why) => Err(format!(
-            "{head}. Only the owning session {owner} can clear it before a stop arrives or the \
-             record reaches 6 h, and the calling session could not be established: {why} \
-             (#8257)"
+            "{head}. Only the owning session {owner} can clear it before its agent's own stop \
+             arrives or the record reaches 6 h, and the calling session could not be \
+             established: {why} (#8257)"
         )),
     }
 }
@@ -389,7 +393,8 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
 /// What: tallies the matched records and resolves each one's
 /// [`record_liveness`]. A still-`Live` record ends only when [`owner_attests`]
 /// — otherwise the call refuses with its words. The rest resolve the strictest
-/// liveness across them and run [`decide`]. On `Ended` it probes each open
+/// liveness across them (`Unknown` over `Gone`) and run [`decide`]. On `Ended`
+/// it probes each open
 /// record and refuses — naming the record and the probe's words — on any
 /// [`LiveEvidence`] that is not `Clear`, the owner included. Only then does it
 /// write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled) and a
@@ -399,7 +404,7 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
 /// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`,
 /// `the_owner_is_refused_while_the_agent_shows_live_8257`,
 /// `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`,
-/// `a_forced_clear_is_logged_8257`.
+/// `a_forced_clear_is_logged_8257`, `an_unknown_owner_outranks_a_gone_one_8257`.
 pub(crate) fn repair_matching(
     state: &Arc<DaemonState>,
     matches: impl Fn(&Delegation) -> bool,
@@ -435,9 +440,12 @@ pub(crate) fn repair_matching(
             ),
         };
         // The strictest answer across the records decides the whole call.
+        // #8257: Unknown outranks Gone, so one undeterminable record needs --force.
         owner = Some(match (owner, liveness) {
-            (Some(OwnerLiveness::Gone), _) | (_, OwnerLiveness::Gone) => OwnerLiveness::Gone,
-            _ => OwnerLiveness::Unknown,
+            (Some(OwnerLiveness::Unknown), _) | (_, OwnerLiveness::Unknown) => {
+                OwnerLiveness::Unknown
+            }
+            _ => OwnerLiveness::Gone,
         });
         open.push((d, basis));
     }

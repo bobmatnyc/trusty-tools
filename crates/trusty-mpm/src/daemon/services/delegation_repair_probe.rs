@@ -172,15 +172,37 @@ fn harness_lock_in(
 /// Why: a lock pid alone is not evidence — pids are reused, and a running
 /// process that started after the lock was written is someone else. The lock
 /// records its holder's start time, so the match is checked, not assumed.
-/// What: `Ok(None)` when the pid is gone, or runs but started at a different
-/// time (a reused pid); `Ok(Some(reason))` when it runs and its start matches
-/// within [`START_TOLERANCE_SECS`]; `Err` when the reason names no pid, carries
-/// no start time, or either probe cannot answer.
+/// What: [`lock_holder_evidence_in`] with this machine's local zone.
 /// Test: `lock_holder_evidence_reads_each_arm_8257`.
 pub(crate) fn lock_holder_evidence(
     reason: &str,
     pid_alive: impl Fn(u32) -> Option<bool>,
     start_of: impl Fn(u32) -> Option<i64>,
+) -> Result<Option<String>, String> {
+    lock_holder_evidence_in(reason, pid_alive, start_of, &chrono::Local)
+}
+
+/// [`lock_holder_evidence`] with the machine's zone injected (#8257).
+///
+/// Why: the harness writes the lock's `start <ctime>` in UTC (measured: lock
+/// `10:45:39`, `ps -o lstart` `06:45:39` EDT). Read as local time, every live
+/// lock on a non-UTC machine looked like a reused pid, so the repair cleared a
+/// record a running agent held. The zone the stamp is written in is not
+/// recorded, so a mismatch shaped like a zone offset is ambiguous, and an
+/// ambiguous reading must never read as dead.
+/// What: `Ok(None)` when the pid is gone, or runs with a start that matches no
+/// reading of the stamp and sits no zone offset away from its UTC reading (a
+/// reused pid). `Ok(Some(reason))` when it runs and its start matches the stamp
+/// read as UTC or in `local`, within [`START_TOLERANCE_SECS`]. `Err` when the
+/// reason names no pid or no start time, when either probe cannot answer, or
+/// when the start sits a whole zone offset from the UTC reading.
+/// Test: `a_live_lock_reads_live_in_any_time_zone_8257`,
+/// `lock_holder_evidence_reads_each_arm_8257`.
+pub(crate) fn lock_holder_evidence_in<Tz: chrono::TimeZone>(
+    reason: &str,
+    pid_alive: impl Fn(u32) -> Option<bool>,
+    start_of: impl Fn(u32) -> Option<i64>,
+    local: &Tz,
 ) -> Result<Option<String>, String> {
     let pid = harness_lock_pid_in_reason(reason)
         .ok_or_else(|| format!("the harness lock `{reason}` names no pid"))?;
@@ -193,36 +215,51 @@ pub(crate) fn lock_holder_evidence(
         }
         Some(true) => {}
     }
-    let recorded = lock_start_epochs(reason).ok_or_else(|| {
+    let stamp = lock_start_stamp(reason).ok_or_else(|| {
         format!("harness lock pid {pid} runs, but the lock carries no readable start time")
     })?;
     let actual = start_of(pid)
         .ok_or_else(|| format!("could not read the start time of running pid {pid}"))?;
-    let matches = recorded
-        .iter()
-        .any(|at| (actual - at).abs() <= START_TOLERANCE_SECS);
-    Ok(matches.then(|| {
-        format!("harness lock pid {pid} is running and is the process that took the lock")
-    }))
+    let as_utc = stamp.and_utc().timestamp();
+    let as_local = local.from_local_datetime(&stamp);
+    let near = |at: i64| (actual - at).abs() <= START_TOLERANCE_SECS;
+    let matches = near(as_utc)
+        || [as_local.clone().earliest(), as_local.latest()]
+            .into_iter()
+            .flatten()
+            .any(|t| near(t.timestamp()));
+    if matches {
+        return Ok(Some(format!(
+            "harness lock pid {pid} is running and is the process that took the lock"
+        )));
+    }
+    let skew = actual - as_utc;
+    if is_zone_offset(skew) {
+        return Err(format!(
+            "harness lock pid {pid} runs, and its start time sits {skew} s from the lock's — a \
+             whole time-zone offset, so a reused pid cannot be told from the lock's own holder \
+             read in another zone"
+        ));
+    }
+    Ok(None)
 }
 
-/// The epoch second(s) a lock reason's `start <ctime>` can mean.
+/// Is `skew` seconds one whole time-zone offset, within the start tolerance?
 ///
-/// What: the `ctime` is local time, so a DST fold yields two candidates;
-/// `None` when the field is missing or does not parse.
-fn lock_start_epochs(reason: &str) -> Option<Vec<i64>> {
-    use chrono::TimeZone;
+/// What: offsets run from UTC-12 to UTC+14 in quarter-hour steps.
+fn is_zone_offset(skew: i64) -> bool {
+    const QUARTER_HOUR: i64 = 15 * 60;
+    let off_grid = skew.rem_euclid(QUARTER_HOUR);
+    skew.abs() <= 14 * 3600 + START_TOLERANCE_SECS
+        && off_grid.min(QUARTER_HOUR - off_grid) <= START_TOLERANCE_SECS
+}
+
+/// A lock reason's `start <ctime>`, zone-less; `None` when missing or unparsable.
+fn lock_start_stamp(reason: &str) -> Option<chrono::NaiveDateTime> {
     let rest = reason.split_once(" start ")?.1;
     let stamp = rest.split(')').next()?;
     let stamp = stamp.split_whitespace().collect::<Vec<_>>().join(" ");
-    let naive = chrono::NaiveDateTime::parse_from_str(&stamp, "%a %b %d %H:%M:%S %Y").ok()?;
-    let local = chrono::Local.from_local_datetime(&naive);
-    let epochs: Vec<i64> = [local.earliest(), local.latest()]
-        .into_iter()
-        .flatten()
-        .map(|t| t.timestamp())
-        .collect();
-    (!epochs.is_empty()).then_some(epochs)
+    chrono::NaiveDateTime::parse_from_str(&stamp, "%a %b %d %H:%M:%S %Y").ok()
 }
 
 /// The kernel's start time of `pid`, in epoch seconds.

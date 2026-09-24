@@ -1688,18 +1688,35 @@ async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
     use crate::core::session::{ControlModel, Session};
     use crate::daemon::services::delegation_repair::RepairOutcome;
 
+    use crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER;
+
     let (state, _dir, session) = hermetic();
     state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
     let d = type_matched_record(&state, session);
+    let by_id = |headers| {
+        repair_delegation_by_id_route(
+            State(state.clone()),
+            Path(d.id.0.to_string()),
+            headers,
+            None,
+        )
+    };
 
-    let Json(outcome) = repair_delegation_by_id_route(
-        State(state.clone()),
-        Path(d.id.0.to_string()),
-        axum::http::HeaderMap::new(),
-        None,
-    )
-    .await
-    .expect("a well-formed id");
+    // #8257: a type-matched stop may be a sibling's, so an anonymous caller is
+    // refused while the owner lives; the owner's own header clears it.
+    let Json(anonymous) = by_id(axum::http::HeaderMap::new())
+        .await
+        .expect("a well-formed id");
+    assert!(
+        matches!(anonymous, RepairOutcome::Refused { .. }),
+        "{anonymous:?}"
+    );
+    let mut owner = axum::http::HeaderMap::new();
+    owner.insert(
+        CALLER_SESSION_HEADER,
+        session.0.to_string().parse().expect("header value"),
+    );
+    let Json(outcome) = by_id(owner).await.expect("a well-formed id");
 
     assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
     assert_eq!(
