@@ -1,2 +1,0 @@
-Fixed
-- The ADR-0057 `git worktree remove` merged-PR check takes the repository's identity from the `origin` remote URL (#8403). A branch pushed to a fork remote searches `origin` first and the fork second, instead of the fork (`<account>/<repo>`) alone, so a cross-repository PR merged in `origin` is found. An unreadable `origin` URL refuses even when the push remote is valid, and a repository that cannot be asked still denies unless another repository reported the merge.

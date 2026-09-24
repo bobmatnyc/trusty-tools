@@ -41,6 +41,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The `tm-session-resume` skill now realigns to the recorded window by its immutable `@N` id instead of a bare `session:index` target (#8443).
 - The attach command the daemon returns (`attach_cmd`) and the hints `tm` prints are now `tmux attach-session -t '=<name>'`, quoted so zsh does not read the leading `=` as a command-path expansion (#8443).
 - `tm doctor`'s `launchd_process_type` row description no longer restates the `com.trusty.mpm` / `com.trusty.mpm.supervisor` launchd labels as literals; it now points at `trusty_common::launchd_labels::MPM` and `MPM_SUPERVISOR`, the registry that owns them (#4919, #8415).
+- The ADR-0057 `git worktree remove` re-check bounds its daemon owner query by the removal deadline (#8082). A late-starting guard facing a daemon that accepts and never answers now denies, naming `sole-owner`, inside the budget instead of after its own 2.5 s client timeouts. A regression test also pins the removal deadlines inside the guard hook's registered timeout.
+- The #7266 secret-read guard no longer refuses `terraform apply` or `terraform plan` that names a state file only as a `-state`, `-state-out` or `-backup` value (#8249). A scratchpad copy of a Terraform root can now apply against the main checkout's state without copying module files into the main checkout. Every such value must be a `*.tfstate` or `*.tfstate.backup` path (`-backup=-` too), so a state flag cannot launder another secret or copy state out to a readable file. `terraform show`, `terraform state`, a secret named outside a state flag (a `-var-file`), a state file read by any other program, and a state flag built from a command substitution are still refused.
+- The ADR-0037 main-checkout guard no longer refuses `git checkout <sha> -- <paths>` and the other whole-tree git verbs inside a disposable clone under the session scratchpad (#8339). It applies the same canonicalized proof #7778 gave the write boundary, so a symlink from the scratchpad into a real checkout, and a `-C $VAR` the guard cannot expand, are still refused.
+- The ADR-0057 `git worktree remove` merged-PR check takes the repository's identity from the `origin` remote URL (#8403). A branch pushed to a fork remote searches `origin` first and the fork second, instead of the fork (`<account>/<repo>`) alone, so a cross-repository PR merged in `origin` is found. An unreadable `origin` URL refuses even when the push remote is valid, and a repository that cannot be asked still denies unless another repository reported the merge.
+- The ADR-0057 `git worktree remove` scope check recognises the harness's `<repo>-worktrees/<tree>` sibling layout (#8413). A `version-control` removal of a linked worktree there now reaches the clean/pushed/merged/owner re-checks instead of being refused at `worktree-scope`. A main checkout that merely sits under a `*-worktrees` directory is still refused.
 
 ### Changed
 
@@ -60,6 +65,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   section) now name a project-root `TICKETING.md` as the `ticketing` agent's
   override of the `tm-ticketing` defaults, so a PM no longer treats a
   ticketing-generated `TICKETING.md` as an unrequested file ([#8437](https://github.com/bobmatnyc/trusty-tools/issues/8437))
+- The `tm-workflow` skill states the sanctioned pattern for a brief that needs a ticket-named branch (#8337): the isolated agent creates that branch inside its assigned worktree instead of adding a second worktree, whose every later operation the Claude Code isolation pin refuses. When the directory itself must carry the ticket name, the PM creates it before dispatch.
 
 ## [1.7.0] — 2026-09-23
 
