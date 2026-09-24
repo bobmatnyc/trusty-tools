@@ -16,9 +16,11 @@
 //!   including those after `--`: git reads `--` as the VALUE of a preceding
 //!   `-e`, so `git grep -e -- -O` still parses `-O` (#8439 round 2). A
 //!   pathspec spelled like a refused option is refused too. `ls-remote` also
-//!   refuses a `<transport>::` remote-helper URL;
-//! - `branch` with listing options only, and a pattern only after
-//!   `--list`/`-l`;
+//!   refuses a `<transport>::` remote-helper URL. A `for` variable is refused
+//!   as an `ls-remote` argument and straight after any option but `--`, where
+//!   it could be that option's value (#8439 round 3);
+//! - `branch` with listing options only, each value a literal, and a pattern
+//!   only after `--list`/`-l`;
 //! - `worktree list [--porcelain|-v|--verbose|-z]`.
 //!
 //! `checkout`, `restore`, `switch`, `fetch` and every other subcommand are
@@ -142,6 +144,23 @@ pub(super) fn check_git(rest: &[Arg]) -> Verdict {
 
 /// A read subcommand without an option that writes or runs a program.
 fn read(sub: &str, tail: &[Arg]) -> Verdict {
+    // #8439 round 3: a `for` variable is judged by where it stands, since its
+    // text is unknown — never an `ls-remote` remote (a `::` helper URL), and
+    // never straight after an option, whose value it could be (`--format`).
+    for (k, arg) in tail.iter().enumerate() {
+        if arg.text().is_some() {
+            continue;
+        }
+        let after_option = k
+            .checked_sub(1)
+            .and_then(|p| tail[p].text())
+            .is_some_and(|prev| prev.starts_with('-') && prev != "--");
+        if sub == "ls-remote" || after_option {
+            return Err(format!(
+                "a `for` variable as the value of a `git {sub}` option or remote"
+            ));
+        }
+    }
     // #8439 round 2: no stop at `--` — it may be an option's value.
     for t in tail.iter().filter_map(Arg::text) {
         if sub == "ls-remote" && t.contains("::") {
@@ -189,6 +208,10 @@ fn branch(tail: &[Arg]) -> Verdict {
         let name = t.split('=').next().unwrap_or(t);
         let joined = t.contains('=') && BRANCH_VALUED.contains(&name);
         if BRANCH_VALUED.contains(&t) {
+            // #8439 round 3: the value's content matters (`%(signature)`).
+            if tail.get(i + 1).and_then(Arg::text).is_none() {
+                return Err(format!("`git branch {t}` without a literal value"));
+            }
             i += 2;
         } else if BRANCH_FLAGS.contains(&t) || joined || (listing && arg.is_operand()) {
             i += 1;

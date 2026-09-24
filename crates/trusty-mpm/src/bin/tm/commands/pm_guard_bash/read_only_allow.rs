@@ -29,7 +29,8 @@
 //! configuration that already exists — git's `core.fsmonitor`,
 //! `diff.external`, textconv drivers, `gpg.program`, `core.pager`, and a
 //! `.cargo/config.toml` `rustc`/`rustc-wrapper` that cargo runs to read the
-//! host target.
+//! host target, and an `rg` config file named by `RIPGREP_CONFIG_PATH`, which
+//! can carry `--pre`.
 //! Test: `read_only_allow_tests` — `refuses_the_incident_plutil_extract_json_form`,
 //! `legitimate_reads_stay_allowed`, `critic_round_three_probes_are_refused`.
 

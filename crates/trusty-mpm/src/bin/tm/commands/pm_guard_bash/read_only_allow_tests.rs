@@ -458,3 +458,38 @@ fn loop_names_are_fixed_and_tail_never_follows() {
         ],
     );
 }
+
+/// #8439 round 3 HIGH: a `for` variable's text is unknown, so it is refused
+/// wherever that text would matter — both forms the critic ran, plus each
+/// other position the audit closed.
+#[test]
+fn a_for_variable_never_reaches_a_git_value_or_remote() {
+    check(
+        false,
+        &[
+            "for x in '%(signature)'; do git branch --format \"$x\"; done",
+            "for x in 'foo::bar'; do git ls-remote \"$x\"; done",
+            "for f in /a/*.git; do git ls-remote \"$f\"; done",
+            "for x in '%G?'; do git log --format \"$x\"; done",
+            "for x in a; do git log --grep -- --format \"$x\"; done",
+            "for x in a; do git show --pretty \"$x\"; done",
+            "for x in a; do git grep -e \"$x\"; done",
+            "for x in a; do git branch --contains \"$x\"; done",
+            "for x in a; do git branch --sort \"$x\" --list; done",
+            "for x in a; do git -C \"$x\" status; done",
+            "for x in a; do git worktree list \"$x\"; done",
+            "for x in a; do sed -n -e \"$x\" f; done",
+            "for x in a; do find . -name \"$x\"; done",
+            "for x in a; do tmux capture-pane -p -t \"$x\"; done",
+            "for x in a; do cargo tree -p \"$x\"; done",
+        ],
+    );
+    check(
+        true,
+        &[
+            "for f in a.txt; do git log --oneline -- \"$f\"; done",
+            "for f in a.txt; do git diff \"$f\"; done",
+            "for p in 'fix/*'; do git branch --list \"$p\"; done",
+        ],
+    );
+}
