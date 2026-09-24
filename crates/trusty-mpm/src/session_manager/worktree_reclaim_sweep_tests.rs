@@ -382,6 +382,8 @@ fn recheck_refuses_when_the_pr_is_no_longer_merged() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("reopened-2919");
     land(&path);
+    // #7771 (f): unpublished work, so only a merged PR could vouch for it.
+    GitWorktreeFixture::commit_unpushed(&path);
     for state in [
         BranchPrState::Open { pr: 2 },
         BranchPrState::ClosedUnmerged { pr: 2 },
@@ -672,6 +674,8 @@ fn survey_still_blocks_a_branch_no_merged_pr_relates_to() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("survey-7267-none");
     land(&path);
+    // #7771 (f): unpublished work, so only a merged PR could vouch for it.
+    GitWorktreeFixture::commit_unpushed(&path);
     let s = survey_with_index(
         &fx.repos_root,
         &nobody(),
@@ -909,16 +913,13 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
     );
 }
 
-/// The #6556 critic round, HIGH 3, at the survey level. The first cut of #6561
-/// let a sentinel-less agent-store worktree through gate 4, so a whole-store
-/// sweep would have offered every unattributed `agent-*` tree whose PR had
-/// merged — including one a dispatched agent was still working in, since
-/// `version-control` squash-merges before that agent finishes.
+/// #7771 reverses the #6556 critic round's survey-level refusal: a live agent
+/// in such a tree holds the harness lock, which condition (a) reads, so a tree
+/// with no owner file, no lock and no process in it is offered.
 ///
-/// Fails before this round: the candidate is `Reclaimable { pr: 759 }` and
-/// `s.reclaimable` is 1.
+/// Fails before #7771: the candidate is blocked with "names no owner".
 #[test]
-fn survey_refuses_an_unattributed_agent_store_worktree() {
+fn worktree_7771_survey_offers_an_unattributed_agent_store_worktree() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join(".claude").join("worktrees");
     let path = fx.add_worktree_at(&parent, "agent-6561");
@@ -938,15 +939,14 @@ fn survey_refuses_an_unattributed_agent_store_worktree() {
         .iter()
         .find(|c| c.path == path)
         .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    // #7771 superseded this refusal: an unattributed, unlocked, merged, clean
+    // agent-store tree with no process in it IS offered.
     assert!(
-        !found.verdict.is_reclaimable(),
-        "a merged, clean, but UNATTRIBUTED agent worktree must not be offered: {:?}",
+        found.verdict.is_reclaimable(),
+        "a merged, clean, unlocked tree with no owner file is reclaimable: {:?}",
         found.verdict
     );
-    assert_eq!(
-        s.reclaimable, 0,
-        "and it must not be counted toward what the operator is told to reclaim"
-    );
+    assert_eq!(s.reclaimable, 1);
 }
 
 #[test]
@@ -1961,8 +1961,29 @@ fn survey_counts_a_failed_lookup_apart_from_an_unknown_state() {
 fn released_agent_worktree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     let path = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), name);
     land(&path);
-    GitWorktreeFixture::stamp_agent_sentinel(&path, name);
+    // #7771 (d): dispatched by a session `parent_ended_claims` proves ended.
+    let owner = crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+        agent_id: name.to_string(),
+        delegation_id: crate::core::agent::DelegationId::new(),
+        parent_session_id: crate::core::session::SessionId(ENDED_PARENT),
+    };
+    crate::session_manager::worktree_ownership::write_agent_sentinel(&path, owner)
+        .expect("write agent sentinel");
     path
+}
+
+/// The dispatching session every `released_agent_worktree` names (#7771).
+const ENDED_PARENT: uuid::Uuid = uuid::Uuid::from_u128(0x7771_0000_0000_0000_0000_0000_0000_0001);
+
+/// A claim snapshot whose owner map proves [`ENDED_PARENT`] ended (#7771).
+fn parent_ended_claims() -> LiveClaims {
+    LiveClaims {
+        owners: crate::session_manager::worktree_reclaim_ownership::SessionOwners::observed([(
+            ENDED_PARENT.to_string(),
+            crate::session_manager::worktree_reclaim_claim::ClaimLiveness::SessionGone,
+        )]),
+        ..LiveClaims::default()
+    }
 }
 
 /// A registry that has never heard of the agent — what every registry answers
@@ -1988,7 +2009,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(nobody()),
+            in_use_now: &|| Some(parent_ended_claims()),
             index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
         },
         ReclaimMode::Report,
@@ -2022,7 +2043,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(nobody()),
+            in_use_now: &|| Some(parent_ended_claims()),
             index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
         },
         ReclaimMode::Remove,
@@ -2048,7 +2069,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(nobody()),
+            in_use_now: &|| Some(parent_ended_claims()),
             index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
         },
         ReclaimMode::Remove,
@@ -2082,7 +2103,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
-            in_use_now: &|| Some(nobody()),
+            in_use_now: &|| Some(parent_ended_claims()),
             index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
         },
         ReclaimMode::Remove,
@@ -2263,6 +2284,8 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
     let fx = GitWorktreeFixture::new();
     let a_wt = fx.add_worktree("adaptive-7057");
     land(&a_wt);
+    // #7771 (f): unpublished work, so only a merged PR could vouch for it.
+    GitWorktreeFixture::commit_unpushed(&a_wt);
     let (b_repo, b_wt) =
         second_project(&fx.repos_root, "hotstats", "hotstats-product-poc", B_BRANCH);
     set_origin_7057(&fx.repo, A_URL);

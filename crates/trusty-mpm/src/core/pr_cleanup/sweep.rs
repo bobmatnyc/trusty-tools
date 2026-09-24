@@ -30,7 +30,7 @@ use tracing::{info, warn};
 use super::auth_backoff::{AuthBackoff, is_auth_failure};
 use super::driver::{ClaimEnder, Gh, Git, Landing};
 use super::registry::{CleanupRegistry, CleanupScope, OpenedPr};
-use super::{CleanupRequest, DirtProbe, plan};
+use super::{CallerOwnership, ClaimOwnership, CleanupRequest, DirtProbe, plan};
 
 /// What the periodic trigger decided about one registry entry.
 ///
@@ -110,6 +110,29 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     registry: &CleanupRegistry,
     backoff: &AuthBackoff,
 ) -> usize {
+    // #8301: a caller with no session store proves only its own session ids.
+    let ownership = CallerOwnership::from_env();
+    run_sweep_with(
+        gh, git, claims, &ownership, landing, probe_dirt, registry, backoff,
+    )
+    .await
+}
+
+/// [`run_sweep`], with the #8301 ownership answers supplied — the supervisor
+/// passes its session store.
+///
+/// Test: `sweep_stamps_only_a_fully_successful_run`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_sweep_with<G: Gh, T: Git, C: ClaimEnder>(
+    gh: &G,
+    git: &T,
+    claims: &C,
+    ownership: &dyn ClaimOwnership,
+    landing: &dyn Landing,
+    probe_dirt: DirtProbe<'_>,
+    registry: &CleanupRegistry,
+    backoff: &AuthBackoff,
+) -> usize {
     let mut cleaned = 0usize;
     for entry in registry.pending() {
         if !backoff.may_poll(Instant::now()) {
@@ -168,7 +191,8 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
                     head_only: fresh.scope == CleanupScope::HeadOnly,
                     ..req
                 };
-                let report = super::run(gh, git, claims, landing, probe_dirt, &req).await;
+                let report =
+                    super::run_with(gh, git, claims, landing, probe_dirt, &req, ownership).await;
                 if report.failed() {
                     warn!(
                         pr = entry.pr,

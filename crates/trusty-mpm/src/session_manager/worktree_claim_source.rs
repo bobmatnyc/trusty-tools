@@ -78,7 +78,14 @@ impl SessionManager {
                 r.id.to_string(),
                 liveness_of(live_names.as_ref(), &r.tmux_name),
             )
-        }));
+        }))
+        // #7771: an agent owner file names the CLAUDE session that dispatched
+        // it, and condition (d) permits the caller's own trees.
+        .with_aliases(records.iter().filter_map(|r| {
+            let claude = r.claude_session_id.clone()?;
+            Some((claude, r.id.to_string()))
+        }))
+        .with_caller(caller.clone());
         let claims = records
             .into_iter()
             .filter_map(|r| {

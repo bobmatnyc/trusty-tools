@@ -144,6 +144,43 @@ pub(super) fn merged_pr_verdict(
     )
 }
 
+/// What [`published_verdict`] names as the ref a published tree was judged
+/// against (#7771).
+pub(super) const PUBLISHED_BASE: &str = "refs/remotes/origin/*";
+
+/// Condition (f)'s third route: every commit on `HEAD` is on an origin ref
+/// (#7771).
+///
+/// Why: version-control publishes some work under a remote branch name the
+/// worktree's own branch does not carry, so no pull request is found for it
+/// and roughly 40 such trees were kept forever. Commits that exist on `origin`
+/// are not lost by removing the tree. PM ruling 2026-09-24: the refs are read
+/// as they are, with no fetch.
+/// What: `Some(Reclaimable…)` only when the #7914 count
+/// ([`LOCAL_ONLY_COMMITS_ARGS`](crate::core::worktree_removal_facts::LOCAL_ONLY_COMMITS_ARGS))
+/// is exactly zero AND `probe_dirt` finds nothing. Any other answer, a failed
+/// count included, is `None`, which leaves the caller's refusal standing.
+/// Test: `worktree_7771_a_published_tree_with_no_pr_is_reclaimed`,
+/// `worktree_7771_a_commit_on_no_origin_ref_is_kept`,
+/// `worktree_7771_published_needs_every_commit_on_some_origin_ref`,
+/// `worktree_7771_a_failed_origin_count_refuses`.
+pub(super) fn published_verdict(
+    path: &Path,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+) -> Option<ReclaimVerdict> {
+    (published(path) && probe_dirt(path).is_none()).then(|| {
+        ReclaimVerdict::ReclaimableLandedContent {
+            base: PUBLISHED_BASE.to_string(),
+        }
+    })
+}
+
+/// Does every commit on `HEAD` sit on some `refs/remotes/origin/*` ref?
+fn published(path: &Path) -> bool {
+    let args = crate::core::worktree_removal_facts::LOCAL_ONLY_COMMITS_ARGS;
+    git_stdout(path, args).is_ok_and(|out| out.trim() == "0")
+}
+
 /// Is this dirt nothing but unpushed commits, with no dirty file (#7889)?
 ///
 /// Why: this only decides whether the landing admission may be ASKED. It does
@@ -311,6 +348,12 @@ pub(super) fn landing_recheck(
         }
         None => Some(refusal),
     };
+    // #7771 (f): a published, clean tree needs no pull request.
+    if matches!(pr_now, BranchPrState::NoPr | BranchPrState::Unknown)
+        && published_verdict(path, &inspect_dirt).is_some()
+    {
+        return None;
+    }
     match pr_now {
         BranchPrState::Merged { .. } => match inspect_dirt(path) {
             None => None,

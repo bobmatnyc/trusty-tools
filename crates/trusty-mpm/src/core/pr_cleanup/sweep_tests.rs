@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::{SweepDecision, run_sweep, sweep_decision};
+use super::{SweepDecision, run_sweep_with, sweep_decision};
 use crate::core::pr_cleanup::auth_backoff::{AuthBackoff, STRIKES};
 use crate::core::pr_cleanup::driver::{ClaimEnder, CmdOut, Gh, Git, Landing};
 use crate::core::pr_cleanup::plan::PrView;
 use crate::core::pr_cleanup::registry::{CleanupRegistry, OpenedPr};
+use crate::core::pr_cleanup::{ClaimOwnership, DirtProbe};
 use crate::session_manager::DirtyWorktree;
 
 const HEAD_OID: &str = "abc1234def5678000000000000000000000000aa";
@@ -151,6 +152,33 @@ impl ClaimEnder for NoClaims {
     async fn end_claim(&self, _id: &str) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl ClaimOwnership for NoClaims {
+    // #8301: these trees are fixtures with no owner; the gate is tested apart.
+    async fn tree_gate(&self, _path: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    async fn release_stale_lock(&self, _path: &Path) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// #8301: every sweep here runs with `NoClaims` as its ownership answer.
+async fn run_sweep<G: Gh, T: Git>(
+    gh: &G,
+    git: &T,
+    claims: &NoClaims,
+    landing: &dyn Landing,
+    probe_dirt: DirtProbe<'_>,
+    registry: &CleanupRegistry,
+    backoff: &AuthBackoff,
+) -> usize {
+    run_sweep_with(
+        gh, git, claims, claims, landing, probe_dirt, registry, backoff,
+    )
+    .await
 }
 
 fn gh_merged() -> Scripted {

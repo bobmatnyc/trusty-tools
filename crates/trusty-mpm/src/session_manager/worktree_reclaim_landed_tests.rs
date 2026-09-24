@@ -8,7 +8,9 @@
 //!
 //! What: the survey admits the donor tree; the sweep probe refuses a donor
 //! tree holding an uncommitted file; the pre-delete re-check admits a landed
-//! tree with no pull request and refuses one that stopped being landed.
+//! tree with no pull request and refuses one that stopped being landed. The
+//! #7771 (f) route counts a tree landed only when every commit is on some
+//! origin ref, and refuses when that count fails.
 
 use std::path::Path;
 
@@ -287,4 +289,68 @@ fn worktree_7889_the_recheck_admits_a_merged_donor_with_commits_only_dirt() {
     )
     .expect("no probe offered keeps the pre-#7889 refusal");
     assert!(unoffered.contains("unpushed"), "{unoffered}");
+}
+
+/// A tree under `.claude/worktrees/` holding one commit that `origin` carries
+/// only under a DIFFERENT branch name (#7771).
+fn published_elsewhere(fx: &GitWorktreeFixture, name: &str) -> std::path::PathBuf {
+    let wt = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), name);
+    std::fs::write(wt.join("published.txt"), "on origin\n").expect("write");
+    git(&wt, &["add", "published.txt"]);
+    git(&wt, &["commit", "-q", "-m", "published elsewhere"]);
+    let refspec = format!("HEAD:refs/heads/vc/{name}");
+    git(&wt, &["push", "-q", "origin", &refspec]);
+    git(&wt, &["fetch", "-q", "origin"]);
+    wt
+}
+
+/// 🔴 REGRESSION (#7771 f): a commit on ANY origin ref counts, and one commit
+/// on no origin ref beside it makes the tree unlanded.
+///
+/// The second half uses a clean dirt probe, so only the origin count can
+/// refuse: an implementation asking "is any commit on origin" passes the first
+/// half and fails here.
+#[test]
+fn worktree_7771_published_needs_every_commit_on_some_origin_ref() {
+    use super::{landing_recheck, published_verdict};
+    use crate::session_manager::worktree_safety::inspect_dirt;
+    let fx = GitWorktreeFixture::new();
+    let wt = published_elsewhere(&fx, "published-elsewhere-7771");
+    assert!(
+        published_verdict(&wt, &inspect_dirt).is_some(),
+        "every commit is on origin/vc/published-elsewhere-7771"
+    );
+    assert_eq!(landing_recheck(&wt, &BranchPrState::NoPr, None), None);
+
+    GitWorktreeFixture::commit_unpushed(&wt);
+    assert!(
+        published_verdict(&wt, &|_| None).is_none(),
+        "one commit on origin and one local-only is not landed"
+    );
+    assert!(landing_recheck(&wt, &BranchPrState::NoPr, None).is_some());
+}
+
+/// #7771 (f) error arm: when the origin count cannot run, the tree is not
+/// published, so the caller's refusal stands (ADR-0045).
+///
+/// The tree's `HEAD` names an unborn branch, so `git rev-list HEAD` fails
+/// inside a real worktree; a plain directory fails the same count outright.
+#[test]
+fn worktree_7771_a_failed_origin_count_refuses() {
+    use super::{landing_recheck, published_verdict};
+    use crate::core::worktree_removal_facts::LOCAL_ONLY_COMMITS_ARGS;
+    use crate::session_manager::worktree_safety::git_stdout;
+    let fx = GitWorktreeFixture::new();
+    let wt = published_elsewhere(&fx, "count-fails-7771");
+    assert!(published_verdict(&wt, &|_| None).is_some(), "precondition");
+    git(&wt, &["symbolic-ref", "HEAD", "refs/heads/unborn-7771"]);
+    assert!(
+        git_stdout(&wt, LOCAL_ONLY_COMMITS_ARGS).is_err(),
+        "the count must fail for this test to reach the error arm"
+    );
+    assert!(published_verdict(&wt, &|_| None).is_none());
+    assert!(landing_recheck(&wt, &BranchPrState::Unknown, None).is_some());
+
+    let plain = tempfile::tempdir().expect("tempdir");
+    assert!(published_verdict(plain.path(), &|_| None).is_none());
 }

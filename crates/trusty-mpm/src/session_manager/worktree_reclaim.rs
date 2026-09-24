@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 // #7889: gate 5's landed-content admission lives next door so this file stays
 // under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
 pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
-use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict};
+use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict, published_verdict};
 
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
@@ -628,7 +628,7 @@ pub(crate) fn pr_state_for_branch_within(
 /// again.
 /// Test: `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
 /// `tm_provisioned_matches_the_removers_own_predicate`,
-/// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
+/// `worktree_7771_a_hand_made_tree_is_reclaimed`.
 pub(crate) fn tm_provisioned(path: &Path) -> bool {
     super::decommission::removal_permitted(path)
 }
@@ -777,10 +777,17 @@ pub(crate) fn classify_with_landed_content(
     // — it means an agent is working in that tree — so it leaves gate 1 as its
     // own verdict kind and reaches `ReclaimSurvey::agent_owned`. Every other
     // non-admitted verdict is an ordinary block, as before.
-    if admission == Admission::HarnessAgentLock {
-        return ReclaimVerdict::blocked_by_agent(ReclaimGate::Admission, admission.reason());
-    }
-    if admission != Admission::Admitted {
+    // #7771: a harness lock whose pid is gone or reused is released; only a
+    // live, matching holder (or an unjudgeable lock) still refuses here.
+    let stale_lock = admission == Admission::HarnessAgentLock
+        && match super::worktree_owner_gate::lock_liveness(path).refusal() {
+            Some(why) => {
+                let reason = format!("{} — {why}", admission.reason());
+                return ReclaimVerdict::blocked_by_agent(ReclaimGate::Admission, reason);
+            }
+            None => true,
+        };
+    if admission != Admission::Admitted && !stale_lock {
         return ReclaimVerdict::blocked(ReclaimGate::Admission, admission.reason());
     }
     // Gate 2 (#2919): a live session can occupy a directory whose record reads
@@ -814,7 +821,7 @@ pub(crate) fn classify_with_landed_content(
     // #5829: recorded as its OWN verdict kind, because sparing a live agent's
     // tree is the one refusal the operator must be told about by name — see
     // `ReclaimVerdict::BlockedByAgent`.
-    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+    if let Some(reason) = agent_ownership_blocks(path, agent_state, owners) {
         return ReclaimVerdict::blocked_by_agent(ReclaimGate::AgentOwnership, reason);
     }
     // Gate 4b (#7652): gate 2 no longer refuses a live foreign session's
@@ -830,7 +837,13 @@ pub(crate) fn classify_with_landed_content(
     }
     // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
-    // out" — refuses.
+    // out" — refuses. #7771 (f): with no PR found, every commit on an origin
+    // ref is landing evidence too.
+    if matches!(pr, BranchPrState::NoPr | BranchPrState::Unknown)
+        && let Some(verdict) = published_verdict(path, probe_dirt)
+    {
+        return verdict;
+    }
     let merged_pr = match pr {
         BranchPrState::Merged { pr } => *pr,
         BranchPrState::Open { pr } => {
@@ -853,11 +866,14 @@ pub(crate) fn classify_with_landed_content(
         BranchPrState::NoPr => {
             return no_pr_verdict(path, probe_dirt, landed_content);
         }
+        // #7771: `Unknown` is a detached HEAD or a truncated index, never a
+        // failed lookup (that is `LookupFailed`), so it does not blame `gh`.
         BranchPrState::Unknown => {
             return ReclaimVerdict::blocked(
                 ReclaimGate::PrState,
-                "pull-request state could not be determined (is `gh` installed \
-                 and authenticated?)",
+                "pull-request state could not be determined — a detached HEAD no merged \
+                 pull request's commit search matched, or a branch past the index's page \
+                 limit",
             );
         }
         // #6561: the lookup broke. Same refusal, but naming the cause — the

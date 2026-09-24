@@ -345,8 +345,12 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
     if record.bare {
         return Err("git now reports this as a bare repository".into());
     }
-    if record.locked {
-        return Err("git-locked by the operator since the survey".into());
+    // #7771: a harness lock whose holder is gone or reused is released; the
+    // removal unlocks it immediately before `git worktree remove`.
+    if record.locked
+        && let Some(why) = super::worktree_owner_gate::lock_liveness(path).refusal()
+    {
+        return Err(format!("git-locked since the survey — {why}"));
     }
     if record.prunable {
         return Err("git reports the directory is already gone".into());
@@ -422,7 +426,7 @@ pub(crate) fn recheck_before_delete(
     // reason #4118 established — an agent can be dispatched into a tree while a
     // survey that takes minutes is still running, and the survey's verdict knows
     // nothing about it.
-    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+    if let Some(reason) = agent_ownership_blocks(path, agent_state, &in_use_now.owners) {
         return Some(reason);
     }
     // #7652: gate 4b, re-asked against the FRESH owner map — a session that
@@ -705,7 +709,10 @@ pub(crate) fn reclaim_with_probes(
                  ({pr_now:?})"
             ),
             &|| {
-                let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref());
+                // #7771: a stale harness lock is released only once every
+                // gate has agreed, so a refused tree keeps its lock.
+                let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref())
+                    .or_else(|| super::worktree_owner_gate::release_stale_lock(&path).err());
                 late_refusal.set(refusal.clone());
                 refusal
             },
