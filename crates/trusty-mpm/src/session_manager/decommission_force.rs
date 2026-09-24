@@ -36,6 +36,7 @@ use super::decommission::{
     remove_session_worktree_guarded,
 };
 use super::record::{ManagedSessionId, SessionRecord};
+use super::worktree_ownership::SentinelOwner;
 use super::worktree_ownership_location::{
     OwnerReadError, admin_sentinel_path, legacy_sentinel_path, read_sentinel_owner_strict,
 };
@@ -230,7 +231,8 @@ pub(super) async fn remove_in_project_worktree(
         return WorkspaceVerdict::default();
     }
     let ws_for_check = ws.to_path_buf();
-    let kept = tokio::task::spawn_blocking(move || keep_reason(&ws_for_check, policy))
+    let owner = *id;
+    let kept = tokio::task::spawn_blocking(move || keep_reason(&ws_for_check, &owner, policy))
         .await
         .unwrap_or_else(|e| {
             // Fail-safe: a panicked check is dirty, never a green light.
@@ -254,7 +256,7 @@ pub(super) async fn remove_in_project_worktree(
         // dirt — inside the audit window; the default path is unchanged.
         let guard = || match policy {
             ProvisioningDirt::Refuse => None,
-            ProvisioningDirt::Discard => keep_reason(&ws_clone, policy),
+            ProvisioningDirt::Discard => keep_reason(&ws_clone, &owner, policy),
         };
         // #7885: name the route in the audit line.
         remove_session_worktree_guarded(
@@ -289,15 +291,16 @@ pub(super) async fn remove_in_project_worktree(
 /// policy — `--force` is never stricter than no flag (#7660 critic round 3).
 /// Only when `--force`'s excuse is needed does [`force_blocker`] run: it acts
 /// only on a worktree tm provably created and nothing locks. Then the dirt
-/// `policy` does not excuse keeps it, named file by file.
+/// `policy` does not excuse keeps it, named file by file. `id` is the session
+/// being decommissioned.
 /// Test: `force_decommission_is_never_stricter_than_plain_on_a_clean_tree`,
 /// `force_decommission_keeps_a_worktree_without_the_sentinel`.
-fn keep_reason(ws: &Path, policy: ProvisioningDirt) -> Option<String> {
+fn keep_reason(ws: &Path, id: &ManagedSessionId, policy: ProvisioningDirt) -> Option<String> {
     let plain = inspect_dirt(ws)?;
     if policy == ProvisioningDirt::Refuse {
         return Some(kept_for_dirt(ws, &plain.reason, policy));
     }
-    if let Some(blocker) = force_blocker(ws) {
+    if let Some(blocker) = force_blocker(ws, id) {
         return Some(format!("--force declined: {blocker}; nothing was removed"));
     }
     inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
@@ -373,15 +376,17 @@ fn blocking_entries(ws: &Path, policy: ProvisioningDirt) -> String {
     format!(": {named}")
 }
 
-/// Why `--force` may not act on `ws`, or `None` when tm provably created it
-/// as a linked worktree that nothing locks (#7660).
+/// Why `--force` may not act on `ws` for session `id`, or `None` when tm
+/// provably created it for `id` as a linked worktree that nothing locks
+/// (#7660).
 ///
 /// Why: `--force` is followed by `git worktree remove --force`, which destroys
 /// the files it excused. It is only safe on a tree tm itself provisioned for a
 /// session — never on a repository's main checkout, a tree tm cannot vouch for,
 /// or one a `git worktree lock` protects.
 /// What: three probes, each failing closed with a named reason: (1) the
-/// ownership marker is present ([`ownership_blocker`]); (2) `git rev-parse`
+/// ownership marker is present and names no other owner
+/// ([`ownership_blocker`]); (2) `git rev-parse`
 /// reports `ws` as its own worktree root whose git dir differs from the common
 /// dir — a linked worktree, not a main checkout; (3) that git dir holds no
 /// `locked` file ([`lock_blocker`]).
@@ -389,10 +394,11 @@ fn blocking_entries(ws: &Path, policy: ProvisioningDirt) -> String {
 /// `force_decommission_keeps_a_main_checkout_under_the_worktrees_dir`,
 /// `force_decommission_keeps_a_worktree_git_cannot_resolve`,
 /// `force_decommission_keeps_a_locked_worktree`,
-/// `lock_blocker_fails_closed_when_the_lock_state_cannot_be_read`.
-pub(crate) fn force_blocker(ws: &Path) -> Option<String> {
-    if let Some(reason) = ownership_blocker(ws) {
-        return Some(format!("cannot prove tm created it: {reason}"));
+/// `lock_blocker_fails_closed_when_the_lock_state_cannot_be_read`,
+/// `force_decommission_keeps_a_worktree_another_session_owns`.
+pub(crate) fn force_blocker(ws: &Path, id: &ManagedSessionId) -> Option<String> {
+    if let Some(reason) = ownership_blocker(ws, id) {
+        return Some(reason);
     }
     match linked_worktree_git_dir(ws) {
         Ok(git_dir) => lock_blocker(&git_dir),
@@ -400,42 +406,58 @@ pub(crate) fn force_blocker(ws: &Path) -> Option<String> {
     }
 }
 
-/// Why `ws`'s ownership marker proves nothing, or `None` when it proves tm
-/// created the tree (#7660 critic round 3, #8511).
+/// Why `ws`'s ownership marker gives `--force` no licence, or `None` when it
+/// proves tm created the tree for session `id` (#7660 critic round 3, #8511).
 ///
 /// Why: since #8511 provisioning writes the marker into the git admin dir
 /// only, so a check of the legacy in-tree path alone refused nearly every
 /// tm-created worktree.
 /// What: any marker location — legacy or admin — that exists as anything but
 /// a regular file blocks, because [`read_sentinel_owner_strict`] follows
-/// symlinks. Then that strict reader decides: a marker (even an owner-less
-/// one) passes; no marker, an unreadable one, a corrupt one, or an
-/// unresolvable `.git` blocks.
+/// symlinks. Then that strict reader decides: a marker naming `id`, or an
+/// owner-less (pre-#3649) one, passes; a marker naming another session or an
+/// agent blocks and names that owner; no marker, an unreadable one, a corrupt
+/// one, or an unresolvable `.git` blocks.
 /// Test: `force_decommission_honours_an_admin_dir_marker`,
+/// `force_decommission_keeps_a_worktree_another_session_owns`,
+/// `force_decommission_keeps_a_worktree_an_agent_owns`,
+/// `force_decommission_removes_a_worktree_its_own_session_owns`,
 /// `force_decommission_honours_a_legacy_in_tree_marker`,
 /// `force_decommission_keeps_a_worktree_whose_marker_is_a_symlink`,
 /// `force_decommission_keeps_a_worktree_whose_marker_is_corrupt`,
 /// `force_decommission_keeps_a_worktree_whose_sentinel_cannot_be_read`.
-fn ownership_blocker(ws: &Path) -> Option<String> {
+fn ownership_blocker(ws: &Path, id: &ManagedSessionId) -> Option<String> {
+    let unproven = |reason: String| Some(format!("cannot prove tm created it: {reason}"));
     for marker in std::iter::once(legacy_sentinel_path(ws)).chain(admin_sentinel_path(ws)) {
         if std::fs::symlink_metadata(&marker).is_ok_and(|meta| !meta.is_file()) {
-            return Some(format!(
+            return unproven(format!(
                 "its ownership sentinel {} is not a regular file",
                 marker.display()
             ));
         }
     }
     match read_sentinel_owner_strict(ws) {
-        Ok(Some(_)) => None,
-        Ok(None) => Some(format!(
+        // #7660 critic round 3: the marker must name this session, or no one.
+        Ok(Some(SentinelOwner::Unknown)) => None,
+        Ok(Some(SentinelOwner::Known(owner, _))) if owner == *id => None,
+        Ok(Some(SentinelOwner::Known(owner, _))) => Some(format!(
+            "its ownership sentinel names session {owner}, not {id}; --force never removes \
+             another session's worktree"
+        )),
+        Ok(Some(SentinelOwner::Agent(agent, _))) => Some(format!(
+            "its ownership sentinel names agent {}, not session {id}; --force never removes \
+             an agent's worktree",
+            agent.agent_id
+        )),
+        Ok(None) => unproven(format!(
             "it carries no ownership sentinel (neither in its git admin dir nor as \
              {WORKTREE_SENTINEL_FILE})"
         )),
-        Err(OwnerReadError::Unreadable { path, reason }) => Some(format!(
+        Err(OwnerReadError::Unreadable { path, reason }) => unproven(format!(
             "its ownership sentinel could not be read ({}): {reason}",
             path.display()
         )),
-        Err(OwnerReadError::Corrupt { path, reason }) => Some(format!(
+        Err(OwnerReadError::Corrupt { path, reason }) => unproven(format!(
             "its ownership sentinel {} is corrupt: {reason}",
             path.display()
         )),

@@ -10,8 +10,13 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::core::agent::DelegationId;
+use crate::core::session::SessionId;
 use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
+use crate::session_manager::worktree_ownership::{
+    AgentWorktreeOwner, sentinel_payload_bytes, write_agent_sentinel,
+};
 use crate::session_manager::worktree_ownership_location::{
     admin_sentinel_path, write_sentinel_bytes,
 };
@@ -46,7 +51,12 @@ fn provisioned_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
 }
 
 async fn remove(wt: &Path, policy: ProvisioningDirt) -> WorkspaceVerdict {
-    remove_in_project_worktree(&ManagedSessionId::new(), wt, policy).await
+    remove_as(&ManagedSessionId::new(), wt, policy).await
+}
+
+/// [`remove`] as the session `id`, for the tests whose marker names an owner.
+async fn remove_as(id: &ManagedSessionId, wt: &Path, policy: ProvisioningDirt) -> WorkspaceVerdict {
+    remove_in_project_worktree(id, wt, policy).await
 }
 
 #[test]
@@ -187,7 +197,11 @@ async fn force_decommission_still_refuses_unpushed_commits() {
 async fn force_decommission_removes_nothing_when_the_dirty_check_cannot_complete() {
     let fx = GitWorktreeFixture::new();
     let wt = provisioned_tree(&fx, "decom-force-unreadable-7660");
-    assert_eq!(force_blocker(&wt), None, "premise: the blocker passes");
+    assert_eq!(
+        force_blocker(&wt, &ManagedSessionId::new()),
+        None,
+        "premise: the blocker passes"
+    );
     let index = fx
         .repo
         .join(".git/worktrees/decom-force-unreadable-7660/index");
@@ -390,6 +404,62 @@ async fn force_decommission_keeps_a_worktree_without_the_sentinel() {
     assert!(reason.contains("no ownership sentinel"), "reason: {reason}");
 }
 
+/// 🔴 #7660 critic round 3 MEDIUM-1: a marker naming ANOTHER session is no
+/// licence for `--force`. Records A and B can name one worktree while B is
+/// still `Provisioning`, which the foreign-`Active` claim check misses. Fails
+/// before the fix, whose ownership check accepted any marker and removed it.
+#[tokio::test]
+async fn force_decommission_keeps_a_worktree_another_session_owns() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-foreign-owner-7660");
+    let other = ManagedSessionId::new();
+    write_sentinel_bytes(&wt, &sentinel_payload_bytes(other)).expect("write the owner marker");
+
+    let verdict = remove_as(&ManagedSessionId::new(), &wt, ProvisioningDirt::Discard).await;
+
+    assert!(
+        !verdict.removed && wt.exists(),
+        "another session's tree must stay"
+    );
+    let reason = verdict.kept_reason.expect("a kept tree must say why");
+    assert!(reason.contains("--force declined"), "reason: {reason}");
+    assert!(reason.contains(&other.to_string()), "reason: {reason}");
+}
+
+/// #7660 critic round 3 MEDIUM-1: a marker naming a dispatched agent keeps the
+/// tree under `--force`, and the reason names the agent.
+#[tokio::test]
+async fn force_decommission_keeps_a_worktree_an_agent_owns() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-agent-owner-7660");
+    let agent = AgentWorktreeOwner {
+        agent_id: "agent-synthetic-7660".to_string(),
+        delegation_id: DelegationId::new(),
+        parent_session_id: SessionId::new(),
+    };
+    write_agent_sentinel(&wt, agent).expect("write the agent marker");
+
+    let reason = kept_under_force(&wt).await;
+
+    assert!(reason.contains("--force declined"), "reason: {reason}");
+    assert!(reason.contains("agent-synthetic-7660"), "reason: {reason}");
+}
+
+/// #7660 critic round 3 MEDIUM-1: a marker naming the decommissioned session
+/// itself is the proof `--force` needs, so the provisioning-dirty tree goes.
+#[tokio::test]
+async fn force_decommission_removes_a_worktree_its_own_session_owns() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-own-owner-7660");
+    let me = ManagedSessionId::new();
+    write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
+
+    let verdict = remove_as(&me, &wt, ProvisioningDirt::Discard).await;
+
+    assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
+    assert!(!wt.exists());
+}
+
 /// #7660 round 2, FAIL-CLOSED: a sentinel whose existence cannot be read is
 /// no proof. Fails on the 1.7.2 fix, whose reason named no sentinel.
 #[tokio::test]
@@ -490,7 +560,8 @@ fn force_blocker_refuses_a_directory_that_is_not_a_worktree_root() {
     std::fs::create_dir_all(&plain).expect("mkdir plain");
     std::fs::write(plain.join(WORKTREE_SENTINEL_FILE), b"").expect("write legacy marker");
 
-    let blocker = force_blocker(&plain).expect("a non-root directory must block");
+    let blocker =
+        force_blocker(&plain, &ManagedSessionId::new()).expect("a non-root directory must block");
 
     assert!(blocker.contains("not a worktree root"), "{blocker}");
 }
