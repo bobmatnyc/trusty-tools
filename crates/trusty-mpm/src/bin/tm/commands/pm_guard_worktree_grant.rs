@@ -45,9 +45,11 @@
 //! rather than a hypothetical one. Since #8547 they are REFUSED rather than
 //! isolated: a dispatch with no usable type bypasses the roster and every
 //! guardrail keyed on an agent name, and a guessed worktree hid that from the
-//! PM. The refusal names the missing or unknown type and the two fixes — a
-//! roster name, or an explicit `isolation: "worktree"`, which this rule leaves
-//! alone — see [`undetermined_type_detail`].
+//! PM. A name is known when it is bundled, deployed in any roster tier, or a
+//! Claude Code built-in; only a name none of those define is refused. The
+//! refusal names the missing or unknown type and the two fixes — a known name,
+//! or an explicit `isolation: "worktree"` on the `Agent` tool, which this rule
+//! leaves alone — see `pm_guard_dispatch_type`.
 //!
 //! **A project may decline the grant entirely (#5814).** Isolation buys
 //! separation between concurrent writers and between build states. A writing or
@@ -70,11 +72,12 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_mpm::core::agent::is_subagent_dispatch_tool;
 use trusty_mpm::core::dispatch_isolation::{
-    AgentWriteRisk, agent_write_risk, dispatch_agent, dispatch_isolation,
-    requires_own_worktree_in_main_checkout,
+    dispatch_agent, dispatch_isolation, requires_own_worktree_in_main_checkout,
 };
 use trusty_mpm::core::project_aliases::is_main_checkout;
 use trusty_mpm::project::dispatched_agent_worktree_enabled;
+
+use crate::commands::pm_guard_dispatch_type::undetermined_type_refusal;
 
 /// The `isolation` value granted to a dispatch that needs its own tree.
 ///
@@ -171,11 +174,12 @@ pub(crate) fn evaluate_worktree_grant(
     if !dispatched_agent_worktree_enabled(cwd) {
         return with_in_place_notice(tool_input).map(WorktreeGrant::InPlace);
     }
+    let accepts_isolation = tool_name == ISOLATION_AWARE_DISPATCH_TOOL;
     // #8547: refuse, never isolate, a dispatch whose type is missing or unknown.
-    if let Some(detail) = undetermined_type_detail(tool_input) {
-        return Some(WorktreeGrant::Deny(undetermined_type_deny_reason(&detail)));
+    if let Some(reason) = undetermined_type_refusal(tool_input, cwd, accepts_isolation) {
+        return Some(WorktreeGrant::Deny(reason));
     }
-    if tool_name != ISOLATION_AWARE_DISPATCH_TOOL {
+    if !accepts_isolation {
         return Some(WorktreeGrant::Deny(TASK_DENY_REASON.to_string()));
     }
     Some(WorktreeGrant::Rewrite(with_granted_isolation(tool_input)))
@@ -204,49 +208,6 @@ pub(crate) enum WorktreeGrant {
     /// given none — the delegation record would then name a tree that does not
     /// exist. The concurrency question is still asked; see the call site.
     InPlace(Value),
-}
-
-/// What is wrong with the dispatch's `subagent_type`, when this binary cannot
-/// classify it (#8547).
-///
-/// Why: a missing, unparsable and unknown type all reach
-/// [`agent_write_risk`] as [`AgentWriteRisk::Unknown`], but each needs a
-/// different fix, so the refusal has to say which one it is.
-/// What: `None` when `subagent_type` names an agent [`agent_write_risk`]
-/// classifies. Otherwise a phrase naming the absent field, the non-string or
-/// empty value, or the unknown name. The caller only asks after
-/// [`requires_own_worktree_in_main_checkout`] held, so a classified name
-/// reaching here is always a writer.
-/// Test: `refuses_an_untyped_dispatch_instead_of_isolating_it`,
-/// `refuses_an_unparsable_agent_type`, `refuses_an_unknown_agent_name`.
-fn undetermined_type_detail(tool_input: Option<&Value>) -> Option<String> {
-    let Some(raw) = tool_input.and_then(|input| input.get("subagent_type")) else {
-        return Some("carries no `subagent_type`".to_string());
-    };
-    let Some(name) = raw.as_str().filter(|name| !name.is_empty()) else {
-        return Some(format!(
-            "carries a `subagent_type` that is not an agent name (`{raw}`)"
-        ));
-    };
-    (agent_write_risk(name) == AgentWriteRisk::Unknown)
-        .then(|| format!("names `subagent_type` `{name}`, which is not an agent this `tm` ships"))
-}
-
-/// Deny text for a dispatch whose agent type cannot be classified (#8547).
-///
-/// Why: the refusal is the PM's only signal, so it names the defect and both
-/// ways to re-issue the dispatch.
-/// What: one paragraph embedding `detail` from [`undetermined_type_detail`].
-/// Test: `refuses_an_untyped_dispatch_instead_of_isolating_it`.
-fn undetermined_type_deny_reason(detail: &str) -> String {
-    format!(
-        "Dispatch refused in a main checkout (#8547): this dispatch {detail}, so tm cannot tell \
-         whether the agent writes files, and it will not isolate or admit an agent it cannot \
-         classify. Set `subagent_type` to an agent in the deployed roster (for example \
-         `rust-engineer` or `research`; names are case-sensitive). A custom project agent that \
-         tm does not ship must declare `isolation: \"worktree\"` itself, which this rule leaves \
-         alone."
-    )
 }
 
 /// The dispatch's own input with `isolation` set to [`GRANTED_ISOLATION`].
@@ -393,6 +354,45 @@ mod tests {
         assert_eq!(updated["subagent_type"], "rust-engineer");
     }
 
+    /// The `isolation` a dispatch of `agent` from `dir` was granted.
+    fn granted_isolation(agent: &str, dir: &Path) -> Value {
+        match evaluate_worktree_grant("Agent", Some(&input(agent, None)), dir) {
+            Some(WorktreeGrant::Rewrite(updated)) => updated["isolation"].clone(),
+            other => panic!("{agent} must be granted a worktree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grants_a_worktree_to_a_deployed_agent_tm_does_not_bundle() {
+        // #8547 review: an agent deployed into a roster tier is a known name,
+        // so it keeps its pre-#8547 worktree instead of being refused.
+        let dir = main_checkout();
+        let agents = dir.path().join(".claude/agents");
+        std::fs::create_dir_all(&agents).expect("mkdir agents");
+        std::fs::write(
+            agents.join("fixture-deployed-ops.md"),
+            "---\nname: fixture-deployed-ops\nrole: ops\n---\n\n# Ops\n",
+        )
+        .expect("write agent");
+        assert_eq!(
+            granted_isolation("fixture-deployed-ops", dir.path()),
+            "worktree"
+        );
+        // A name defined nowhere is still refused.
+        let reason = refusal(Some(&input("fixture-defined-nowhere", None)), dir.path());
+        assert!(reason.contains("`fixture-defined-nowhere`"), "{reason}");
+    }
+
+    #[test]
+    fn grants_a_worktree_to_a_harness_builtin_writer() {
+        // #8547 review: Claude Code's own writers ship in no bundle and no tier,
+        // yet they are known names — isolated, never refused.
+        let dir = main_checkout();
+        for agent in ["general-purpose", "claude", "statusline-setup"] {
+            assert_eq!(granted_isolation(agent, dir.path()), "worktree", "{agent}");
+        }
+    }
+
     /// The deny reason for `tool_input`, panicking on any other outcome.
     fn refusal(tool_input: Option<&Value>, dir: &Path) -> String {
         match evaluate_worktree_grant("Agent", tool_input, dir) {
@@ -439,8 +439,20 @@ mod tests {
         for agent in ["some-project-custom-agent", "Rust-Engineer"] {
             let reason = refusal(Some(&input(agent, None)), dir.path());
             assert!(reason.contains(&format!("`{agent}`")), "{reason}");
-            assert!(reason.contains("not an agent this `tm` ships"), "{reason}");
+            assert!(reason.contains("not a bundled agent"), "{reason}");
         }
+        // #8547 review: `Task` cannot carry `isolation`, so it is pointed at
+        // the `Agent` tool rather than told to declare a field it lacks.
+        let task = evaluate_worktree_grant(
+            "Task",
+            Some(&input("some-project-custom-agent", None)),
+            dir.path(),
+        );
+        let Some(WorktreeGrant::Deny(reason)) = task else {
+            panic!("an unknown Task dispatch must be refused, got {task:?}");
+        };
+        assert!(reason.contains("`some-project-custom-agent`"), "{reason}");
+        assert!(reason.contains("through the `Agent` tool"), "{reason}");
         // The same name with explicit isolation is the documented fix.
         assert_eq!(
             evaluate_worktree_grant(
@@ -457,7 +469,15 @@ mod tests {
         // A positively-identified reader writes nothing, so a worktree would be
         // pure cost — and #3455 is an open complaint about exactly that cost.
         let dir = main_checkout();
-        for agent in ["research", "code-critic", "code-analyzer", "ticketing"] {
+        for agent in [
+            "research",
+            "code-critic",
+            "code-analyzer",
+            "ticketing",
+            "Explore",
+            "Plan",
+            "claude-code-guide",
+        ] {
             assert_eq!(
                 evaluate_worktree_grant("Agent", Some(&input(agent, None)), dir.path()),
                 None,

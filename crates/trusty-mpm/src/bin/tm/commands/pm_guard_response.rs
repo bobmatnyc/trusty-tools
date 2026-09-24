@@ -7,10 +7,12 @@
 //! a new print site; splitting them out of `pm_guard.rs` is also what kept that
 //! file under the 500-SLOC cap when #7172 added a rule to it.
 //!
-//! What: [`build_pretooluse_deny_response`] blocks a tool call;
-//! [`build_pm_guard_deny_response`] is the same deny carrying the
+//! What: [`build_pretooluse_deny_response`] is the private deny envelope. Only
+//! two builders reach it, so the compiler decides who may print an unprefixed
+//! deny: [`build_pm_guard_deny_response`] carries the
 //! [`PM_GUARD_REFUSAL_PREFIX`] every `tm hook --pm-guard` refusal starts with
-//! (#8546); [`build_pretooluse_context_response`] speaks to the agent and
+//! (#8546), and [`build_divert_deny_response`] is `divert_check`'s own,
+//! unprefixed. [`build_pretooluse_context_response`] speaks to the agent and
 //! decides nothing. None ever emits an explicit `allow` — see each doc for why.
 //!
 //! Test: the `#[cfg(test)]` suite below.
@@ -31,8 +33,10 @@
 /// What: returns the deny `serde_json::Value`; its `Display` impl is compact
 /// single-line JSON, so `println!("{}", …)` satisfies the protocol's "stdout
 /// must contain only the JSON object" rule.
+/// Private since #8547 review: a caller outside this module must choose
+/// [`build_pm_guard_deny_response`] or [`build_divert_deny_response`].
 /// Test: `build_pretooluse_deny_response_has_expected_shape`.
-pub(crate) fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value {
+fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value {
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -59,8 +63,8 @@ pub(crate) const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
 /// Why (#8546): the one builder every pm-guard deny site calls, so the prefix
 /// is added in one place instead of being written into ~30 reason strings, any
 /// of which a new rule could forget.
-/// What: [`build_pretooluse_deny_response`] over `reason` with the prefix
-/// prepended; a `reason` that already starts with it is not prefixed twice.
+/// What: the private deny envelope over `reason` with the prefix prepended; a
+/// `reason` that already starts with it is not prefixed twice.
 /// Test: `pm_guard_deny_carries_the_prefix_exactly_once`,
 /// `pm_guard_modules_never_print_an_unprefixed_deny`.
 pub(crate) fn build_pm_guard_deny_response(reason: &str) -> serde_json::Value {
@@ -68,6 +72,18 @@ pub(crate) fn build_pm_guard_deny_response(reason: &str) -> serde_json::Value {
         .strip_prefix(PM_GUARD_REFUSAL_PREFIX)
         .unwrap_or(reason);
     build_pretooluse_deny_response(&format!("{PM_GUARD_REFUSAL_PREFIX}{body}"))
+}
+
+/// Build the deny for a `tm hook --divert-check` refusal, with no prefix.
+///
+/// Why (#8546 review): `divert_check` is a separate hook layer whose refusal
+/// must not read as tm pm-guard's, so it needs an unprefixed deny. Naming it
+/// keeps the generic builder private, and the scan in the test suite below
+/// fails if a pm-guard module calls this one.
+/// What: [`build_pretooluse_deny_response`] over `reason`, unchanged.
+/// Test: `divert_deny_carries_no_prefix`.
+pub(crate) fn build_divert_deny_response(reason: &str) -> serde_json::Value {
+    build_pretooluse_deny_response(reason)
 }
 
 /// Build a `hookSpecificOutput.additionalContext` body — a message TO the agent
@@ -123,30 +139,29 @@ mod tests {
                 "input {reason:?}"
             );
         }
-        // The generic builder, which other layers use, adds nothing.
-        assert_eq!(
-            build_pretooluse_deny_response("nope")["hookSpecificOutput"]["permissionDecisionReason"],
-            "nope"
-        );
     }
 
-    /// Every production `.rs` file of the pm-guard hook: `pm_guard*` and
-    /// `hook_stdin*` under `commands/`, recursing into `pm_guard_*` directories,
-    /// skipping `tests.rs` and `*_tests.rs`.
-    fn pm_guard_module_sources() -> Vec<std::path::PathBuf> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tm/commands");
+    #[test]
+    fn divert_deny_carries_no_prefix() {
+        // divert_check is its own layer; its refusal must not read as pm-guard's.
+        let v = build_divert_deny_response("nope");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "nope");
+    }
+
+    /// Every production `.rs` file of the `tm` binary, skipping `tests/`
+    /// directories, `tests.rs` and `*_tests.rs`.
+    fn tm_binary_sources() -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tm");
         let mut out = Vec::new();
-        let mut stack = vec![root.clone()];
+        let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("read commands dir") {
+            for entry in std::fs::read_dir(&dir).expect("read source dir") {
                 let path = entry.expect("dir entry").path();
-                let rel = path.strip_prefix(&root).expect("under commands dir");
-                let rel = rel.to_string_lossy();
-                if !(rel.starts_with("pm_guard") || rel.starts_with("hook_stdin")) {
-                    continue;
-                }
                 if path.is_dir() {
-                    stack.push(path);
+                    if !path.ends_with("tests") {
+                        stack.push(path);
+                    }
                     continue;
                 }
                 let name = path
@@ -183,25 +198,26 @@ mod tests {
 
     #[test]
     fn pm_guard_modules_never_print_an_unprefixed_deny() {
-        // #8546: a refusal added to the pm-guard hook through the generic
-        // builder, or through a hand-built deny object, would reach the
-        // operator without the `tm pm-guard:` prefix. This scan fails on it
-        // whether or not any test exercises the new path.
-        let sources = pm_guard_module_sources();
-        assert!(sources.len() > 10, "scan found too few files: {sources:?}");
+        // #8546: the private generic builder is enforced by the compiler. What
+        // it cannot see is a hand-built deny object anywhere in the binary, or
+        // a pm-guard module borrowing divert_check's unprefixed builder. This
+        // scan fails on either whether or not any test exercises the new path.
+        let sources = tm_binary_sources();
+        assert!(sources.len() > 100, "scan found too few files: {sources:?}");
         let mut offenders = Vec::new();
         for path in sources {
             if path.ends_with("pm_guard_response.rs") {
                 continue;
             }
+            let divert = path.ends_with("divert_check.rs");
             let text = std::fs::read_to_string(&path).expect("read source");
             for (i, line) in production_lines(&text).iter().enumerate() {
                 let code = line.trim_start();
                 if code.starts_with("//") {
                     continue;
                 }
-                if code.contains("build_pretooluse_deny_response")
-                    || code.contains("\"permissionDecision\"")
+                if code.contains("\"permissionDecision\"")
+                    || (!divert && code.contains("build_divert_deny_response"))
                 {
                     offenders.push(format!("{}:{}: {code}", path.display(), i + 1));
                 }

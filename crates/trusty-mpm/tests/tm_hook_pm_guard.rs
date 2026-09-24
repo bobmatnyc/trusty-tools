@@ -4470,6 +4470,28 @@ fn pm_guard_refuses_an_untyped_or_unknown_dispatch_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_grants_a_worktree_to_a_deployed_agent_it_does_not_bundle() {
+    // #8547 review: a name deployed into a roster tier is known, so the real
+    // binary isolates it rather than refusing it as unknown.
+    let (_dir, repo) = main_checkout_fixture();
+    let agents = repo.join(".claude/agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::fs::write(
+        agents.join("fixture-deployed-ops.md"),
+        "---\nname: fixture-deployed-ops\nrole: ops\n---\n\n# Ops\n",
+    )
+    .expect("write agent");
+    let input = r#"{"subagent_type":"fixture-deployed-ops","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "{stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_leaves_read_only_and_isolated_dispatches_alone() {
     // A worktree per read-only dispatch would re-open #3455's wasted-disk
     // complaint, and re-granting an already-isolated dispatch would let the

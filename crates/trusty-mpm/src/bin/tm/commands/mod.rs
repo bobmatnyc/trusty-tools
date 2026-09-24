@@ -118,6 +118,8 @@ pub(crate) mod repair_delegation_list;
 // #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
 // left to succeed and wedge the agent — see its module doc for why the pin it
 // names belongs to the harness and cannot be moved from here.
+// #8547: which `subagent_type` names are known, and the refusal for the rest.
+pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_response;
