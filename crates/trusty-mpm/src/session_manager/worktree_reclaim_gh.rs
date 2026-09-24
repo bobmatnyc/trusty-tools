@@ -234,7 +234,7 @@ fn warn_once_about_the_keychain() {
 /// What: takes the repository the caller already resolved (`origin`, an
 /// `owner/repo` slug or a URL — #5850 dropped the second `git config` read of
 /// `dir`), then asks
-/// [`crate::core::gh_account_registry::pinned_gh_env_in`] FIRST, against this
+/// [`crate::core::gh_account_registry::pinned_gh_env_with`] FIRST, against this
 /// host's registry directory. Only
 /// "no pin recorded" falls through to [`gh_identity::select_config_for_origin`]
 /// over the static config; every unanswerable registry outcome is returned as a
@@ -268,14 +268,21 @@ pub(crate) fn resolve_daemon_gh_env_in(
     registry_dir: &Path,
 ) -> Result<GhEnv, GhFailure> {
     let origin = slug_as_url(origin);
+    let config = TrustyToolsConfig::load();
+    // #8510: an account-only registry pin may borrow the static binding's dir
+    // or tm's own `gh-accounts/<login>` — only if that dir is active as it.
+    let sources = crate::core::gh_account_registry::AccountDirSources::for_origin(
+        &config,
+        &origin,
+        crate::core::paths::FrameworkPaths::default().root,
+    );
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
-    match crate::core::gh_account_registry::pinned_gh_env_in(registry_dir, &origin) {
+    match crate::core::gh_account_registry::pinned_gh_env_with(registry_dir, &origin, &sources) {
         Ok(Some(env)) => return Ok(env),
         Ok(None) => {}
         Err(reason) => return Err(GhFailure::new(reason)),
     }
-    let config = TrustyToolsConfig::load();
     let selected = gh_identity::select_config_for_origin(&config, Some(&origin));
     let env = match gh_identity::resolve_gh_env(selected) {
         Ok(env) => env,

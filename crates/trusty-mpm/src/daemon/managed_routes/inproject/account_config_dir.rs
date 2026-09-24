@@ -43,7 +43,8 @@ use std::path::{Path, PathBuf};
 /// account.
 ///
 /// Test: `ensure_account_config_dir_places_it_under_gh_accounts`.
-pub(super) const GH_ACCOUNTS_DIR_NAME: &str = "gh-accounts";
+pub(super) const GH_ACCOUNTS_DIR_NAME: &str =
+    crate::core::gh_account_registry::GH_ACCOUNTS_DIR_NAME;
 
 /// The `<state_root>/gh-accounts/<login>` path for `login`.
 ///

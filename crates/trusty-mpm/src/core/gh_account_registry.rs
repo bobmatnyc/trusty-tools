@@ -13,7 +13,7 @@
 //! call came back "Could not resolve to a Repository", and every branch under
 //! that worktree blocked. This module is the missing read.
 //!
-//! What: [`pinned_gh_env_in`] reads `<registry_dir>/projects.json`, collects
+//! What: [`pinned_gh_env_with`] reads `<registry_dir>/projects.json`, collects
 //! EVERY record whose `repo_url` matches the checkout's `origin` under
 //! [`repo_url_matches`], picks the one pin among them with [`select_pin`], and
 //! turns that record's `github:` binding into a
@@ -32,11 +32,13 @@
 //! the survey already surfaces, so the operator reads the pinned account's name
 //! instead of a bare "no pull request found".
 //!
-//! An account pinned WITHOUT a `config_dir` fails closed for the #5851 reason:
-//! `gh auth token -u <account>` does not discriminate between logged-in
-//! accounts on a keyring-backed host, so minting a token from it here would
-//! return the globally-active account's credential — the very substitution this
-//! module exists to prevent.
+//! An account pinned WITHOUT a `config_dir` never mints a token, for the #5851
+//! reason: `gh auth token -u <account>` does not discriminate between logged-in
+//! accounts on a keyring-backed host, so it would return the globally-active
+//! account's credential — the very substitution this module exists to prevent.
+//! #8510: such a pin borrows a candidate config dir ([`AccountDirSources`])
+//! whose local `hosts.yml` names the pinned account as its ACTIVE `user:`, and
+//! fails closed when none does. The repository owner never picks the account.
 //!
 //! ## Cost
 //!
@@ -56,7 +58,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::core::gh_identity::{self, GhEnv, GhIdentityError};
-use crate::core::trusty_tools_config::GithubConfig;
+use crate::core::trusty_tools_config::{GithubConfig, TrustyToolsConfig};
 use crate::project::record::{Project, repo_url_matches};
 
 /// The file [`crate::project::store::ProjectStore`] publishes under the
@@ -65,6 +67,135 @@ use crate::project::record::{Project, repo_url_matches};
 /// Why: named once here rather than re-spelled inline, so a rename of the
 /// store's own file is a single-line fix on this side too.
 const REGISTRY_FILE: &str = "projects.json";
+
+/// Directory under the tm state root holding one `gh` config dir per account
+/// (#7166); the daemon's `account_config_dir` bootstrap names it from here.
+pub(crate) const GH_ACCOUNTS_DIR_NAME: &str = "gh-accounts";
+
+/// The config dirs an account-only pin may borrow (#8510).
+///
+/// Why: #8416 put the registry ahead of the static config, so a record with
+/// `gh_account` but no `github.config_dir` refused even when the static config
+/// binds a dir for that origin. Borrowing a dir is safe only when the dir
+/// itself selects the pinned account, so each candidate is verified.
+/// What: the static config's per-project `config_dir` for this origin (the
+/// global binding is not "for this origin"), then `<state_root>/gh-accounts/
+/// <login>`. `Default` names neither: the pre-#8510 refusal.
+/// Test: `account_dir_sources_take_only_this_origins_static_binding`.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct AccountDirSources {
+    /// The static `projects[].github.config_dir` bound to this origin.
+    pub(crate) static_config_dir: Option<PathBuf>,
+    /// tm's state root, whose `gh-accounts/<login>` is the second candidate.
+    pub(crate) state_root: Option<PathBuf>,
+}
+
+impl AccountDirSources {
+    /// The candidates for `origin`: its static binding and tm's own account dirs.
+    /// Test: `account_dir_sources_take_only_this_origins_static_binding`.
+    pub(crate) fn for_origin(
+        config: &TrustyToolsConfig,
+        origin: &str,
+        state_root: PathBuf,
+    ) -> Self {
+        let static_config_dir = config
+            .projects
+            .iter()
+            .find(|p| repo_url_matches(&p.repo_url, origin))
+            .and_then(|p| p.github.as_ref())
+            .and_then(selected_config_dir);
+        Self {
+            static_config_dir,
+            state_root: Some(state_root),
+        }
+    }
+
+    /// Every candidate dir for `login`, in order, or why the tm dir is skipped.
+    /// Test: `an_account_only_pin_refuses_an_unsafe_login_segment`.
+    fn candidates(&self, login: &str) -> Vec<Result<PathBuf, String>> {
+        let mut out: Vec<Result<PathBuf, String>> =
+            self.static_config_dir.iter().cloned().map(Ok).collect();
+        if let Some(root) = &self.state_root {
+            let safe = !matches!(login, "" | "." | "..") && !login.contains(['/', '\\']);
+            out.push(if safe {
+                Ok(root.join(GH_ACCOUNTS_DIR_NAME).join(login))
+            } else {
+                Err(format!("'{login}' is not a valid gh-accounts path segment"))
+            });
+        }
+        out
+    }
+
+    /// The first candidate whose active `user:` is `login`, else every reason.
+    /// Test: `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`,
+    /// `an_account_only_pin_falls_back_to_tms_own_account_dir`.
+    fn verified_dir(&self, login: &str) -> Result<PathBuf, Vec<String>> {
+        let mut reasons = Vec::new();
+        for candidate in self.candidates(login) {
+            match candidate.and_then(|dir| verify_active_user(&dir, login).map(|()| dir)) {
+                Ok(dir) => return Ok(dir),
+                Err(reason) => reasons.push(reason),
+            }
+        }
+        Err(reasons)
+    }
+}
+
+/// Does `dir`'s local `hosts.yml` name `login` as its ACTIVE github.com user?
+///
+/// Why (#8510): only the active `user:` is who `gh` acts as under
+/// `GH_CONFIG_DIR=dir`; a dir that merely lists the account would probe as
+/// someone else. Read locally, never over the network.
+/// What: `Ok(())` on a case-insensitive match (GitHub logins are); otherwise
+/// `Err` naming the dir and the failure — missing dir, unreadable or
+/// unparsable `hosts.yml`, no active user, or a different active user.
+/// Test: `an_account_only_pin_refuses_a_static_dir_active_as_another_account`,
+/// `an_account_only_pin_refuses_a_dir_listing_it_but_active_as_another`,
+/// `an_account_only_pin_refuses_a_missing_candidate_dir`,
+/// `an_account_only_pin_refuses_an_unreadable_hosts_yml`,
+/// `an_account_only_pin_refuses_a_malformed_hosts_yml`,
+/// `an_account_only_pin_refuses_a_hosts_yml_with_no_active_user`,
+/// `an_account_only_pin_never_resolves_from_the_repository_owner`.
+fn verify_active_user(dir: &Path, login: &str) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{} does not exist", dir.display()));
+    }
+    let hosts = dir.join("hosts.yml");
+    let text = std::fs::read_to_string(&hosts)
+        .map_err(|e| format!("{} could not be read ({e})", hosts.display()))?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+        .map_err(|e| format!("{} did not parse ({e})", hosts.display()))?;
+    let host = doc.get("github.com");
+    let active = host
+        .and_then(|h| h.get("user"))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    match active {
+        Some(user) if user.eq_ignore_ascii_case(login) => Ok(()),
+        Some(user) => {
+            let lists = host
+                .and_then(|h| h.get("users"))
+                .and_then(serde_yaml::Value::as_mapping)
+                .is_some_and(|users| {
+                    users
+                        .keys()
+                        .filter_map(serde_yaml::Value::as_str)
+                        .any(|k| k.trim().eq_ignore_ascii_case(login))
+                });
+            let how = if lists {
+                format!("lists '{login}' but is active as")
+            } else {
+                "is active as".to_string()
+            };
+            Err(format!("{} {how} '{user}'", hosts.display()))
+        }
+        None => Err(format!(
+            "{} names no active github.com user",
+            hosts.display()
+        )),
+    }
+}
 
 /// The one shape this module needs out of `projects.json`.
 ///
@@ -103,10 +234,26 @@ struct RegistrySnapshot {
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
 /// `an_account_only_pin_fails_closed_naming_the_account`,
 /// `an_unset_token_env_pin_fails_closed`.
+#[cfg(test)]
 pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Option<GhEnv>, String> {
+    pinned_gh_env_with(registry_dir, origin, &AccountDirSources::default())
+}
+
+/// `pinned_gh_env_in` with the config dirs an account-only pin may borrow.
+///
+/// Why (#8510): the production call site knows the static config and tm's
+/// state root; tests pass fixture dirs so no `$HOME` state leaks in.
+/// What: the same outcomes as `pinned_gh_env_in`, except an account-only pin
+/// resolves to the first `sources` dir whose active `user:` is that account.
+/// Test: `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`.
+pub(crate) fn pinned_gh_env_with(
+    registry_dir: &Path,
+    origin: &str,
+    sources: &AccountDirSources,
+) -> Result<Option<GhEnv>, String> {
     match read_pin(registry_dir, origin)? {
         None => Ok(None),
-        Some(pin) => resolve_pin(&pin),
+        Some(pin) => resolve_pin(&pin, sources),
     }
 }
 
@@ -117,19 +264,22 @@ pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Opti
 /// credential-shaped ones, which need different wording for the operator.
 /// What: the matched record's `gh_account` (blank treated as unset) and its own
 /// `github:` binding, both exactly as persisted.
-/// Test: the arms listed on [`pinned_gh_env_in`].
+/// Test: the arms listed on `pinned_gh_env_in`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct RegistryPin {
     /// `Project::gh_account` — the login this project's sessions run as.
     pub(crate) account: Option<String>,
     /// `Project::github` — the per-project binding, `config_dir` included.
     pub(crate) github: Option<GithubConfig>,
+    /// The record's registry name and `repo_url`, for the #8510 fix command.
+    pub(crate) record: Option<(String, String)>,
 }
 
 impl RegistryPin {
     /// The pin a registry record carries, with a blank `gh_account` unset.
     pub(crate) fn from_project(project: &Project) -> Self {
         Self {
+            record: Some((project.name.clone(), project.repo_url.clone())),
             account: project
                 .gh_account
                 .as_deref()
@@ -333,13 +483,15 @@ fn disagreement(a: &str, b: &str, how: &str) -> String {
 /// answer as somebody else.
 /// What: `Ok(Some(env))` for a usable binding, `Ok(None)` when the resolved env
 /// sets neither `GH_CONFIG_DIR` nor `GH_TOKEN` (a host-only binding), `Err`
-/// otherwise.
+/// otherwise. An account-only pin (no `config_dir`, no `token_env`) first
+/// borrows the dir [`AccountDirSources::verified_dir`] verifies (#8510).
 /// Test: `registry_pin_resolves_the_projects_scoped_config_dir`,
 /// `a_host_only_binding_is_not_a_pin`,
 /// `a_pinned_config_dir_without_a_credential_fails_closed`,
 /// `an_account_only_pin_fails_closed_naming_the_account`,
+/// `an_account_only_pin_borrows_a_static_dir_whose_active_user_matches`,
 /// `an_unset_token_env_pin_fails_closed`.
-fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
+fn resolve_pin(pin: &RegistryPin, sources: &AccountDirSources) -> Result<Option<GhEnv>, String> {
     // The record's own binding, with `gh_account` supplying `account` when the
     // binding does not name one itself — the same two keys
     // `gh_account::find_pinned_gh_identity` reads for a session spawn.
@@ -347,19 +499,24 @@ fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
     if cfg.account.is_none() {
         cfg.account = pin.account.clone();
     }
+    // #8510: an account-only pin borrows a dir whose ACTIVE user is that account
+    // — never one picked from the repository owner — or refuses naming the fix.
+    let mut borrow_failures = Vec::new();
+    if let Some(login) = pin.login()
+        && selected_config_dir(&cfg).is_none()
+        && named_token_env(&cfg).is_none()
+    {
+        match sources.verified_dir(login) {
+            Ok(dir) => cfg.config_dir = Some(dir),
+            Err(reasons) => borrow_failures = reasons,
+        }
+    }
     let env = match gh_identity::resolve_gh_env(Some(&cfg)) {
         Ok(env) => env,
         // #5851: `gh auth token -u <account>` does not select an account on a
         // keyring-backed host, so there is no safe way to honour this pin.
         Err(GhIdentityError::AccountStrategyUnsupported(account)) => {
-            return Err(format!(
-                "this repository is pinned to gh account '{account}' with no \
-                 `github.config_dir`, and `gh auth token -u {account}` does not \
-                 discriminate between logged-in accounts on a keyring-backed host \
-                 (#5851) — refusing to probe it as whichever account is globally \
-                 active. Re-run `tm --user {account} <url>` once to build this \
-                 project's scoped gh config dir, or set `github.config_dir` for it."
-            ));
+            return Err(account_only_refusal(pin, &account, &borrow_failures));
         }
     };
     // #5850: `resolve_gh_env` skips a `token_env` it cannot read, which leaves
@@ -398,6 +555,38 @@ fn resolve_pin(pin: &RegistryPin) -> Result<Option<GhEnv>, String> {
         ));
     }
     Ok(Some(env))
+}
+
+/// The refusal for an account pin no candidate config dir verifies (#5851, #8510).
+///
+/// Why: the operator needs the one command that pins a dir for this record,
+/// and why each candidate was rejected, not a bare "refusing".
+/// What: names the account, every candidate's failure, and
+/// `tm projects register <name> --repo-url <url> --gh-account <login>
+/// --gh-config-dir <dir>` with the record's own name and URL filled in.
+/// Test: `an_account_only_pin_fails_closed_naming_the_account`,
+/// `an_account_only_pin_refuses_a_static_dir_active_as_another_account`.
+fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -> String {
+    let (name, url) = pin
+        .record
+        .as_ref()
+        .map_or(("<name>", "<url>"), |(n, u)| (n.as_str(), u.as_str()));
+    let checked = if failures.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " No candidate gh config dir is active as it: {}.",
+            failures.join("; ")
+        )
+    };
+    format!(
+        "this repository is pinned to gh account '{account}' with no `github.config_dir`, \
+         and `gh auth token -u {account}` does not discriminate between logged-in accounts \
+         on a keyring-backed host (#5851) — refusing to probe it as whichever account is \
+         globally active.{checked} Pin a gh config dir whose active user is '{account}': \
+         `tm projects register {name} --repo-url {url} --gh-account {account} \
+         --gh-config-dir <dir>` (#8510)."
+    )
 }
 
 /// The `config_dir` [`gh_identity::resolve_gh_env`] would select, if any.
