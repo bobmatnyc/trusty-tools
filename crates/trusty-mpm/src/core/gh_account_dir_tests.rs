@@ -144,6 +144,7 @@ fn the_second_candidate_is_used_when_the_first_fails() {
         sources: &sources(Some(&first), Some(&second)),
         probe: &probe,
         check: &check,
+        cache: None,
     };
     let proven = prover
         .prove("bob-duetto", ORIGIN)

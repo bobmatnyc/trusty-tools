@@ -644,11 +644,11 @@ fn spawn_with(
         sources: &sources,
         probe,
         check,
+        cache: None,
     };
+    let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
     super::pinned_spawn_env(&account_only_pin(), origin, |login| {
-        prover
-            .prove(login, origin)
-            .map_err(|reasons| reasons.join("; "))
+        super::spawn_proof(&prover, login, origin, &aliases)
     })
     .expect("a pin must produce an env")
     .expect("the spawn env never errs")
@@ -849,6 +849,61 @@ fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     (vars, String::from_utf8(bytes).expect("utf-8 log"))
+}
+
+/// 🔴 #8510 r4: a spawn env carrying the proven token prints no token in
+/// `{:?}`.
+/// Test: itself.
+#[test]
+fn spawn_env_debug_redacts_every_token() {
+    let env = github_spawn(Ok("bob-duetto"));
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob");
+    let shown = format!("{env:?}");
+    assert!(!shown.contains("tok-bob"), "shown: {shown}");
+    assert!(
+        shown.contains("GH_USER") && shown.contains("bob-duetto"),
+        "shown: {shown}"
+    );
+}
+
+/// 🔴 #8510 r4: an origin behind a `~/.ssh/config` alias proves on the host
+/// the alias names — the host the daemon's `repo_slug_for` derives — never on
+/// the alias itself; an alias nothing renames refuses.
+/// Test: itself.
+#[test]
+fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
+    let aliased = "git@github-duetto:duettoresearch/jev-matching.git";
+    let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::parse(
+        "Host github-duetto\n  HostName github.com\n",
+    );
+    let daemon_slug =
+        crate::session_manager::worktree_repo_slug::parse_repo_slug(aliased, &aliases)
+            .expect("the daemon resolves the alias");
+    assert_eq!(daemon_slug, "duettoresearch/jev-matching");
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = migrated_dir(root.path());
+    let probe = TableProbe::default().answer(&dir, "github.com", "bob-duetto", Ok("tok-bob"));
+    let check = TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("bob-duetto"));
+    let sources = crate::core::gh_account_dir::AccountDirSources {
+        own_config_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let prover = crate::core::gh_account_proof::AccountProver {
+        sources: &sources,
+        probe: &probe,
+        check: &check,
+        cache: None,
+    };
+    let proven = super::spawn_proof(&prover, "bob-duetto", aliased, &aliases)
+        .expect("the aliased origin proves on github.com");
+    assert_eq!(proven.host, "github.com");
+
+    let unresolved = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
+    let err = super::spawn_proof(&prover, "bob-duetto", aliased, &unresolved)
+        .expect_err("an alias nothing renames names no host");
+    assert!(err.contains("'github-duetto'"), "got: {err}");
+    assert_eq!(probe.calls().len(), 1, "the refusal never runs gh");
 }
 
 /// 🔴 #8510: no arm writes a token to the log — neither the injected proven

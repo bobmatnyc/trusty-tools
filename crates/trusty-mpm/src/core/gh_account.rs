@@ -501,12 +501,23 @@ pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
 /// be resolved" outcome — it carries no vars at all.
 /// Test: `config_dir_without_credential_still_pins_and_warns`,
 /// `config_dir_with_credential_has_no_warning`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct GhSpawnEnv {
     /// Ordered `(name, value)` overrides to inject into the spawned session.
     pub vars: Vec<(String, String)>,
     /// A non-fatal diagnostic the caller logs at warn level; `vars` still applies.
     pub warning: Option<String>,
+}
+
+/// #8510 r4: `vars` holds a real token; `Debug` redacts every `*TOKEN` value.
+/// Test: `spawn_env_debug_redacts_every_token`.
+impl std::fmt::Debug for GhSpawnEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GhSpawnEnv")
+            .field("vars", &crate::core::gh_identity::RedactedVars(&self.vars))
+            .field("warning", &self.warning)
+            .finish()
+    }
 }
 
 /// Whether `dir` carries a github.com credential of its own (#5851).
@@ -747,10 +758,11 @@ pub async fn resolve_gh_account_env_for_registry(
                 sources: &sources,
                 probe: &CliTokenProbe,
                 check: &HttpUserCheck,
+                cache: None,
             };
-            prover
-                .prove(login, &origin_for_task)
-                .map_err(|reasons| reasons.join("; "))
+            let aliases =
+                crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user();
+            spawn_proof(&prover, login, &origin_for_task, &aliases)
         };
         log_spawn_env(
             pinned_spawn_env(&pinned_for_task, &origin_for_task, prove),
@@ -759,6 +771,25 @@ pub async fn resolve_gh_account_env_for_registry(
     })
     .await;
     joined_spawn_vars(joined, &pinned, &origin, cwd)
+}
+
+/// Prove `login`'s token for a spawn whose raw origin is `origin` (#8510 r4).
+///
+/// Why: the daemon proves against the host `repo_slug_for` derives, which
+/// resolves a `~/.ssh/config` alias; the spawn must derive the same host.
+/// What: [`crate::session_manager::worktree_reclaim_gh::proof_origin`] under
+/// `aliases`, then `prover`. Every refusal is one joined reason.
+/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`.
+pub(crate) fn spawn_proof(
+    prover: &crate::core::gh_account_proof::AccountProver<'_>,
+    login: &str,
+    origin: &str,
+    aliases: &crate::session_manager::ssh_host_alias::SshHostAliases,
+) -> Result<crate::core::gh_account_proof::ProvenToken, String> {
+    let origin = crate::session_manager::worktree_reclaim_gh::proof_origin(origin, aliases)?;
+    prover
+        .prove(login, &origin)
+        .map_err(|reasons| reasons.join("; "))
 }
 
 /// The vars a spawn gets from its blocking identity task (#8510 LOW).

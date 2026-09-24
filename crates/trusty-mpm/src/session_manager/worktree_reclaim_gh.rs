@@ -263,6 +263,8 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path, origin: &str) -> Result<GhEnv, G
 ///
 /// Why: the seam that lets a test prove a registry refusal reaches the caller
 /// as a [`GhFailure`] instead of falling through to the ambient account.
+/// #8510 r4: an account-only pin's proof is remembered in
+/// [`crate::core::gh_account_proof::PROCESS_PROOFS`].
 /// Test: `daemon_gh_env_refuses_when_the_registry_cannot_answer`,
 /// `daemon_gh_env_uses_the_registry_pin`.
 pub(crate) fn resolve_daemon_gh_env_in(
@@ -284,6 +286,9 @@ pub(crate) fn resolve_daemon_gh_env_in(
         sources: &sources,
         probe: &crate::core::gh_account_proof::CliTokenProbe,
         check: &crate::core::gh_account_proof::HttpUserCheck,
+        // #8510 r4: the hook and the reclaim sweep look the same pin up many
+        // times in one run; a fresh proof is not repeated.
+        cache: Some(&crate::core::gh_account_proof::PROCESS_PROOFS),
     };
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
@@ -325,6 +330,33 @@ fn slug_as_url(origin: &str) -> String {
     } else {
         format!("https://{origin}")
     }
+}
+
+/// A raw `remote.origin.url` as the URL the daemon derives for it (#8510 r4).
+///
+/// Why: a session spawn reads the raw origin, while the daemon reads it through
+/// `repo_slug_for`, which resolves a `~/.ssh/config` alias. Proving the token
+/// for `git@github-duetto:org/repo` against host `github-duetto` refused a pin
+/// the daemon proved.
+/// What: [`super::worktree_repo_slug::parse_repo_slug`] with `aliases`, then
+/// the same slug-to-URL step the daemon uses. An origin that parse refuses —
+/// an unresolvable alias among them — is an `Err` naming why.
+/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`.
+pub(crate) fn proof_origin(
+    origin: &str,
+    aliases: &super::ssh_host_alias::SshHostAliases,
+) -> Result<String, String> {
+    super::worktree_repo_slug::parse_repo_slug(origin, aliases)
+        .map(|slug| slug_as_url(&slug))
+        .map_err(|refusal| match refusal {
+            super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
+                "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry renames \
+                 SSH alias '{alias}'"
+            ),
+            super::worktree_repo_slug::SlugRefusal::NoRepository => {
+                format!("cannot tell which gh host serves {origin}: it names no repository")
+            }
+        })
 }
 
 /// Why one `gh` call failed, and whether it failed by HANGING (#6561, #6867).

@@ -733,6 +733,7 @@ fn resolve_with(
         sources,
         probe,
         check,
+        cache: None,
     };
     pinned_gh_env_with(registry_dir, origin, &prover)
 }
@@ -1039,6 +1040,56 @@ fn an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token() {
     assert_eq!(
         value_of(&env, "GH_TOKEN"),
         crate::core::gh_account::REFUSED_GH_TOKEN
+    );
+}
+
+/// 🔴 #8510 r4: an account-only pin never sets a `GH_HOST` other than the host
+/// its token was proven on. A matching `github.host` (in any case) is kept as
+/// the proven host; a different one refuses and names both hosts.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_gh_host_other_than_the_proven_one() {
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "bob-duetto",
+        r#"{"host":"GitHub.com"}"#,
+    );
+    let (probe, check) = proving(&static_dir);
+    let env = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect("a host naming the proven one resolves")
+    .expect("the pin yields an identity");
+    assert_eq!(value_of(&env, "GH_HOST"), "github.com");
+
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "bob-duetto",
+        r#"{"host":"ghe.corp"}"#,
+    );
+    let (probe, check) = proving(&static_dir);
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("a GH_HOST the token was not proven on must refuse");
+    assert!(
+        err.contains("'ghe.corp'") && err.contains("'github.com'") && !err.contains("tok-"),
+        "got: {err}"
     );
 }
 

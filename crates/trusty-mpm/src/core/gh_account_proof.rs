@@ -13,10 +13,11 @@
 //! the token itself, never a config dir: gh re-reads a config dir against the
 //! keyring on every call, so a dir would be proven only at the moment it was
 //! checked. No reason, log line or `Debug` output ever contains a token.
-//! Test: `gh_account_dir_tests`.
+//! Test: `gh_account_dir_tests`, `gh_account_proof_tests`.
 
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::core::gh_account_dir::{AccountDirSources, refuse_unmigrated_config};
 
@@ -95,8 +96,8 @@ pub(crate) const GH_USER_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// What: runs on its own thread (a blocking client must not run on an async
 /// executor), with [`GH_USER_CHECK_TIMEOUT`] on the request and a slightly
 /// longer bound on the thread. A unit-test build never sends it (#8510).
-/// Test: the answer parsing is `parse_user_login`'s; the request itself is
-/// never sent from a test.
+/// Test: the request is `send_user_request`'s, tested against a loopback
+/// listener; this wrapper is never run from a test.
 pub(crate) struct HttpUserCheck;
 
 impl GhUserCheck for HttpUserCheck {
@@ -114,11 +115,36 @@ impl GhUserCheck for HttpUserCheck {
     }
 }
 
-/// Send `GET url` with `token`; the body's `login` on a `200`.
+/// Send `GET url` with `token` over HTTPS only; the body's `login` on a `200`.
+/// Test: `fetch_user_login_refuses_a_non_https_url`.
 fn fetch_user_login(url: &str, token: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
+    // #8510 r4: a token only ever leaves over TLS.
+    if !url.starts_with("https://") {
+        return Err(format!("refusing to send a token to non-https {url}"));
+    }
+    send_user_request(user_client(), url, token)
+}
+
+/// The client every `GET /user` uses: bounded, and never following a redirect.
+fn user_client() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
         .timeout(GH_USER_CHECK_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// Send `GET url` with `token` through `builder`'s client (#8510 r4 seam).
+///
+/// Why: [`fetch_user_login`] allows only https; a hermetic test reaches this
+/// directly with a plain-http loopback URL.
+/// Test: `a_redirect_is_refused_and_never_followed`,
+/// `a_stalled_user_answer_times_out`,
+/// `a_matching_login_is_read_and_the_token_is_sent`.
+fn send_user_request(
+    builder: reqwest::blocking::ClientBuilder,
+    url: &str,
+    token: &str,
+) -> Result<String, String> {
+    let client = builder
         .build()
         .map_err(|e| format!("no HTTP client for GET {url} ({e})"))?;
     let response = client
@@ -157,12 +183,38 @@ pub(crate) fn parse_user_login(url: &str, status: u16, body: &str) -> Result<Str
 
 /// The gh host `origin` lives on, normalized the way gh does, or why not.
 ///
-/// What: lowercased; `github.com` and any `*.github.com` are `github.com`.
-/// Test: `api_base_url_and_token_var_follow_the_host_class`.
+/// What: the remote's host through [`normalize_gh_host`].
+/// Test: `api_base_url_and_token_var_follow_the_host_class`,
+/// `origin_host_refuses_a_host_outside_the_hostname_set`.
 pub(crate) fn origin_host(origin: &str) -> Result<String, String> {
     let host = trusty_common::github_path::parse_remote_url(origin)
-        .map(|remote| remote.host.to_ascii_lowercase())
+        .map(|remote| remote.host)
         .map_err(|e| format!("cannot tell which gh host serves it ({e})"))?;
+    normalize_gh_host(&host)
+}
+
+/// `host` lowercased and normalized the way gh does, or why it is no host.
+///
+/// Why: the host is spliced into the URL a token is sent to, so
+/// `evil.com#.foo.ghe.com` must never become `https://api.evil.com#…` (#8510 r4).
+/// What: refuses anything but ASCII letters, digits, `.` and `-`, optionally
+/// followed by `:<digits>`; then `github.com` and any `*.github.com` become
+/// `github.com`.
+/// Test: `origin_host_refuses_a_host_outside_the_hostname_set`.
+pub(crate) fn normalize_gh_host(host: &str) -> Result<String, String> {
+    let host = host.trim().to_ascii_lowercase();
+    let name = match host.split_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        Some(_) => "",
+        None => host.as_str(),
+    };
+    let valid = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !valid {
+        return Err(format!("'{host}' is not a valid gh host name"));
+    }
     Ok(if host == "github.com" || host.ends_with(".github.com") {
         "github.com".to_string()
     } else {
@@ -310,13 +362,106 @@ pub(crate) struct AccountProver<'a> {
     pub(crate) probe: &'a dyn GhTokenProbe,
     /// Asks GitHub whose token it is.
     pub(crate) check: &'a dyn GhUserCheck,
+    /// Remembers proofs across calls; `None` proves every time.
+    pub(crate) cache: Option<&'a ProofCache>,
 }
 
 impl AccountProver<'_> {
     /// [`prove_account_token`] over this prover's seams.
     /// Test: `the_second_candidate_is_used_when_the_first_fails`.
     pub(crate) fn prove(&self, login: &str, origin: &str) -> Result<ProvenToken, Vec<String>> {
-        prove_account_token(self.sources, login, origin, self.probe, self.check)
+        self.prove_at(login, origin, Instant::now())
+    }
+
+    /// [`Self::prove`] as of `now`: a fresh remembered proof for the same
+    /// login and host is returned without asking `gh` or GitHub (#8510 r4).
+    /// Test: `a_remembered_proof_is_reused_within_its_ttl`,
+    /// `a_remembered_proof_never_serves_another_login_or_host`,
+    /// `an_expired_proof_is_proven_again`, `a_refusal_is_never_remembered`.
+    pub(crate) fn prove_at(
+        &self,
+        login: &str,
+        origin: &str,
+        now: Instant,
+    ) -> Result<ProvenToken, Vec<String>> {
+        let Some(cache) = self.cache else {
+            return prove_account_token(self.sources, login, origin, self.probe, self.check);
+        };
+        let key = (
+            login.to_ascii_lowercase(),
+            origin_host(origin).map_err(|e| vec![e])?,
+        );
+        if let Some(proven) = cache.fresh(&key, now) {
+            return Ok(proven);
+        }
+        let proven = prove_account_token(self.sources, login, origin, self.probe, self.check)?;
+        cache.remember(key, now, proven.clone());
+        Ok(proven)
+    }
+}
+
+/// How long a remembered proof is served: 5 minutes (#8510 r4).
+///
+/// Why: a token's account never changes, so the proof goes stale only when the
+/// token is revoked or the operator logs the account out; 5 minutes bounds how
+/// long either goes unnoticed while covering one hook run or reclaim sweep.
+pub(crate) const PROOF_TTL: Duration = Duration::from_secs(300);
+
+/// The proofs one process remembers, for [`PROOF_TTL`] (#8510 r4).
+pub(crate) static PROCESS_PROOFS: ProofCache = ProofCache::new(PROOF_TTL);
+
+/// A `(lowercased login, normalized host)` proof key.
+type ProofKey = (String, String);
+
+/// Proofs remembered per login and host (#8510 r4).
+///
+/// Why: the pm-guard removal hook proves once per repository and again for its
+/// commit search inside a 3.5 s budget, and the reclaim sweep proves per
+/// branch; each proof is a keyring read plus a network round trip.
+/// Why refusals are not remembered: a refusal is usually transient (a dropped
+/// network, a locked keyring, an account not yet logged in), and the
+/// operator's fix must take effect on the next lookup. Remembering one would
+/// not stop a false deny either: on the network that refused the proof, the
+/// hook's own `gh` calls fail too.
+/// What: an entry serves only its exact key, and only while younger than the
+/// TTL; an older one is dropped on the next write. A poisoned lock is a miss.
+/// Test: `a_remembered_proof_is_reused_within_its_ttl`,
+/// `a_refusal_is_never_remembered`.
+pub(crate) struct ProofCache {
+    ttl: Duration,
+    entries: Mutex<Vec<(ProofKey, Instant, ProvenToken)>>,
+}
+
+impl ProofCache {
+    /// An empty cache whose entries live for `ttl`.
+    pub(crate) const fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Is a proof proven at `at` still fresh at `now`?
+    fn is_fresh(&self, at: Instant, now: Instant) -> bool {
+        now.checked_duration_since(at)
+            .is_some_and(|age| age < self.ttl)
+    }
+
+    /// The remembered proof for `key`, if it is still fresh at `now`.
+    fn fresh(&self, key: &ProofKey, now: Instant) -> Option<ProvenToken> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .iter()
+            .find(|(k, at, _)| k == key && self.is_fresh(*at, now))
+            .map(|(_, _, proven)| proven.clone())
+    }
+
+    /// Remember `proven` for `key` as of `now`, dropping stale entries.
+    fn remember(&self, key: ProofKey, now: Instant, proven: ProvenToken) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|(k, at, _)| *k != key && self.is_fresh(*at, now));
+            entries.push((key, now, proven));
+        }
     }
 }
 
@@ -347,3 +492,7 @@ fn prove_one(
     }
     Ok(token)
 }
+
+#[cfg(test)]
+#[path = "gh_account_proof_tests.rs"]
+mod gh_account_proof_tests;

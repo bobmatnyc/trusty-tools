@@ -58,7 +58,7 @@ use serde::Deserialize;
 
 #[cfg(test)]
 use crate::core::gh_account_dir::AccountDirSources;
-use crate::core::gh_account_proof::AccountProver;
+use crate::core::gh_account_proof::{AccountProver, normalize_gh_host};
 use crate::core::gh_identity::{self, GhEnv, GhIdentityError};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::record::{Project, repo_url_matches};
@@ -114,6 +114,7 @@ pub(crate) fn pinned_gh_env_in(registry_dir: &Path, origin: &str) -> Result<Opti
         sources: &AccountDirSources::default(),
         probe: &crate::core::gh_account_proof::CliTokenProbe,
         check: &crate::core::gh_account_proof::HttpUserCheck,
+        cache: None,
     };
     pinned_gh_env_with(registry_dir, origin, &prover)
 }
@@ -375,6 +376,7 @@ fn disagreement(a: &str, b: &str, how: &str) -> String {
 /// `an_account_only_pin_fails_closed_naming_the_account`,
 /// `an_account_only_pin_uses_a_token_proven_under_the_static_dir`,
 /// `an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token`,
+/// `an_account_only_pin_refuses_a_gh_host_other_than_the_proven_one`,
 /// `a_pinned_config_dir_is_never_replaced_by_a_borrowed_one`,
 /// `a_token_env_pin_never_borrows_a_config_dir`,
 /// `a_record_naming_two_accounts_fails_closed`,
@@ -418,7 +420,12 @@ fn resolve_pin(
             Ok(proven) => {
                 let mut vars = proven.identity_vars();
                 if let Some(host) = cfg.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
-                    vars.push(("GH_HOST".to_string(), host.to_string()));
+                    // #8510 r4: GH_HOST never names a host the token was not
+                    // proven on.
+                    if normalize_gh_host(host).as_deref() != Ok(proven.host.as_str()) {
+                        return Err(host_mismatch_refusal(login, host, &proven.host));
+                    }
+                    vars.push(("GH_HOST".to_string(), proven.host.clone()));
                 }
                 Ok(Some(GhEnv::from_identity_vars(vars)))
             }
@@ -509,6 +516,18 @@ fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -
          (#5851) — refusing to probe it as whichever account is globally active.{checked} \
          Pin a gh config dir logged in as '{account}': `tm projects register {name} \
          --repo-url {url} --gh-account {account} --gh-config-dir <dir>` (#8510)."
+    )
+}
+
+/// The refusal for an account pin whose `github.host` is not the host its
+/// token was proven on (#8510 r4).
+/// Test: `an_account_only_pin_refuses_a_gh_host_other_than_the_proven_one`.
+fn host_mismatch_refusal(account: &str, host: &str, proven: &str) -> String {
+    format!(
+        "this repository is pinned to gh account '{account}' with `github.host` '{host}', \
+         but the account's token was proven on '{proven}', the repository's own host — \
+         refusing to point gh at a host the token was not proven on (#8510). Remove \
+         `github.host` or make it '{proven}'."
     )
 }
 

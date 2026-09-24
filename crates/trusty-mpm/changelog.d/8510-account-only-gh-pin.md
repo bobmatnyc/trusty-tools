@@ -4,3 +4,7 @@ Fixed
 - tm never runs `gh` in a candidate config dir whose `config.yml` does not declare `version: "1"`. gh migrates such a dir, and that migration can copy one account's token into another account's keyring slot. tm's own `gh-accounts/<login>` dirs now always declare `version: "1"`, including dirs built before this fix (#8510).
 - A registry record whose `gh_account` and `github.account` name different logins now refuses by name instead of silently using `gh_account` (#8510).
 - Daemon `gh` calls no longer inherit `GH_HOST` from the environment, and `GH_ENTERPRISE_TOKEN` is redacted in identity diagnostics like `GH_TOKEN` (#8510).
+- A daemon or `tm hook --pm-guard` process remembers a proven token for 5 minutes per login and host, so a worktree removal or reclaim sweep no longer repeats the keyring read and `GET /user` for every repository and branch. A refusal is never remembered (#8510).
+- Session spawn now resolves a `~/.ssh/config` host alias in the origin, as the daemon does, so `git@github-duetto:org/repo` is proven on the host the alias names instead of being refused as an unknown Enterprise Server (#8510).
+- A repository host containing anything but letters, digits, `.`, `-` and a `:port` is refused before it is placed in the `GET /user` URL, the token is only ever sent over https, and an account-only pin whose `github.host` differs from the host its token was proven on now refuses instead of setting that `GH_HOST` (#8510).
+- The `Debug` output of a resolved gh environment redacts every `*TOKEN` value (#8510).
