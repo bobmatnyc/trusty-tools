@@ -1622,3 +1622,95 @@ async fn repair_route_refuses_a_live_owner_7602() {
     assert!(matches!(outcome, RepairOutcome::Refused { .. }));
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
 }
+
+/// A record a stop matched by agent type: live-shaped for a dispatch, no id.
+fn type_matched_record(state: &DaemonState, session: SessionId) -> Delegation {
+    let mut d = Delegation::observed(session, "version-control", "task", Some("toolu_vc".into()));
+    d.cwd = Some(PathBuf::from("/repo"));
+    d.status = DelegationStatus::Stale;
+    d.stale_by_agent_type = true;
+    state.upsert_delegation(d.clone());
+    d
+}
+
+// #8257: the deny named only `version-control`. The answer now carries the
+// record's delegation id (it has no agent id), owner, and clearing command.
+#[tokio::test]
+async fn shared_tree_dispatch_route_names_each_blocking_record_8257() {
+    let (state, _dir, session) = hermetic();
+    let d = type_matched_record(&state, session);
+
+    let body = call(
+        &state,
+        SessionId::new(),
+        dispatch("/repo", "rust-engineer", None, Some("toolu_new")),
+    )
+    .await;
+
+    assert_eq!(body.records.len(), 1, "{body:?}");
+    let r = &body.records[0];
+    assert_eq!(r.delegation_id, d.id.0.to_string());
+    assert_eq!(r.agent_id, None);
+    assert_eq!(r.session, session.0.to_string());
+    assert_eq!(
+        r.repair_command,
+        format!("tm repair delegation --delegation-id {}", d.id.0)
+    );
+}
+
+// #8257: the read-only listing names the record the dispatch deny blocks on.
+#[tokio::test]
+async fn list_route_names_the_blocking_record_8257() {
+    let (state, _dir, session) = hermetic();
+    let d = type_matched_record(&state, session);
+
+    let Json(listing) = list_delegations_route(
+        State(state.clone()),
+        Query(ListDelegationsQuery {
+            cwd: PathBuf::from("/repo"),
+        }),
+    )
+    .await;
+
+    assert_eq!(listing.records.len(), 1, "{listing:?}");
+    assert_eq!(listing.records[0].delegation_id, d.id.0.to_string());
+    assert!(listing.records[0].blocks_dispatch);
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Stale,
+        "listing writes nothing"
+    );
+}
+
+// #8257: the id-less record is reachable over the wire by its delegation id.
+#[tokio::test]
+async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::RepairOutcome;
+
+    let (state, _dir, session) = hermetic();
+    state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
+    let d = type_matched_record(&state, session);
+
+    let Json(outcome) =
+        repair_delegation_by_id_route(State(state.clone()), Path(d.id.0.to_string()), None)
+            .await
+            .expect("a well-formed id");
+
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Cancelled
+    );
+    assert!(
+        call(
+            &state,
+            SessionId::new(),
+            dispatch("/repo", "rust-engineer", None, Some("t2"))
+        )
+        .await
+        .agents
+        .is_empty(),
+        "the repaired record no longer blocks a dispatch"
+    );
+}

@@ -50,14 +50,27 @@
 //! process before removing anything (`agent_worktree_reap`'s gate 6,
 //! `worktree_reclaim_sweep`, #7504) — so the worst outcome is a status flipped
 //! early, not a live agent's tree removed.
+//!
+//! # #8257: reaching every record, and asking the OS before writing
+//!
+//! A record a stop matched by agent type never learns an `agent_id`, so it is
+//! addressed by its delegation id ([`repair_delegation_by_id`]). Such a stop,
+//! or a record older than `RUNNING_STALE_AFTER_SECS`, is evidence about the
+//! AGENT, so a live owner session no longer refuses it ([`record_liveness`]).
+//! Every would-be write then passes
+//! [`super::delegation_repair_probe::probe_live_evidence`], which refuses on a
+//! live process in the agent's tree and on any probe that cannot answer.
 //! Test: `delegation_repair_tests`.
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::delegation_repair_probe::{LiveEvidence, probe_live_evidence};
+use crate::core::agent::{Delegation, DelegationId};
 use crate::core::session::{SessionId, SessionStatus};
 use crate::daemon::state::DaemonState;
+use crate::daemon::state::sessions::RUNNING_STALE_AFTER_SECS;
 
 /// What the daemon can say about the session that owns a stuck record.
 ///
@@ -149,10 +162,14 @@ pub(crate) fn decide(
     match owner {
         // Never, at any force. A live owner's agent may still be writing, and
         // releasing its tree is the ADR-0048 harm this refusal exists for.
+        // #8257: names the three ways the record becomes repairable.
         OwnerLiveness::Live => RepairOutcome::Refused {
-            reason: "the session that dispatched this agent is still Active — ending its \
-                     delegation would readmit a second writer onto a working tree the agent may \
-                     still hold. Stop the session first (#7602)"
+            reason: "the session that dispatched this agent is still Active, no stop has arrived \
+                     for the agent, and the record is younger than the 6 h stale threshold — so \
+                     the agent may still be running, and ending its delegation would readmit a \
+                     second writer onto a working tree it may still hold. It becomes repairable \
+                     once that session stops, once a stop for its agent type arrives, or at 6 h \
+                     (#7602, #8257)"
                 .to_string(),
         },
         OwnerLiveness::Unknown if !force => RepairOutcome::Refused {
@@ -203,44 +220,132 @@ pub(crate) fn owner_liveness(state: &Arc<DaemonState>, session: SessionId) -> Ow
 /// `repair_force_ends_a_record_whose_owner_is_unknown_7602`,
 /// `repair_reports_no_record_for_an_unknown_agent_7602`.
 pub fn repair_delegation(state: &Arc<DaemonState>, agent_id: &str, force: bool) -> RepairOutcome {
-    let mut open = 0usize;
+    repair_matching(
+        state,
+        |d| d.agent_id.as_deref() == Some(agent_id),
+        force,
+        probe_live_evidence,
+    )
+}
+
+/// End the one delegation `id` names, or say why not (#8257).
+///
+/// Why: a record a stop matched by agent type has no `agent_id`, so
+/// [`repair_delegation`] could never name it — the unrepairable record #8257
+/// reports. Its delegation id is always known; the dispatch deny prints it.
+/// What: [`repair_matching`] over the single record with that id.
+/// Test: `repair_by_delegation_id_ends_a_record_with_no_agent_id_8257`,
+/// `a_type_matched_record_of_a_live_session_becomes_repairable_8257`.
+pub fn repair_delegation_by_id(
+    state: &Arc<DaemonState>,
+    id: DelegationId,
+    force: bool,
+) -> RepairOutcome {
+    repair_matching(state, |d| d.id == id, force, probe_live_evidence)
+}
+
+/// A record's owner liveness, as far as it still speaks for the AGENT (#8257).
+///
+/// Why: a live session proves its agent MAY run only while nothing says the
+/// agent stopped. A stop matched by agent type (#6556) says it did, and a record
+/// past `RUNNING_STALE_AFTER_SECS` is past the budget the sweep already gives
+/// up at. Refusing those forever on the session's liveness is what left the
+/// 2026-09-17 record unrepairable.
+/// What: `Gone` for a type-matched stop or a record at or past the threshold;
+/// otherwise `owner` unchanged. The OS probe still runs before any write.
+/// Test: `a_type_matched_record_of_a_live_session_becomes_repairable_8257`,
+/// `repair_refuses_while_the_owner_is_live_7602`.
+pub(crate) fn record_liveness(
+    owner: OwnerLiveness,
+    d: &Delegation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> OwnerLiveness {
+    let aged_out = super::delegation_records::record_age_secs(d, now) >= RUNNING_STALE_AFTER_SECS;
+    if d.stale_by_agent_type || aged_out {
+        OwnerLiveness::Gone
+    } else {
+        owner
+    }
+}
+
+/// The repair over every record `matches` selects, with the OS probe injected.
+///
+/// Why: the probe is the one part a test cannot drive through the real OS on
+/// demand — a probe that FAILS in particular — so it is a parameter here and
+/// the public entry points pass [`probe_live_evidence`].
+/// What: tallies the matched records, resolves the strictest
+/// [`record_liveness`] across them (any live owner wins), and runs [`decide`].
+/// On `Ended` it probes each open record and refuses — naming the record and
+/// the probe's words — on any [`LiveEvidence`] that is not `Clear`. Only then
+/// does it write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled)
+/// to those records. Nothing is written on any other outcome.
+/// Test: `repair_refuses_while_a_live_process_holds_the_tree_8257`,
+/// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`.
+pub(crate) fn repair_matching(
+    state: &Arc<DaemonState>,
+    matches: impl Fn(&Delegation) -> bool,
+    force: bool,
+    probe: impl Fn(&Delegation) -> LiveEvidence,
+) -> RepairOutcome {
+    let now = chrono::Utc::now();
+    let mut open: Vec<Delegation> = Vec::new();
     let mut terminal = 0usize;
     let mut owner = None;
     for d in state.all_delegations() {
-        if d.agent_id.as_deref() != Some(agent_id) {
+        if !matches(&d) {
             continue;
         }
         if d.status.is_terminal() {
             terminal += 1;
             continue;
         }
-        open += 1;
         // Any live owner decides the whole call: the strictest answer wins.
-        let liveness = owner_liveness(state, d.session);
+        let liveness = record_liveness(owner_liveness(state, d.session), &d, now);
         owner = Some(match (owner, liveness) {
             (Some(OwnerLiveness::Live), _) | (_, OwnerLiveness::Live) => OwnerLiveness::Live,
             (Some(OwnerLiveness::Gone), _) | (_, OwnerLiveness::Gone) => OwnerLiveness::Gone,
             _ => OwnerLiveness::Unknown,
         });
+        open.push(d);
     }
 
     let outcome = decide(
-        open,
+        open.len(),
         terminal,
         owner.unwrap_or(OwnerLiveness::Unknown),
         force,
     );
-    if let RepairOutcome::Ended { .. } = outcome {
-        // #7602: Cancelled, never Completed — the agent did not report finishing,
-        // an operator ended the record because nothing else could.
-        state.cancel_stuck_delegations_of_agent(agent_id);
-        tracing::warn!(
-            agent_id,
-            ended = open,
-            forced = force,
-            "delegation: operator-repaired a stuck record — status Cancelled (#7602)"
-        );
+    if !matches!(outcome, RepairOutcome::Ended { .. }) {
+        return outcome;
     }
+    // #8257: the registry says the records may end; the OS must agree first.
+    for d in &open {
+        let reason = match probe(d) {
+            LiveEvidence::Clear => continue,
+            LiveEvidence::Held(why) => format!("a live process still holds its tree: {why}"),
+            LiveEvidence::Undeterminable(why) => format!(
+                "the live-agent probe could not answer, and an unanswered probe is not proof \
+                 the agent is gone (ADR-0045): {why}"
+            ),
+        };
+        return RepairOutcome::Refused {
+            reason: format!(
+                "{} record {} (agent id {}): {reason} (#8257)",
+                d.agent,
+                d.id.0,
+                d.agent_id.as_deref().unwrap_or("none")
+            ),
+        };
+    }
+    // #7602: Cancelled, never Completed — the agent did not report finishing,
+    // an operator ended the record because nothing else could.
+    let ids: Vec<DelegationId> = open.iter().map(|d| d.id).collect();
+    let ended = state.cancel_stuck_delegations(&ids);
+    tracing::warn!(
+        ended,
+        forced = force,
+        "delegation: operator-repaired a stuck record — status Cancelled (#7602, #8257)"
+    );
     outcome
 }
 

@@ -54,7 +54,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::{Json, Router, extract::Path, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -118,6 +122,11 @@ pub struct SharedTreeWritersResponse {
     /// Whether this call claimed the directory for the asking dispatch.
     #[serde(default)]
     pub claimed: bool,
+    /// #8257: each blocking record — id, owner, age, clearing command — for a
+    /// dispatch the answer denies. Empty for a HEAD-write query and for a
+    /// claim; absent from an older daemon, which the guard tolerates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<crate::daemon::services::delegation_records::DelegationRecordView>,
 }
 
 /// One agent name with its live unisolated delegation count.
@@ -152,6 +161,61 @@ pub fn router() -> Router<Arc<DaemonState>> {
             "/api/v1/delegations/{agent_id}/repair",
             post(repair_delegation_route),
         )
+        // #8257: the same repair addressed by delegation id — the only address
+        // a record matched by agent type ever has — and the read-only listing.
+        .route(
+            "/api/v1/delegations/by-id/{delegation_id}/repair",
+            post(repair_delegation_by_id_route),
+        )
+        .route("/api/v1/delegations", get(list_delegations_route))
+}
+
+/// Query of [`list_delegations_route`].
+#[derive(Debug, Deserialize)]
+pub struct ListDelegationsQuery {
+    /// The directory whose records to list.
+    pub cwd: PathBuf,
+}
+
+/// `GET /api/v1/delegations?cwd=<dir>` (#8257).
+///
+/// Why: the read-only listing `tm repair delegation --list` prints. Before it,
+/// the only reads of the map were POSTs that CLAIM a directory.
+/// What: [`crate::daemon::services::delegation_records::list_for_dir`] as JSON.
+/// Test: `list_route_names_the_blocking_record_8257`.
+pub async fn list_delegations_route(
+    State(state): State<Arc<DaemonState>>,
+    Query(q): Query<ListDelegationsQuery>,
+) -> Json<crate::daemon::services::delegation_records::DelegationListing> {
+    let records = crate::daemon::services::delegation_records::list_for_dir(&state, &q.cwd);
+    Json(
+        crate::daemon::services::delegation_records::DelegationListing {
+            cwd: q.cwd,
+            records,
+        },
+    )
+}
+
+/// `POST /api/v1/delegations/by-id/{delegation_id}/repair` (#8257).
+///
+/// Why: see [`crate::daemon::services::delegation_repair::repair_delegation_by_id`].
+/// What: a malformed id is a 400; otherwise the outcome, always 200, exactly
+/// as [`repair_delegation_route`] answers.
+/// Test: `repair_by_id_route_ends_a_record_with_no_agent_id_8257`.
+pub async fn repair_delegation_by_id_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(delegation_id): Path<String>,
+    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
+) -> Result<Json<crate::daemon::services::delegation_repair::RepairOutcome>, DaemonError> {
+    let id = uuid::Uuid::parse_str(&delegation_id)
+        .map(crate::core::agent::DelegationId)
+        .map_err(|_| {
+            DaemonError::InvalidRequest(format!("malformed delegation id: {delegation_id}"))
+        })?;
+    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    Ok(Json(
+        crate::daemon::services::delegation_repair::repair_delegation_by_id(&state, id, force),
+    ))
 }
 
 /// `POST /api/v1/delegations/{agent_id}/repair` (#7602).
@@ -274,7 +338,33 @@ pub fn granted_worktree_op(
             state, session, payload,
         );
     }
-    Ok(writers_response(&names, claimed))
+    let mut response = writers_response(&names, claimed);
+    response.records = blocking_records(state, &cwd, exclude, &names);
+    Ok(response)
+}
+
+/// The records behind a non-empty dispatch answer, for the deny text (#8257).
+///
+/// Why: the names alone left a denied PM nothing to act on. Read after the
+/// claim rather than inside it: the text is advisory, the deny is decided by
+/// the names, and a record that changed in between is at worst named stale.
+fn blocking_records(
+    state: &DaemonState,
+    cwd: &std::path::Path,
+    exclude: Option<&str>,
+    names: &[String],
+) -> Vec<crate::daemon::services::delegation_records::DelegationRecordView> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let now = chrono::Utc::now();
+    state
+        .shared_tree_records(cwd, exclude, true, None)
+        .iter()
+        .map(|d| {
+            crate::daemon::services::delegation_records::DelegationRecordView::of(d, now, true)
+        })
+        .collect()
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` (#4480, #5324).
@@ -381,7 +471,13 @@ pub fn shared_tree_dispatch_op(
         );
     }
 
-    Ok(writers_response(&names, claimed))
+    let mut response = writers_response(&names, claimed);
+    // #8257: only a dispatch's deny names records; a HEAD-write answer is
+    // scoped differently and keeps its own text.
+    if question == SharedTreeQuestion::Dispatch {
+        response.records = blocking_records(state, &cwd, exclude, &names);
+    }
+    Ok(response)
 }
 
 /// Fold a list of live writer names into the wire response.
@@ -404,6 +500,7 @@ fn writers_response(names: &[String], claimed: bool) -> SharedTreeWritersRespons
             .collect(),
         total: names.len(),
         claimed,
+        records: Vec::new(),
     }
 }
 

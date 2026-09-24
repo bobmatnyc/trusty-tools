@@ -112,6 +112,9 @@ pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_dispatch;
+pub(crate) mod pm_guard_dispatch_deny;
+// #8257: `tm repair delegation --list`.
+pub(crate) mod repair_delegation_list;
 // #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
 // left to succeed and wedge the agent — see its module doc for why the pin it
 // names belongs to the harness and cannot be moved from here.

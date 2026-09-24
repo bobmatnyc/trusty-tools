@@ -10,7 +10,7 @@
 //! Test: this file IS the test module.
 
 use super::*;
-use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
+use crate::core::agent::{DelegationStatus, ModelTier};
 use crate::core::session::{ControlModel, Session};
 use crate::daemon::state::DaemonState;
 
@@ -225,6 +225,135 @@ fn decide_reports_no_record() {
         decide(0, 0, OwnerLiveness::Unknown, true),
         RepairOutcome::NoRecord
     );
+}
+
+/// A record a stop matched by agent type (#6556): no agent id, `Stale`.
+fn type_matched(session: SessionId) -> Delegation {
+    let mut d = Delegation::new(session, None, "version-control", ModelTier::Sonnet, "work");
+    d.status = DelegationStatus::Stale;
+    d.stale_by_agent_type = true;
+    d
+}
+
+// #8257: `tm repair delegation <agent-id>` could never name this record.
+#[test]
+fn repair_by_delegation_id_ends_a_record_with_no_agent_id_8257() {
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    let mut d = delegation(session, "unused", DelegationStatus::Running);
+    d.agent_id = None;
+    state.upsert_delegation(d.clone());
+
+    assert_eq!(
+        repair_delegation_by_id(&state, d.id, false),
+        RepairOutcome::Ended { records: 1 }
+    );
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Cancelled
+    );
+}
+
+// #8257: the 2026-09-17 specimen — matched by type, owned by a live session.
+// The stop is evidence about the agent, so the live session no longer refuses.
+#[test]
+fn a_type_matched_record_of_a_live_session_becomes_repairable_8257() {
+    let (state, session) = state_with(Some(SessionStatus::Active));
+    let d = type_matched(session);
+    state.upsert_delegation(d.clone());
+
+    assert_eq!(
+        repair_delegation_by_id(&state, d.id, false),
+        RepairOutcome::Ended { records: 1 }
+    );
+}
+
+// #8257 Fail-Open Check: a process standing in the agent's own tree refuses
+// the repair, whatever the registry says and whatever `--force` asserts.
+#[test]
+fn repair_refuses_while_a_live_process_holds_the_tree_8257() {
+    let tree = tempfile::tempdir().expect("tree");
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(tree.path())
+        .spawn()
+        .expect("spawn sleep");
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    let mut d = delegation(session, "agent-held", DelegationStatus::Running);
+    d.cwd = Some(std::path::PathBuf::from("/repo"));
+    d.worktree_path = Some(tree.path().to_path_buf());
+    state.upsert_delegation(d);
+
+    let outcome = repair_delegation(&state, "agent-held", true);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("live process"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 Fail-Open Check: a probe that cannot answer refuses, naming the step.
+#[test]
+fn repair_refuses_when_the_live_agent_probe_cannot_answer_8257() {
+    let (state, session) = state_with(Some(SessionStatus::Stopped));
+    state.upsert_delegation(delegation(session, "agent-x", DelegationStatus::Running));
+
+    let outcome = repair_matching(
+        &state,
+        |d| d.agent_id.as_deref() == Some("agent-x"),
+        true,
+        |_| LiveEvidence::Undeterminable("lsof exited 1".to_string()),
+    );
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("could not answer"), "{reason}");
+            assert!(reason.contains("lsof exited 1"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257: each arm of the harness-lock check; every unanswered step is `Err`.
+#[test]
+fn lock_holder_evidence_reads_each_arm_8257() {
+    use super::super::delegation_repair_probe::lock_holder_evidence;
+    let reason = "claude agent agent-a1 (pid 4242 start Mon Sep 14 15:30:46 2026)";
+    let started = {
+        use chrono::TimeZone;
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 9, 14)
+            .and_then(|d| d.and_hms_opt(15, 30, 46))
+            .expect("date");
+        chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .expect("local")
+            .timestamp()
+    };
+    let at = move |_| Some(started);
+
+    assert!(matches!(
+        lock_holder_evidence(reason, |_| Some(true), at),
+        Ok(Some(_))
+    ));
+    assert_eq!(lock_holder_evidence(reason, |_| Some(false), at), Ok(None));
+    assert_eq!(
+        lock_holder_evidence(reason, |_| Some(true), move |_| Some(started + 3600)),
+        Ok(None),
+        "a reused pid is not the lock's holder"
+    );
+    assert!(lock_holder_evidence(reason, |_| None, at).is_err());
+    assert!(lock_holder_evidence(reason, |_| Some(true), |_| None).is_err());
+    assert!(
+        lock_holder_evidence("claude agent agent-a1 (pid 4242)", |_| Some(true), at).is_err(),
+        "no start time to match"
+    );
+    assert!(lock_holder_evidence("claude agent agent-a1", |_| Some(true), at).is_err());
 }
 
 #[test]
