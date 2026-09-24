@@ -10,21 +10,25 @@
 //! to `$(git rev-parse --git-common-dir)/info/exclude` — shared by every
 //! worktree of the repository, local to the clone, and never a committed file —
 //! the same approach `super::worktree_naming::ensure_worktrees_gitignored`
-//! takes for `.worktrees/`. `.trusty-mpm/` is skipped when the project tracks
-//! files under it. [`ensure_and_log`] is the best-effort wrapper registration
-//! calls.
+//! takes for `.worktrees/`. Both patterns are anchored to the tree root: the
+//! harness writes only there, and an unanchored pattern would also hide a
+//! project's own nested `sub/.trusty-mpm/` from `git status` and from the
+//! clean-tree reclaim gate. `/.trusty-mpm/` is skipped when the project tracks
+//! files under the top-level `.trusty-mpm/` — the same scope the pattern
+//! covers. [`ensure_and_log`] is the best-effort wrapper registration calls.
 //! Test: `exclude_entries_are_added_once`,
-//! `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`.
+//! `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`,
+//! `nested_trusty_mpm_files_stay_visible`.
 
 use std::path::{Path, PathBuf};
 
-/// The in-tree marker's name as an exclude pattern.
-const MARKER_ENTRY: &str = ".trusty-mpm-worktree";
-/// The harness scratch directory as an exclude pattern.
-const SCRATCH_DIR_ENTRY: &str = ".trusty-mpm/";
+/// The in-tree marker's name as an exclude pattern, anchored to the tree root.
+const MARKER_ENTRY: &str = "/.trusty-mpm-worktree";
+/// The harness scratch directory as an exclude pattern, anchored to the tree root.
+const SCRATCH_DIR_ENTRY: &str = "/.trusty-mpm/";
 
 /// Every pattern this module maintains, in the order it appends them.
-pub const HARNESS_EXCLUDE_ENTRIES: [&str; 2] = [MARKER_ENTRY, SCRATCH_DIR_ENTRY];
+pub(crate) const HARNESS_EXCLUDE_ENTRIES: [&str; 2] = [MARKER_ENTRY, SCRATCH_DIR_ENTRY];
 
 /// Run `git -C <repo> <args>` and return trimmed stdout, or a named error.
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -63,12 +67,13 @@ fn exclude_file(repo: &Path) -> Result<PathBuf, String> {
 ///
 /// Why: the doctor repair must preview exactly what the apply writes.
 /// What: an entry is pending when no line of the exclude file equals it
-/// (trimmed). `.trusty-mpm/` is never pending while `git ls-files` reports
-/// tracked files under the top-level `.trusty-mpm/` — excluding it there would
-/// hide the project's own new files in that directory.
+/// (trimmed). `/.trusty-mpm/` is never pending while `git ls-files` reports
+/// tracked files under the top-level `.trusty-mpm/` (`:(top)`, the pattern's
+/// own anchored scope) — excluding it there would hide the project's own new
+/// files in that directory.
 /// Test: `exclude_entries_are_added_once`,
 /// `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`.
-pub fn pending_excludes(repo: &Path) -> Result<(PathBuf, Vec<&'static str>), String> {
+pub(crate) fn pending_excludes(repo: &Path) -> Result<(PathBuf, Vec<&'static str>), String> {
     let path = exclude_file(repo)?;
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -101,7 +106,7 @@ pub fn pending_excludes(repo: &Path) -> Result<(PathBuf, Vec<&'static str>), Str
 /// `ensure_worktrees_gitignored` documents for its own entry.
 /// Test: `exclude_entries_are_added_once`,
 /// `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`.
-pub fn ensure_harness_files_excluded(repo: &Path) -> Result<Vec<&'static str>, String> {
+pub(crate) fn ensure_harness_files_excluded(repo: &Path) -> Result<Vec<&'static str>, String> {
     let (path, pending) = pending_excludes(repo)?;
     if pending.is_empty() {
         return Ok(pending);
@@ -131,7 +136,7 @@ pub fn ensure_harness_files_excluded(repo: &Path) -> Result<Vec<&'static str>, S
 
 /// Best-effort [`ensure_harness_files_excluded`] for registration and
 /// provisioning: logs, never fails the caller (#8511).
-pub fn ensure_and_log(repo: &Path) {
+pub(crate) fn ensure_and_log(repo: &Path) {
     match ensure_harness_files_excluded(repo) {
         Ok(added) if added.is_empty() => {}
         Ok(added) => tracing::info!(
@@ -217,7 +222,7 @@ mod tests {
                 "{entry} must appear exactly once"
             );
         }
-        std::fs::write(wt.join(MARKER_ENTRY), b"{}").expect("write marker");
+        std::fs::write(wt.join(".trusty-mpm-worktree"), b"{}").expect("write marker");
         std::fs::create_dir(wt.join(".trusty-mpm")).expect("mkdir");
         std::fs::write(wt.join(".trusty-mpm").join("note.md"), b"x").expect("write");
         let status = std::process::Command::new("git")
@@ -245,5 +250,39 @@ mod tests {
         assert_eq!(added, vec![MARKER_ENTRY]);
         let exclude = repo.join(".git").join("info").join("exclude");
         assert_eq!(count(&exclude, SCRATCH_DIR_ENTRY), 0);
+    }
+
+    /// Finding 4 (#8511 review): the patterns cover the tree root only, so a
+    /// project's nested `.trusty-mpm/` and marker-named files still show as
+    /// untracked work.
+    #[test]
+    fn nested_trusty_mpm_files_stay_visible() {
+        let (_tmp, _repo, wt) = repo_with_worktree();
+        ensure_harness_files_excluded(&wt).expect("run");
+        let sub = wt.join("sub");
+        std::fs::create_dir_all(sub.join(".trusty-mpm")).expect("mkdir");
+        std::fs::write(sub.join(".trusty-mpm").join("work.md"), b"x").expect("write");
+        std::fs::write(sub.join(".trusty-mpm-worktree"), b"x").expect("write");
+        std::fs::create_dir(wt.join(".trusty-mpm")).expect("mkdir");
+        std::fs::write(wt.join(".trusty-mpm").join("note.md"), b"x").expect("write");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .output()
+            .expect("status");
+        let status = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            status.contains("sub/.trusty-mpm/work.md"),
+            "nested scratch dir hidden: {status}"
+        );
+        assert!(
+            status.contains("sub/.trusty-mpm-worktree"),
+            "nested marker-named file hidden: {status}"
+        );
+        assert!(
+            !status.contains(" .trusty-mpm/"),
+            "top-level scratch dir not excluded: {status}"
+        );
     }
 }

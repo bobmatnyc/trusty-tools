@@ -106,7 +106,8 @@ pub(crate) fn adopt_pre_existing_worktrees(
 /// every project registered before the marker moved, once per daemon start.
 /// What: refuses on a scratch framework root (a test process, #6348), then runs
 /// [`crate::session_manager::worktree_marker_migration::migrate_registered_projects`]
-/// over the orphan-GC's repos root and the adopted anchors on a blocking thread.
+/// over the orphan-GC's repos root and the adopted anchors on a blocking thread,
+/// awaited by a small task that logs the tally or a panic (`JoinError`).
 /// Test: the pass itself is `the_fleet_pass_migrates_every_tree_and_excludes_once`.
 pub(crate) fn spawn_startup_marker_migration(state: &Arc<DaemonState>) {
     if let Some(reason) = crate::daemon::host_state_refusal(state) {
@@ -115,16 +116,21 @@ pub(crate) fn spawn_startup_marker_migration(state: &Arc<DaemonState>) {
     }
     let repos_root = crate::daemon::managed_routes::inproject::repos_root();
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
-    tokio::task::spawn_blocking(move || {
-        let tally = crate::session_manager::worktree_marker_migration::migrate_registered_projects(
+    let pass = tokio::task::spawn_blocking(move || {
+        crate::session_manager::worktree_marker_migration::migrate_registered_projects(
             &repos_root,
             &adopted,
-        );
-        tracing::info!(
-            migrated = tally.migrated,
-            kept = tally.kept,
-            "startup marker migration finished (#8511)"
-        );
+        )
+    });
+    tokio::spawn(async move {
+        match pass.await {
+            Ok(tally) => tracing::info!(
+                migrated = tally.migrated,
+                kept = tally.kept,
+                "startup marker migration finished (#8511)"
+            ),
+            Err(e) => tracing::warn!("startup marker migration did not finish: {e} (#8511)"),
+        }
     });
 }
 

@@ -279,7 +279,8 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 /// Why: the single call site every consumer (orphan-GC, decommission's owner
 /// gate) should use, so the tolerant-parse rule lives in exactly one place.
 /// What: [`read_sentinel_owner_strict`] with every failure folded in (#8511) —
-/// admin dir first, legacy in-tree file second, migrating a legacy-only marker;
+/// the admin-dir marker wins over the legacy in-tree file, and the read never
+/// writes (a marker moves only through `migrate_legacy_sentinel`);
 /// a missing file, an empty file, or a read/parse failure all resolve to
 /// [`SentinelOwner::Unknown`]; a valid [`WorktreeSentinel`] resolves to
 /// [`SentinelOwner::Known`].

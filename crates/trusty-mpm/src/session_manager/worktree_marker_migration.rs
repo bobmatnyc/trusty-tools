@@ -1,9 +1,9 @@
 //! The one-shot marker migration over every registered project (#8511).
 //!
-//! Why: readers migrate a legacy in-tree marker the first time they see it,
-//! but a tree nothing reads stays dirty. This pass visits every tree of every
-//! registered project once, and adds the shared `info/exclude` entries while
-//! it is there.
+//! Why: readers never move a marker (a read-only or dry-run path must not
+//! write), so a legacy in-tree marker stays until an explicit pass moves it.
+//! This pass visits every tree of every registered project, and adds the
+//! shared `info/exclude` entries while it is there.
 //! What: [`registered_checkouts`] — the checkouts the sweeps already
 //! interrogate (the repos-root walk plus adopted anchors);
 //! [`prepare_checkout`] — one checkout: exclude entries, then every tree's
@@ -41,9 +41,18 @@ pub(crate) fn registered_checkouts(repos_root: &Path, adopted: &[PathBuf]) -> Ve
 }
 
 /// Every tree `checkout`'s registry lists that has a directory on disk.
+///
+/// A listing failure is logged and yields no trees, so the pass skips the
+/// checkout visibly rather than reporting it clean.
 fn trees_of(checkout: &Path) -> Vec<PathBuf> {
-    list_registered_worktrees(checkout)
-        .unwrap_or_default()
+    let Some(listed) = list_registered_worktrees(checkout) else {
+        tracing::warn!(
+            checkout = %checkout.display(),
+            "ownership markers: could not list this checkout's worktrees; skipped (#8511)"
+        );
+        return Vec::new();
+    };
+    listed
         .into_iter()
         .filter(|w| !w.bare && !w.prunable)
         .map(|w| w.path)
@@ -52,11 +61,11 @@ fn trees_of(checkout: &Path) -> Vec<PathBuf> {
 
 /// What one checkout's pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CheckoutTally {
+pub(crate) struct CheckoutTally {
     /// Legacy markers moved to the admin dir (including removed duplicates).
-    pub migrated: usize,
+    pub(crate) migrated: usize,
     /// Legacy markers kept because a step failed or the two copies conflict.
-    pub kept: usize,
+    pub(crate) kept: usize,
 }
 
 /// Exclude entries, then migrate every tree of `checkout` (#8511).
@@ -66,7 +75,7 @@ pub struct CheckoutTally {
 /// What: [`crate::core::harness_exclude::ensure_and_log`], then
 /// [`migrate_legacy_sentinel`] per tree. Best-effort: logs, never fails.
 /// Test: `the_fleet_pass_migrates_every_tree_and_excludes_once`.
-pub fn prepare_checkout(checkout: &Path) -> CheckoutTally {
+pub(crate) fn prepare_checkout(checkout: &Path) -> CheckoutTally {
     crate::core::harness_exclude::ensure_and_log(checkout);
     let mut tally = CheckoutTally::default();
     for tree in trees_of(checkout) {
@@ -92,7 +101,7 @@ pub fn prepare_checkout(checkout: &Path) -> CheckoutTally {
 /// [`prepare_checkout`] over every [`registered_checkouts`] entry — the
 /// daemon's one-shot startup pass (#8511).
 /// Test: `the_fleet_pass_migrates_every_tree_and_excludes_once`.
-pub fn migrate_registered_projects(repos_root: &Path, adopted: &[PathBuf]) -> CheckoutTally {
+pub(crate) fn migrate_registered_projects(repos_root: &Path, adopted: &[PathBuf]) -> CheckoutTally {
     let mut total = CheckoutTally::default();
     for checkout in registered_checkouts(repos_root, adopted) {
         let t = prepare_checkout(&checkout);

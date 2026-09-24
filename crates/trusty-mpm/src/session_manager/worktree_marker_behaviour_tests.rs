@@ -1,8 +1,9 @@
 //! The ownership marker lives in the git admin dir (#8511, #8368).
 //!
-//! Why: these tests drive ONLY the ownership API that predates #8511
-//! (`write_agent_sentinel`, `read_sentinel_owner`) plus git itself, so each one
-//! compiles against the pre-fix code and fails there for the behaviour it pins.
+//! Why: these tests drive the ownership API that predates #8511
+//! (`write_agent_sentinel`, `read_sentinel_owner`) plus git itself, and the one
+//! explicit migration entry point (`migrate_legacy_sentinel`) — readers never
+//! move a marker.
 //! What: real git worktrees from [`GitWorktreeFixture`]; the admin-dir path is
 //! always taken from `git rev-parse --git-path trusty-mpm-worktree`, never
 //! computed by the code under test.
@@ -16,6 +17,7 @@ use super::worktree_git_fixture::GitWorktreeFixture;
 use super::worktree_ownership::{
     AgentWorktreeOwner, SentinelOwner, WorktreeSentinel, read_sentinel_owner, write_agent_sentinel,
 };
+use super::worktree_ownership_location::{MarkerMigration, migrate_legacy_sentinel};
 use crate::core::agent::DelegationId;
 use crate::core::session::SessionId;
 
@@ -88,7 +90,8 @@ fn the_agent_marker_is_written_to_the_admin_dir() {
     assert_eq!(agent_of(&wt).as_deref(), Some("agent-w"));
 }
 
-/// A legacy in-tree marker is read, copied byte for byte, then removed.
+/// A legacy in-tree marker is read in place; the explicit migration then
+/// copies it byte for byte and removes it.
 #[test]
 fn a_legacy_marker_is_read_then_migrated() {
     let fx = GitWorktreeFixture::new();
@@ -100,6 +103,8 @@ fn a_legacy_marker_is_read_then_migrated() {
         Some("agent-l"),
         "ownership lost on read"
     );
+    assert!(!git_path(&wt).exists(), "a read wrote the admin marker");
+    assert_eq!(migrate_legacy_sentinel(&wt), MarkerMigration::Migrated);
     assert_eq!(
         std::fs::read(git_path(&wt)).ok(),
         Some(bytes),
@@ -109,6 +114,7 @@ fn a_legacy_marker_is_read_then_migrated() {
         !wt.join(WORKTREE_SENTINEL_FILE).exists(),
         "legacy marker not removed"
     );
+    assert_eq!(agent_of(&wt).as_deref(), Some("agent-l"));
     assert_eq!(stdout(&wt, &["status", "--porcelain"]), "");
 }
 
@@ -130,7 +136,7 @@ impl Drop for Mode {
 }
 
 /// A copy that cannot be made keeps the legacy marker and the owner; the next
-/// read, once the copy can succeed, migrates it.
+/// migration, once the copy can succeed, moves it.
 #[test]
 fn a_failed_migration_keeps_the_legacy_marker() {
     let fx = GitWorktreeFixture::new();
@@ -146,6 +152,8 @@ fn a_failed_migration_keeps_the_legacy_marker() {
             eprintln!("skipped: a read-only directory is writable here (running as root?)");
             return;
         }
+        let outcome = migrate_legacy_sentinel(&wt);
+        assert!(matches!(outcome, MarkerMigration::Failed(_)), "{outcome:?}");
         assert_eq!(agent_of(&wt).as_deref(), Some("agent-f"), "ownership lost");
         assert_eq!(
             std::fs::read(&legacy).ok(),
@@ -154,6 +162,7 @@ fn a_failed_migration_keeps_the_legacy_marker() {
         );
         assert!(!admin.exists(), "a partial admin copy was left behind");
     }
+    assert_eq!(migrate_legacy_sentinel(&wt), MarkerMigration::Migrated);
     assert_eq!(agent_of(&wt).as_deref(), Some("agent-f"));
     assert!(
         !legacy.exists(),

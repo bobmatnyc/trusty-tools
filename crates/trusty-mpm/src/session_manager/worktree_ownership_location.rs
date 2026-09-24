@@ -12,27 +12,37 @@
 //! resolved from the tree's own `.git` entry ([`admin_sentinel_path`]), never
 //! guessed. A directory with no `.git` entry is not a git working tree, so no
 //! git clean check can count a file in it; there the in-tree path is the only
-//! location. The decision table:
+//! location.
 //!
-//! | on disk | read answers | side effect |
-//! |---|---|---|
-//! | admin only | admin | none |
-//! | legacy only | legacy | copy to admin, verify byte for byte, then remove legacy |
-//! | both, same bytes | admin | remove the leftover legacy copy |
-//! | both, different bytes | admin | log the conflict, keep both |
-//! | admin unreadable | nothing (owner unknown) | log |
-//! | legacy tracked by git | admin if present, else legacy | none — never removed |
-//! | no `.git` entry | legacy | none |
+//! Readers never write. A read answers the admin marker when present, else the
+//! legacy one. Only [`migrate_legacy_sentinel`] (the startup pass, registration
+//! and `tm doctor --fix --yes`) and [`write_sentinel_bytes`] change the disk.
+//! The migration's decision table:
 //!
-//! A legacy marker a branch has already COMMITTED (#8368) is never removed:
-//! deleting a tracked file would make the tree dirty, the opposite of the fix.
+//! | on disk | migration does |
+//! |---|---|
+//! | admin only | nothing |
+//! | legacy only | copy to a private temp file, verify, link it in as the admin marker, then remove legacy |
+//! | both, same bytes | remove the leftover legacy copy |
+//! | both, different bytes | log the conflict, keep both (the admin marker wins on read) |
+//! | either unreadable | report a failure, keep both |
+//! | legacy tracked by git | nothing — never removed (#8368) |
+//! | no `.git` entry | nothing |
 //!
-//! Fail-open: a copy or verification that fails removes only the admin copy
-//! this module created and keeps the legacy file, so ownership is never lost.
+//! Concurrency: readers, the startup pass, the doctor apply and agent claims
+//! can all run at once. Two rules keep ownership from being lost:
+//! - every writer creates the admin marker BEFORE it removes the legacy one,
+//!   and every reader reads the legacy marker BEFORE the admin one, so no
+//!   interleaving answers "no marker" for a tree that always had one;
+//! - the migration never overwrites or deletes an admin marker: it links its
+//!   verified temp file in with no-clobber semantics, so a concurrent writer's
+//!   marker always survives.
+//!
 //! Test: `worktree_ownership_location_tests`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::decommission::WORKTREE_SENTINEL_FILE;
 use super::worktree_ownership::{SentinelOwner, WorktreeSentinel, owner_from_payload};
@@ -86,14 +96,15 @@ pub(crate) fn legacy_sentinel_path(worktree: &Path) -> PathBuf {
 /// Why: the removal gates and the workspace scanner ask "was this tree
 /// provisioned by trusty-mpm?" by the marker's existence; a marker moved to
 /// the admin dir must still answer yes.
-/// What: legacy file exists, or the admin-dir file exists.
+/// What: legacy file exists, or the admin-dir file exists — legacy first, the
+/// module doc's read order.
 /// Test: `a_tree_marked_only_in_the_admin_dir_is_still_marked`.
 pub(crate) fn sentinel_present(worktree: &Path) -> bool {
     legacy_sentinel_path(worktree).exists()
         || admin_sentinel_path(worktree).is_some_and(|p| p.exists())
 }
 
-/// What one look at a tree's legacy marker did (#8511).
+/// What one migration of a tree's legacy marker did (#8511).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkerMigration {
     /// No legacy in-tree marker: nothing to move.
@@ -104,11 +115,13 @@ pub(crate) enum MarkerMigration {
     Migrated,
     /// Both existed with identical bytes; the leftover legacy copy was removed.
     DuplicateRemoved,
-    /// Both existed with different bytes. The admin marker wins; both are kept.
+    /// Both existed with different bytes, or a writer created the admin
+    /// marker mid-copy. The admin marker wins; both are kept.
     Conflict,
     /// The legacy marker is tracked by git (#8368), so it is left in place.
     Tracked,
-    /// A step failed. The legacy marker is kept, so ownership is not lost.
+    /// A step failed, or a marker could not be read. The legacy marker is
+    /// kept, so ownership is not lost.
     Failed(String),
 }
 
@@ -129,40 +142,6 @@ pub(crate) fn legacy_is_tracked(worktree: &Path) -> bool {
     }
 }
 
-/// Copies `bytes` to a NEW file at `path` — the production migration writer.
-///
-/// `create_new` makes a concurrent writer's admin marker win: this copy never
-/// overwrites one.
-fn copy_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-/// Move `worktree`'s legacy marker to the admin dir, if it has one (#8511).
-///
-/// Why: the one-shot fleet migration and the doctor repair need the outcome,
-/// not the bytes.
-/// Test: `a_legacy_marker_is_read_then_migrated`.
-pub(crate) fn migrate_legacy_sentinel(worktree: &Path) -> MarkerMigration {
-    resolve_with(worktree, &copy_new).1
-}
-
-/// The tolerant form of [`read_sentinel_bytes_strict`] — any failure reads as
-/// no marker — with an injectable copy step, so a test can make the copy lie
-/// (#8511).
-/// Test: `a_copy_that_does_not_verify_keeps_the_legacy_marker`.
-pub(crate) fn resolve_with(
-    worktree: &Path,
-    copy: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
-) -> (Option<Vec<u8>>, MarkerMigration) {
-    let (found, outcome) = resolve_strict_with(worktree, copy);
-    (found.ok().flatten().map(|(_, bytes)| bytes), outcome)
-}
-
 /// A marker that exists but could not be read, or does not parse (#8511).
 ///
 /// Why: a reclaim gate must keep a tree whose marker is present but
@@ -175,17 +154,6 @@ pub(crate) enum OwnerReadError {
     Unreadable { path: PathBuf, reason: String },
     /// The marker at `path` was read but is not a valid ownership payload.
     Corrupt { path: PathBuf, reason: String },
-}
-
-/// The marker's location and bytes, or `Ok(None)` when neither location holds
-/// one — the module doc's decision table (#8511).
-/// Test: `a_legacy_marker_is_read_then_migrated`,
-/// `the_admin_marker_wins_when_both_exist`,
-/// `a_failed_migration_keeps_the_legacy_marker`.
-pub(crate) fn read_sentinel_bytes_strict(
-    worktree: &Path,
-) -> Result<Option<(PathBuf, Vec<u8>)>, OwnerReadError> {
-    resolve_strict_with(worktree, &copy_new).0
 }
 
 /// Read `path`: `Ok(None)` when absent, `Err` for any other failure.
@@ -203,47 +171,36 @@ fn read_present(path: &Path) -> Result<Option<Vec<u8>>, OwnerReadError> {
 /// Where the winning marker was found and its bytes, `Ok(None)` for no marker.
 type Found = Result<Option<(PathBuf, Vec<u8>)>, OwnerReadError>;
 
-/// The one read path: the module doc's decision table, with the unreadable
-/// case kept apart from the missing one.
-fn resolve_strict_with(
-    worktree: &Path,
-    copy: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
-) -> (Found, MarkerMigration) {
+/// The marker's location and bytes, or `Ok(None)` when neither location holds
+/// one (#8511). Reads only; never writes.
+/// Test: `the_admin_marker_wins_when_both_exist`,
+/// `a_migration_between_the_two_reads_still_finds_the_marker`.
+pub(crate) fn read_sentinel_bytes_strict(worktree: &Path) -> Found {
+    read_both_with(worktree, &|| {})
+}
+
+/// The one read path, with a hook between its two reads so a test can
+/// interleave a migration or a write there.
+///
+/// Legacy is read FIRST (see the module doc): a writer removes legacy only
+/// after the admin marker exists, so a legacy miss here means the admin read
+/// that follows sees the marker.
+fn read_both_with(worktree: &Path, between: &dyn Fn()) -> Found {
     let legacy = legacy_sentinel_path(worktree);
+    let legacy_read = read_present(&legacy);
     let Some(admin) = admin_sentinel_path(worktree) else {
-        let found = read_present(&legacy).map(|b| b.map(|b| (legacy, b)));
-        return (found, MarkerMigration::NoAdminDir);
+        return legacy_read.map(|b| b.map(|b| (legacy, b)));
     };
+    between();
     match read_present(&admin) {
-        Ok(Some(bytes)) => {
-            let outcome = settle_leftover_legacy(&legacy, &bytes, worktree);
-            (Ok(Some((admin, bytes))), outcome)
-        }
-        Ok(None) => {
-            let legacy_bytes = match read_present(&legacy) {
-                Ok(Some(b)) => b,
-                Ok(None) => return (Ok(None), MarkerMigration::NoLegacy),
-                Err(e) => return (Err(e), MarkerMigration::NoLegacy),
-            };
-            if legacy_is_tracked(worktree) {
-                return (Ok(Some((legacy, legacy_bytes))), MarkerMigration::Tracked);
-            }
-            let outcome = migrate_bytes(&legacy, &admin, &legacy_bytes, copy);
-            if let MarkerMigration::Failed(reason) = &outcome {
-                tracing::warn!(
-                    worktree = %worktree.display(),
-                    "ownership marker: legacy marker kept in the tree — {reason} (#8511)"
-                );
-            }
-            (Ok(Some((legacy, legacy_bytes))), outcome)
-        }
+        Ok(Some(bytes)) => Ok(Some((admin, bytes))),
+        Ok(None) => legacy_read.map(|b| b.map(|b| (legacy, b))),
         Err(e) => {
             tracing::warn!(
                 worktree = %worktree.display(),
                 "ownership marker: the admin-dir marker cannot be read ({e:?}); owner unknown (#8511)"
             );
-            let reason = format!("admin marker unreadable: {e:?}");
-            (Err(e), MarkerMigration::Failed(reason))
+            Err(e)
         }
     }
 }
@@ -252,11 +209,11 @@ fn resolve_strict_with(
 ///
 /// Why: see [`OwnerReadError`]. [`super::worktree_ownership::read_sentinel_owner`]
 /// stays tolerant for every existing caller.
-/// What: admin dir first, legacy second, with the same migration as the
-/// tolerant read. `Ok(None)` — no marker in either location. `Ok(Some(owner))`
-/// — a marker is present and parses; an empty (pre-#3649) marker or one naming
-/// no owner is `Ok(Some(SentinelOwner::Unknown))`, which a caller must treat as
-/// PRESENT. `Err(Unreadable)` — the winning location exists but cannot be read.
+/// What: [`read_sentinel_bytes_strict`], then a parse; never writes.
+/// `Ok(None)` — no marker in either location. `Ok(Some(owner))` — a marker is
+/// present and parses; an empty (pre-#3649) marker or one naming no owner is
+/// `Ok(Some(SentinelOwner::Unknown))`, which a caller must treat as PRESENT.
+/// `Err(Unreadable)` — the winning location exists but cannot be read.
 /// `Err(Corrupt)` — it was read but is not a valid payload.
 /// Test: `strict_read_separates_missing_from_unreadable_and_corrupt`.
 pub(crate) fn read_sentinel_owner_strict(
@@ -276,15 +233,81 @@ pub(crate) fn read_sentinel_owner_strict(
         })
 }
 
-/// Both locations may hold a marker: finish an interrupted migration, or log a
-/// conflict the admin marker wins.
-fn settle_leftover_legacy(legacy: &Path, admin_bytes: &[u8], worktree: &Path) -> MarkerMigration {
-    let Ok(legacy_bytes) = std::fs::read(legacy) else {
-        return MarkerMigration::NoLegacy;
+/// Writes `bytes` to a NEW file at `path` — the production migration copy step.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Move `worktree`'s legacy marker to the admin dir, if it has one (#8511).
+///
+/// Why: the one-shot fleet migration, registration and the doctor repair are
+/// the only paths allowed to move a marker; readers never do.
+/// What: the module doc's decision table. Never overwrites or deletes an admin
+/// marker.
+/// Test: `a_legacy_marker_is_read_then_migrated`,
+/// `a_failed_migration_keeps_the_legacy_marker`.
+pub(crate) fn migrate_legacy_sentinel(worktree: &Path) -> MarkerMigration {
+    migrate_with(worktree, &write_new)
+}
+
+/// [`migrate_legacy_sentinel`] with an injectable copy step, so a test can make
+/// the copy lie or race a writer.
+/// Test: `a_copy_that_does_not_verify_keeps_the_legacy_marker`,
+/// `a_concurrent_writers_marker_survives_the_migration`.
+fn migrate_with(
+    worktree: &Path,
+    copy: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> MarkerMigration {
+    let legacy = legacy_sentinel_path(worktree);
+    let Some(admin) = admin_sentinel_path(worktree) else {
+        return MarkerMigration::NoAdminDir;
+    };
+    let legacy_bytes = match read_present(&legacy) {
+        Ok(Some(b)) => b,
+        Ok(None) => return MarkerMigration::NoLegacy,
+        // An unreadable legacy marker is a failure the operator must see.
+        Err(e) => return failed(worktree, format!("the in-tree marker is unreadable: {e:?}")),
     };
     if legacy_is_tracked(worktree) {
         return MarkerMigration::Tracked;
     }
+    match read_present(&admin) {
+        Ok(Some(admin_bytes)) => {
+            settle_leftover_legacy(&legacy, &legacy_bytes, &admin_bytes, worktree)
+        }
+        Ok(None) => match migrate_bytes(&legacy, &admin, &legacy_bytes, copy) {
+            MarkerMigration::Failed(reason) => failed(worktree, reason),
+            outcome => outcome,
+        },
+        Err(e) => failed(
+            worktree,
+            format!("the admin-dir marker is unreadable: {e:?}"),
+        ),
+    }
+}
+
+/// Log and return [`MarkerMigration::Failed`].
+fn failed(worktree: &Path, reason: String) -> MarkerMigration {
+    tracing::warn!(
+        worktree = %worktree.display(),
+        "ownership marker: legacy marker kept in the tree — {reason} (#8511)"
+    );
+    MarkerMigration::Failed(reason)
+}
+
+/// Both locations hold a marker: finish an interrupted migration, or log a
+/// conflict the admin marker wins.
+fn settle_leftover_legacy(
+    legacy: &Path,
+    legacy_bytes: &[u8],
+    admin_bytes: &[u8],
+    worktree: &Path,
+) -> MarkerMigration {
     if legacy_bytes != admin_bytes {
         tracing::warn!(
             worktree = %worktree.display(),
@@ -300,37 +323,63 @@ fn settle_leftover_legacy(legacy: &Path, admin_bytes: &[u8], worktree: &Path) ->
     }
 }
 
-/// Copy, verify byte for byte, then remove the legacy marker — the Fail-Open
-/// order (#8511). Any failure before the removal deletes only the admin copy.
+/// A fresh temp-file path beside `admin`, unique within and across processes.
+fn temp_beside(admin: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = format!(
+        "{ADMIN_SENTINEL_NAME}.migrate-{}-{nanos}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    admin.with_file_name(name)
+}
+
+/// Copy to a private temp file, verify it byte for byte, link it in as the
+/// admin marker, then remove the legacy marker (#8511).
+///
+/// The verification runs on a file only this call knows, and the link fails
+/// rather than replace an existing admin marker — so this never overwrites or
+/// deletes a concurrent writer's marker. Any failure removes only the temp
+/// file and keeps the legacy marker.
 fn migrate_bytes(
     legacy: &Path,
     admin: &Path,
     bytes: &[u8],
     copy: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> MarkerMigration {
-    if let Err(e) = copy(admin, bytes) {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            // A writer won the race; its marker is authoritative.
-            return MarkerMigration::Conflict;
-        }
-        let _ = std::fs::remove_file(admin);
-        return MarkerMigration::Failed(format!("copy to {} failed: {e}", admin.display()));
+    let temp = temp_beside(admin);
+    let staged = copy(&temp, bytes)
+        .map_err(|e| format!("copy to {} failed: {e}", temp.display()))
+        .and_then(|()| match std::fs::read(&temp) {
+            Ok(copied) if copied == bytes => Ok(()),
+            Ok(_) => Err("the copy did not verify byte for byte".to_string()),
+            Err(e) => Err(format!("the copy could not be read back: {e}")),
+        });
+    let linked = staged.and_then(|()| match std::fs::hard_link(&temp, admin) {
+        Ok(()) => Ok(true),
+        // A writer created the admin marker first; it is authoritative.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("could not link {}: {e}", admin.display())),
+    });
+    if let Err(e) = std::fs::remove_file(&temp)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(temp = %temp.display(), "ownership marker: temp copy not removed ({e}) (#8511)");
     }
-    match std::fs::read(admin) {
-        Ok(copied) if copied == bytes => {}
-        Ok(_) => {
-            let _ = std::fs::remove_file(admin);
-            return MarkerMigration::Failed("the copy did not verify byte for byte".to_string());
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(admin);
-            return MarkerMigration::Failed(format!("the copy could not be read back: {e}"));
-        }
-    }
-    match std::fs::remove_file(legacy) {
-        Ok(()) => MarkerMigration::Migrated,
-        // Both copies now match; the next read removes the duplicate.
-        Err(e) => MarkerMigration::Failed(format!("verified copy made, legacy not removed: {e}")),
+    match linked {
+        Err(reason) => MarkerMigration::Failed(reason),
+        Ok(false) => MarkerMigration::Conflict,
+        Ok(true) => match std::fs::remove_file(legacy) {
+            Ok(()) => MarkerMigration::Migrated,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => MarkerMigration::Migrated,
+            // Both copies now match; the next migration removes the duplicate.
+            Err(e) => {
+                MarkerMigration::Failed(format!("verified copy made, legacy not removed: {e}"))
+            }
+        },
     }
 }
 
@@ -338,10 +387,11 @@ fn migrate_bytes(
 ///
 /// Why: every marker writer — the agent claim, session provisioning, adoption —
 /// goes through here, so a new marker never lands in the working tree.
-/// What: writes the admin-dir marker when the tree has one, then removes any
+/// What: writes the admin-dir marker when the tree has one, THEN removes any
 /// legacy in-tree marker unless git tracks it (the new write supersedes it; a
-/// failed removal is logged, and the admin marker still wins on read). With no admin dir it
-/// writes the in-tree path. Write errors propagate.
+/// failed removal is logged, and the admin marker still wins on read). The
+/// order is the module doc's writer rule. With no admin dir it writes the
+/// in-tree path. Write errors propagate.
 /// Test: `the_agent_marker_is_written_to_the_admin_dir`.
 pub(crate) fn write_sentinel_bytes(worktree: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let legacy = legacy_sentinel_path(worktree);

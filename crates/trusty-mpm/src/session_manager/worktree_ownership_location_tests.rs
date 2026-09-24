@@ -83,8 +83,22 @@ fn a_committed_legacy_marker_is_never_removed() {
     );
 }
 
+/// Every temp copy the migration left beside `admin`.
+fn temp_leftovers(admin: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{ADMIN_SENTINEL_NAME}.migrate-");
+    std::fs::read_dir(admin.parent().expect("admin dir"))
+        .expect("read admin dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect()
+}
+
 /// A copy that writes the wrong bytes, or fails outright, leaves the legacy
-/// marker and no admin copy; the read still names the legacy bytes.
+/// marker, no admin marker and no temp file behind.
 #[test]
 fn a_copy_that_does_not_verify_keeps_the_legacy_marker() {
     let fx = GitWorktreeFixture::new();
@@ -98,14 +112,95 @@ fn a_copy_that_does_not_verify_keeps_the_legacy_marker() {
     type Copy = dyn Fn(&Path, &[u8]) -> std::io::Result<()>;
     let copies: [&Copy; 2] = [&truncating, &failing];
     for copy in copies {
-        let (bytes, outcome) = resolve_with(&wt, copy);
+        let outcome = migrate_with(&wt, copy);
         assert!(matches!(outcome, MarkerMigration::Failed(_)), "{outcome:?}");
-        assert_eq!(bytes.as_deref(), Some(&b"{\"owner\":1}"[..]));
-        assert!(legacy.exists(), "legacy marker lost");
+        assert_eq!(
+            std::fs::read(&legacy).ok().as_deref(),
+            Some(&b"{\"owner\":1}"[..])
+        );
         assert!(!admin.exists(), "an unverified admin copy was left behind");
+        assert!(
+            temp_leftovers(&admin).is_empty(),
+            "a temp copy was left behind"
+        );
     }
     assert_eq!(migrate_legacy_sentinel(&wt), MarkerMigration::Migrated);
     assert_eq!(migrate_legacy_sentinel(&wt), MarkerMigration::NoLegacy);
+}
+
+/// Finding 1 (#8511 review): a writer that lands its admin marker while the
+/// migration is copying keeps it — the migration never deletes or replaces it.
+#[test]
+fn a_concurrent_writers_marker_survives_the_migration() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("race-writer");
+    let legacy = legacy_sentinel_path(&wt);
+    let admin = admin_sentinel_path(&wt).expect("admin path");
+    std::fs::write(&legacy, b"A").expect("write legacy");
+    // The copy writes A where it is told to, then the writer overwrites the
+    // admin marker with B before the migration looks again.
+    let racing = |p: &Path, b: &[u8]| {
+        std::fs::write(p, b)?;
+        std::fs::write(&admin, b"B")
+    };
+    let outcome = migrate_with(&wt, &racing);
+    assert_eq!(
+        std::fs::read(&admin).ok().as_deref(),
+        Some(&b"B"[..]),
+        "the writer's marker was lost ({outcome:?})"
+    );
+    assert!(
+        legacy.exists(),
+        "the legacy marker was removed on a conflict"
+    );
+    assert!(
+        temp_leftovers(&admin).is_empty(),
+        "a temp copy was left behind"
+    );
+}
+
+/// Finding 2 (#8511 review): a migration that runs between the reader's two
+/// reads cannot make a marked tree read as unmarked.
+#[test]
+fn a_migration_between_the_two_reads_still_finds_the_marker() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("race-reader");
+    let bytes = agent_payload("r1");
+    std::fs::write(legacy_sentinel_path(&wt), &bytes).expect("write legacy");
+    let found = read_both_with(&wt, &|| {
+        assert_eq!(migrate_legacy_sentinel(&wt), MarkerMigration::Migrated);
+    });
+    assert_eq!(
+        found.expect("readable").map(|(_, b)| b),
+        Some(bytes),
+        "a marked tree read as unmarked"
+    );
+}
+
+/// Finding 5 (#8511 review): an unreadable legacy marker is a reported
+/// failure, never a silent "nothing to move".
+#[test]
+fn an_unreadable_legacy_marker_fails_the_migration() {
+    let fx = GitWorktreeFixture::new();
+    for (name, with_admin) in [("unreadable-alone", false), ("unreadable-both", true)] {
+        let wt = fx.add_worktree(name);
+        let legacy = legacy_sentinel_path(&wt);
+        std::fs::write(&legacy, b"{}").expect("write legacy");
+        if with_admin {
+            std::fs::write(admin_sentinel_path(&wt).expect("admin"), b"{}").expect("write admin");
+        }
+        let _restore = crate::session_manager::worktree_git_fixture::deny_all(&legacy);
+        if std::fs::read(&legacy).is_ok() {
+            eprintln!("skipped {name}: a mode-000 file is readable here (running as root?)");
+            continue;
+        }
+        let outcome = migrate_legacy_sentinel(&wt);
+        assert!(
+            matches!(outcome, MarkerMigration::Failed(_)),
+            "{name}: {outcome:?}"
+        );
+        assert!(legacy.exists(), "{name}: the unreadable marker was removed");
+    }
 }
 
 /// A valid agent payload for the strict-reader matrix.
@@ -142,11 +237,19 @@ fn strict_read_separates_missing_from_unreadable_and_corrupt() {
     std::fs::write(&admin, agent_payload("a1")).expect("write");
     assert_eq!(strict_agent(&wt).as_deref(), Some("a1"));
 
-    // Valid, legacy location: answered, then migrated.
+    // Valid, legacy location: answered, and the read writes nothing (finding 3).
     let wt = fx.add_worktree("strict-valid-legacy");
     std::fs::write(legacy_sentinel_path(&wt), agent_payload("l1")).expect("write");
     assert_eq!(strict_agent(&wt).as_deref(), Some("l1"));
-    assert!(!legacy_sentinel_path(&wt).exists());
+    assert!(matches!(read_sentinel_owner(&wt), SentinelOwner::Agent(o, _) if o.agent_id == "l1"));
+    assert!(
+        legacy_sentinel_path(&wt).exists(),
+        "a read moved the marker"
+    );
+    assert!(
+        !admin_sentinel_path(&wt).expect("admin").exists(),
+        "a read wrote the admin marker"
+    );
 
     // Empty (pre-#3649): present, naming no owner.
     let wt = fx.add_worktree("strict-empty");
