@@ -2429,3 +2429,128 @@ async fn a_dry_run_leaves_the_harness_marker_in_place() {
         "a dry run must leave the tree exactly as it found it"
     );
 }
+
+// ── #8489: never "no worktree holds X" while one does ───────────────────
+
+/// A full `git` fake whose worktree listing is `listing` (#8489).
+fn git_listing(listing: &str) -> Scripted {
+    Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on("git worktree list", listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "")
+}
+
+/// Assert the #8489 invariant on a rendered report: the worktree step names
+/// `holder` as kept and never claims that no worktree holds the head.
+fn assert_holder_named(rendered: &str, holder: &str) {
+    assert!(
+        !rendered.contains("no worktree holds"),
+        "a tree holds {BRANCH}; the report must not say none does:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "worktree: FAILED — {holder}: holds {BRANCH} and was kept"
+        )),
+        "the holder must be named with the reason it was kept:\n{rendered}"
+    );
+}
+
+/// 🔴 #8489: `tm pr cleanup` run from the harness tree that holds the head —
+/// the shape `tm pr open` records when it runs there. That tree is never a
+/// target, and the report used to say no worktree held the branch.
+#[tokio::test]
+async fn cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head() {
+    let git = git_listing(&worktree_listing());
+    let req = CleanupRequest {
+        repo_root: PathBuf::from(TREE),
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert_holder_named(&report.render(), TREE);
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "the checkout cleanup runs in is never removed: {joined}"
+    );
+}
+
+/// 🔴 #8489 error arm: a listing that names no tree at all was not read, and
+/// must never be reported as "no worktree holds X".
+#[tokio::test]
+async fn cleanup_8489_an_empty_worktree_listing_is_inconclusive() {
+    let git = git_listing("");
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(report.failed(), "{rendered}");
+    assert!(!rendered.contains("no worktree holds"), "{rendered}");
+    assert!(
+        rendered.contains("worktree: FAILED — `git worktree list --porcelain` named no worktree")
+            && rendered.contains("inconclusive"),
+        "{rendered}"
+    );
+}
+
+/// 🔴 #8489: git lists the tree by its real path while the caller spells it
+/// through a symlink. Compared as strings, the running checkout became a
+/// removal target; it is the same directory and is kept and named.
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("agent-real");
+    std::fs::create_dir_all(&real).expect("tree");
+    let link = tmp.path().join("agent-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let shown = real.display().to_string();
+
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {shown}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let git = git_listing(&listing);
+    let req = CleanupRequest {
+        repo_root: link,
+        ..req(false)
+    };
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req,
+    )
+    .await;
+
+    assert_holder_named(&report.render(), &shown);
+    let joined = git.calls().join("\n");
+    assert!(
+        !joined.contains("git worktree remove"),
+        "a symlinked spelling of the running checkout is still that checkout: {joined}"
+    );
+}

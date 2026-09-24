@@ -1,0 +1,2 @@
+Fixed
+- `tm pr cleanup` no longer reports "no worktree holds <branch>" when the checkout it runs in holds that branch. The worktree step names that checkout, says why it was kept, and names the recovery. A symlinked or differently spelled path to the running checkout is recognised as that checkout, so it is never made a removal target. A worktree listing that names no tree now fails as inconclusive instead of reading as "none holds it". (#8489)

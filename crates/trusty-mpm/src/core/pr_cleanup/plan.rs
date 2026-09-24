@@ -229,7 +229,8 @@ pub fn is_pr_branch(head: &str, name: &str) -> bool {
 /// Test: `worktree_targets_matches_branch_and_detached_head`,
 /// `worktree_targets_never_returns_the_main_checkout`,
 /// `worktree_targets_ignores_an_empty_head_oid`,
-/// `worktree_targets_includes_a_round_sibling`.
+/// `worktree_targets_includes_a_round_sibling`,
+/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`.
 pub fn worktree_targets<'a>(
     entries: &'a [WorktreeEntry],
     branch: &str,
@@ -240,13 +241,69 @@ pub fn worktree_targets<'a>(
     let oid = head_oid.trim();
     entries
         .iter()
-        .filter(|e| e.path != repo_root)
+        // #8489: git and the caller may spell one directory two ways.
+        .filter(|e| !same_tree(&e.path, repo_root))
         .filter(|e| {
             let by_branch = e.branch.as_deref().is_some_and(|b| is_pr_branch(branch, b));
             let by_head = !oid.is_empty() && e.head.eq_ignore_ascii_case(oid);
             by_branch || by_head
         })
         .collect()
+}
+
+/// Do two spellings name one directory (#8489)?
+///
+/// Why: `git worktree list` reports the path git recorded, while `repo_root`
+/// comes from `--show-toplevel` or a registry entry's cwd, and a symlink or
+/// case difference between them made the running checkout look like a target.
+/// What: plain equality, else `trusty_common::identifies_same_path`.
+fn same_tree(a: &Path, b: &Path) -> bool {
+    a == b || trusty_common::identifies_same_path(a, b)
+}
+
+/// The checkout cleanup runs in, when it holds this PR's branch (#8489).
+///
+/// Why: [`worktree_targets`] never returns the checkout the git commands run
+/// in, and the worktree step then reported "no worktree holds X" while that
+/// checkout still had X checked out — so `git branch -D` failed one step later.
+/// What: every entry naming `repo_root` whose checked-out branch belongs to
+/// the PR under [`is_pr_branch`].
+/// Test: `cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head`,
+/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`.
+pub(crate) fn holders_run_from<'a>(
+    entries: &'a [WorktreeEntry],
+    branch: &str,
+    repo_root: &Path,
+) -> Vec<&'a WorktreeEntry> {
+    entries
+        .iter()
+        .filter(|e| same_tree(&e.path, repo_root))
+        .filter(|e| e.branch.as_deref().is_some_and(|b| is_pr_branch(branch, b)))
+        .collect()
+}
+
+/// The report line for a holder [`holders_run_from`] found (#8489).
+pub(crate) fn kept_run_from(entry: &WorktreeEntry, pr: u64) -> String {
+    let branch = entry.branch.as_deref().unwrap_or_default();
+    format!(
+        "{}: holds {branch} and was kept — cleanup runs its git commands in this checkout and \
+         never removes it; switch it off {branch}, or run `tm pr cleanup {pr}` from the main \
+         checkout",
+        entry.path.display()
+    )
+}
+
+/// The report line for a worktree listing that named no tree at all (#8489).
+///
+/// Why: git lists the checkout it runs in on every successful call, so an
+/// empty parse means the listing was not read, never that nothing holds the
+/// branch.
+/// Test: `cleanup_8489_an_empty_worktree_listing_is_inconclusive`.
+pub(crate) fn inconclusive_listing(branch: &str) -> String {
+    format!(
+        "`git worktree list --porcelain` named no worktree, not even this checkout — the \
+         lookup is inconclusive, so whether a worktree holds {branch} is unknown"
+    )
 }
 
 /// Split cleanup targets into the PR head's own trees and the rest (#8301).

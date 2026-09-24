@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `pr` | `gh pr view <n> --json state,headRefName,headRefOid,mergeCommit` | the state is not `MERGED` |
 //! | `remote-branch` | deletes `origin/<head>` when `git ls-remote` still lists it | the delete errors |
-//! | `worktree` | ends any session claim, then `git worktree remove` each tree holding the head | a tree holds unsaved work, or the claim store cannot be read |
+//! | `worktree` | ends any session claim, then `git worktree remove` each tree holding the head | a tree holds unsaved work, the claim store cannot be read, the listing names no tree, or the checkout cleanup runs in holds the head (#8489) |
 //!
 //! **"Unsaved work" is not an ahead-of-upstream count (#7275 round 3).** Every
 //! merge here is a squash, so a landed branch's commits are never ancestors of
@@ -367,6 +367,20 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         }
     };
     let entries = plan::parse_worktree_list(&porcelain);
+    // #8489: an empty listing is a lookup that failed, never "none holds it".
+    if entries.is_empty() {
+        lines.push(StepLine::failed(
+            STEP,
+            plan::inconclusive_listing(&view.head_ref_name),
+        ));
+        return;
+    }
+    // #8489: the checkout cleanup runs in is never a target, but it is still a
+    // holder — name it, so the report never says no worktree holds the head.
+    let kept = plan::holders_run_from(&entries, &view.head_ref_name, &req.repo_root);
+    for k in &kept {
+        lines.push(StepLine::failed(STEP, plan::kept_run_from(k, req.pr)));
+    }
     let mut targets = plan::worktree_targets(
         &entries,
         &view.head_ref_name,
@@ -386,10 +400,13 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         targets = named;
     }
     if targets.is_empty() {
-        lines.push(StepLine::ok(
-            STEP,
-            format!("no worktree holds {}", view.head_ref_name),
-        ));
+        // #8489: only true when the checkout cleanup runs in holds it neither.
+        if kept.is_empty() {
+            lines.push(StepLine::ok(
+                STEP,
+                format!("no worktree holds {}", view.head_ref_name),
+            ));
+        }
         return;
     }
     for t in targets {
