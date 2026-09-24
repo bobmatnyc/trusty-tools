@@ -402,14 +402,21 @@ pub(crate) async fn decommission_core(
     let outcome = if record_only {
         mgr.decommission_record_only(&id)
             .await
-            .map(|(record, workspace_removed)| (record, workspace_removed, None))
+            .map(|(record, workspace_removed)| (record, workspace_removed, None, None))
     } else {
         mgr.decommission_reporting(&id, None, dirt_policy)
             .await
-            .map(|r| (r.record, r.workspace_removed, r.workspace_kept_reason))
+            .map(|r| {
+                (
+                    r.record,
+                    r.workspace_removed,
+                    r.workspace_kept_reason,
+                    r.workspace_kept_by_design,
+                )
+            })
     };
     match outcome {
-        Ok((record, workspace_removed, workspace_kept_reason)) => {
+        Ok((record, workspace_removed, workspace_kept_reason, workspace_kept_by_design)) => {
             // workspace_path_was: only meaningful for owned sessions.
             let workspace_path_was = if pre_owned {
                 pre_ws.map(|p| p.to_string_lossy().into_owned())
@@ -421,6 +428,7 @@ pub(crate) async fn decommission_core(
                 workspace_removed,
                 workspace_path_was,
                 workspace_kept_reason,
+                workspace_kept_by_design,
             })
         }
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => not_found(id_str),
