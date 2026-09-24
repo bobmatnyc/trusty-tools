@@ -1,2 +1,0 @@
-Fixed
-- `tm session prune-worktrees` sends its request straight to the daemon when `tm` resolved a trusty-console gateway on this machine, so the URL no longer reads `/api/mpm/api/v1/…` and a multi-minute `--merged-prs` survey is no longer cut to a 502 by the gateway's 30-second proxy timeout. The daemon must answer its health probe first, and a gateway on another host is refused with an error rather than silently redirected to the local daemon (#8347).
