@@ -413,7 +413,9 @@ fn blocking_records(
         .shared_tree_records(cwd, exclude, true, None)
         .iter()
         .map(|d| {
-            crate::daemon::services::delegation_records::DelegationRecordView::of(d, now, true)
+            crate::daemon::services::delegation_records::DelegationRecordView::of(
+                state, d, now, true,
+            )
         })
         .collect()
 }

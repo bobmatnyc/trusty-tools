@@ -12,6 +12,7 @@
 use super::*;
 use crate::core::agent::{DelegationStatus, ModelTier};
 use crate::core::session::{ControlModel, Session};
+use crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid;
 use crate::daemon::state::DaemonState;
 
 /// A daemon holding one session in `status`, or holding none at all.
@@ -266,10 +267,7 @@ fn a_type_matched_record_of_a_live_session_needs_its_owner_8257() {
         match repair_delegation_by_id(&state, d.id, true, &caller) {
             RepairOutcome::Refused { reason } => {
                 assert!(reason.contains("matched by agent type"), "{reason}");
-                assert!(
-                    reason.contains(&format!("Only the owning session {}", session.0)),
-                    "{reason}"
-                );
+                assert!(reason.contains("Only the owning session can"), "{reason}");
             }
             other => panic!("expected a refusal for {caller:?}, got {other:?}"),
         }
@@ -574,15 +572,79 @@ fn a_non_owning_session_is_refused_on_a_live_record_8257() {
 
     match outcome {
         RepairOutcome::Refused { reason } => {
-            assert!(
-                reason.contains(&format!("Only the owning session {}", owner.0)),
-                "{reason}"
-            );
+            assert!(reason.contains("Only the owning session can"), "{reason}");
+            assert_no_uuid(&reason, owner);
+            // The caller's own id is its own to see.
             assert!(reason.contains(&stranger.0.to_string()), "{reason}");
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+// #8257 owner ruling: no owner-check refusal hands the caller the owner's
+// UUID — every caller shape, on both the agent-id and the delegation-id path.
+// The owner is named by its tmux name, which the caller header rejects.
+#[test]
+fn an_owner_refusal_never_names_the_owner_uuid_8257() {
+    let (state, owner) = live_owned("a-hidden");
+    let typed = type_matched(owner);
+    state.upsert_delegation(typed.clone());
+    let label = crate::daemon::services::delegation_records::owner_label(&state, owner);
+    assert!(label.starts_with("session `tm-"), "{label}");
+    let callers = [
+        no_caller(),
+        RepairCaller::from_request(None),
+        RepairCaller::from_request(Some("not-a-uuid")),
+        RepairCaller::from_request(Some(&label)),
+        RepairCaller::Session(SessionId::new()),
+    ];
+
+    for caller in &callers {
+        for outcome in [
+            repair_delegation_as(&state, "a-hidden", true, caller),
+            repair_delegation_by_id(&state, typed.id, true, caller),
+        ] {
+            let RepairOutcome::Refused { reason } = outcome else {
+                panic!("expected a refusal for {caller:?}, got {outcome:?}");
+            };
+            assert!(reason.contains(&format!("owned by {label}")), "{reason}");
+            assert_no_uuid(&reason, owner);
+            // The wire form the CLI prints is the same text.
+            let wire = serde_json::to_string(&RepairOutcome::Refused { reason }).expect("json");
+            assert_no_uuid(&wire, owner);
+        }
+    }
+}
+
+// #8257 owner ruling: the refusal text drops the owner's UUID, so the daemon
+// log is where the operator finds it — one WARN line per refusal.
+#[test]
+fn an_owner_refusal_logs_the_owner_uuid_8257() {
+    let (state, owner) = live_owned("a-logged");
+    let stranger = SessionId::new();
+
+    let (outcome, lines) = captured(|| {
+        repair_delegation_as(&state, "a-logged", false, &RepairCaller::Session(stranger))
+    });
+
+    assert!(
+        matches!(outcome, RepairOutcome::Refused { .. }),
+        "{outcome:?}"
+    );
+    let refused: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("repair refused"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{lines:#?}");
+    let line = refused[0];
+    assert!(line.contains("WARN"), "{line}");
+    assert!(
+        line.contains(&format!("owner_session={}", owner.0.hyphenated())),
+        "{line}"
+    );
+    assert!(line.contains(&format!("caller={}", stranger.0)), "{line}");
+    assert!(clear_lines(&lines).is_empty(), "{lines:#?}");
 }
 
 // #8257: a caller whose session cannot be established is refused, naming why —

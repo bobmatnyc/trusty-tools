@@ -46,7 +46,7 @@ fn listing_line(r: &DelegationRecordView) -> String {
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default();
     format!(
-        "  {} [{status}{}] agent id {} delegation {} session {} age {}m tree {} — {}",
+        "  {} [{status}{}] agent id {} delegation {} owner {} age {}m tree {} — {}",
         r.agent,
         if r.blocks_dispatch {
             ", blocks dispatch"
@@ -55,7 +55,7 @@ fn listing_line(r: &DelegationRecordView) -> String {
         },
         r.agent_id.as_deref().unwrap_or("none"),
         r.delegation_id,
-        r.session,
+        r.owner,
         r.age_secs.max(0) / 60,
         r.worktree_path
             .as_deref()
@@ -75,7 +75,7 @@ mod tests {
             delegation_id: "64237d1c-0aa4-4090-bd14-d3c273da7e95".to_string(),
             agent: "version-control".to_string(),
             agent_id: None,
-            session: "5f0e2c1a-1111-4222-8333-944445555666".to_string(),
+            owner: "session `tm-trusty-tools`".to_string(),
             status: DelegationStatus::Stale,
             age_secs: 600,
             cwd: None,
@@ -89,7 +89,7 @@ mod tests {
             "version-control [stale, blocks dispatch]",
             "agent id none",
             "delegation 64237d1c-0aa4-4090-bd14-d3c273da7e95",
-            "session 5f0e2c1a-1111-4222-8333-944445555666",
+            "owner session `tm-trusty-tools`",
             "age 10m",
             "— tm repair delegation --delegation-id 64237d1c",
         ] {

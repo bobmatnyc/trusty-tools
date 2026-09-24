@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent::{Delegation, DelegationStatus};
+use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 
 /// One delegation record as the dispatch deny and the listing show it.
@@ -35,8 +36,10 @@ pub struct DelegationRecordView {
     /// The harness agent id, when a `PostToolUse` taught one.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// The session that dispatched the agent.
-    pub session: String,
+    /// A caller-safe name for the session that dispatched the agent — its
+    /// tmux name, never its id (#8257 owner ruling; see [`owner_label`]).
+    #[serde(default)]
+    pub owner: String,
     /// The record's lifecycle status.
     pub status: DelegationStatus,
     /// Seconds since the agent started (or the record was created).
@@ -55,13 +58,18 @@ pub struct DelegationRecordView {
 }
 
 impl DelegationRecordView {
-    /// Project one record, aged against `now`.
-    pub fn of(d: &Delegation, now: chrono::DateTime<chrono::Utc>, blocks_dispatch: bool) -> Self {
+    /// Project one record, aged against `now`, its owner named by [`owner_label`].
+    pub fn of(
+        state: &DaemonState,
+        d: &Delegation,
+        now: chrono::DateTime<chrono::Utc>,
+        blocks_dispatch: bool,
+    ) -> Self {
         Self {
             delegation_id: d.id.0.to_string(),
             agent: d.agent.clone(),
             agent_id: d.agent_id.clone(),
-            session: d.session.0.to_string(),
+            owner: owner_label(state, d.session),
             status: d.status,
             age_secs: record_age_secs(d, now),
             cwd: d.cwd.clone(),
@@ -69,6 +77,34 @@ impl DelegationRecordView {
             blocks_dispatch,
             repair_command: repair_command(d),
         }
+    }
+}
+
+/// A name for `session` that a caller cannot replay as its identity (#8257).
+///
+/// Why: owner ruling 2026-09-24. The repair route identifies its caller by the
+/// `x-tm-caller-session` header, which
+/// [`super::delegation_repair::RepairCaller::from_request`] accepts only as a
+/// UUID. Every text or wire field a denied caller reads therefore names the
+/// owner without its UUID; the operator finds the UUID in the daemon log.
+/// What: `session `<tmux name>`` when the daemon holds a tmux name that does not
+/// parse as a UUID and does not contain this session's UUID in hyphenated or
+/// bare form; otherwise a fixed phrase with no identifier in it.
+/// Test: `owner_label_never_carries_the_owner_uuid_8257`.
+pub fn owner_label(state: &DaemonState, session: SessionId) -> String {
+    let hyphenated = session.0.hyphenated().to_string();
+    let bare = session.0.simple().to_string();
+    let safe = |name: &str| {
+        let lower = name.trim().to_ascii_lowercase();
+        !lower.is_empty()
+            && uuid::Uuid::parse_str(&lower).is_err()
+            && !lower.contains(&hyphenated)
+            && !lower.contains(&bare)
+    };
+    match state.session(session).map(|s| s.tmux_name) {
+        Some(name) if safe(&name) => format!("session `{}`", name.trim()),
+        Some(_) => "a session with no caller-safe name".to_string(),
+        None => "a session the daemon holds no record of".to_string(),
     }
 }
 
@@ -132,10 +168,10 @@ pub fn list_for_dir(state: &DaemonState, dir: &Path) -> Vec<DelegationRecordView
     records.sort_by_key(|d| d.started_at.unwrap_or(d.created_at));
     records
         .iter()
-        .map(|d| DelegationRecordView::of(d, now, blocking.contains(&d.id)))
+        .map(|d| DelegationRecordView::of(state, d, now, blocking.contains(&d.id)))
         .collect()
 }
 
 #[cfg(test)]
 #[path = "delegation_records_tests.rs"]
-mod delegation_records_tests;
+pub(crate) mod delegation_records_tests;

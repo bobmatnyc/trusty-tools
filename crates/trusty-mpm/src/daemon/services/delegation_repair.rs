@@ -77,6 +77,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::delegation_records::owner_label;
 use super::delegation_repair_probe::{LiveEvidence, probe_live_evidence};
 use crate::core::agent::{Delegation, DelegationId, DelegationRepair};
 use crate::core::session::{SessionId, SessionStatus};
@@ -171,6 +172,9 @@ pub enum RepairCaller {
 
 impl RepairCaller {
     /// Read the caller from the request's [`CALLER_SESSION_HEADER`] value.
+    ///
+    /// Only a UUID establishes a caller, so an [`owner_label`] — a tmux name —
+    /// cannot be replayed as one (#8257 owner ruling).
     pub fn from_request(raw: Option<&str>) -> Self {
         match raw.map(str::trim).filter(|s| !s.is_empty()) {
             None => Self::Unestablished(
@@ -352,13 +356,15 @@ pub(crate) fn record_liveness(
 ///
 /// What: `Ok(())` when `caller` is the record's own session — the owner
 /// attests the agent finished. Otherwise `Err` with the refusal: a different
-/// session is told only the owner (named) can clear it before the stop or the
-/// 6 h mark; an unestablished caller is told why none could be established.
+/// session is told only the owner can clear it before the stop or the 6 h
+/// mark; an unestablished caller is told why none could be established. The
+/// owner is named by `owner`, an [`owner_label`] — never by its UUID, which
+/// the caller could replay in [`CALLER_SESSION_HEADER`] (#8257 owner ruling).
 /// Test: `the_owning_session_clears_its_own_live_record_8257`,
 /// `a_non_owning_session_is_refused_on_a_live_record_8257`,
-/// `an_unestablished_caller_is_refused_on_a_live_record_8257`.
-fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
-    let owner = d.session.0;
+/// `an_unestablished_caller_is_refused_on_a_live_record_8257`,
+/// `an_owner_refusal_never_names_the_owner_uuid_8257`.
+fn owner_attests(d: &Delegation, caller: &RepairCaller, owner: &str) -> Result<(), String> {
     // #8257: a type-matched stop may belong to a sibling (#6556), so say so.
     let stop = if d.stale_by_agent_type {
         "the only stop that arrived was matched by agent type and may belong to a sibling"
@@ -366,19 +372,19 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
         "no stop has arrived"
     };
     let head = format!(
-        "{} record {} is owned by session {owner}, which is still Active; {stop} and the record \
-         is under the 6 h stale threshold, so the agent may still be running",
+        "{} record {} is owned by {owner}, which is still Active; {stop} and the record is \
+         under the 6 h stale threshold, so the agent may still be running",
         d.agent, d.id.0
     );
     match caller {
         RepairCaller::Session(s) if *s == d.session => Ok(()),
         RepairCaller::Session(s) => Err(format!(
-            "{head}. Only the owning session {owner} can clear it before its agent's own stop \
-             arrives or the record reaches 6 h; this repair came from session {} (#8257)",
+            "{head}. Only the owning session can clear it before its agent's own stop arrives \
+             or the record reaches 6 h; this repair came from session {} (#8257)",
             s.0
         )),
         RepairCaller::Unestablished(why) => Err(format!(
-            "{head}. Only the owning session {owner} can clear it before its agent's own stop \
+            "{head}. Only the owning session can clear it before its agent's own stop \
              arrives or the record reaches 6 h, and the calling session could not be \
              established: {why} (#8257)"
         )),
@@ -399,12 +405,15 @@ fn owner_attests(d: &Delegation, caller: &RepairCaller) -> Result<(), String> {
 /// [`LiveEvidence`] that is not `Clear`, the owner included. Only then does it
 /// write [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled) and a
 /// [`DelegationRepair`] naming the caller and the basis, and logs one WARN line
-/// per cleared record. Nothing is written or logged on any other outcome.
+/// per cleared record. An owner-check refusal logs one WARN line carrying the
+/// owner's UUID, which its refusal text omits (#8257 owner ruling). Nothing is
+/// written or logged on any other outcome.
 /// Test: `repair_refuses_while_a_live_process_holds_the_tree_8257`,
 /// `repair_refuses_when_the_live_agent_probe_cannot_answer_8257`,
 /// `the_owner_is_refused_while_the_agent_shows_live_8257`,
 /// `the_owner_is_refused_while_a_harness_lock_names_its_agent_8257`,
-/// `a_forced_clear_is_logged_8257`, `an_unknown_owner_outranks_a_gone_one_8257`.
+/// `a_forced_clear_is_logged_8257`, `an_unknown_owner_outranks_a_gone_one_8257`,
+/// `an_owner_refusal_logs_the_owner_uuid_8257`.
 pub(crate) fn repair_matching(
     state: &Arc<DaemonState>,
     matches: impl Fn(&Delegation) -> bool,
@@ -426,10 +435,23 @@ pub(crate) fn repair_matching(
         }
         let (liveness, basis) = match record_liveness(owner_liveness(state, d.session), &d, now) {
             // #8257 owner ruling: the owning session's word ends its own record.
-            OwnerLiveness::Live => match owner_attests(&d, caller) {
-                Ok(()) => (OwnerLiveness::Gone, OWNER_ATTESTED),
-                Err(reason) => return RepairOutcome::Refused { reason },
-            },
+            OwnerLiveness::Live => {
+                match owner_attests(&d, caller, &owner_label(state, d.session)) {
+                    Ok(()) => (OwnerLiveness::Gone, OWNER_ATTESTED),
+                    Err(reason) => {
+                        // #8257 owner ruling: the refusal omits the owner's UUID;
+                        // the operator reads it here.
+                        tracing::warn!(
+                            delegation_id = %d.id.0,
+                            agent = %d.agent,
+                            owner_session = %d.session.0,
+                            caller = caller.session().map_or_else(|| "unestablished".to_string(), |s| s.0.to_string()),
+                            "delegation: repair refused — only the owning session may clear a live record (#8257)"
+                        );
+                        return RepairOutcome::Refused { reason };
+                    }
+                }
+            }
             OwnerLiveness::Gone => (
                 OwnerLiveness::Gone,
                 "operator-ended: owner gone, agent stopped, or past 6 h (#7602, #8257)",

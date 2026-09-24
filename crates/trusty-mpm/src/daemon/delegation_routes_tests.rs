@@ -1651,7 +1651,12 @@ async fn shared_tree_dispatch_route_names_each_blocking_record_8257() {
     let r = &body.records[0];
     assert_eq!(r.delegation_id, d.id.0.to_string());
     assert_eq!(r.agent_id, None);
-    assert_eq!(r.session, session.0.to_string());
+    // #8257 owner ruling: the deny JSON the hook reads names no owner UUID.
+    assert_eq!(r.owner, "a session the daemon holds no record of");
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&body).expect("json"),
+        session,
+    );
     assert_eq!(
         r.repair_command,
         format!("tm repair delegation --delegation-id {}", d.id.0)
@@ -1675,6 +1680,12 @@ async fn list_route_names_the_blocking_record_8257() {
     assert_eq!(listing.records.len(), 1, "{listing:?}");
     assert_eq!(listing.records[0].delegation_id, d.id.0.to_string());
     assert!(listing.records[0].blocks_dispatch);
+    // #8257 owner ruling: the listing asks no caller identity, so it names
+    // no owner UUID either.
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&listing).expect("json"),
+        session,
+    );
     assert_eq!(
         state.all_delegations()[0].status,
         DelegationStatus::Stale,
@@ -1767,6 +1778,12 @@ async fn repair_route_lets_the_owning_session_clear_its_record_8257() {
     assert!(
         matches!(stranger, RepairOutcome::Refused { .. }),
         "{stranger:?}"
+    );
+    // #8257 owner ruling: the route's answer does not hand the stranger the
+    // owner's UUID to replay in the caller header.
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&stranger).expect("json"),
+        session,
     );
 
     let Json(owner) = repair_delegation_as_route(

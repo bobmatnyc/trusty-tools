@@ -107,10 +107,12 @@ pub(crate) fn granted_deny_reason(agent: &str, cwd: &Path, live: &[String]) -> S
 /// [`DelegationRecordView::repair_command`], so the text cannot name a verb
 /// the repair route does not answer.
 /// What: one clause per record — agent type, agent id or delegation id, owning
-/// session, age, clearing command — then the repair's refusal rule and the
+/// session by its caller-safe label (never its UUID, #8257 owner ruling), age,
+/// clearing command — then the repair's refusal rule and the
 /// `--list` command. With no records (a daemon older than #8257) only the
 /// `--list` pointer.
-/// Test: `blocking_records_name_the_id_age_and_command_8257`.
+/// Test: `blocking_records_name_the_id_age_and_command_8257`,
+/// `no_writer_deny_names_the_owner_uuid_8257`.
 pub(crate) fn blocking_records(cwd: &Path, records: &[DelegationRecordView]) -> String {
     let list = format!("`tm repair delegation --list {}`", cwd.display());
     if records.is_empty() {
@@ -123,10 +125,11 @@ pub(crate) fn blocking_records(cwd: &Path, records: &[DelegationRecordView]) -> 
                 Some(agent_id) => format!("agent id {agent_id}"),
                 None => format!("no agent id, delegation id {}", r.delegation_id),
             };
+            // #8257 owner ruling: `owner` is the daemon's caller-safe label.
             format!(
-                "{} ({id}; session {}; age {}) — clear with `{}`",
+                "{} ({id}; owned by {}; age {}) — clear with `{}`",
                 r.agent,
-                r.session,
+                r.owner,
                 format_age(r.age_secs),
                 r.repair_command
             )
@@ -175,7 +178,7 @@ mod tests {
             delegation_id,
             agent: "version-control".to_string(),
             agent_id: agent_id.map(str::to_string),
-            session: "5f0e2c1a-1111-4222-8333-944445555666".to_string(),
+            owner: "session `tm-trusty-tools`".to_string(),
             status: DelegationStatus::Running,
             age_secs,
             cwd: None,
@@ -211,13 +214,55 @@ mod tests {
         );
         assert!(text.contains("age 3h07m"), "{text}");
         assert!(
-            text.contains("session 5f0e2c1a-1111-4222-8333-944445555666"),
+            text.contains("owned by session `tm-trusty-tools`"),
             "{text}"
         );
         assert!(
             text.contains("`tm repair delegation --list /repo`"),
             "{text}"
         );
+    }
+
+    // #8257 owner ruling: a denied caller must never read the owner's UUID,
+    // which it could replay as `CLAUDE_CODE_SESSION_ID`. Both writer denies,
+    // over views the daemon itself projects, for a named and an unknown owner.
+    #[test]
+    fn no_writer_deny_names_the_owner_uuid_8257() {
+        use trusty_mpm::core::agent::Delegation;
+        use trusty_mpm::core::session::{ControlModel, Session, SessionId};
+        use trusty_mpm::daemon::state::DaemonState;
+
+        let state = DaemonState::new();
+        let named = SessionId::new();
+        let unknown = SessionId::new();
+        state.register_session(Session::new(
+            named,
+            "/repo",
+            ControlModel::Tmux,
+            Some(Path::new("/repo")),
+        ));
+        let now = chrono::Utc::now();
+        let views: Vec<_> = [named, unknown]
+            .into_iter()
+            .map(|s| {
+                let d = Delegation::observed(s, "version-control", "task", None);
+                DelegationRecordView::of(&state, &d, now, true)
+            })
+            .collect();
+        let live = ["version-control".to_string()];
+        let cwd = Path::new("/repo");
+
+        for text in [
+            deny_reason("rust-engineer", cwd, &live) + &blocking_records(cwd, &views),
+            granted_deny_reason("rust-engineer", cwd, &live) + &blocking_records(cwd, &views),
+        ] {
+            for s in [named, unknown] {
+                for form in [s.0.hyphenated().to_string(), s.0.simple().to_string()] {
+                    assert!(!text.contains(&form), "owner UUID {form} leaked: {text}");
+                }
+            }
+            assert!(text.contains("owned by session `tm-repo`"), "{text}");
+        }
     }
 
     #[test]
