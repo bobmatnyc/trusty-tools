@@ -1038,6 +1038,7 @@ impl SessionManager {
         // inferred from filesystem).
         let mut workspace_removed = false;
         let mut kept_reason: Option<String> = None;
+        let mut kept_by_design: Option<String> = None;
         if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never bulk-delete.
@@ -1052,9 +1053,13 @@ impl SessionManager {
                     workspace_removed = verdict.removed;
                     kept_reason = verdict.kept_reason;
                 } else {
-                    // #7660: kept by design, and now said so — the CLI exits
-                    // non-zero naming it instead of reporting success.
-                    kept_reason = unowned_kept_reason(ws, dirt_policy);
+                    // #7660: kept by design and said so; only a refused
+                    // `--force` makes it a failure.
+                    let reason = unowned_kept_reason(ws, dirt_policy);
+                    match dirt_policy {
+                        ProvisioningDirt::Discard => kept_reason = reason,
+                        ProvisioningDirt::Refuse => kept_by_design = reason,
+                    }
                     warn!(
                         id = %id,
                         workspace = %ws.display(),
@@ -1189,6 +1194,7 @@ impl SessionManager {
             record,
             workspace_removed,
             workspace_kept_reason: kept_reason,
+            workspace_kept_by_design: kept_by_design,
         })
     }
 

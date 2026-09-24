@@ -361,6 +361,10 @@ pub struct DecommissionResponse {
     /// exits non-zero when this is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes.
+    /// Informational — the CLI prints it and exits 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_by_design: Option<String>,
 }
 
 /// Query parameters for POST /api/v1/sessions/managed/{id}/delete (#2012).

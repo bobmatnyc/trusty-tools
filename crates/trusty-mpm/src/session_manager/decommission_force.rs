@@ -78,8 +78,11 @@ pub struct DecommissionReport {
     pub workspace_removed: bool,
     /// Why the workspace was kept; `None` when it was removed or is absent.
     /// #7660: a workspace tm never removes (a main checkout, a local-path or
-    /// adopted directory) carries its by-design reason too.
+    /// adopted directory) is a refusal here only under `--force`.
     pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes (a
+    /// main checkout, a local-path or adopted directory). Not a failure.
+    pub workspace_kept_by_design: Option<String>,
 }
 
 /// What [`remove_in_project_worktree`] did (#7660).

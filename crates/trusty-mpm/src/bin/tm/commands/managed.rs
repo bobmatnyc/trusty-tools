@@ -613,13 +613,24 @@ pub(crate) async fn session_decommission_routed(
     let outcome = super::managed_route::executor(client, url)
         .decommission_managed_target(target, force)
         .await?;
-    println!(
-        "{}",
-        decommission_message(&outcome.summary.id, outcome.workspace_removed)
-    );
+    println!("{}", decommission_report(&outcome));
     match decommission_kept_error(outcome.workspace_kept_reason.as_deref()) {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+/// What `tm sessions decommission` prints on stdout (#7660): the verdict line,
+/// then the one-line by-design reason when the daemon kept a workspace tm
+/// never removes.
+/// Test: `session_decommission_routed_says_why_it_kept_the_main_checkout`.
+pub(crate) fn decommission_report(
+    outcome: &trusty_mpm::client::ManagedDecommissionOutcome,
+) -> String {
+    let verdict = decommission_message(&outcome.summary.id, outcome.workspace_removed);
+    match outcome.workspace_kept_by_design.as_deref() {
+        Some(why) => format!("{verdict}\n{why}"),
+        None => verdict,
     }
 }
 

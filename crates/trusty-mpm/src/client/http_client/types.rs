@@ -688,6 +688,10 @@ pub struct ManagedDecommissionOutcome {
     /// means the decommission declined, and the CLI exits non-zero.
     #[serde(default)]
     pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes;
+    /// informational, never a failure.
+    #[serde(default)]
+    pub workspace_kept_by_design: Option<String>,
     /// Every response key this client does not model yet.
     ///
     /// Why: an unmodelled key is the exact shape of #5899 — the daemon sends

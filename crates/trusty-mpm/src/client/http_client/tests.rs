@@ -175,8 +175,10 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
         msg.contains(&sibling.to_string()),
         "the guard's reason must reach the CLI naming the blocking session, got: {msg}"
     );
+    // #7660: `(500` / `server error` is how `error_for_status` renders a 500;
+    // a bare "500" also matched the random UUIDs in the reason.
     assert!(
-        !msg.contains("500"),
+        !msg.contains("(500") && !msg.contains("server error"),
         "a guard refusal must never look like a server fault, got: {msg}"
     );
 }

@@ -1098,20 +1098,34 @@ async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force(
 }
 
 /// #7660 round 2: a plain decommission that keeps the main checkout by design
-/// says why in one line, and still exits non-zero. Fails on the 1.7.2 fix.
+/// exits 0 and prints why in one line. Fails on the 1.7.2 fix, which printed
+/// no reason.
 #[tokio::test]
 async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     let (url, id, repo) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, false)
+    let outcome = super::super::managed_route::executor(&client, &url)
+        .decommission_managed_target(&id, false)
         .await
-        .expect_err("a kept workspace must fail the command");
+        .expect("decommission");
+    let printed = super::decommission_report(&outcome);
+    let why = printed.lines().nth(1).expect("a by-design reason line");
+    assert!(why.contains("kept by design"), "{printed}");
+    assert!(why.contains("main checkout"), "{printed}");
+    assert_eq!(printed.lines().count(), 2, "one reason line: {printed}");
+    assert!(
+        super::decommission_kept_error(outcome.workspace_kept_reason.as_deref()).is_none(),
+        "a by-design keep is not a failure"
+    );
 
-    let msg = err.to_string();
-    assert!(msg.contains("kept by design"), "{msg}");
-    assert!(!msg.contains('\n'), "one line: {msg}");
-    assert!(repo.exists());
+    // The CLI entry point itself exits 0 on a second decommission of a
+    // fresh launch-on-main session.
+    let (url, id, repo2) = spawn_daemon_on_the_main_checkout().await;
+    super::session_decommission_routed(&client, &url, &id, false)
+        .await
+        .expect("a by-design keep exits 0");
+    assert!(repo.exists() && repo2.join(".git").is_dir());
 }
 
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
