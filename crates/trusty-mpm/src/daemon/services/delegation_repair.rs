@@ -153,6 +153,12 @@ pub struct RepairDelegationRequest {
 /// Why a header, not a body field: the request body is a public struct, and
 /// the caller identity is transport metadata `tm` fills from the harness's
 /// `CLAUDE_CODE_SESSION_ID` — never from a CLI argument.
+///
+/// Residual: the header is caller-asserted, so any local process that knows
+/// the owner's UUID can send it. Owner ruling 2026-09-24: 1.7.3 keeps that
+/// UUID out of every text and wire field a denied caller reads
+/// ([`owner_label`]); authenticating the caller by its peer pid is deferred to
+/// 1.7.4 (#8257).
 pub const CALLER_SESSION_HEADER: &str = "x-tm-caller-session";
 
 /// Who asked for the repair (#8257 owner ruling).

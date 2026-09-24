@@ -582,6 +582,52 @@ fn a_non_owning_session_is_refused_on_a_live_record_8257() {
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
 }
 
+// #8257 owner ruling: a LIVE session cannot clear a record another live session
+// owns — not by delegation id, not with --force, and not by sharing an agent id
+// with a record of its own. The whole call refuses and writes nothing.
+#[test]
+fn a_live_session_cannot_clear_another_live_sessions_record_8257() {
+    let (state, owner) = live_owned("a-shared");
+    let mut caller = Session::new(SessionId::new(), "/tmp/q", ControlModel::Tmux, None);
+    caller.status = SessionStatus::Active;
+    let caller_id = caller.id;
+    state.register_session(caller);
+    let mine = delegation(caller_id, "a-shared", DelegationStatus::Running);
+    state.upsert_delegation(mine.clone());
+    let theirs = state
+        .all_delegations()
+        .into_iter()
+        .find(|d| d.session == owner)
+        .expect("the owner's record");
+    let as_caller = RepairCaller::Session(caller_id);
+
+    for outcome in [
+        repair_delegation_by_id(&state, theirs.id, true, &as_caller),
+        repair_delegation_as(&state, "a-shared", true, &as_caller),
+    ] {
+        let RepairOutcome::Refused { reason } = outcome else {
+            panic!("expected a refusal, got {outcome:?}");
+        };
+        assert!(reason.contains("Only the owning session can"), "{reason}");
+        assert_no_uuid(&reason, owner);
+    }
+    for d in state.all_delegations() {
+        assert_eq!(d.status, DelegationStatus::Running, "{d:?}");
+        assert!(d.repair.is_none(), "a refusal stamps nothing: {d:?}");
+    }
+    // The caller's own record alone is still its own to clear.
+    assert_eq!(
+        repair_delegation_by_id(&state, mine.id, false, &as_caller),
+        RepairOutcome::Ended { records: 1 }
+    );
+    let theirs_now = state
+        .all_delegations()
+        .into_iter()
+        .find(|d| d.id == theirs.id)
+        .expect("still held");
+    assert_eq!(theirs_now.status, DelegationStatus::Running);
+}
+
 // #8257 owner ruling: no owner-check refusal hands the caller the owner's
 // UUID — every caller shape, on both the agent-id and the delegation-id path.
 // The owner is named by its tmux name, which the caller header rejects.
