@@ -43,10 +43,12 @@ function allCommands(): CommandBlock[] {
 	];
 }
 
-describe('the nine install audiences', () => {
-	it('covers the nine paths the research doc establishes, with unique ids', () => {
-		expect(AUDIENCES.length).toBe(9);
-		expect(new Set(AUDIENCES.map((a) => a.id)).size).toBe(9);
+describe('the eight install audiences', () => {
+	it('covers eight of the nine paths the research doc establishes, with unique ids', () => {
+		// #8507: tga's row moved to its own site; eight of the doc's nine paths
+		// remain here.
+		expect(AUDIENCES.length).toBe(8);
+		expect(new Set(AUDIENCES.map((a) => a.id)).size).toBe(8);
 		expect(AUDIENCES.map((a) => a.id)).toEqual([
 			'trusty-memory',
 			'trusty-search',
@@ -55,8 +57,7 @@ describe('the nine install audiences', () => {
 			'trusty-review',
 			'trusty-mpm',
 			'trusty-code',
-			'trusty-agents',
-			'tga'
+			'trusty-agents'
 		]);
 	});
 
@@ -185,8 +186,7 @@ describe('macOS permission categories are per product and never widened', () => 
 			'trusty-memory',
 			'trusty-analyze',
 			'trusty-review',
-			'trusty-code',
-			'tga'
+			'trusty-code'
 		]);
 		for (const audience of none) {
 			expect(audience.tcc.summary, audience.id).not.toContain('Full Disk Access');
@@ -219,15 +219,5 @@ describe('the MCP registration each audience publishes', () => {
 				`${id} MCP args`
 			).toBe(true);
 		}
-	});
-
-	it('registers nothing for tga, which has no MCP transport', () => {
-		const tga = AUDIENCES.find((a) => a.id === 'tga')!;
-		for (const step of tga.steps) {
-			for (const block of step.commands) {
-				expect(block.command, 'tga').not.toContain('mcpServers');
-			}
-		}
-		expect(audienceText(tga)).toContain('no MCP transport');
 	});
 });

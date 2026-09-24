@@ -204,12 +204,8 @@
 <section class="mx-auto max-w-content px-4 py-16 sm:px-6">
 	<h2 id="install" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">Install</h2>
 	<p class="mt-3 max-w-2xl text-foundry-secondary">
-		A bare <code class="text-sm">tctl install</code> brings up the eight managed crates in
-		dependency order. Name one to install just that crate and whatever it needs at runtime.
-		trusty-audit is not one of them — it
-		<a href="/tools/trusty-audit" class="text-foundry-primary underline underline-offset-2"
-			>installs itself</a
-		>.
+		A bare <code class="text-sm">tctl install</code> brings up the eight managed crates in dependency
+		order. Name one to install just that crate and whatever it needs at runtime.
 	</p>
 	<div class="mt-8 grid gap-6 lg:grid-cols-3">
 		{#each INSTALL_OPTIONS as option (option.id)}
@@ -240,7 +236,7 @@
 		Installing one specific product? The
 		<a href="/install" class="text-foundry-primary underline underline-offset-2"
 			>install walkthrough</a
-		> has the exact sequence for each of the nine, what it needs first, and the macOS permission it asks
+		> has the exact sequence for each of the eight, what it needs first, and the macOS permission it asks
 		for.
 	</p>
 </section>
