@@ -14,13 +14,17 @@
 //! failure arms write `projects.json` by hand, because a real registry cannot
 //! produce a corrupt one on demand.
 //!
-//! Nothing here shells out to `gh` or reads `~/.config/gh`: every config dir is
-//! a temp dir and every `hosts.yml` is written by a fixture.
+//! Nothing here shells out to `gh`, reads `~/.config/gh` or a keyring, or makes
+//! a network call: every config dir is a temp dir, every `hosts.yml` is written
+//! by a fixture, and the #8510 token lookup and `GET /user` are table fakes.
 //! Test: itself.
 
 use std::path::Path;
 
-use super::pinned_gh_env_in;
+use super::{pinned_gh_env_in, pinned_gh_env_with};
+use crate::core::gh_account_dir::AccountDirSources;
+use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe, migrated_dir};
+use crate::core::gh_account_proof::AccountProver;
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::ProjectRegistry;
 use crate::project::record::Project;
@@ -689,4 +693,587 @@ fn daemon_gh_env_uses_the_registry_pin() {
         value_of(&env, "GH_CONFIG_DIR"),
         config_dir.path().to_string_lossy()
     );
+}
+
+// ── #8510: an account-only pin uses only a token `GET /user` proves ─────────
+
+/// A registry whose one record pins `account` with no `github:` binding.
+fn write_account_only_registry(registry_dir: &Path, account: &str) {
+    write_pin_registry(registry_dir, ORIGIN, account, "null");
+}
+
+/// A registry whose one record for `origin` pins `account` plus `github`
+/// (raw JSON).
+fn write_pin_registry(registry_dir: &Path, origin: &str, account: &str, github: &str) {
+    write_registry(
+        registry_dir,
+        &format!(
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{origin}","default_branch":"main","gh_account":"{account}","github":{github}}}}}}}"#
+        ),
+    );
+}
+
+/// Sources naming only a static candidate dir.
+fn static_only(dir: &Path) -> AccountDirSources {
+    AccountDirSources {
+        static_config_dir: Some(dir.to_path_buf()),
+        ..AccountDirSources::default()
+    }
+}
+
+/// Resolve `origin`'s registry pin with table fakes.
+fn resolve_with(
+    registry_dir: &Path,
+    origin: &str,
+    sources: &AccountDirSources,
+    probe: &TableProbe,
+    check: &TableCheck,
+) -> Result<Option<crate::core::gh_identity::GhEnv>, String> {
+    let prover = AccountProver {
+        sources,
+        probe,
+        check,
+        cache: None,
+    };
+    pinned_gh_env_with(registry_dir, origin, &prover)
+}
+
+/// A probe and check that prove `tok-octo-pinned` under `dir` on github.com.
+fn proving(dir: &Path) -> (TableProbe, TableCheck) {
+    (
+        TableProbe::default().answer(dir, "github.com", "octo-pinned", Ok("tok-octo-pinned")),
+        TableCheck::default().answer(
+            "https://api.github.com",
+            "tok-octo-pinned",
+            Ok("octo-pinned"),
+        ),
+    )
+}
+
+/// 🔴 #8510 REGRESSION: a registry record pinning an account with no
+/// `config_dir` resolves to the token proven under the static binding's dir,
+/// injected as the token itself — never as `GH_CONFIG_DIR`.
+///
+/// Why: #8416 put the registry ahead of the static config, so this record
+/// refused every merged-PR lookup even though the operator's static config
+/// binds a dir holding the pinned account's token.
+/// Test: itself.
+#[tokio::test]
+async fn an_account_only_pin_uses_a_token_proven_under_the_static_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    let registry = ProjectRegistry::load(registry_dir.path())
+        .await
+        .expect("load");
+    registry
+        .register(project("jev-matching", ORIGIN, Some("octo-pinned")))
+        .await
+        .expect("register");
+    let (probe, check) = proving(&static_dir);
+
+    let env = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect("a proven token must resolve the account-only pin")
+    .expect("the pin must yield an identity");
+    assert_eq!(value_of(&env, "GH_TOKEN"), "tok-octo-pinned");
+    assert_eq!(
+        value_of(&env, "GH_ENTERPRISE_TOKEN"),
+        crate::core::gh_account::REFUSED_GH_TOKEN
+    );
+    assert!(
+        !env.vars().iter().any(|(k, _)| k == "GH_CONFIG_DIR"),
+        "a config dir is re-read against the keyring on every call: {}",
+        env.describe()
+    );
+    assert!(
+        env.unset_vars().iter().any(|k| k == "GH_CONFIG_DIR"),
+        "an inherited GH_CONFIG_DIR must be cleared; got {:?}",
+        env.unset_vars()
+    );
+}
+
+/// With no static binding, tm's own `gh-accounts/<login>` dir is a candidate.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_falls_back_to_tms_own_account_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let state_root = tempfile::tempdir().expect("tempdir");
+    let account_dir = migrated_dir(&state_root.path().join("gh-accounts").join("octo-pinned"));
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let sources = AccountDirSources {
+        state_root: Some(state_root.path().to_path_buf()),
+        ..AccountDirSources::default()
+    };
+    let (probe, check) = proving(&account_dir);
+    let env = resolve_with(registry_dir.path(), ORIGIN, &sources, &probe, &check)
+        .expect("a proven tm account dir token must resolve")
+        .expect("the pin must yield an identity");
+    assert_eq!(value_of(&env, "GH_TOKEN"), "tok-octo-pinned");
+}
+
+/// 🔴 #8510 CRITICAL: a token that `GET /user` says is another account's is
+/// refused, and the refusal names the account and the fix command.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_token_for_another_account() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let probe =
+        TableProbe::default().answer(&static_dir, "github.com", "octo-pinned", Ok("tok-global"));
+    let check =
+        TableCheck::default().answer("https://api.github.com", "tok-global", Ok("octo-other"));
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("another account's token must refuse");
+    assert!(
+        err.contains("authenticates as 'octo-other'")
+            && err.contains("refusing to probe")
+            && !err.contains("tok-"),
+        "got: {err}"
+    );
+    // #8510 r6: the whole rendered text, so a quoting slip such as
+    // `'octo-pinned''s` cannot pass unseen.
+    let shown = static_dir.display();
+    assert_eq!(
+        err,
+        format!(
+            "this repository is pinned to gh account 'octo-pinned' with no \
+             `github.config_dir`, and a gh token is used for it only once `GET /user` proves \
+             it belongs to 'octo-pinned' (#5851) — refusing to probe it as whichever account \
+             is globally active. No candidate token is proven to belong to 'octo-pinned': \
+             {shown}: the token gh returned for 'octo-pinned' authenticates as 'octo-other'. \
+             Pin a gh config dir logged in as 'octo-pinned': `tm projects register \
+             jev-matching --repo-url {ORIGIN} --gh-account octo-pinned --gh-config-dir \
+             <dir>` (#8510)."
+        )
+    );
+}
+
+/// 🔴 #8510 network identity check: when `GET /user` cannot confirm the token
+/// (timeout, HTTP error), the daemon lookup refuses. It never falls through to
+/// the static tier (`Ok(None)`) and never uses the candidate dir.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_when_the_user_check_fails() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let probe =
+        TableProbe::default().answer(&static_dir, "github.com", "octo-pinned", Ok("tok-bob"));
+    let failure = "GET https://api.github.com/user did not answer in time";
+    let check = TableCheck::default().answer("https://api.github.com", "tok-bob", Err(failure));
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("an unconfirmed token must refuse, not fall through");
+    assert!(
+        err.contains("could not be proven") && err.contains(failure) && !err.contains("tok-"),
+        "got: {err}"
+    );
+    assert_eq!(
+        check.calls(),
+        vec![("https://api.github.com".to_string(), "tok-bob".to_string())],
+        "the refusal must follow a network check of the candidate's token"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a candidate dir that does not exist refuses by name.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_missing_candidate_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let parent = tempfile::tempdir().expect("tempdir");
+    let missing = parent.path().join("gh-never-created");
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let probe = TableProbe::default();
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&missing),
+        &probe,
+        &TableCheck::default(),
+    )
+    .expect_err("a missing dir must refuse");
+    assert!(
+        err.contains(&format!("{} does not exist", missing.display())),
+        "got: {err}"
+    );
+    assert!(probe.calls().is_empty());
+}
+
+/// 🔴 #8510 HIGH: the daemon lookup never runs gh in a dir gh would migrate.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_never_runs_gh_in_an_unmigrated_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        static_dir.path().join("config.yml"),
+        "git_protocol: https\n",
+    )
+    .expect("cfg");
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let (probe, check) = proving(static_dir.path());
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(static_dir.path()),
+        &probe,
+        &check,
+    )
+    .expect_err("an unmigrated dir must refuse");
+    assert!(err.contains("declares no `version"), "got: {err}");
+    assert!(probe.calls().is_empty(), "gh ran: {:?}", probe.calls());
+}
+
+/// 🔴 The repository OWNER never selects the account: a tm dir for the owner
+/// `duettoresearch` does not answer a `octo-pinned` pin.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_never_resolves_from_the_repository_owner() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let state_root = tempfile::tempdir().expect("tempdir");
+    let owner_dir = migrated_dir(&state_root.path().join("gh-accounts").join("duettoresearch"));
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let sources = AccountDirSources {
+        state_root: Some(state_root.path().to_path_buf()),
+        ..AccountDirSources::default()
+    };
+    let probe =
+        TableProbe::default().answer(&owner_dir, "github.com", "octo-pinned", Ok("tok-owner"));
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &sources,
+        &probe,
+        &TableCheck::default(),
+    )
+    .expect_err("the owner's dir must never stand in for the pinned account");
+    assert!(
+        err.contains("gh-accounts/octo-pinned does not exist"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a pinned login that is not a safe path segment never joins
+/// onto the tm state root.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_an_unsafe_login_segment() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let state_root = tempfile::tempdir().expect("tempdir");
+    write_account_only_registry(registry_dir.path(), "..");
+    let sources = AccountDirSources {
+        state_root: Some(state_root.path().to_path_buf()),
+        ..AccountDirSources::default()
+    };
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &sources,
+        &TableProbe::default(),
+        &TableCheck::default(),
+    )
+    .expect_err("an unsafe login must refuse");
+    assert!(err.contains("is not a valid account login"), "got: {err}");
+}
+
+/// The static candidate is this origin's own `projects[].github` binding; the
+/// global `github:` binding is not "for this origin" and is never asked.
+/// Test: itself.
+#[test]
+fn account_dir_sources_take_only_this_origins_static_binding() {
+    use crate::core::trusty_tools_config::{ProjectConfig, TrustyToolsConfig};
+    let binding = |dir: &str| GithubConfig {
+        config_dir: Some(dir.into()),
+        ..GithubConfig::default()
+    };
+    let config = TrustyToolsConfig {
+        github: Some(binding("/cfg/global")),
+        projects: vec![ProjectConfig {
+            name: "jev-matching".into(),
+            repo_url: format!("{ORIGIN}.git"),
+            github: Some(binding("/cfg/gh-octo-other")),
+            ..ProjectConfig::default()
+        }],
+        ..TrustyToolsConfig::default()
+    };
+    let root = std::path::PathBuf::from("/state");
+    let own = Some(std::path::PathBuf::from("/home/me/.config/gh"));
+    let matched = AccountDirSources::for_origin(&config, ORIGIN, root.clone(), own.clone());
+    assert_eq!(
+        matched.static_config_dir.as_deref(),
+        Some(Path::new("/cfg/gh-octo-other"))
+    );
+    assert_eq!(matched.state_root.as_deref(), Some(root.as_path()));
+    assert_eq!(matched.own_config_dir, own);
+    let other =
+        AccountDirSources::for_origin(&config, "https://github.com/acme/widget", root, None);
+    assert_eq!(other.static_config_dir, None);
+}
+
+/// 🔴 #8510: a `-u` lookup that finds no token for the login refuses, and
+/// never echoes a token.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_dir_whose_login_has_no_token() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let probe = TableProbe::default().answer(
+        &static_dir,
+        "github.com",
+        "octo-pinned",
+        Err("exit status 1: no oauth token found for github.com account octo-pinned"),
+    );
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &TableCheck::default(),
+    )
+    .expect_err("no token must refuse");
+    assert!(
+        err.contains("-u octo-pinned` failed") && !err.contains("tok-"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 #8510 HIGH: an Enterprise Server pin's proven token rides
+/// `GH_ENTERPRISE_TOKEN`, the variable gh reads for that host; `GH_TOKEN` gets
+/// the nobody-token.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token() {
+    let ghe_origin = "https://ghe.corp/duettoresearch/jev-matching";
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_pin_registry(registry_dir.path(), ghe_origin, "octo-pinned", "null");
+    let probe = TableProbe::default().answer(&static_dir, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
+    let check =
+        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("octo-pinned"));
+    let env = resolve_with(
+        registry_dir.path(),
+        ghe_origin,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect("a proven Enterprise Server token resolves")
+    .expect("the pin yields an identity");
+    assert_eq!(value_of(&env, "GH_ENTERPRISE_TOKEN"), "tok-ghe");
+    assert_eq!(
+        value_of(&env, "GH_TOKEN"),
+        crate::core::gh_account::REFUSED_GH_TOKEN
+    );
+}
+
+/// 🔴 #8510 r4: an account-only pin never sets a `GH_HOST` other than the host
+/// its token was proven on. A matching `github.host` (in any case) is kept as
+/// the proven host; a different one refuses and names both hosts.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_a_gh_host_other_than_the_proven_one() {
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "octo-pinned",
+        r#"{"host":"GitHub.com"}"#,
+    );
+    let (probe, check) = proving(&static_dir);
+    let env = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect("a host naming the proven one resolves")
+    .expect("the pin yields an identity");
+    assert_eq!(value_of(&env, "GH_HOST"), "github.com");
+
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "octo-pinned",
+        r#"{"host":"ghe.corp"}"#,
+    );
+    let (probe, check) = proving(&static_dir);
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("a GH_HOST the token was not proven on must refuse");
+    assert!(
+        err.contains("'ghe.corp'") && err.contains("'github.com'") && !err.contains("tok-"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: an origin whose host cannot be read proves nothing.
+/// Test: itself.
+#[test]
+fn an_account_only_pin_refuses_an_origin_with_no_host() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = tempfile::tempdir().expect("tempdir");
+    let static_dir = migrated_dir(static_dir.path());
+    write_pin_registry(registry_dir.path(), "local-checkout", "octo-pinned", "null");
+    let (probe, check) = proving(&static_dir);
+    let err = resolve_with(
+        registry_dir.path(),
+        "local-checkout",
+        &static_only(&static_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("no host, no token");
+    assert!(
+        err.contains("cannot tell which gh host serves it"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 A pinned `config_dir` is used as-is; no candidate is ever asked.
+/// Test: itself.
+#[test]
+fn a_pinned_config_dir_is_never_replaced_by_a_borrowed_one() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let pinned_dir = tempfile::tempdir().expect("tempdir");
+    let borrow_dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(pinned_dir.path(), "octo-pinned");
+    let borrow_dir = migrated_dir(borrow_dir.path());
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "octo-pinned",
+        &format!(r#"{{"config_dir":"{}"}}"#, pinned_dir.path().display()),
+    );
+    let (probe, check) = proving(&borrow_dir);
+    let env = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&borrow_dir),
+        &probe,
+        &check,
+    )
+    .expect("a pinned dir resolves")
+    .expect("the pin yields an identity");
+    assert_eq!(
+        value_of(&env, "GH_CONFIG_DIR"),
+        pinned_dir.path().to_string_lossy()
+    );
+    assert!(probe.calls().is_empty(), "gh ran: {:?}", probe.calls());
+}
+
+/// 🔴 A `token_env` pin whose variable is unset refuses with the token_env
+/// reason; it never looks for a candidate token instead.
+/// Test: itself.
+#[test]
+fn a_token_env_pin_never_borrows_a_config_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let borrow_dir = tempfile::tempdir().expect("tempdir");
+    let borrow_dir = migrated_dir(borrow_dir.path());
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "octo-pinned",
+        r#"{"token_env":"TM_8510_NEVER_SET_TOKEN_VAR"}"#,
+    );
+    let (probe, check) = proving(&borrow_dir);
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &static_only(&borrow_dir),
+        &probe,
+        &check,
+    )
+    .expect_err("an unset token_env must refuse, never borrow");
+    assert!(
+        err.contains("`github.token_env` 'TM_8510_NEVER_SET_TOKEN_VAR'"),
+        "got: {err}"
+    );
+    assert!(probe.calls().is_empty(), "gh ran: {:?}", probe.calls());
+}
+
+/// 🔴 A record whose `gh_account` and `github.account` differ refuses by name.
+/// Test: itself.
+#[test]
+fn a_record_naming_two_accounts_fails_closed() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(dir.path(), "octo-pinned");
+    write_pin_registry(
+        registry_dir.path(),
+        ORIGIN,
+        "octo-pinned",
+        &format!(
+            r#"{{"account":"octo-other","config_dir":"{}"}}"#,
+            dir.path().display()
+        ),
+    );
+    let err = resolve_with(
+        registry_dir.path(),
+        ORIGIN,
+        &AccountDirSources::default(),
+        &TableProbe::default(),
+        &TableCheck::default(),
+    )
+    .expect_err("two accounts on one record must refuse");
+    assert!(
+        err.contains("gh_account 'octo-pinned' but its `github.account` is 'octo-other'"),
+        "got: {err}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED: a symlinked `gh-accounts/<login>` dir is never asked.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn an_account_only_pin_refuses_a_symlinked_tm_account_dir() {
+    let registry_dir = tempfile::tempdir().expect("tempdir");
+    let state_root = tempfile::tempdir().expect("tempdir");
+    let real = tempfile::tempdir().expect("tempdir");
+    let real = migrated_dir(real.path());
+    std::fs::create_dir_all(state_root.path().join("gh-accounts")).expect("gh-accounts");
+    let link = state_root.path().join("gh-accounts").join("octo-pinned");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    write_account_only_registry(registry_dir.path(), "octo-pinned");
+    let sources = AccountDirSources {
+        state_root: Some(state_root.path().to_path_buf()),
+        ..AccountDirSources::default()
+    };
+    let (probe, check) = proving(&link);
+    let err = resolve_with(registry_dir.path(), ORIGIN, &sources, &probe, &check)
+        .expect_err("a symlinked account dir must refuse");
+    assert!(err.contains("is a symlink"), "got: {err}");
+    assert!(probe.calls().is_empty(), "gh ran: {:?}", probe.calls());
 }
