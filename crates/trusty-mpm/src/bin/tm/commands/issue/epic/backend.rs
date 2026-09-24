@@ -25,6 +25,7 @@
 //! `gh_backend_reports_an_absent_plan_doc_as_none`,
 //! `gh_backend_reads_a_childs_labels_with_its_body`,
 //! `gh_backend_reads_a_parent_and_its_absence`,
+//! `gh_backend_refuses_a_parent_read_with_no_parent_key`,
 //! `gh_backend_refuses_a_full_phase_title_page` in `tests.rs`.
 
 use serde::Deserialize;
@@ -281,10 +282,33 @@ struct LabelName {
 }
 
 /// `{"parent": {"number": N} | null}` — the single-field parent read.
+///
+/// #8448: the key is REQUIRED. A real `--json parent` answer always carries it
+/// (`null` when there is no parent), so a document without it is not that
+/// answer — and reading it as "no parent" would make the transition hook skip
+/// a sync. serde treats a bare `Option` field as implicitly optional even
+/// without `#[serde(default)]`; routing it through `deserialize_with` is what
+/// turns the missing key into an error.
+/// Test: `gh_backend_refuses_a_parent_read_with_no_parent_key`,
+/// `gh_backend_reads_a_parent_and_its_absence`.
 #[derive(Debug, Deserialize)]
 struct ParentOnly {
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable")]
     parent: Option<ParentRef>,
+}
+
+/// Deserialize a key that must be present but may be `null`.
+///
+/// Why: serde's derive skips a missing `Option` field silently unless the
+/// field carries `deserialize_with`, and `parent: null` and no `parent` key
+/// mean different things here — see [`ParentOnly`].
+/// Test: `gh_backend_refuses_a_parent_read_with_no_parent_key`.
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// The `number` of a parent object.

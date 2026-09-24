@@ -108,6 +108,9 @@ pub(crate) struct CreateOptions {
     pub(crate) tracker: Option<u64>,
     /// Plan and report without mutating anything.
     pub(crate) dry_run: bool,
+    /// The state model's status-label prefix the final sync renders the State
+    /// cell with (#8448).
+    pub(crate) status_prefix: String,
 }
 
 /// What one `create` run did.
@@ -220,7 +223,7 @@ pub(crate) fn create<B: EpicBackend>(
         report.filed.push((number, filed));
     }
 
-    super::sync::sync(backend, tracker)?;
+    super::sync::sync(backend, tracker, &opts.status_prefix)?;
     Ok(report)
 }
 

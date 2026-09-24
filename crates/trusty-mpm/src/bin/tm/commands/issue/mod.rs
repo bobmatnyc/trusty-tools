@@ -166,6 +166,12 @@ fn dispatch<S: TicketSystem>(
                      was written)",
                     report.to
                 );
+                // #8448: a no-op on a phase still synced its tracker (the
+                // re-run after an interrupted sync IS a no-op); say what that
+                // did, on stderr so stdout stays silent for scripts.
+                if let Some(synced) = hooked.synced {
+                    eprintln!("{}", tracker_sync_line(&synced));
+                }
                 return Ok(());
             }
             let from = report.from.as_deref().unwrap_or("(none)");
@@ -174,14 +180,7 @@ fn dispatch<S: TicketSystem>(
                 println!("  assignee rule applied");
             }
             if let Some(synced) = hooked.synced {
-                if synced.unchanged {
-                    println!(
-                        "  tracker #{}: phases block already current",
-                        synced.tracker
-                    );
-                } else {
-                    println!("  tracker #{}: phases block regenerated", synced.tracker);
-                }
+                println!("{}", tracker_sync_line(&synced));
             }
         }
         IssueCmd::Current { issue, config } => {
@@ -199,18 +198,30 @@ fn dispatch<S: TicketSystem>(
         IssueCmd::SeedConfig { force } => {
             seed_config(force)?;
         }
-        // #7097: reads only — no model needed, and no `gh` write.
+        // #7097: reads only — no `gh` write. #8448: the epic set rows render
+        // the State cell with the model's status prefix, so the model is
+        // loaded the way `transition` loads it.
         IssueCmd::Audit {
             issue,
             recent,
             since,
         } => {
-            audit::run(&ticketing, gh_env, runner, issue, recent, since)?;
+            let (model, _source) = load_model_with_source(None, lifecycle)?;
+            audit::run(
+                &ticketing,
+                gh_env,
+                runner,
+                issue,
+                recent,
+                since,
+                &model.label_config.status_prefix,
+            )?;
         }
         // #8447: the epic verbs reach `gh` and `git` through their own narrow
-        // `EpicBackend` seam (D7), so they need the identity, not the model.
+        // `EpicBackend` seam (D7), so they need the identity; #8448: `create`
+        // and `sync` also read the model's status prefix.
         IssueCmd::Epic(epic_cmd) => {
-            epic::run(epic_cmd, gh_env)?;
+            epic::run(epic_cmd, gh_env, lifecycle)?;
         }
         IssueCmd::Repair { issue, config } => {
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
@@ -254,6 +265,21 @@ fn print_seed_report(report: &ops::SeedReport) {
 /// Test: `verb_failure_names_the_embedded_default_source_7580`.
 fn with_source(err: anyhow::Error, source: &ModelSource) -> anyhow::Error {
     anyhow::anyhow!("{err:#}\n  {}", describe_source(source))
+}
+
+/// The one line a transition prints about its tracker sync (#8448).
+///
+/// Test: side-effect-only; the report itself is asserted by the
+/// `transition_hook_*` tests.
+fn tracker_sync_line(synced: &epic::sync::SyncReport) -> String {
+    if synced.unchanged {
+        format!(
+            "  tracker #{}: phases block already current",
+            synced.tracker
+        )
+    } else {
+        format!("  tracker #{}: phases block regenerated", synced.tracker)
+    }
 }
 
 /// Print the configured states and transitions.

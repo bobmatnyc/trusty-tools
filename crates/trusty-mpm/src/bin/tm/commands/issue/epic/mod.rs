@@ -35,7 +35,10 @@ pub(crate) mod sync;
 #[path = "tests.rs"]
 mod tests;
 
+use std::path::Path;
+
 use crate::cli::EpicCmd;
+use crate::commands::issue::config::load_model_with_source;
 use crate::commands::ticket::runner::RealCommandRunner;
 
 use backend::GhEpicBackend;
@@ -49,12 +52,16 @@ use create::{CreateOptions, CreateReport};
 /// refuses when any is missing, because an issue filed without them is a
 /// standard violation `tm issue audit` would report.
 /// What: builds a [`GhEpicBackend`] over a runner bound to the resolved
-/// per-project GitHub identity (#1265), then dispatches.
+/// per-project GitHub identity (#1265), then dispatches. The two verbs that
+/// render the `phases` block (`create`, `sync`) load the state model the way
+/// `tm issue transition` does, for its status-label prefix (#8448);
+/// `lifecycle` is the configured `agents.ticketing.lifecycle_model`.
 /// Test: `epic_create_requires_a_milestone`, `epic_create_requires_a_component`,
 /// `epic_create_requires_a_session_name`.
 pub(crate) fn run(
     cmd: EpicCmd,
     gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+    lifecycle: Option<&Path>,
 ) -> anyhow::Result<()> {
     let backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
     match cmd {
@@ -77,12 +84,13 @@ pub(crate) fn run(
                 session: require_session(session)?,
                 tracker,
                 dry_run,
+                status_prefix: status_prefix(lifecycle)?,
             };
             let report = create::create(&backend, &opts)?;
             print_create(&report);
         }
         EpicCmd::Sync { epic } => {
-            let report = sync::sync(&backend, epic)?;
+            let report = sync::sync(&backend, epic, &status_prefix(lifecycle)?)?;
             if report.unchanged {
                 println!(
                     "#{}: phases block already matches its {} child issue(s) — nothing written",
@@ -135,6 +143,20 @@ pub(crate) fn run(
         }
     }
     Ok(())
+}
+
+/// The status-label prefix of the state model in force (#8448).
+///
+/// Why: the State cell strips this prefix from a child's lifecycle label, and
+/// it differs per project (`status:` here, `unicorn:` in the crate default) —
+/// so it is read from the same model `tm issue transition` resolves, never
+/// hardcoded. The epic verbs carry no `--config` flag, so the flag slot is
+/// `None` and discovery runs from the working directory upward.
+/// Test: `phases_table_uses_the_configured_status_prefix` covers the renderer;
+/// the load itself is `load_model_in`'s.
+fn status_prefix(lifecycle: Option<&Path>) -> anyhow::Result<String> {
+    let (model, _source) = load_model_with_source(None, lifecycle)?;
+    Ok(model.label_config.status_prefix)
 }
 
 /// The milestone every issue in the run carries, or the refusal.

@@ -69,6 +69,8 @@ const CRATE_LABEL_DESCRIPTION_PREFIX: &str = "Crate:";
 /// guessing a default window. `gh` runs in the current directory, which is what
 /// selects the repository — and, since #7123, also what selects the crate
 /// labels that satisfy the owning-component rule (widened per the module doc).
+/// `status_prefix` is the state model's lifecycle-label prefix the epic rows
+/// render the State cell with (#8448).
 /// Test: see the module doc; the pure halves are unit-tested in the library.
 pub(crate) fn run(
     ticketing: &ResolvedTicketing,
@@ -77,6 +79,7 @@ pub(crate) fn run(
     issue: Option<u64>,
     recent: Option<usize>,
     since: Option<String>,
+    status_prefix: &str,
 ) -> anyhow::Result<()> {
     // #7123: the accepted component labels are the audited repository's own
     // crate labels, not just the ones the harness seeds.
@@ -95,7 +98,7 @@ pub(crate) fn run(
             // audit rather than printing PASS over an unenumerated set.
             let epic_backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
             audit.rows.extend(
-                epic_rows(&epic_backend, number)
+                epic_rows(&epic_backend, number, status_prefix)
                     .with_context(|| format!("epic rows for #{number}"))?,
             );
             vec![audit]

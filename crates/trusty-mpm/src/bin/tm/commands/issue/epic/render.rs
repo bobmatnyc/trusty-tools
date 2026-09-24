@@ -19,7 +19,9 @@
 //! `next_phase_number_never_reuses_a_deleted_number`,
 //! `state_cell_reads_closed_for_a_closed_child`,
 //! `state_cell_reads_the_status_label_of_an_open_child`,
-//! `state_cell_reads_open_for_an_unlabelled_open_child`.
+//! `state_cell_reads_open_for_an_unlabelled_open_child`,
+//! `phases_table_uses_the_configured_status_prefix`,
+//! `outcomes_of_folds_wrapped_continuation_lines`.
 
 use std::fmt::Write as _;
 
@@ -300,12 +302,13 @@ pub(crate) fn plan_permalink(repo: &str, sha: &str, path: &str) -> String {
 /// block — a row hand-edited inside the old block is discarded by construction
 /// rather than merged.
 /// What: the two header rows plus one row per child, ordered by phase number,
-/// each carrying the child's number, its [`state_cell`], and the `## Gate`
-/// section of its body collapsed to one line. A `|` in any cell is escaped so
-/// it cannot split the row.
+/// each carrying the child's number, its [`state_cell`] under `status_prefix`,
+/// and the `## Gate` section of its body collapsed to one line. A `|` in any
+/// cell is escaped so it cannot split the row.
 /// Test: `render_replaces_the_whole_phases_block`,
-/// `render_escapes_a_pipe_in_a_phase_title`.
-pub(crate) fn phases_table(children: &[ChildIssue]) -> String {
+/// `render_escapes_a_pipe_in_a_phase_title`,
+/// `phases_table_uses_the_configured_status_prefix`.
+pub(crate) fn phases_table(children: &[ChildIssue], status_prefix: &str) -> String {
     let mut rows: Vec<(u64, &ChildIssue)> = children
         .iter()
         .filter_map(|c| phase_number_of(&c.title).map(|n| (n, c)))
@@ -319,36 +322,38 @@ pub(crate) fn phases_table(children: &[ChildIssue]) -> String {
             "\n| {number} | {} | #{} | {} | {} |",
             cell(&phase_what(&child.title)),
             child.number,
-            cell(&state_cell(child)),
+            cell(&state_cell(child, status_prefix)),
             cell(&gate_of(&child.body))
         );
     }
     out
 }
 
-/// The label prefix the lifecycle states wear (`status:in-progress`, …).
-const STATUS_LABEL_PREFIX: &str = "status:";
-
 /// The State column for one child (AC6 of #8448, owner ruling 2026-09-24).
 ///
 /// Why: GitHub's `OPEN`/`CLOSED` is two states, and the lifecycle between them
-/// lives in the `status:*` label — a table that showed only `open` for a phase
-/// already `coded` restated the sub-issue list GitHub renders anyway.
+/// lives in the status label — a table that showed only `open` for a phase
+/// already `coded` restated the sub-issue list GitHub renders anyway. The
+/// prefix is the model's `label_config.status_prefix` (`status:` in this repo,
+/// `unicorn:` in the crate default), never a constant: a hardcoded `status:`
+/// read `open` for every phase of a project on the default model.
 /// What: `closed` for a closed child, whatever labels it still wears. For an
-/// open child, the value of its `status:*` label without the prefix; several
-/// such labels (a `tm issue repair` case) are joined with `/` in sorted order
-/// so the cell is deterministic; none at all reads `open`.
+/// open child, the value of its `<status_prefix>*` label without the prefix;
+/// several such labels (a `tm issue repair` case) are joined with `/` in sorted
+/// order so the cell is deterministic; none at all reads `open`.
 /// Test: `state_cell_reads_closed_for_a_closed_child`,
 /// `state_cell_reads_the_status_label_of_an_open_child`,
-/// `state_cell_reads_open_for_an_unlabelled_open_child`.
-pub(crate) fn state_cell(child: &ChildIssue) -> String {
+/// `state_cell_reads_open_for_an_unlabelled_open_child`,
+/// `phases_table_uses_the_configured_status_prefix`.
+pub(crate) fn state_cell(child: &ChildIssue, status_prefix: &str) -> String {
     if child.state.eq_ignore_ascii_case("CLOSED") {
         return "closed".to_string();
     }
+    // #8448: the prefix comes from the state model in force, not a constant.
     let mut states: Vec<&str> = child
         .labels
         .iter()
-        .filter_map(|l| l.strip_prefix(STATUS_LABEL_PREFIX))
+        .filter_map(|l| l.strip_prefix(status_prefix))
         .filter(|s| !s.is_empty())
         .collect();
     states.sort_unstable();
@@ -372,12 +377,18 @@ pub(crate) fn cell(text: &str) -> String {
 /// the tracker rather than from the plan document — a tracker whose outcomes
 /// were edited on the issue closes against the edited set.
 /// What: scans the lines under `## Outcomes` up to the next `## ` heading and
-/// keeps those shaped `- **O<digits>** <text>`; the id is `O<digits>`.
+/// keeps those shaped `- **O<digits>** <text>`; the id is `O<digits>`. A
+/// wrapped outcome — the shape the live #8445 body has, with every line after
+/// the first indented — is folded into one text, single-space joined; the fold
+/// stops at a blank line, a new `- ` item, or a heading.
 /// Test: `close_posts_one_line_per_declared_outcome`,
-/// `close_refuses_a_tracker_that_declares_no_outcomes`.
+/// `close_refuses_a_tracker_that_declares_no_outcomes`,
+/// `outcomes_of_folds_wrapped_continuation_lines`.
 pub(crate) fn outcomes_of(body: &str) -> Vec<(String, String)> {
     let mut inside = false;
-    let mut out = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    // Whether the last pushed outcome is still open for continuation lines.
+    let mut folding = false;
     for line in body.lines() {
         if line.trim_end() == "## Outcomes" {
             inside = true;
@@ -389,7 +400,21 @@ pub(crate) fn outcomes_of(body: &str) -> Vec<(String, String)> {
         if line.starts_with("## ") {
             break;
         }
-        let Some(rest) = line.trim().strip_prefix("- **O") else {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            folding = false;
+            continue;
+        }
+        // #8448: a continuation line of a wrapped outcome, not a new item.
+        if folding && !trimmed.starts_with("- ") && line.starts_with(char::is_whitespace) {
+            if let Some((_, text)) = out.last_mut() {
+                text.push(' ');
+                text.push_str(trimmed);
+            }
+            continue;
+        }
+        folding = false;
+        let Some(rest) = trimmed.strip_prefix("- **O") else {
             continue;
         };
         let Some((digits, text)) = rest.split_once("**") else {
@@ -399,6 +424,7 @@ pub(crate) fn outcomes_of(body: &str) -> Vec<(String, String)> {
             continue;
         }
         out.push((format!("O{digits}"), text.trim().to_string()));
+        folding = true;
     }
     out
 }

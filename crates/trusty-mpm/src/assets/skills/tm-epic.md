@@ -39,10 +39,14 @@ cases the CLI does not cover.
 | `tm issue epic close <epic#> --evidence "O<n>: …"…` | Refuses while any child is open, naming it; posts the closing comment mapping each declared outcome to its evidence; closes |
 
 `tm issue transition` on a phase issue regenerates its tracker's `phases`
-block as a side effect. A sync that fails there fails the command and names
-the tracker to `sync` by hand — the label has already moved. `tm issue audit
-<epic#>` adds two set-level rows: the block matches its children, and every
-`[EPIC_<epic#> PHASE_…]`-titled issue is a native sub-issue.
+block as a side effect — a no-op transition included, so re-running the same
+command after a killed or failed sync repairs the tracker. A sync that fails
+there fails the command and names the tracker to `sync` by hand — the label
+has already moved. `tm issue audit <epic#>` adds two set-level rows: the block
+matches its children, and every `[EPIC_<epic#> PHASE_…]`-titled issue is a
+native sub-issue. The linkage row reads GitHub's title search, which lags a
+just-created issue; when it omits a linked phase the row FAILs with
+`search index returned N of M known phases — re-run in a minute`, never PASS.
 
 ## The gate test
 
@@ -126,7 +130,8 @@ A session touches the tracker body on exactly five triggers:
 
 The State cell reads `closed` for a closed phase; for an open one, its
 `status:*` label without the prefix (`in-progress`, `coded`, `merged`,
-`tested`), or `open` when it carries none.
+`tested`), or `open` when it carries none. The prefix is the issue state
+model's `label_config.status_prefix` (`status:` in trusty-tools).
 
 **Not on PR open, merge, commit or review.** Those are phase-issue events and
 belong on the phase issue or its PR. A finding discovered mid-execution is a

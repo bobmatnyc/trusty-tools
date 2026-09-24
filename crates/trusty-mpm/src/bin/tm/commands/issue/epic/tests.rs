@@ -10,7 +10,7 @@
 //! Test: itself.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::audit_rows::{self, REQ_PHASE_LINKAGE, REQ_PHASES_BLOCK};
 use super::backend::{
@@ -32,6 +32,9 @@ use trusty_mpm::core::issue_audit::Verdict;
 
 /// The repository-relative path the fake backend reports for any plan path.
 const REL_PATH: &str = "docs/research/tm-epic-cli/epic-plan.md";
+/// This repository's status-label prefix (`issue-state.yaml`); the crate
+/// default model's is `unicorn:`, which the hook tests run under (#8448).
+const STATUS: &str = "status:";
 /// A plausible 40-hex commit for the permalink assertions.
 const PUBLISHED_SHA: &str = "581cfb4da254f7448c5c042c8d9bea50ebe84828";
 /// gh's handled wording when the token lacks the `project` scope — the ONE
@@ -138,6 +141,9 @@ struct FakeBackend {
     fail: RefCell<Vec<(String, String)>>,
     /// The label set the last `find_tracker` call narrowed by (#8447 HIGH).
     find_labels: RefCell<Vec<String>>,
+    /// Issues the title SEARCH does not return yet — GitHub's index lagging a
+    /// just-created issue (#8448 HIGH 2). Every direct read still sees them.
+    hidden_from_search: RefCell<BTreeSet<u64>>,
 }
 
 impl FakeBackend {
@@ -152,7 +158,19 @@ impl FakeBackend {
             counts: RefCell::new(HashMap::new()),
             fail: RefCell::new(Vec::new()),
             find_labels: RefCell::new(Vec::new()),
+            hidden_from_search: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    /// Make the search index lag `number`: `phase_titled_issues` omits it while
+    /// `children` and `parent` still report it.
+    fn hide_from_search(&self, number: u64) {
+        self.hidden_from_search.borrow_mut().insert(number);
+    }
+
+    /// Every `EpicBackend` call made so far, across all operations.
+    fn total_calls(&self) -> usize {
+        self.counts.borrow().values().sum()
     }
 
     /// Script one call to fail with a generic message. `key` is `<op>` or
@@ -398,10 +416,12 @@ impl EpicBackend for FakeBackend {
 
     fn phase_titled_issues(&self, epic: u64) -> anyhow::Result<Vec<PhaseCandidate>> {
         self.tick("phase_titled_issues")?;
+        let hidden = self.hidden_from_search.borrow();
         Ok(self
             .issues
             .borrow()
             .iter()
+            .filter(|(n, _)| !hidden.contains(n))
             .filter(|(_, i)| render::epic_number_of(&i.title) == Some(epic))
             .map(|(n, i)| PhaseCandidate {
                 number: *n,
@@ -486,6 +506,7 @@ fn opts_for(dir: &tempfile::TempDir, project: Option<u64>) -> CreateOptions {
         session: "tm-trusty-tools-15".to_string(),
         tracker: None,
         dry_run: false,
+        status_prefix: STATUS.to_string(),
     }
 }
 
@@ -772,7 +793,7 @@ fn child(phase: u64, number: u64) -> ChildIssue {
 #[test]
 fn render_replaces_the_whole_phases_block() {
     let body = format!("prose\n\n{PHASES_START}\n| stale |\n{PHASES_END}\n\ntail\n");
-    let table = render::phases_table(&[child(1, 101), child(2, 102)]);
+    let table = render::phases_table(&[child(1, 101), child(2, 102)], STATUS);
     let out = render::replace_block(&body, PHASES_START, PHASES_END, &table).expect("replaces");
     assert!(!out.contains("| stale |"), "{out}");
     assert!(
@@ -791,13 +812,16 @@ fn render_replaces_the_whole_phases_block() {
 fn gate_of_reads_only_the_first_paragraph() {
     let body =
         "Part of #1.\n\n## Gate\n\nthe gate line.\n\nthe phase summary.\n\n## Risk\n\nnope\n";
-    let rendered = render::phases_table(&[ChildIssue {
-        number: 7,
-        title: render::phase_title(1, 1, "x"),
-        state: "CLOSED".to_string(),
-        labels: Vec::new(),
-        body: body.to_string(),
-    }]);
+    let rendered = render::phases_table(
+        &[ChildIssue {
+            number: 7,
+            title: render::phase_title(1, 1, "x"),
+            state: "CLOSED".to_string(),
+            labels: Vec::new(),
+            body: body.to_string(),
+        }],
+        STATUS,
+    );
     assert!(rendered.contains("| the gate line. |"), "{rendered}");
     assert!(!rendered.contains("phase summary"), "{rendered}");
     assert!(rendered.contains("| closed |"), "{rendered}");
@@ -806,13 +830,16 @@ fn gate_of_reads_only_the_first_paragraph() {
 #[test]
 fn render_escapes_a_pipe_in_a_phase_title() {
     // The committed plan's own first phase is titled `tm issue epic create|sync`.
-    let rendered = render::phases_table(&[ChildIssue {
-        number: 9,
-        title: "[EPIC_1 PHASE_1] tm issue epic create|sync".to_string(),
-        state: "OPEN".to_string(),
-        labels: Vec::new(),
-        body: "## Gate\n\nnone | really\n".to_string(),
-    }]);
+    let rendered = render::phases_table(
+        &[ChildIssue {
+            number: 9,
+            title: "[EPIC_1 PHASE_1] tm issue epic create|sync".to_string(),
+            state: "OPEN".to_string(),
+            labels: Vec::new(),
+            body: "## Gate\n\nnone | really\n".to_string(),
+        }],
+        STATUS,
+    );
     assert!(rendered.contains(r"create\|sync"), "{rendered}");
     assert!(rendered.contains(r"none \| really"), "{rendered}");
     // Exactly six pipes per row: five separators plus the escaped pair.
@@ -1395,7 +1422,7 @@ fn sync_replaces_the_whole_block_and_discards_a_hand_edited_row() {
         "## Gate\n\ngate 1\n",
     );
 
-    let report = sync::sync(&backend, 100).expect("syncs");
+    let report = sync::sync(&backend, 100, STATUS).expect("syncs");
     assert!(!report.unchanged);
     assert_eq!(report.rows, 1);
 
@@ -1424,7 +1451,7 @@ fn sync_leaves_every_byte_outside_the_markers_identical() {
         "## Gate\n\ngate 1\n",
     );
 
-    sync::sync(&backend, 100).expect("syncs");
+    sync::sync(&backend, 100, STATUS).expect("syncs");
     let after = backend.issue(100).body;
     assert_ne!(after, before, "the block itself must change");
 
@@ -1464,7 +1491,7 @@ fn sync_refuses_a_body_with_no_markers_and_writes_nothing() {
         "## Gate\n\ng\n",
     );
 
-    let err = sync::sync(&backend, 100).unwrap_err();
+    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
     assert!(err.to_string().contains(PHASES_START), "{err}");
     assert_eq!(
         backend.issue(100).body,
@@ -1489,7 +1516,7 @@ fn sync_refuses_a_body_with_two_start_markers_and_writes_nothing() {
         "## Gate\n\ng\n",
     );
 
-    let err = sync::sync(&backend, 100).unwrap_err();
+    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
     assert!(err.to_string().contains("exactly one is required"), "{err}");
     assert_eq!(
         backend.issue(100).body,
@@ -1512,9 +1539,9 @@ fn sync_is_a_no_op_when_the_block_already_matches() {
     );
     backend.seed_child(100, 101, &child_title, "OPEN", "## Gate\n\ngate 1\n");
 
-    sync::sync(&backend, 100).expect("first sync writes");
+    sync::sync(&backend, 100, STATUS).expect("first sync writes");
     assert_eq!(backend.calls("set_body"), 1);
-    let report = sync::sync(&backend, 100).expect("second sync is a no-op");
+    let report = sync::sync(&backend, 100, STATUS).expect("second sync is a no-op");
     assert!(report.unchanged, "a matching block must not be rewritten");
     assert_eq!(backend.calls("set_body"), 1, "no second write");
 }
@@ -1538,7 +1565,7 @@ fn sync_propagates_a_failed_body_write() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    let err = sync::sync(&backend, 100).unwrap_err();
+    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
     assert!(
         err.to_string().contains("scripted failure: set_body"),
         "{err}"
@@ -1557,7 +1584,7 @@ fn sync_propagates_a_failed_child_read() {
             "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
         ),
     );
-    let err = sync::sync(&backend, 100).unwrap_err();
+    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
     assert!(
         err.to_string().contains("scripted failure: children"),
         "{err}"
@@ -1892,7 +1919,7 @@ fn labelled_child(state: &str, labels: &[&str]) -> ChildIssue {
 #[test]
 fn state_cell_reads_closed_for_a_closed_child() {
     assert_eq!(
-        render::state_cell(&labelled_child("CLOSED", &["status:tested"])),
+        render::state_cell(&labelled_child("CLOSED", &["status:tested"]), STATUS),
         "closed"
     );
 }
@@ -1903,8 +1930,8 @@ fn state_cell_reads_the_status_label_of_an_open_child() {
     for state in ["in-progress", "coded", "merged", "tested"] {
         let label = format!("status:{state}");
         let child = labelled_child("OPEN", &["trusty-mpm", &label]);
-        assert_eq!(render::state_cell(&child), state);
-        let table = render::phases_table(std::slice::from_ref(&child));
+        assert_eq!(render::state_cell(&child, STATUS), state);
+        let table = render::phases_table(std::slice::from_ref(&child), STATUS);
         assert!(table.contains(&format!("| #5 | {state} |")), "{table}");
     }
 }
@@ -1913,9 +1940,68 @@ fn state_cell_reads_the_status_label_of_an_open_child() {
 #[test]
 fn state_cell_reads_open_for_an_unlabelled_open_child() {
     assert_eq!(
-        render::state_cell(&labelled_child("OPEN", &["trusty-mpm", "enhancement"])),
+        render::state_cell(
+            &labelled_child("OPEN", &["trusty-mpm", "enhancement"]),
+            STATUS
+        ),
         "open"
     );
+}
+
+/// #8448 (review MEDIUM 4): the prefix is the model's `status_prefix`, not a
+/// constant. Under the crate default's `unicorn:` a `unicorn:coded` child reads
+/// `coded`; a hardcoded `status:` read it as `open`, and read a `status:coded`
+/// child as `coded` under a model that never issues that label.
+#[test]
+fn phases_table_uses_the_configured_status_prefix() {
+    let child = labelled_child("OPEN", &["unicorn", "unicorn:coded"]);
+    assert_eq!(render::state_cell(&child, "unicorn:"), "coded");
+    assert_eq!(render::state_cell(&child, STATUS), "open");
+    let table = render::phases_table(std::slice::from_ref(&child), "unicorn:");
+    assert!(table.contains("| #5 | coded |"), "{table}");
+    let default_model: StateModel =
+        serde_yaml::from_str(DEFAULT_MODEL_YAML).expect("the default model parses");
+    assert_eq!(default_model.label_config.status_prefix, "unicorn:");
+}
+
+/// #8448 (review MEDIUM 3): the live #8445 body wraps every outcome across
+/// indented continuation lines; `close` must post the whole text, not the
+/// first line. The fold stops at a blank line, a new `- ` item, or a heading.
+#[test]
+fn outcomes_of_folds_wrapped_continuation_lines() {
+    let body = "## Outcomes\n\
+                \n\
+                - **O1** A tracker and its phase issues are created from a committed plan\n\
+                \x20 document by one command, with titles, labels, milestone and native sub-issue\n\
+                \x20 links applied without anyone typing them.\n\
+                - **O2** The `phases` block is regenerated from live child state by a command,\n\
+                \x20 never by a session retyping a table, and content outside the markers is\n\
+                \x20 provably untouched.\n\
+                - **O3** A phase transition updates its tracker without a human remembering to,\n\
+                \x20 so a closed phase never leaves a stale tracker.\n\
+                - **O4** `tm issue audit` reports a tracker whose block has drifted from its\n\
+                \x20 children, so the guarantee is checked rather than asserted.\n\
+                \n\
+                \x20 not an outcome: a blank line ended the fold\n\
+                \n\
+                ## Ratified decisions\n\
+                \n\
+                - **O9** a heading ended the section\n";
+    let outcomes = render::outcomes_of(body);
+    assert_eq!(outcomes.len(), 4, "{outcomes:?}");
+    assert_eq!(outcomes[0].0, "O1");
+    assert_eq!(
+        outcomes[0].1,
+        "A tracker and its phase issues are created from a committed plan document by one \
+         command, with titles, labels, milestone and native sub-issue links applied without \
+         anyone typing them."
+    );
+    assert_eq!(
+        outcomes[3].1,
+        "`tm issue audit` reports a tracker whose block has drifted from its children, so the \
+         guarantee is checked rather than asserted."
+    );
+    assert!(!outcomes[3].1.contains("not an outcome"), "{outcomes:?}");
 }
 
 // ------------------------------------------------------- phase 2: `defer`
@@ -2205,8 +2291,9 @@ fn seed_hookable(backend: &FakeBackend, parent: Option<u64>) -> FakeTickets {
             state: "OPEN".to_string(),
             parent,
             // The lifecycle label the LIVE child wears after the swap, which
-            // is what the regenerated State cell must show (AC6).
-            labels: vec!["status:coded".to_string()],
+            // is what the regenerated State cell must show (AC6) — under the
+            // default model's `unicorn:` prefix, not this repo's `status:`.
+            labels: vec!["unicorn:coded".to_string()],
             ..FakeIssue::default()
         },
     );
@@ -2270,13 +2357,11 @@ fn transition_hook_makes_no_epic_call_for_a_non_phase_title() {
             .expect("transitions");
     assert!(hooked.synced.is_none());
     assert_eq!(tickets.count("swap_labels"), 1);
-    for op in ["parent", "body", "children", "set_body"] {
-        assert_eq!(backend.calls(op), 0, "{op} was called");
-    }
+    assert_eq!(backend.total_calls(), 0, "{:?}", backend.counts.borrow());
 }
 
 /// AC2, second half: a phase-titled issue with no parent costs one parent
-/// read and no tracker read or write.
+/// read and no tracker read or write — exactly one backend call in total.
 #[test]
 fn transition_hook_reads_no_tracker_for_a_parentless_phase() {
     let backend = FakeBackend::new();
@@ -2286,24 +2371,55 @@ fn transition_hook_reads_no_tracker_for_a_parentless_phase() {
             .expect("transitions");
     assert!(hooked.synced.is_none());
     assert_eq!(backend.calls("parent"), 1);
-    for op in ["body", "children", "set_body"] {
-        assert_eq!(backend.calls(op), 0, "{op} was called");
-    }
+    assert_eq!(backend.total_calls(), 1, "{:?}", backend.counts.borrow());
 }
 
-/// A no-op transition (#8003) changed nothing, so it syncs nothing.
+/// #8448 (review HIGH 1): a run killed between the label swap and the sync
+/// leaves the tracker stale, and re-issuing the command is then a no-op
+/// transition (#8003). The no-op still syncs, so the re-run converges; a
+/// no-op that returned before the sync exited 0 and repaired nothing.
 #[test]
-fn transition_hook_skips_a_no_op_transition() {
+fn transition_hook_regenerates_a_stale_tracker_on_a_no_op_transition() {
     let backend = FakeBackend::new();
     let tickets = seed_hookable(&backend, Some(100));
     let hooked =
         hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "queued", None)
+            .expect("no-op transitions and syncs");
+    assert!(hooked.report.no_op);
+    assert_eq!(tickets.count("swap_labels"), 0, "the no-op wrote no label");
+    let synced = hooked.synced.expect("the stale tracker was synced");
+    assert_eq!(synced.tracker, 100);
+    assert!(!synced.unchanged, "the block was stale, so it was written");
+    assert_eq!(backend.calls("set_body"), 1);
+    assert!(
+        backend
+            .issue(100)
+            .body
+            .contains("| 1 | phase 1 | #101 | coded | g |"),
+        "{}",
+        backend.issue(100).body
+    );
+    // The second re-run finds the block current and writes nothing.
+    let again =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "queued", None)
+            .expect("no-op");
+    assert!(again.synced.expect("synced").unchanged);
+    assert_eq!(backend.calls("set_body"), 1, "no second write");
+}
+
+/// The zero-call guarantee of AC2 holds for a no-op too: a non-phase title
+/// costs no epic backend call whether or not the transition moved anything.
+#[test]
+fn transition_hook_makes_no_epic_call_for_a_no_op_on_a_non_phase_title() {
+    let backend = FakeBackend::new();
+    let tickets = FakeTickets::new(7, "a plain issue", &["unicorn", "unicorn:queued"]);
+    let hooked =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 7, "queued", None)
             .expect("no-op");
     assert!(hooked.report.no_op);
     assert!(hooked.synced.is_none());
-    for op in ["parent", "body", "children", "set_body"] {
-        assert_eq!(backend.calls(op), 0, "{op} was called");
-    }
+    assert_eq!(tickets.count("swap_labels"), 0);
+    assert_eq!(backend.total_calls(), 0, "{:?}", backend.counts.borrow());
 }
 
 /// A parent read that fails cannot tell "no tracker" from "could not look", so
@@ -2344,16 +2460,44 @@ fn audit_rows_pass_a_tracker_whose_block_matches() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    sync::sync(&backend, 100).expect("bring the block current");
-    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    sync::sync(&backend, 100, STATUS).expect("bring the block current");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert_eq!(row(&rows, REQ_PHASES_BLOCK).verdict, Verdict::Pass);
     assert_eq!(row(&rows, REQ_PHASE_LINKAGE).verdict, Verdict::Pass);
-    assert!(
-        row(&rows, REQ_PHASE_LINKAGE)
-            .detail
-            .contains("1 phase-titled")
+    assert_eq!(
+        row(&rows, REQ_PHASE_LINKAGE).detail,
+        "1 of 1 linked phases seen by search"
     );
+}
+
+/// #8448 (review HIGH 2): the candidates come from GitHub's search index,
+/// which lags a just-created issue. A linked phase the search did not return
+/// proves the result is short, and a short result cannot vouch for the
+/// unlinked set — so the row FAILs with the shortfall, never PASSes.
+#[test]
+fn audit_rows_fail_when_search_omits_a_linked_phase() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    for (n, phase) in [(101, 1), (102, 2)] {
+        backend.seed_child(
+            100,
+            n,
+            &render::phase_title(100, phase, "p"),
+            "OPEN",
+            "## Gate\n\ng\n",
+        );
+    }
+    sync::sync(&backend, 100, STATUS).expect("current");
+    backend.hide_from_search(102);
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let linkage = row(&rows, REQ_PHASE_LINKAGE);
+    assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
+    assert_eq!(
+        linkage.detail,
+        "search index returned 1 of 2 known phases — re-run in a minute"
+    );
+    assert_eq!(backend.calls("phase_titled_issues"), 1);
 }
 
 /// AC4: a stale block is a FAIL carrying the exact repair wording.
@@ -2368,7 +2512,7 @@ fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
     let block = row(&rows, REQ_PHASES_BLOCK);
     assert_eq!(block.verdict, Verdict::Fail);
     assert_eq!(
@@ -2390,12 +2534,12 @@ fn audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    sync::sync(&backend, 100).expect("current");
+    sync::sync(&backend, 100, STATUS).expect("current");
     // Phase-titled for #100, parent None — the unlinked case.
     backend.seed_tracker(102, &render::phase_title(100, 2, "orphan"), "body");
     // Phase-titled for ANOTHER epic: not this tracker's concern.
     backend.seed_tracker(103, &render::phase_title(999, 1, "elsewhere"), "body");
-    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
     let linkage = row(&rows, REQ_PHASE_LINKAGE);
     assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
     assert!(linkage.detail.contains("#102"), "{}", linkage.detail);
@@ -2411,7 +2555,7 @@ fn audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue() {
 fn audit_rows_are_empty_for_a_non_tracker() {
     let backend = FakeBackend::new();
     backend.seed_tracker(7, "a plain issue", "prose with no markers\n");
-    let rows = audit_rows::epic_rows(&backend, 7).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 7, STATUS).expect("rows");
     assert!(rows.is_empty(), "{rows:?}");
     assert_eq!(backend.calls("children"), 0);
     assert_eq!(backend.calls("phase_titled_issues"), 0);
@@ -2422,7 +2566,7 @@ fn audit_rows_fail_a_body_whose_markers_cannot_be_rewritten() {
     let backend = FakeBackend::new();
     let body = format!("{PHASES_START}\na\n{PHASES_START}\nb\n{PHASES_END}\n");
     backend.seed_tracker(100, "[EPIC 100] An outcome", &body);
-    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
     let block = row(&rows, REQ_PHASES_BLOCK);
     assert_eq!(block.verdict, Verdict::Fail);
     assert!(
@@ -2447,7 +2591,7 @@ fn gh_backend_reads_a_childs_labels_with_its_body() {
     let backend = super::backend::GhEpicBackend::new(runner);
     let children = backend.children(8445).expect("parses");
     assert_eq!(children[0].labels, vec!["status:coded", "trusty-mpm"]);
-    assert_eq!(render::state_cell(&children[0]), "coded");
+    assert_eq!(render::state_cell(&children[0], STATUS), "coded");
     let calls = backend_calls(&backend);
     assert!(calls[1].contains(&"body,labels".to_string()), "{calls:?}");
 }
@@ -2469,6 +2613,17 @@ fn gh_backend_reads_a_parent_and_its_absence() {
     // A failed read is an error, never `None`.
     let backend = super::backend::GhEpicBackend::new(FakeRunner::new(vec![]));
     assert!(backend.parent(8448).is_err());
+}
+
+/// #8448 (review LOW 5): a `--json parent` answer always carries the key, so
+/// a document without it is a parse error — never "no parent", which would
+/// make the transition hook skip the sync.
+#[test]
+fn gh_backend_refuses_a_parent_read_with_no_parent_key() {
+    let backend =
+        super::backend::GhEpicBackend::new(FakeRunner::new(vec![ok_out(r#"{"number":8448}"#)]));
+    let err = backend.parent(8448).unwrap_err();
+    assert!(err.to_string().contains("parent of #8448"), "{err}");
 }
 
 #[test]
