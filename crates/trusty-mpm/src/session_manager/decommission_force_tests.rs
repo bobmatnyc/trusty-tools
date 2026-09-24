@@ -464,7 +464,9 @@ async fn force_decommission_keeps_a_worktree_whose_marker_is_corrupt() {
 }
 
 /// #7660 round 2: a `git worktree lock` keeps the tree, and the reason says
-/// it is locked.
+/// it is locked. #7660 round 3: the refusal must be tm's own — git's "cannot
+/// remove a locked working tree" also names the lock, so without the
+/// `--force declined` check this passed with the lock probe removed.
 #[tokio::test]
 async fn force_decommission_keeps_a_locked_worktree() {
     let fx = GitWorktreeFixture::new();
@@ -473,7 +475,24 @@ async fn force_decommission_keeps_a_locked_worktree() {
 
     let reason = kept_under_force(&wt).await;
 
+    assert!(reason.contains("--force declined"), "reason: {reason}");
     assert!(reason.contains("locked"), "reason: {reason}");
+}
+
+/// #7660 round 3, FAIL-CLOSED: a plain directory under `.worktrees/` that
+/// carries a legacy marker is not a worktree root — git answers for the
+/// enclosing main checkout — so `--force` has no proof to act on. Fails on the
+/// 1.7.2 fix, which ran no provenance check at all.
+#[test]
+fn force_blocker_refuses_a_directory_that_is_not_a_worktree_root() {
+    let fx = GitWorktreeFixture::new();
+    let plain = fx.repo.join(".worktrees").join("plain-7660");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+    std::fs::write(plain.join(WORKTREE_SENTINEL_FILE), b"").expect("write legacy marker");
+
+    let blocker = force_blocker(&plain).expect("a non-root directory must block");
+
+    assert!(blocker.contains("not a worktree root"), "{blocker}");
 }
 
 /// #7660 round 2, FAIL-CLOSED: a lock state that cannot be read (the git dir

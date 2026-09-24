@@ -1154,6 +1154,29 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     assert!(repo.exists() && repo2.join(".git").is_dir());
 }
 
+/// #7660 round 3: a session whose worktree is already gone exits 0 and says
+/// nothing was on disk. Fails before the fix, which printed "workspace NOT
+/// removed (still on disk)" for a directory that did not exist.
+#[tokio::test]
+async fn decommission_report_says_nothing_was_on_disk_for_an_absent_workspace() {
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
+    std::fs::remove_dir_all(&wt).expect("remove the worktree out of band");
+    let client = reqwest::Client::new();
+
+    let outcome = super::super::managed_route::executor(&client, &url)
+        .decommission_managed_target(&id, false)
+        .await
+        .expect("decommission");
+    let printed = super::decommission_report(&outcome);
+
+    assert!(printed.contains("no workspace was on disk"), "{printed}");
+    assert!(!printed.contains("still on disk"), "{printed}");
+    assert!(
+        super::decommission_kept_error(outcome.workspace_kept_reason.as_deref()).is_none(),
+        "an absent workspace is not a refusal"
+    );
+}
+
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
 /// `Err` — `prune.rs`'s bulk sweep records that `Err` as a failed row, and a
 /// softened 404 would make a raced session read as a clean teardown.

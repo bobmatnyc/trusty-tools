@@ -622,11 +622,25 @@ pub(crate) async fn session_decommission_routed(
 
 /// What `tm sessions decommission` prints on stdout (#7660): the verdict line,
 /// then the one-line by-design reason when the daemon kept a workspace tm
-/// never removes.
-/// Test: `session_decommission_routed_says_why_it_kept_the_main_checkout`.
+/// never removes. A `false` verdict with nothing kept and no path left on the
+/// tombstone means nothing was on disk, and says so instead of "still on disk".
+/// Test: `session_decommission_routed_says_why_it_kept_the_main_checkout`,
+/// `decommission_report_says_nothing_was_on_disk_for_an_absent_workspace`.
 pub(crate) fn decommission_report(
     outcome: &trusty_mpm::client::ManagedDecommissionOutcome,
 ) -> String {
+    // #7660: the tombstone keeps `workspace_path` only while the directory is
+    // on disk, so an empty one with no kept reason is an absent workspace.
+    if outcome.workspace_removed == Some(false)
+        && outcome.workspace_kept_reason.is_none()
+        && outcome.workspace_kept_by_design.is_none()
+        && outcome.summary.workspace_path.is_none()
+    {
+        return format!(
+            "decommissioned {} — tombstone record kept; no workspace was on disk to remove",
+            outcome.summary.id
+        );
+    }
     let verdict = decommission_message(&outcome.summary.id, outcome.workspace_removed);
     match outcome.workspace_kept_by_design.as_deref() {
         Some(why) => format!("{verdict}\n{why}"),

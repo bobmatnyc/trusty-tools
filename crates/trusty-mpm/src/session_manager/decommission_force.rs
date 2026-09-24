@@ -449,7 +449,8 @@ fn ownership_blocker(ws: &Path) -> Option<String> {
 /// A failed or malformed answer, a toplevel other than `ws`, and a git dir
 /// equal to the common dir (a main checkout) are each an `Err` naming why.
 /// Test: `force_decommission_keeps_a_main_checkout_under_the_worktrees_dir`,
-/// `force_decommission_keeps_a_worktree_git_cannot_resolve`.
+/// `force_decommission_keeps_a_worktree_git_cannot_resolve`,
+/// `force_blocker_refuses_a_directory_that_is_not_a_worktree_root`.
 fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
     let args = [
         "rev-parse",
