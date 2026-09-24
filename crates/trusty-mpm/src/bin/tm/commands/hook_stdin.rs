@@ -317,7 +317,7 @@ async fn audit_then_deny_and_exit(
     crate::commands::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
     println!(
         "{}",
-        crate::commands::pm_guard_response::build_pretooluse_deny_response(&reason)
+        crate::commands::pm_guard_response::build_pm_guard_deny_response(&reason)
     );
     exit_after_decision()
 }

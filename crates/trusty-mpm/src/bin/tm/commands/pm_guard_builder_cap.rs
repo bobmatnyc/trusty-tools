@@ -577,7 +577,7 @@ pub(crate) async fn emit_builder_cap_or(
             super::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
             println!(
                 "{}",
-                super::pm_guard_response::build_pretooluse_deny_response(&reason)
+                super::pm_guard_response::build_pm_guard_deny_response(&reason)
             );
         }
         // #8261: the slot notice merges INTO the grant's own object — a second

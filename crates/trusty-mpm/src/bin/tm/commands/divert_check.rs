@@ -37,7 +37,7 @@ use trusty_mpm::core::mcp_session_env::DIVERT_MIN_LINES_ENV;
 
 use crate::commands::divert_worker::{WORKER_BINARY, worker_available};
 use crate::commands::misc::{DISABLE_HOOKS_ENV, read_stdin_hook_payload};
-use crate::commands::pm_guard::build_pretooluse_deny_response;
+use crate::commands::pm_guard_response::build_pretooluse_deny_response;
 
 /// Bash commands that read a whole file to stdout.
 ///

@@ -8,8 +8,10 @@
 //! file under the 500-SLOC cap when #7172 added a rule to it.
 //!
 //! What: [`build_pretooluse_deny_response`] blocks a tool call;
-//! [`build_pretooluse_context_response`] speaks to the agent and decides
-//! nothing. Neither ever emits an explicit `allow` — see each doc for why.
+//! [`build_pm_guard_deny_response`] is the same deny carrying the
+//! [`PM_GUARD_REFUSAL_PREFIX`] every `tm hook --pm-guard` refusal starts with
+//! (#8546); [`build_pretooluse_context_response`] speaks to the agent and
+//! decides nothing. None ever emits an explicit `allow` — see each doc for why.
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
@@ -38,6 +40,34 @@ pub(crate) fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value 
             "permissionDecisionReason": reason
         }
     })
+}
+
+/// The text every refusal `tm hook --pm-guard` prints begins with (#8546).
+///
+/// Why: the Claude Code harness refuses some tool calls itself — for example a
+/// Bash command "too complex to verify that it stays inside the worktree" — and
+/// both refusals reach the agent and the operator as bare text. The prefix is
+/// how a reader tells tm's refusal from the harness's, so it is never added to
+/// another layer's refusal: `divert_check` prints its own, unprefixed.
+/// What: the literal `tm pm-guard: `.
+/// Test: `pm_guard_deny_carries_the_prefix_exactly_once`.
+pub(crate) const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
+
+/// Build the deny for a `tm hook --pm-guard` refusal: `reason` behind
+/// [`PM_GUARD_REFUSAL_PREFIX`].
+///
+/// Why (#8546): the one builder every pm-guard deny site calls, so the prefix
+/// is added in one place instead of being written into ~30 reason strings, any
+/// of which a new rule could forget.
+/// What: [`build_pretooluse_deny_response`] over `reason` with the prefix
+/// prepended; a `reason` that already starts with it is not prefixed twice.
+/// Test: `pm_guard_deny_carries_the_prefix_exactly_once`,
+/// `pm_guard_modules_never_print_an_unprefixed_deny`.
+pub(crate) fn build_pm_guard_deny_response(reason: &str) -> serde_json::Value {
+    let body = reason
+        .strip_prefix(PM_GUARD_REFUSAL_PREFIX)
+        .unwrap_or(reason);
+    build_pretooluse_deny_response(&format!("{PM_GUARD_REFUSAL_PREFIX}{body}"))
 }
 
 /// Build a `hookSpecificOutput.additionalContext` body — a message TO the agent
@@ -81,6 +111,88 @@ mod tests {
         assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "nope");
         // Display is compact single-line JSON (protocol: stdout is only the object).
         assert!(!v.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn pm_guard_deny_carries_the_prefix_exactly_once() {
+        for reason in ["nope", "tm pm-guard: nope"] {
+            let v = build_pm_guard_deny_response(reason);
+            assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+            assert_eq!(
+                v["hookSpecificOutput"]["permissionDecisionReason"], "tm pm-guard: nope",
+                "input {reason:?}"
+            );
+        }
+        // The generic builder, which other layers use, adds nothing.
+        assert_eq!(
+            build_pretooluse_deny_response("nope")["hookSpecificOutput"]["permissionDecisionReason"],
+            "nope"
+        );
+    }
+
+    /// Every production `.rs` file of the pm-guard hook: `pm_guard*` and
+    /// `hook_stdin*` under `commands/`, recursing into `pm_guard_*` directories,
+    /// skipping `tests.rs` and `*_tests.rs`.
+    fn pm_guard_module_sources() -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tm/commands");
+        let mut out = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read commands dir") {
+                let path = entry.expect("dir entry").path();
+                let rel = path.strip_prefix(&root).expect("under commands dir");
+                let rel = rel.to_string_lossy();
+                if !(rel.starts_with("pm_guard") || rel.starts_with("hook_stdin")) {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let is_test = name == "tests.rs" || name.ends_with("_tests.rs");
+                if name.ends_with(".rs") && !is_test {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pm_guard_modules_never_print_an_unprefixed_deny() {
+        // #8546: a refusal added to the pm-guard hook through the generic
+        // builder, or through a hand-built deny object, would reach the
+        // operator without the `tm pm-guard:` prefix. This scan fails on it
+        // whether or not any test exercises the new path.
+        let sources = pm_guard_module_sources();
+        assert!(sources.len() > 10, "scan found too few files: {sources:?}");
+        let mut offenders = Vec::new();
+        for path in sources {
+            if path.ends_with("pm_guard_response.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let production = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (i, line) in production.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if code.contains("build_pretooluse_deny_response")
+                    || code.contains("\"permissionDecision\"")
+                {
+                    offenders.push(format!("{}:{}: {code}", path.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "pm-guard modules must deny through build_pm_guard_deny_response: {offenders:#?}"
+        );
     }
 
     #[test]

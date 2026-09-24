@@ -178,3 +178,38 @@ pub fn write_disk_threshold(home: &Path, pct: u8) {
     )
     .expect("write config");
 }
+
+/// The prefix every `tm hook --pm-guard` refusal starts with (#8546).
+///
+/// Mirrors `PM_GUARD_REFUSAL_PREFIX` in the `tm` binary, which an integration
+/// target cannot import.
+pub const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
+
+/// Assert that every deny object in a `tm hook --pm-guard` stdout names its
+/// layer: the reason starts with [`PM_GUARD_REFUSAL_PREFIX`] and carries it
+/// exactly once (#8546).
+///
+/// Why: every pm-guard integration collector calls this, so a refusal path
+/// added later without the prefix fails the first test that exercises it —
+/// the test author does not have to remember to assert it.
+/// What: parses each stdout line; a line that is not a JSON deny is ignored,
+/// because an ALLOW prints nothing and a grant prints `updatedInput`.
+pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
+    for line in stdout.lines() {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let output = &parsed["hookSpecificOutput"];
+        if output["permissionDecision"] != "deny" {
+            continue;
+        }
+        let reason = output["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with(PM_GUARD_REFUSAL_PREFIX)
+                && reason.matches(PM_GUARD_REFUSAL_PREFIX.trim_end()).count() == 1,
+            "a tm pm-guard refusal must start with {PM_GUARD_REFUSAL_PREFIX:?} exactly once: {reason:?}"
+        );
+    }
+}

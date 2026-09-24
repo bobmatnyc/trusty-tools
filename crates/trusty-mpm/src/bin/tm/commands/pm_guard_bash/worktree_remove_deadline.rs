@@ -35,7 +35,7 @@ use super::worktree_remove_rechecks::{
     CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
     CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks, recheck_deny,
 };
-use crate::commands::pm_guard::{audit_denied_tool, build_pretooluse_deny_response};
+use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_dispatch;
 use std::io::Write;
 
@@ -113,7 +113,7 @@ pub(crate) async fn print_deny_then_audit(
     reason: &str,
     started: Instant,
 ) {
-    println!("{}", build_pretooluse_deny_response(reason));
+    println!("{}", build_pm_guard_deny_response(reason));
     // Nothing useful can be done with a flush error; the deny is written.
     let _ = std::io::stdout().flush();
     let left = remaining(DECISION_DEADLINE, started);
