@@ -224,7 +224,7 @@ pub(crate) fn tmux_priority_row(
 /// Probe the live tmux server and build the row. Read-only.
 ///
 /// Test: the pure halves are covered in `doctor_tmux_priority_tests.rs`; this
-/// wiring by `run_doctor_produces_sixty_checks`.
+/// wiring by `run_doctor_produces_sixty_one_checks`.
 pub(crate) fn check_tmux_priority() -> DoctorCheck {
     tmux_priority_row(cfg!(target_os = "macos"), || {
         let bin = crate::core::tmux::resolve_tmux_binary_or_bare();

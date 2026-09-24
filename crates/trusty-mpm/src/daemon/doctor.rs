@@ -122,6 +122,15 @@ use doctor_skill_drift::check_skill_staleness;
 mod doctor_binary_provenance;
 use doctor_binary_provenance::check_binary_provenance;
 
+// #8482: the row above orders two RELEASE labels against cargo's registry
+// ledger and never reads the source tree; this one compares the binary's
+// EMBEDDED assets against `origin/main`, which is the only way a binary whose
+// bundled skills lag the repo is visible at all — `skill_staleness` compares
+// deployed files against those same embedded assets and is structurally blind.
+#[path = "doctor_bundled_asset_lag.rs"]
+mod doctor_bundled_asset_lag;
+use doctor_bundled_asset_lag::check_bundled_asset_lag;
+
 // #4605: the reachability half for SKILLS — `check_skill_staleness` above
 // compares against the deploy MANIFEST, so a bundled skill absent from that
 // manifest is outside everything it can see and reports a clean `Ok` while the
@@ -414,7 +423,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_checks`,
+/// Test: `run_doctor_produces_sixty_one_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -650,6 +659,12 @@ pub(crate) async fn run_doctor_with_claims(
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
     checks.push(check_binary_provenance());
+    // #8482: and this is the half the row above cannot reach — the binary's
+    // own embedded skill assets against `origin/main`. Skips outside
+    // `bobmatnyc/trusty-tools`, where the comparison is meaningless; UNKNOWN,
+    // never Ok, whenever the source tree could not be read. Read-only: it
+    // never fetches, installs, or deploys.
+    checks.push(check_bundled_asset_lag(project_dir));
     // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
     // every write while `tm ls` keeps serving the daemon's in-memory copy, so
     // without this probe the condition is invisible until someone attempts a
@@ -788,7 +803,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_one_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
