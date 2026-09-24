@@ -36,6 +36,7 @@ fn text(section: SectionId, body: &str) -> InstructionBlock {
         },
         join_before: Join::Rule,
         optional: false,
+        pinned: false,
     }
 }
 
@@ -46,6 +47,7 @@ fn generated(section: SectionId, generator: Generator, optional: bool) -> Instru
         body: BlockBody::Generated { generator },
         join_before: Join::Rule,
         optional,
+        pinned: false,
     }
 }
 
@@ -231,6 +233,7 @@ fn file_body_resolves_through_the_bundled_table() {
         },
         join_before: Join::Rule,
         optional: false,
+        pinned: false,
     };
 
     assert_eq!(package.validate(), Ok(()));
