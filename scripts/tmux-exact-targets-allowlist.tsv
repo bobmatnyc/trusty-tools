@@ -4,3 +4,15 @@
 crates/trusty-common/src/tmux_tests.rs	assert_eq!\(kill, \["kill-session", "-t", "\$"\]	asserts the unresolvable `$` sentinel an empty session name renders (#8443)
 crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#S"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged
 crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#\{pane_tty\}"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t s:0 \| grep -n error",	#8439 classifier fixture, not a tmux call: the bare target an agent types must be allowed, and the classifier refuses `=`
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -pt main -S -200 \| grep -E \'fail\|error\' \| tail -5",	#8439 classifier fixture, not a tmux call: the clustered `-pt main` form an agent types must be allowed
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	^\s*"tmux capture-pane -t s:0",$	#8439 classifier fixture, not a tmux call: refused for missing `-p`; an `=` target would be refused for a different reason
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t \'#\{session_name\}\'",	#8439 classifier fixture, not a tmux call: a format-expanding `-t` value the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t \'a b\'",	#8439 classifier fixture, not a tmux call: a `-t` value with a space the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -S-200 -t main:0\.1",	#8439 classifier fixture, not a tmux call: the bare session:window.pane form an agent types must be allowed
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"for x in a; do tmux capture-pane -p -t \\"\$x\\"; done",	#8439 classifier fixture, not a tmux call: a loop variable as `-t` value the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-print",$	`find -print` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-not",$	`find -not` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-mount",$	`find -mount` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-quit",$	`find -quit` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	Some\("-lint"\) => \{$	`plutil -lint` verb match arm; the gate reads a quoted word ending in t as a -t cluster

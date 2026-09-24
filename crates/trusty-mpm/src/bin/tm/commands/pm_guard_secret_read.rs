@@ -1862,6 +1862,20 @@ mod tests {
         }
     }
 
+    /// #8439: when an unknown git global option leaves the subcommand
+    /// unresolved, the ref-name and pattern exemptions are withdrawn — the
+    /// secret operand is scanned as a file and denied.
+    #[test]
+    fn an_unknown_git_global_option_withdraws_the_git_exemptions() {
+        for command in [
+            "git --shallow-file x branch secrets.txt",
+            "git --shallow-file x checkout -b .env",
+            "git --shallow-file x grep -n KEY .env",
+        ] {
+            assert!(eval(command).is_some(), "must deny: `{command}`");
+        }
+    }
+
     /// The ref position withdraws ONE arm, and only in a ref position.
     ///
     /// Why: #7498 round 3's acceptance criterion — an implementation that
