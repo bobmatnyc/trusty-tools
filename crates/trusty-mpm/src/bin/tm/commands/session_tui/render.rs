@@ -22,6 +22,8 @@ use ratatui::{
 };
 use trusty_mpm::client::ManagedSessionSummary;
 
+use crate::commands::session_picker_render::{StateColor, session_color};
+
 use super::layout::{self, Column, MARKER_WIDTH};
 use super::state::{Mode, Severity, TuiState};
 
@@ -164,7 +166,10 @@ fn render_table(
     let rows: Vec<Row> = sessions[start..start + len]
         .iter()
         .enumerate()
-        .map(|(offset, session)| row(&columns, session, start + offset == state.selected()))
+        .map(|(offset, session)| {
+            let selected = start + offset == state.selected();
+            row(&columns, session, selected, state.use_color())
+        })
         .collect();
     let header = Row::new(
         std::iter::once(String::new())
@@ -187,7 +192,15 @@ fn render_table(
 }
 
 /// Build one table row, marked and highlighted when it is the selected one.
-fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> Row<'static> {
+///
+/// #8506: an unselected row takes its whole-row color from the shared
+/// [`session_color`] mapping, and none at all when `use_color` is off.
+fn row(
+    columns: &[Column],
+    session: &ManagedSessionSummary,
+    selected: bool,
+    use_color: bool,
+) -> Row<'static> {
     let cells: Vec<String> = std::iter::once(if selected {
         "▸".to_string()
     } else {
@@ -195,16 +208,36 @@ fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> R
     })
     .chain(columns.iter().map(|c| layout::cell(*c, session)))
     .collect();
-    let style = match (selected, session.attached, session.unresumable) {
-        (true, _, _) => Style::default()
+    let style = if selected {
+        Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-        (false, _, true) => Style::default().fg(Color::Red),
-        (false, true, _) => Style::default().fg(Color::Cyan),
-        _ => Style::default(),
+            .add_modifier(Modifier::BOLD)
+    } else if use_color {
+        state_style(session_color(session))
+    } else {
+        Style::default()
     };
     Row::new(cells).style(style)
+}
+
+/// The ratatui style for a [`StateColor`] — the TUI's half of the shared
+/// mapping, whose ANSI half is `session_picker_render::colorize`.
+///
+/// Test: `render_paints_each_row_in_its_state_color`.
+pub(crate) fn state_style(color: StateColor) -> Style {
+    let style = Style::default();
+    match color {
+        StateColor::Green => style.fg(Color::Green),
+        StateColor::AttachedCyan => style.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        StateColor::Dim => style.add_modifier(Modifier::DIM),
+        StateColor::Red => style.fg(Color::Red),
+        StateColor::Yellow => style.fg(Color::Yellow),
+        StateColor::Blue => style.fg(Color::Blue),
+        StateColor::Magenta => style.fg(Color::Magenta),
+        StateColor::Cyan => style.fg(Color::Cyan),
+        StateColor::Plain => style,
+    }
 }
 
 /// Draw a centered modal with `title` over the list.

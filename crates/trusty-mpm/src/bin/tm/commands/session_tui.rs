@@ -132,7 +132,11 @@ pub(crate) async fn run_session_tui(
     self_tmux_name: Option<String>,
 ) -> anyhow::Result<()> {
     let mut sessions = sessions;
-    let mut state = TuiState::new(self_session_id, self_tmux_name);
+    // #8506: the same stdout TTY + `NO_COLOR` gate the static table uses.
+    let use_color = super::session_picker_render::table_use_color(
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    );
+    let mut state = TuiState::new(self_session_id, self_tmux_name).with_color(use_color);
     let mut terminal = terminal::enter()?;
     // The guard restores cooked mode and the main screen on every exit path —
     // normal return AND panic unwind — so it is the SOLE teardown.

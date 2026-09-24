@@ -40,10 +40,10 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// strings turn into a color, and keeps [`colorize`] trivially testable
 /// against each variant.
 /// What: `Green` (active, not attached), `AttachedCyan` (a client is
-/// attached — bold cyan, deliberately distinct from plain `Green`), `Dim`
-/// (stopped — gray/faint), `Red` (errored, dead, deleted), `Yellow`
-/// (provisioning), `Plain` (unrecognised/future state — never fails closed
-/// into a misleading color).
+/// attached — bold cyan, deliberately distinct from plain `Green`), `Yellow`
+/// (stopped), `Red` (errored, dead, deleted), `Blue` (provisioning), `Plain`
+/// (unrecognised/future state — never fails closed into a misleading color).
+/// `Dim` is the `ID` column hue; #8506 moved `stopped` off it to `Yellow`.
 ///
 /// `Magenta` and `Cyan` are COLUMN hues rather than state hues — the `tm ls`
 /// table colors its `NUM` and `NAME` columns through the same [`colorize`]
@@ -57,6 +57,7 @@ pub(crate) enum StateColor {
     Dim,
     Red,
     Yellow,
+    Blue,
     Magenta,
     Cyan,
     Plain,
@@ -74,6 +75,7 @@ fn ansi_param(color: StateColor) -> Option<&'static str> {
         StateColor::Dim => Some("2"),
         StateColor::Red => Some("31"),
         StateColor::Yellow => Some("33"),
+        StateColor::Blue => Some("34"),
         StateColor::Magenta => Some("35"),
         StateColor::Cyan => Some("36"),
         StateColor::Plain => None,
@@ -99,15 +101,15 @@ pub(crate) fn colorize(text: &str, color: StateColor, use_color: bool) -> String
 
 /// Resolve the color for a session's displayed state word.
 ///
-/// Why: centralizes Bob's suggested mapping (active=green, attached=cyan/
-/// bold-green, stopped=dim/gray, dead/errored=red, provisioning=yellow) so
-/// [`format_session_row`]'s three call shapes (deleted/unresumable/normal)
-/// never diverge on what a given state renders as.
+/// Why: centralizes the owner's mapping — active=green, stopped=yellow,
+/// dead=red (#8506, replacing #3730's stopped=dim) — plus the two extra states
+/// #3730 colored: attached (bold cyan) and provisioning, moved from yellow to
+/// blue so it no longer shares stopped's hue.
 /// What: `attached` wins over every `state` value (a client is connected
 /// RIGHT NOW, the strongest signal); otherwise `"active"` → `Green`,
-/// `"stopped"` → `Dim`, `"errored"` → `Red`, `"provisioning"` → `Yellow`,
+/// `"stopped"` → `Yellow`, `"errored"` → `Red`, `"provisioning"` → `Blue`,
 /// anything else → `Plain` (never guesses a color for a state this mapping
-/// doesn't recognise).
+/// doesn't recognise — `decommissioned` included).
 /// Test: `state_color_attached_wins_over_active`, `state_color_maps_known_states`,
 /// `state_color_unknown_state_is_plain`.
 pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
@@ -116,12 +118,39 @@ pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
     }
     match state {
         "active" => StateColor::Green,
-        "stopped" => StateColor::Dim,
-        "errored" => StateColor::Red,
-        "provisioning" => StateColor::Yellow,
+        // #8506: owner mapping — stopped=yellow, dead=red; provisioning moves
+        // to blue so it no longer reads as stopped.
+        "stopped" => StateColor::Yellow,
+        "errored" => DEAD_COLOR,
+        "provisioning" => StateColor::Blue,
         _ => StateColor::Plain,
     }
 }
+
+/// Resolve the color for a whole session row — the one mapping every `tm ls`
+/// surface uses.
+///
+/// Why (#8506): the static table, the session TUI, and the numbered picker
+/// each colored rows by their own rule, which is how the TUI redesign (#7248)
+/// dropped #3730's state colors without a failing test. One function over the
+/// summary keeps the three surfaces from drifting again.
+/// What: a slot tombstone (`deleted`) or an `unresumable` session (the `[dead]`
+/// marker) → `Red`, ahead of `attached` and the state; otherwise
+/// [`state_color`].
+/// Test: `session_color_maps_every_state`,
+/// `session_color_dead_wins_over_state_and_attached`.
+pub(crate) fn session_color(s: &ManagedSessionSummary) -> StateColor {
+    if s.deleted || s.unresumable {
+        return DEAD_COLOR;
+    }
+    state_color(&s.state, s.attached)
+}
+
+/// The owner's "dead" hue (#8506): errored, unresumable, and slot tombstones.
+///
+/// Named so the `tm ls` tombstone row, which has only a slot number and no
+/// summary to hand [`session_color`], paints the same hue.
+pub(crate) const DEAD_COLOR: StateColor = StateColor::Red;
 
 /// Decide whether the picker should emit color, resolved ONCE per invocation.
 ///
@@ -177,18 +206,20 @@ fn color_enabled(tty: bool) -> bool {
 /// colored red); `unresumable` → the DEAD notice, its state word colored red;
 /// otherwise the normal row, `[N] <name> (<state>)` — `<state>` is
 /// `"attached"` when a client is connected (else the raw `state` string),
-/// colored via [`state_color`]. Never prints a verb in any branch.
+/// colored via [`session_color`]. Never prints a verb in any branch.
 /// Test: `format_session_row_normal_is_verbless`,
 /// `format_session_row_attached_uses_attached_word`,
 /// `format_session_row_deleted_notice`, `format_session_row_unresumable_notice`,
 /// `format_session_row_color_disabled_is_plain_text`.
 pub(crate) fn format_session_row(num: u32, s: &ManagedSessionSummary, use_color: bool) -> String {
+    // #8506: every branch takes its color from the shared `session_color`.
+    let color = session_color(s);
     if s.deleted {
-        let label = colorize("-- deleted --", StateColor::Red, use_color);
+        let label = colorize("-- deleted --", color, use_color);
         return format!("[{num}] {label}");
     }
     if s.unresumable {
-        let state = colorize(&s.state, StateColor::Red, use_color);
+        let state = colorize(&s.state, color, use_color);
         return format!(
             "[{num}] {} ({state}) — DEAD: workspace removed; use [d{num}] to remove the record",
             s.name
@@ -199,7 +230,6 @@ pub(crate) fn format_session_row(num: u32, s: &ManagedSessionSummary, use_color:
     } else {
         s.state.as_str()
     };
-    let color = state_color(&s.state, s.attached);
     let state = colorize(shown_state, color, use_color);
     format!("[{num}] {} ({state})", s.name)
 }

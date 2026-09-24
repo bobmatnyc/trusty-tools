@@ -177,6 +177,8 @@ pub(crate) struct TuiState {
     message: Option<(String, Severity)>,
     self_session_id: Option<String>,
     self_tmux_name: Option<String>,
+    /// #8506: paint rows in their state color; off under `NO_COLOR`.
+    use_color: bool,
 }
 
 impl TuiState {
@@ -194,7 +196,22 @@ impl TuiState {
             message: None,
             self_session_id,
             self_tmux_name,
+            use_color: true,
         }
+    }
+
+    /// Set whether rows are painted in their state color (#8506).
+    ///
+    /// The gate is resolved at the I/O boundary (`run_session_tui`) and
+    /// injected, for the same #5544 reason as the two self-identifiers.
+    pub(crate) fn with_color(mut self, use_color: bool) -> Self {
+        self.use_color = use_color;
+        self
+    }
+
+    /// Whether rows are painted in their state color.
+    pub(crate) fn use_color(&self) -> bool {
+        self.use_color
     }
 
     /// The current overlay.

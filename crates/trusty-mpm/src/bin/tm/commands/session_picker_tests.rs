@@ -16,7 +16,7 @@ use trusty_mpm::client::ManagedSessionSummary;
 use super::{LaunchNewRequest, PickerDecision, next_launch_slot};
 use crate::commands::session_picker_render::{
     StateColor, colorize, command_legend, format_session_row, picker_use_color,
-    restart_confirm_hint, state_color, table_use_color,
+    restart_confirm_hint, session_color, state_color, table_use_color,
 };
 
 /// [`super::parse_picker_choice`] with the pre-#3552 bare-Enter target.
@@ -330,9 +330,55 @@ fn state_color_attached_wins_over_active() {
 #[test]
 fn state_color_maps_known_states() {
     assert_eq!(state_color("active", false), StateColor::Green);
-    assert_eq!(state_color("stopped", false), StateColor::Dim);
+    // #8506: the owner's mapping replaces #3730's stopped=dim; provisioning
+    // leaves yellow so it cannot read as stopped.
+    assert_eq!(state_color("stopped", false), StateColor::Yellow);
     assert_eq!(state_color("errored", false), StateColor::Red);
-    assert_eq!(state_color("provisioning", false), StateColor::Yellow);
+    assert_eq!(state_color("provisioning", false), StateColor::Blue);
+    assert_eq!(state_color("decommissioned", false), StateColor::Plain);
+}
+
+/// Why (#8506): one row mapping feeds the static table, the TUI and the
+/// numbered picker, so each state the owner named is pinned on it directly.
+/// Test: this test.
+#[test]
+fn session_color_maps_every_state() {
+    let cases = [
+        ("active", StateColor::Green),
+        ("stopped", StateColor::Yellow),
+        ("errored", StateColor::Red),
+        ("provisioning", StateColor::Blue),
+        ("decommissioned", StateColor::Plain),
+        ("deleted", StateColor::Plain),
+        ("some-future-state", StateColor::Plain),
+    ];
+    for (state, want) in cases {
+        assert_eq!(
+            session_color(&session("tm-x-01", state, 3)),
+            want,
+            "state {state}"
+        );
+    }
+    let mut attached = session("tm-x-01", "active", 3);
+    attached.attached = true;
+    assert_eq!(session_color(&attached), StateColor::AttachedCyan);
+}
+
+/// Why (#8506): the `[dead]` marker (`unresumable`) and a slot tombstone are
+/// the owner's "dead"; they must read red whatever state or attachment the
+/// record also carries.
+/// Test: this test.
+#[test]
+fn session_color_dead_wins_over_state_and_attached() {
+    for state in ["active", "stopped", "provisioning"] {
+        let mut unresumable = session("tm-x-01", state, 3);
+        unresumable.unresumable = true;
+        unresumable.attached = true;
+        assert_eq!(session_color(&unresumable), StateColor::Red, "{state}");
+        let mut tombstone = session("tm-x-01", state, 3);
+        tombstone.deleted = true;
+        assert_eq!(session_color(&tombstone), StateColor::Red, "{state}");
+    }
 }
 
 #[test]
