@@ -806,10 +806,15 @@ pub(super) fn prepare_session_inner(
     // a style, the manifest's value applies; otherwise the higher source wins
     // exactly as before (zero regression for the flag/config paths). `config` was
     // loaded ONCE at the top of this function.
-    let effective_style: Option<String> = explicit_style
-        .map(str::to_owned)
-        .or_else(|| config.style.active.clone())
-        .or_else(|| plan.style.clone());
+    // #8533: the committed `.trusty-mpm.toml` `[style] active` sits between the
+    // flag and the host config, and a project style file resolves like a
+    // bundled one.
+    let effective_style: Option<String> = crate::core::output_style::effective_style_id(
+        project_dir,
+        explicit_style,
+        &config,
+        plan.style.as_deref(),
+    );
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -863,19 +868,11 @@ pub(super) fn prepare_session_inner(
     // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
     // it directly; older builds pick it up via prompt injection at the
     // `build_system_prompt_for` seam.
-    let active_style_id = match crate::core::output_style::resolve_active_style(
-        &config,
-        effective_style.as_deref(),
-    ) {
-        Ok(style) => style.id,
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                "falling back to the default output style for settings.json"
-            );
-            crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID
-        }
-    };
+    // #8533: an unknown id is never a silent fallback — the warning joins the
+    // launch's asset notices, which every launch path prints.
+    let (active_style, style_notice) =
+        crate::core::output_style::resolve_or_default(project_dir, effective_style.as_deref());
+    let active_style_id = active_style.id();
 
     // Set the Claude Code output style so the launched session's status bar
     // reads `style:<active_style_id>`. A failure here is non-fatal: the session
@@ -1151,8 +1148,9 @@ pub(super) fn prepare_session_inner(
 
     // #6649: computed LAST so the skill tier it reads is the one this launch
     // leaves behind, not the one it inherited.
-    let asset_notices =
+    let mut asset_notices =
         asset_notices::launch_asset_notices(fw, project_dir, quarantine_report.as_ref());
+    asset_notices.extend(style_notice);
 
     Ok(PrepReport {
         deploy,

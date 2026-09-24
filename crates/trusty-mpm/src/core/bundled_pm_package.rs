@@ -148,6 +148,30 @@ pub(crate) fn authored_run(sections: &[SectionId]) -> Option<String> {
         .map(|package| package.authored_run(sections))
 }
 
+/// The pinned blocks of `section`, joined with a paragraph break (#8533).
+///
+/// Why: the roster-absent string assembly replaces a section without the
+/// package's block model, and must still keep the feature statement a pinned
+/// block carries.
+/// What: the trimmed authored text of every pinned block owned by `section`, in
+/// block order; empty when there is none or the manifest is unreadable.
+/// Test: `a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path`.
+pub(crate) fn pinned_run(section: SectionId) -> String {
+    let Ok(package) = bundled_fallback_package() else {
+        return String::new();
+    };
+    package
+        .blocks
+        .iter()
+        .filter(|b| b.section == section && b.pinned)
+        .filter_map(|b| match b.body.authored() {
+            Some(Ok(text)) => Some(text.trim()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Compose the bundled-fallback PM prompt, applying named-section overrides.
 ///
 /// Why: the single entry point `resolve_pm_prompt` calls for configuration 1.

@@ -192,3 +192,62 @@ fn a_clean_project_produces_no_override_diagnostics() {
         );
     }
 }
+
+#[test]
+fn instructions_reports_section_status_and_project_style() {
+    // #8533: the per-section table and the project style reach stderr, and the
+    // prompt on stdout matches the table. Against origin/main the report and
+    // the `PM-ALLOWLIST` token do not exist.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    write_project(tmp.path());
+    let claude_md = tmp.path().join("CLAUDE.md");
+    let mut text = std::fs::read_to_string(&claude_md).expect("read CLAUDE.md");
+    text.push_str(
+        "\n<!-- TRUSTY-MPM: IDENTITY START v=1 -->\n# Fixture Supervisor\n\
+         <!-- TRUSTY-MPM: IDENTITY END -->\n\n\
+         <!-- TRUSTY-MPM: PM-ALLOWLIST START v=1 -->\nFixture allowlist.\n\
+         <!-- TRUSTY-MPM: PM-ALLOWLIST END -->\n",
+    );
+    std::fs::write(&claude_md, text).expect("write CLAUDE.md");
+    let styles = tmp.path().join(".claude").join("output-styles");
+    std::fs::create_dir_all(&styles).expect("styles");
+    std::fs::write(
+        styles.join("fixture-voice.md"),
+        "---\nname: fixture-voice\n---\n\nVoice.\n",
+    )
+    .expect("style");
+    std::fs::write(
+        tmp.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let dir = tmp.path().to_string_lossy().into_owned();
+
+    let (stdout, stderr) = run_tm(&["sessions", "instructions", "--dir", &dir], None);
+
+    assert!(
+        stdout.contains("# Fixture Supervisor") && !stdout.contains("# PM Agent -- Trusty MPM"),
+        "the IDENTITY override must replace the package opening"
+    );
+    for needle in [
+        "instruction sections (package / overridden / declined):",
+        "output style: fixture-voice (project file",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "missing {needle:?} in stderr: {stderr}"
+        );
+    }
+    let row = |token: &str| {
+        stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{token} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(row("IDENTITY").contains("overridden"), "{stderr}");
+    assert!(row("PM-ALLOWLIST").contains("overridden"), "{stderr}");
+    assert!(row("CORE").contains("declined:"), "{stderr}");
+    assert!(row("SEARCH").contains("package"), "{stderr}");
+    assert!(!stderr.contains("NOT FOUND"), "{stderr}");
+}

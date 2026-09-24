@@ -138,8 +138,28 @@ pub const SCHEMA_JSON: &str =
 pub enum SectionId {
     /// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
     Identity,
-    /// The PM's core operating instructions (today's `PM_INSTRUCTIONS.md` body).
+    /// The safety core — the only tier-`fixed` section (#8533): Memory &
+    /// Instruction Sources and the Customization Surface.
     Core,
+    /// The PM allowlist. Split out of [`SectionId::Core`] by #8533.
+    PmAllowlist,
+    /// Delegation mechanics. Split out of [`SectionId::Core`] by #8533.
+    DelegationMechanics,
+    /// Agent routing and delegating well. Split out of [`SectionId::Core`] by #8533.
+    AgentRouting,
+    /// Parked-subagent re-engagement. Split out of [`SectionId::Core`] by #8533.
+    SubagentReEngagement,
+    /// The 5-phase workflow summary. Split out of [`SectionId::Core`] by #8533.
+    Phases,
+    /// The QA verification gate. Split out of [`SectionId::Core`] by #8533.
+    QaGate,
+    /// The git file-tracking protocol. Split out of [`SectionId::Core`] by #8533.
+    GitFileTracking,
+    /// Tickets, PRs and releases. Split out of [`SectionId::Core`] by #8533.
+    TicketsPrsReleases,
+    /// Messages, reports, sessions, prose style and clickable references.
+    /// Split out of [`SectionId::Core`] by #8533.
+    MessagesReportsSessions,
     /// When the PM runs without stopping, and when it may stop and ask.
     ///
     /// Was prose inside [`SectionId::Core`] until #8361. `core` is tier `fixed`,
@@ -182,12 +202,20 @@ impl SectionId {
     /// Why: `sections` must be declared in this order so a package manifest
     /// reads the same way in every project; the order is also the enum's `Ord`,
     /// so the check is a simple sortedness test.
-    /// What: the ten ids, floor-first-and-last around the six content
-    /// sections.
+    /// What: the nineteen ids, in prompt order of their first block.
     /// Test: `canonical_order_is_sorted_and_complete`.
-    pub const CANONICAL: [SectionId; 10] = [
+    pub const CANONICAL: [SectionId; 19] = [
         SectionId::Identity,
         SectionId::Core,
+        SectionId::PmAllowlist,
+        SectionId::DelegationMechanics,
+        SectionId::AgentRouting,
+        SectionId::SubagentReEngagement,
+        SectionId::Phases,
+        SectionId::QaGate,
+        SectionId::GitFileTracking,
+        SectionId::TicketsPrsReleases,
+        SectionId::MessagesReportsSessions,
         SectionId::AutonomousExecution,
         SectionId::Memory,
         SectionId::Search,
@@ -427,6 +455,15 @@ pub struct InstructionBlock {
     /// the structural guard against #4196.
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
+    /// Whether this authored block survives a named-section override (#8533).
+    ///
+    /// Why: agent selection, memory and code search are framework features, not
+    /// prose a project tunes. A pinned block carries a feature's statement inside
+    /// an otherwise replaceable section, so an override of that section still
+    /// emits it. Only an authored block may be pinned; a generated block is
+    /// already out of an override's reach.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 /// Serde helper: skip serializing `join_before` when it is the default.
@@ -536,6 +573,14 @@ pub enum ValidationError {
     /// An authored (`text` or `file`) block whose content is blank.
     #[error("block {index} ({section:?}) has an empty authored body; remove it instead")]
     EmptyAuthoredBody {
+        /// Index into `blocks`.
+        index: usize,
+        /// The owning section.
+        section: SectionId,
+    },
+    /// A generated block marked `pinned` (#8533); only authored blocks may be.
+    #[error("block {index} ({section:?}) is a generated block and may not be `pinned`")]
+    PinnedGeneratedBlock {
         /// Index into `blocks`.
         index: usize,
         /// The owning section.
@@ -752,6 +797,13 @@ impl InstructionPackage {
 
         for (index, block) in self.blocks.iter().enumerate() {
             let Some(authored) = block.body.authored() else {
+                // #8533: pinning is meaningful only for authored text.
+                if block.pinned {
+                    return Err(ValidationError::PinnedGeneratedBlock {
+                        index,
+                        section: block.section,
+                    });
+                }
                 continue;
             };
             let body = match authored {

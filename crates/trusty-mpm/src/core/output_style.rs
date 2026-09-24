@@ -319,7 +319,14 @@ pub const INJECTED_STYLE_HEADING: &str =
 /// and overrides are untouched — the style is purely additive and placed first.
 /// Test: `inject_prepends_style_block`, `inject_preserves_prompt`.
 pub fn inject_style_into_prompt(style: &BundledStyle, prompt: &str) -> String {
-    let body = strip_frontmatter(style.content).trim();
+    inject_style_text(style.content, prompt)
+}
+
+/// [`inject_style_into_prompt`] for a style's raw text, bundled or project (#8533).
+///
+/// Test: `inject_prepends_style_block`, `a_project_style_is_injected_when_native_is_unsupported`.
+pub fn inject_style_text(content: &str, prompt: &str) -> String {
+    let body = strip_frontmatter(content).trim();
     format!(
         "{INJECTED_STYLE_HEADING}\n\n{body}{sep}{prompt}",
         sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
@@ -401,19 +408,35 @@ pub fn apply_output_style_to_prompt(
 /// version detection (and fails safe to injection) via the wrapper above.
 /// What: loads [`MpmConfig::load_default`] and delegates to the pure
 /// [`maybe_inject_active_style`] core with the caller-supplied `native_supported`
-/// flag. `_project_dir` is accepted for symmetry / future project-scoped overrides.
-/// Test: `output_style_tests.rs` covers the pure core directly; the
+/// flag. #8533: the style is chosen by [`effective_style_id`] and resolved
+/// against the project's own style files too, so a project style reaches an
+/// older Claude Code; an unknown id warns and injects the default.
+/// Test: `a_project_style_is_injected_when_native_is_unsupported`; the
 /// stash/launch invariant under both flag values is covered by
 /// `prepare_session_stash_reflects_override` in `session_launch/tests.rs`.
 pub fn apply_output_style_to_prompt_with_native(
-    _project_dir: &Path,
+    project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
     native_supported: bool,
 ) -> String {
+    if native_supported {
+        return prompt;
+    }
     let config = MpmConfig::load_default();
-    maybe_inject_active_style(&config, explicit, prompt, native_supported)
+    let id = effective_style_id(project_dir, explicit, &config, None);
+    let (style, _warning) = resolve_or_default(project_dir, id.as_deref());
+    inject_style_text(style.content(), &prompt)
 }
+
+// #8533: project-local styles live in a child module (SLOC headroom).
+#[path = "output_style_project.rs"]
+mod project;
+pub use project::{
+    ActiveStyle, PROJECT_STYLES_DIR, describe_effective_style, effective_style_id,
+    project_selected_style,
+    project_style_ids, resolve_or_default, resolve_style_in_project,
+};
 
 #[cfg(test)]
 #[path = "output_style_tests.rs"]

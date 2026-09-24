@@ -595,8 +595,15 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
 /// (`claude_md_sections_tests.rs`).
 fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
     match named_override {
+        // #8533: the pinned agent-selection note survives the override here as
+        // it does on the package path; like the default, it only precedes a roster.
         Some(body) => match roster {
-            Some(roster) => format!("{}\n\n{}", body.trim(), roster.trim()),
+            Some(roster) => format!(
+                "{}\n\n{}\n\n{}",
+                body.trim(),
+                crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation),
+                roster.trim()
+            ),
             None => body.trim().to_string(),
         },
         None => delegation_with_roster(roster),
@@ -619,6 +626,13 @@ fn join_sections(sections: Vec<String>) -> String {
         .collect::<Vec<_>>()
         .join(SECTION_SEPARATOR)
 }
+
+// #8533: the per-section status report lives in a child module (SLOC cap).
+#[path = "instruction_section_report.rs"]
+mod section_report;
+pub use section_report::{
+    SectionState, SectionStatus, render_section_report, section_report_for, section_statuses,
+};
 
 #[cfg(test)]
 #[path = "instruction_overrides_tests.rs"]
