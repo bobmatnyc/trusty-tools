@@ -952,7 +952,10 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
     assert!(reason(&v).contains("names no owner"), "{}", reason(&v));
 
     let denied = agent_store_worktree(&fx, "denied-sentinel-5661");
-    let sentinel = denied.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    // #8511: the agent marker is written to the git admin dir.
+    let sentinel =
+        crate::session_manager::worktree_ownership_location::admin_sentinel_path(&denied)
+            .expect("an agent-store worktree has a git admin dir");
     GitWorktreeFixture::stamp_agent_sentinel(&denied, "agent-behind-a-locked-door");
     let _restore = deny_all(&sentinel);
     let v = classify(

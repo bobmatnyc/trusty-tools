@@ -131,8 +131,9 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, the stray-`.mcp.json`
-/// sweep (`stray_mcp_json`), and the LaunchAgent credential strip
-/// (`launchd_secrets`, #8236) — printing each item's path, what would change,
+/// sweep (`stray_mcp_json`), the LaunchAgent credential strip
+/// (`launchd_secrets`, #8236), and the ownership-marker move into the git
+/// admin dir across every registered project (`worktree_markers`, #8511) — printing each item's path, what would change,
 /// and the outcome. In dry run it closes by naming the flag that applies. It
 /// never deletes: `legacy_sources` findings are reported as refused, and a
 /// stray `.mcp.json` is RENAMED aside rather than removed.
@@ -252,6 +253,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             ),
         );
     }
+
+    // #8511: exclude the harness files and move legacy ownership markers into
+    // the git admin dir, across every registered project's trees.
+    steps.extend(
+        trusty_mpm::session_manager::worktree_marker_migration::repair_worktree_markers(
+            &trusty_mpm::daemon::managed_routes::inproject::repos_root(),
+            &trusty_mpm::project::default_adopted_anchors(),
+            mode,
+        ),
+    );
 
     print_steps(&steps, apply, FIX_APPLY_HINT);
 }

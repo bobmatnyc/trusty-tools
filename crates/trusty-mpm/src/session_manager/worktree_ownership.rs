@@ -52,6 +52,11 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, SessionRecord};
 use crate::core::agent::DelegationId;
 use crate::core::session::SessionId;
+// #8511: the strict reader, which keeps "missing" apart from "unreadable".
+// `OwnerReadError` is re-exported for the #7771 reclaim gate, its first reader.
+#[allow(unused_imports)]
+pub(crate) use super::worktree_ownership_location::OwnerReadError;
+pub(crate) use super::worktree_ownership_location::read_sentinel_owner_strict;
 
 /// JSON payload written into every SM-created worktree's ownership sentinel
 /// (#3649), replacing the pre-#3649 zero-byte convention.
@@ -273,8 +278,10 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 ///
 /// Why: the single call site every consumer (orphan-GC, decommission's owner
 /// gate) should use, so the tolerant-parse rule lives in exactly one place.
-/// What: reads `<worktree_path>/.trusty-mpm-worktree`; a missing file, an
-/// empty file, or a read/parse failure all resolve to
+/// What: [`read_sentinel_owner_strict`] with every failure folded in (#8511) —
+/// the admin-dir marker wins over the legacy in-tree file, and the read never
+/// writes (a marker moves only through `migrate_legacy_sentinel`);
+/// a missing file, an empty file, or a read/parse failure all resolve to
 /// [`SentinelOwner::Unknown`]; a valid [`WorktreeSentinel`] resolves to
 /// [`SentinelOwner::Known`].
 /// Test: `sentinel_owner_absent_file_is_unknown`,
@@ -282,16 +289,15 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 /// `sentinel_owner_garbage_file_is_unknown`,
 /// `sentinel_owner_round_trips_valid_payload`.
 pub(crate) fn read_sentinel_owner(worktree_path: &Path) -> SentinelOwner {
-    let sentinel_path = worktree_path.join(WORKTREE_SENTINEL_FILE);
-    let Ok(bytes) = std::fs::read(&sentinel_path) else {
-        return SentinelOwner::Unknown;
-    };
-    if bytes.is_empty() {
-        return SentinelOwner::Unknown;
-    }
-    let Ok(payload) = serde_json::from_slice::<WorktreeSentinel>(&bytes) else {
-        return SentinelOwner::Unknown;
-    };
+    // #8511: the strict reader, with missing, unreadable and corrupt all Unknown.
+    read_sentinel_owner_strict(worktree_path)
+        .ok()
+        .flatten()
+        .unwrap_or(SentinelOwner::Unknown)
+}
+
+/// The owner a parsed payload names (#8511: split out for the strict reader).
+pub(crate) fn owner_from_payload(payload: WorktreeSentinel) -> SentinelOwner {
     // #4311: agent first. Both fields present is a payload no writer produces,
     // and `Agent` is the answer that removes the LEAST authority — the
     // orphan-GC never deletes it — so a malformed sentinel resolves toward
@@ -312,7 +318,9 @@ pub(crate) fn read_sentinel_owner(worktree_path: &Path) -> SentinelOwner {
 /// only evidence of that authority that survives a daemon restart, which is
 /// what ADR-0023 point 4 requires of the ownership record.
 /// What: serialises a [`WorktreeSentinel::for_agent`] payload and writes it to
-/// `<worktree_path>/.trusty-mpm-worktree`. Both failure modes are propagated
+/// `git rev-parse --git-path trusty-mpm-worktree` for the tree (#8511), via
+/// [`super::worktree_ownership_location::write_sentinel_bytes`], so the tree
+/// stays clean for `git status`. Both failure modes are propagated
 /// rather than swallowed — the caller declines to register when this fails, so
 /// a silent success here would be the fail-open branch the write exists to
 /// close.
@@ -330,7 +338,8 @@ pub(crate) fn write_agent_sentinel(
 ) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(&WorktreeSentinel::for_agent(owner))
         .map_err(|e| std::io::Error::other(format!("serialize agent sentinel: {e}")))?;
-    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), bytes)
+    // #8511: the git admin dir, never the working tree.
+    super::worktree_ownership_location::write_sentinel_bytes(worktree_path, &bytes)
 }
 
 /// Take the harness's own ownership sentinel out of `worktree_path` (#7185).
@@ -345,6 +354,9 @@ pub(crate) fn write_agent_sentinel(
 /// disk. Clearing the marker is what makes git's answer match the decision tm
 /// already made; adding `--force` would instead override the one gate standing
 /// between the removal and an operator's unsaved work.
+/// Only the LEGACY in-tree marker needs this (#8511): a marker in the git admin
+/// dir is invisible to git's clean check, and `git worktree remove` deletes it
+/// with the admin dir.
 /// What: reads `<worktree_path>/.trusty-mpm-worktree`, removes it, and hands
 /// the bytes back so a caller whose removal then fails can put them back with
 /// [`restore_worktree_sentinel`] — the removal is what makes the deletion safe,

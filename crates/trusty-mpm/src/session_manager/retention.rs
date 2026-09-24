@@ -254,12 +254,14 @@ impl RetentionOutcome {
 /// Test: `workspace_needs_protection_treats_an_undetermined_path_as_protected`,
 /// `workspace_needs_protection_covers_a_session_worktree`,
 /// `workspace_needs_protection_ignores_a_plain_main_checkout`,
-/// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`.
+/// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`,
+/// `a_migrated_tree_with_an_unresolvable_git_entry_stays_protected`.
 pub(super) fn workspace_needs_protection(
     path: Option<&std::path::Path>,
     names: &trusty_common::workspace_layout::WorktreeDirNames,
     probe: impl Fn(&std::path::Path) -> std::io::Result<bool>,
 ) -> bool {
+    use super::worktree_ownership_location::AdminLocation;
     let Some(p) = path else {
         return false;
     };
@@ -271,6 +273,13 @@ pub(super) fn workspace_needs_protection(
     }
     super::decommission::is_session_worktree_with(p, names)
         || probe(&p.join(super::decommission::WORKTREE_SENTINEL_FILE)).unwrap_or(true)
+        // #8511: the marker may live in the git admin dir instead; a `.git`
+        // that does not resolve may hide one, so it is undetermined.
+        || match super::worktree_ownership_location::admin_location(p) {
+            AdminLocation::NotGit => false,
+            AdminLocation::At(admin) => probe(&admin).unwrap_or(true),
+            AdminLocation::Unresolvable(_) => true,
+        }
 }
 
 /// Two-observation gate before a candidate may be acted on destructively.

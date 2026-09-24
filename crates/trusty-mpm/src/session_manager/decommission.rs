@@ -200,7 +200,8 @@ pub(crate) fn is_session_worktree_with(
 /// `tm_provisioned_matches_the_removers_own_predicate`,
 /// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
 pub(crate) fn removal_permitted(path: &Path) -> bool {
-    path.join(WORKTREE_SENTINEL_FILE).exists()
+    // #8511: the marker may live in the git admin dir.
+    super::worktree_ownership_location::sentinel_present(path)
         || is_session_worktree(path)
         // #6561: the harness's own isolation store, which the agent-worktree
         // reaper already removes from.
@@ -341,8 +342,8 @@ pub(super) fn remove_session_worktree_guarded(
     //   • and the path is NOT under `.worktrees/` → NOT a SM worktree; refuse removal.
     // This two-tier check is conservative: it avoids deleting user-owned directories
     // that happen to sit under a `.worktrees/` parent.
-    let sentinel = path.join(WORKTREE_SENTINEL_FILE);
-    if !sentinel.exists() {
+    // #8511: either marker location counts.
+    if !super::worktree_ownership_location::sentinel_present(path) {
         // #6561: one predicate, shared with the reclaim classifier that proposes
         // these candidates — see `removal_permitted`.
         if !removal_permitted(path) {

@@ -158,6 +158,8 @@ pub mod gh_identity;
 #[cfg(any(test, debug_assertions))]
 pub mod gh_scoped_stub;
 pub mod git_identity;
+// #8511: keep the harness's own files out of every registered project's `git status`.
+pub(crate) mod harness_exclude;
 pub mod harness_root;
 pub mod home_trust_seed;
 pub mod hook;

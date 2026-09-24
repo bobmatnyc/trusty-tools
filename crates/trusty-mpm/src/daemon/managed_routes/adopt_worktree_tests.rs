@@ -289,6 +289,8 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
     let (_fixture, tree) = harness_locked_tree("agent-still-working", std::process::id());
     let state = Arc::new(DaemonState::new());
     let before = std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel");
+    // #8511: nor may the refusal's read move the marker into the git admin dir.
+    let admin = crate::session_manager::worktree_ownership_location::admin_sentinel_path(&tree);
 
     let outcome = adopt_worktree_core(
         &state,
@@ -307,6 +309,10 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
         std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel"),
         before,
         "a refusal must write nothing"
+    );
+    assert!(
+        !admin.is_some_and(|a| a.exists()),
+        "a refusal wrote the admin-dir marker"
     );
 }
 
