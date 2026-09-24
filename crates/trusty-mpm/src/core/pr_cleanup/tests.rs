@@ -2613,7 +2613,7 @@ const RUN_TREE: &str = "/repo/.claude/worktrees/agent-run";
 /// Did the run issue exactly `git branch -D <branch>`?
 fn deleted(git: &Scripted, branch: &str) -> bool {
     let argv = format!("git branch -D {branch}");
-    git.calls().iter().any(|c| *c == argv)
+    git.calls().contains(&argv)
 }
 
 /// 🔴 #8489 round 2 (critic HIGH 1): run from the tree holding the head, step 4
