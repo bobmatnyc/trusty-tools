@@ -46,17 +46,6 @@ fn isolated_home() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
-/// Write `disk.max_usage_pct: <pct>` into `home` (#7497).
-fn write_disk_threshold(home: &std::path::Path, pct: u8) {
-    let dir = home.join(".trusty-tools").join("trusty-mpm");
-    std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(
-        dir.join("config.yaml"),
-        format!("disk:\n  max_usage_pct: {pct}\n"),
-    )
-    .expect("write config");
-}
-
 /// The `$HOME` every spawned guard child gets unless its caller names one
 /// (#7497).
 ///
@@ -78,7 +67,7 @@ fn default_hook_home() -> &'static std::path::Path {
             .tempdir_in("/tmp")
             .expect("create hook scratch $HOME")
             .keep();
-        write_disk_threshold(&dir, 100);
+        common::write_disk_threshold(&dir, 100);
         dir
     })
     .as_path()
@@ -744,7 +733,7 @@ fn in_project_worktree_add_payload(agent_id: Option<&str>) -> String {
 /// absent-key default is disabled under a test harness on purpose.
 fn disk_threshold_home(max_usage_pct: u8) -> tempfile::TempDir {
     let home = isolated_home();
-    write_disk_threshold(home.path(), max_usage_pct);
+    common::write_disk_threshold(home.path(), max_usage_pct);
     home
 }
 
