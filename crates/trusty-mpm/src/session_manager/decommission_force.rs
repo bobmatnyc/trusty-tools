@@ -307,16 +307,25 @@ fn keep_reason(ws: &Path, id: &ManagedSessionId, policy: ProvisioningDirt) -> Op
         .map(|d| kept_for_dirt(ws, &d.reason, policy))
 }
 
+/// The untracked provisioning files `--force` excuses by path alone, never by
+/// content, so an edit to one is lost with the worktree. See #8540.
+const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"];
+
 /// The operator-facing reason a dirty worktree was kept (#7660).
+///
+/// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
+/// `decommission_refusal_omits_the_warning_without_untracked_claude_files`.
 fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
     let files = PROVISIONING_FILES.join(", ");
+    let entries = dirty_entries(ws);
     // #7660: name what blocked the removal, not only how many entries did.
-    let named = blocking_entries(ws, policy);
+    let named = blocking_entries(ws, &entries, policy);
     match policy {
         ProvisioningDirt::Refuse => format!(
             "the dirty-tree guard kept it ({reason}{named}). If the only changes are tm's own \
              provisioning files ({files}), re-run with --force to remove it; --force never \
-             discards other changes or unpushed commits"
+             discards other changes or unpushed commits{}",
+            force_discard_warning(&entries)
         ),
         ProvisioningDirt::Discard => format!(
             "--force excused tm's provisioning files ({files}), but the dirty-tree guard \
@@ -328,37 +337,20 @@ fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
 /// How many dirty entries [`blocking_entries`] names before it summarises.
 const NAMED_ENTRIES_CAP: usize = 10;
 
-/// `": <entry>, <entry>"` for the working-tree entries that keep `ws` under
-/// `policy`, or `""` when there are none to name or status cannot be read
-/// (#7660).
+/// `": <entry>, <entry>"` for the [`dirty_entries`] that keep `ws` under
+/// `policy`, or `""` when there are none to name (#7660).
 ///
 /// Why: "1 uncommitted/untracked file(s)" tells an operator THAT `--force`
 /// refused, not what to look at.
 /// What: display only — the keep/remove decision was already made by
-/// [`keep_reason`], so a failed read here only drops the list. Lists the
-/// per-file porcelain entries [`is_provisioning_entry`] does not excuse under
-/// `Discard` (every entry under `Refuse`), skipping the ownership sentinel and
-/// `.trusty-mpm/`, which the dirty-tree guard accounts for itself.
+/// [`keep_reason`], so a failed status read only drops the list. Lists the
+/// entries [`is_provisioning_entry`] does not excuse under `Discard` (every
+/// entry under `Refuse`).
 /// Test: `force_decommission_still_refuses_user_work`.
-fn blocking_entries(ws: &Path, policy: ProvisioningDirt) -> String {
-    let args = [
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    ];
-    let Ok(status) = super::worktree_safety::git_stdout(ws, &args) else {
-        return String::new();
-    };
-    let entries: Vec<&str> = status
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter(|line| {
-            let path = line.get(3..).unwrap_or("").trim();
-            path != WORKTREE_SENTINEL_FILE
-                && path != ".trusty-mpm"
-                && !path.starts_with(".trusty-mpm/")
-        })
+fn blocking_entries(ws: &Path, entries: &[String], policy: ProvisioningDirt) -> String {
+    let entries: Vec<&str> = entries
+        .iter()
+        .map(String::as_str)
         .filter(|line| policy == ProvisioningDirt::Refuse || !is_provisioning_entry(ws, line))
         .collect();
     if entries.is_empty() {
@@ -374,6 +366,53 @@ fn blocking_entries(ws: &Path, policy: ProvisioningDirt) -> String {
         named.push_str(&format!(", and {} more", entries.len() - NAMED_ENTRIES_CAP));
     }
     format!(": {named}")
+}
+
+/// `ws`'s per-file `git status --porcelain` lines, without the ownership
+/// sentinel and `.trusty-mpm/`, which the dirty-tree guard accounts for
+/// itself; empty when status cannot be read (display only, #7660).
+fn dirty_entries(ws: &Path) -> Vec<String> {
+    let args = [
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ];
+    let Ok(status) = super::worktree_safety::git_stdout(ws, &args) else {
+        return Vec::new();
+    };
+    status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| {
+            let path = line.get(3..).unwrap_or("").trim();
+            path != WORKTREE_SENTINEL_FILE
+                && path != ".trusty-mpm"
+                && !path.starts_with(".trusty-mpm/")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The warning a plain refusal appends when `entries` hold an untracked file
+/// `--force` would discard unread, or `""` when they hold none (#7660).
+///
+/// Why: the owner's interim ruling for 1.7.3 — `--force` excuses these files
+/// by path, so notes a user appended to an untracked `CLAUDE.md` are lost.
+// See #8540
+fn force_discard_warning(entries: &[String]) -> String {
+    let named: Vec<&str> = CONTENT_UNCHECKED_FILES
+        .into_iter()
+        .filter(|file| entries.iter().any(|line| line == &format!("?? {file}")))
+        .collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    format!(
+        ". WARNING: --force deletes the untracked {} with the worktree, including any edits \
+         made to them; copy out anything you added there first",
+        named.join(", ")
+    )
 }
 
 /// Why `--force` may not act on `ws` for session `id`, or `None` when tm

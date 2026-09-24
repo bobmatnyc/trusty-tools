@@ -148,6 +148,45 @@ async fn decommission_reports_why_it_kept_a_provisioned_worktree() {
     assert!(reason.contains("--force"), "reason: {reason}");
 }
 
+/// #7660 interim ruling (#8540): the plain refusal recommends `--force`, which
+/// excuses an untracked `CLAUDE.md` / `.claude/settings.json` by path alone,
+/// so it must name them and say `--force` discards edits to them. Fails
+/// before the ruling, whose refusal carried no such warning.
+#[tokio::test]
+async fn decommission_refusal_warns_force_discards_untracked_claude_md_edits() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-refuse-warn-7660");
+
+    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
+
+    assert!(!verdict.removed && wt.exists());
+    let reason = verdict.kept_reason.expect("a kept workspace must say why");
+    assert!(
+        reason.contains(
+            "WARNING: --force deletes the untracked .claude/settings.json, CLAUDE.md with the \
+             worktree, including any edits made to them"
+        ),
+        "reason: {reason}"
+    );
+}
+
+/// #7660 interim ruling (#8540): with no untracked `CLAUDE.md` or
+/// `.claude/settings.json` in the tree, the refusal carries no warning.
+#[tokio::test]
+async fn decommission_refusal_omits_the_warning_without_untracked_claude_files() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("decom-refuse-no-warn-7660");
+    mark_owned(&wt);
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("write user work");
+
+    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
+
+    assert!(!verdict.removed && wt.join("notes.rs").exists());
+    let reason = verdict.kept_reason.expect("a kept workspace must say why");
+    assert!(reason.contains("?? notes.rs"), "reason: {reason}");
+    assert!(!reason.contains("WARNING"), "reason: {reason}");
+}
+
 /// The reported case: `--force` removes a tree dirty only from provisioning.
 #[tokio::test]
 async fn force_decommission_removes_a_provisioning_only_worktree() {
