@@ -297,17 +297,23 @@ pub(crate) fn holders_run_from<'a>(
 ///
 /// `head_only` keeps the recovery inside a merge-chained run's scope (#8301):
 /// that run reaches only the head branch, so it never points at the wider
-/// `tm pr cleanup <n>`.
-/// Test: `cleanup_8489_head_only_recovery_stays_in_scope`.
+/// `tm pr cleanup <n>`. The recovery names `git switch --detach`, which works
+/// in any worktree; `git switch main` fails in an agent tree because the main
+/// checkout already holds `main`.
+/// Test: `cleanup_8489_head_only_recovery_stays_in_scope`,
+/// `cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head`.
 pub(crate) fn kept_run_from(entry: &WorktreeEntry, pr: u64, head_only: bool) -> String {
     let branch = entry.branch.as_deref().unwrap_or_default();
     let recovery = if head_only {
         format!(
-            "switch it off {branch}, then run `git branch -D {branch}` — this merge's cleanup \
-             reaches only {branch}"
+            "run `git switch --detach` in it, then `git branch -D {branch}` — this merge's \
+             cleanup reaches only {branch}"
         )
     } else {
-        format!("switch it off {branch}, or run `tm pr cleanup {pr}` from the main checkout")
+        format!(
+            "run `git switch --detach` in it, then `git branch -D {branch}`; or run \
+             `tm pr cleanup {pr}` from the main checkout"
+        )
     };
     format!(
         "{}: holds {branch} and was kept — cleanup runs its git commands in this checkout and \

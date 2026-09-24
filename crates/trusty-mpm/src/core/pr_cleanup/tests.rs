@@ -2508,6 +2508,14 @@ fn assert_holder_named(rendered: &str, holder: &str) {
         )),
         "the holder must be named with the reason it was kept:\n{rendered}"
     );
+    // #8489 round 3: `git switch main` fails in an agent tree; `--detach` works.
+    assert!(
+        rendered.contains(&format!(
+            "run `git switch --detach` in it, then `git branch -D {BRANCH}`; or run \
+             `tm pr cleanup 7275` from the main checkout"
+        )),
+        "the recovery must name a switch that works in any worktree:\n{rendered}"
+    );
 }
 
 /// 🔴 #8489: `tm pr cleanup` run from the harness tree that holds the head —
@@ -2762,7 +2770,8 @@ async fn cleanup_8489_head_only_recovery_stays_in_scope() {
     let rendered = report.render();
     assert!(
         rendered.contains(&format!(
-            "switch it off {BRANCH}, then run `git branch -D {BRANCH}`"
+            "run `git switch --detach` in it, then `git branch -D {BRANCH}` — this merge's \
+             cleanup reaches only {BRANCH}"
         )),
         "{rendered}"
     );
