@@ -4,6 +4,7 @@
 use super::*;
 use crate::core::harness_exclude::HARNESS_EXCLUDE_ENTRIES;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+use crate::session_manager::worktree_ownership_location::admin_sentinel_path;
 
 fn exclude_count(fx: &GitWorktreeFixture, entry: &str) -> usize {
     std::fs::read_to_string(fx.repo.join(".git").join("info").join("exclude"))
@@ -65,4 +66,42 @@ fn the_doctor_repair_previews_then_applies() {
     assert!(!legacy_sentinel_path(&wt).exists());
 
     assert!(repair_worktree_markers(&fx.repos_root, &[], RepairMode::Apply).is_empty());
+}
+
+/// Round 2 finding 3 (#8511): the dry run reports what apply will do — a tree
+/// whose two markers differ is refused in both modes, never planned.
+#[test]
+fn the_doctor_dry_run_reports_what_apply_will_do() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("differs");
+    std::fs::write(legacy_sentinel_path(&wt), b"A").expect("write legacy");
+    std::fs::write(admin_sentinel_path(&wt).expect("admin"), b"B").expect("write admin");
+    let marker_step = |mode| {
+        repair_worktree_markers(&fx.repos_root, &[], mode)
+            .into_iter()
+            .find(|s| s.path == legacy_sentinel_path(&wt))
+            .map(|s| s.status)
+    };
+    let planned = marker_step(RepairMode::DryRun);
+    let applied = marker_step(RepairMode::Apply);
+    assert!(
+        matches!(applied, Some(StepStatus::Refused(_))),
+        "{applied:?}"
+    );
+    assert_eq!(planned, applied);
+}
+
+/// Round 2 finding 4 (#8511): a checkout whose worktrees cannot be listed is a
+/// failed doctor step in both modes, never an empty (clean-looking) result.
+#[test]
+fn a_listing_failure_is_a_failed_doctor_step() {
+    let not_a_repo = tempfile::tempdir().expect("tempdir");
+    for mode in [RepairMode::DryRun, RepairMode::Apply] {
+        let steps = checkout_steps(not_a_repo.path(), mode);
+        assert!(
+            steps.iter().any(|s| s.path == not_a_repo.path()
+                && matches!(&s.status, StepStatus::Failed(r) if r.contains("could not list"))),
+            "{mode:?}: {steps:?}"
+        );
+    }
 }

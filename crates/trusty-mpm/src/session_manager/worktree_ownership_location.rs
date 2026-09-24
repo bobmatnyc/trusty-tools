@@ -9,15 +9,19 @@
 //! What: the marker now lives at `git rev-parse --git-path trusty-mpm-worktree`
 //! for the tree — `<common-dir>/worktrees/<name>/trusty-mpm-worktree` for a
 //! linked worktree, `.git/trusty-mpm-worktree` for a main checkout. It is
-//! resolved from the tree's own `.git` entry ([`admin_sentinel_path`]), never
+//! resolved from the tree's own `.git` entry ([`admin_location`]), never
 //! guessed. A directory with no `.git` entry is not a git working tree, so no
 //! git clean check can count a file in it; there the in-tree path is the only
-//! location.
+//! location. A `.git` entry that exists but does not resolve (a dangling
+//! `gitdir:` after the main checkout moved, an unreadable pointer) is NOT that
+//! case: the marker may sit in the unreachable admin dir, so ownership is
+//! undetermined — the strict reader answers unreadable and retention protects.
 //!
 //! Readers never write. A read answers the admin marker when present, else the
 //! legacy one. Only [`migrate_legacy_sentinel`] (the startup pass, registration
 //! and `tm doctor --fix --yes`) and [`write_sentinel_bytes`] change the disk.
-//! The migration's decision table:
+//! The migration's decision table, which [`preview_migration`] answers without
+//! writing:
 //!
 //! | on disk | migration does |
 //! |---|---|
@@ -25,7 +29,7 @@
 //! | legacy only | copy to a private temp file, verify, link it in as the admin marker, then remove legacy |
 //! | both, same bytes | remove the leftover legacy copy |
 //! | both, different bytes | log the conflict, keep both (the admin marker wins on read) |
-//! | either unreadable | report a failure, keep both |
+//! | either unreadable, or `.git` unresolvable | report a failure, keep both |
 //! | legacy tracked by git | nothing — never removed (#8368) |
 //! | no `.git` entry | nothing |
 //!
@@ -53,37 +57,84 @@ use super::worktree_ownership::{SentinelOwner, WorktreeSentinel, owner_from_payl
 /// location; spelling the name once keeps the writer and every reader on it.
 pub(crate) const ADMIN_SENTINEL_NAME: &str = "trusty-mpm-worktree";
 
-/// The admin-dir marker path for the tree rooted at `worktree`, when it is a git
-/// working tree (#8511).
+/// Where a tree's admin-dir marker lives, as its `.git` entry answers (#8511).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AdminLocation {
+    /// No `.git` entry: not a git working tree, so the in-tree path is the only
+    /// marker location.
+    NotGit,
+    /// The marker path inside the resolved git admin dir.
+    At(PathBuf),
+    /// A `.git` entry exists but does not resolve — dangling, unreadable or
+    /// malformed. A marker may sit in the unreachable admin dir, so ownership
+    /// is undetermined; the string says why.
+    Unresolvable(String),
+}
+
+/// Resolve the admin-dir marker location for the tree rooted at `worktree`
+/// (#8511).
 ///
 /// Why: the path must match what `git rev-parse --git-path` prints, and must be
 /// cheap — readers call this once per candidate in every sweep, so a `git`
-/// subprocess per call is not affordable.
-/// What: reads `<worktree>/.git`. A directory is the git dir itself; a file is
-/// a linked worktree's `gitdir: <path>` pointer, resolved against `worktree`
+/// subprocess per call is not affordable. "Not a git tree" and "a git tree we
+/// cannot resolve" must stay apart: after a migration the second may still
+/// hold the only marker (round 2 finding 1).
+/// What: `<worktree>/.git` absent (not even a dangling symlink) is
+/// [`AdminLocation::NotGit`]. A directory is the git dir itself; a file is a
+/// linked worktree's `gitdir: <path>` pointer, resolved against `worktree`
 /// when relative, and accepted only when it names an existing directory.
-/// Anything else — no `.git`, an unreadable or malformed pointer — is `None`.
-/// Test: `admin_path_matches_git_rev_parse_git_path`.
-pub(crate) fn admin_sentinel_path(worktree: &Path) -> Option<PathBuf> {
+/// Anything else is [`AdminLocation::Unresolvable`].
+/// Test: `admin_path_matches_git_rev_parse_git_path`,
+/// `a_migrated_tree_with_an_unresolvable_git_entry_stays_protected`.
+pub(crate) fn admin_location(worktree: &Path) -> AdminLocation {
+    use AdminLocation::{At, NotGit, Unresolvable};
     let dot_git = worktree.join(".git");
-    let meta = std::fs::metadata(&dot_git).ok()?;
+    match std::fs::symlink_metadata(&dot_git) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return NotGit,
+        Err(e) => return Unresolvable(format!("cannot stat {}: {e}", dot_git.display())),
+        Ok(_) => {}
+    }
+    let meta = match std::fs::metadata(&dot_git) {
+        Ok(meta) => meta,
+        Err(e) => return Unresolvable(format!("cannot follow {}: {e}", dot_git.display())),
+    };
     if meta.is_dir() {
-        return Some(dot_git.join(ADMIN_SENTINEL_NAME));
+        return At(dot_git.join(ADMIN_SENTINEL_NAME));
     }
     if !meta.is_file() {
-        return None;
+        return Unresolvable(format!("{} is not a file or directory", dot_git.display()));
     }
-    let text = std::fs::read_to_string(&dot_git).ok()?;
-    let raw = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+    let text = match std::fs::read_to_string(&dot_git) {
+        Ok(text) => text,
+        Err(e) => return Unresolvable(format!("cannot read {}: {e}", dot_git.display())),
+    };
+    let raw = text
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .unwrap_or_default();
     if raw.is_empty() {
-        return None;
+        return Unresolvable(format!("{} names no gitdir", dot_git.display()));
     }
     let git_dir = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
         worktree.join(raw)
     };
-    git_dir.is_dir().then(|| git_dir.join(ADMIN_SENTINEL_NAME))
+    if git_dir.is_dir() {
+        At(git_dir.join(ADMIN_SENTINEL_NAME))
+    } else {
+        Unresolvable(format!("gitdir {} does not resolve", git_dir.display()))
+    }
+}
+
+/// The admin-dir marker path, when [`admin_location`] resolves one.
+/// Test: `admin_path_matches_git_rev_parse_git_path`.
+pub(crate) fn admin_sentinel_path(worktree: &Path) -> Option<PathBuf> {
+    match admin_location(worktree) {
+        AdminLocation::At(path) => Some(path),
+        AdminLocation::NotGit | AdminLocation::Unresolvable(_) => None,
+    }
 }
 
 /// The legacy in-tree marker path, `<worktree>/.trusty-mpm-worktree`.
@@ -97,7 +148,9 @@ pub(crate) fn legacy_sentinel_path(worktree: &Path) -> PathBuf {
 /// provisioned by trusty-mpm?" by the marker's existence; a marker moved to
 /// the admin dir must still answer yes.
 /// What: legacy file exists, or the admin-dir file exists — legacy first, the
-/// module doc's read order.
+/// module doc's read order. An unresolvable `.git` answers `false`: every
+/// caller reads presence as a PERMISSION to remove or as discovery, so "no" is
+/// the safe answer there; protection reads [`admin_location`] instead.
 /// Test: `a_tree_marked_only_in_the_admin_dir_is_still_marked`.
 pub(crate) fn sentinel_present(worktree: &Path) -> bool {
     legacy_sentinel_path(worktree).exists()
@@ -115,8 +168,8 @@ pub(crate) enum MarkerMigration {
     Migrated,
     /// Both existed with identical bytes; the leftover legacy copy was removed.
     DuplicateRemoved,
-    /// Both existed with different bytes, or a writer created the admin
-    /// marker mid-copy. The admin marker wins; both are kept.
+    /// Both existed with different bytes, or a writer created a different
+    /// admin marker mid-copy. The admin marker wins; both are kept.
     Conflict,
     /// The legacy marker is tracked by git (#8368), so it is left in place.
     Tracked,
@@ -150,7 +203,9 @@ pub(crate) fn legacy_is_tracked(worktree: &Path) -> bool {
 /// Test: `strict_read_separates_missing_from_unreadable_and_corrupt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OwnerReadError {
-    /// The marker exists at `path` but reading it failed.
+    /// The marker exists at `path` but reading it failed — or the tree's
+    /// `.git` entry does not resolve, so the admin-dir marker cannot be
+    /// looked for; `path` is then the `.git` entry.
     Unreadable { path: PathBuf, reason: String },
     /// The marker at `path` was read but is not a valid ownership payload.
     Corrupt { path: PathBuf, reason: String },
@@ -188,8 +243,20 @@ pub(crate) fn read_sentinel_bytes_strict(worktree: &Path) -> Found {
 fn read_both_with(worktree: &Path, between: &dyn Fn()) -> Found {
     let legacy = legacy_sentinel_path(worktree);
     let legacy_read = read_present(&legacy);
-    let Some(admin) = admin_sentinel_path(worktree) else {
-        return legacy_read.map(|b| b.map(|b| (legacy, b)));
+    let admin = match admin_location(worktree) {
+        AdminLocation::NotGit => return legacy_read.map(|b| b.map(|b| (legacy, b))),
+        AdminLocation::At(admin) => admin,
+        // Round 2 finding 1: the admin marker, which wins, cannot be looked for.
+        AdminLocation::Unresolvable(reason) => {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                "ownership marker: the git admin dir cannot be resolved ({reason}); owner unknown (#8511)"
+            );
+            return Err(OwnerReadError::Unreadable {
+                path: worktree.join(".git"),
+                reason,
+            });
+        }
     };
     between();
     match read_present(&admin) {
@@ -258,64 +325,110 @@ pub(crate) fn migrate_legacy_sentinel(worktree: &Path) -> MarkerMigration {
 /// [`migrate_legacy_sentinel`] with an injectable copy step, so a test can make
 /// the copy lie or race a writer.
 /// Test: `a_copy_that_does_not_verify_keeps_the_legacy_marker`,
-/// `a_concurrent_writers_marker_survives_the_migration`.
+/// `a_concurrent_writers_marker_survives_the_migration`,
+/// `identical_bytes_from_a_concurrent_migration_settle_cleanly`,
+/// `a_failed_duplicate_removal_is_logged_for_the_tree`.
 fn migrate_with(
     worktree: &Path,
     copy: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> MarkerMigration {
-    let legacy = legacy_sentinel_path(worktree);
-    let Some(admin) = admin_sentinel_path(worktree) else {
-        return MarkerMigration::NoAdminDir;
+    let outcome = match decide(worktree) {
+        Decision::Settled(outcome) => outcome,
+        Decision::RemoveLegacy(legacy) => remove_duplicate(&legacy),
+        Decision::Copy {
+            legacy,
+            admin,
+            bytes,
+        } => migrate_bytes(&legacy, &admin, &bytes, copy),
     };
-    let legacy_bytes = match read_present(&legacy) {
-        Ok(Some(b)) => b,
-        Ok(None) => return MarkerMigration::NoLegacy,
-        // An unreadable legacy marker is a failure the operator must see.
-        Err(e) => return failed(worktree, format!("the in-tree marker is unreadable: {e:?}")),
-    };
-    if legacy_is_tracked(worktree) {
-        return MarkerMigration::Tracked;
-    }
-    match read_present(&admin) {
-        Ok(Some(admin_bytes)) => {
-            settle_leftover_legacy(&legacy, &legacy_bytes, &admin_bytes, worktree)
-        }
-        Ok(None) => match migrate_bytes(&legacy, &admin, &legacy_bytes, copy) {
-            MarkerMigration::Failed(reason) => failed(worktree, reason),
-            outcome => outcome,
-        },
-        Err(e) => failed(
-            worktree,
-            format!("the admin-dir marker is unreadable: {e:?}"),
+    // Round 2 finding 5: one warning per tree, whichever step produced it.
+    match &outcome {
+        MarkerMigration::Failed(reason) => tracing::warn!(
+            worktree = %worktree.display(),
+            "ownership marker: legacy marker kept in the tree — {reason} (#8511)"
         ),
-    }
-}
-
-/// Log and return [`MarkerMigration::Failed`].
-fn failed(worktree: &Path, reason: String) -> MarkerMigration {
-    tracing::warn!(
-        worktree = %worktree.display(),
-        "ownership marker: legacy marker kept in the tree — {reason} (#8511)"
-    );
-    MarkerMigration::Failed(reason)
-}
-
-/// Both locations hold a marker: finish an interrupted migration, or log a
-/// conflict the admin marker wins.
-fn settle_leftover_legacy(
-    legacy: &Path,
-    legacy_bytes: &[u8],
-    admin_bytes: &[u8],
-    worktree: &Path,
-) -> MarkerMigration {
-    if legacy_bytes != admin_bytes {
-        tracing::warn!(
+        MarkerMigration::Conflict => tracing::warn!(
             worktree = %worktree.display(),
             "ownership marker: the admin-dir and in-tree markers differ; the admin-dir \
              marker wins and both are kept (#8511)"
-        );
-        return MarkerMigration::Conflict;
+        ),
+        _ => {}
     }
+    outcome
+}
+
+/// What [`migrate_legacy_sentinel`] would do to `worktree` now, decided by
+/// reads alone (#8511).
+///
+/// Why: the doctor's dry run must report what apply will do (round 2 finding
+/// 3); planning a move that apply then refuses never converges.
+/// What: the outcome [`migrate_legacy_sentinel`] returns when nothing changes
+/// on disk in between. Never writes, never logs.
+/// Test: `the_doctor_dry_run_reports_what_apply_will_do`.
+pub(crate) fn preview_migration(worktree: &Path) -> MarkerMigration {
+    match decide(worktree) {
+        Decision::Settled(outcome) => outcome,
+        Decision::RemoveLegacy(_) => MarkerMigration::DuplicateRemoved,
+        Decision::Copy { .. } => MarkerMigration::Migrated,
+    }
+}
+
+/// The migration's decision for one tree, taken from reads only.
+enum Decision {
+    /// Nothing to change on disk; this is the outcome.
+    Settled(MarkerMigration),
+    /// Both markers hold the same bytes: remove the leftover legacy copy.
+    RemoveLegacy(PathBuf),
+    /// Only the legacy marker exists: copy its bytes into the admin dir.
+    Copy {
+        legacy: PathBuf,
+        admin: PathBuf,
+        bytes: Vec<u8>,
+    },
+}
+
+/// The module doc's decision table, shared by the migration and its preview.
+fn decide(worktree: &Path) -> Decision {
+    use MarkerMigration::{Conflict, Failed, NoAdminDir, NoLegacy, Tracked};
+    let admin = match admin_location(worktree) {
+        AdminLocation::NotGit => return Decision::Settled(NoAdminDir),
+        AdminLocation::At(admin) => Ok(admin),
+        AdminLocation::Unresolvable(reason) => Err(reason),
+    };
+    let legacy = legacy_sentinel_path(worktree);
+    let bytes = match read_present(&legacy) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Decision::Settled(NoLegacy),
+        // An unreadable legacy marker is a failure the operator must see.
+        Err(e) => {
+            return Decision::Settled(Failed(format!("the in-tree marker is unreadable: {e:?}")));
+        }
+    };
+    let admin = match admin {
+        Ok(admin) => admin,
+        Err(reason) => {
+            return Decision::Settled(Failed(format!(
+                "the git admin dir cannot be resolved: {reason}"
+            )));
+        }
+    };
+    if legacy_is_tracked(worktree) {
+        return Decision::Settled(Tracked);
+    }
+    match read_present(&admin) {
+        Ok(Some(admin_bytes)) if admin_bytes == bytes => Decision::RemoveLegacy(legacy),
+        Ok(Some(_)) => Decision::Settled(Conflict),
+        Ok(None) => Decision::Copy {
+            legacy,
+            admin,
+            bytes,
+        },
+        Err(e) => Decision::Settled(Failed(format!("the admin-dir marker is unreadable: {e:?}"))),
+    }
+}
+
+/// Both locations hold the same bytes: remove the leftover legacy copy.
+fn remove_duplicate(legacy: &Path) -> MarkerMigration {
     match std::fs::remove_file(legacy) {
         Ok(()) => MarkerMigration::DuplicateRemoved,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => MarkerMigration::DuplicateRemoved,
@@ -371,7 +484,17 @@ fn migrate_bytes(
     }
     match linked {
         Err(reason) => MarkerMigration::Failed(reason),
-        Ok(false) => MarkerMigration::Conflict,
+        // Round 2 finding 2: a concurrent migration that linked the same bytes
+        // settles the tree; only different bytes are a conflict.
+        Ok(false) => match read_present(admin) {
+            Ok(Some(admin_bytes)) if admin_bytes == bytes => remove_duplicate(legacy),
+            Ok(Some(_)) => MarkerMigration::Conflict,
+            Ok(None) => MarkerMigration::Failed(format!(
+                "{} refused the link, then vanished",
+                admin.display()
+            )),
+            Err(e) => MarkerMigration::Failed(format!("the admin-dir marker is unreadable: {e:?}")),
+        },
         Ok(true) => match std::fs::remove_file(legacy) {
             Ok(()) => MarkerMigration::Migrated,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => MarkerMigration::Migrated,
@@ -390,13 +513,21 @@ fn migrate_bytes(
 /// What: writes the admin-dir marker when the tree has one, THEN removes any
 /// legacy in-tree marker unless git tracks it (the new write supersedes it; a
 /// failed removal is logged, and the admin marker still wins on read). The
-/// order is the module doc's writer rule. With no admin dir it writes the
-/// in-tree path. Write errors propagate.
+/// order is the module doc's writer rule. With no `.git` entry it writes the
+/// in-tree path; an unresolvable `.git` is an error, since a marker written
+/// in the tree there could not win over one in the unreachable admin dir.
+/// Write errors propagate.
 /// Test: `the_agent_marker_is_written_to_the_admin_dir`.
 pub(crate) fn write_sentinel_bytes(worktree: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let legacy = legacy_sentinel_path(worktree);
-    let Some(admin) = admin_sentinel_path(worktree) else {
-        return std::fs::write(legacy, bytes);
+    let admin = match admin_location(worktree) {
+        AdminLocation::NotGit => return std::fs::write(legacy, bytes),
+        AdminLocation::At(admin) => admin,
+        AdminLocation::Unresolvable(reason) => {
+            return Err(std::io::Error::other(format!(
+                "ownership marker not written: the git admin dir cannot be resolved ({reason})"
+            )));
+        }
     };
     std::fs::write(&admin, bytes)?;
     if !legacy.exists() || legacy_is_tracked(worktree) {

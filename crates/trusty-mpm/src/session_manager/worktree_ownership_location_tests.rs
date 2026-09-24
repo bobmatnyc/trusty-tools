@@ -303,3 +303,100 @@ fn strict_read_separates_missing_from_unreadable_and_corrupt() {
         assert!(path.exists(), "{name}: an unreadable marker was removed");
     }
 }
+
+/// Round 2 finding 1 (#8511): a migrated tree whose `.git` pointer dangles (the
+/// main checkout moved) or cannot be read is protected, and the strict reader
+/// calls its marker unreadable, never missing.
+#[test]
+fn a_migrated_tree_with_an_unresolvable_git_entry_stays_protected() {
+    let fx = GitWorktreeFixture::new();
+    let parked = fx.repos_root.join("elsewhere");
+    let names = trusty_common::workspace_layout::WorktreeDirNames::from_configured(None);
+    for (name, dangling) in [("dangling-gitdir", true), ("denied-gitdir", false)] {
+        let wt = fx.add_worktree_at(&parked, name);
+        write_sentinel_bytes(&wt, &agent_payload(name)).expect("write");
+        assert!(!legacy_sentinel_path(&wt).exists(), "{name}: not migrated");
+        let dot_git = wt.join(".git");
+        let _restore = if dangling {
+            let gone = fx.repos_root.join("moved").join(".git").join("worktrees");
+            std::fs::write(&dot_git, format!("gitdir: {}\n", gone.join(name).display()))
+                .expect("rewrite .git");
+            None
+        } else {
+            let guard = crate::session_manager::worktree_git_fixture::deny_all(&dot_git);
+            if std::fs::read(&dot_git).is_ok() {
+                eprintln!("skipped {name}: a mode-000 file is readable here (running as root?)");
+                continue;
+            }
+            Some(guard)
+        };
+        let strict = read_sentinel_owner_strict(&wt);
+        assert!(
+            matches!(strict, Err(OwnerReadError::Unreadable { .. })),
+            "{name}: {strict:?}"
+        );
+        assert!(
+            super::super::retention::workspace_needs_protection(Some(&wt), &names, |p| {
+                p.try_exists()
+            }),
+            "{name}: a marked tree lost its protection"
+        );
+    }
+}
+
+/// Round 2 finding 5 (#8511): a duplicate legacy marker that cannot be removed
+/// is a failure logged for the tree, like every other failed step.
+#[test]
+fn a_failed_duplicate_removal_is_logged_for_the_tree() {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing_subscriber::layer::SubscriberExt;
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("stuck-duplicate");
+    let legacy = legacy_sentinel_path(&wt);
+    std::fs::write(&legacy, b"{}").expect("write legacy");
+    std::fs::write(admin_sentinel_path(&wt).expect("admin"), b"{}").expect("write admin");
+    let mode = std::fs::metadata(&wt).expect("stat").permissions().mode();
+    std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let outcome = tracing::subscriber::with_default(subscriber, || migrate_legacy_sentinel(&wt));
+    std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(mode)).expect("restore");
+    if !legacy.exists() {
+        eprintln!("skipped: a read-only directory allowed the removal (running as root?)");
+        return;
+    }
+    assert!(matches!(outcome, MarkerMigration::Failed(_)), "{outcome:?}");
+    let lines = buffer.tail(64);
+    assert!(
+        lines.iter().any(|l| l.contains("legacy marker kept")),
+        "no per-tree warning: {lines:?}"
+    );
+}
+
+/// Round 2 finding 2 (#8511): a concurrent migration that links the same bytes
+/// first settles the tree — no conflict, and the leftover legacy copy goes.
+#[test]
+fn identical_bytes_from_a_concurrent_migration_settle_cleanly() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("race-same-bytes");
+    let legacy = legacy_sentinel_path(&wt);
+    let admin = admin_sentinel_path(&wt).expect("admin path");
+    std::fs::write(&legacy, b"A").expect("write legacy");
+    let racing = |p: &Path, b: &[u8]| {
+        std::fs::write(p, b)?;
+        std::fs::write(&admin, b)
+    };
+    assert_eq!(
+        migrate_with(&wt, &racing),
+        MarkerMigration::DuplicateRemoved
+    );
+    assert!(!legacy.exists(), "the settled legacy copy was kept");
+    assert_eq!(std::fs::read(&admin).ok().as_deref(), Some(&b"A"[..]));
+    assert!(
+        temp_leftovers(&admin).is_empty(),
+        "a temp copy was left behind"
+    );
+}

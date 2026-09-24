@@ -17,8 +17,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::worktree_ownership_location::{
-    MarkerMigration, admin_sentinel_path, legacy_is_tracked, legacy_sentinel_path,
-    migrate_legacy_sentinel,
+    MarkerMigration, legacy_sentinel_path, migrate_legacy_sentinel, preview_migration,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
@@ -42,21 +41,16 @@ pub(crate) fn registered_checkouts(repos_root: &Path, adopted: &[PathBuf]) -> Ve
 
 /// Every tree `checkout`'s registry lists that has a directory on disk.
 ///
-/// A listing failure is logged and yields no trees, so the pass skips the
-/// checkout visibly rather than reporting it clean.
-fn trees_of(checkout: &Path) -> Vec<PathBuf> {
-    let Some(listed) = list_registered_worktrees(checkout) else {
-        tracing::warn!(
-            checkout = %checkout.display(),
-            "ownership markers: could not list this checkout's worktrees; skipped (#8511)"
-        );
-        return Vec::new();
-    };
-    listed
+/// A listing failure is an `Err`, never an empty list: the startup pass logs
+/// it and the doctor reports it as a failed step (round 2 finding 4).
+fn trees_of(checkout: &Path) -> Result<Vec<PathBuf>, String> {
+    let listed = list_registered_worktrees(checkout)
+        .ok_or_else(|| "could not list this checkout's worktrees".to_string())?;
+    Ok(listed
         .into_iter()
         .filter(|w| !w.bare && !w.prunable)
         .map(|w| w.path)
-        .collect()
+        .collect())
 }
 
 /// What one checkout's pass did.
@@ -78,7 +72,14 @@ pub(crate) struct CheckoutTally {
 pub(crate) fn prepare_checkout(checkout: &Path) -> CheckoutTally {
     crate::core::harness_exclude::ensure_and_log(checkout);
     let mut tally = CheckoutTally::default();
-    for tree in trees_of(checkout) {
+    let trees = trees_of(checkout).unwrap_or_else(|reason| {
+        tracing::warn!(
+            checkout = %checkout.display(),
+            "ownership markers: {reason}; skipped (#8511)"
+        );
+        Vec::new()
+    });
+    for tree in trees {
         match migrate_legacy_sentinel(&tree) {
             MarkerMigration::Migrated | MarkerMigration::DuplicateRemoved => tally.migrated += 1,
             MarkerMigration::Conflict | MarkerMigration::Tracked | MarkerMigration::Failed(_) => {
@@ -115,52 +116,67 @@ pub(crate) fn migrate_registered_projects(repos_root: &Path, adopted: &[PathBuf]
 ///
 /// Why: the operator-facing form of the one-shot migration, previewed by
 /// default like every other doctor repair.
-/// What: per checkout, one step for its pending exclude entries; per tree, one
-/// step for a legacy marker that can move (the tree has an admin dir and git
-/// does not track the marker). Dry run
-/// plans; apply runs [`crate::core::harness_exclude::ensure_harness_files_excluded`]
-/// and [`migrate_legacy_sentinel`] and reports what each actually did. A clean
-/// fleet produces no steps.
-/// Test: `the_doctor_repair_previews_then_applies`.
+/// What: per checkout, one step for its pending exclude entries, and one
+/// failed step when its worktrees cannot be listed; per tree, one step for a
+/// legacy marker the migration would act on. A dry run reports
+/// [`preview_migration`]'s answer, apply runs [`migrate_legacy_sentinel`] —
+/// the same decision table, so both modes show the same refusals and failures
+/// (round 2 finding 3). A committed marker (#8368) and a tree with nothing to
+/// move produce no step, so a clean fleet produces none.
+/// Test: `the_doctor_repair_previews_then_applies`,
+/// `the_doctor_dry_run_reports_what_apply_will_do`,
+/// `a_listing_failure_is_a_failed_doctor_step`.
 pub fn repair_worktree_markers(
     repos_root: &Path,
     adopted: &[PathBuf],
     mode: RepairMode,
 ) -> Vec<RepairStep> {
-    let mut steps = Vec::new();
-    for checkout in registered_checkouts(repos_root, adopted) {
-        steps.extend(exclude_step(&checkout, mode));
-        for tree in trees_of(&checkout) {
-            let legacy = legacy_sentinel_path(&tree);
-            // A committed marker (#8368) is never moved; see the location module.
-            if !legacy.exists() || admin_sentinel_path(&tree).is_none() || legacy_is_tracked(&tree)
-            {
-                continue;
-            }
-            let status = match mode {
-                RepairMode::DryRun => StepStatus::Planned,
-                RepairMode::Apply => match migrate_legacy_sentinel(&tree) {
-                    MarkerMigration::Migrated | MarkerMigration::DuplicateRemoved => {
-                        StepStatus::Applied { backup: None }
-                    }
-                    MarkerMigration::Conflict => StepStatus::Refused(
-                        "the admin-dir marker differs; it wins and the in-tree one is kept"
-                            .to_string(),
-                    ),
-                    MarkerMigration::Tracked => {
-                        StepStatus::Refused("git tracks this marker; it stays".to_string())
-                    }
-                    MarkerMigration::Failed(reason) => StepStatus::Failed(reason),
-                    MarkerMigration::NoLegacy | MarkerMigration::NoAdminDir => continue,
-                },
-            };
+    registered_checkouts(repos_root, adopted)
+        .iter()
+        .flat_map(|checkout| checkout_steps(checkout, mode))
+        .collect()
+}
+
+/// One checkout's doctor steps; see [`repair_worktree_markers`].
+fn checkout_steps(checkout: &Path, mode: RepairMode) -> Vec<RepairStep> {
+    let mut steps: Vec<RepairStep> = exclude_step(checkout, mode).into_iter().collect();
+    let trees = match trees_of(checkout) {
+        Ok(trees) => trees,
+        Err(reason) => {
             steps.push(RepairStep {
                 check: CHECK,
-                path: legacy,
-                what: "move the ownership marker into the git admin dir".to_string(),
-                status,
+                path: checkout.to_path_buf(),
+                what: "move the ownership markers into the git admin dir".to_string(),
+                status: StepStatus::Failed(reason),
             });
+            return steps;
         }
+    };
+    for tree in trees {
+        let outcome = match mode {
+            RepairMode::DryRun => preview_migration(&tree),
+            RepairMode::Apply => migrate_legacy_sentinel(&tree),
+        };
+        let status = match outcome {
+            MarkerMigration::Migrated | MarkerMigration::DuplicateRemoved => match mode {
+                RepairMode::DryRun => StepStatus::Planned,
+                RepairMode::Apply => StepStatus::Applied { backup: None },
+            },
+            MarkerMigration::Conflict => StepStatus::Refused(
+                "the admin-dir marker differs; it wins and the in-tree one is kept".to_string(),
+            ),
+            MarkerMigration::Failed(reason) => StepStatus::Failed(reason),
+            // A committed marker (#8368) is never moved; see the location module.
+            MarkerMigration::Tracked | MarkerMigration::NoLegacy | MarkerMigration::NoAdminDir => {
+                continue;
+            }
+        };
+        steps.push(RepairStep {
+            check: CHECK,
+            path: legacy_sentinel_path(&tree),
+            what: "move the ownership marker into the git admin dir".to_string(),
+            status,
+        });
     }
     steps
 }
