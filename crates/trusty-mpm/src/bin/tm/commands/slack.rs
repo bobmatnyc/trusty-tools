@@ -17,7 +17,7 @@ use crate::cli::SlackCmd;
 ///
 /// Why: every Slack operation belongs under one discoverable command group; this
 /// dispatcher routes the [`SlackCmd`] variants to their handlers, resolving the
-/// bot/app tokens from flags or the shared credential resolver (mirroring how
+/// bot/app tokens from flags or the dotenv/env fallback (mirroring how
 /// `tm telegram start` resolves `TELEGRAM_BOT_TOKEN`).
 /// What: `Start` runs the Socket-Mode bot in the foreground; `Stop` signals the
 /// PID recorded in `~/.trusty-mpm/slack.pid`.
