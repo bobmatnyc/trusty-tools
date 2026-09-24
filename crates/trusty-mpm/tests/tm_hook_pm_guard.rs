@@ -4492,6 +4492,26 @@ fn pm_guard_grants_a_worktree_to_a_deployed_agent_it_does_not_bundle() {
 }
 
 #[test]
+fn pm_guard_never_refuses_a_harness_builtin_agent() {
+    // #8547 review: Claude Code's built-ins ship in no bundle and no tier. The
+    // reader runs in place; the writers are isolated; none is refused.
+    let (_dir, repo) = main_checkout_fixture();
+    let reader = r#"{"subagent_type":"claude-code-guide","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", reader, &repo, ""), &[]);
+    assert_eq!(stdout.trim(), "", "claude-code-guide only reads: {stdout}");
+    for agent in ["general-purpose", "claude", "statusline-setup"] {
+        let input = format!(r#"{{"subagent_type":"{agent}","prompt":"go"}}"#);
+        let stdout = run_pm_guard(&tool_payload_at("Agent", &input, &repo, ""), &[]);
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+        assert_eq!(
+            value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+            "{agent}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn pm_guard_leaves_read_only_and_isolated_dispatches_alone() {
     // A worktree per read-only dispatch would re-open #3455's wasted-disk
     // complaint, and re-granting an already-isolated dispatch would let the
