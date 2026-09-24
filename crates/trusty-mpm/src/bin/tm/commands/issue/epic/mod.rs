@@ -11,15 +11,22 @@
 //! [`backend::EpicBackend::set_body`]; the marker half is structural, since
 //! [`render::replace_block`] copies both marker lines through rather than
 //! re-serialising the body.
-//! What: the [`EpicCmd`] dispatcher — `create` (`create.rs`) and `sync`
-//! (`sync.rs`) — over the [`backend::EpicBackend`] seam (D7), with the plan
-//! parser in `plan.rs` and every title, marker and table rendering in
-//! `render.rs`.
+//! What: the [`EpicCmd`] dispatcher — `create` (`create.rs`), `sync`
+//! (`sync.rs`), `defer` (`defer.rs`) and `close` (`close.rs`) — over the
+//! [`backend::EpicBackend`] seam (D7), with the plan parser in `plan.rs` and
+//! every title, marker and table rendering in `render.rs`. Two more entry points
+//! are called from outside this verb family (#8448): `hook.rs` is the
+//! `tm issue transition` side effect that regenerates a phase's tracker, and
+//! `audit_rows.rs` is the set-level rows `tm issue audit <tracker>` appends.
 //! Test: orchestration in `tests.rs` against a scripted fake backend; CLI
 //! parsing in `bin/tm/tests.rs` (`cli_parses_issue_epic_*`).
 
+pub(crate) mod audit_rows;
 pub(crate) mod backend;
+pub(crate) mod close;
 pub(crate) mod create;
+pub(crate) mod defer;
+pub(crate) mod hook;
 pub(crate) mod plan;
 pub(crate) mod render;
 pub(crate) mod sync;
@@ -87,6 +94,44 @@ pub(crate) fn run(
                     report.tracker, report.rows
                 );
             }
+        }
+        // #8448: the deferred block is amended, one row per run.
+        EpicCmd::Defer {
+            epic,
+            item,
+            why,
+            destination,
+        } => {
+            let opts = defer::DeferOptions {
+                item,
+                why,
+                destination,
+            };
+            let report = defer::defer(&backend, epic, &opts)?;
+            if report.unchanged {
+                println!(
+                    "#{}: deferred block already carries this row — nothing written",
+                    report.tracker
+                );
+            } else {
+                println!("#{}: deferred row appended: {}", report.tracker, report.row);
+            }
+        }
+        // #8448: refuses while a child is open; posts the outcome→evidence
+        // comment; closes.
+        EpicCmd::Close { epic, evidence } => {
+            let report = close::close(&backend, epic, &evidence)?;
+            let posted = if report.comment_posted {
+                "closing comment posted"
+            } else {
+                "closing comment was already on the record"
+            };
+            println!(
+                "#{}: closed — {} phase issue(s) closed, {} outcome line(s), {posted}",
+                report.tracker,
+                report.phases.len(),
+                report.outcomes
+            );
         }
     }
     Ok(())

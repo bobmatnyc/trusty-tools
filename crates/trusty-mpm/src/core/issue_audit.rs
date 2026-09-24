@@ -225,6 +225,22 @@ pub struct AuditRow {
     pub detail: String,
 }
 
+impl AuditRow {
+    /// Build a row.
+    ///
+    /// Why: the type is `#[non_exhaustive]`, so a caller outside this crate —
+    /// the `tm issue audit` epic rows (#8448) — cannot use a struct literal.
+    /// Test: `audit_rows_pass_a_tracker_whose_block_matches`.
+    #[must_use]
+    pub fn new(requirement: &'static str, verdict: Verdict, detail: impl Into<String>) -> Self {
+        Self {
+            requirement,
+            verdict,
+            detail: detail.into(),
+        }
+    }
+}
+
 /// One issue's complete audit.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

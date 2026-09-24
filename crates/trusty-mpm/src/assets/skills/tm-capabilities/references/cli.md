@@ -48,7 +48,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `audit` — Verify a filed issue carries a project, a milestone, and a component label (#7097)
   - `current` — Report an issue's current state, derived from its labels
   - `epic` — File and maintain an epic tracker and its phase issues (#8447)
+    - `close` — Close a tracker once every phase is closed, posting the outcome→evidence comment (#8448)
     - `create` — File an epic tracker and its phase issues from a committed plan document
+    - `defer` — Append one row to a tracker's `deferred` block (#8448)
     - `sync` — Regenerate a tracker's `phases` block from its live child issues
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path

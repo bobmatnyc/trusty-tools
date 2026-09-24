@@ -12,14 +12,23 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
-use super::backend::{ChildIssue, EpicBackend, FoundTracker, NewIssue, issue_number_from_url};
+use super::audit_rows::{self, REQ_PHASE_LINKAGE, REQ_PHASES_BLOCK};
+use super::backend::{
+    ChildIssue, EpicBackend, FoundTracker, NewIssue, PhaseCandidate, issue_number_from_url,
+};
+use super::close::{self, CLOSE_COMMENT_PREFIX};
 use super::create::{self, CreateOptions, NO_PROJECT_PREFIX};
+use super::defer::{self, DeferOptions};
+use super::hook;
 use super::plan::{self, PlanError};
 use super::render::{
     self, DEFERRED_END, DEFERRED_START, FOLLOWUPS_END, FOLLOWUPS_START, PHASES_END, PHASES_START,
 };
 use super::sync;
+use crate::commands::issue::config::{DEFAULT_MODEL_YAML, StateModel};
 use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
+use crate::commands::ticket::system::{Issue, TicketSystem};
+use trusty_mpm::core::issue_audit::Verdict;
 
 /// The repository-relative path the fake backend reports for any plan path.
 const REL_PATH: &str = "docs/research/tm-epic-cli/epic-plan.md";
@@ -321,6 +330,7 @@ impl EpicBackend for FakeBackend {
                 number: *n,
                 title: i.title.clone(),
                 state: i.state.clone(),
+                labels: i.labels.clone(),
                 body: i.body.clone(),
             })
             .collect())
@@ -370,6 +380,95 @@ impl EpicBackend for FakeBackend {
         if let Some(found) = self.issues.borrow_mut().get_mut(&issue) {
             found.comments.push(body.to_string());
         }
+        Ok(())
+    }
+
+    fn parent(&self, issue: u64) -> anyhow::Result<Option<u64>> {
+        self.tick("parent")?;
+        Ok(self.issue(issue).parent)
+    }
+
+    fn close_issue(&self, issue: u64) -> anyhow::Result<()> {
+        self.tick("close_issue")?;
+        if let Some(found) = self.issues.borrow_mut().get_mut(&issue) {
+            found.state = "CLOSED".to_string();
+        }
+        Ok(())
+    }
+
+    fn phase_titled_issues(&self, epic: u64) -> anyhow::Result<Vec<PhaseCandidate>> {
+        self.tick("phase_titled_issues")?;
+        Ok(self
+            .issues
+            .borrow()
+            .iter()
+            .filter(|(_, i)| render::epic_number_of(&i.title) == Some(epic))
+            .map(|(n, i)| PhaseCandidate {
+                number: *n,
+                title: i.title.clone(),
+            })
+            .collect())
+    }
+}
+
+/// A minimal [`TicketSystem`] for the transition hook tests: one scripted
+/// issue, every mutation recorded by name.
+///
+/// Why: the hook composes `ops::transition` (a `TicketSystem`) with the epic
+/// backend, and AC1 needs the label to have MOVED before the sync fails — so
+/// the test has to see the swap on this side and the failure on the other.
+/// Test: the `transition_hook_*` tests.
+struct FakeTickets {
+    issue: Issue,
+    calls: RefCell<Vec<String>>,
+}
+
+impl FakeTickets {
+    fn new(number: u64, title: &str, labels: &[&str]) -> Self {
+        Self {
+            issue: Issue {
+                number,
+                title: title.to_string(),
+                body: String::new(),
+                labels: labels.iter().map(|l| (*l).to_string()).collect(),
+                assignees: Vec::new(),
+                open: true,
+            },
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn count(&self, op: &str) -> usize {
+        self.calls.borrow().iter().filter(|c| *c == op).count()
+    }
+}
+
+impl TicketSystem for FakeTickets {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn validate(&self, _issue: u64) -> anyhow::Result<Issue> {
+        self.calls.borrow_mut().push("validate".to_string());
+        Ok(self.issue.clone())
+    }
+    fn comment(&self, _issue: u64, _body: &str) -> anyhow::Result<()> {
+        self.calls.borrow_mut().push("comment".to_string());
+        Ok(())
+    }
+    fn add_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        self.calls.borrow_mut().push("add_label".to_string());
+        Ok(())
+    }
+    fn remove_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        self.calls.borrow_mut().push("remove_label".to_string());
+        Ok(())
+    }
+    fn swap_labels(&self, _issue: u64, _add: &str, _remove: &str) -> anyhow::Result<()> {
+        self.calls.borrow_mut().push("swap_labels".to_string());
+        Ok(())
+    }
+    fn close_issue(&self, _issue: u64) -> anyhow::Result<()> {
+        self.calls.borrow_mut().push("close_issue".to_string());
         Ok(())
     }
 }
@@ -653,6 +752,7 @@ fn next_phase_number_never_reuses_a_deleted_number() {
         number: 200,
         title: "a follow-up".to_string(),
         state: "OPEN".to_string(),
+        labels: Vec::new(),
         body: String::new(),
     }];
     assert_eq!(render::next_phase_number(&stray), 1);
@@ -664,6 +764,7 @@ fn child(phase: u64, number: u64) -> ChildIssue {
         number,
         title: render::phase_title(8445, phase, &format!("phase {phase}")),
         state: "OPEN".to_string(),
+        labels: Vec::new(),
         body: format!("## Gate\n\ngate {phase}\n"),
     }
 }
@@ -694,6 +795,7 @@ fn gate_of_reads_only_the_first_paragraph() {
         number: 7,
         title: render::phase_title(1, 1, "x"),
         state: "CLOSED".to_string(),
+        labels: Vec::new(),
         body: body.to_string(),
     }]);
     assert!(rendered.contains("| the gate line. |"), "{rendered}");
@@ -708,6 +810,7 @@ fn render_escapes_a_pipe_in_a_phase_title() {
         number: 9,
         title: "[EPIC_1 PHASE_1] tm issue epic create|sync".to_string(),
         state: "OPEN".to_string(),
+        labels: Vec::new(),
         body: "## Gate\n\nnone | really\n".to_string(),
     }]);
     assert!(rendered.contains(r"create\|sync"), "{rendered}");
@@ -1770,4 +1873,624 @@ fn epic_create_requires_a_session_name() {
         Ok(name) => assert!(!name.trim().is_empty(), "a derived name is never blank"),
         Err(e) => assert!(e.to_string().contains("--session"), "{e}"),
     }
+}
+
+// ------------------------------------------------ phase 2 (#8448): State cell
+
+/// A child with the given state and labels, for the State-cell tests.
+fn labelled_child(state: &str, labels: &[&str]) -> ChildIssue {
+    ChildIssue {
+        number: 5,
+        title: render::phase_title(1, 1, "x"),
+        state: state.to_string(),
+        labels: labels.iter().map(|l| (*l).to_string()).collect(),
+        body: "## Gate\n\ng\n".to_string(),
+    }
+}
+
+/// AC6: a closed child reads `closed`, whatever label it still wears.
+#[test]
+fn state_cell_reads_closed_for_a_closed_child() {
+    assert_eq!(
+        render::state_cell(&labelled_child("CLOSED", &["status:tested"])),
+        "closed"
+    );
+}
+
+/// AC6: an open child reads its `status:*` label without the prefix.
+#[test]
+fn state_cell_reads_the_status_label_of_an_open_child() {
+    for state in ["in-progress", "coded", "merged", "tested"] {
+        let label = format!("status:{state}");
+        let child = labelled_child("OPEN", &["trusty-mpm", &label]);
+        assert_eq!(render::state_cell(&child), state);
+        let table = render::phases_table(std::slice::from_ref(&child));
+        assert!(table.contains(&format!("| #5 | {state} |")), "{table}");
+    }
+}
+
+/// AC6: an open child with no `status:*` label reads `open`.
+#[test]
+fn state_cell_reads_open_for_an_unlabelled_open_child() {
+    assert_eq!(
+        render::state_cell(&labelled_child("OPEN", &["trusty-mpm", "enhancement"])),
+        "open"
+    );
+}
+
+// ------------------------------------------------------- phase 2: `defer`
+
+fn defer_opts() -> DeferOptions {
+    DeferOptions {
+        item: "The | pipe thing".to_string(),
+        why: "later".to_string(),
+        destination: "unscheduled".to_string(),
+    }
+}
+
+/// AC5: exactly one row lands, escaped, and the report says it was written.
+#[test]
+fn defer_appends_exactly_one_row() {
+    let backend = FakeBackend::new();
+    let before = tracker_fixture("| # |");
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &before);
+    let report = defer::defer(&backend, 100, &defer_opts()).expect("defers");
+    assert!(!report.unchanged);
+    let after = backend.issue(100).body;
+    let block = render::block_content(&after, DEFERRED_START, DEFERRED_END).expect("block");
+    let before_block = render::block_content(&before, DEFERRED_START, DEFERRED_END).expect("b");
+    assert_eq!(
+        block.lines().count(),
+        before_block.lines().count() + 1,
+        "{block}"
+    );
+    assert!(
+        block.ends_with(r"| The \| pipe thing | later | unscheduled |"),
+        "{block}"
+    );
+}
+
+/// AC5: the `phases` and `followups` blocks — and everything else outside the
+/// `deferred` markers — are byte-identical before and after.
+#[test]
+fn defer_leaves_the_phases_and_followups_blocks_byte_identical() {
+    let backend = FakeBackend::new();
+    let before = tracker_fixture("| 1 | phase 1 | #101 | in-progress | gate 1 |");
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &before);
+    defer::defer(&backend, 100, &defer_opts()).expect("defers");
+    let after = backend.issue(100).body;
+    assert_ne!(after, before);
+    let split = |text: &str| -> (String, String) {
+        let start = text.find(DEFERRED_START).expect("start");
+        let end = text.find(DEFERRED_END).expect("end");
+        (
+            text[..start + DEFERRED_START.len()].to_string(),
+            text[end..].to_string(),
+        )
+    };
+    let (head_before, tail_before) = split(&before);
+    let (head_after, tail_after) = split(&after);
+    assert_eq!(
+        head_before, head_after,
+        "bytes before the deferred block changed"
+    );
+    assert_eq!(
+        tail_before, tail_after,
+        "bytes after the deferred block changed"
+    );
+    assert!(head_after.contains(PHASES_START) && head_after.contains(PHASES_END));
+    assert!(tail_after.contains(FOLLOWUPS_START) && tail_after.contains(FOLLOWUPS_END));
+}
+
+#[test]
+fn defer_is_a_no_op_when_the_row_is_already_present() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    defer::defer(&backend, 100, &defer_opts()).expect("first");
+    let report = defer::defer(&backend, 100, &defer_opts()).expect("second");
+    assert!(report.unchanged, "the same row must not stack");
+    assert_eq!(backend.calls("set_body"), 1);
+}
+
+#[test]
+fn defer_refuses_a_blank_cell_and_writes_nothing() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    let mut opts = defer_opts();
+    opts.why = "  ".to_string();
+    let err = defer::defer(&backend, 100, &opts).unwrap_err();
+    assert!(err.to_string().contains("--why"), "{err}");
+    assert_eq!(backend.calls("body"), 0, "refused before any read");
+    assert_eq!(backend.calls("set_body"), 0);
+}
+
+#[test]
+fn defer_seeds_the_header_into_an_empty_block() {
+    let backend = FakeBackend::new();
+    let body = format!("prose\n{DEFERRED_START}\n{DEFERRED_END}\n");
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &body);
+    defer::defer(&backend, 100, &defer_opts()).expect("defers");
+    let after = backend.issue(100).body;
+    assert!(
+        after.contains("| Item | Why deferred | Where it went |"),
+        "{after}"
+    );
+    assert!(after.starts_with("prose\n"), "{after}");
+}
+
+// ------------------------------------------------------- phase 2: `close`
+
+/// A tracker body declaring two outcomes above the marker blocks.
+fn tracker_with_outcomes() -> String {
+    format!(
+        "## Outcomes\n\n- **O1** The first outcome.\n- **O2** The second outcome.\n\n{}",
+        tracker_fixture("| # |")
+    )
+}
+
+fn two_evidence() -> Vec<String> {
+    vec![
+        "O1: proved by #101".to_string(),
+        "O2 proved by #102".to_string(),
+    ]
+}
+
+fn seed_closable(backend: &FakeBackend, child_states: &[&str]) {
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_with_outcomes());
+    for (i, state) in child_states.iter().enumerate() {
+        let n = 101 + i as u64;
+        let title = render::phase_title(100, i as u64 + 1, &format!("phase {}", i + 1));
+        backend.seed_child(100, n, &title, state, "## Gate\n\ng\n");
+    }
+}
+
+/// AC3, first half: an open child is a refusal that names it, and nothing is
+/// posted or closed.
+#[test]
+fn close_refuses_while_a_child_is_open_and_names_it() {
+    let backend = FakeBackend::new();
+    seed_closable(&backend, &["CLOSED", "OPEN"]);
+    let err = close::close(&backend, 100, &two_evidence()).unwrap_err();
+    assert!(err.to_string().contains("#102"), "{err}");
+    assert!(!err.to_string().contains("#101"), "{err}");
+    assert_eq!(backend.calls("comment"), 0);
+    assert_eq!(backend.calls("close_issue"), 0);
+    assert_eq!(backend.issue(100).state, "OPEN");
+}
+
+/// AC3, second half: once the child is closed the same call succeeds.
+#[test]
+fn close_succeeds_once_every_child_is_closed() {
+    let backend = FakeBackend::new();
+    seed_closable(&backend, &["CLOSED", "OPEN"]);
+    close::close(&backend, 100, &two_evidence()).expect_err("refused while #102 is open");
+    backend
+        .issues
+        .borrow_mut()
+        .get_mut(&102)
+        .expect("#102")
+        .state = "CLOSED".to_string();
+    let report = close::close(&backend, 100, &two_evidence()).expect("closes");
+    assert_eq!(report.phases, vec![101, 102]);
+    assert!(report.comment_posted);
+    assert_eq!(backend.issue(100).state, "CLOSED");
+}
+
+/// AC3: the comment carries one line per outcome the tracker body declares.
+#[test]
+fn close_posts_one_line_per_declared_outcome() {
+    let backend = FakeBackend::new();
+    seed_closable(&backend, &["CLOSED"]);
+    let report = close::close(&backend, 100, &two_evidence()).expect("closes");
+    assert_eq!(report.outcomes, 2);
+    let comments = backend.issue(100).comments;
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    let comment = &comments[0];
+    assert!(comment.starts_with(CLOSE_COMMENT_PREFIX), "{comment}");
+    assert!(
+        comment.contains("- **O1** The first outcome. — proved by #101"),
+        "{comment}"
+    );
+    assert!(
+        comment.contains("- **O2** The second outcome. — proved by #102"),
+        "{comment}"
+    );
+    assert_eq!(comment.matches("\n- **O").count(), 2, "{comment}");
+}
+
+/// A tracker with no linked phases has nothing this verb can vouch for — and
+/// an empty page is exactly what a broken sub-issue read would look like.
+#[test]
+fn close_refuses_a_tracker_with_no_children() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_with_outcomes());
+    let err = close::close(&backend, 100, &two_evidence()).unwrap_err();
+    assert!(err.to_string().contains("no native sub-issues"), "{err}");
+    assert_eq!(backend.calls("close_issue"), 0);
+}
+
+#[test]
+fn close_refuses_a_tracker_that_declares_no_outcomes() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "CLOSED",
+        "## Gate\n\ng\n",
+    );
+    let err = close::close(&backend, 100, &two_evidence()).unwrap_err();
+    assert!(err.to_string().contains("## Outcomes"), "{err}");
+    assert_eq!(backend.calls("comment"), 0);
+    assert_eq!(backend.calls("close_issue"), 0);
+}
+
+#[test]
+fn close_refuses_evidence_that_does_not_match_the_declared_outcomes() {
+    let backend = FakeBackend::new();
+    seed_closable(&backend, &["CLOSED"]);
+    // Missing O2, unknown O3.
+    let err = close::close(
+        &backend,
+        100,
+        &["O1: yes".to_string(), "O3: invented".to_string()],
+    )
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("missing [O2]"), "{text}");
+    assert!(text.contains("unknown [O3]"), "{text}");
+    // A repeated id, and an entry with no text, are refused too.
+    let err = close::close(&backend, 100, &["O1: a".to_string(), "O1: b".to_string()]).unwrap_err();
+    assert!(err.to_string().contains("twice"), "{err}");
+    let err = close::close(&backend, 100, &["O1:".to_string()]).unwrap_err();
+    assert!(err.to_string().contains("O<n>: <what proves it>"), "{err}");
+    assert_eq!(backend.calls("comment"), 0);
+    assert_eq!(backend.calls("close_issue"), 0);
+}
+
+/// The two-call tail: a run killed after the comment and before the close
+/// leaves the comment; the re-run closes without posting a second one.
+#[test]
+fn close_does_not_post_a_second_comment_on_re_run() {
+    let backend = FakeBackend::new().fails("close_issue:1");
+    seed_closable(&backend, &["CLOSED"]);
+    let err = close::close(&backend, 100, &two_evidence()).unwrap_err();
+    assert!(err.to_string().contains("still open"), "{err}");
+    assert_eq!(backend.issue(100).comments.len(), 1);
+    assert_eq!(backend.issue(100).state, "OPEN");
+
+    backend.clear_failures();
+    let report = close::close(&backend, 100, &two_evidence()).expect("re-run closes");
+    assert!(
+        !report.comment_posted,
+        "the comment was already on the record"
+    );
+    assert_eq!(
+        backend.issue(100).comments.len(),
+        1,
+        "one closing comment, not two"
+    );
+    assert_eq!(backend.issue(100).state, "CLOSED");
+}
+
+#[test]
+fn close_propagates_a_failed_close_call() {
+    let backend = FakeBackend::new().fails("close_issue");
+    seed_closable(&backend, &["CLOSED"]);
+    let err = close::close(&backend, 100, &two_evidence()).unwrap_err();
+    assert!(
+        err.to_string().contains("scripted failure: close_issue"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("#100"), "{err}");
+}
+
+// ------------------------------------------- phase 2: the transition hook
+
+fn model() -> StateModel {
+    serde_yaml::from_str(DEFAULT_MODEL_YAML).expect("the default model parses")
+}
+
+/// A tracker whose `phases` block is stale (header only) with one linked,
+/// phase-titled child; the transition moves that child `queued → approved`.
+fn seed_hookable(backend: &FakeBackend, parent: Option<u64>) -> FakeTickets {
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    let title = render::phase_title(100, 1, "phase 1");
+    backend.issues.borrow_mut().insert(
+        101,
+        FakeIssue {
+            title: title.clone(),
+            body: "## Gate\n\ng\n".to_string(),
+            state: "OPEN".to_string(),
+            parent,
+            // The lifecycle label the LIVE child wears after the swap, which
+            // is what the regenerated State cell must show (AC6).
+            labels: vec!["status:coded".to_string()],
+            ..FakeIssue::default()
+        },
+    );
+    FakeTickets::new(101, &title, &["unicorn", "unicorn:queued"])
+}
+
+/// The happy path: the label moves, then the parent tracker's block is
+/// regenerated from the child's live state.
+#[test]
+fn transition_hook_regenerates_the_parent_trackers_block() {
+    let backend = FakeBackend::new();
+    let tickets = seed_hookable(&backend, Some(100));
+    let hooked =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "approved", None)
+            .expect("transitions and syncs");
+    assert!(!hooked.report.no_op);
+    let synced = hooked.synced.expect("the tracker was synced");
+    assert_eq!(synced.tracker, 100);
+    assert_eq!(tickets.count("swap_labels"), 1);
+    assert!(
+        backend
+            .issue(100)
+            .body
+            .contains("| 1 | phase 1 | #101 | coded | g |"),
+        "{}",
+        backend.issue(100).body
+    );
+}
+
+/// AC1: the sync fails AFTER the label moved, and the command fails with it —
+/// naming the stale tracker and the repair. The backend errors ONLY on the
+/// sync's write; every other call succeeds. Deleting the `?` on the sync arm
+/// turns this into a plain success, which is the fail-open this pins.
+#[test]
+fn transition_hook_fails_the_command_when_the_sync_fails() {
+    let backend = FakeBackend::new().fails("set_body");
+    let tickets = seed_hookable(&backend, Some(100));
+    let err =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "approved", None)
+            .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("tracker #100"), "{text}");
+    assert!(text.contains("tm issue epic sync 100"), "{text}");
+    assert!(text.contains("is now `approved`"), "{text}");
+    assert_eq!(
+        tickets.count("swap_labels"),
+        1,
+        "the label had already moved"
+    );
+    assert_eq!(backend.calls("set_body"), 1, "the write was attempted once");
+}
+
+/// AC2, first half: a title that is not `[EPIC_<n> PHASE_<m>]` costs no epic
+/// backend call at all — not even a parent read.
+#[test]
+fn transition_hook_makes_no_epic_call_for_a_non_phase_title() {
+    let backend = FakeBackend::new();
+    let tickets = FakeTickets::new(7, "a plain issue", &["unicorn", "unicorn:queued"]);
+    let hooked =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 7, "approved", None)
+            .expect("transitions");
+    assert!(hooked.synced.is_none());
+    assert_eq!(tickets.count("swap_labels"), 1);
+    for op in ["parent", "body", "children", "set_body"] {
+        assert_eq!(backend.calls(op), 0, "{op} was called");
+    }
+}
+
+/// AC2, second half: a phase-titled issue with no parent costs one parent
+/// read and no tracker read or write.
+#[test]
+fn transition_hook_reads_no_tracker_for_a_parentless_phase() {
+    let backend = FakeBackend::new();
+    let tickets = seed_hookable(&backend, None);
+    let hooked =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "approved", None)
+            .expect("transitions");
+    assert!(hooked.synced.is_none());
+    assert_eq!(backend.calls("parent"), 1);
+    for op in ["body", "children", "set_body"] {
+        assert_eq!(backend.calls(op), 0, "{op} was called");
+    }
+}
+
+/// A no-op transition (#8003) changed nothing, so it syncs nothing.
+#[test]
+fn transition_hook_skips_a_no_op_transition() {
+    let backend = FakeBackend::new();
+    let tickets = seed_hookable(&backend, Some(100));
+    let hooked =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "queued", None)
+            .expect("no-op");
+    assert!(hooked.report.no_op);
+    assert!(hooked.synced.is_none());
+    for op in ["parent", "body", "children", "set_body"] {
+        assert_eq!(backend.calls(op), 0, "{op} was called");
+    }
+}
+
+/// A parent read that fails cannot tell "no tracker" from "could not look", so
+/// it fails the command and names the tracker by the title's number.
+#[test]
+fn transition_hook_names_the_tracker_when_the_parent_read_fails() {
+    let backend = FakeBackend::new().fails("parent");
+    let tickets = seed_hookable(&backend, Some(100));
+    let err =
+        hook::transition_with_tracker_sync(&tickets, &backend, &model(), 101, "approved", None)
+            .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("tracker #100"), "{text}");
+    assert!(text.contains("tm issue epic sync 100"), "{text}");
+    assert_eq!(render::epic_number_of("[EPIC_8445 PHASE_2] x"), Some(8445));
+    assert_eq!(render::epic_number_of("[EPIC 8445] x"), None);
+}
+
+// --------------------------------------------- phase 2: audit set-level rows
+
+fn row<'a>(
+    rows: &'a [trusty_mpm::core::issue_audit::AuditRow],
+    req: &str,
+) -> &'a trusty_mpm::core::issue_audit::AuditRow {
+    rows.iter()
+        .find(|r| r.requirement == req)
+        .unwrap_or_else(|| panic!("no {req} row in {rows:?}"))
+}
+
+#[test]
+fn audit_rows_pass_a_tracker_whose_block_matches() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "OPEN",
+        "## Gate\n\ng\n",
+    );
+    sync::sync(&backend, 100).expect("bring the block current");
+    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(row(&rows, REQ_PHASES_BLOCK).verdict, Verdict::Pass);
+    assert_eq!(row(&rows, REQ_PHASE_LINKAGE).verdict, Verdict::Pass);
+    assert!(
+        row(&rows, REQ_PHASE_LINKAGE)
+            .detail
+            .contains("1 phase-titled")
+    );
+}
+
+/// AC4: a stale block is a FAIL carrying the exact repair wording.
+#[test]
+fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "OPEN",
+        "## Gate\n\ng\n",
+    );
+    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let block = row(&rows, REQ_PHASES_BLOCK);
+    assert_eq!(block.verdict, Verdict::Fail);
+    assert_eq!(
+        block.detail,
+        "phases block stale — run tm issue epic sync 100"
+    );
+    assert_eq!(backend.calls("set_body"), 0, "an audit never writes");
+}
+
+/// AC4: a phase-titled issue that is not a native sub-issue is FAIL, not INFO.
+#[test]
+fn audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "OPEN",
+        "## Gate\n\ng\n",
+    );
+    sync::sync(&backend, 100).expect("current");
+    // Phase-titled for #100, parent None — the unlinked case.
+    backend.seed_tracker(102, &render::phase_title(100, 2, "orphan"), "body");
+    // Phase-titled for ANOTHER epic: not this tracker's concern.
+    backend.seed_tracker(103, &render::phase_title(999, 1, "elsewhere"), "body");
+    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let linkage = row(&rows, REQ_PHASE_LINKAGE);
+    assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
+    assert!(linkage.detail.contains("#102"), "{}", linkage.detail);
+    assert!(
+        linkage.detail.contains("--add-sub-issue 102"),
+        "{}",
+        linkage.detail
+    );
+    assert!(!linkage.detail.contains("#103"), "{}", linkage.detail);
+}
+
+#[test]
+fn audit_rows_are_empty_for_a_non_tracker() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(7, "a plain issue", "prose with no markers\n");
+    let rows = audit_rows::epic_rows(&backend, 7).expect("rows");
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(backend.calls("children"), 0);
+    assert_eq!(backend.calls("phase_titled_issues"), 0);
+}
+
+#[test]
+fn audit_rows_fail_a_body_whose_markers_cannot_be_rewritten() {
+    let backend = FakeBackend::new();
+    let body = format!("{PHASES_START}\na\n{PHASES_START}\nb\n{PHASES_END}\n");
+    backend.seed_tracker(100, "[EPIC 100] An outcome", &body);
+    let rows = audit_rows::epic_rows(&backend, 100).expect("rows");
+    let block = row(&rows, REQ_PHASES_BLOCK);
+    assert_eq!(block.verdict, Verdict::Fail);
+    assert!(
+        block.detail.contains("exactly one is required"),
+        "{}",
+        block.detail
+    );
+}
+
+// ------------------------------------------- phase 2: the `gh` layer additions
+
+#[test]
+fn gh_backend_reads_a_childs_labels_with_its_body() {
+    let runner = FakeRunner::new(vec![
+        ok_out(
+            r#"{"subIssues":{"nodes":[{"number":8447,"title":"[EPIC_8445 PHASE_1] a","state":"OPEN"}],"totalCount":1}}"#,
+        ),
+        ok_out(
+            "{\"body\":\"## Gate\\n\\nnone\\n\",\"labels\":[{\"name\":\"status:coded\"},{\"name\":\"trusty-mpm\"}]}",
+        ),
+    ]);
+    let backend = super::backend::GhEpicBackend::new(runner);
+    let children = backend.children(8445).expect("parses");
+    assert_eq!(children[0].labels, vec!["status:coded", "trusty-mpm"]);
+    assert_eq!(render::state_cell(&children[0]), "coded");
+    let calls = backend_calls(&backend);
+    assert!(calls[1].contains(&"body,labels".to_string()), "{calls:?}");
+}
+
+/// Borrow the fake runner's argv log back out of a backend.
+fn backend_calls(backend: &super::backend::GhEpicBackend<FakeRunner>) -> Vec<Vec<String>> {
+    backend.runner().calls.borrow().clone()
+}
+
+#[test]
+fn gh_backend_reads_a_parent_and_its_absence() {
+    let backend = super::backend::GhEpicBackend::new(FakeRunner::new(vec![ok_out(
+        r#"{"parent":{"number":8445,"title":"[EPIC 8445] x"}}"#,
+    )]));
+    assert_eq!(backend.parent(8448).expect("reads"), Some(8445));
+    let backend =
+        super::backend::GhEpicBackend::new(FakeRunner::new(vec![ok_out(r#"{"parent":null}"#)]));
+    assert_eq!(backend.parent(8448).expect("reads"), None);
+    // A failed read is an error, never `None`.
+    let backend = super::backend::GhEpicBackend::new(FakeRunner::new(vec![]));
+    assert!(backend.parent(8448).is_err());
+}
+
+#[test]
+fn gh_backend_refuses_a_full_phase_title_page() {
+    let rows: Vec<String> = (1..=200)
+        .map(|n| format!(r#"{{"number":{n},"title":"[EPIC_9 PHASE_{n}] p"}}"#))
+        .collect();
+    let backend = super::backend::GhEpicBackend::new(FakeRunner::new(vec![ok_out(&format!(
+        "[{}]",
+        rows.join(",")
+    ))]));
+    let err = backend.phase_titled_issues(9).unwrap_err();
+    assert!(err.to_string().contains("full page"), "{err}");
+    let backend = super::backend::GhEpicBackend::new(FakeRunner::new(vec![ok_out(
+        r#"[{"number":8447,"title":"[EPIC_8445 PHASE_1] a"}]"#,
+    )]));
+    let found = backend.phase_titled_issues(8445).expect("reads");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].number, 8447);
+    let calls = backend_calls(&backend);
+    assert!(
+        calls[0].contains(&"in:title \"EPIC_8445 PHASE_\"".to_string()),
+        "{calls:?}"
+    );
 }

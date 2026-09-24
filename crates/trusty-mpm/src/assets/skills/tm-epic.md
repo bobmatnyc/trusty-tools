@@ -1,6 +1,6 @@
 ---
 name: tm-epic
-description: Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the four tracker-update triggers, and the manual gh procedure until the CLI ships.
+description: Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the five tracker-update triggers, and the tm issue epic verbs that maintain the tracker.
 user-invocable: true
 version: "0.1.0"
 category: pm-workflow
@@ -24,24 +24,25 @@ what a tracker and its phases need on top. A project that ships a `TICKETING.md`
 at its root may narrow these defaults; where none exists, this skill applies as
 written.
 
-## Subcommands — intended shape, NOT YET IMPLEMENTED
+## The `tm issue epic` verbs
 
-No `tm` verb exists for this yet ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)
-Part A ships the skill and templates; the CLI is a later phase). Until it lands,
-[`references/manual-procedure.md`](references/manual-procedure.md) is the whole
-implementation, run by hand.
+The deterministic half is code ([#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445)).
+[`references/manual-procedure.md`](references/manual-procedure.md) remains the
+`gh`-level description of what each verb does, for the adopt-an-existing-issue
+cases the CLI does not cover.
 
-| Verb | Intended behaviour |
+| Verb | Behaviour |
 |---|---|
-| `/tm-epic create <plan-doc>` | Refuse until the plan document is on `origin/main`; file the tracker, read its number back, edit it into the title, then file each phase as a sub-issue |
-| `/tm-epic sync <epic#>` | Regenerate the `phases` block wholesale from live child state |
-| `/tm-epic defer <epic#>` | Amend the `deferred` block with one removed-scope row |
-| `/tm-epic close <epic#>` | Refuse while any phase is open; post the closing comment mapping each outcome to evidence |
+| `tm issue epic create --from <plan-doc> --milestone … --component … [--project N] [--session …]` | Refuses until the plan document is on `origin/main`; files the tracker, reads its number back, edits it into the title, then files each phase as a native sub-issue; re-runnable |
+| `tm issue epic sync <epic#>` | Regenerates the `phases` block wholesale from live child state; a no-op when it already matches |
+| `tm issue epic defer <epic#> --item … --why … --where …` | Appends one row to the `deferred` block; the same row twice is a no-op |
+| `tm issue epic close <epic#> --evidence "O<n>: …"…` | Refuses while any child is open, naming it; posts the closing comment mapping each declared outcome to its evidence; closes |
 
-Also intended, not implemented: `tm issue transition` on a phase issue will
-regenerate its tracker's `phases` block as a side effect, so a phase closing
-never leaves the tracker stale. Until then, `sync` — or the manual regeneration
-step — runs after every transition.
+`tm issue transition` on a phase issue regenerates its tracker's `phases`
+block as a side effect. A sync that fails there fails the command and names
+the tracker to `sync` by hand — the label has already moved. `tm issue audit
+<epic#>` adds two set-level rows: the block matches its children, and every
+`[EPIC_<epic#> PHASE_…]`-titled issue is a native sub-issue.
 
 ## The gate test
 
@@ -113,14 +114,19 @@ fail for a specific reason, so neither can be checked.
 
 ## When the tracker body changes
 
-A session touches the tracker body on exactly four triggers:
+A session touches the tracker body on exactly five triggers:
 
 | Trigger | What changes |
 |---|---|
 | A phase issue opens | `phases` block regenerated |
 | A phase issue closes | `phases` block regenerated |
 | A phase blocks or unblocks | `phases` block regenerated (Gate column) |
-| An item is deferred, or a deferred item lands | `deferred` block amended |
+| An item is deferred, or a deferred item lands | `deferred` block amended (`tm issue epic defer`) |
+| A phase's `status:*` label changes | `phases` block regenerated (State column) — `tm issue transition` on a phase does this itself |
+
+The State cell reads `closed` for a closed phase; for an open one, its
+`status:*` label without the prefix (`in-progress`, `coded`, `merged`,
+`tested`), or `open` when it carries none.
 
 **Not on PR open, merge, commit or review.** Those are phase-issue events and
 belong on the phase issue or its PR. A finding discovered mid-execution is a

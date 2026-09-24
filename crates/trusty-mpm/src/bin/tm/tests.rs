@@ -2341,6 +2341,93 @@ fn cli_parses_issue_epic_sync() {
 }
 
 #[test]
+fn cli_parses_issue_epic_defer() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "defer",
+        "8445",
+        "--item",
+        "the gap",
+        "--why",
+        "later",
+        "--where",
+        "unscheduled",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Defer {
+                    epic,
+                    item,
+                    why,
+                    destination,
+                }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(item, "the gap");
+            assert_eq!(why, "later");
+            assert_eq!(destination, "unscheduled");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // All three cells are required flags.
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "issue",
+            "epic",
+            "defer",
+            "8445",
+            "--item",
+            "x"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_parses_issue_epic_close() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "close",
+        "8445",
+        "--evidence",
+        "O1: PR #1",
+        "--evidence",
+        "O2: PR #2",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic, evidence }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(evidence, vec!["O1: PR #1", "O2: PR #2"]);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // `--evidence` is repeatable and optional at parse time; the verb itself
+    // refuses when the declared outcomes are not all covered.
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "close", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic: 8445, .. }),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn cli_parses_watch_poll_minimal() {
     // Why: the minimal `tm watch poll <project>` must parse with safety defaults
     // (dry-run off but execute also off → dry-run behaviour) and claude-code.

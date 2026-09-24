@@ -214,6 +214,7 @@ pub(crate) fn create<B: EpicBackend>(
             number: filed,
             title: spec.title,
             state: "OPEN".to_string(),
+            labels: spec.labels,
             body: spec.body,
         });
         report.filed.push((number, filed));

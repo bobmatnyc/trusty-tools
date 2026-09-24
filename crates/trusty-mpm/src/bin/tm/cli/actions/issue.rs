@@ -107,11 +107,14 @@ pub(crate) enum IssueCmd {
 /// retyping a markdown table — the drift `TICKETING.md`'s `epics.*` rules exist
 /// to prevent. Two verbs make the deterministic half code.
 /// What: `Create` (parse a committed plan document, file the tracker, rename it
-/// once its number is known, then file each phase as a native sub-issue) and
-/// `Sync` (regenerate the `phases` block wholesale from live child state).
+/// once its number is known, then file each phase as a native sub-issue),
+/// `Sync` (regenerate the `phases` block wholesale from live child state),
+/// `Defer` (append one row to the `deferred` block, #8448) and `Close` (refuse
+/// while a phase is open, post the outcome→evidence comment, close, #8448).
 /// Test: `cli_parses_issue_epic_create`,
 /// `cli_parses_issue_epic_create_repeatable_components`,
-/// `cli_parses_issue_epic_sync`.
+/// `cli_parses_issue_epic_sync`, `cli_parses_issue_epic_defer`,
+/// `cli_parses_issue_epic_close`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum EpicCmd {
     /// File an epic tracker and its phase issues from a committed plan document.
@@ -145,5 +148,27 @@ pub(crate) enum EpicCmd {
     Sync {
         /// The tracker's issue number.
         epic: u64,
+    },
+    /// Append one row to a tracker's `deferred` block (#8448).
+    Defer {
+        /// The tracker's issue number.
+        epic: u64,
+        /// The scope removed from the plan, or the gap it leaves.
+        #[arg(long, value_name = "TEXT")]
+        item: String,
+        /// Why it left the plan.
+        #[arg(long, value_name = "TEXT")]
+        why: String,
+        /// Where it went — an issue reference, or `unscheduled`.
+        #[arg(long = "where", value_name = "TEXT")]
+        destination: String,
+    },
+    /// Close a tracker once every phase is closed, posting the outcome→evidence comment (#8448).
+    Close {
+        /// The tracker's issue number.
+        epic: u64,
+        /// `O<n>: <what proves it>` — exactly one per outcome the tracker body declares. Repeatable.
+        #[arg(long, value_name = "O<n>: TEXT")]
+        evidence: Vec<String>,
     },
 }

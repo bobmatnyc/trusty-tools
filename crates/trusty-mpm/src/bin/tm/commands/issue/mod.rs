@@ -142,8 +142,21 @@ fn dispatch<S: TicketSystem>(
             // #7580: a rejected state name is the error this bug reads as, so
             // the model in force is named beside it.
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
-            let report = ops::transition(backend, &model, issue, &to_state, note.as_deref())
-                .map_err(|e| with_source(e, &source))?;
+            // #8448: a phase issue's transition regenerates its tracker's
+            // phases block, and a failed regeneration is THIS command's
+            // failure — the hook composes the two so it cannot be swallowed.
+            let epic_backend =
+                epic::backend::GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
+            let hooked = epic::hook::transition_with_tracker_sync(
+                backend,
+                &epic_backend,
+                &model,
+                issue,
+                &to_state,
+                note.as_deref(),
+            )
+            .map_err(|e| with_source(e, &source))?;
+            let report = hooked.report;
             // #8003: a no-op is stdout-silent and says so on stderr, so a
             // script piping stdout still reads only real transitions while the
             // operator is told why nothing moved.
@@ -159,6 +172,16 @@ fn dispatch<S: TicketSystem>(
             println!("transitioned #{issue}: {from} → {}", report.to);
             if report.assignee_changed {
                 println!("  assignee rule applied");
+            }
+            if let Some(synced) = hooked.synced {
+                if synced.unchanged {
+                    println!(
+                        "  tracker #{}: phases block already current",
+                        synced.tracker
+                    );
+                } else {
+                    println!("  tracker #{}: phases block regenerated", synced.tracker);
+                }
             }
         }
         IssueCmd::Current { issue, config } => {

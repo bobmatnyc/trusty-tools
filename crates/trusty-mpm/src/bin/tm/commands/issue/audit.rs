@@ -45,8 +45,12 @@ use trusty_mpm::core::issue_audit::{IssueAudit, audit_issue, render_audit, rende
 use trusty_mpm::core::issue_audit_gh::{AuditWindow, list_open_issues, view_issue};
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
+use anyhow::Context as _;
+
+use crate::commands::issue::epic::audit_rows::epic_rows;
+use crate::commands::issue::epic::backend::GhEpicBackend;
 use crate::commands::ticket::labels::gh_list_repo_labels;
-use crate::commands::ticket::runner::CommandRunner;
+use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
 
 /// Prefix a live `gh` label's description carries when it names a crate.
 ///
@@ -84,7 +88,17 @@ pub(crate) fn run(
     let audits = match (issue, recent, since) {
         (Some(number), _, _) => {
             let facts = view_issue(number, None, gh_env)?;
-            vec![audit_issue(&facts, ticketing, &components)]
+            let mut audit = audit_issue(&facts, ticketing, &components);
+            // #8448: a tracker gets the set-level rows — block currency and
+            // phase linkage — computed against its live children. An issue
+            // with no phases block gets none; a read that fails fails the
+            // audit rather than printing PASS over an unenumerated set.
+            let epic_backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
+            audit.rows.extend(
+                epic_rows(&epic_backend, number)
+                    .with_context(|| format!("epic rows for #{number}"))?,
+            );
+            vec![audit]
         }
         (None, Some(n), _) => {
             audit_window(&AuditWindow::Recent(n), ticketing, &components, gh_env)?
