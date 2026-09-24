@@ -6,16 +6,18 @@
 //! What: canonicalizes DIR (the form `tm hook` stamps on a record), GETs
 //! `/api/v1/delegations?cwd=`, and prints one line per record with the same
 //! fields the dispatch deny names.
-//! Test: `listing_line_names_every_field_8257`; the route in
+//! Test: `listing_line_names_every_field_8257`,
+//! `listing_dir_is_absolute_for_a_missing_relative_dir_8257`,
+//! `listing_dir_refuses_a_path_it_cannot_resolve_8257`; the route in
 //! `list_route_names_the_blocking_record_8257`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use trusty_mpm::daemon::services::delegation_records::{DelegationListing, DelegationRecordView};
 
 /// Fetch and print the listing for `dir`.
 pub(crate) async fn list(client: &reqwest::Client, url: &str, dir: &Path) -> anyhow::Result<()> {
-    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let dir = listing_dir(dir)?;
     let resp = client
         .get(format!("{url}/api/v1/delegations"))
         .query(&[("cwd", dir.display().to_string())])
@@ -37,6 +39,39 @@ pub(crate) async fn list(client: &reqwest::Client, url: &str, dir: &Path) -> any
         println!("{}", listing_line(record));
     }
     Ok(())
+}
+
+/// The directory to ask the daemon about, in the canonical form `tm hook`
+/// stamps on a record (#8257).
+///
+/// Why: the daemon matches `cwd` exactly, so a relative or unresolved path
+/// matches no record, and the listing would print "no live delegation
+/// records" for a directory it never asked about.
+/// What: the canonical path when `dir` exists. When it does not — a removed
+/// worktree whose record outlives it — the deepest existing ancestor,
+/// canonicalized, joined with the missing tail. `Err` when the path cannot be
+/// resolved for any reason other than its absence.
+/// Test: `listing_dir_is_absolute_for_a_missing_relative_dir_8257`,
+/// `listing_dir_canonicalizes_the_existing_ancestor_8257`,
+/// `listing_dir_refuses_a_path_it_cannot_resolve_8257`.
+fn listing_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = std::path::absolute(dir)
+        .map_err(|e| anyhow::anyhow!("could not resolve {}: {e}", dir.display()))?;
+    let mut tail = Vec::new();
+    let mut at = absolute.as_path();
+    loop {
+        match std::fs::canonicalize(at) {
+            Ok(base) => return Ok(tail.iter().rev().fold(base, |p, c| p.join(c))),
+            // #8257: only absence walks up; any other failure is not a listing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => anyhow::bail!("could not resolve {}: {e}", dir.display()),
+        }
+        let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else {
+            return Ok(absolute);
+        };
+        tail.push(name.to_os_string());
+        at = parent;
+    }
 }
 
 /// One record as a listing line — type, ids, owner, age, clearing command.
@@ -95,5 +130,38 @@ mod tests {
         ] {
             assert!(line.contains(want), "missing {want:?}: {line}");
         }
+    }
+
+    // #8257: a relative path that no longer exists still asks the daemon about
+    // the canonical absolute directory a record would carry, never about ".".
+    #[test]
+    fn listing_dir_is_absolute_for_a_missing_relative_dir_8257() {
+        let rel = Path::new("no-such-dir-8257/removed-tree");
+        let resolved = listing_dir(rel).expect("a missing dir still resolves");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        assert!(resolved.ends_with(rel), "{}", resolved.display());
+    }
+
+    // #8257: the missing tail hangs off the canonical form of the deepest
+    // directory that exists, the form a record's `cwd` was stamped in.
+    #[test]
+    fn listing_dir_canonicalizes_the_existing_ancestor_8257() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("gone").join("tree");
+        let resolved = listing_dir(&missing).expect("resolves");
+        let base = std::fs::canonicalize(dir.path()).expect("canonical");
+        assert_eq!(resolved, base.join("gone").join("tree"));
+    }
+
+    // #8257: a path that fails for a reason other than absence is an error, not
+    // an empty listing for an unresolved path.
+    #[test]
+    fn listing_dir_refuses_a_path_it_cannot_resolve_8257() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"x").expect("write");
+        let through_a_file = file.join("sub");
+        let err = listing_dir(&through_a_file).expect_err("a path through a file");
+        assert!(err.to_string().contains("could not resolve"), "{err}");
     }
 }
