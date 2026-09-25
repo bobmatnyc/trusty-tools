@@ -1220,3 +1220,26 @@ fn schema_example_composes_deterministically() {
     assert!(out.contains("ROSTER"), "roster reaches the output: {out}");
     assert_eq!(out, pkg.compose(&inputs()).expect("composes"));
 }
+
+#[test]
+fn a_breaking_bullet_sits_in_a_breaking_fragment() {
+    // #8533 critic LOW: the `SectionId` library breaks were bullets prefixed
+    // "Breaking" inside a `Changed` fragment, so the assembled changelog filed
+    // a semver break under Changed. A fragment's first line is its category.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("changelog.d");
+    let mut misfiled = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("changelog.d") {
+        let path = entry.expect("entry").path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with(".md") || name == "README.md" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("fragment");
+        let mut lines = text.lines();
+        let category = lines.next().unwrap_or("").trim();
+        if category != "Breaking" && lines.any(|l| l.starts_with("- Breaking")) {
+            misfiled.push(name.to_string());
+        }
+    }
+    assert_eq!(misfiled, Vec::<String>::new());
+}

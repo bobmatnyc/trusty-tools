@@ -348,6 +348,52 @@ fn an_override_ending_in_an_unclosed_comment_hides_nothing_on_the_roster_absent_
 }
 
 #[test]
+fn an_override_ending_in_an_unclosed_fence_closes_it_in_its_own_block() {
+    // #8533 critic LOW: a body that opens a fence and never closes it turned
+    // the text after it into code. Each block now closes its own fence, so the
+    // prompt equals the one the same body composes with the fence closed.
+    let packaged: Vec<SectionId> = SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| !is_fixed_core_section(*id))
+        .collect();
+    let roster_absent = [
+        SectionId::Memory,
+        SectionId::Workflow,
+        SectionId::AgentDelegation,
+    ];
+    let paths: [(&[SectionId], fn(&TempDir) -> String); 2] = [
+        (&packaged, prompt_for),
+        (&roster_absent, roster_absent_prompt_for),
+    ];
+    for (ids, compose) in paths {
+        for id in ids {
+            let token = section_token(*id);
+            for (open, close) in [
+                ("```text\nunclosed", "```"),
+                ("~~~\nunclosed", "~~~"),
+                ("````md\n```\ninner", "````"),
+            ] {
+                let body = format!("Project text for {token}.\n{open}");
+                let closed = compose(&project_with_claude_md(&marker(
+                    token,
+                    &format!("{body}\n{close}"),
+                )));
+                let unclosed = compose(&project_with_claude_md(&marker(token, &body)));
+                assert_eq!(
+                    crate::core::instruction_fold::open_fence_at_end(&unclosed),
+                    None,
+                    "{token} {open:?}"
+                );
+                assert!(
+                    unclosed == closed,
+                    "{token} {open:?}: the override's open fence reached the text after it"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn every_bundled_block_closes_its_own_comments_and_fences() {
     // Folding per block is byte-neutral for the shipped corpus only while no
     // block leaves a comment or fence open for the next one to depend on — the

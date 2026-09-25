@@ -208,8 +208,39 @@ fn a_project_style_keeps_the_floor_with_and_without_native_support() {
         "{injected}"
     );
     assert_eq!(injected.matches(&floor).count(), 1);
-    // Native: Claude Code delivers the prose; the floor heads the prompt.
+    // Native, no composite in place: the floor heads the prompt.
     assert_eq!(apply(true), format!("{floor}{sep}PROMPT"));
+    // Native, the settings naming the current composite: Claude Code delivers
+    // the prose and the floor, so the prompt carries no second floor.
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    std::fs::write(
+        dir.path().join(".claude").join("settings.json"),
+        serde_json::json!({ "outputStyle": id }).to_string(),
+    )
+    .expect("settings");
+    assert_eq!(apply(true), "PROMPT");
+    // A stale composite is not trusted.
+    std::fs::write(
+        dir.path().join(PROJECT_STYLES_DIR).join(format!("{id}.md")),
+        "stale",
+    )
+    .expect("stale composite");
+    assert_eq!(apply(true), format!("{floor}{sep}PROMPT"));
+}
+
+#[test]
+fn a_composite_id_is_neither_listed_nor_selectable() {
+    // #8533: selecting the generated composite would append a second floor.
+    let dir = project_with_style("fixture-voice");
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    assert_eq!(id, "fixture-voice.tm-floor");
+    assert_eq!(project_style_ids(dir.path()), vec!["fixture-voice"]);
+    assert!(matches!(
+        resolve_style_in_project(dir.path(), &id),
+        Err(ProjectStyleError::Unknown(_))
+    ));
 }
 
 #[test]

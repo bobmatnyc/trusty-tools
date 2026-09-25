@@ -213,7 +213,9 @@ pub fn composite_is_active(project_dir: &Path, style: &ActiveStyle) -> bool {
         .and_then(serde_json::Value::as_str)
         == Some(composite_style_id(style.id()).as_str());
     named
-        && std::fs::read_to_string(composite_path(project_dir, style.id())).ok().as_deref()
+        && std::fs::read_to_string(composite_path(project_dir, style.id()))
+            .ok()
+            .as_deref()
             == Some(text.as_str())
 }
 

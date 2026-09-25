@@ -4,7 +4,8 @@
 //! tier, so a project whose only style source was the harness manifest saw the
 //! report name the default style while the launch wrote the manifest's.
 //! What: sets a style ONLY in the project manifest, runs the real launch, and
-//! compares the `outputStyle` it wrote with what the report names.
+//! compares the `outputStyle` it wrote with what the report names. A second
+//! test reads what a bare `claude` launch would load after a tm launch.
 //! Test: this is the test module.
 
 use super::tests::EnvVarGuard;
@@ -55,8 +56,8 @@ fn a_manifest_only_style_is_named_alike_by_the_report_and_the_launch() {
     )
     .unwrap();
     assert_eq!(
-        settings["outputStyle"], "tm-demo-01",
-        "the launch applies the manifest's style"
+        settings["outputStyle"], "tm-demo-01.tm-floor",
+        "the launch applies the manifest's style, through its composite"
     );
 
     let report = crate::core::output_style::describe_effective_style(&fw.root, project);
@@ -65,4 +66,67 @@ fn a_manifest_only_style_is_named_alike_by_the_report_and_the_launch() {
         "the report names the style the launch wrote: {report}"
     );
     assert!(!report.contains("warning:"), "{report}");
+}
+
+#[test]
+#[serial_test::serial]
+fn a_bare_claude_launch_loads_the_project_prose_then_the_floor() {
+    // #8533 critic HIGH: a bare `claude` reads the style `outputStyle` names
+    // and no appended prompt. Naming the project style file itself lost the
+    // floor there; the launch now names a composite of prose and floor.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    std::fs::write(
+        project.join(".trusty-mpm.toml"),
+        "[style]\nactive = \"tm-demo-01\"\n",
+    )
+    .unwrap();
+    let styles = project.join(crate::core::output_style::PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).unwrap();
+    std::fs::write(
+        styles.join("tm-demo-01.md"),
+        "---\nname: tm-demo-01\ndescription: Demo voice\n---\nSpeak as the fixture voice.\n",
+    )
+    .unwrap();
+
+    prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        HostInputs::with_home(Some(tmp_home.path())),
+    )
+    .expect("the launch prepares");
+
+    // What a bare `claude` in this project loads: the settings' style name,
+    // resolved to the file of that name under `.claude/output-styles/`.
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    let named = settings["outputStyle"].as_str().expect("an outputStyle");
+    let file = std::fs::read_to_string(styles.join(format!("{named}.md")))
+        .expect("the named style file exists");
+    assert!(file.contains(&format!("\nname: {named}\n")), "{file}");
+    assert!(file.contains("\ndescription: Demo voice\n"), "{file}");
+    let prose = file
+        .find("Speak as the fixture voice.")
+        .expect("the project prose");
+    let floor = file
+        .find(&crate::core::output_style::style_floor())
+        .expect("the floor");
+    assert!(prose < floor, "the floor follows the prose: {file}");
+
+    // The tm launch reads the same composite, so its appended prompt adds no
+    // second floor.
+    let stash = std::fs::read_to_string(
+        crate::core::harness_root::harness_dir(project).join("last-instructions.md"),
+    )
+    .unwrap();
+    assert!(!stash.contains(crate::core::output_style::STYLE_FLOOR_HEADING));
 }

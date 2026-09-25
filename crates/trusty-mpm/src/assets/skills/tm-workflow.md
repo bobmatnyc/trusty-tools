@@ -940,7 +940,9 @@ default style.
 A project style keeps its prose, and the launch appends the floor to it: the
 bundled style's **PRIMARY DIRECTIVE** and **Communication — Write Plainly**
 sections. The floor is not overridable, and `tm sessions instructions` names
-the style `<id> (project) + floor`. `last-instructions.md` is written by `prepare_session` every
+the style `<id> (project) + floor`. The launch writes that composite to
+`.claude/output-styles/<id>.tm-floor.md` and names it in `outputStyle`, so a
+bare `claude` in the project gets the floor too. `last-instructions.md` is written by `prepare_session` every
 time a prompt is assembled, so the inspectable copy can never diverge from what
 the PM received (#382).
 

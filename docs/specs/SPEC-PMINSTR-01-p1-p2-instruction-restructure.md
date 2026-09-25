@@ -1548,10 +1548,14 @@ Plainly** sections, cut from that asset at launch. The PM prompt's "Prose
 Style — Write Plainly" pointer therefore names a section every style carries.
 
 - Injected (Claude Code without native `outputStyle`): the project prose,
-  folded on its own, then the floor. A trailing unclosed `<!--` or fence in
-  the prose ends with the prose; a heading that spoofs the floor adds nothing.
-- Native: Claude Code reads the style file as authored, and the floor heads
-  the appended prompt.
+  folded on its own, then the floor. A trailing unclosed `<!--` or open fence
+  (backtick or tilde, any length) in the prose ends with the prose; a heading
+  that spoofs the floor adds nothing.
+- Native: the launch writes the composite `<id>.tm-floor.md` (the project
+  prose, then the floor) into `.claude/output-styles/` and names it in
+  `outputStyle`, so a bare `claude` launch gets the floor too. The appended
+  prompt carries no second floor while that composite is current; when it is
+  not, the floor heads the appended prompt. A composite id is not selectable.
 - A bundled style gets no floor appended; each carries its own.
 
 `tm sessions instructions` names a project style `<id> (project) + floor`.

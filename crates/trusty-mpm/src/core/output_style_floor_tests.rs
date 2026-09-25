@@ -86,3 +86,119 @@ fn the_floor_survives_an_unclosed_comment_or_fence_and_a_spoofed_heading() {
         assert!(refolded.ends_with(&style_floor()), "{tail:?}: {refolded}");
     }
 }
+
+#[test]
+fn a_project_style_closes_its_tilde_or_long_backtick_fence_before_the_floor() {
+    // #8533 critic LOW: counting three-backtick lines left a `~~~` fence open,
+    // and read a four-backtick fence around a three-backtick one as closed.
+    for tail in [
+        "\n~~~\nunclosed",
+        "\n````md\n```\ninner example",
+        "\n````md\n```\ninner\n```",
+    ] {
+        let delivered = delivered_style_text(&project_style(&format!("Demo voice.\n{tail}")));
+        let prose = delivered
+            .strip_suffix(&format!("{SECTION_SEPARATOR}{}", style_floor()))
+            .expect("the floor ends the delivered style");
+        assert_eq!(
+            crate::core::instruction_fold::open_fence_at_end(prose),
+            None,
+            "{tail:?}: {delivered}"
+        );
+    }
+}
+
+#[test]
+fn a_heading_like_line_inside_a_fence_does_not_end_the_section() {
+    // #8533 critic LOW: a `#` line in a code example ended the section early.
+    let doc = "# Title\n\n## Floor\n\nRule one.\n\n```bash\n# a shell comment\n```\n\n\
+               ~~~\n## not a heading\n~~~\n\nRule two.\n\n## Next\n\nOther.\n";
+    let cut = section(doc, "## Floor").expect("present");
+    assert!(
+        cut.starts_with("## Floor") && cut.ends_with("Rule two."),
+        "{cut}"
+    );
+    assert!(!cut.contains("Other."), "{cut}");
+    assert_eq!(section(doc, "## Absent"), None);
+}
+
+/// The four minimum prohibitions every PRIMARY DIRECTIVE states.
+const MINIMUM_PROHIBITIONS: [&str; 4] = [
+    "never Edit/Write source files",
+    "never read more than ~3 files",
+    "never run build/test/lint/verification commands yourself",
+    "never claim \"done\"/\"fixed\"/\"working\" without agent-verified evidence",
+];
+
+/// The seven override phrases every PRIMARY DIRECTIVE lists, quoted as listed.
+const OVERRIDE_PHRASES: [&str; 7] = [
+    "\"do this yourself\"",
+    "\"don't delegate\"",
+    "\"implement directly\"",
+    "\"you do it\"",
+    "\"no delegation\"",
+    "\"PM do it\"",
+    "\"handle it yourself\"",
+];
+
+/// The PRIMARY DIRECTIVE section of `doc`, whitespace collapsed to single spaces.
+fn primary_directive(doc: &str) -> String {
+    let start = doc
+        .find("## 🔴 PRIMARY DIRECTIVE")
+        .expect("a PRIMARY DIRECTIVE");
+    let rest = &doc[start..];
+    let end = rest[1..].find("\n## ").map_or(rest.len(), |at| at + 1);
+    rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The required items `directive` lacks.
+fn missing_items(directive: &str) -> Vec<&'static str> {
+    MINIMUM_PROHIBITIONS
+        .into_iter()
+        .chain(OVERRIDE_PHRASES)
+        .filter(|item| !directive.contains(item))
+        .collect()
+}
+
+#[test]
+fn every_primary_directive_states_the_four_prohibitions_and_seven_override_phrases() {
+    // #8533 critic MEDIUM: the teacher and research directives were pinned by
+    // their headings only. Each bundled style and the project-style floor must
+    // state every item, and each item must be stated once, so removing any one
+    // makes this test fail.
+    let floor = style_floor();
+    let docs = OUTPUT_STYLES
+        .iter()
+        .map(|style| (style.id, style.content))
+        .chain([("project-style floor", floor.as_str())]);
+    for (name, doc) in docs {
+        let directive = primary_directive(doc);
+        assert_eq!(missing_items(&directive), Vec::<&str>::new(), "{name}");
+        for item in MINIMUM_PROHIBITIONS.into_iter().chain(OVERRIDE_PHRASES) {
+            let without = directive.replacen(item, "", 1);
+            assert_eq!(
+                missing_items(&without),
+                vec![item],
+                "{name}: deleting {item} must be caught"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_composite_is_refused() {
+    // #8533: the composite is written into the project; a symlink planted at
+    // its path must not redirect the write to a file elsewhere.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside");
+    let target = outside.path().join("victim.txt");
+    std::fs::write(&target, "UNTOUCHED").expect("victim");
+    let styles = dir.path().join(PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).expect("styles dir");
+    std::os::unix::fs::symlink(&target, styles.join("tm-demo-01.tm-floor.md")).expect("symlink");
+
+    let err = native_style_id(dir.path(), &project_style("Demo voice.")).expect_err("refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), "UNTOUCHED");
+}
