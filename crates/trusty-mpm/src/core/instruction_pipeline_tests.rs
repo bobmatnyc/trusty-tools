@@ -780,7 +780,7 @@ fn strip_delegation_block_noop_when_absent() {
 }
 
 #[test]
-fn pm_instructions_is_its_four_sections() {
+fn pm_instructions_is_the_pm_body_sections() {
     // #4183: the legacy PM body is RECONSTITUTED, never kept as a fourth copy
     // on disk. #4318 moved the source of that reconstitution from the
     // `include_str!` constants to the MANIFEST, because the manifest may now
@@ -825,7 +825,7 @@ fn pm_instructions_is_its_four_sections() {
 }
 
 #[test]
-fn base_pm_is_its_four_sections() {
+fn base_pm_is_its_three_tail_sections() {
     // Same no-second-copy property for the non-overridable floor, plus the
     // one reordering #4183 makes: the tool-priority mandate travels with the
     // other non-overridable rules and so now precedes the conventions.

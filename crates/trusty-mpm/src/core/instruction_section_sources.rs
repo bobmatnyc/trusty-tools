@@ -66,7 +66,8 @@ pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/
 /// `AGENT_DELEGATION.md` override is present.
 pub(crate) const AGENT_DELEGATION: &str =
     include_str!("../assets/instructions/sections/agent-delegation.md");
-/// The canonical Prohibitions and Circuit Breakers tables. Floor, tier `fixed`.
+/// The canonical Prohibitions and Circuit Breakers tables. Tier `project` since
+/// #8533.
 ///
 /// Split out of `core.md` by #4573: both tables sat inside the `project`-tier
 /// core section, so a three-line `CORE` block in a project's `CLAUDE.md` deleted
@@ -74,10 +75,10 @@ pub(crate) const AGENT_DELEGATION: &str =
 pub(crate) const SECTION_ENFORCEMENT: &str =
     include_str!("../assets/instructions/sections/enforcement.md");
 /// Absorbed BASE_PM non-overridable rules, the customization contract, and the
-/// Trusty tool-priority mandate. Floor, tier `fixed`.
+/// Trusty tool-priority mandate. Tier `project` since #8533.
 pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
     include_str!("../assets/instructions/sections/non-overridable-rules.md");
-/// Absorbed BASE_PM framework-guaranteed conventions. Floor, tier `fixed`.
+/// Absorbed BASE_PM framework-guaranteed conventions. Tier `project` since #8533.
 pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
     include_str!("../assets/instructions/sections/framework-guaranteed-conventions.md");
 
@@ -160,7 +161,7 @@ pub(crate) fn section_source(path: &str) -> Option<&'static str> {
 /// the roster-absent assembly still needs them as one string, positioned
 /// before the stack profile exactly as the package emits them.
 /// What: every section whose blocks precede the stack-profile block.
-/// Test: `pm_instructions_is_its_four_sections`.
+/// Test: `pm_instructions_is_the_pm_body_sections`.
 pub(crate) const PM_BODY_SECTIONS: [SectionId; 14] = [
     SectionId::Identity,
     SectionId::Core,
@@ -182,7 +183,7 @@ pub(crate) const PM_BODY_SECTIONS: [SectionId; 14] = [
 /// manifest fallback only.
 ///
 /// What: the file source by section; `None` for sections outside the PM body.
-/// Test: `pm_instructions_is_its_four_sections`.
+/// Test: `pm_instructions_is_the_pm_body_sections`.
 pub(crate) fn fallback_source(id: SectionId) -> Option<&'static str> {
     let path = match id {
         SectionId::Identity => "identity",

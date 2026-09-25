@@ -127,10 +127,10 @@ pub const SCHEMA_JSON: &str =
 /// | `## Trusty Tool Priority (Non-Overridable)` | [`SectionId::NonOverridableRules`] |
 /// | `## Framework-Guaranteed Conventions (Non-Overridable)` | [`SectionId::FrameworkGuaranteedConventions`] |
 ///
-/// The tool-priority block stays whole in the fixed floor deliberately: the
-/// *mandate* to reach for memory and code search before grep is non-overridable
-/// even though the memory/search *guidance* sections a project may tune are
-/// tier `project`.
+/// Since #8533 every section but [`SectionId::Core`] is tier `project`; what no
+/// override removes is the safety core
+/// ([`crate::core::instruction_safety_core::SAFETY_CORE`]), not a floor of
+/// whole sections.
 ///
 /// Test: `canonical_order_is_sorted_and_complete`, `schema_enums_match_rust_enums`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -138,7 +138,8 @@ pub const SCHEMA_JSON: &str =
 // #8533: new sections must not be a major-version break for downstream matches.
 #[non_exhaustive]
 pub enum SectionId {
-    /// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
+    /// Absorbed BASE_PM `## Identity` — who the PM is. Opens the prompt; an
+    /// `IDENTITY` override replaces it in place (#8533).
     Identity,
     /// The safety core — the only tier-`fixed` section (#8533): Memory &
     /// Instruction Sources and the Customization Surface.
@@ -178,8 +179,8 @@ pub enum SectionId {
     Workflow,
     /// Delegation routing — dynamic, built from the deployed-agent roster.
     AgentDelegation,
-    /// The canonical Prohibitions and Circuit Breakers tables. Floor, tier
-    /// `fixed` (#4573).
+    /// The canonical Prohibitions and Circuit Breakers tables. Tier `fixed`
+    /// from #4573 until #8533 made it tier `project`.
     ///
     /// These two tables ARE the PM's delegation-enforcement authority, and they
     /// shipped inside [`SectionId::Core`] at tier `project` — so a three-line
@@ -191,10 +192,12 @@ pub enum SectionId {
     /// every override tier.
     Enforcement,
     /// Absorbed BASE_PM non-overridable rules + customization contract + the
-    /// Trusty tool-priority mandate. Floor, tier `fixed`.
+    /// Trusty tool-priority mandate. Tier `project` since #8533; the name is
+    /// historical.
     NonOverridableRules,
     /// Absorbed BASE_PM framework-guaranteed conventions (attribution footer,
-    /// documentation proportionality, ticket attribution). Floor, tier `fixed`.
+    /// documentation proportionality, ticket attribution). Tier `project` since
+    /// #8533.
     FrameworkGuaranteedConventions,
 }
 
@@ -1032,7 +1035,7 @@ impl InstructionPackage {
     ///
     /// Test: `authored_run_projects_blocks_in_order_with_joins`,
     /// `authored_run_skips_generated_blocks`,
-    /// `pm_instructions_is_its_four_sections`.
+    /// `pm_instructions_is_the_pm_body_sections`.
     pub fn authored_run(&self, sections: &[SectionId]) -> String {
         let mut out = String::new();
         let mut emitted = false;

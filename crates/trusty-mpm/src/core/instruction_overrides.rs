@@ -24,10 +24,11 @@
 //! launch resolves the prompt twice), and the `legacy_overrides` `tm doctor`
 //! check fails on them.
 //!
-//! Naming note: `base_pm()` and the `# Framework Instructions` heading are
-//! historical labels. `BASE_PM.md` the FILE was deleted by #4183 and
-//! `scripts/check_instruction_floor.sh` fails the build if it returns; the floor
-//! is authored as four `fixed`-tier sections and reconstituted by that function.
+//! Naming note: `base_pm()` is a historical label. `BASE_PM.md` the FILE was
+//! deleted by #4183 and `scripts/check_instruction_floor.sh` fails the build if
+//! it returns; its content is the enforcement, non-overridable-rules and
+//! framework-guaranteed-conventions sections, which that function reconstitutes
+//! as the prompt tail. The `# Framework Instructions` heading is gone (#8533).
 //!
 //! Test: the `tests` module inverts one gate per retired file (a retired file
 //! must change nothing), pins the survival set across every reachable

@@ -67,7 +67,7 @@ pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 mod section_sources;
 pub(crate) use section_sources::*;
 
-/// The former `PM_INSTRUCTIONS.md` body, rebuilt from its four sections.
+/// The former `PM_INSTRUCTIONS.md` body, rebuilt from the PM-body sections.
 ///
 /// Why: the legacy override assembly
 /// ([`crate::core::instruction_overrides::assemble_sections`]) treats the PM body
@@ -76,15 +76,16 @@ pub(crate) use section_sources::*;
 /// Reconstituting here — rather than keeping a fifth copy on disk — is what
 /// stops the legacy path and the packaged path from delivering different
 /// content once a section is edited (#4183).
-/// What: Core, Autonomous Execution, Memory and Search joined with a paragraph
-/// break, in block order, with the trailing newline a file would have carried.
+/// What: the `PM_BODY_SECTIONS` run — Identity through Search, every section
+/// before the stack profile (#8533) — joined with a paragraph break, in block
+/// order, with the trailing newline a file would have carried.
 /// The paragraph break is deliberately
 /// [`crate::core::instruction_package::Join::Blank`]'s literal, so this string
 /// is byte-identical to what the packaged composer emits for the same blocks.
 /// #8361 added the autonomy section here: it is inside this opaque blob on the
 /// legacy path, so leaving it out would have dropped the rule from every
 /// roster-absent prompt.
-/// Test: `pm_instructions_is_its_four_sections`,
+/// Test: `pm_instructions_is_the_pm_body_sections`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
 pub(crate) fn pm_instructions() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -113,7 +114,7 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// as the retained fallback for the case where the manifest itself is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
-/// Test: `pm_instructions_is_its_four_sections`, `base_pm_is_its_four_sections`.
+/// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
 fn manifest_run(sections: &[SectionId]) -> Option<String> {
     crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
 }
@@ -153,14 +154,15 @@ pub(crate) fn delegation_doctrine() -> &'static str {
     &JOINED
 }
 
-/// The non-overridable framework floor, rebuilt from its three sections.
+/// The prompt tail, rebuilt from its three sections.
 ///
 /// Why: the floor is appended last under *every* override branch, including full
 /// PM replacement, so the resolver needs it as one opaque string. Same
 /// no-duplicate-copy argument as [`pm_instructions`].
-/// What: Identity, Enforcement (the Prohibitions and Circuit Breakers tables),
-/// Non-Overridable Rules (which now carries the Trusty tool-priority mandate) and
-/// Framework-Guaranteed Conventions, joined with a paragraph break.
+/// What: Enforcement (the Prohibitions and Circuit Breakers tables),
+/// Non-Overridable Rules (which carries the Trusty tool-priority mandate) and
+/// Framework-Guaranteed Conventions, joined with a paragraph break. All three
+/// are tier `project` since #8533; Identity opens the prompt instead.
 ///
 /// #4573: `Enforcement` joins the floor here so the two authority tables reach
 /// EVERY legacy branch too — including the `PM_INSTRUCTIONS_DEPLOYED.md` full
@@ -174,7 +176,7 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// travels with the other non-overridable rules and consequently precedes the
 /// conventions. Position only — not one word of either block changed, and both
 /// remain inside the floor, so nothing about what is overridable moved.
-/// Test: `base_pm_is_its_four_sections`, `floor_carries_the_tool_priority_mandate`.
+/// Test: `base_pm_is_its_three_tail_sections`, `floor_carries_the_tool_priority_mandate`.
 pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         // #8533: Identity moved to the top of the prompt, out of this tail.
