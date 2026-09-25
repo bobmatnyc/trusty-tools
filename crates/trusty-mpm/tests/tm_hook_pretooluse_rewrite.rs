@@ -50,6 +50,10 @@ use std::process::Stdio;
 fn run_hook_with_stdin(event: &str, stdin_json: &str) -> String {
     let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
+        // #7477: a payload without `cwd` falls back to the hook's own cwd, and
+        // cargo runs this target from an agent's isolation worktree, where the
+        // hook rightly never rewrites. Pin it outside any worktree.
+        .current_dir(common::tm_spawn_home())
         .env("CLAUDE_HOOK_EVENT", event)
         .env("CLAUDE_SESSION_ID", "test-session")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
@@ -90,6 +94,22 @@ fn hook_rewrites_plain_bash_command_on_pretooluse() {
         parsed["hookSpecificOutput"]["updatedInput"]["command"],
         EXPECTED_CARGO_TEST_REWRITE
     );
+}
+
+#[test]
+fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
+    // #7477: the harness classifier refuses the wrapped shape inside an
+    // isolation worktree, so the hook must print nothing and let the command
+    // run as written. The payload `cwd` is what Claude Code reports.
+    for command in ["git diff", "ls -la", "cargo test"] {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "cwd": "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+        });
+        let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+        assert_eq!(stdout.trim(), "", "{command} must not be rewritten");
+    }
 }
 
 #[test]
@@ -150,6 +170,10 @@ fn hook_rewrite_stdout_contains_only_the_json_object() {
 fn run_hook_with_stdin_only(stdin_json: &str) -> String {
     let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
+        // #7477: a payload without `cwd` falls back to the hook's own cwd, and
+        // cargo runs this target from an agent's isolation worktree, where the
+        // hook rightly never rewrites. Pin it outside any worktree.
+        .current_dir(common::tm_spawn_home())
         .env_remove("CLAUDE_HOOK_EVENT")
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
