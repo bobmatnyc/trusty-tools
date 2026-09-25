@@ -499,3 +499,107 @@ fn a_for_variable_never_reaches_a_git_value_or_remote() {
         ],
     );
 }
+
+/// The 2026-09-25 live refusal: a `security` agent scanning another worktree.
+const LIVE_CD_SCAN: &str = "cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/\
+                            .claude/worktrees/agent-a1 && git diff c5e9a7d2c..HEAD";
+
+/// 🔴 REGRESSION (#8578): one leading `cd <plain dir> &&` before an allowed
+/// read is allowed. Refused on origin/main, whose lexer refuses every `&`.
+#[test]
+fn a_leading_cd_reaches_another_worktree() {
+    for agent in READ_ONLY_DISPATCH_AGENTS {
+        assert_eq!(run(Some(agent), LIVE_CD_SCAN), None, "{agent}");
+    }
+    check(
+        true,
+        &[
+            "cd /repo && git log --oneline -5",
+            "cd /repo && git show abc123 --stat",
+            "cd crates/trusty-mpm && rg -n foo src | head -5",
+            "cd ../other-wt && git status --short 2>&1",
+            "cd '/path with space' && git rev-parse HEAD",
+            "cd /repo && if git diff --quiet; then echo clean; fi",
+            "cd /repo && for f in a.txt b.txt; do head -1 \"$f\"; done",
+        ],
+    );
+}
+
+/// #8578: `git -C <dir> <verb> <args>` is judged exactly as `git <verb> <args>`,
+/// for reads and for every mutating verb the brief names.
+#[test]
+fn git_dash_c_is_judged_as_its_plain_form() {
+    let reads = [
+        "diff A..B",
+        "log",
+        "log --oneline -5",
+        "show abc123",
+        "rev-parse",
+        "rev-parse --show-toplevel",
+        "status --short",
+    ];
+    let writes = [
+        "commit -m x",
+        "push origin HEAD",
+        "reset --hard",
+        "checkout main",
+        "stash",
+        "rebase origin/main",
+        "merge topic",
+        "diff --output=/tmp/d.diff",
+    ];
+    for (tails, allowed) in [(&reads[..], true), (&writes[..], false)] {
+        for tail in tails {
+            let plain = judge(&format!("git {tail}")).is_ok();
+            assert_eq!(plain, allowed, "git {tail}");
+            for dir in ["/Users/masa/wt/agent-a1", "crates", "'/a b'"] {
+                let with_c = format!("git -C {dir} {tail}");
+                assert_eq!(judge(&with_c).is_ok(), plain, "{with_c}");
+            }
+        }
+    }
+}
+
+/// #8578: the `cd` prefix never admits a write, an unresolved directory, or
+/// any other `&&`/`;`/`|` chain.
+#[test]
+fn a_leading_cd_never_admits_a_write() {
+    check(
+        false,
+        &[
+            "cd /repo && rm -rf target",
+            "cd /repo && git diff > /tmp/d.diff",
+            "cd /repo && git diff | tee /tmp/d.diff",
+            "cd /repo && git commit -m x",
+            "cd /repo && git -C /other push",
+            "cd /repo && sed -i s/a/b/ f.txt",
+            "cd /repo && for f in a; do rm \"$f\"; done",
+            "cd /repo && git diff && rm f",
+            "cd /repo && cd /other && git diff",
+            "git diff && cd /repo",
+            "if cd /repo && git diff; then echo x; fi",
+            "cd /repo; git diff",
+            "cd /repo || git diff",
+            "cd /repo & git diff",
+            "cd /repo &&& git diff",
+            "cd /repo&&git diff",
+            "cd /repo &&\ngit diff",
+            "cd /repo &&",
+            "cd && git diff",
+            "cd - && git diff",
+            "cd -P /repo && git diff",
+            "cd /repo /x && git diff",
+            // Unresolved directories (path_tokens::unresolved_target).
+            "cd $X && git diff",
+            "cd \"$X\" && git diff",
+            "cd '$X' && git diff",
+            "cd ~/wt && git diff",
+            "cd '~/wt' && git diff",
+            "cd '$(cat /tmp/main)' && git diff",
+            "cd '`pwd`' && git diff",
+            "git -C $X diff",
+            "git -C \"$X\" diff",
+            "git -C ~/wt diff",
+        ],
+    );
+}

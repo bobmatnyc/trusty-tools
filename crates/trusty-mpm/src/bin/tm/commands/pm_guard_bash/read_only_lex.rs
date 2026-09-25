@@ -12,8 +12,9 @@
 //! with no `$`, backtick, `\` or `!`. Two expansions are recognised so the
 //! caller can confine them: `"$NAME"`/`"${NAME}"` ([`WordKind::Var`]) and a
 //! bare path word led by `/` or `~/` carrying `*`/`?` ([`WordKind::Expanding`]).
-//! Operators are `|`, `;`/newline, and the exact tokens `2>&1` and
-//! `2>/dev/null`. Everything else — `$`, backtick, `\`, `<`, `>`, `&`, parens,
+//! Operators are `|`, `;`/newline, `&&`, and the exact tokens `2>&1` and
+//! `2>/dev/null`; the parser admits `&&` only after a leading `cd <dir>`
+//! (#8578). Everything else — `$`, backtick, `\`, `<`, `>`, a lone `&`, parens,
 //! braces, brackets, `#`, `!`, a leading `=` or `^`, `~` anywhere but a word's
 //! start or mid-word — is an `Err`. Every loop iteration consumes at least one
 //! byte, so lexing is linear in the input and always terminates.
@@ -38,6 +39,8 @@ pub(super) enum Tok {
     Pipe,
     /// `;` or a newline.
     Sep,
+    /// `&&` (#8578).
+    AndIf,
     /// The exact token `2>&1` or `2>/dev/null`: stderr joins stdout or is dropped.
     StderrRedirect,
 }
@@ -114,6 +117,12 @@ pub(super) fn lex(command: &str) -> Result<Vec<Tok>, String> {
                 }
                 toks.push(Tok::Pipe);
                 i += 1;
+            }
+            // #8578: `&&` is a token so the parser can admit `cd <dir> && …`;
+            // a lone `&` (background, `&>`) stays refused.
+            b'&' if bytes.get(i + 1) == Some(&b'&') => {
+                toks.push(Tok::AndIf);
+                i += 2;
             }
             _ => {
                 if let Some(len) = stderr_redirect_at(bytes, i) {
