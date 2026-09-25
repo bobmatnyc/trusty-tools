@@ -183,9 +183,12 @@ pub trait DaemonProbe: Send + Sync {
 
 /// [`DaemonProbe`] over the daemon's socket and the process table.
 ///
-/// What: the socket probe `trusty-memory start` uses, then the `serve`
+/// What: the socket probe `trusty-memory start` uses, then the daemon
 /// process scan `trusty-memory stop` uses, which also sees a daemon still
-/// hydrating palaces before it binds.
+/// hydrating palaces before it binds. Stdio bridges (`serve --stdio`) are not
+/// counted: they never open a palace (#1078), and every MCP client session
+/// runs one. A short-lived CLI that opens a palace directly is caught per
+/// palace by redb's lock, as [`KuzuImportError::PalaceLocked`].
 pub struct SystemDaemonProbe;
 
 #[async_trait]
