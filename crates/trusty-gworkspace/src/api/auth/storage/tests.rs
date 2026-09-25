@@ -246,6 +246,86 @@ fn remove_profile_clears_both_stores() {
     );
 }
 
+#[test]
+fn remove_profile_keeps_a_different_account_user_entry() {
+    let mut other = scoped_entry(&[GMAIL_MODIFY], 600, USER_ACCESS);
+    other.metadata.email = Some("other@example.com".into());
+    let (storage, user_path, _) = two_tier(
+        "remove-other",
+        HashMap::from([("work".to_string(), other)]),
+        HashMap::from([(
+            "work".to_string(),
+            scoped_entry(&[GMAIL_MODIFY], 1800, PROJECT_ACCESS),
+        )]),
+    );
+
+    let outcome = storage.remove_profile("work").unwrap();
+
+    let user = TokenStorage::with_path(user_path).load().unwrap();
+    assert_eq!(
+        user["work"].metadata.email.as_deref(),
+        Some("other@example.com"),
+        "removing the project override must not delete another account's credential"
+    );
+    assert!(outcome.user_entry_remains);
+}
+
+#[test]
+fn update_does_not_deadlock_when_project_and_user_are_the_same_file() {
+    // cwd = $HOME makes both paths one file; two flocks on it self-deadlock.
+    let dir = std::env::temp_dir().join(format!("gw-storage-same-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("tokens.json");
+    TokenStorage::with_path(path.clone())
+        .save(&HashMap::from([("work".to_string(), make_stored(3600))]))
+        .unwrap();
+    let mut storage = TokenStorage::with_path(path.clone());
+    storage.project_path = Some(path);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(storage.set_default_profile("work").is_ok());
+    });
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("update deadlocked when project and user paths name one file");
+    assert!(ok, "set_default_profile failed");
+}
+
+#[test]
+fn update_refuses_to_overwrite_an_unparsable_store() {
+    let (storage, user_path, project_path) = scope_shadowed("corrupt");
+    std::fs::write(&project_path, "{not json").unwrap();
+    let user_before = std::fs::read(&user_path).unwrap();
+
+    let result = storage.update(|all| {
+        all.insert("new".to_string(), make_stored(3600));
+        Ok(())
+    });
+
+    assert!(result.is_err(), "update must fail on an unreadable store");
+    assert_eq!(std::fs::read(&project_path).unwrap(), b"{not json");
+    assert_eq!(std::fs::read(&user_path).unwrap(), user_before);
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn load_warns_on_unparsable_store_without_echoing_it() {
+    let (storage, _, project_path) = scope_shadowed("corrupt-load");
+    // serde's own message would quote this value back.
+    std::fs::write(
+        &project_path,
+        r#"{"work": {"version": "echo-fixture-value"}}"#,
+    )
+    .unwrap();
+
+    let loaded = storage.load().unwrap();
+
+    assert_eq!(loaded["work"].token.access_token, USER_ACCESS);
+    assert!(logs_contain("unreadable"));
+    assert!(logs_contain("line 1"));
+    assert!(!logs_contain("echo-fixture-value"));
+}
+
 /// Best-effort regression test for issue #3502: two threads racing a
 /// load-mutate-save cycle through [`TokenStorage::update`] on clones of
 /// the same storage (the in-process half of the guard; the file lock

@@ -23,6 +23,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use tracing::warn;
 
 use super::models::{OAuthToken, StoredToken};
 use super::oauth::errors::{redact_token_response, refresh_failure_message};
@@ -87,11 +88,15 @@ impl OAuthManager {
     /// global one — see [`resolve_client_creds_for_profile`]), POSTs to
     /// Google's OAuth endpoint with `grant_type=refresh_token`, parses the
     /// response, updates `expires_at` to `now + expires_in`, and writes the
-    /// updated `StoredToken` back to disk. On an HTTP failure it returns
+    /// updated `StoredToken` back to disk — but only if, under the storage
+    /// lock, the stored entry still holds the refresh token that was used; a
+    /// credential replaced mid-refresh is kept and the new token is returned
+    /// unsaved (#8539). On an HTTP failure it returns
     /// [`refresh_failure_message`]'s actionable error (naming the exact
     /// re-auth command on `invalid_grant`).
     /// Test: `refresh_uses_per_profile_client_when_present`,
-    /// `refresh_falls_back_to_global_client_when_absent`; the failure-message
+    /// `refresh_falls_back_to_global_client_when_absent`,
+    /// `refresh_does_not_overwrite_a_consent_that_landed_mid_refresh`; the failure-message
     /// mapping is covered by
     /// `refresh_failure_message_names_profile_and_setup_command`.
     pub async fn refresh(&self, storage: &TokenStorage, profile: &str) -> Result<OAuthToken> {
@@ -137,7 +142,7 @@ impl OAuthManager {
         let expires_in = parsed.expires_in.unwrap_or(3600);
         let new_token = OAuthToken {
             access_token: parsed.access_token,
-            refresh_token: parsed.refresh_token.or(Some(refresh_token)),
+            refresh_token: parsed.refresh_token.or_else(|| Some(refresh_token.clone())),
             expires_at: Utc::now() + Duration::seconds(expires_in),
             scopes: parsed
                 .scope
@@ -152,7 +157,19 @@ impl OAuthManager {
         // Guard against a concurrent refresh of a different profile (or the
         // same one) losing this write — see `TokenStorage::update` (#3502).
         storage.update(|all| {
-            all.insert(profile.to_string(), stored);
+            // #8539: a consent that landed mid-refresh replaced the credential
+            // we refreshed; keep it, and hand back our token unsaved.
+            let current = all
+                .get(profile)
+                .and_then(|e| e.token.refresh_token.as_deref());
+            if current == Some(refresh_token.as_str()) {
+                all.insert(profile.to_string(), stored);
+            } else {
+                warn!(
+                    profile = %profile,
+                    "stored credential changed during refresh; not saving the refreshed token"
+                );
+            }
             Ok(())
         })?;
 
@@ -314,6 +331,61 @@ mod tests {
                  (backward compatibility)",
         );
         assert_eq!(refreshed.access_token, "legacy-new-token");
+    }
+
+    /// Token endpoint that lands a new consent for `work` while the refresh
+    /// is in flight, then answers the refresh.
+    struct ConsentLandsMidRefresh(TokenStorage);
+
+    impl wiremock::Respond for ConsentLandsMidRefresh {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            self.0
+                .update(|all| {
+                    if let Some(entry) = all.get_mut("work") {
+                        entry.token.access_token = "consent-access".into();
+                        entry.token.refresh_token = Some("r-consent".into());
+                    }
+                    Ok(())
+                })
+                .expect("simulated consent write");
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "refresh-access",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            }))
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_does_not_overwrite_a_consent_that_landed_mid_refresh() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        let home = isolated_home("refresh-race");
+        write_client_json(
+            &home.join(".gworkspace-mcp").join("oauth_client.json"),
+            "global-client",
+            "global-secret",
+        );
+        let storage = temp_storage_with_token("work", "r-work");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/token"))
+            .respond_with(ConsentLandsMidRefresh(storage.clone()))
+            .mount(&server)
+            .await;
+
+        let mgr = OAuthManager::with_token_url(format!("{}/token", server.uri()));
+        let refreshed = mgr.refresh(&storage, "work").await.expect("refresh");
+        assert_eq!(refreshed.access_token, "refresh-access");
+
+        let stored = storage.get_profile("work").unwrap().unwrap();
+        assert_eq!(
+            stored.token.refresh_token.as_deref(),
+            Some("r-consent"),
+            "a consent that landed mid-refresh must not be overwritten (#8539)"
+        );
+        assert_eq!(stored.token.access_token, "consent-access");
     }
 
     #[tokio::test]

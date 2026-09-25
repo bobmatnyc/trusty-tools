@@ -41,12 +41,15 @@ pub(super) enum Reason {
     /// Both entries name an account email and the emails differ: the project
     /// store is a deliberate per-directory account override.
     DifferentAccount,
+    /// At least one entry records no email, so the two may be different
+    /// accounts; the project override is kept.
+    UnknownAccount,
     /// The winner's scope set is a strict superset of the loser's; carries
     /// the scopes only the winner holds.
     WiderScopes(Vec<String>),
     /// Scopes are equal, incomparable, or unrecorded, and the winner was
-    /// issued or refreshed later.
-    NewerIssue,
+    /// consented later, or consented at the same time and refreshed later.
+    NewerConsent,
     /// Nothing distinguishes the two entries; the project override keeps the
     /// documented project-over-user contract.
     Tie,
@@ -58,13 +61,17 @@ impl fmt::Display for Reason {
             Reason::DifferentAccount => f.write_str(
                 "the entries name different accounts; the project override is deliberate",
             ),
+            Reason::UnknownAccount => f.write_str(
+                "an entry records no account email, so they may be different accounts; \
+                 keeping the project override",
+            ),
             Reason::WiderScopes(extra) => {
                 write!(f, "wider scopes; the other entry lacks {}", extra.join(" "))
             }
-            Reason::NewerIssue => f.write_str("issued or refreshed more recently"),
-            Reason::Tie => {
-                f.write_str("same scopes and issue time; project overrides user on a tie")
-            }
+            Reason::NewerConsent => f.write_str("consented more recently"),
+            Reason::Tie => f.write_str(
+                "same scopes, consent and refresh time; project overrides user on a tie",
+            ),
         }
     }
 }
@@ -82,29 +89,39 @@ pub(super) struct Resolution {
 /// instead of the project entry winning unconditionally.
 /// What: Applies these rules in order; the first that decides wins.
 ///
-/// 1. Different account: both `metadata.email` values are present and differ
-///    (case-insensitive) → project. A per-directory account override must
-///    never be swapped for another mailbox's token. A missing email skips
-///    this rule.
+/// 1. Account identity: if either `metadata.email` is missing, or both are
+///    present and differ (case-insensitive) → project. A per-directory
+///    account override must never be swapped for another mailbox's token,
+///    and an unrecorded identity may be another mailbox.
 /// 2. Wider scopes: both scope lists are non-empty and one is a strict
 ///    superset of the other → the superset. Scope beats recency because a
 ///    narrower token fails writes however new it is, while an older, wider
 ///    token works after one refresh. An empty scope list means "not
 ///    recorded" and skips this rule rather than counting as the empty grant.
-/// 3. Newer issue: the later [`issued_at`] wins.
+/// 3. Newer consent: the later [`recency`] wins — `created_at` (consent
+///    time, a required field) first, `last_refreshed` only on an equal
+///    consent time, where a missing `last_refreshed` sorts oldest. A refresh
+///    does not widen a grant, so it must not outrank a later consent.
 /// 4. Tie → project, keeping the documented project-over-user contract where
 ///    nothing distinguishes the entries.
 ///
-/// Test: `different_accounts_keep_project`, `wider_user_scopes_beat_newer_project`,
-/// `wider_project_scopes_beat_newer_user`, `unrecorded_scopes_fall_back_to_recency`,
-/// `incomparable_scopes_fall_back_to_recency`, `full_tie_keeps_project`.
+/// Test: `different_accounts_keep_project`, `unknown_account_keeps_project`,
+/// `wider_user_scopes_beat_newer_project`,
+/// `wider_project_scopes_beat_newer_user`,
+/// `unrecorded_scopes_fall_back_to_recency`,
+/// `incomparable_scopes_fall_back_to_recency`,
+/// `newer_consent_beats_later_refresh`, `full_tie_keeps_project`.
 pub(super) fn resolve(project: &StoredToken, user: &StoredToken) -> Resolution {
-    if let (Some(p), Some(u)) = (&project.metadata.email, &user.metadata.email)
-        && !p.eq_ignore_ascii_case(u)
-    {
+    // #8539: an unknown identity is treated as a possibly different account.
+    let identity = match (&project.metadata.email, &user.metadata.email) {
+        (Some(p), Some(u)) if p.eq_ignore_ascii_case(u) => None,
+        (Some(_), Some(_)) => Some(Reason::DifferentAccount),
+        _ => Some(Reason::UnknownAccount),
+    };
+    if let Some(reason) = identity {
         return Resolution {
             winner: Store::Project,
-            reason: Reason::DifferentAccount,
+            reason,
         };
     }
 
@@ -119,27 +136,30 @@ pub(super) fn resolve(project: &StoredToken, user: &StoredToken) -> Resolution {
         }
     }
 
-    let (p_at, u_at) = (issued_at(project), issued_at(user));
+    let (p_at, u_at) = (recency(project), recency(user));
     let (winner, reason) = if u_at > p_at {
-        (Store::User, Reason::NewerIssue)
+        (Store::User, Reason::NewerConsent)
     } else if p_at > u_at {
-        (Store::Project, Reason::NewerIssue)
+        (Store::Project, Reason::NewerConsent)
     } else {
         (Store::Project, Reason::Tie)
     };
     Resolution { winner, reason }
 }
 
-/// When an entry's current token was issued: the later of `created_at`
-/// (set at consent) and `last_refreshed` (set on refresh). `created_at` is a
-/// required field, so a missing `last_refreshed` falls back to it.
-pub(super) fn issued_at(entry: &StoredToken) -> DateTime<Utc> {
-    entry
-        .metadata
-        .last_refreshed
-        .map_or(entry.metadata.created_at, |r| {
-            r.max(entry.metadata.created_at)
-        })
+/// Whether two entries name the same account: both record an email and the
+/// emails match (case-insensitive). An unrecorded email is never a match.
+pub(super) fn same_account(a: &StoredToken, b: &StoredToken) -> bool {
+    matches!(
+        (&a.metadata.email, &b.metadata.email),
+        (Some(x), Some(y)) if x.eq_ignore_ascii_case(y)
+    )
+}
+
+/// Sort key for rule 3: consent time, then refresh time (`None` oldest).
+// #8539: consent time leads; a refresh is only a tiebreak (code-critic).
+fn recency(entry: &StoredToken) -> (DateTime<Utc>, Option<DateTime<Utc>>) {
+    (entry.metadata.created_at, entry.metadata.last_refreshed)
 }
 
 fn scope_set(entry: &StoredToken) -> BTreeSet<&str> {
@@ -220,7 +240,7 @@ mod tests {
         let user = entry(&[BASE, EXTRA], 600);
         let r = resolve(&project, &user);
         assert_eq!(r.winner, Store::Project);
-        assert_eq!(r.reason, Reason::NewerIssue);
+        assert_eq!(r.reason, Reason::NewerConsent);
     }
 
     #[test]
@@ -229,7 +249,29 @@ mod tests {
         let user = entry(&[EXTRA], 10);
         let r = resolve(&project, &user);
         assert_eq!(r.winner, Store::User);
-        assert_eq!(r.reason, Reason::NewerIssue);
+        assert_eq!(r.reason, Reason::NewerConsent);
+    }
+
+    #[test]
+    fn unknown_account_keeps_project() {
+        let mut project = entry(&[BASE], 7200);
+        project.metadata.email = None;
+        let user = entry(&[BASE, EXTRA], 10);
+        let r = resolve(&project, &user);
+        assert_eq!(r.winner, Store::Project);
+        assert_eq!(r.reason, Reason::UnknownAccount);
+    }
+
+    #[test]
+    fn newer_consent_beats_later_refresh() {
+        // The project entry was consented first but refreshed just now; a
+        // refresh does not widen the grant, so the later consent wins.
+        let mut project = entry(&[BASE], 7200);
+        project.metadata.last_refreshed = Some(Utc::now());
+        let user = entry(&[BASE], 600);
+        let r = resolve(&project, &user);
+        assert_eq!(r.winner, Store::User);
+        assert_eq!(r.reason, Reason::NewerConsent);
     }
 
     #[test]

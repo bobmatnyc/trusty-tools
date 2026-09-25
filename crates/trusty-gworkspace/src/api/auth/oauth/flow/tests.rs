@@ -102,6 +102,37 @@ fn persist_marks_single_default() {
 }
 
 #[test]
+fn persist_in_project_dir_does_not_overwrite_user_credential() {
+    // #8539: `setup --profile work` for another account, run in a project
+    // directory, must not replace the user-level `work` credential.
+    let dir = std::env::temp_dir().join(format!("gw-persist3-{}", uuid::Uuid::new_v4()));
+    let user_path = dir.join("user").join("tokens.json");
+    let project_path = dir.join("project").join("tokens.json");
+    let bob = HashMap::from([("work".to_string(), make_stored("bob", true))]);
+    TokenStorage::with_path(user_path.clone())
+        .save(&bob)
+        .unwrap();
+    TokenStorage::with_path(project_path.clone())
+        .save(&HashMap::new())
+        .unwrap();
+    let storage = TokenStorage::with_paths(user_path.clone(), Some(project_path.clone()));
+
+    persist(&storage, "work", make_stored("alice", false), false).unwrap();
+
+    let user = TokenStorage::with_path(user_path).load().unwrap();
+    let project = TokenStorage::with_path(project_path).load().unwrap();
+    assert_eq!(
+        user["work"].metadata.email.as_deref(),
+        Some("bob@example.com"),
+        "the user-level credential must survive a consent made in a project dir"
+    );
+    assert_eq!(
+        project["work"].metadata.email.as_deref(),
+        Some("alice@example.com")
+    );
+}
+
+#[test]
 fn persist_false_does_not_steal_existing_default() {
     // Regression test: a second `setup` run with set_default=false (the
     // outcome of DefaultMode::Auto when a default already exists on a
