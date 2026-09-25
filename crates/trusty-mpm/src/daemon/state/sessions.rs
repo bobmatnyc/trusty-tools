@@ -719,8 +719,9 @@ impl DaemonState {
     /// session. Excluding the caller's own `tool_use_id` makes the answer
     /// independent of that ordering.
     ///
-    /// A delegation with no recorded `cwd` is skipped rather than assumed to
-    /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
+    /// A delegation with no recorded `cwd` is not assumed to share one: it
+    /// counts only where its own latest hook places it (#8161), and is
+    /// otherwise skipped, because this whole guard fails toward ALLOW.
     /// `Stale` is deliberately not live — a record tracking has given up on
     /// must not block a dispatch for the remaining hours of its retention.
     ///
@@ -734,10 +735,11 @@ impl DaemonState {
     /// [`crate::daemon::services::delegation_tracker`]'s four ownership claims and
     /// a successful sentinel write — so a value that differs from `cwd` is
     /// positive evidence that this agent is not writing in `cwd` at all
-    /// (ADR-0045). #8535 widened the evidence to the agent's latest hook cwd,
-    /// so the answer no longer waits for that claim to land. On 2026-09-01 a `rust-engineer` dispatched with
+    /// (ADR-0045). On 2026-09-01 a `rust-engineer` dispatched with
     /// `isolation: "worktree"` and running in `.claude/worktrees/agent-…` was
     /// named here anyway, and blocked four ADR-0049 documents-only commits.
+    /// #8535 widened the evidence to the agent's latest hook cwd, so the answer
+    /// no longer waits for that claim to land.
     ///
     /// **This is the ADMISSION answer; occupancy is
     /// [`Self::shared_tree_occupants`] (#6556 critic round).** A record staled by

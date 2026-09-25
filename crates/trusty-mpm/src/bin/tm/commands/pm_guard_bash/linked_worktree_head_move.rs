@@ -31,9 +31,14 @@
 //! its cwd can be moved into an agent's worktree (#8535).
 //!
 //! Residuals, stated: only the FIRST HEAD-moving segment is classified, as in
-//! the main-checkout rule; `git pull` is not classified (ADR-0053); a
-//! non-isolated subagent standing in another agent's tree passes the
-//! own-tree exemption, which is the #4480 dispatch guard's question to answer.
+//! the main-checkout rule, so a later segment aimed at another tree is not
+//! asked about; `git pull` is not classified (ADR-0053); the own-tree
+//! exemption is lexical, so a subagent (payload `agent_id` or
+//! `CLAUDE_MPM_SUB_AGENT`) standing in ANOTHER agent's tree — a non-isolated
+//! dispatch from a PM whose cwd was moved there (#8535) — passes it unasked.
+//! Closing both means querying for every segment and excluding the caller's
+//! own `agent_id` daemon-side; that is left to a follow-up (#8161 critic
+//! round, finding 8).
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
@@ -46,8 +51,7 @@ use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 use super::main_checkout::{git_verb_target_dir_with_tail, starts_a_head_move};
 use super::{PathEnv, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
-use crate::commands::pm_guard_dispatch;
-use crate::commands::pm_guard_fanout;
+use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
 
 /// A HEAD move whose target is a linked worktree, awaiting the daemon's answer.
 #[derive(Debug, PartialEq, Eq)]
@@ -153,18 +157,16 @@ pub(crate) fn linked_head_move_verdict(
 /// Run the rule for one `Bash` call and print its deny (#8161).
 ///
 /// Why: `pm_guard.rs` sits at the 500-SLOC cap, so its call site is one
-/// statement. What: [`linked_worktree_head_move_deny`] for this payload's
-/// caller; on a deny, audits it, prints it, and returns `true`.
+/// statement. What: [`linked_worktree_head_move_deny`] for `(command, cwd,
+/// caller_is_subagent)`; on a deny, audits it, prints it, and returns `true`.
 /// Test: `pm_guard_denies_a_reset_keep_into_a_live_agents_worktree` in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn deny_linked_worktree_head_move(
     url: &str,
     session_id: &str,
     payload: &Value,
-    command: &str,
-    cwd: &Path,
+    (command, cwd, subagent): (&str, &Path, bool),
 ) -> bool {
-    let subagent = pm_guard_fanout::caller_is_subagent(payload);
     let deny = linked_worktree_head_move_deny(url, session_id, command, cwd, payload, subagent);
     let Some(reason) = deny.await else {
         return false;
@@ -203,7 +205,8 @@ pub(crate) async fn linked_worktree_head_move_deny(
 /// sessions (#6797); a parked worktree needs neither. Both keys are asked for
 /// the reason #5769 gave the main-checkout rule — a record may be stamped at the
 /// tree root or at the directory the command resolved.
-/// What: stops at the first non-empty answer; the first failure is `Err`.
+/// What: stops at the first non-empty answer; the first failure is `Err`,
+/// read by [`tree_holders_in`].
 async fn tree_holders_or_deny(
     url: &str,
     session_id: &str,
@@ -220,14 +223,39 @@ async fn tree_holders_or_deny(
             continue;
         }
         asked.push(dir);
-        let live =
-            pm_guard_dispatch::live_shared_tree_writers_or_deny(url, session_id, dir, &marked)
-                .await?;
+        let reply =
+            pm_guard_dispatch::post_shared_tree(url, session_id, dir, &marked, SHARED_TREE_ROUTE);
+        let live = tree_holders_in(reply.await)?;
         if !live.is_empty() {
             return Ok(live);
         }
     }
     Ok(Vec::new())
+}
+
+/// Read one tree-holders reply, failing CLOSED (#8161 critic round).
+///
+/// Why: a daemon older than #8161 serves the same route with 200, ignores the
+/// marker, scopes the answer to other sessions and never places an agent by
+/// where it stands — so it answers "idle" for exactly the agent this rule
+/// protects. Only an answer that echoes the marker counted every session.
+/// What: `Ok(writers)` for an answer echoing `tree_holders: true`; `Err` naming
+/// `tm restart` for an answer without it; `Err(detail)` for no answer.
+/// Test: `tree_holders_in_refuses_an_answer_without_the_echo`.
+fn tree_holders_in(reply: SharedTreeReply) -> Result<Vec<String>, String> {
+    match reply {
+        SharedTreeReply::Answered(body)
+            if body.get(TREE_HOLDERS_MARKER).and_then(Value::as_bool) == Some(true) =>
+        {
+            Ok(pm_guard_dispatch::writers_in(&body))
+        }
+        SharedTreeReply::Answered(_) => Err(
+            "the daemon answered without counting this session's own agents, so it predates \
+             #8161 — run `tm restart` to load the daemon that ships with this `tm`"
+                .to_string(),
+        ),
+        SharedTreeReply::Unavailable(detail) | SharedTreeReply::Unanswered(detail) => Err(detail),
+    }
 }
 
 /// Deny text for a HEAD move into a worktree a live agent is standing in.

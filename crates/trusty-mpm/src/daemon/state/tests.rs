@@ -1374,6 +1374,34 @@ fn a_record_stamped_in_a_relocated_pm_cwd_is_not_a_writer_there() {
     );
 }
 
+/// #8161 critic round: rule 1 on the DISPATCH question. When the PM's cwd sits
+/// inside a live agent's worktree (#8535), an unisolated dispatch from there
+/// would join that agent's tree, so the agent occupies it even though its
+/// record carries the checkout it was dispatched from.
+///
+/// Fails before the fix: the filter matched `Delegation::cwd` only.
+#[test]
+fn a_live_agent_occupies_its_worktree_for_a_dispatch_from_inside_it() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-live");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.isolation = Some("worktree".to_string());
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.clone());
+    state.upsert_delegation(d);
+
+    assert_eq!(
+        state.shared_tree_occupants(&tree, None),
+        vec!["rust-engineer".to_string()]
+    );
+    assert!(state.shared_tree_occupants(&checkout, None).is_empty());
+}
+
 /// The control for the #8161 rule: a positively read-only agent standing in a
 /// parked worktree does not block consolidating into it.
 #[test]

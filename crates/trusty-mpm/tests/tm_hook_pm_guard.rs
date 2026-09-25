@@ -4774,11 +4774,13 @@ fn pm_guard_allows_a_merge_in_a_main_checkout_nobody_else_is_writing_in() {
 fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
     // A worktree's HEAD belongs to the agent working in it, so its own merge
     // races nothing — this is where delegated work happens and it must stay
-    // unrestricted. The mock is deliberately never consumed: the
-    // classification returns before any daemon call. #8161: the caller is that
-    // agent (`agent_id`); the PM moving a linked worktree's HEAD now asks who
-    // stands there, see `pm_guard_denies_a_reset_keep_into_a_live_agents_worktree`.
-    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    // unrestricted. The agent's own runs return before any daemon call. #8161:
+    // the PM moving a `.claude/worktrees/` tree's HEAD now asks who stands
+    // there and is denied beside a live writer; a tree outside that layout is
+    // not this rule's, so the PM stays allowed there.
+    let url = spawn_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1,"tree_holders":true}"#,
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
     std::fs::create_dir_all(claude_wt.join(".git")).expect("mkdir worktree");
@@ -4786,21 +4788,30 @@ fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
     std::fs::create_dir_all(&linked_wt).expect("mkdir linked");
     std::fs::write(linked_wt.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write .git");
 
-    for cwd in [&claude_wt, &linked_wt] {
+    let agent = r#""agent_id":"agent-wt-x","#;
+    for (cwd, extra) in [(&claude_wt, agent), (&linked_wt, agent), (&linked_wt, "")] {
         for command in [
             "git pull",
             "git merge origin/main",
             "git rebase origin/main",
         ] {
-            let payload = head_move_payload(command, cwd, r#""agent_id":"agent-wt-x","#);
-            let stdout = run_pm_guard_at(&payload, &url, cwd);
+            let stdout = run_pm_guard_at(&head_move_payload(command, cwd, extra), &url, cwd);
             assert_eq!(
                 stdout.trim(),
                 "",
-                "`{command}` must be allowed in {}, got: {stdout}",
+                "`{command}` must be allowed in {} (caller {extra:?}), got: {stdout}",
                 cwd.display()
             );
         }
+    }
+    for command in ["git merge origin/main", "git rebase origin/main"] {
+        let stdout = run_pm_guard_at(
+            &head_move_payload(command, &claude_wt, ""),
+            &url,
+            &claude_wt,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#8161"), "{stdout}");
     }
 }
 
@@ -5279,11 +5290,18 @@ fn pm_guard_denies_a_reset_keep_into_a_live_agents_worktree() {
     );
 
     // The idle half: an empty answer lets the consolidation through.
-    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0,"tree_holders":true}"#);
     let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
     assert_eq!(
         stdout.trim(),
         "",
         "an idle parked worktree must be consolidatable"
     );
+
+    // Critic round: a daemon older than #8161 answers "idle" without the echo,
+    // having scoped the answer to other sessions — that is not an idle tree.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_denied(&stdout);
+    assert!(stdout.contains("tm restart"), "{stdout}");
 }

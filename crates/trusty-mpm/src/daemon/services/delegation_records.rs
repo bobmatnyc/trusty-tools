@@ -161,8 +161,11 @@ pub fn list_for_dir(state: &DaemonState, dir: &Path) -> Vec<DelegationRecordView
         .all_delegations()
         .into_iter()
         .filter(|d| {
-            !d.status.is_terminal()
-                && (d.cwd.as_deref() == Some(dir) || d.worktree_path.as_deref() == Some(dir))
+            // #8161: a record the guard blocks on is listed even when neither
+            // field names `dir` — an agent standing in a linked worktree.
+            blocking.contains(&d.id)
+                || (!d.status.is_terminal()
+                    && (d.cwd.as_deref() == Some(dir) || d.worktree_path.as_deref() == Some(dir)))
         })
         .collect();
     records.sort_by_key(|d| d.started_at.unwrap_or(d.created_at));

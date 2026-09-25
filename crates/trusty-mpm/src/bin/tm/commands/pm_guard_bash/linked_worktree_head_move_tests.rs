@@ -114,6 +114,23 @@ fn classify_denies_an_unresolved_target() {
 }
 
 #[test]
+fn tree_holders_in_refuses_an_answer_without_the_echo() {
+    // #8161 critic round: an old daemon answers 200 with no echo — not idle.
+    let old = serde_json::json!({"agents": [], "total": 0});
+    let err = tree_holders_in(SharedTreeReply::Answered(old)).expect_err("must not read as idle");
+    assert!(err.contains("tm restart"), "{err}");
+    let new = serde_json::json!({"agents": [{"agent": "qa", "count": 1}], "total": 1, "tree_holders": true});
+    assert_eq!(
+        tree_holders_in(SharedTreeReply::Answered(new)),
+        Ok(vec!["qa".to_string()])
+    );
+    assert_eq!(
+        tree_holders_in(SharedTreeReply::Unanswered("timed out".to_string())),
+        Err("timed out".to_string())
+    );
+}
+
+#[test]
 fn verdict_denies_a_live_writer() {
     let live = vec!["rust-engineer".to_string()];
     let reason = linked_head_move_verdict(&parked_move("reset"), Ok(&live))

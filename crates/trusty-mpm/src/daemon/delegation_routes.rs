@@ -137,6 +137,12 @@ pub struct SharedTreeWritersResponse {
     /// claim; absent from an older daemon, which the guard tolerates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<crate::daemon::services::delegation_records::DelegationRecordView>,
+    /// #8161: echoes [`TREE_HOLDERS_MARKER`] when this answer counted the
+    /// asking session's own agents. A daemon older than #8161 answers the same
+    /// route without it, scoped to other sessions, so the guard treats its
+    /// absence on a tree-holders query as no answer.
+    #[serde(default)]
+    pub tree_holders: bool,
 }
 
 /// One agent name with its live unisolated delegation count.
@@ -571,6 +577,7 @@ pub fn shared_tree_dispatch_op(
     }
 
     let mut response = writers_response(&names, claimed);
+    response.tree_holders = tree_holders;
     // #8257: only a dispatch's deny names records; a HEAD-write answer is
     // scoped differently and keeps its own text.
     if question == SharedTreeQuestion::Dispatch {
@@ -600,6 +607,7 @@ fn writers_response(names: &[String], claimed: bool) -> SharedTreeWritersRespons
         total: names.len(),
         claimed,
         records: Vec::new(),
+        tree_holders: false,
     }
 }
 

@@ -126,3 +126,22 @@ fn listing_names_every_open_record_in_a_directory_8257() {
     );
     assert!(!find(&isolated), "an isolated one does not");
 }
+
+/// #8161: the linked-worktree deny names `tm repair delegation --list <tree>`,
+/// and the agent it blocks on is placed there by where it STANDS — its record
+/// carries the checkout it was dispatched from. The listing must still show it.
+#[test]
+fn listing_includes_an_agent_standing_in_a_linked_worktree_8161() {
+    let state = DaemonState::new();
+    let tree = "/repo/.claude/worktrees/agent-parked";
+    let mut standing = record(Some("parked"), "/repo", DelegationStatus::Running);
+    standing.isolation = Some("worktree".to_string());
+    standing.last_agent_cwd = Some(std::path::PathBuf::from(tree));
+    state.upsert_delegation(standing.clone());
+
+    let listed = list_for_dir(&state, Path::new(tree));
+
+    assert_eq!(listed.len(), 1, "the blocking record must be listed");
+    assert_eq!(listed[0].delegation_id, standing.id.0.to_string());
+    assert!(listed[0].blocks_dispatch);
+}

@@ -575,7 +575,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             }
         }
         // #8161: the same move aimed at a LINKED worktree — see that module.
-        if deny_linked_worktree_head_move(url, session_id, &payload, command, &hook_cwd).await {
+        let linked = (command, hook_cwd.as_path(), caller_is_subagent);
+        if deny_linked_worktree_head_move(url, session_id, &payload, linked).await {
             return Ok(());
         }
     }

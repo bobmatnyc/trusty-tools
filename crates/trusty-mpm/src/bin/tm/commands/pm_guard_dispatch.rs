@@ -680,7 +680,7 @@ fn unanswered_grant_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String
 }
 
 /// The route that answers and claims for an unisolated dispatch (#4480).
-const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
+pub(crate) const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
 
 /// The route that answers and records the isolation the guard granted (#5769).
 const GRANTED_WORKTREE_ROUTE: &str = "granted-worktree";
@@ -855,7 +855,7 @@ fn classify_transport_failure(endpoint: &str, error: &reqwest::Error) -> SharedT
 }
 
 /// The live writers named in a shared-tree answer.
-fn writers_in(body: &Value) -> Vec<String> {
+pub(crate) fn writers_in(body: &Value) -> Vec<String> {
     body.get("agents")
         .and_then(Value::as_array)
         .map(|rows| {
