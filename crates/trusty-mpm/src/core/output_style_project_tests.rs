@@ -230,6 +230,68 @@ fn a_project_style_keeps_the_floor_with_and_without_native_support() {
 }
 
 #[test]
+fn a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt() {
+    // #8533 critic round 3 HIGH: Claude Code applies settings.local.json ahead
+    // of settings.json. A local outputStyle naming the raw project id loads the
+    // prose with no floor, so the appended prompt must carry it.
+    let dir = project_with_style("fixture-voice");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let composite = super::super::native_style_id(dir.path(), &style).expect("composite");
+    let floor = super::super::style_floor();
+    let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
+    let claude = dir.path().join(".claude");
+    let write = |file: &str, value: serde_json::Value| {
+        std::fs::write(claude.join(file), value.to_string()).expect("settings");
+    };
+    let apply = || {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            None,
+            "PROMPT".to_string(),
+            true,
+        )
+    };
+
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    write(
+        "settings.local.json",
+        serde_json::json!({ "outputStyle": "fixture-voice" }),
+    );
+    assert_eq!(apply(), format!("{floor}{sep}PROMPT"));
+
+    // The local file naming the composite wins over a raw plain setting.
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": "fixture-voice" }),
+    );
+    write(
+        "settings.local.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    assert_eq!(apply(), "PROMPT");
+
+    // A local file silent on the key falls through to settings.json.
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    write("settings.local.json", serde_json::json!({ "model": "x" }));
+    assert_eq!(apply(), "PROMPT");
+
+    // A malformed local file is never taken for the composite.
+    std::fs::write(claude.join("settings.local.json"), "{not json").expect("malformed");
+    assert_eq!(apply(), format!("{floor}{sep}PROMPT"));
+}
+
+#[test]
 fn a_composite_id_is_neither_listed_nor_selectable() {
     // #8533: selecting the generated composite would append a second floor.
     let dir = project_with_style("fixture-voice");

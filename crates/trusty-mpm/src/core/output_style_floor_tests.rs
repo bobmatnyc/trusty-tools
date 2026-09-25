@@ -187,6 +187,39 @@ fn every_primary_directive_states_the_four_prohibitions_and_seven_override_phras
 
 #[cfg(unix)]
 #[test]
+fn the_composite_is_replaced_by_rename_never_written_through() {
+    // #8533 critic round 3 LOW: an in-place write follows whatever the path
+    // names when it runs. A hard link shares the victim's inode, so an in-place
+    // write changes the victim; a temp file renamed over the path does not.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let target = dir.path().join("victim.txt");
+    std::fs::write(&target, "UNTOUCHED").expect("victim");
+    let styles = dir.path().join(PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).expect("styles dir");
+    let composite = styles.join("tm-demo-01.tm-floor.md");
+    std::fs::hard_link(&target, &composite).expect("hard link");
+
+    let style = project_style("Demo voice.");
+    let id = native_style_id(dir.path(), &style).expect("written");
+    assert_eq!(id, "tm-demo-01.tm-floor");
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), "UNTOUCHED");
+    assert_eq!(
+        std::fs::read_to_string(&composite)
+            .expect("composite")
+            .as_str(),
+        composite_style_text(&style).expect("text")
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&styles)
+        .expect("list")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_symlinked_composite_is_refused() {
     // #8533: the composite is written into the project; a symlink planted at
     // its path must not redirect the write to a file elsewhere.

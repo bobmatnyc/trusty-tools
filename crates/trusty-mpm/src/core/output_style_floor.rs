@@ -19,7 +19,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{ActiveStyle, PROJECT_STYLES_DIR, strip_frontmatter};
+use crate::core::agent_manifest::{ManifestError, atomic_write};
 use crate::core::bundle::OUTPUT_STYLE;
+use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::instruction_fold::{fold_block, step_fence};
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 
@@ -124,7 +126,7 @@ pub fn is_composite_style_id(id: &str) -> bool {
 }
 
 /// Where project style `id`'s composite lives.
-fn composite_path(project_dir: &Path, id: &str) -> PathBuf {
+pub fn composite_path(project_dir: &Path, id: &str) -> PathBuf {
     project_dir
         .join(PROJECT_STYLES_DIR)
         .join(format!("{}.md", composite_style_id(id)))
@@ -177,8 +179,12 @@ pub fn composite_style_text(style: &ActiveStyle) -> Option<String> {
 /// [`composite_style_text`] written to
 /// `<project>/.claude/output-styles/<id>.tm-floor.md` when the file differs,
 /// and the composite id. A symlink at that path is an error, never followed.
+/// #8533: the file is published by a temp file renamed over the path, so a
+/// link planted after the symlink check is replaced, never written through,
+/// and a reader never sees a half-written composite.
 /// Test: `a_bare_claude_launch_loads_the_project_prose_then_the_floor`,
-/// `a_symlinked_composite_is_refused`.
+/// `a_symlinked_composite_is_refused`,
+/// `the_composite_is_replaced_by_rename_never_written_through`.
 pub fn native_style_id(project_dir: &Path, style: &ActiveStyle) -> std::io::Result<String> {
     let Some(text) = composite_style_text(style) else {
         return Ok(style.id().to_string());
@@ -191,28 +197,54 @@ pub fn native_style_id(project_dir: &Path, style: &ActiveStyle) -> std::io::Resu
         ));
     }
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-        std::fs::write(&path, &text)?;
+        atomic_write(&path, &text).map_err(|err| match err {
+            ManifestError::Io(io) => io,
+            other => std::io::Error::other(other.to_string()),
+        })?;
     }
     Ok(composite_style_id(style.id()))
 }
 
-/// Whether the project's settings name `style`'s composite and the composite
-/// on disk is current, so Claude Code delivers the floor itself.
+/// The `outputStyle` Claude Code resolves from the project's own settings.
 ///
-/// Test: `a_project_style_keeps_the_floor_with_and_without_native_support`.
+/// Why (#8533): Claude Code applies `.claude/settings.local.json` ahead of
+/// `.claude/settings.json`. Reading only the plain file trusted a composite
+/// that a local setting had displaced, and the floor went undelivered.
+/// What: `settings.local.json`, then `settings.json`; the first that sets a
+/// string `outputStyle` wins, as `daemon::doctor_output_style` resolves the
+/// project scope. `None` when neither sets it, or when a layer is unreadable
+/// or not JSON — an unknown value is never taken for the composite.
+/// Test: `a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt`.
+fn project_output_style(project_dir: &Path) -> Option<String> {
+    let paths = ClaudeConfigReader::paths_for_project(project_dir);
+    for path in [paths.project_local_settings, paths.project_settings] {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        if let Some(id) = value.get("outputStyle").and_then(serde_json::Value::as_str) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+/// Whether the project's effective `outputStyle` names `style`'s composite
+/// and the composite on disk is current, so Claude Code delivers the floor
+/// itself.
+///
+/// What: [`project_output_style`] equals [`composite_style_id`], and the file
+/// at [`composite_path`] reads as [`composite_style_text`].
+/// Test: `a_project_style_keeps_the_floor_with_and_without_native_support`,
+/// `a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt`.
 pub fn composite_is_active(project_dir: &Path, style: &ActiveStyle) -> bool {
     let Some(text) = composite_style_text(style) else {
         return false;
     };
-    let settings = std::fs::read_to_string(project_dir.join(".claude").join("settings.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let named = settings
-        .as_ref()
-        .and_then(|value| value.get("outputStyle"))
-        .and_then(serde_json::Value::as_str)
-        == Some(composite_style_id(style.id()).as_str());
-    named
+    // #8533: the effective value across both project layers, not settings.json alone.
+    project_output_style(project_dir).as_deref() == Some(composite_style_id(style.id()).as_str())
         && std::fs::read_to_string(composite_path(project_dir, style.id()))
             .ok()
             .as_deref()

@@ -455,7 +455,7 @@ pub fn apply_output_style_to_prompt_with_native(
 mod floor;
 pub use floor::{
     COMPOSITE_STYLE_SUFFIX, FLOOR_SECTIONS, STYLE_FLOOR_HEADING, composite_is_active,
-    composite_style_id, composite_style_text, delivered_style_text, floor_for,
+    composite_path, composite_style_id, composite_style_text, delivered_style_text, floor_for,
     is_composite_style_id, native_style_id, style_floor,
 };
 
