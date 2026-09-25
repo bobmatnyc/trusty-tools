@@ -285,8 +285,8 @@ nothing:
 
 A fact the guard cannot establish denies, naming which of the five failed —
 read it and act on it, never retry the same command. When the direct path
-refuses, report the path and the refusal to the PM and stop: a fleet sweep is
-never the fallback for one refused removal (#8577).
+refuses, report the path and the refusal to the PM and stop; never fall back
+to a fleet sweep for one refused tree (#8577).
 
 `gh pr merge --delete-branch` removes the remote branch at merge time; the local
 branch goes with the prune pass. From a worktree whose base branch is checked
