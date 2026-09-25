@@ -369,3 +369,147 @@ fn classify_bare_with_no_account_is_unchanged() {
     let bare = classify_bare("bobmatnyc/trusty-tools").unwrap().unwrap();
     assert!(matches!(bare, RunTarget::Repo { account: None, .. }));
 }
+
+/// Turn a `&str` list into the owned tokens clap hands the external arm.
+fn toks(items: &[&str]) -> Vec<String> {
+    items.iter().map(ToString::to_string).collect()
+}
+
+/// 🔴 #5850 REGRESSION: `tm <url> --user <login>` must reach the managed run.
+///
+/// Why this is the assertion: the owner's invocation put the flag AFTER the
+/// repository. clap collected it into the external subcommand's argv instead
+/// of the global `--account` field, so `run_external` saw two extra tokens and
+/// bailed with "takes no further arguments" — the flag never reached
+/// `classify_bare_with_account` at all.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_a_trailing_user_flag() {
+    let (rest, account) = split_trailing_account(&toks(&[
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ]))
+    .expect("a trailing --user must be lifted, not refused");
+    assert_eq!(
+        rest,
+        toks(&["https://github.com/duettoresearch/jev-matching"])
+    );
+    assert_eq!(account.as_deref(), Some("bob-duetto"));
+}
+
+/// The `=` form and the `--account` spelling behave identically.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_an_inline_account_value() {
+    let (rest, account) =
+        split_trailing_account(&toks(&["acme/widget", "--account=bobmatnyc"])).expect("lifted");
+    assert_eq!(rest, toks(&["acme/widget"]));
+    assert_eq!(account.as_deref(), Some("bobmatnyc"));
+}
+
+/// A flag with no value is an ERROR, never a silent drop.
+///
+/// Why: dropping it would clone as the machine's global account while the
+/// operator believed they had selected one — the #5850 substitution, arrived
+/// at from the other direction.
+/// Test: itself.
+#[test]
+fn bare_form_rejects_a_trailing_flag_with_no_value() {
+    let err = split_trailing_account(&toks(&["acme/widget", "--user"]))
+        .expect_err("a valueless flag must refuse");
+    assert!(err.to_string().contains("needs a gh login"), "{err}");
+}
+
+/// Every other token survives untouched, so the "takes no further arguments"
+/// bail still fires for genuine extra arguments.
+/// Test: itself.
+#[test]
+fn bare_form_leaves_unrelated_tokens_alone() {
+    let (rest, account) =
+        split_trailing_account(&toks(&["acme/widget", "extra"])).expect("no flag present");
+    assert_eq!(rest, toks(&["acme/widget", "extra"]));
+    assert_eq!(account, None);
+}
+
+/// Two DIFFERENT accounts around the repository are refused, not resolved by
+/// position.
+/// Test: itself.
+#[test]
+fn bare_form_refuses_two_different_accounts_around_the_repository() {
+    let err = reconcile_bare_account(Some("bobmatnyc".into()), Some("bob-duetto".into()))
+        .expect_err("a conflict must refuse");
+    assert!(err.to_string().contains("conflicting account"), "{err}");
+    assert_eq!(
+        reconcile_bare_account(Some("bob-duetto".into()), Some("bob-duetto".into()))
+            .expect("agreeing values collapse")
+            .as_deref(),
+        Some("bob-duetto")
+    );
+}
+
+/// 🔴 #5850 REGRESSION (fail-open): an EMPTY account value is refused at the
+/// lift, never carried downstream.
+///
+/// Why this is the assertion: `--user=` used to lift as `Some("")`, and
+/// `resolve_account` treats a blank flag as absent — so the clone ran as the
+/// machine's global account while the operator believed they had pinned one.
+/// Covers the inline `=` form and a blank separate value, for both spellings.
+/// Test: itself.
+#[test]
+fn bare_form_rejects_an_empty_account_value() {
+    for tokens in [
+        &["acme/widget", "--user="][..],
+        &["acme/widget", "--account="][..],
+        &["acme/widget", "--user", ""][..],
+        &["acme/widget", "--account", "   "][..],
+        &["acme/widget", "--user=  "][..],
+    ] {
+        let err = split_trailing_account(&toks(tokens))
+            .expect_err("an empty account value must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{tokens:?}: {err}"
+        );
+    }
+}
+
+/// 🔴 #5850 REGRESSION (wiring): the real parse of `tm <url> --user <login>`
+/// reaches a `RunTarget::Repo` carrying that login.
+///
+/// Why this is the assertion: the lift's unit tests stay green if
+/// `resolve_external` stops calling it. Driving clap's own output through the
+/// resolver fails the moment the lift is unwired, because the trailing tokens
+/// then hit the "takes no further arguments" refusal.
+/// Test: itself.
+#[test]
+fn bare_form_trailing_user_reaches_the_repo_target() {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from([
+        "tm",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ])
+    .expect("the bare form parses");
+    let Some(crate::cli::Command::External(tokens)) = cli.command else {
+        panic!("the bare form must reach the external catch-all");
+    };
+    let target = resolve_external(&tokens, cli.account)
+        .expect("a trailing --user must resolve, not refuse")
+        .expect("a repository URL is repo-shaped");
+    let RunTarget::Repo {
+        owner,
+        repo,
+        account,
+        ..
+    } = target
+    else {
+        panic!("expected a repository target, got {target:?}");
+    };
+    assert_eq!(
+        (owner.as_str(), repo.as_str()),
+        ("duettoresearch", "jev-matching")
+    );
+    assert_eq!(account.as_deref(), Some("bob-duetto"));
+}

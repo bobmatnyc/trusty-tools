@@ -718,6 +718,10 @@ fn resolve_account_neither_is_none() {
     assert_eq!(super::resolve_account(None, None).unwrap(), None);
 }
 
+/// Pins the function-level contract only. Since #5850 no CLI path reaches this
+/// arm: `Cli::account` refuses a blank value at parse time
+/// (`cli_rejects_a_blank_account_flag_before_the_repository`), and the bare-form
+/// lift does too (`bare_form_rejects_an_empty_account_value`).
 #[test]
 fn resolve_account_blank_flag_is_treated_as_absent() {
     assert_eq!(

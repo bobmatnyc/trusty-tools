@@ -1,0 +1,13 @@
+# Dev/build dependency edges on a workspace crate that the consumer's NORMAL
+# dependencies never reach — grandfathered, one row each (issue #8341).
+#
+# A RATCHET: rows may be removed, never accumulated as a way to make a red gate
+# green. `scripts/check_dev_dep_edges.sh` fails both on an uncovered edge AND on
+# a row whose edge no longer exists.
+#
+# The fix for a genuine cross-crate test is to move it into a `publish = false`
+# crate that depends on BOTH sides normally — `crates/trusty-crate-contracts/`.
+# Add a row only when that move is blocked, and say what blocks it.
+#
+# Format (tab-separated):  <consumer><TAB><dep><TAB><reason, naming #NNNN>
+trusty-code-gui	trusty-code	#8341: three tests in src/bridge/mod.rs pin this crate's copies of the daemon's socket name, its two stream method names, and its JSON-RPC-to-HTTP status table against trusty-code's originals. Moving them needs a new member depending on trusty-code-gui, and every crate that does inherits trusty-code-gui's `--exclude` from the six headless `--workspace` invocations in ci.yml plus its own `code-gui` job (Tauri/WebKit2GTK). #6637 PR 2c deletes the daemon-side originals and the tests with them, which removes this edge outright.

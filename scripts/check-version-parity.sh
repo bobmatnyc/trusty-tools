@@ -37,10 +37,17 @@
 #   is exercised by running it against this repo (see the #3366 PR
 #   description for the raw output confirming it reproduces the real,
 #   already-live drift on several crates).
+#
+# Prefers an already-installed `publish-guard` on PATH over `cargo run`, so
+# this gate never waits on the workspace build lock a concurrent agent build
+# holds. `cargo run` remains the fallback, scoped to its own CARGO_TARGET_DIR —
+# see scripts/lib/run_or_cargo.sh.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-exec cargo run --quiet --locked -p trusty-publish-guard --bin publish-guard -- --root "${REPO_ROOT}"
+# shellcheck source=lib/run_or_cargo.sh
+. "${REPO_ROOT}/scripts/lib/run_or_cargo.sh"
+run_or_cargo publish-guard trusty-publish-guard publish-guard -- --root "${REPO_ROOT}"

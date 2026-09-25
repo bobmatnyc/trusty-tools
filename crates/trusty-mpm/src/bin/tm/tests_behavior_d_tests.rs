@@ -367,7 +367,7 @@ fn cli_parses_session_decommission() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "decommission", "abc"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Decommission { id },
+            action: SessionAction::Decommission { id, .. },
         } => assert_eq!(id, "abc"),
         other => panic!("expected session decommission, got {other:?}"),
     }

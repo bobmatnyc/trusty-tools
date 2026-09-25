@@ -22,9 +22,8 @@
 //! `source_version` is 2, `run_migrations` will apply it to all indexes
 //! currently at v2, including those "stuck" indexes.
 //!
-//! What: `apply` resolves the HNSW path for the index (trying colocated
-//! `<root>/.trusty-search/hnsw.usearch` first, then the legacy global path),
-//! calls `CodeIndexer::rewrite_vector_store_keys` (which updates the live
+//! What: `apply` resolves the HNSW path from the indexer's registry-named
+//! storage layout (#8438), calls `CodeIndexer::rewrite_vector_store_keys` (which updates the live
 //! maps and flushes the sidecar), and returns `Ok(())`.  The method is
 //! idempotent: already-relative IDs are left unchanged and a count of 0 is
 //! a clean no-op.
@@ -72,7 +71,7 @@ impl Migration for M003HnswKeyRelativization {
     ///
     /// Why: see module-level doc.
     /// What:
-    /// 1. Resolve the HNSW path (colocated or legacy global).
+    /// 1. Resolve the HNSW path from the registry-named layout (#8438).
     /// 2. Under a read lock on the indexer, call `rewrite_vector_store_keys`
     ///    which updates the live in-memory maps and flushes the sidecar.
     /// 3. Return `Ok(())` — a count of 0 (already relative / no store) is
@@ -80,7 +79,7 @@ impl Migration for M003HnswKeyRelativization {
     /// Test: `test_m003_apply_no_store_is_ok`.
     async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
         // ── Step 1: resolve the HNSW path ─────────────────────────────────
-        let hnsw_path = resolve_hnsw_path(index)?;
+        let hnsw_path = resolve_hnsw_path(index).await?;
 
         if !hnsw_path.exists() {
             tracing::debug!(
@@ -121,29 +120,18 @@ impl Migration for M003HnswKeyRelativization {
 
 // ── Path resolution helper ────────────────────────────────────────────────────
 
-/// Resolve the HNSW snapshot path for `index`.
+/// Resolve the HNSW snapshot path for `index` from the registry-named layout.
 ///
-/// Why: indexes may store their HNSW snapshot in the colocated
-/// `<root_path>/.trusty-search/hnsw.usearch` (issue #403) or in the legacy
-/// global data dir (`<data_dir>/indexes/<id>/hnsw.usearch`).  M003 must find
-/// the right file without re-introducing the colocated-vs-legacy branch that
-/// lives in `service::persistence`.  The cheapest correct strategy is: try
-/// the colocated path first (it is the newer convention); if that file does
-/// not exist, fall through to the legacy global path.
-/// What: returns the `PathBuf` of the first existing `hnsw.usearch`; when
-/// neither exists, returns the legacy global path so the caller can perform its
-/// own "file not found" check.
-/// Test: covered indirectly by `test_m003_apply_no_store_is_ok` (no file →
-/// apply returns Ok without panicking).
-fn resolve_hnsw_path(index: &IndexHandle) -> Result<std::path::PathBuf> {
-    // Try colocated first (issue #403).
-    let colocated = index.root_path.join(".trusty-search").join("hnsw.usearch");
-    if colocated.exists() {
-        return Ok(colocated);
-    }
-    // Fall back to the legacy global data-dir path.
-    crate::service::persistence::hnsw_path(&index.id.0)
-        .context("M003: could not resolve legacy hnsw path")
+/// Why (#8438): this used to try `<root>/.trusty-search/hnsw.usearch` first
+/// whenever that FILE existed, regardless of the registry, so a
+/// `colocated=false` index rewrote the repo's copy instead of its own.
+/// What: `hnsw.usearch` inside the directory the indexer's `StorageLayout`
+/// names; the caller performs its own "file not found" check.
+/// Test: `test_m003_apply_no_store_is_ok` (no file → apply returns Ok).
+async fn resolve_hnsw_path(index: &IndexHandle) -> Result<std::path::PathBuf> {
+    crate::service::storage_layout::handle_file(index, crate::service::storage_layout::HNSW_FILE)
+        .await
+        .context("M003: could not resolve the hnsw path")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -269,6 +257,66 @@ mod tests {
         // Idempotency: a second rewrite must change nothing.
         let count2 = store.rewrite_keys_to_relative(root).await.unwrap();
         assert_eq!(count2, 0, "second rewrite must be a no-op");
+    }
+
+    /// Why (#8438): `resolve_hnsw_path` used to prefer
+    /// `<root>/.trusty-search/hnsw.usearch` whenever that file existed, so a
+    /// `colocated=false` index rewrote the repo's copy instead of its own.
+    /// What: the repo holds an `hnsw.usearch` + sidecar, the data dir holds the
+    /// index's own absolute-keyed snapshot; M003 resolves and rewrites, and the
+    /// repo copy must be byte-identical afterwards.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_m003_rewrites_the_data_dir_not_the_repo_copy() {
+        use crate::service::storage_layout::storage_layout_8438_tests::Fixture;
+        use crate::service::storage_layout::{StorageLayout, HNSW_FILE};
+        const ID: &str = "m003-8438";
+        let fx = Fixture::new(true);
+        let repo_hnsw = fx.repo_dir().join(HNSW_FILE);
+        let repo_keys = repo_hnsw.with_extension("keys.json");
+        std::fs::write(&repo_hnsw, b"another instance's usearch").unwrap();
+        std::fs::write(&repo_keys, b"{\"another\":\"instance\"}").unwrap();
+        let (hnsw_before, keys_before) = (
+            std::fs::read(&repo_hnsw).unwrap(),
+            std::fs::read(&repo_keys).unwrap(),
+        );
+
+        let own_hnsw = fx.data_index_dir(ID).join(HNSW_FILE);
+        let abs_id = format!("{}/src/lib.rs:1:9", fx.root.path().display());
+        let store = UsearchStore::new(4).expect("store init");
+        store
+            .upsert(&abs_id, vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        std::fs::create_dir_all(own_hnsw.parent().unwrap()).unwrap();
+        store.save(&own_hnsw).await.unwrap();
+        let mut indexer =
+            CodeIndexer::new(ID, fx.root.path()).with_storage_layout(StorageLayout::DataDir);
+        indexer.set_store(Arc::new(store));
+        let handle = IndexHandle::bare(
+            IndexId::new(ID),
+            Arc::new(RwLock::new(indexer)),
+            fx.root.path().to_path_buf(),
+        );
+
+        assert_eq!(resolve_hnsw_path(&handle).await.unwrap(), own_hnsw);
+        M003HnswKeyRelativization
+            .apply(&handle)
+            .await
+            .expect("apply");
+
+        let own_keys = std::fs::read_to_string(own_hnsw.with_extension("keys.json")).unwrap();
+        assert!(
+            own_keys.contains("src/lib.rs:1:9") && !own_keys.contains(&abs_id),
+            "M003 must rewrite the data-dir sidecar: {own_keys}"
+        );
+        assert_eq!(std::fs::read(&repo_hnsw).unwrap(), hnsw_before);
+        assert_eq!(
+            std::fs::read(&repo_keys).unwrap(),
+            keys_before,
+            "#8438: the repo's .trusty-search copy must be byte-identical after M003"
+        );
     }
 
     /// Why: validates that an absolute ID that does NOT share `root_path` as a

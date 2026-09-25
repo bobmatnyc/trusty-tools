@@ -410,17 +410,12 @@ fn floor_sections_refuse_every_named_section_override() {
 fn content_sections_accept_a_project_override() {
     // #4286 flipped which sections these are: `core` became the one protected
     // section and the four former floor sections joined the overridable set.
+    // #8533: every section but `core` — including the nine split out of it.
     let package = bundled_fallback_package().expect("manifest parses");
-    for section in [
-        SectionId::Identity,
-        SectionId::Memory,
-        SectionId::Search,
-        SectionId::Workflow,
-        SectionId::AgentDelegation,
-        SectionId::Enforcement,
-        SectionId::NonOverridableRules,
-        SectionId::FrameworkGuaranteedConventions,
-    ] {
+    for section in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id != SectionId::Core)
+    {
         let (result, rejected) = package.with_overrides(&[over(section, "REPLACED_BODY")]);
         assert_eq!(rejected, vec![], "{section:?} is tier project");
         assert_ne!(&result, package, "{section:?} must actually change");
@@ -428,10 +423,11 @@ fn content_sections_accept_a_project_override() {
         // property #4318 could have silently broken: an override must replace an
         // authored block whether that block is inline `text` or a `file`
         // reference, and must collapse the section to exactly one authored block.
+        // #8533: a pinned block is a framework feature and survives untouched.
         let texts: Vec<&str> = result
             .blocks
             .iter()
-            .filter(|b| b.section == section)
+            .filter(|b| b.section == section && !b.pinned)
             .filter_map(|b| match &b.body {
                 BlockBody::Text { text } => Some(text.as_str()),
                 BlockBody::File { .. } | BlockBody::Generated { .. } => None,
@@ -443,10 +439,9 @@ fn content_sections_accept_a_project_override() {
             "{section:?} keeps exactly one authored block, rewritten as inline text"
         );
         assert!(
-            !result
-                .blocks
-                .iter()
-                .any(|b| b.section == section && matches!(b.body, BlockBody::File { .. })),
+            !result.blocks.iter().any(|b| b.section == section
+                && !b.pinned
+                && matches!(b.body, BlockBody::File { .. })),
             "{section:?} must not keep a file body alongside the override"
         );
         result.validate().expect("overridden package validates");
@@ -1483,9 +1478,10 @@ const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
         "the Issue is `ticketing`'s, whole (P6)",
         "P6 — the whole Issue stays with ticketing (#5202)",
     ),
-    // The verbatim-name rule, which gated both deleted tables.
+    // The verbatim-name rule, which gated both deleted tables (#8533: now in
+    // the pinned agent-selection block).
     (
-        "fails to dispatch (issue #4594)",
+        "fails to dispatch (#4594)",
         "the pass-the-name-verbatim rule",
     ),
 ];
@@ -1578,8 +1574,9 @@ fn the_relocated_routing_detail_is_carried_by_the_delegation_skill() {
 fn routing_lives_on_exactly_one_surface() {
     // The point of the collapse: a reader asking "which agent handles what"
     // must find one table, not six. `core.md` keeps a pointer, never a table.
+    // #8533: the pointer moved out of `core` into its own section.
     let package = bundled_fallback_package().expect("manifest parses");
-    let core = package.authored_run(&[SectionId::Core]);
+    let core = package.authored_run(&[SectionId::AgentRouting]);
 
     for retired in [
         "## Ops Agent Routing",
@@ -1624,7 +1621,8 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
         "enforcement.md holds the canonical statement"
     );
 
-    for section in [SectionId::Core, SectionId::NonOverridableRules] {
+    // #8533: the opening `## Identity` moved from `core` into `identity`.
+    for section in [SectionId::Identity, SectionId::NonOverridableRules] {
         let body = package.authored_run(&[section]);
         assert!(
             body.contains(TITLE),
@@ -1636,30 +1634,13 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
         );
     }
 
-    // #4969: `identity` no longer references the budget AT ALL. It used to restate the
-    // whole PM identity — orchestrator role, delegation default, budget — that
-    // `core` already states, so the two sections said the same thing twice in
-    // one prompt. `identity` now defers to core's `## Identity` and keeps only
-    // the tm-session context that is genuinely its own.
-    //
-    // The anti-rot guarantee this test exists for still holds, via a two-hop
-    // chain that is asserted end to end: identity -> core's `## Identity` ->
-    // the budget title -> enforcement's canonical statement.
-    let identity = package.authored_run(&[SectionId::Identity]);
+    // #4969 kept one statement of the PM identity. #8533 made that statement
+    // the `identity` section itself (it opens the prompt), so `core` carries
+    // no `## Identity` and no budget pointer of its own.
+    let core = package.authored_run(&[SectionId::Core]);
     assert!(
-        !identity.contains(TITLE) && !identity.contains("One direct action = one PM-executed step"),
-        "identity must not restate the budget — core states it once"
-    );
-    assert!(
-        identity.contains(r#"CORE section's "Identity""#),
-        "identity must point at the section that does state it, by exact title"
-    );
-    assert!(
-        package
-            .authored_run(&[SectionId::Core])
-            .contains("## Identity"),
-        "core must carry the `## Identity` heading identity points at, or that \
-         pointer is dangling"
+        !core.contains("## Identity") && !core.contains(TITLE),
+        "core must not keep a second identity statement"
     );
 }
 
@@ -1709,7 +1690,11 @@ fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
     // again with no pointer at all.
     let package = bundled_fallback_package().expect("manifest parses");
 
-    for (section, id) in [("core", SectionId::Core), ("workflow", SectionId::Workflow)] {
+    for (section, id) in [
+        ("core", SectionId::Core),
+        ("qa-gate", SectionId::QaGate),
+        ("workflow", SectionId::Workflow),
+    ] {
         let body = package.authored_run(&[id]);
         assert!(
             !body.contains("Forbidden Phrases") && !body.contains("| Required Evidence |"),
@@ -1720,7 +1705,8 @@ fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
 
     // The trigger stays resident: the PM has to know a completion claim is
     // gated before it can know to load anything.
-    let core = package.authored_run(&[SectionId::Core]);
+    // #8533: the gate is its own section now.
+    let core = package.authored_run(&[SectionId::QaGate]);
     assert!(
         core.contains("## QA Verification Gate (BLOCKING unless phase 4 is skipped)")
             && core.contains(r#"Skill(skill="tm-verification-protocols")"#),
@@ -1801,9 +1787,10 @@ fn the_prose_rules_live_in_the_output_style_not_core() {
     // bind, and states none of them itself. A restatement here would be a
     // second resident copy of text the output style already delivers — the
     // duplication this issue removed.
+    // #8533: the pointer moved with its neighbours out of `core`.
     let core = bundled_fallback_package()
         .expect("manifest parses")
-        .authored_run(&[SectionId::Core]);
+        .authored_run(&[SectionId::MessagesReportsSessions]);
 
     assert!(
         core.contains("## Prose Style — Write Plainly"),

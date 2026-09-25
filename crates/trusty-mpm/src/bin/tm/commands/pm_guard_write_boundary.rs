@@ -245,7 +245,9 @@ const SCRATCHPAD_SEGMENT: &str = "scratchpad";
 /// `denies_a_dotdot_escape_from_the_scratchpad`,
 /// `denies_a_checkout_whose_path_merely_contains_the_scratchpad_name`,
 /// `denies_when_no_scratchpad_root_can_be_determined`.
-fn write_lands_in_a_scratchpad_clone(resolved: &Path, root: &Path) -> bool {
+// #8339: shared with the ADR-0037 destructive-git rule, so both boundaries
+// exempt the same scratchpad clones by the same proof.
+pub(crate) fn write_lands_in_a_scratchpad_clone(resolved: &Path, root: &Path) -> bool {
     let Ok(real_root) = root.canonicalize() else {
         return false;
     };

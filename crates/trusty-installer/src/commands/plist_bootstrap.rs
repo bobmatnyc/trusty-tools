@@ -243,7 +243,15 @@ impl<'a> SupervisorTarget<'a> {
 /// What: A `&str` holding the full plist XML with the two placeholder tokens
 /// that `fill_template` will replace at runtime.
 ///
-/// Test: `tests::template_contains_placeholders`.
+/// #8415: `ProcessType` is `Interactive`. The supervisor auto-resumes tmux
+/// servers, and a process launchd starts as `Background` passes that clamp to
+/// every child: tmux, the PM `claude` sessions and their `cargo` gates all ran
+/// at Darwin priority 4, on efficiency cores, with throttled I/O. Apple's
+/// `launchd.plist(5)` documents four values; `Standard` (the default) still
+/// throttles and `Adaptive` needs XPC traffic the supervisor never has.
+///
+/// Test: `tests::template_contains_placeholders`,
+/// `tests::supervisor_plist_runs_interactive_not_background`.
 pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -277,7 +285,7 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <string>__HOME__/.trusty-mpm/logs/supervisor.err.log</string>
 
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 </dict>
 </plist>"#;
 
@@ -379,6 +387,109 @@ pub enum DowngradeDecision {
     Refuse,
 }
 
+/// The downgrade guard refused to replace the registered supervisor (#3527).
+///
+/// Why (#8415): [`install_mpm_supervisor_for`] returns this and every real
+/// failure through one `anyhow::Error`. A distinct type lets
+/// [`classify_supervisor_bootstrap`] keep this deliberate no-op informational
+/// while a failed plist write or `launchctl` reload fails the install.
+/// Test: `tests::install_mpm_supervisor_for_refuses_downgrade_without_force`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to replace trusty-mpm supervisor: registered version {current} is not \
+     older than the candidate version {candidate} being installed; pass --force to \
+     override (this refusal leaves the currently-running supervisor untouched)"
+)]
+pub struct DowngradeRefused {
+    /// Version of the currently-registered `tm` binary.
+    pub current: String,
+    /// Version of the `tm` binary this install placed.
+    pub candidate: String,
+}
+
+/// How `tctl install` must report a supervisor bootstrap result (#8415).
+///
+/// Why: `install.rs` used to print every `Err` from
+/// [`install_mpm_supervisor`] as "warning ... (non-fatal)" and exit 0. A plist
+/// that failed to rewrite or reload keeps the old `ProcessType=Background`
+/// job running, so that report claimed a fix the host never received.
+/// What: `Installed` and `Refused` are not failures; `Failed` is, and folds
+/// into the member's `service_ok` and the install's exit code.
+/// Test: `tests::classify_supervisor_bootstrap_fails_the_install_on_reload_error`,
+/// `tests::classify_supervisor_bootstrap_keeps_refusal_informational`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorBootstrapVerdict {
+    /// The plist was written and bootstrapped.
+    Installed,
+    /// The downgrade guard left the registered supervisor untouched.
+    Refused(String),
+    /// Writing or reloading the plist failed.
+    Failed(String),
+    /// Not attempted: launchd does not exist on this platform.
+    Skipped(String),
+}
+
+impl SupervisorBootstrapVerdict {
+    /// Whether the install must report this member as failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// The one line `tctl install` prints for this verdict.
+    pub fn note(&self) -> String {
+        match self {
+            Self::Installed => "trusty-mpm supervisor bootstrapped".to_owned(),
+            Self::Refused(e) => format!("trusty-mpm supervisor left as registered: {e}"),
+            Self::Failed(e) => format!("trusty-mpm supervisor bootstrap failed: {e}"),
+            Self::Skipped(why) => format!("trusty-mpm supervisor bootstrap skipped: {why}"),
+        }
+    }
+
+    /// The `(service_ok, service_detail)` pair `tctl install` records for
+    /// trusty-mpm (#8415).
+    ///
+    /// Why: `install_all` cannot be unit-tested (it downloads and installs),
+    /// so the verdict-to-report mapping lives here where a test can reach it.
+    /// Test: `failed_supervisor_bootstrap_fails_the_install_report` (in `install_tests.rs`).
+    pub fn service_outcome(&self) -> (bool, String) {
+        (!self.is_failure(), self.note())
+    }
+}
+
+/// Run the supervisor bootstrap and classify it (#8415).
+///
+/// What: on macOS, [`install_mpm_supervisor`] classified by
+/// [`classify_supervisor_bootstrap`]; elsewhere `Skipped`, so the install
+/// never claims a bootstrap that did not happen.
+/// Test: `tests::skipped_supervisor_bootstrap_claims_no_bootstrap`.
+pub fn supervisor_bootstrap_verdict(force: bool, tm_path: &Path) -> SupervisorBootstrapVerdict {
+    if cfg!(target_os = "macos") {
+        classify_supervisor_bootstrap(install_mpm_supervisor(force, tm_path))
+    } else {
+        SupervisorBootstrapVerdict::Skipped(
+            "launchd is macOS-only; install the systemd unit at \
+             `crates/trusty-mpm/deploy/supervisor/trusty-mpm-supervisor.service`"
+                .to_owned(),
+        )
+    }
+}
+
+/// Classify an [`install_mpm_supervisor`] result (#8415).
+///
+/// What: `Ok` → `Installed`; an `Err` carrying [`DowngradeRefused`] →
+/// `Refused`; any other `Err` → `Failed`, with the full error chain.
+/// Test: `tests::classify_supervisor_bootstrap_fails_the_install_on_reload_error`,
+/// `tests::classify_supervisor_bootstrap_keeps_refusal_informational`.
+pub fn classify_supervisor_bootstrap(result: anyhow::Result<()>) -> SupervisorBootstrapVerdict {
+    match result {
+        Ok(()) => SupervisorBootstrapVerdict::Installed,
+        Err(e) if e.downcast_ref::<DowngradeRefused>().is_some() => {
+            SupervisorBootstrapVerdict::Refused(e.to_string())
+        }
+        Err(e) => SupervisorBootstrapVerdict::Failed(format!("{e:#}")),
+    }
+}
+
 /// Decide whether replacing a registered supervisor with `candidate` is safe.
 ///
 /// Why: THE #3527 safety property — `tctl install` must never silently
@@ -425,6 +536,84 @@ pub fn decide_downgrade(
         (Ok(cur), Ok(cand)) if cand <= cur => DowngradeDecision::Refuse,
         _ => DowngradeDecision::Proceed,
     }
+}
+
+/// Inputs to [`decide_supervisor_rewrite`].
+#[derive(Debug, Clone, Copy)]
+pub struct RewriteInputs<'a> {
+    /// The plist currently on disk.
+    pub existing: &'a str,
+    /// What this installer would write for the REGISTERED binary — the
+    /// template filled with the plist's own `ProgramArguments[0]`. Comparing
+    /// against it asks "is this plist stale?" without the candidate's path
+    /// making every plist look different (#8415 review round 2).
+    pub registered_template: &'a str,
+    /// The plist's registered binary is the file this install just replaced.
+    pub registered_is_candidate: bool,
+    /// Version of the registered binary, when probeable.
+    pub current: Option<&'a str>,
+    /// Version of the binary this install placed, when probeable.
+    pub candidate: Option<&'a str>,
+    /// `--force`.
+    pub force: bool,
+}
+
+/// Whether to rewrite an existing supervisor plist (#3527, #8415).
+///
+/// Why (#8415): `install_one` overwrites `tm_path` before this guard runs, so
+/// when the plist registers that same path the "current" version is the new
+/// binary compared with itself — equal, and every upgrade was refused, which
+/// kept the `Background` plist. #3527 still wants an older-or-equal install
+/// of a DIFFERENT binary refused, unless the plist itself is stale.
+/// What: `Proceed` when forced, when the registered binary IS the candidate,
+/// or when [`decide_downgrade`] proceeds (newer, or unprobeable). `Refuse` a
+/// strictly older candidate. At an equal version, `Proceed` only when the
+/// plist differs from the template for its registered binary (stale).
+/// Test: `tests::decide_supervisor_rewrite_table`,
+/// `tests::install_mpm_supervisor_for_rewrites_a_background_plist`,
+/// `tests::install_mpm_supervisor_for_refuses_a_true_downgrade_with_a_stale_plist`,
+/// `tests::equal_version_other_path_fresh_plist_is_refused`,
+/// `tests::equal_version_other_path_stale_plist_is_rewritten_with_a_backup`,
+/// `tests::same_path_identical_plist_equal_version_proceeds`.
+pub fn decide_supervisor_rewrite(i: &RewriteInputs<'_>) -> DowngradeDecision {
+    if i.force
+        || i.registered_is_candidate
+        || decide_downgrade(i.current, i.candidate, false) == DowngradeDecision::Proceed
+    {
+        return DowngradeDecision::Proceed;
+    }
+    let strictly_older = match (i.current, i.candidate) {
+        (Some(cur), Some(cand)) => matches!(
+            (
+                semver::Version::parse(cur.trim_start_matches('v')),
+                semver::Version::parse(cand.trim_start_matches('v')),
+            ),
+            (Ok(cur), Ok(cand)) if cand < cur
+        ),
+        _ => false,
+    };
+    let stale = i.existing != i.registered_template;
+    if strictly_older || !stale {
+        DowngradeDecision::Refuse
+    } else {
+        DowngradeDecision::Proceed
+    }
+}
+
+/// The path an existing plist is copied to before it is replaced (#8415).
+pub fn backup_path(plist_path: &Path) -> PathBuf {
+    let mut name = plist_path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+/// Whether two paths name the same file (textually, or after canonicalizing).
+fn same_binary(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// Extract the registered `tm` binary path from an existing plist's
@@ -505,24 +694,29 @@ pub fn install_mpm_supervisor_for(
     let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
 
     // #3527: downgrade guard — refuse to replace an already-registered
-    // supervisor with an older-or-equal version unless `force`.
+    // supervisor with an older version unless `force`; #8415: see
+    // `decide_supervisor_rewrite` for the equal-version and same-path cases.
     if let Ok(existing) = std::fs::read_to_string(&plist_path) {
         if let Some(old_binary) = extract_program_path(&existing) {
             let current_version = super::update_engine::installed_version(&old_binary);
             let candidate_version = super::update_engine::installed_version(tm_path_str);
-            if decide_downgrade(
-                current_version.as_deref(),
-                candidate_version.as_deref(),
+            let registered_template = fill_template(home_str, &old_binary);
+            if decide_supervisor_rewrite(&RewriteInputs {
+                existing: &existing,
+                registered_template: &registered_template,
+                registered_is_candidate: same_binary(Path::new(&old_binary), tm_path),
+                current: current_version.as_deref(),
+                candidate: candidate_version.as_deref(),
                 force,
-            ) == DowngradeDecision::Refuse
+            }) == DowngradeDecision::Refuse
             {
-                anyhow::bail!(
-                    "refusing to replace trusty-mpm supervisor: registered version {} is not \
-                     older than the candidate version {} being installed; pass --force to \
-                     override (this refusal leaves the currently-running supervisor untouched)",
-                    current_version.as_deref().unwrap_or("<unknown>"),
-                    candidate_version.as_deref().unwrap_or("<unknown>"),
-                );
+                // #8415: typed, so the caller can tell this deliberate no-op
+                // from a failed write or reload.
+                return Err(DowngradeRefused {
+                    current: current_version.unwrap_or_else(|| "<unknown>".to_owned()),
+                    candidate: candidate_version.unwrap_or_else(|| "<unknown>".to_owned()),
+                }
+                .into());
             }
         }
     }
@@ -539,6 +733,20 @@ pub fn install_mpm_supervisor_for(
     std::fs::create_dir_all(&agents_dir)
         .with_context(|| format!("creating LaunchAgents dir {}", agents_dir.display()))?;
 
+    // #8415: keep what is being replaced. Any plist that differs from the new
+    // one is copied aside first — it may carry an operator's own edits.
+    if let Ok(existing) = std::fs::read_to_string(&plist_path) {
+        if existing != plist_content {
+            let bak = backup_path(&plist_path);
+            std::fs::copy(&plist_path, &bak).with_context(|| {
+                format!("backing up {} to {}", plist_path.display(), bak.display())
+            })?;
+            eprintln!(
+                "trusty-mpm supervisor: previous plist saved to {} before rewriting it.",
+                bak.display()
+            );
+        }
+    }
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("writing plist to {}", plist_path.display()))?;
 

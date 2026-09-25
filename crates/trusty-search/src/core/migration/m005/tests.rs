@@ -270,6 +270,8 @@ async fn fixture_inner(index_id: &str, cap: Option<usize>, office: bool) -> Fixt
         calls: Arc::clone(&embed_calls),
     });
     let mut indexer = CodeIndexer::new(index_id, root.to_string_lossy().as_ref())
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated)
         .with_components(embedder, store.clone() as Arc<dyn VectorStore>);
     if let Some(cap) = cap {
         indexer = indexer.with_chunk_cap(cap);

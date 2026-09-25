@@ -1381,6 +1381,8 @@ async fn doctor_endpoint_returns_report() {
         // project and component label the ticketing standard requires.
         "issue_audit_recent",
         "oauth_token",
+        "launchd_secrets",
+        "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",
         "hooks_build_tree_binary",
@@ -1395,6 +1397,9 @@ async fn doctor_endpoint_returns_report() {
         // #7965: each background sweep's kill switch and last pass duration.
         "background_sweeps",
         "binary_provenance",
+        // #8482: the binary's own embedded skill assets against `origin/main` —
+        // the row above reads a registry ledger, never the source tree.
+        "bundled_asset_lag",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
@@ -1405,6 +1410,10 @@ async fn doctor_endpoint_returns_report() {
         "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #8415: the launchd ProcessType of the jobs that start tmux servers.
+        "launchd_process_type",
+        // #8415: the observed priority of the running tmux server.
+        "tmux_priority",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",

@@ -48,7 +48,7 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 
 | # | Change class | Risk | PR gate, in short |
 |---|---|---|---|
-| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, `check_test_pointers.sh`, + line-cap if touched). No Cargo test by default. |
+| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, `check_test_pointers.sh`, + line-cap if touched). No Cargo test and no website code suite; a fragment owes the `Website content corpus` content check. |
 | 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, flake re-run ~10× |
 | 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast` `-p <crate>`, + one regression test that failed before |
 | 4 | **Cross-crate change** — public API or shared library | Normal → High | Rung 3 on the library, then `SKIP_UI_BUILD=1 check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
@@ -93,6 +93,7 @@ stale. Advance with `tm issue transition N status:merged`. Fix PRs use
 `status:merged`/`status:tested`. Rung 4–6 (CLI/daemon/hook fixes needing
 live proof) close only from `status:tested`; a merged fix failing
 verification stays open, returning to `status:coded` only via a follow-up fix.
+Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
 
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,
@@ -158,6 +159,8 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
 - Docs/config stay writable in the main checkout; commits never land on
   local `main` — docs/session notes reach origin only via the fast-path PR
   ([ADR-0061](docs/adr/0061-commits-never-land-on-local-main.md)).
+  Exception (owner ruling 2026-09-19): the PM may commit a NEW documentation
+  file straight to `main`; the pre-push credential scan still applies.
 - 🔴 **`.trusty-mpm/sessions/` is gitignored, local-only** (ruling 2026-09-13).
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in
   a worktree — bare `git diff`, `bash scripts/…`, a heredoc. Substitute for

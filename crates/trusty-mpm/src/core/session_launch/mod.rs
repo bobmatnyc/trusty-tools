@@ -136,6 +136,11 @@ mod tests_malformed_settings_7780;
 #[path = "tests_settings_lock_7762.rs"]
 mod tests_settings_lock_7762;
 
+// #8533: the launch and `tm sessions instructions` name one style.
+#[cfg(test)]
+#[path = "tests_style_selection_8533.rs"]
+mod tests_style_selection_8533;
+
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
@@ -806,10 +811,50 @@ pub(super) fn prepare_session_inner(
     // a style, the manifest's value applies; otherwise the higher source wins
     // exactly as before (zero regression for the flag/config paths). `config` was
     // loaded ONCE at the top of this function.
-    let effective_style: Option<String> = explicit_style
-        .map(str::to_owned)
-        .or_else(|| config.style.active.clone())
-        .or_else(|| plan.style.clone());
+    // #8533: the committed `.trusty-mpm.toml` `[style] active` sits between the
+    // flag and the host config, and a project style file resolves like a
+    // bundled one.
+    // The report (`describe_effective_style`) calls this same selector.
+    let selected_style =
+        crate::core::output_style::select_style(project_dir, explicit_style, &config, || {
+            plan.style.clone()
+        });
+    let effective_style: Option<String> = selected_style.id.clone();
+
+    // Resolve the active output style for settings.json using the same
+    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
+    // An unknown id is logged and falls back to the professional default rather
+    // than failing the launch (DOC-17). The resolved id is written into
+    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
+    // it directly; older builds pick it up via prompt injection at the
+    // `build_system_prompt_for` seam.
+    // #8533: an unknown id is never a silent fallback — the warning joins the
+    // launch's asset notices, which every launch path prints. A project style
+    // is named through its composite (prose + floor), written before the prompt
+    // is built so the prompt seam sees it in place; a composite that cannot be
+    // written names the default style, which carries its own floor.
+    let mut style_notice = selected_style.warning;
+    let active_style_id =
+        match crate::core::output_style::native_style_id(project_dir, &selected_style.style) {
+            Ok(id) => id,
+            Err(err) => {
+                let warning = format!(
+                    "output style '{}': cannot write its composite with the trusty-mpm floor \
+                     ({err}); using `{OUTPUT_STYLE}` for native launches",
+                    selected_style.style.id()
+                );
+                tracing::warn!("{warning}");
+                style_notice.get_or_insert(warning);
+                OUTPUT_STYLE.to_string()
+            }
+        };
+
+    // Set the Claude Code output style so the launched session's status bar
+    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
+    // still launches, it just shows the operator's default style.
+    if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
+        tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -854,34 +899,6 @@ pub(super) fn prepare_session_inner(
             "could not refresh the instruction stash at {} (non-fatal): {e}",
             stash.display()
         ),
-    }
-
-    // Resolve the active output style for settings.json using the same
-    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
-    // An unknown id is logged and falls back to the professional default rather
-    // than failing the launch (DOC-17). The resolved id is written into
-    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
-    // it directly; older builds pick it up via prompt injection at the
-    // `build_system_prompt_for` seam.
-    let active_style_id = match crate::core::output_style::resolve_active_style(
-        &config,
-        effective_style.as_deref(),
-    ) {
-        Ok(style) => style.id,
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                "falling back to the default output style for settings.json"
-            );
-            crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID
-        }
-    };
-
-    // Set the Claude Code output style so the launched session's status bar
-    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
-    // still launches, it just shows the operator's default style.
-    if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
-        tracing::warn!("failed to set trusty-mpm output style: {err}");
     }
 
     // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
@@ -1151,8 +1168,9 @@ pub(super) fn prepare_session_inner(
 
     // #6649: computed LAST so the skill tier it reads is the one this launch
     // leaves behind, not the one it inherited.
-    let asset_notices =
+    let mut asset_notices =
         asset_notices::launch_asset_notices(fw, project_dir, quarantine_report.as_ref());
+    asset_notices.extend(style_notice);
 
     Ok(PrepReport {
         deploy,

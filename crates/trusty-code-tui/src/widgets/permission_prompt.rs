@@ -138,8 +138,17 @@ pub fn permission_prompt_lines(
 ///
 /// Why: a subject can legitimately be several file paths separated by
 /// newlines; rendering them as rows would make the prompt's height depend on
-/// the request and could push the input composer off a short terminal.
-fn fold_to_one_line(text: &str) -> String {
+/// the request and could push the input composer off a short terminal. It is
+/// `pub(crate)` rather than private because the FLAT scrollback line must
+/// fold identically — see [`crate::app::reduce`]'s
+/// `apply_permission_requested` (#8237).
+/// What: splits on `\n`, trims and drops blank lines, joins with `" · "`.
+/// Every non-blank source line survives, in order — a raw `\n` inside one
+/// ratatui `Span` renders as nothing, so the join separator is what keeps a
+/// multi-statement `bash` command readable instead of glued.
+/// Test: `tests::prompt_folds_a_multi_line_subject_onto_one_row`,
+/// `crate::app::reduce::tests::permission_requested_folds_a_multi_line_subject_in_scrollback`.
+pub(crate) fn fold_to_one_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())

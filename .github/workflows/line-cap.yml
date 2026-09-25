@@ -10,6 +10,11 @@
 #
 # Pure line counting — no Rust toolchain or build needed, so this is fast and
 # runs as its own lightweight job (matches ci.yml's checkout style/auth).
+#
+# A second job in this file, `dev-dep-edges` (#8341), enforces that no crate's
+# dev/build dependencies reach a workspace crate its normal dependencies do not.
+# It is the one gate here that needs cargo (`cargo metadata --no-deps`, offline),
+# which is why it is a separate job rather than another step above.
 name: Line cap
 
 on:
@@ -71,9 +76,49 @@ jobs:
       - name: Enforce SLOC file cap (500 prod / 3000 test, ratcheted allowlist)
         run: bash scripts/check_line_cap.sh
 
+      # docs/roadmap first PR: check_generated_regions.sh's `docs/roadmap/*.md)`
+      # owner case requires scripts/roadmap/generate.test.mjs to exist, so its
+      # own regression suite runs here — before that gate, matching
+      # token-drift.yml's "checker's own logic first" ordering — rather than in
+      # a separate workflow.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Roadmap generator regression tests (scripts/roadmap/generate.mjs)
+        run: node --test scripts/roadmap/generate.test.mjs
+
       # #5205: a generated doc region is only checked if the owning crate has a
       # `tests/generated_docs.rs`. Markers pasted anywhere else would look
       # generated while being hand-maintained, so reject an unowned region here
       # rather than discovering it via another stale README. Cheap, no toolchain.
       - name: Every generated doc region has an owning test
         run: bash scripts/check_generated_regions.sh
+
+  # Test-only workspace dev-dependency edges (#8341). A separate job because it
+  # is the one gate in this file that needs cargo: `cargo metadata --no-deps`
+  # reads the member manifests and nothing else — no registry index, no network,
+  # no build — but it still needs a toolchain, and the line-cap job above is
+  # deliberately toolchain-free. Running it here rather than in its own workflow
+  # keeps every cheap script gate reachable from one file.
+  dev-dep-edges:
+    name: No test-only workspace dev-dependency edges
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # The MSRV toolchain, matching ci.yml, so the manifest read never depends
+      # on whatever cargo the runner image happens to ship.
+      - name: Install Rust toolchain (1.94)
+        uses: dtolnay/rust-toolchain@1.94
+
+      # The gate's own fixture suite first: a gate that cannot be shown to fail
+      # makes the real run's green meaningless. Mirrors the selftest-then-gate
+      # ordering of the line-cap job above. No cargo — it drives the gate over
+      # synthetic metadata documents.
+      - name: Dev-dep-edge selftest (must reject a test-only edge)
+        run: bash scripts/check_dev_dep_edges_selftest.sh
+
+      - name: No crate's dev/build deps reach outside its normal tree
+        run: bash scripts/check_dev_dep_edges.sh

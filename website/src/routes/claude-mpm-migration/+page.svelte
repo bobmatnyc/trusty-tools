@@ -8,10 +8,10 @@
 	 * is choosing between two tools, not reading about one.
 	 *
 	 * What: the whole migration page. Not built on `ToolPage.svelte`, for the
-	 * same reason `/tools/trusty-git-analytics/audit` is not: that component
-	 * derives its `<h1>`, source link, and single install line from a `Tool`
-	 * record, and this page is about a move between two projects rather than
-	 * about a crate. The chrome below matches it by hand.
+	 * same reason `/install` is not: that component derives its `<h1>`, source
+	 * link, and single install line from a `Tool` record, and this page is
+	 * about a move between two projects rather than about a crate. The chrome
+	 * below matches it by hand.
 	 *
 	 * Sourcing rule, inherited from `$lib/tools`: every claim was checked
 	 * against repository source, never against a README sentence.
@@ -33,11 +33,11 @@
 	 *     and `docs/reference/threat-model.md`
 	 *   - the kuzu-memory targets, their required flags, and the idempotency
 	 *     claims — `crates/trusty-memory/src/commands/migrate.rs` and
-	 *     `src/main.rs`'s `Migrate` variant; the importer's behaviour and the
-	 *     four refused predicates —
-	 *     `crates/trusty-memory/src/commands/kuzu_migrate.rs` and
+	 *     `src/main.rs`'s `Migrate` variant; the importer's behaviour and why it
+	 *     never writes one of the four hot predicates —
+	 *     `crates/trusty-memory/src/commands/kuzu_import/` and
 	 *     `crates/trusty-memory/src/prompt_facts.rs::HOT_PREDICATES`, pinned by
-	 *     `kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones`. There is
+	 *     `kuzu_import_never_writes_a_hot_predicate`. There is
 	 *     no default `--from` path: the handler errors when it is absent, so
 	 *     the `~/.open-mpm/...` path in the example is kuzu-memory's own
 	 *     convention rather than a default this command applies.
@@ -256,7 +256,7 @@ tm --version</pre>
 					<thead>
 						<tr>
 							<th scope="col">Daemon</th>
-							<th scope="col">Address</th>
+							<th scope="col">Transport</th>
 							<th scope="col">What it holds</th>
 						</tr>
 					</thead>
@@ -272,7 +272,7 @@ tm --version</pre>
 						</tr>
 						<tr>
 							<td><code class="whitespace-nowrap">trusty-memory</code></td>
-							<td><code class="whitespace-nowrap">127.0.0.1:7070</code></td>
+							<td><code class="whitespace-nowrap">Unix socket</code></td>
 							<td class="text-foundry-secondary"
 								>Memory palaces — long-term recall organised per project, over an HNSW vector index,
 								a redb store, and a knowledge graph.</td
@@ -291,9 +291,10 @@ tm --version</pre>
 			</div>
 
 			<p class="mt-6 max-w-3xl text-foundry-secondary">
-				Every one of those addresses is loopback. Nothing in the fleet listens on an external
-				interface, and the HTTP routers additionally reject requests whose origin is not the machine
-				itself, so a page you happen to have open cannot reach them.
+				Every one of those is local-only. trusty-mpm and trusty-search bind loopback HTTP and
+				additionally reject requests whose origin is not the machine itself; trusty-memory's daemon
+				has no network listener at all — its transport is a Unix domain socket, reachable only to
+				processes on the same host. Either way, a page you happen to have open cannot reach them.
 			</p>
 
 			<div class="mt-6 grid max-w-3xl gap-4 sm:grid-cols-2">

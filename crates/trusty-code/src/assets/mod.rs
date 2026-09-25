@@ -237,6 +237,67 @@ const PM_MD: &str = include_str!("agents/pm.md");
 // #8129: the four delivery-workflow agents. tcode-NATIVE, not forks of the
 // shared roster's same-named files — see this module's "Delivery-workflow
 // agents" doc section.
+/// Opening marker of `pm.md`'s contiguous agent-routing block (#8287).
+///
+/// Why: DOC-75 §4b row 3 ([#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293))
+/// will lift the routing table out of this crate into one shared source neither
+/// product crate owns, behind a drift check. A marked, contiguous block is what
+/// makes that a move rather than a rewrite, and it is also the span the routing
+/// tests parse — so the lift boundary and the test boundary can never disagree.
+/// What: the exact Markdown-comment line opening the block. Matched literally,
+/// with no trailing prose on the marker line, so [`pm_routing_block`] needs no
+/// line-scanning heuristic.
+/// Test: `assets::tests::pm_routing_block_names_only_delegable_roster_agents`.
+pub const PM_ROUTING_BLOCK_BEGIN: &str = "<!-- pm-routing-table:begin -->";
+
+/// Closing marker of `pm.md`'s routing block.
+///
+/// Why/What/Test: as [`PM_ROUTING_BLOCK_BEGIN`].
+pub const PM_ROUTING_BLOCK_END: &str = "<!-- pm-routing-table:end -->";
+
+/// The delegation targets a delegate-mode coding task passes through, in order
+/// (#8287).
+///
+/// Why: DOC-75 §1's delegate run is "research, then engineer, then qa" — the
+/// ORDER is the behaviour, not just the membership, so it is declared here
+/// rather than re-read from the card's prose by each test. `qa-agent` and not
+/// `qa` because DOC-75 §6 requires real test output in the transcript and
+/// tcode's `qa` fork carries no `bash` (see this module's "Tools-restriction
+/// deviation" section) — it recommends commands it cannot run.
+/// What: three roster names, each an [`EmbeddedAgent`] entry in
+/// [`DEFAULT_AGENTS`], in the order the card's routing block must name them.
+/// Test: `assets::tests::pm_routing_block_names_only_delegable_roster_agents`.
+pub const PM_ROUTING_ORDER: &[&str] = &["research", "engineer", "qa-agent"];
+
+/// `pm.md`'s size before #8287 added the routing block, in bytes.
+///
+/// Why: DOC-75 §4b caps tcode's resident PM prompt at 2x its 2026-09-19 size —
+/// token budget is a first-class axis for tcode. A hardcoded baseline is what
+/// lets a test enforce that cap; deriving it from `PM_MD.len()` would make the
+/// assertion vacuous.
+/// What: `wc -c` of `crates/trusty-code/src/assets/agents/pm.md` at commit
+/// `3473119`, the tip of `main` when #8287 landed.
+/// Test: `assets::tests::pm_card_stays_within_the_doc_75_size_cap`.
+pub const PM_CARD_BASELINE_BYTES: usize = 2863;
+
+/// The routing block's inner text, or `None` when the markers are absent.
+///
+/// Why: two callers need the same span — the routing tests, and
+/// [#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293)'s shared-source
+/// lift, which has to read the block out of whichever card it is migrating.
+/// Returning `None` rather than the whole prompt is deliberate: a card that
+/// lost its markers must fail the routing test, not silently pass by matching
+/// agent names elsewhere in the body.
+/// What: the text between [`PM_ROUTING_BLOCK_BEGIN`] and
+/// [`PM_ROUTING_BLOCK_END`], exclusive of both markers, trimmed. `None` when
+/// either marker is missing or they appear out of order.
+/// Test: `assets::tests::pm_routing_block_names_only_delegable_roster_agents`,
+/// `prompt::tests::delegate_mode_prompt_carries_the_routing_table`.
+pub fn pm_routing_block(card: &str) -> Option<&str> {
+    let after_begin = card.split_once(PM_ROUTING_BLOCK_BEGIN)?.1;
+    Some(after_begin.split_once(PM_ROUTING_BLOCK_END)?.0.trim())
+}
+
 const TICKETING_MD: &str = include_str!("agents/ticketing.md");
 const VERSION_CONTROL_MD: &str = include_str!("agents/version-control.md");
 const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
@@ -305,6 +366,9 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     // bundled one carrying a `permissions:` block: every mutating tool asks
     // first (#3422), reads stay unprompted. A headless run has nobody to ask,
     // so an `ask` there denies (#8100) unless TCODE_PERMISSION_MODE=allow-asks.
+    // #8287: in DELEGATE mode the same card is the only routing text the PM has,
+    // so its contiguous routing block (see [`PM_ROUTING_BLOCK_BEGIN`]) is what
+    // decides whether `research`/`engineer`/`qa-agent` get dispatched at all.
     EmbeddedAgent::Direct {
         name: "pm",
         md: PM_MD,

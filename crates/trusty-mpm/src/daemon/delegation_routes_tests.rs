@@ -985,6 +985,36 @@ async fn head_write_excludes_the_calling_sessions_own_delegation() {
     );
     assert_eq!(commit.total, 0);
     assert!(!commit.claimed, "a Bash query never claims the tree");
+    assert!(
+        !commit.tree_holders,
+        "no marker sent, so none echoed (#8161)"
+    );
+}
+
+/// #8161: the tree-holders marker lifts #6797's own-session exclusion, because a
+/// consolidating `reset --keep` would clobber the asking PM's own live agent.
+#[tokio::test]
+async fn shared_tree_route_tree_holders_counts_the_callers_own_agent() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo/.claude/worktrees/agent-parked",
+        None,
+        Some("toolu_own"),
+        DelegationStatus::Running,
+    );
+    let mut query = commit_query("/repo/.claude/worktrees/agent-parked");
+    query.payload[crate::daemon::delegation_routes::TREE_HOLDERS_MARKER] = Value::Bool(true);
+
+    let answer = call(&state, session, query).await;
+    assert_eq!(answer.total, 1, "{:?}", answer.agents);
+    assert!(
+        answer.tree_holders,
+        "the answer must echo the marker it honoured"
+    );
+    assert!(!answer.claimed, "a Bash query never claims the tree");
 }
 
 /// The fail-closed half, and the reason the exclusion is scoped to the caller
@@ -1621,4 +1651,252 @@ async fn repair_route_refuses_a_live_owner_7602() {
 
     assert!(matches!(outcome, RepairOutcome::Refused { .. }));
     assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}
+
+/// A record a stop matched by agent type: live-shaped for a dispatch, no id.
+fn type_matched_record(state: &DaemonState, session: SessionId) -> Delegation {
+    let mut d = Delegation::observed(session, "version-control", "task", Some("toolu_vc".into()));
+    d.cwd = Some(PathBuf::from("/repo"));
+    d.status = DelegationStatus::Stale;
+    d.stale_by_agent_type = true;
+    state.upsert_delegation(d.clone());
+    d
+}
+
+// #8257: the deny named only `version-control`. The answer now carries the
+// record's delegation id (it has no agent id), owner, and clearing command.
+#[tokio::test]
+async fn shared_tree_dispatch_route_names_each_blocking_record_8257() {
+    let (state, _dir, session) = hermetic();
+    let d = type_matched_record(&state, session);
+
+    let body = call(
+        &state,
+        SessionId::new(),
+        dispatch("/repo", "rust-engineer", None, Some("toolu_new")),
+    )
+    .await;
+
+    assert_eq!(body.records.len(), 1, "{body:?}");
+    let r = &body.records[0];
+    assert_eq!(r.delegation_id, d.id.0.to_string());
+    assert_eq!(r.agent_id, None);
+    // #8257 owner ruling: the deny JSON the hook reads names no owner UUID.
+    assert_eq!(r.owner, "a session the daemon holds no record of");
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&body).expect("json"),
+        session,
+    );
+    assert_eq!(
+        r.repair_command,
+        format!("tm repair delegation --delegation-id {}", d.id.0)
+    );
+}
+
+// #8257: the read-only listing names the record the dispatch deny blocks on.
+#[tokio::test]
+async fn list_route_names_the_blocking_record_8257() {
+    let (state, _dir, session) = hermetic();
+    let d = type_matched_record(&state, session);
+
+    let Json(listing) = list_delegations_route(
+        State(state.clone()),
+        Query(ListDelegationsQuery {
+            cwd: PathBuf::from("/repo"),
+        }),
+    )
+    .await;
+
+    assert_eq!(listing.records.len(), 1, "{listing:?}");
+    assert_eq!(listing.records[0].delegation_id, d.id.0.to_string());
+    assert!(listing.records[0].blocks_dispatch);
+    // #8257 owner ruling: the listing asks no caller identity, so it names
+    // no owner UUID either.
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&listing).expect("json"),
+        session,
+    );
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Stale,
+        "listing writes nothing"
+    );
+}
+
+// #8257: the id-less record is reachable over the wire by its delegation id.
+#[tokio::test]
+async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::RepairOutcome;
+
+    use crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER;
+
+    let (state, _dir, session) = hermetic();
+    state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
+    let d = type_matched_record(&state, session);
+    let by_id = |headers| {
+        repair_delegation_by_id_route(
+            State(state.clone()),
+            Path(d.id.0.to_string()),
+            headers,
+            None,
+        )
+    };
+
+    // #8257: a type-matched stop may be a sibling's, so an anonymous caller is
+    // refused while the owner lives; the owner's own header clears it.
+    let Json(anonymous) = by_id(axum::http::HeaderMap::new())
+        .await
+        .expect("a well-formed id");
+    assert!(
+        matches!(anonymous, RepairOutcome::Refused { .. }),
+        "{anonymous:?}"
+    );
+    let mut owner = axum::http::HeaderMap::new();
+    owner.insert(
+        CALLER_SESSION_HEADER,
+        session.0.to_string().parse().expect("header value"),
+    );
+    let Json(outcome) = by_id(owner).await.expect("a well-formed id");
+
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+    assert_eq!(
+        state.all_delegations()[0].status,
+        DelegationStatus::Cancelled
+    );
+    assert!(
+        call(
+            &state,
+            SessionId::new(),
+            dispatch("/repo", "rust-engineer", None, Some("t2"))
+        )
+        .await
+        .agents
+        .is_empty(),
+        "the repaired record no longer blocks a dispatch"
+    );
+}
+
+// #8257 owner ruling, over the wire: the caller-session header lets the owning
+// session clear its own live record; any other session's header does not.
+#[tokio::test]
+async fn repair_route_lets_the_owning_session_clear_its_record_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairOutcome};
+
+    let (state, _dir, session) = hermetic();
+    state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
+    let mut d = Delegation::observed(session, "version-control", "task", Some("toolu_o".into()));
+    d.agent_id = Some("a0wner".to_string());
+    state.upsert_delegation(d);
+    let as_session = |s: SessionId| {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            CALLER_SESSION_HEADER,
+            s.0.to_string().parse().expect("header value"),
+        );
+        h
+    };
+
+    let Json(stranger) = repair_delegation_as_route(
+        State(state.clone()),
+        Path("a0wner".to_string()),
+        as_session(SessionId::new()),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(stranger, RepairOutcome::Refused { .. }),
+        "{stranger:?}"
+    );
+    // #8257 owner ruling: the route's answer does not hand the stranger the
+    // owner's UUID to replay in the caller header.
+    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
+        &serde_json::to_string(&stranger).expect("json"),
+        session,
+    );
+
+    let Json(owner) = repair_delegation_as_route(
+        State(state.clone()),
+        Path("a0wner".to_string()),
+        as_session(session),
+        None,
+    )
+    .await;
+    assert_eq!(owner, RepairOutcome::Ended { records: 1 });
+}
+
+// #8257 owner ruling: ownership is never taken from caller-supplied content. A
+// different session that names the owner's id in the request body — the wire
+// form a CLI argument would take — is still refused, as is a request that
+// names the owner in the body and carries no caller session at all.
+#[tokio::test]
+async fn repair_route_ignores_an_owner_id_the_caller_supplies_8257() {
+    use crate::core::session::{ControlModel, Session};
+    use crate::daemon::services::delegation_repair::{
+        CALLER_SESSION_HEADER, RepairDelegationRequest, RepairOutcome,
+    };
+
+    let (state, _dir, owner) = hermetic();
+    state.register_session(Session::new(owner, "/repo", ControlModel::Tmux, None));
+    let mut d = Delegation::observed(owner, "version-control", "task", Some("toolu_c".into()));
+    d.agent_id = Some("a0wnclaim".to_string());
+    state.upsert_delegation(d);
+    let body = || {
+        let raw = serde_json::json!({
+            "force": false,
+            "session": owner.0.to_string(),
+            "caller_session": owner.0.to_string(),
+            "owner": owner.0.to_string(),
+        });
+        Some(Json(
+            serde_json::from_value::<RepairDelegationRequest>(raw).expect("request body"),
+        ))
+    };
+    let mut stranger = axum::http::HeaderMap::new();
+    stranger.insert(
+        CALLER_SESSION_HEADER,
+        SessionId::new()
+            .0
+            .to_string()
+            .parse()
+            .expect("header value"),
+    );
+
+    for headers in [stranger, axum::http::HeaderMap::new()] {
+        let Json(outcome) = repair_delegation_as_route(
+            State(state.clone()),
+            Path("a0wnclaim".to_string()),
+            headers,
+            body(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RepairOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
+    }
+    assert!(
+        state
+            .all_delegations()
+            .iter()
+            .all(|d| !d.status.is_terminal()),
+        "no caller-supplied owner id may clear the record"
+    );
+}
+
+// #8257 critic R6 Fail-Open Check: the repair runs off the runtime worker, and
+// a task that dies before answering is a refusal, never a success.
+#[tokio::test]
+async fn a_repair_task_that_panics_is_a_refusal_8257() {
+    use crate::daemon::services::delegation_repair::RepairOutcome;
+
+    let outcome = repair_off_worker(|| panic!("synthetic repair panic")).await;
+
+    match outcome {
+        RepairOutcome::Refused { reason } => {
+            assert!(reason.contains("failed before it answered"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }

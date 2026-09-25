@@ -11,8 +11,9 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
-		"test": "vitest run",
+		"test": "vitest run --project=unit --project=smoke",
 		"test:unit": "vitest run --project=unit",
+		"test:corpus": "vitest run --project=corpus",
 		"check:tokens": "node ../scripts/check_token_drift.mjs"
 	},
 	"devDependencies": {

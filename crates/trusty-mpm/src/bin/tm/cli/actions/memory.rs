@@ -4,15 +4,106 @@
 //! trusty-memory palace is ETL, not reasoning. Doing it through an agent cost
 //! 622k tokens for 120 files; this command group is the zero-inference path.
 //! What: [`MemoryAction`] — `import`, plus `import-auto-memory` (#7685), the
-//! one-way migration of Claude Code's own auto-memory store into the palace.
-//! Test: `cli_parses_memory_import*` in `tests.rs`.
+//! one-way migration of Claude Code's own auto-memory store into the palace,
+//! plus `recall` / `remember` / `note` (#8352), the no-MCP palace verbs.
+//! Test: `cli_parses_memory_import*`, `cli_parses_memory_recall*` in `tests.rs`.
 
 use std::path::PathBuf;
 
 use clap::Subcommand;
 
+/// `tm memory` actions.
+///
+/// #8352: `recall`, `remember` and `note` are the FALLBACK path for a session
+/// whose `mcp__trusty-memory__*` tools are unavailable. They call the same
+/// daemon methods the MCP tools do, over its Unix socket, so nothing in this
+/// process ever opens a palace store the daemon is serving (#1078).
 #[derive(Debug, Subcommand)]
 pub(crate) enum MemoryAction {
+    /// Recall memories from the palace — the no-MCP `memory_recall` (#8352).
+    ///
+    /// Use this when the `mcp__trusty-memory__*` tools are unavailable. The
+    /// palace is the session's own — `TRUSTY_MEMORY_PALACE`, else the
+    /// committed pin, else the repo slug — unless `--palace` names another.
+    /// With no palace resolvable at all, trusty-memory answers with an index of
+    /// the palaces on this host, naming the one to pass next.
+    Recall {
+        /// What to recall.
+        query: String,
+        /// Palace to search. Defaults to the session's own.
+        #[arg(long)]
+        palace: Option<String>,
+        /// Hits to return. Defaults to trusty-memory's own default.
+        #[arg(long)]
+        top_k: Option<u64>,
+        /// Restrict the semantic layer to one room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Restrict the search to the rooms one wing owns.
+        #[arg(long, conflicts_with = "room")]
+        wing: Option<String>,
+        /// Drop query-scored hits below this relevance floor (0.4 is the
+        /// recommended value for PM-context recall).
+        #[arg(long)]
+        min_score: Option<f64>,
+        /// Print the machine-readable envelope instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to `TRUSTY_MEMORY_SOCKET`, else
+        /// the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
+    /// Store a memory in the palace — the no-MCP `memory_remember` (#8352).
+    ///
+    /// The daemon's content gates still apply: very short text with no context,
+    /// auto-capture noise, and secret-shaped content are refused there, and the
+    /// report says so.
+    Remember {
+        /// The memory text.
+        text: String,
+        /// Palace to write to. Defaults to the session's own.
+        #[arg(long)]
+        palace: Option<String>,
+        /// Room to file it in.
+        #[arg(long)]
+        room: Option<String>,
+        /// Tag to store alongside it; repeat for several.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Print the machine-readable envelope instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
+    /// Store a short curated fact — the no-MCP `memory_note` (#8352).
+    ///
+    /// The shortcut for high-signal one-liners ("deploy target is prod-east"):
+    /// stored at importance 1.0 so it surfaces in the palace's essentials.
+    Note {
+        /// The fact.
+        content: String,
+        /// Palace to write to. Defaults to the session's own.
+        #[arg(long)]
+        palace: Option<String>,
+        /// Room to file it in.
+        #[arg(long)]
+        room: Option<String>,
+        /// Tag to store alongside it; repeat for several.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Print the machine-readable envelope instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
     /// Bulk-import a directory of memory `.md` files into a palace.
     ///
     /// Reads every `*.md` file directly inside `<DIR>` (non-recursive), maps

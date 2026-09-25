@@ -27,6 +27,7 @@ use crate::core::{
 };
 
 use crate::service::persistence::{self, PersistedIndex};
+use crate::service::storage_layout::StorageLayout;
 
 /// Open a `CorpusStore`, serialized per-path and panic-safe, retrying once on
 /// `DatabaseAlreadyOpen` (issues #840, #3659).
@@ -125,8 +126,10 @@ pub async fn build_indexer_from_entry(
     let dim = embedder.dimension();
     let (store, hnsw_load_failed): (Arc<dyn VectorStore>, bool) =
         build_store_for_entry(entry, dim).await?;
-    let mut indexer =
-        CodeIndexer::new(index_id, root_path).with_components(Arc::clone(embedder), store);
+    // #8438: the layout is decided here, once, from the registry entry.
+    let mut indexer = CodeIndexer::new(index_id, root_path)
+        .with_components(Arc::clone(embedder), store)
+        .with_storage_layout(StorageLayout::for_entry(entry));
     // Issue #2922: propagate whether a persisted snapshot existed but failed
     // to load, so warm-boot / lazy-load can fold it into `hnsw_snapshot_ready`
     // instead of trusting bare file existence.

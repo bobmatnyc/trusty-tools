@@ -14,8 +14,10 @@
 #   two-hop REVERSE chain, the shape the selector exists to compute) — and
 #   asserts the crate set `select-test-crates.sh --files ...` prints for each
 #   case. A fixture rather than this repo's live graph, so an unrelated PR
-#   that adds a dependency edge cannot turn these cases red. A short LIVE
-#   section follows, checking this repo's own trusty-common override.
+#   that adds a dependency edge cannot turn these cases red. A second fixture
+#   covers the scripts/** and .github/** rules (#7777 ruling). A short LIVE
+#   section follows, checking this repo's own trusty-common override and its
+#   real scripts/** literal edges.
 #
 # Usage: bash scripts/select-test-crates_selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing both sides of each
@@ -170,8 +172,11 @@ assert_eq "root-level *.md prints nothing" \
   "" "$(run README.md)"
 assert_eq "Cargo.lock prints all crates" \
   "${ALL_EIGHT}" "$(run Cargo.lock)"
-assert_eq "scripts/** prints all crates" \
-  "${ALL_EIGHT}" "$(run scripts/some-gate.sh)"
+assert_eq "deny.toml prints all crates" \
+  "${ALL_EIGHT}" "$(run deny.toml)"
+# #7777 ruling (c): was "scripts/** prints all crates".
+assert_eq "an unreferenced scripts/** path prints nothing" \
+  "" "$(run scripts/some-gate.sh)"
 assert_eq "an unknown path prints all crates (fail open)" \
   "${ALL_EIGHT}" "$(run some/unclassified/path.rs)"
 
@@ -189,6 +194,17 @@ assert_eq "broken cargo metadata -> exit 0" "0" "${broken_exit}"
 echo "fixture: --cargo-args mode"
 assert_eq "isolated --cargo-args -> -p isolated" \
   "-p isolated" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --files crates/isolated/src/lib.rs --cargo-args 2>/dev/null)"
+
+# #7777 review round 3: before the first commit HEAD is unborn, so --staged
+# has no diff base and fails open. The exclude list hides every root input and
+# crate so the untracked set is one docs file, which alone would select nothing.
+echo "fixture: --staged before the first commit fails open"
+printf '/*\n!/docs/\n' >"${FIXTURE}/.git/info/exclude"
+mkdir -p "${FIXTURE}/docs" && echo probe >"${FIXTURE}/docs/staged-probe.md"
+assert_eq "--staged with an unborn HEAD (docs-only untracked set) -> all crates" \
+  "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --staged 2>/dev/null)"
+rm -rf "${FIXTURE}/docs"
+: >"${FIXTURE}/.git/info/exclude"
 
 echo "fixture: --staged mode sees an untracked file"
 (cd "${FIXTURE}" && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1)
@@ -230,6 +246,10 @@ assert_eq "--range with no value terminates promptly (not a 124 timeout)" \
   "0" "${range_missing_exit}"
 assert_eq "--range with no value fails open -> all crates, never nothing" \
   "${ALL_EIGHT}" "${range_missing_out}"
+
+# #7777 review round 2: ci.yml passes `--range ""` when merge-base fails.
+assert_eq "--range \"\" (explicit empty string) fails open -> all crates" \
+  "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range "" 2>/dev/null)"
 
 assert_eq "--range with an unresolvable ref fails open -> all crates" \
   "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range 'no-such-ref..also-fake' 2>/dev/null)"
@@ -285,6 +305,282 @@ assert_eq "fail-open before cargo metadata has run still finds a nested member" 
 alpha-ui" "${nested_out}"
 
 # ---------------------------------------------------------------------------
+# scripts/** and .github/** (#7777 owner ruling 2026-09-23). Its own
+# workspace, named after the real crates the ruling cites, so the canary set
+# and the UI-crate relevance list resolve without an override:
+#
+#   trusty-mpm        src names "scripts/check_changelog_fragment.sh" in code
+#                     and "scripts/unrelated.sh" only in comments
+#   trusty-search     build.rs names "scripts/check-ui-bundle-freshness.sh"
+#   trusty-console    build.rs names "../../scripts/check-ui-bundle-freshness.sh"
+#   search-consumer   depends on trusty-search — rule 4 must NOT select it
+#   bystander         test fixture strings "scripts/go.sh", "scripts/ingest.sh"
+#                     — neither file exists; src/paths.rs names dot.sh, fmt.sh,
+#                     up.sh and abs.sh through `./`, `{r}/`, `../` and `/abs/`
+#                     prefixes, mine.sh only as "myscripts/mine.sh", and
+#                     include_str!s h.sh (deleted / renamed in a --range copy)
+#   trusty-mpm-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
+#   scripts/sign.sh   contains `codesign`; scripts/sub/sign.sh and
+#                     scripts/sign.txt do too but sit outside the scan's scope
+# ---------------------------------------------------------------------------
+echo "fixture: scripts/** and .github/** selection rules (#7777 ruling)"
+
+SR="${WORK}/scriptref"
+sr_crate() {
+  local name="$1"
+  mkdir -p "${SR}/crates/${name}/src"
+  : >"${SR}/crates/${name}/src/lib.rs"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$name" >"${SR}/crates/${name}/Cargo.toml"
+}
+mkdir -p "${SR}/scripts" "${SR}/.github/workflows"
+printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >"${SR}/Cargo.toml"
+for c in trusty-common trusty-mpm trusty-search trusty-console search-consumer bystander trusty-mpm-gui; do
+  sr_crate "$c"
+done
+printf '\n[dependencies]\ntrusty-search = { path = "../trusty-search" }\n' >>"${SR}/crates/search-consumer/Cargo.toml"
+cat >"${SR}/crates/trusty-mpm/src/lib.rs" <<'EOF'
+// Runs scripts/unrelated.sh? No: this comment must not count.
+/// Nor does this doc line naming "scripts/unrelated.sh".
+pub fn gate(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("scripts/check_changelog_fragment.sh")
+}
+EOF
+cat >"${SR}/crates/trusty-search/build.rs" <<'EOF'
+fn main() {
+    let _ = std::path::Path::new(".").join("scripts/check-ui-bundle-freshness.sh");
+}
+EOF
+cat >"${SR}/crates/trusty-console/build.rs" <<'EOF'
+fn main() {
+    let _ = std::path::Path::new("../../scripts/check-ui-bundle-freshness.sh");
+}
+EOF
+mkdir -p "${SR}/crates/bystander/tests"
+cat >"${SR}/crates/bystander/tests/fixtures.rs" <<'EOF'
+#[test]
+fn fixture_strings() {
+    assert_ne!("scripts/go.sh", "scripts/ingest.sh");
+}
+EOF
+cat >"${SR}/crates/bystander/src/paths.rs" <<'EOF'
+pub const HOOK: &str = include_str!("../../../scripts/h.sh");
+pub fn paths(r: &str) -> [String; 5] {
+    [
+        "./scripts/dot.sh".to_string(),
+        format!("{r}/scripts/fmt.sh"),
+        "../scripts/up.sh".to_string(),
+        "/abs/scripts/abs.sh".to_string(),
+        "myscripts/mine.sh".to_string(),
+    ]
+}
+EOF
+for f in scripts/check_changelog_fragment.sh scripts/check-ui-bundle-freshness.sh scripts/unrelated.sh \
+  scripts/dot.sh scripts/fmt.sh scripts/up.sh scripts/abs.sh scripts/mine.sh scripts/h.sh \
+  .github/workflows/ci.yml .github/workflows/other.yml; do
+  echo '# fixture' >"${SR}/${f}"
+done
+# Codesign rule: in scope only as scripts/<name>.sh, like trusty-common's scan.
+mkdir -p "${SR}/scripts/sub"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sign.sh"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sub/sign.sh"
+echo 'codesign --force --sign - "$APP"' >"${SR}/scripts/sign.txt"
+echo 'echo "no signing here"' >"${SR}/scripts/nosign.sh"
+(cd "${SR}" && git init -q . && git config user.email selftest@example.invalid &&
+  git config user.name selftest && git add -A && git commit -qm base) >/dev/null 2>&1
+
+sr_run() { (cd "${SR}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
+
+assert_eq "ci.yml-only diff -> canary + the one relevant UI crate" \
+  "trusty-common
+trusty-mpm
+trusty-mpm-gui" "$(sr_run .github/workflows/ci.yml)"
+assert_eq "select-test-crates.sh diff -> canary only (UI crate inert)" \
+  "trusty-common
+trusty-mpm" "$(sr_run scripts/select-test-crates.sh)"
+assert_eq "check_changelog_fragment.sh -> trusty-mpm only" \
+  "trusty-mpm" "$(sr_run scripts/check_changelog_fragment.sh)"
+assert_eq "check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
+  "trusty-console
+trusty-search" "$(sr_run scripts/check-ui-bundle-freshness.sh)"
+assert_eq "a script named only in comments -> nothing" \
+  "" "$(sr_run scripts/unrelated.sh)"
+assert_eq "an unreferenced .github/** file -> nothing" \
+  "" "$(sr_run .github/workflows/other.yml)"
+assert_eq "fixture-shaped literal with no file on disk -> nothing" \
+  "" "$(sr_run scripts/ingest.sh)"
+assert_eq "crate change + fixture-shaped nonexistent path -> nothing extra" \
+  "trusty-mpm-gui" "$(sr_run crates/trusty-mpm-gui/src/lib.rs scripts/go.sh)"
+
+# #7777 review round 2: a `/` before the path is a boundary; a name byte is not.
+assert_eq "path form \"./scripts/dot.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/dot.sh)"
+assert_eq "path form format!(\"{r}/scripts/fmt.sh\") -> bystander" \
+  "bystander" "$(sr_run scripts/fmt.sh)"
+assert_eq "path form \"../scripts/up.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/up.sh)"
+assert_eq "path form \"/abs/scripts/abs.sh\" -> bystander" \
+  "bystander" "$(sr_run scripts/abs.sh)"
+assert_eq "\"myscripts/mine.sh\" does not name scripts/mine.sh -> nothing" \
+  "" "$(sr_run scripts/mine.sh)"
+
+# #7777 ruling 2026-09-23 23:17Z: a scripts/*.sh containing `codesign` is in
+# trusty-common's codesign_scripts scan, so it selects trusty-common. Same
+# scope as that scan: no subdirectory, extension exactly `sh`.
+assert_eq "codesign: scripts/sign.sh containing codesign -> trusty-common" \
+  "trusty-common" "$(sr_run scripts/sign.sh)"
+assert_eq "codesign: scripts/nosign.sh without codesign -> nothing" \
+  "" "$(sr_run scripts/nosign.sh)"
+assert_eq "codesign: scripts/sub/sign.sh (subdirectory) -> nothing" \
+  "" "$(sr_run scripts/sub/sign.sh)"
+assert_eq "codesign: scripts/sign.txt (not .sh) -> nothing" \
+  "" "$(sr_run scripts/sign.txt)"
+SR_NOCOMMON="${WORK}/scriptref-nocommon"
+cp -R "${SR}" "${SR_NOCOMMON}" && rm -rf "${SR_NOCOMMON}/crates/trusty-common"
+assert_eq "codesign: trusty-common not a workspace member -> all crates" \
+  "bystander
+search-consumer
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOCOMMON}" && bash "${SCRIPT}" --files scripts/sign.sh 2>/dev/null)"
+
+# A canary missing from the workspace fails open rather than testing less.
+SR_NOCANARY="${WORK}/scriptref-nocanary"
+cp -R "${SR}" "${SR_NOCANARY}" && rm -rf "${SR_NOCANARY}/crates/trusty-mpm"
+assert_eq "canary crate not a workspace member -> all crates (fail open)" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOCANARY}" && bash "${SCRIPT}" --files .github/workflows/ci.yml 2>/dev/null)"
+
+# #7777 review round 2: a script deleted or renamed in the range is absent on
+# disk but existed at the range base, so the crate naming it is still selected.
+SR_RANGE="${WORK}/scriptref-range"
+cp -R "${SR}" "${SR_RANGE}"
+srr() { (cd "${SR_RANGE}" && "$@") >/dev/null 2>&1; }
+SRR_BASE="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git rm -q scripts/h.sh
+srr git commit -qm "delete h.sh"
+SRR_DEL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range deleting include_str!'d scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_DEL}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr git mv scripts/h.sh scripts/h-renamed.sh
+srr git commit -qm "rename h.sh"
+SRR_REN="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range a...b renaming scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}...${SRR_REN}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr git rm -q scripts/h.sh
+# The earlier runs' untracked Cargo.lock would read as a root input (ALL).
+echo Cargo.lock >>"${SR_RANGE}/.git/info/exclude"
+assert_eq "--staged deletion of scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --staged 2>/dev/null)"
+# The range names scripts/go.sh, but HEAD sits at the base: the path is on
+# neither the disk nor the base, so bystander's fixture string still counts
+# for nothing.
+srr git reset -q --hard "${SRR_BASE}"
+srr sh -c 'echo "# fixture" >scripts/go.sh && git add scripts/go.sh && git commit -qm "add go.sh"'
+SRR_GO="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_BASE}"
+assert_eq "--range naming a path absent on disk and at base -> nothing" \
+  "" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_GO}" 2>/dev/null)"
+# A codesign script deleted in the range, or edited to drop codesign, left
+# the scan's set: its content at the range base still selects trusty-common.
+srr git rm -q scripts/sign.sh
+srr git commit -qm "delete sign.sh"
+SRR_SIGNDEL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "codesign: --range deleting scripts/sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_SIGNDEL}" 2>/dev/null)"
+srr git checkout -q "${SRR_BASE}"
+srr sh -c 'echo "echo unsigned" >scripts/sign.sh && git commit -qam "drop codesign from sign.sh"'
+SRR_SIGNEDIT="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "codesign: --range dropping codesign from sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_BASE}..${SRR_SIGNEDIT}" 2>/dev/null)"
+# #7777 review round 2, HIGH: `<sha>^!` is one commit's own diff. Its base is
+# `<sha>^`; read as a literal ref it resolved nothing and selected nothing.
+# HEAD sits at each deleting commit so the deleted file is absent on disk.
+srr git checkout -q "${SRR_DEL}"
+assert_eq "--range <sha>^! deleting include_str!'d scripts/h.sh -> bystander" \
+  "bystander" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_DEL}^!" 2>/dev/null)"
+srr git checkout -q "${SRR_SIGNDEL}"
+assert_eq "codesign: --range <sha>^! deleting scripts/sign.sh -> trusty-common" \
+  "trusty-common" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^!" 2>/dev/null)"
+# A base git diff accepts but that is not one commit fails open, never empty.
+assert_eq "--range <sha>^- (base is not one commit) -> all crates" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^-" 2>/dev/null)"
+# #7777 review round 3: a merge commit's `^!` is a combined diff, which omits
+# a change one parent already carried. Evil merge: the first parent deletes
+# check_changelog_fragment.sh (named by trusty-mpm), the merge itself adds
+# zz-evil.md. Both merges fail open.
+SR_ALL="bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search"
+srr git checkout -q "${SRR_BASE}"
+srr git rm -q scripts/check_changelog_fragment.sh
+srr git commit -qm "first parent: delete check_changelog_fragment.sh"
+SRR_P1="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_BASE}"
+srr sh -c 'echo side >side.md && git add side.md && git commit -qm "second parent: side.md"'
+SRR_P2="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+srr git checkout -q "${SRR_P1}"
+srr git merge -q --no-ff --no-commit "${SRR_P2}"
+srr sh -c 'echo evil >zz-evil.md && git add zz-evil.md && git commit -qm "evil merge"'
+SRR_EVIL="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range <evil-merge>^! -> all crates, never empty" \
+  "${SR_ALL}" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_EVIL}^!" 2>/dev/null)"
+srr git checkout -q "${SRR_P1}"
+srr git merge -q --no-ff -m "clean merge" "${SRR_P2}"
+SRR_CLEAN="$(cd "${SR_RANGE}" && git rev-parse HEAD)"
+assert_eq "--range <clean-merge>^! -> all crates" \
+  "${SR_ALL}" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_CLEAN}^!" 2>/dev/null)"
+
+# The literal scan needs git; outside a repo it must fail open, never answer
+# "no reference". Asserted on a path that answers `trusty-mpm` when git works.
+SR_NOGIT="${WORK}/scriptref-nogit"
+cp -R "${SR}" "${SR_NOGIT}" && rm -rf "${SR_NOGIT}/.git"
+assert_eq "literal scan unavailable (no git repo) -> all crates" \
+  "bystander
+search-consumer
+trusty-common
+trusty-console
+trusty-mpm
+trusty-mpm-gui
+trusty-search" "$(cd "${SR_NOGIT}" && bash "${SCRIPT}" --files scripts/check_changelog_fragment.sh 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# #7777 review round 3: a fail-open that can name no crate used to exit 0 with
+# empty stdout, which ci-affected-test-plan.sh reads as count=0 and a green
+# check. Each such arm exits 3. EMPTY_DIR has no workspace and no git repo, so
+# neither cargo metadata nor the crates/*/Cargo.toml fallback finds a crate.
+# ---------------------------------------------------------------------------
+echo "fixture: a fail-open that can name no crate exits 3"
+EMPTY_DIR="${WORK}/empty"
+mkdir -p "${EMPTY_DIR}"
+(cd "${EMPTY_DIR}" && bash "${SCRIPT}" --files >/dev/null 2>&1)
+assert_eq "fail-open with an empty fallback scan -> exit 3" "3" "$?"
+# A failing mktemp stub, not a TMPDIR under a regular file: macOS
+# /usr/bin/mktemp -d ignores TMPDIR when given no template.
+MKTEMP_STUB_DIR="${WORK}/stub-mktemp"
+mkdir -p "${MKTEMP_STUB_DIR}"
+printf '#!/usr/bin/env bash\nexit 1\n' >"${MKTEMP_STUB_DIR}/mktemp"
+chmod +x "${MKTEMP_STUB_DIR}/mktemp"
+(cd "${FIXTURE}" && PATH="${MKTEMP_STUB_DIR}:${PATH}" bash "${SCRIPT}" --files crates/isolated/src/lib.rs >/dev/null 2>&1)
+assert_eq "mktemp -d failure -> exit 3" "3" "$?"
+
+# ---------------------------------------------------------------------------
 # bash 3.2 path (#7777 review, finding 2): macOS ships bash 3.2.57 as
 # /bin/bash. `declare -A` there is a non-fatal error under `set -uo
 # pipefail` (no `-e`), so the unguarded script fell through to exit 0 with
@@ -313,6 +609,8 @@ if [ -n "${LEGACY_MAJOR}" ] && [ "${LEGACY_MAJOR}" -lt 4 ] 2>/dev/null; then
       fail "bash <4 stderr warning missing"
       ;;
   esac
+  (cd "${EMPTY_DIR}" && "${LEGACY_BASH}" "${SCRIPT}" --files x >/dev/null 2>&1)
+  assert_eq "bash <4 with no crate to name -> exit 3" "3" "$?"
 else
   echo "  skip: /bin/bash on this host is not pre-4 — nothing to guard here (macOS repro in #7777 review)"
 fi
@@ -328,6 +626,28 @@ case "${live_out}" in
     fail "trusty-common --cargo-args override missing: got '${live_out}'"
     ;;
 esac
+
+echo "live: this repo's own scripts/** literal edges (#7777 ruling)"
+live_run() { (cd "${REPO_ROOT}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
+assert_eq "live: check_changelog_fragment.sh -> trusty-mpm" \
+  "trusty-mpm" "$(live_run scripts/check_changelog_fragment.sh)"
+assert_eq "live: check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
+  "trusty-console
+trusty-search" "$(live_run scripts/check-ui-bundle-freshness.sh)"
+assert_eq "live: codesign build-console-saver.sh -> trusty-common" \
+  "trusty-common" "$(live_run scripts/build-console-saver.sh)"
+assert_eq "live: codesign install-trusty-mpm-signed.sh -> trusty-common" \
+  "trusty-common" "$(live_run scripts/install-trusty-mpm-signed.sh)"
+# The job's helper scripts select the canary. The Tauri UI crates the
+# relevance union may add are that rule's business, not this assertion's.
+live_canary() {
+  live_run "$1" | grep -vxE 'trusty-(agents-ui|audit-ui|code-gui|mpm-gui)'
+}
+for helper in ci-create-local-main.sh ci-free-disk-space.sh ci-apt-install.sh; do
+  assert_eq "live: helper ${helper} -> canary trusty-common + trusty-mpm" \
+    "trusty-common
+trusty-mpm" "$(live_canary "scripts/${helper}")"
+done
 
 echo
 echo "${CASES} cases, ${FAILURES} failures"

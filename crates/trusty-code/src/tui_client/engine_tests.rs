@@ -469,7 +469,10 @@ fn agent_attributed_kind(event: &Event) -> Option<&'static str> {
         // (#7948) Both carry `agent`/`agent_id` so a client can route a
         // permission prompt to the delegation that raised it.
         | Event::PermissionRequested { .. }
-        | Event::PermissionResolved { .. } => Some(event.kind()),
+        | Event::PermissionResolved { .. }
+        // (#8235) Carries `agent`/`agent_id` so a client can tell whose
+        // checklist changed.
+        | Event::TodosChanged { .. } => Some(event.kind()),
         // Not agent-attributed. `AgentStarted`/`ReportGenerated` carry an
         // `agent_name`, not an `agent`, and neither has a producer on this
         // daemon's session path.
@@ -519,6 +522,12 @@ const INTENTIONALLY_IGNORED: &[(&str, &str)] = &[
     // list: both now map, and
     // `forward_permission_requested_opens_the_prompt` /
     // `forward_permission_resolved_closes_the_prompt` pin the mapping.
+    (
+        "todos_changed",
+        "the checklist panel is #8182's work; until it lands this client has no \
+         ReplEvent to render a checklist into, and the roster read path \
+         (session.get_agents) carries the same list",
+    ),
 ];
 
 /// Every agent-attributed `Event` the daemon can emit during a delegation
@@ -646,6 +655,16 @@ fn delegation_event_samples() -> Vec<Event> {
             agent_id: "spawn-1".into(),
             decision: "deny".into(),
             source: "client".into(),
+        },
+        // #8235: the session checklist's change event.
+        Event::TodosChanged {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            todos: vec![crate::events::TodoItem {
+                content: "write the test".into(),
+                status: crate::events::TodoStatus::InProgress,
+            }],
         },
     ]
 }
@@ -809,4 +828,131 @@ fn session_shape_summary_names_the_delegating_pm() {
         "binding": {"state": "git_repo", "root": "/tmp/repo"},
     }));
     assert_eq!(summary, "delegating PM, file tools rooted at /tmp/repo");
+}
+
+// ── #8207: the cancel outcome the TUI can render ──────────────────────────────
+
+/// `-32010` must reach this client as a NAMED outcome, not an opaque error.
+///
+/// Why: the daemon mints a domain code for "accepted, not stopped yet" precisely
+/// so a client can hold a cancelling state instead of showing a fault — and
+/// before this, every client in the repo flattened it. The daemon's own sentence
+/// has to survive too: it names what the wait is still on, which is the whole
+/// content of a "still cancelling…" line.
+/// Test: this test.
+#[test]
+fn cancel_unconfirmed_is_a_still_cancelling_outcome() {
+    let outcome = classify_cancel_error(EngineError::Rpc {
+        code: -32010,
+        message: "session s-1: cancellation requested but the task did not stop within 10s"
+            .to_string(),
+        data: None,
+    })
+    .expect("an unconfirmed cancel is an outcome, not a failure");
+
+    assert_eq!(
+        outcome,
+        CancelOutcome::StillCancelling {
+            detail: "session s-1: cancellation requested but the task did not stop within 10s"
+                .to_string()
+        }
+    );
+}
+
+/// A confirmed stop — and the no-session case — must reach the TUI as
+/// `CancelReply::Stopped`, the one arm that reopens input (#8207).
+///
+/// Why: `NoSession` is not a failure. `setup` never minted a session, so nothing
+/// is running; reporting it as a failure would leave the pane refusing input
+/// with nothing to wait for.
+/// Test: this test.
+#[test]
+fn cancel_reply_reports_a_confirmed_stop() {
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::Stopped)),
+        CancelReply::Stopped
+    );
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::NoSession)),
+        CancelReply::Stopped
+    );
+}
+
+/// An unconfirmed cancel must stay its own arm all the way to the TUI, carrying
+/// the daemon's sentence (#8207).
+///
+/// Why: this is the state the TUI renders as "still cancelling" — collapsing it
+/// into `Stopped` reopens input while the run continues (the original bug), and
+/// collapsing it into `Failed` reads as a cancel that never landed.
+/// Test: this test.
+#[test]
+fn cancel_reply_keeps_an_unconfirmed_cancel_distinct() {
+    let detail = "session s-1: cancellation requested but the task did not stop within 10s";
+    assert_eq!(
+        cancel_reply_from(Ok(CancelOutcome::StillCancelling {
+            detail: detail.to_string()
+        })),
+        CancelReply::StillCancelling {
+            detail: detail.to_string()
+        }
+    );
+}
+
+/// A refusal reaches the user as the daemon's sentence WITHOUT its JSON-RPC code
+/// (#8207).
+///
+/// Why: `CancelReply`'s payload is rendered verbatim, and `EngineError`'s own
+/// `Display` writes `daemon returned an error (-32003): …` — exactly the string
+/// the issue was filed about. Naming `message` here is what keeps the code off
+/// the screen; a transport failure has no code to strip and passes through.
+/// Test: this test.
+#[test]
+fn cancel_reply_strips_the_rpc_code_from_a_refusal() {
+    let reply = cancel_reply_from(Err(EngineError::Rpc {
+        code: -32003,
+        message: "session s-1 already has a task running".to_string(),
+        data: None,
+    }));
+    assert_eq!(
+        reply,
+        CancelReply::Failed {
+            error: "session s-1 already has a task running".to_string()
+        }
+    );
+    let CancelReply::Failed { error } = &reply else {
+        panic!("a refusal is a failure: {reply:?}");
+    };
+    assert!(
+        !error.contains("-32003"),
+        "the wire code must not reach the user: {error}"
+    );
+
+    assert_eq!(
+        cancel_reply_from(Err(EngineError::NoSession)),
+        CancelReply::Failed {
+            error: EngineError::NoSession.to_string()
+        }
+    );
+}
+
+/// Every other refusal stays an error (#8207).
+///
+/// Why: the split has to be exactly one code wide. Reading a `-32603` daemon
+/// fault or a `-32007 session_not_found` as "still cancelling" would hide a real
+/// failure behind a spinner that never resolves.
+/// Test: this test.
+#[test]
+fn any_other_refusal_stays_an_error() {
+    for code in [-32603, -32007, -32003] {
+        let err = classify_cancel_error(EngineError::Rpc {
+            code,
+            message: "nope".to_string(),
+            data: None,
+        })
+        .expect_err("only -32010 is an outcome");
+        assert!(
+            matches!(err, EngineError::Rpc { code: got, .. } if got == code),
+            "code {code} must pass through verbatim, got {err:?}"
+        );
+    }
 }

@@ -6,6 +6,182 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.2] — 2026-09-25
+
+### Added
+
+- the `ticketing` agent reads the project-root `TICKETING.md` before any create, label, comment, or transition in any tracker, generates it from the skill skeleton plus the observed repository state when absent, and never overwrites an existing one ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376))
+  - the file's behaviour settings are honoured, its contents are treated as data, and it outranks a conflicting brief unless the brief cites an owner ruling
+  - component labels are chosen from the project's own stack unit rather than an assumed Cargo crate, and the `no-component-label:` waiver reason names that unit
+  - epics follow the tracker + phase-issue pattern — `[EPIC <epic#>] <outcome>` (created `[EPIC]`, renamed once the number is known), `[EPIC_<epic#> PHASE_<n>]` sub-issues, a wholesale-regenerated phases block, four update triggers, phase numbers never reused — and a tracker links to its committed research doc instead of carrying findings
+  - follow-ups are budgeted per phase issue, and stale-issue recommendations are posted per epic as one digest
+
+### Fixed
+
+- The `version-control` agent's composed body is back under its 47,500-byte resident budget (#7727). Its CI-waits section, which #8601 pushed over the ceiling, now points at BASE-AGENT's "Finishing Work — Push, Report, Stop" instead of restating it; the agent-specific rules stay.
+- The `version-control` agent no longer falls back to a fleet-wide
+  `prune-worktrees` sweep when the guard refuses one worktree removal. It
+  reports the path and the refusal to the PM and stops. Refs #8577.
+
+### Changed
+
+- Align shared agent verification, authorization, issue references, and build waiting with scoped operational work.
+- The `version-control` agent names the command that moves an agent's commits
+  into a parked worktree (#8161).
+- The shared `ticketing` agent asset now carries the epic/phase mechanics — the `[EPIC N]` / `[EPIC_N PHASE_M]` title forms, the two-step tracker create, native sub-issue linking, the three tracker marker blocks, and the rule that the `phases` block is regenerated from live child state and never hand-patched — and its gh-version claim now matches the installed 2.96 ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
+- BASE-AGENT.md now forbids moving, renaming, or restructuring an existing top-level directory to satisfy a layout ADR, scaffold, or monorepo convention (Refs #8382).
+- The `version-control` agent never switches branches, stashes or runs
+  `reset --hard` in a main checkout; it publishes a branch with
+  `git push origin <branch>`, which needs no checkout. Refs #8572.
+
+### Documentation
+
+- The `AttachHandle::ShellCommand` example is now the exact, quoted form `tmux attach -t '=tmpm-a1b2c3'` that trusty-mpm returns (#8443).
+
+## [0.8.1] — 2026-09-18
+
+### Fixed
+
+- BASE-ENGINEER's escape-sensitive edits section gains a dedicated bullet for numeric escapes (`\x00`, `\uXXXX`, `\0`, octal `\NNN`), with a concrete example of the failure (NUL byte injection) and the detection method (`od -c <file>`), closing a documentation gap that allowed the same corruption to recur undetected in live verification (Refs #7480).
+- The `ticketing` agent body now requires `gh label list -R <owner>/<repo>` in
+  front of any claim that a repository lacks a label, and says what to do with
+  each answer — use the existing label, or `gh label create <name>` and report
+  what was created
+  (refs [#7871](https://github.com/bobmatnyc/trusty-tools/issues/7871))
+- BASE-ENGINEER's WIP-squash guidance now names the captured merge-base or task-start SHA as the `git reset --soft` target, never `origin/main` directly, and requires a `git status --porcelain` check before committing (#7891).
+- `vercel-ops` agent guidance now states which operations a Developer-role
+  Vercel token cannot perform (Production env writes; a Production
+  `vercel env ls` can return zero rows without meaning data was lost) and
+  requires every `vercel env ls` to name an explicit environment instead of
+  the unfiltered form.
+- BASE-AGENT's "Never Narrate a Wait" section again points at
+  `condition-based-waiting` with the ``Read `<path>` `` form an agent acts on;
+  #8075's rewrite left the path inside a prose sentence, which a Skill-less
+  agent cannot follow and which reddened trusty-code's
+  `embedded_agent_skill_pointers_open_with_read_file` (#8107).
+- `rust-engineer.md`'s rename-a-test rule names the project's own doc-pointer
+  lint rather than a gate script only this repository ships, restoring the
+  deploy-anywhere property #7247 and #7270 established (#8107).
+- BASE-AGENT.md restores the pinned raw-output rule #8264 deleted and trims 2.5 KB of gate, wait, worktree and changelog mechanics into the skills it already points at, bringing every composed agent body back under its resident budget (#8274).
+
+### Changed
+
+- BASE-AGENT's File-Size Precheck now treats a file's own "at cap" comment as
+  the trigger to plan the split before the first edit, not only the
+  size-plus-addition check (#7470).
+- BASE-AGENT's Verification Hygiene adds a mutation-test step for any check
+  asserting a count of requests/writes/calls or a stale-result guard: run the
+  mutation once and confirm the check goes red before trusting it (#7230).
+- BASE-AGENT's Output Format warns that a long report risks the ~16384-token
+  single-`Write` ceiling and directs writing it in ≤250-line appends instead
+  (#7631).
+- BASE-AGENT's "Never Narrate a Wait" and "Never end a gate chain in a pipe"
+  sections trim duplicated detail already carried by the
+  `condition-based-waiting` and `verification-before-completion` skills, to
+  hold the composed resident-body budget (#8046) after the additions above.
+- `BASE-AGENT.md` states a numeric hand-back cap in place of the qualitative "verbosity scales with what went wrong" sentence: a clean run is at most 300 words, a run with failures at most 600, raw gate output in fenced blocks does not count, and detail over the cap moves to a scratchpad file the report links with a one-line summary per section (owner ruling 2026-09-14). Paid for within the 42,000-byte composed-prompt budget by cutting three passages that restated a rule the same file already states: two duplicate pointers to `verification-before-completion/SKILL.md`, the `echo "EXIT=$?"` sentinel mechanics repeated under "Never end a gate chain in a pipe", and the background-monitor bullet that already deferred to "Never Narrate a Wait".
+- `rust-engineer.md` now instructs landing several same-crate fixes on one branch before gating, running the crate-scoped gate once per batch (cap ~5 fixes) instead of once per fix (owner ruling 2026-09-16)
+- `code-critic` agent body now emits the enclosing function or method name
+  beside every finding's file + line citation
+  (refs [#7239](https://github.com/bobmatnyc/trusty-tools/issues/7239))
+- `code-critic` now greps for a changed fixture-of-record file's consumers
+  (seed fixtures, Terraform demo data, content YAML) and runs their suites
+  before verdict, or states in Notes that none exist, instead of gating on
+  the changed file's own language tooling alone
+  (refs [#7750](https://github.com/bobmatnyc/trusty-tools/issues/7750))
+- `nextjs-engineer` body points to the `test-driven-development` skill's new
+  Prop-Removal Checklist for a `...rest`-forwarding component
+  (refs [#7371](https://github.com/bobmatnyc/trusty-tools/issues/7371))
+- The `version-control` agent brief names the widened nine-field PR-body contract: `## Gates not run` and `## Partial-red accounting` join the seven `tm pr open` checks, and a clean run writes the single word `none` under each (#7336).
+- `version-control`'s pre-push credential scan now runs on the agent itself
+  and reports the pattern set it checked, instead of delegating to `security`
+  — the delegation contradicted BASE-AGENT's "No Subagent Fan-Out" rule when
+  `version-control` ran as a dispatched subagent. A high-risk branch gets
+  `security` dispatched by the PM before `version-control` starts, not
+  mid-task
+  (refs [#7730](https://github.com/bobmatnyc/trusty-tools/issues/7730))
+- java-engineer, nextjs-engineer, python-engineer and svelte-engineer bodies
+  are trimmed back under the 42,000-byte composed-body resident budget by
+  collapsing worked code examples into prose rules and dropping illustrative
+  (non-rule) scaffolding, so their `OVER_BUDGET_BODY_BASELINES` ratchet
+  entries in `trusty-mpm`'s bundle test are removed
+  (refs [#8047](https://github.com/bobmatnyc/trusty-tools/issues/8047))
+- rust-engineer's Quality Bar gains a dedicated rule placing the
+  `check_test_pointers.sh` doc-comment pointer check right after a test
+  rename/move, ahead of `cargo test`, instead of only at the closing gate
+  (closes [#7469](https://github.com/bobmatnyc/trusty-tools/issues/7469))
+- `rust-engineer` now declares the new `rust-delivery-workflow` skill and no longer names `toolchains-rust-core`, which ships in no bundle. #2904 claimed to port that skill and never did, so every dispatched `rust-engineer` was told as its FIRST action to load a skill that resolves in no tier. The first-action instruction now names `rust-delivery-workflow` for delivery process and `rust-build-performance` for build speed; the frontmatter `description` and the numbered workflow say the same. `mpm-skills-manager`'s Rust stack recommendation drops both dangling names: `toolchains-rust-core` for the same reason, and `cargo-publish` because it is a project-local skill in the trusty-tools checkout, not a bundled one — the row now recommends `rust-delivery-workflow` and `rust-build-performance`. Its naming-convention paragraph cites those two as the non-colliding baseline instead of the absent skill (Refs #8192).
+
+### Documentation
+
+- BASE-AGENT.md gains rules for stable scratchpad/commit-message naming and a ban on globbing the shared scratchpad, a base-ref-moved-mid-task check, worktree-isolation scratch-script authorship, a `gh` list empty-output byte-count check, a Terraform state-lock warning and anchored gate-trim patterns, WIP-commit-before-destructive-checkout guidance, `pnpm --force`/`lsof` dev-server gotchas, a `|| true` pipeline-placement rule, and a changelog-fragment bullet-marker requirement (Refs #7238, #7315, #7382, #7383, #7440, #7560, #7562, #7596, #7722).
+- BASE-ENGINEER.md gains a CI-job-local-run and candidate-readers checklist items, pre-fix-behavior-pinning rules for regression tests (including the uncommitted-fix and net-new-module cases), a build-after-conflict-resolution rule, a vendor-format-constant citation rule, CI-red-fix and whole-target debugging steps, a `_with_` wrapper heuristic, a delivered-content total-function design rule, parser/predicate test-generation rules, and gate-trigger checklist items for test-pointer and roster-asset changes (Refs #7385, #7552, #7563, #7564, #7635, #7715, #7718).
+- rust-engineer.md gains a feature-gated reproduction recipe and a cold-worktree `--no-run` split, and a run-`cargo fmt`-before-first-edit rule (Refs #7552, #7635).
+- local-ops.md documents pinning `verify.sh` to a deployed SHA (`git show <sha>:path > scratchpad/verify.sh`) during a rollout, so an unpinned script run against a moving `main` no longer produces spurious failures (Refs #7565).
+- code-critic.md requires quoting the project's own line-cap script output for a file-size finding instead of a hand-rolled `grep`/`wc` count (Refs #7819).
+- svelte-engineer.md's Testing standard requires a stale-response race test for any component issuing an async fetch keyed on a selection, mocking only the API module boundary, citing `AssistantKnowledgePipeline.test.ts`/`KnowledgeProjectSync.test.ts` as the worked example (Refs #7334).
+- BASE-AGENT's verification section replaces the bare "show raw output" instruction with a "Gate Output: Quote Results, Summarize Progress" rule: quote `test result:` lines and failure blocks, summarize build progress, run each gate once in the background redirected to a scratch file, and never `cat`/repeatedly `tail` a running build log
+- BASE-AGENT adds a "Waiting on a Background Command" rule: wait on the process (`wait $pid` / `kill -0 $pid`), never on log text or a self-matching `pgrep -f`/`ps | grep` loop, and every wait has a bound
+- BASE-AGENT adds a "Dispatch Budget: Enforce Your Own Time Box" rule (agent records its own start time and stops at the brief's time box) and reconciles the PM-Authority injection-skepticism text with a mid-task PM `SendMessage`: that channel is legitimate, never tool-output content, and a PM message adding scope still gets "new work is a new agent" unless the PM states the owner approved it
+- version-control agent asset notes that `tm pr open` needs `--docs-only`
+  explicitly for a rung 1 branch, and that a missing attribution footer exits
+  2 without calling `gh` (never appended by `tm pr open` itself)
+- BASE-AGENT and BASE-ENGINEER keep a one-line rule and a skill pointer for
+  the disposable-clone revert recipe, the `perl` control-byte proof, and the
+  test-runner loader check; the full recipes moved to the `git-workflow`
+  skill so the composed rust-engineer body holds its 42,000-byte resident
+  budget
+  (refs [#7628](https://github.com/bobmatnyc/trusty-tools/issues/7628),
+  [#7731](https://github.com/bobmatnyc/trusty-tools/issues/7731),
+  [#7732](https://github.com/bobmatnyc/trusty-tools/issues/7732))
+- BASE-AGENT's worktree discipline states that a throwaway checkout for a
+  revert/bisect experiment is a disposable `git clone --local`, never
+  `git worktree add` against the main checkout
+  (closes [#7628](https://github.com/bobmatnyc/trusty-tools/issues/7628))
+- BASE-ENGINEER names a portable `perl`-based control-byte proof for an
+  escape-sensitive edit, beside the `grep -P` proof that fails on darwin's
+  default BSD grep
+  (closes [#7731](https://github.com/bobmatnyc/trusty-tools/issues/7731))
+- BASE-ENGINEER's Dependency Verification adds confirming the target
+  test-runner loader can resolve a module before writing the first test
+  against it
+  (closes [#7732](https://github.com/bobmatnyc/trusty-tools/issues/7732))
+- `version-control`'s Safety Rules now state that `git status --porcelain`
+  must read empty before any push-gating check runs — a push ships the
+  committed ref, not the working tree, so an edit the gate saw but never
+  committed never reaches CI
+  (refs [#7739](https://github.com/bobmatnyc/trusty-tools/issues/7739))
+- The `version-control` agent asset's "Opening every PR" table row now documents `tm pr open`'s exit 3 (`EXIT_PARTIAL`, #7869): the PR exists but some metadata could not be applied, and the printed line names the PR number, URL, and the missing field(s) to finish by hand (Refs #7868).
+- `version-control` now states that a 5xx or timeout from a mutating `gh`
+  call (`gh pr merge`, `gh pr create`, `gh api -X POST/DELETE`) is not proof
+  the call failed — it reads the state back (`gh pr view --json
+  state,mergeCommit`) before retrying
+  (refs [#8013](https://github.com/bobmatnyc/trusty-tools/issues/8013))
+- `version-control` now states that a commit subject or PR title shown in a
+  brief is a format shape, not a literal value, unless the brief says
+  "verbatim" — the real subject comes from the change itself or the live
+  PR's own title
+  (refs [#8014](https://github.com/bobmatnyc/trusty-tools/issues/8014))
+- `research` now states that storing findings in memory never replaces the
+  report — the final message carries the conclusion itself, and a drawer ID
+  or file path is a supplement, never the deliverable
+  (refs [#8015](https://github.com/bobmatnyc/trusty-tools/issues/8015))
+- `web-qa` now states never to close the last other tab in the MCP tab
+  group mid-task, and to call `tabs_context_mcp` on the first unexpected
+  tool error to check for a lost tab group before retrying
+  (refs [#8022](https://github.com/bobmatnyc/trusty-tools/issues/8022))
+- `vercel-ops` now names `vercel ls --prod --json` and the API's `GET
+  /v6/deployments` `meta.githubCommitSha` field as the source of truth for
+  which commit a deployment serves, and the git-sourced `POST
+  /v13/deployments` as the redeploy path after a dropped webhook
+  (refs [#8023](https://github.com/bobmatnyc/trusty-tools/issues/8023))
+- `local-ops` now states that a diagnose-only brief overrides its own
+  troubleshooting playbook, that a log's mtime must be checked against the
+  incident window before citing it as root cause, and that the
+  trusty-memory palaces directory is never touched without explicit
+  authorization
+  (refs [#8027](https://github.com/bobmatnyc/trusty-tools/issues/8027))
+
 ## [0.8.0] — 2026-09-13
 
 ### Added

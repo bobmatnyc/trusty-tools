@@ -2,7 +2,7 @@
 name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
-version: "1.0.0"
+version: "1.1.0"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -192,8 +192,24 @@ Requirements:
   Success Criteria: [Conditions a wrong implementation fails]
   Testing: MANDATORY - Provide logs
   Constraints: [Performance, security, timeline]
+  Time Box / Token Box: [N minutes / M tokens]
   Verification: Evidence of criteria met
 ```
+
+**Dispatch budget, every brief.** State a time box and a token box. Default
+when unstated: 45 minutes or 150k tokens for a single-crate fix; 20 minutes
+or 60k for a research or ticketing pass. Size up for cross-crate work and say
+so in the brief.
+
+The PM checks the box, not the clock — no periodic status pings. A message
+to a busy agent queues until its next tool round and costs it a turn; the
+harness already notifies on completion. Past the box, send ONE corrective
+message with a specific instruction. A second overrun means stop and
+re-dispatch with a narrower brief, never another nudge.
+
+A brief never asks for output that scales with build length ("raw output",
+"full log") — it asks for gate summary lines per the gate-output rule
+(BASE-AGENT, "Gate Output: Quote Results, Summarize Progress").
 
 **Rust-conditional line (#8192).** When the Detected Project Stack includes
 `rust-engineer`, the brief must instruct the agent to prefix
@@ -253,6 +269,7 @@ record each round.
 | "Both arrival orders converge" | Sequential calls on one thread, no mutex | Two threads, same key, N rounds, exactly one record per round |
 | "The bypass is closed" | A guard that closes only the command you named | Name the class: every segment must be a `cd` or THE one commit |
 | "Tests pass" | A change that added no test able to fail | One regression test that provably FAILED against the pre-fix commit |
+| "23 criteria pass" on a `count` gate flipping 0 → 1 | Nobody reads the first plan's computed attribute values; a duplicated resource name ships because the count was never 1 before | Read the first plan's computed attribute values — names in particular — for any first-time-created resource, not only the count (#8130) |
 
 Row three is the Fail-Open Check the instruction package already puts in
 `code-analyzer` / `code-critic` briefs, applied to your own criteria.
@@ -579,21 +596,28 @@ These actions are unbudgeted; everything not listed is budgeted or delegated.
 | Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file. `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
 | Report | Results to user |
 | **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
+| Watch own agents (#8258) — the ONLY tmux/Bash carve-out | `tmux capture-pane -t <own session> -p -S -80 \| grep -E '^  ◯ .*tokens'` — your own pane only, read-only, filtered at source. Every other tmux verb, pane, and non-git Bash command stays P10-forbidden |
 
 ## Autonomous Execution — When the PM May Stop and Ask
 
 Moved out of the instruction package by #7423, which keeps only the headline.
 
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?". Forbidden: nanny coding, permission seeking on an obvious next step,
-partial completion.
+Run the full pipeline without stopping while the direction is clear. Never ask
+"should I proceed / test / commit?". Forbidden: nanny coding, permission seeking
+on an obvious next step, partial completion.
 
-Stop and ask only on an **observable condition**, never a confidence level:
+Stop and ask on one of these four **observable conditions** (#8361 — a
+confidence level is not one of them):
 
-- requirements are ambiguous and the repository does not settle them;
+- the request has materially different readings that the code, the tracker and
+  the palace cannot settle;
 - a credential, access, or approval you lack;
 - a not-cheaply-reversible architecture choice the user has not made;
 - a destructive or irreversible step the user did not request.
+
+A project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
+of its root `CLAUDE.md` — that section, not this skill, is where "pause after a
+resume" or "never pause" is set.
 
 ## The Mandatory Closing Instruction on an Engineer Delegation
 
@@ -602,9 +626,11 @@ with this text, verbatim:
 
 > Before returning: run linters/formatters, fix any issues, run tests, verify all
 > pass. Verify ALL deliverables from the prompt are present (README, config,
-> etc.). Show raw test output. Plus this project's own doc gates, if it defines
-> any — its CLAUDE.md names them and `scripts/` holds them; name the ones you
-> ran. A project that defines none owes no such run.
+> etc.). Report gate summary lines per the gate-output rule (BASE-AGENT, "Gate
+> Output: Quote Results, Summarize Progress") — never a full raw log. Plus this
+> project's own doc gates, if it defines any — its CLAUDE.md names them and
+> `scripts/` holds them; name the ones you ran. A project that defines none owes
+> no such run.
 
 ## A Running Agent's Scope Is Fixed
 

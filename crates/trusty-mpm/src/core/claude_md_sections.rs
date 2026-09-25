@@ -58,7 +58,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::instruction_package::{
-    BlockBody, CustomizationTier, InstructionPackage, OverrideTier, SectionId, ValidationError,
+    BlockBody, CustomizationTier, InstructionBlock, InstructionPackage, Join, OverrideTier,
+    SectionId, ValidationError,
 };
 
 /// Project-relative files scanned for marker blocks, highest precedence first.
@@ -124,12 +125,26 @@ pub const REASON_SHADOWED: &str = "section already overridden by a higher-preced
 /// the enum. Deriving it from the serde name by hand here — and pinning that
 /// correspondence in a test — keeps a renamed section from silently orphaning
 /// every project's marker.
-/// What: the nine tokens, matched case-insensitively by [`section_for_token`].
+/// What: one token per [`SectionId`], matched case-insensitively by
+/// [`section_for_token`].
 /// Test: `every_section_token_is_the_kebab_case_id_uppercased`.
 pub const fn section_token(id: SectionId) -> &'static str {
     match id {
         SectionId::Identity => "IDENTITY",
         SectionId::Core => "CORE",
+        // #8533: one token per heading that used to live inside `CORE`.
+        SectionId::PmAllowlist => "PM-ALLOWLIST",
+        SectionId::DelegationMechanics => "DELEGATION-MECHANICS",
+        SectionId::AgentRouting => "AGENT-ROUTING",
+        SectionId::SubagentReEngagement => "SUBAGENT-RE-ENGAGEMENT",
+        SectionId::Phases => "PHASES",
+        SectionId::QaGate => "QA-GATE",
+        SectionId::GitFileTracking => "GIT-FILE-TRACKING",
+        SectionId::TicketsPrsReleases => "TICKETS-PRS-RELEASES",
+        SectionId::MessagesReportsSessions => "MESSAGES-REPORTS-SESSIONS",
+        // #8361: autonomy is its own token so a project can retune it; `CORE` is
+        // tier `fixed` and declines every override.
+        SectionId::AutonomousExecution => "AUTONOMOUS-EXECUTION",
         SectionId::Memory => "MEMORY",
         SectionId::Search => "SEARCH",
         SectionId::Workflow => "WORKFLOW",
@@ -635,10 +650,12 @@ pub enum Rejection {
 
 /// Apply one override to a package, or say why it may not be applied.
 ///
-/// What: replaces the section's FIRST *authored* block — [`BlockBody::Text`] or,
-/// since schema v2, [`BlockBody::File`] — with the override body and drops that
-/// section's remaining authored blocks, leaving every [`BlockBody::Generated`]
-/// block untouched. That asymmetry is the point: a generated block is
+/// What: replaces the section's FIRST unpinned *authored* block — [`BlockBody::Text`]
+/// or, since schema v2, [`BlockBody::File`] — with the override body and drops
+/// that section's remaining unpinned authored blocks, leaving every
+/// [`BlockBody::Generated`] block and every `pinned` block untouched (#8533). A
+/// section whose authored blocks are all pinned takes the override right after
+/// its last pinned block, so the project text adds to the feature statement. That asymmetry is the point: a generated block is
 /// host-computed content the project cannot author, so an `AGENT-DELEGATION`
 /// override rewrites the routing doctrine but CANNOT suppress the live agent
 /// roster (#4196 in override form).
@@ -671,8 +688,14 @@ fn apply_one(
 
     let mut next = package.clone();
     let mut replaced = false;
+    // #8533: a pinned block (agent selection, memory, search) is a framework
+    // feature, not replaceable prose — it survives exactly like a generated one.
+    let last_pinned = next
+        .blocks
+        .iter()
+        .rposition(|b| b.section == section && b.pinned);
     next.blocks.retain_mut(|block| {
-        if block.section != section || block.body.authored().is_none() {
+        if block.section != section || block.body.authored().is_none() || block.pinned {
             return true;
         }
         if replaced {
@@ -685,7 +708,21 @@ fn apply_one(
         true
     });
     if !replaced {
-        return Err(Rejection::NoTextBlock { section });
+        let Some(at) = last_pinned else {
+            return Err(Rejection::NoTextBlock { section });
+        };
+        next.blocks.insert(
+            at + 1,
+            InstructionBlock {
+                section,
+                body: BlockBody::Text {
+                    text: body.to_string(),
+                },
+                join_before: Join::Blank,
+                optional: false,
+                pinned: false,
+            },
+        );
     }
     if !next
         .blocks

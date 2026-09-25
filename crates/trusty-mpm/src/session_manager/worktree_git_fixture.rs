@@ -288,6 +288,35 @@ impl GitWorktreeFixture {
         git_ok(&scratch, &["push", "origin", "main"]);
     }
 
+    /// The real donor-branch shape (#7889): `wt` commits `file`, and the remote
+    /// lands that content in ONE squash together with a sibling's `extra`.
+    ///
+    /// Why: [`Self::land_on_the_remote_only`] lands the donor's patch alone, so
+    /// `git cherry` matches it and gate 6 reads the tree as clean. A real `-r2`
+    /// squash also carries the continuing agent's work, so no patch id matches
+    /// and gate 6 counts the donor's commit as unpushed. Only this shape shows
+    /// whether the sweep's admission can fire at all.
+    /// What: as [`Self::land_on_the_remote_only`], with `extra` added to the
+    /// landing commit. The worktree's `origin/main` is stale afterwards.
+    /// Test: `worktree_7889_the_sweep_admits_a_real_donor_branch`.
+    pub(crate) fn land_with_sibling_work(&self, wt: &Path, file: &str, extra: &str) {
+        self.land_on_the_remote_only(wt, file);
+        let scratch = self
+            .repos_root
+            .parent()
+            .expect("fixture: repos root has a parent")
+            .join(format!("landing-{file}"));
+        git_ok(&scratch, &["reset", "--soft", "HEAD~1"]);
+        std::fs::write(scratch.join(extra), "the sibling's own work\n")
+            .expect("fixture: write sibling file");
+        git_ok(&scratch, &["add", extra]);
+        git_ok(
+            &scratch,
+            &["commit", "-m", "feat: donor + -r2 work, squashed"],
+        );
+        git_ok(&scratch, &["push", "--force", "origin", "main"]);
+    }
+
     /// Commit `files` as SEPARATE commits in `wt`, then squash-merge the branch
     /// to `origin/main` and prune the refs that made them reachable (#6507).
     ///
@@ -408,7 +437,42 @@ impl GitWorktreeFixture {
     /// Test: `scan_separates_a_harness_agent_lock_from_an_operator_lock`,
     /// `survey_discloses_a_harness_locked_agent_worktree`.
     pub(crate) fn harness_lock_worktree(&self, wt: &Path, agent_id: &str) {
-        self.harness_lock_worktree_with_pid(wt, agent_id, 4242);
+        // #7771: a HELD lock names a running pid with its real start time, so
+        // it names this test process — a fixed pid would read as stale.
+        let pid = std::process::id();
+        let start = super::worktree_owner_gate::process_start_secs(pid)
+            .expect("fixture: this process's start time");
+        self.harness_lock_worktree_with_reason(
+            wt,
+            &format!(
+                "claude agent {agent_id} (pid {pid} start {})",
+                super::worktree_owner_gate::format_lock_start(start)
+            ),
+        );
+    }
+
+    /// An owner map proving `owner`'s dispatching session ended (#7771 d).
+    pub(crate) fn parent_ended(
+        owner: &super::worktree_ownership::AgentWorktreeOwner,
+    ) -> super::worktree_reclaim_ownership::SessionOwners {
+        super::worktree_reclaim_ownership::SessionOwners::observed([(
+            owner.parent_session_id.0.to_string(),
+            super::worktree_reclaim_claim::ClaimLiveness::SessionGone,
+        )])
+    }
+
+    /// Lock `wt` with an exact `reason` (#7771).
+    pub(crate) fn harness_lock_worktree_with_reason(&self, wt: &Path, reason: &str) {
+        git_ok(
+            &self.repo,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                reason,
+                wt.to_str().expect("utf8 worktree path"),
+            ],
+        );
     }
 
     /// [`Self::harness_lock_worktree`] with the dispatched pid chosen (#7974).

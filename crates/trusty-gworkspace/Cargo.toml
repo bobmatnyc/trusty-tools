@@ -1,6 +1,6 @@
 [package]
 name = "trusty-gworkspace"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024" # edition 2024 required: let-chains used in api/client.rs, api/services/gmail/, api/services/docs/ (issue #258)
 description = "Google Workspace MCP server for the Trusty suite"
 license.workspace = true
@@ -15,7 +15,7 @@ name = "trusty-gworkspace-mcp"
 path = "src/bin/trusty-gworkspace-mcp.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.51" }
+trusty-common = { path = "../trusty-common", version = "0.52" }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { workspace = true }
 anyhow = { workspace = true }

@@ -1,0 +1,37 @@
+# Exact tmux targets gate (issue #8443).
+#
+# tmux resolves a bare `-t <name>` by exact name, then prefix, then fnmatch, so
+# `tm sessions resume tm-cto` with `tm-cto` gone killed `tm-cto-reports`. Every
+# target is now rendered by `trusty_common::tmux::exact_*_target`; this job
+# fails on a bare `-t <name>` anywhere in the workspace's Rust, shell, Swift,
+# TS/JS or Svelte sources. Pure text scanning — no toolchain, no build.
+name: Tmux exact targets
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Explicit activity types (#4179): `edited` is the event a base-branch
+    # retarget fires. Matches ci.yml and teardown-guard.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+concurrency:
+  group: tmux-exact-targets-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  tmux-exact-targets:
+    name: Every tmux -t target is exact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Selftest FIRST: the gate must still reject a bare target, a stale
+      # allowlist row and an empty scan before its green run means anything.
+      - name: Selftest (the gate must reject each known-bad shape)
+        run: bash scripts/check_tmux_exact_targets_selftest.sh
+
+      - name: No bare tmux -t target
+        run: bash scripts/check_tmux_exact_targets.sh

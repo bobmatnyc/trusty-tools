@@ -21,6 +21,9 @@ pub mod inbox_check;
 pub mod kg_rebuild;
 // #5401: fold pre-#4678 punctuated entity nodes onto their cleaned twins.
 pub mod kg_twin_merge;
+// #277: `import kuzu` — discover and idempotently import kuzu-memory stores.
+pub mod kuzu_import;
+// #277: deprecated `migrate kuzu-data`, now a forwarder to `kuzu_import`.
 pub mod kuzu_migrate;
 pub mod link;
 pub mod migrate;
@@ -34,6 +37,8 @@ pub mod prompt_context;
 pub mod rooms;
 pub mod send_message;
 pub mod serve_stdio_bridge;
+// #8351: the two MCP methods the bridge answers without the daemon.
+pub mod serve_stdio_local;
 pub mod service;
 pub mod setup;
 pub mod single_instance;

@@ -878,7 +878,10 @@ async fn spawn_managed_inproject(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, reachable);
+    // #8233: the post-send launch check below needs the driver after the adapter
+    // has taken ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
+    let adapter = build_adapter(record.runtime, tmux_arc, reachable, state.framework_root());
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -896,12 +899,9 @@ async fn spawn_managed_inproject(
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
             .await;
     } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            worktree = %worktree.display(),
-            "managed session spawned successfully (in-project worktree)"
-        );
+        // #8233: `spawn` returning Ok means tmux took the keystrokes, not that
+        // `claude` started — the launch-spec shim can still fail after this.
+        super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), &record).await;
     }
 
     emit(ProvisioningStage::Complete);
@@ -995,7 +995,10 @@ pub async fn spawn_runtime_for(
     }
 
     let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc, None);
+    // #8233: the post-send launch check needs the driver after the adapter takes
+    // ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
+    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
     let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -1014,11 +1017,9 @@ pub async fn spawn_runtime_for(
             .await;
         return Err(e.to_string());
     }
-    info!(
-        id = %record.id,
-        name = %record.tmux_name,
-        "FRONT-gate-escalated session spawned after human approval"
-    );
+    // #8233: same post-send check as the in-project path — an accepted
+    // keystroke is not a started runtime.
+    super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), record).await;
     Ok(())
 }
 
@@ -1108,10 +1109,20 @@ pub(super) async fn front_gate_or_escalate(
 /// Why: the HTTP resume handler and the MCP `session_resume` tool must both
 /// resume the record AND re-spawn the runtime so the session is actually live;
 /// centralising avoids the MCP path silently resuming without re-spawning.
-/// What: calls [`crate::session_manager::SessionManager::resume`] (which performs
-/// the existence + state check in a SINGLE round-trip — no pre-flight `get`, so
+/// What: takes the #8233 in-flight claim for the WHOLE route (see the body),
+/// then calls `SessionManager::resume_inner` (which performs the existence +
+/// state check in a SINGLE round-trip — no pre-flight `get`, so
 /// no TOCTOU window) and maps its typed [`ManagedError`](crate::session_manager::ManagedError) into a typed
-/// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`Other`). It then re-spawns
+/// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`AlreadyResuming`/`Other`).
+/// #8233 r7 correction: this route is now the ONLY production path that
+/// resumes a managed session, so `SessionManager::resume` — the crate's public
+/// claiming one-shot, which takes the claim and releases it the moment the
+/// record transition returns — has no production caller left. It is kept as
+/// public API and as the seam the manager-level resume tests drive; deleting it
+/// would rewrite ten test modules to open-code the three calls it composes,
+/// which buys nothing this issue is about. The claim
+/// SPAN is what differs: this route holds it past the transition, through the
+/// prompt refresh, the spawn and the post-send check. It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
 /// the final record.
 ///
@@ -1152,8 +1163,15 @@ pub(super) async fn front_gate_or_escalate(
 /// best-effort and never block the resume — a long-lived session worktree
 /// that was previously frozen at its creation commit now catches up to
 /// `origin/main` on every resume instead of silently drifting forever.
-/// Test: covered by the HTTP `resume_managed_session` tests and the MCP
-/// `session_resume_unknown_id_errors` test;
+/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane` pins the
+/// claim's SPAN — that it is still held at the first driver call made after the
+/// record reads `Active` on disk, which is the whole of this issue's P0;
+/// `a_second_operator_resume_is_refused_while_one_is_in_flight` covers
+/// the route's own refusal, and
+/// `a_supervisor_tick_does_nothing_to_a_session_being_resumed` /
+/// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` cover the two
+/// consequences of the #8233 claim's span; the HTTP `resume_managed_session` tests and the MCP
+/// `session_resume_unknown_id_errors` test cover the route;
 /// `resume_managed_backfills_missing_status_line` in
 /// `tests/session_manager_mvp.rs` covers the self-heal call added here;
 /// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
@@ -1163,7 +1181,19 @@ pub async fn resume_managed(
     id: &ManagedSessionId,
 ) -> Result<SessionRecord, ResumeManagedError> {
     let mgr = state.session_manager().await;
-    let record = mgr.resume(id).await.map_err(ResumeManagedError::from)?;
+    // #8233 item 4: the claim spans THIS WHOLE FUNCTION, not just the record
+    // transition. `SessionManager::resume` released it the moment it returned,
+    // leaving the self-heal, the prompt refresh, the pane handshake, the spawn
+    // and the post-send check to run unclaimed over a record already written
+    // `Active` with a bare shell behind it — which the reaper stopped and the
+    // next supervisor tick launched a second time. Dropped on every exit path,
+    // including each `?` below and a cancelled request future.
+    let _in_flight = mgr.begin_resume(id).map_err(ResumeManagedError::from)?;
+    let record = mgr
+        .resume_inner(id)
+        .await
+        .map_err(ResumeManagedError::from)?;
+    mgr.note_operator_resume(id).await;
 
     let workspace = record
         .workspace_path
@@ -1192,7 +1222,12 @@ pub async fn resume_managed(
     // `ensure_deployment_complete` itself no-ops for an unresolved (`/unknown`)
     // workspace — an adopted session with no known cwd is handled separately by
     // the reconcile-on-boot fix, not here.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    // #8233: the root THIS daemon runs on, never `$HOME` — `for_managed_workspace`
+    // resolves the base through `default()`, so the deployment repair below wrote
+    // its agent and skill manifests into the operator's own
+    // `~/.trusty-tools/trusty-mpm/claude-config/` on every test run of this route.
+    let fw_root = state.framework_root();
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
     // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
     // `None` keeps the single probe the repair pipeline makes for itself.
     let url = record.repo_url.as_deref();
@@ -1203,7 +1238,15 @@ pub async fn resume_managed(
     // #4752: the resume path never runs `prepare_session*`, so the compiled PM
     // prompt is refreshed here — fatal, exactly as on the start path; #4832
     // scopes it to this session's id. See `session_prep`'s own doc.
-    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt(&workspace, &record.id) {
+    // #8233 r7: the root-taking seam, anchored to the root THIS daemon runs on
+    // (`~/.trusty-mpm` in production, a tempdir under test) rather than
+    // re-deriving `FrameworkPaths::default()`. Production behaviour is
+    // unchanged — `DaemonState::new` sets exactly that root — and a test that
+    // drives this route no longer writes a usage fold into the operator's own
+    // home, which is what kept `resume_managed` untestable past this line.
+    if let Err(msg) =
+        super::session_prep::refresh_resume_compiled_prompt_in(fw_root, &workspace, &record.id)
+    {
         warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
         let _ = mgr.mark_errored(&record.id, &msg).await;
         return Err(ResumeManagedError::Other(msg));
@@ -1213,7 +1256,7 @@ pub async fn resume_managed(
     // #6766: the post-send launch check below needs the driver after the
     // adapter has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None);
+    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
@@ -1239,20 +1282,27 @@ pub async fn resume_managed(
             runtime = %record.runtime.as_str(),
             "resume_managed: runtime adapter spawn_resume failed: {e}"
         );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
-            .await;
-    } else {
+        // #8233 review round 2 (finding 7): this arm marked the record errored
+        // and then fell through to `Ok(record)`, so the caller saw a successful
+        // resume and had to notice the state itself. `guided_resume` did not,
+        // and printed "restarted but runtime failed to start" from a later read.
+        let msg = format!("resume spawn failed: {e}");
+        let _ = mgr.mark_errored(&record.id, &msg).await;
+        return Err(ResumeManagedError::Other(msg));
+    } else if let Some(msg) = super::launch_verify::record_resume_outcome(
         // #6766: `spawn_resume` returning Ok means tmux accepted the keystrokes,
         // not that `claude` started. A launch-time refusal leaves the pane at a
         // bare shell, and this arm used to log a resume that never happened.
-        super::launch_verify::record_resume_outcome(
-            &mgr,
-            tmux_driver.as_ref(),
-            &record,
-            &workspace,
-        )
-        .await;
+        &mgr,
+        tmux_driver.as_ref(),
+        &record,
+        &workspace,
+    )
+    .await
+    {
+        // #8233 finding 7: same rule — the record is errored, so the resume is
+        // an error.
+        return Err(ResumeManagedError::Other(msg));
     }
 
     Ok(mgr.get(id).await.unwrap_or(record))

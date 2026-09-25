@@ -524,6 +524,8 @@ fn colocated_fixture(tag: &str) -> (tempfile::TempDir, Arc<IndexHandle>, Arc<Use
     );
     let store = Arc::new(UsearchStore::new(8).unwrap());
     let mut indexer = CodeIndexer::new(&id, root.path().to_path_buf())
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated)
         .with_components(Arc::new(MockEmbedder::new(8)), store.clone());
     indexer.set_corpus_store(Arc::new(corpus));
     let mut handle = IndexHandle::bare(

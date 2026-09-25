@@ -34,7 +34,9 @@ const PAGE: usize = 10;
 /// part of input handling — `d` is "delete" while browsing and a literal `d`
 /// while typing a name, so the mode-aware half has to see the character, not a
 /// pre-resolved command.
-/// What: the ten inputs [`TuiState::apply`] acts on.
+/// What: the inputs [`TuiState::apply`] acts on. Two Ctrl chords are modelled
+/// as their own variants ([`Input::Cancel`], [`Input::NameNew`]); every other
+/// modifier is dropped by `map_key`.
 /// Test: every `state_*` transition test constructs these directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Input {
@@ -60,6 +62,9 @@ pub(crate) enum Input {
     PageDown,
     /// Ctrl-C / Ctrl-D — leave, from any mode.
     Cancel,
+    /// Ctrl-N — in the new-session list, name the session before creating it
+    /// (#8587). Ignored everywhere else.
+    NameNew,
 }
 
 /// What the I/O driver should do after an [`Input`].
@@ -177,6 +182,8 @@ pub(crate) struct TuiState {
     message: Option<(String, Severity)>,
     self_session_id: Option<String>,
     self_tmux_name: Option<String>,
+    /// #8506: paint rows in their state color; off under `NO_COLOR`.
+    use_color: bool,
 }
 
 impl TuiState {
@@ -194,7 +201,22 @@ impl TuiState {
             message: None,
             self_session_id,
             self_tmux_name,
+            use_color: true,
         }
+    }
+
+    /// Set whether rows are painted in their state color (#8506).
+    ///
+    /// The gate is resolved at the I/O boundary (`run_session_tui`) and
+    /// injected, for the same #5544 reason as the two self-identifiers.
+    pub(crate) fn with_color(mut self, use_color: bool) -> Self {
+        self.use_color = use_color;
+        self
+    }
+
+    /// Whether rows are painted in their state color.
+    pub(crate) fn use_color(&self) -> bool {
+        self.use_color
     }
 
     /// The current overlay.

@@ -225,6 +225,21 @@ fn project_config_parses_prompt_self_improvement() {
     assert_eq!(off.prompt_self_improvement, Some(false));
 }
 
+#[test]
+fn project_config_parses_style() {
+    // #8533: the committed project file selects the output style.
+    let cfg = ProjectLevelConfig::from_toml(
+        "[style]\nactive = \"trusty-supervisor\"\n",
+        Path::new("/p/.trusty-mpm.toml"),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.style.and_then(|s| s.active).as_deref(),
+        Some("trusty-supervisor")
+    );
+    assert!(ProjectLevelConfig::from_toml("[style]\nactiv = \"x\"\n", Path::new("/p")).is_err());
+}
+
 /// An absent key declines to decide, so the host layer answers — it does NOT
 /// mean "off".
 #[test]

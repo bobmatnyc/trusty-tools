@@ -48,17 +48,48 @@
 #                                       most specific (longest) matching
 #                                       `crates/...` directory prefix.
 #   2. Root `Cargo.toml`, `Cargo.lock`, `rust-toolchain`,
-#      `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `rustfmt.toml`
-#                                    -> ALL crates (every cargo invocation
+#      `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `rustfmt.toml`,
+#      `deny.toml`                  -> ALL crates (every cargo invocation
 #                                       reads these).
-#   3. `scripts/**`, `.github/**`   -> ALL crates (deliberately broad, not a
-#                                       computed closure — see the report for
-#                                       the narrower rule considered and
-#                                       rejected in favor of this one).
-#   4. `docs/**`, `website/**`, a root-level `*.md`
+#   3. The affected-crate CI job's own inputs — `.github/workflows/ci.yml`,
+#      this script, `scripts/ci-affected-test-plan.sh`, their selftests, and
+#      the job's helpers `scripts/ci-create-local-main.sh`,
+#      `scripts/ci-free-disk-space.sh`, `scripts/ci-apt-install.sh`
+#                                    -> the CANARY set (trusty-common +
+#                                       trusty-mpm), unioned with each Tauri
+#                                       UI crate `ci-crate-relevance.sh`
+#                                       answers `true` for over the same
+#                                       change set. Direct only, no closure.
+#   4. Any other `scripts/**` or `.github/**` path
+#                                    -> each crate with a `*.rs` file (build.rs,
+#                                       tests, include_str!, production code)
+#                                       whose non-comment line names that path
+#                                       literally, found by `git grep` at
+#                                       selection time. Counts only when the
+#                                       path EXISTS on disk or, in --range /
+#                                       --staged mode, existed at the diff's
+#                                       base (a deleted or renamed script), so
+#                                       a fixture string like "scripts/go.sh"
+#                                       selects nothing. `./`, `../`,
+#                                       `{root}/` and `/abs/` prefixes all
+#                                       name the path; `myscripts/` does not.
+#                                       No reference -> NO crates.
+#                                       Direct only: a build.rs failure shows
+#                                       in the owning crate's own test run.
+#      Plus: a `scripts/<name>.sh` directly in `scripts/` (no subdirectory,
+#      extension exactly `sh`) whose content contains the substring
+#      `codesign` — on disk, or at the diff's base for a deleted, renamed or
+#      edited script -> trusty-common. This mirrors the directory scan
+#      `codesign_scripts` in crates/trusty-common/src/launchd_labels/tests.rs,
+#      read by `codesign_scripts_name_identifiers_by_convention`; change the
+#      two together.
+#   5. `docs/**`, `website/**`, a root-level `*.md`
 #                                    -> NO crates.
-#   5. anything else                -> ALL crates (fail open on an
+#   6. anything else                -> ALL crates (fail open on an
 #                                       unclassified path).
+#   Rules 2-4: owner ruling 2026-09-23 on #7777. A literal scan that cannot
+#   run (git grep error) fails open to ALL, and so does a canary crate or the
+#   codesign crate that is not a workspace member.
 #
 # FAIL OPEN. A `cargo metadata` failure, a missing `jq`, or an empty/
 #   unresolvable change set prints every crate cargo metadata (or, failing
@@ -91,7 +122,14 @@
 #
 # Exit: 0 for every well-formed invocation, including every detection
 #   failure covered by FAIL OPEN above (a bad `--range`, missing value on
-#   `--range`, unresolvable ref, missing `cargo`/`jq`, bash <4 — see below).
+#   `--range`, unresolvable ref, a diff base that is not one commit, `a^!` on
+#   a merge commit, missing `cargo`/`jq`, bash <4 — see below). `a^!` on a
+#   single-parent commit diffs from `a^`; on a merge commit git prints a
+#   combined diff, which omits a change one parent already carried, so it
+#   fails open; `a^-` does not resolve to one commit and fails open.
+#   Exit 3 when a fail-open path cannot name a single crate (bash <4 with no
+#   crate found, no temp dir, an empty fallback scan): empty output would read
+#   as "nothing to test" and turn the plan green.
 #   A malformed CLI invocation — an argument this parser does not recognize
 #   at all — exits 2 with a usage message on stderr; that scope exclusion is
 #   deliberate (#7777 review) so a real usage typo stays visible to a human
@@ -199,8 +237,8 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
     fi
   fi
   if [ -z "$BASH32_NAMES" ]; then
-    echo "select-test-crates: WARNING: could not determine any crate names under bash <4 — no output produced" >&2
-    exit 0
+    echo "select-test-crates: ERROR: could not determine any crate names under bash <4 — no output produced" >&2
+    exit 3
   fi
   if [ "$CARGO_ARGS_MODE" = "1" ]; then
     BASH32_ARGS=""
@@ -217,8 +255,8 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
 fi
 
 TMPDIR_SELF="$(mktemp -d 2>/dev/null)" || {
-  echo "select-test-crates: WARNING: cannot create a temp dir — no output produced" >&2
-  exit 0
+  echo "select-test-crates: ERROR: cannot create a temp dir — no output produced" >&2
+  exit 3
 }
 trap 'rm -rf "${TMPDIR_SELF}"' EXIT
 
@@ -239,6 +277,15 @@ ALL_CRATES=()
 declare -A CARGO_ARGS_FEATURE_OVERRIDES=(
   [trusty-common]="--features unconditional-only"
 )
+
+# #7777 ruling (b): what a change to the affected-crate job's own inputs tests.
+CANARY_CRATES="trusty-common trusty-mpm"
+# The crate whose test scans every codesign script (rule 4, codesign_script).
+CODESIGN_CRATE="trusty-common"
+# The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
+# list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
+RELEVANCE_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # fallback_all_crates — last-resort crate-name scan needing neither cargo nor
 # jq, for the case where `cargo metadata` itself is the thing that is broken.
@@ -292,7 +339,8 @@ emit_output() {
   fi
 }
 
-# fail_open <reason> — warn, print every crate we can still name, exit 0.
+# fail_open <reason> — warn, print every crate we can still name, exit 0; exit
+# 3 when it can name none.
 #
 # #7777: try cargo metadata first; the shallow scan misses nested members (trusty-agents-ui)
 fail_open() {
@@ -319,6 +367,10 @@ fail_open() {
       done < <(fallback_all_crates)
     fi
   fi
+  if [ ${#crates[@]} -eq 0 ]; then
+    echo "select-test-crates: ERROR: fail-open found no crate to print — no output produced" >&2
+    exit 3
+  fi
   emit_output "${crates[@]}"
   exit 0
 }
@@ -341,12 +393,53 @@ case "$MODE" in
     ;;
   range)
     [ -n "$RANGE_SPEC" ] || fail_open "no range given"
+    case "$RANGE_SPEC" in
+      *^!)
+        # #7777 review round 3: a merge's `^!` is a combined diff, which drops
+        # a change one parent already carried
+        merge_parents="$(git rev-list --parents -n 1 "${RANGE_SPEC%^!}" 2>/dev/null | wc -w)"
+        [ "${merge_parents:-0}" -le 2 ] ||
+          fail_open "'${RANGE_SPEC}' names a merge commit, whose ^! is a combined diff"
+        ;;
+    esac
     if ! git diff -z --name-only --no-renames "$RANGE_SPEC" 2>/dev/null |
       tr '\0' '\n' >"${CHANGED_FILE}"; then
       fail_open "git diff over range '${RANGE_SPEC}' failed"
     fi
     ;;
 esac
+
+# The diff's old side, for rule 4's existence check: a script deleted or
+# renamed in the change set is absent on disk but still named by crates.
+# `a...b` diffs from merge-base(a, b); `a^!` (single-parent only — a merge
+# failed open above) from `a^`; `a..b` and a lone `a` diff from `a`.
+DIFF_BASE=""
+case "$MODE" in
+  staged) DIFF_BASE="HEAD" ;;
+  range)
+    case "$RANGE_SPEC" in
+      *^!) DIFF_BASE="${RANGE_SPEC%^!}^" ;;
+      *...*)
+        r_old="${RANGE_SPEC%%...*}"
+        r_new="${RANGE_SPEC#*...}"
+        DIFF_BASE="$(git merge-base "${r_old:-HEAD}" "${r_new:-HEAD}" 2>/dev/null)"
+        ;;
+      *..*)
+        r_old="${RANGE_SPEC%%..*}"
+        DIFF_BASE="${r_old:-HEAD}"
+        ;;
+      *) DIFF_BASE="$RANGE_SPEC" ;;
+    esac
+    ;;
+esac
+# #7777 review round 2: a base that is not one commit (`a^-`, a failed
+# merge-base, an unborn HEAD) would make every base lookup miss silently.
+if [ "$MODE" != "files" ]; then
+  base_of="$RANGE_SPEC"
+  [ "$MODE" = "staged" ] && base_of="the staged change set"
+  DIFF_BASE="$(git rev-parse -q --verify "${DIFF_BASE}^{commit}" 2>/dev/null)" ||
+    fail_open "cannot resolve the diff base of '${base_of}'"
+fi
 
 # A file of nothing but blank lines is the same "nothing to act on" case as a
 # zero-byte file — strip blanks before judging emptiness.
@@ -382,17 +475,23 @@ if ! jq -r --arg root "$WORKSPACE_ROOT" '
 fi
 [ -s "${DIRMAP_FILE}" ] || fail_open "workspace has no members"
 
+declare -A IS_MEMBER=()
 while IFS=$'\t' read -r dir name; do
   [ -n "$dir" ] && [ -n "$name" ] || continue
   NAME_OF_DIR["$dir"]="$name"
   CRATE_DIRS+=("$dir")
   ALL_CRATES+=("$name")
+  IS_MEMBER["$name"]=1
 done <"${DIRMAP_FILE}"
 
 # ---------------------------------------------------------------------------
-# 4. Classify each changed path: an owning crate name, ALL, or NONE.
+# 4. Classify each changed path: an owning crate name, ALL, NONE, CANARY
+#    (rule 3) or SCRIPTREF (rule 4).
 # ---------------------------------------------------------------------------
-classify_path() {
+
+# owning_crate <path> — the crate whose directory is the longest prefix of
+# <path>, on a segment boundary; prints nothing when no crate owns it.
+owning_crate() {
   local path="$1" d best="" bestlen=-1
   for d in "${CRATE_DIRS[@]}"; do
     if [ "$path" = "$d" ] || [ "${path#"$d"/}" != "$path" ]; then
@@ -402,12 +501,18 @@ classify_path() {
       fi
     fi
   done
-  if [ -n "$best" ]; then
-    printf '%s\n' "${NAME_OF_DIR[$best]}"
+  [ -n "$best" ] && printf '%s\n' "${NAME_OF_DIR[$best]}"
+}
+
+classify_path() {
+  local path="$1" owner
+  owner="$(owning_crate "$path")"
+  if [ -n "$owner" ]; then
+    printf '%s\n' "$owner"
     return
   fi
   case "$path" in
-    Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | clippy.toml | rustfmt.toml)
+    Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | clippy.toml | rustfmt.toml | deny.toml)
       echo "ALL"
       return
       ;;
@@ -415,8 +520,13 @@ classify_path() {
       echo "ALL"
       return
       ;;
+    .github/workflows/ci.yml | scripts/select-test-crates.sh | scripts/select-test-crates_selftest.sh | scripts/ci-affected-test-plan.sh | scripts/ci-affected-test-plan-selftest.sh | \
+      scripts/ci-create-local-main.sh | scripts/ci-free-disk-space.sh | scripts/ci-apt-install.sh)
+      echo "CANARY"
+      return
+      ;;
     scripts/* | .github/*)
-      echo "ALL"
+      echo "SCRIPTREF"
       return
       ;;
     docs/* | website/*)
@@ -434,14 +544,103 @@ classify_path() {
   echo "ALL"
 }
 
+# crates_referencing <path> — rule 4. Prints the owning crate of every `*.rs`
+# file (tracked or untracked, not ignored) with a non-comment line naming
+# <path> literally. A <path> absent on disk, and absent at DIFF_BASE, references
+# nothing. Returns 2 when git grep itself fails, so the caller can fail open.
+crates_referencing() {
+  local path="$1" re hits rc line file content
+  if [ ! -f "${WORKSPACE_ROOT}/${path}" ]; then
+    # #7777: a deleted or renamed script still counts if the diff's base had it
+    [ -n "$DIFF_BASE" ] &&
+      git -C "$WORKSPACE_ROOT" cat-file -e "${DIFF_BASE}:${path}" 2>/dev/null ||
+      return 0
+  fi
+  re="$(printf '%s' "$path" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
+  # Path boundaries: a non-name byte before (`/` included, so `./`, `../`,
+  # `{root}/` and `/abs/` prefixes match), no longer name after —
+  # "scripts/go.sh" must not match "myscripts/go.sh" or "scripts/go.sh.bak".
+  hits="$(git -C "$WORKSPACE_ROOT" grep --untracked -n -I -E \
+    -e "(^|[^A-Za-z0-9_.-])${re}([^A-Za-z0-9_.-]|\.[^A-Za-z0-9]|\.?\$)" \
+    -- '*.rs' </dev/null 2>/dev/null)"
+  rc=$?
+  [ "$rc" -le 1 ] || return 2
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    file="${line%%:*}"
+    content="${line#*:}"
+    content="${content#*:}"
+    content="${content#"${content%%[![:space:]]*}"}"
+    case "$content" in
+      //* | /\** | \*/* | '* '* | '*') continue ;;
+    esac
+    owning_crate "$file"
+  done <<<"$hits"
+  return 0
+}
+
+# codesign_script <path> — true when <path> is one of the files trusty-common's
+# `codesign_scripts` test helper scans: a `*.sh` directly in `scripts/` whose
+# content contains "codesign", on disk or at DIFF_BASE. Keep in step with
+# crates/trusty-common/src/launchd_labels/tests.rs `codesign_scripts`.
+codesign_script() {
+  local path="$1" name="${1#scripts/}" base_body
+  [ "$name" != "$path" ] || return 1
+  case "$name" in
+    */* | .sh) return 1 ;; # a subdirectory, or a dotfile with no extension
+    *.sh) : ;;
+    *) return 1 ;;
+  esac
+  [ -f "${WORKSPACE_ROOT}/${path}" ] &&
+    grep -qF codesign "${WORKSPACE_ROOT}/${path}" 2>/dev/null && return 0
+  [ -n "$DIFF_BASE" ] || return 1
+  # Captured, not piped into `grep -q`: an early grep exit SIGPIPEs cat-file
+  # and pipefail would turn a match into a miss.
+  base_body="$(git -C "$WORKSPACE_ROOT" cat-file blob "${DIFF_BASE}:${path}" 2>/dev/null)" || return 1
+  [[ "$base_body" == *codesign* ]]
+}
+
+# relevant_ui_crates — rule 3's union: each RELEVANCE_CRATES member that
+# ci-crate-relevance.sh answers `true` for over this change set. That script
+# fails closed (`true`); a missing copy of it counts the same way.
+relevant_ui_crates() {
+  local relevance="${SELF_DIR}/ci-crate-relevance.sh" c verdict
+  for c in $RELEVANCE_CRATES; do
+    [ -n "${IS_MEMBER[$c]:-}" ] || continue
+    verdict="true"
+    if [ -f "$relevance" ]; then
+      verdict="$(cd "$WORKSPACE_ROOT" && GITHUB_OUTPUT="" bash "$relevance" "$c" <"${CHANGED_FILE}" 2>/dev/null)"
+    else
+      echo "select-test-crates: WARNING: ${relevance} missing — counting ${c} relevant" >&2
+    fi
+    [ "$verdict" = "false" ] || printf '%s\n' "$c"
+  done
+}
+
 declare -A DIRECT_SET=()
+# Rules 3 and 4 select crates directly, never through the reverse closure.
+declare -A EXTRA_SET=()
 ANY_ALL=0
+CANARY_HIT=0
+CODESIGN_HIT=0
 while IFS= read -r path; do
   [ -n "$path" ] || continue
   cls="$(classify_path "$path")"
   case "$cls" in
     ALL) ANY_ALL=1 ;;
     NONE) : ;;
+    CANARY) CANARY_HIT=1 ;;
+    SCRIPTREF)
+      codesign_script "$path" && CODESIGN_HIT=1
+      if ! refs="$(crates_referencing "$path")"; then
+        echo "select-test-crates: WARNING: git grep failed scanning crates for '${path}' — printing ALL crates" >&2
+        ANY_ALL=1
+        continue
+      fi
+      while IFS= read -r c; do
+        [ -n "$c" ] && EXTRA_SET["$c"]=1
+      done <<<"$refs"
+      ;;
     *) DIRECT_SET["$cls"]=1 ;;
   esac
 done <"${CHANGED_FILE}"
@@ -454,8 +653,27 @@ if [ "$ANY_ALL" = "1" ]; then
   exit 0
 fi
 
-# Docs/website/root-md-only change: nothing owns a crate, nothing to test.
+if [ "$CANARY_HIT" = "1" ]; then
+  for c in $CANARY_CRATES; do
+    # #7777: a missing canary means the canary set no longer tests anything
+    [ -n "${IS_MEMBER[$c]:-}" ] || fail_open "canary crate '${c}' is not a workspace member"
+    EXTRA_SET["$c"]=1
+  done
+  while IFS= read -r c; do
+    [ -n "$c" ] && EXTRA_SET["$c"]=1
+  done < <(relevant_ui_crates)
+fi
+
+if [ "$CODESIGN_HIT" = "1" ]; then
+  [ -n "${IS_MEMBER[$CODESIGN_CRATE]:-}" ] ||
+    fail_open "codesign crate '${CODESIGN_CRATE}' is not a workspace member"
+  EXTRA_SET["$CODESIGN_CRATE"]=1
+fi
+
+# Nothing owns a crate (docs, website, root md, an unreferenced script): print
+# the direct picks, if any, and stop — there is no closure to walk.
 if [ ${#DIRECT_SET[@]} -eq 0 ]; then
+  [ ${#EXTRA_SET[@]} -eq 0 ] || emit_output "${!EXTRA_SET[@]}"
   exit 0
 fi
 
@@ -505,4 +723,4 @@ while [ ${#QUEUE[@]} -gt 0 ]; do
   done
 done
 
-emit_output "${!CLOSURE[@]}"
+emit_output "${!CLOSURE[@]}" "${!EXTRA_SET[@]}"

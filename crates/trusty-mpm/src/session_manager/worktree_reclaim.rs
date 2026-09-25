@@ -35,6 +35,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+// #7889: gate 5's landed-content admission lives next door so this file stays
+// under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
+pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
+use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict, published_verdict};
+
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
 use super::worktree_reclaim_gh::{
@@ -346,7 +351,7 @@ impl PrIndex {
             // #6623: resolved once per registry root — the daemon's own gh
             // identity, since launchd hands it neither `GH_TOKEN` nor
             // `GH_CONFIG_DIR`.
-            let gh_env = resolve_daemon_gh_env(registry_root);
+            let gh_env = resolve_daemon_gh_env(registry_root, &repo)?;
             let identity = gh_env.describe();
             let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
             cmd.args(["--state", "all", "--limit"])
@@ -565,7 +570,7 @@ pub(crate) fn pr_state_for_branch_within(
         // #6623: same resolution as the bulk index — this call has its own
         // working directory and must not rely on the daemon's bare launchd
         // environment either.
-        let gh_env = resolve_daemon_gh_env(registry_root);
+        let gh_env = resolve_daemon_gh_env(registry_root, &repo)?;
         let identity = gh_env.describe();
         let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
         cmd.args(["--head", branch, "--state", "all", "--limit"])
@@ -623,7 +628,7 @@ pub(crate) fn pr_state_for_branch_within(
 /// again.
 /// Test: `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
 /// `tm_provisioned_matches_the_removers_own_predicate`,
-/// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
+/// `worktree_7771_a_hand_made_tree_is_reclaimed`.
 pub(crate) fn tm_provisioned(path: &Path) -> bool {
     super::decommission::removal_permitted(path)
 }
@@ -717,6 +722,48 @@ pub(crate) fn classify(
     owners: &SessionOwners,
     keep_list: &KeepList,
 ) -> ReclaimVerdict {
+    // #7889: gate 5's landed-content admission is OPT-IN, because the predicate
+    // behind it fetches. Every caller that does not offer one keeps the
+    // pre-#7889 refusal verbatim.
+    classify_with_landed_content(
+        path,
+        admission,
+        claim,
+        pr,
+        probe_dirt,
+        agent_state,
+        owners,
+        keep_list,
+        None,
+    )
+}
+
+/// [`classify`], with gate 5's landed-content admission supplied (#7889).
+///
+/// Why: the admission runs `git fetch` and `git merge-tree`, so it cannot be
+/// reached implicitly by every surveyor — the doctor's unattended, read-only
+/// pass must not fetch. Parameterised rather than made unconditional, and
+/// spelled as a second entry point rather than a ninth argument on the first,
+/// so the forty existing call sites keep their exact behaviour and their exact
+/// shape.
+/// What: as [`classify`], plus `landed_content`. See [`no_pr_verdict`] for what
+/// gate 5 does with it.
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_classify_refuses_a_tree_holding_residue`,
+/// `worktree_7889_classify_refuses_when_the_admission_is_unavailable`,
+/// `worktree_7889_classify_refuses_a_dirty_tree_whose_content_is_landed`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_with_landed_content(
+    path: &Path,
+    admission: Admission,
+    claim: &ClaimState,
+    pr: &BranchPrState,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    agent_state: AgentStateProbe<'_>,
+    owners: &SessionOwners,
+    keep_list: &KeepList,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimVerdict {
     // Gate 0 (#6927): the operator's own standing veto outranks every answer
     // the gates below could compute, so it is asked first — see DOC-73 §16.4.
     if let Some(kept) = keep_list.keeps(path) {
@@ -730,10 +777,17 @@ pub(crate) fn classify(
     // — it means an agent is working in that tree — so it leaves gate 1 as its
     // own verdict kind and reaches `ReclaimSurvey::agent_owned`. Every other
     // non-admitted verdict is an ordinary block, as before.
-    if admission == Admission::HarnessAgentLock {
-        return ReclaimVerdict::blocked_by_agent(ReclaimGate::Admission, admission.reason());
-    }
-    if admission != Admission::Admitted {
+    // #7771: a harness lock whose pid is gone or reused is released; only a
+    // live, matching holder (or an unjudgeable lock) still refuses here.
+    let stale_lock = admission == Admission::HarnessAgentLock
+        && match super::worktree_owner_gate::lock_liveness(path).refusal() {
+            Some(why) => {
+                let reason = format!("{} — {why}", admission.reason());
+                return ReclaimVerdict::blocked_by_agent(ReclaimGate::Admission, reason);
+            }
+            None => true,
+        };
+    if admission != Admission::Admitted && !stale_lock {
         return ReclaimVerdict::blocked(ReclaimGate::Admission, admission.reason());
     }
     // Gate 2 (#2919): a live session can occupy a directory whose record reads
@@ -767,7 +821,7 @@ pub(crate) fn classify(
     // #5829: recorded as its OWN verdict kind, because sparing a live agent's
     // tree is the one refusal the operator must be told about by name — see
     // `ReclaimVerdict::BlockedByAgent`.
-    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+    if let Some(reason) = agent_ownership_blocks(path, agent_state, owners) {
         return ReclaimVerdict::blocked_by_agent(ReclaimGate::AgentOwnership, reason);
     }
     // Gate 4b (#7652): gate 2 no longer refuses a live foreign session's
@@ -783,7 +837,13 @@ pub(crate) fn classify(
     }
     // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
-    // out" — refuses.
+    // out" — refuses. #7771 (f): with no PR found, every commit on an origin
+    // ref is landing evidence too.
+    if matches!(pr, BranchPrState::NoPr | BranchPrState::Unknown)
+        && let Some(verdict) = published_verdict(path, probe_dirt)
+    {
+        return verdict;
+    }
     let merged_pr = match pr {
         BranchPrState::Merged { pr } => *pr,
         BranchPrState::Open { pr } => {
@@ -798,17 +858,22 @@ pub(crate) fn classify(
                 format!("PR #{pr} was closed without merging"),
             );
         }
+        // #7889: the one refusal that is permanent for a tree holding nothing.
+        // A donor branch fast-forwarded onto a sibling's head and squash-merged
+        // under that name can never acquire a pull request of its own, so this
+        // arm asks the landed-content question before it refuses. Owner ruling
+        // 2026-09-22; the same predicate the ADR-0057 guard runs.
         BranchPrState::NoPr => {
-            return ReclaimVerdict::blocked(
-                ReclaimGate::PrState,
-                "no pull request found for this branch",
-            );
+            return no_pr_verdict(path, probe_dirt, landed_content);
         }
+        // #7771: `Unknown` is a detached HEAD or a truncated index, never a
+        // failed lookup (that is `LookupFailed`), so it does not blame `gh`.
         BranchPrState::Unknown => {
             return ReclaimVerdict::blocked(
                 ReclaimGate::PrState,
-                "pull-request state could not be determined (is `gh` installed \
-                 and authenticated?)",
+                "pull-request state could not be determined — a detached HEAD no merged \
+                 pull request's commit search matched, or a branch past the index's page \
+                 limit",
             );
         }
         // #6561: the lookup broke. Same refusal, but naming the cause — the
@@ -824,13 +889,9 @@ pub(crate) fn classify(
     // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
     // unpushed source. This is the last gate and it fails toward dirty.
-    if let Some(dirt) = probe_dirt(path) {
-        return ReclaimVerdict::blocked(
-            ReclaimGate::UnsavedWork,
-            format!("holds unsaved work: {}", dirt.reason),
-        );
-    }
-    ReclaimVerdict::Reclaimable { pr: merged_pr }
+    // #7889: commits-only dirt reaches the landing admission — see
+    // `merged_pr_verdict`.
+    merged_pr_verdict(path, merged_pr, probe_dirt, landed_content)
 }
 
 /// One surveyed worktree and everything the survey learned about it (#2919).

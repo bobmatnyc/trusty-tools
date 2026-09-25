@@ -579,6 +579,12 @@ pub struct CodeIndexer {
     /// #7991: why the last staged reindex promotion was refused, reported by
     /// `GET /indexes/:id/status` as `promotion_deferred`.
     pub(super) promotion_deferral: Arc<promotion_state::PromotionDeferralRecord>,
+
+    /// #8438: where this index's storage lives, as its registry entry names
+    /// it. Set once by `persistence_loader::build_indexer_from_entry`; every
+    /// write path resolves its target through it, never through a probe of
+    /// `<root>/.trusty-search/`.
+    storage_layout: crate::service::storage_layout::StorageLayout,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -705,6 +711,7 @@ impl CodeIndexer {
             snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
             migration_fault: Arc::new(migration_state::MigrationFaultRecord::default()),
             promotion_deferral: Arc::new(promotion_state::PromotionDeferralRecord::default()),
+            storage_layout: Default::default(),
         }
     }
 
@@ -991,6 +998,26 @@ impl CodeIndexer {
     /// Test: `service::server::tests_components::patch_vector_off_stops_index_file_from_embedding`.
     pub fn set_skip_vector(&mut self, skip_vector: bool) {
         self.skip_vector = skip_vector;
+    }
+
+    /// The registry-named storage layout (#8438); see `service::storage_layout`.
+    pub(crate) fn storage_layout(&self) -> crate::service::storage_layout::StorageLayout {
+        self.storage_layout
+    }
+
+    /// Record the storage layout the registry entry names (#8438).
+    ///
+    /// Why: the layout is decided once, from `PersistedIndex::colocated`, and
+    /// never re-derived from what exists on disk.
+    /// What: overwrites the field and returns `self`.
+    /// Test: `service::storage_layout::storage_layout_8438_tests`.
+    #[must_use]
+    pub(crate) fn with_storage_layout(
+        mut self,
+        layout: crate::service::storage_layout::StorageLayout,
+    ) -> Self {
+        self.storage_layout = layout;
+        self
     }
 
     /// Returns a cheap `Arc` snapshot of the current symbol graph.

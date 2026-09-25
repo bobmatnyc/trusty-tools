@@ -11,7 +11,7 @@ numbers drift; names are greppable.
 
 ## The shape in one paragraph
 
-Nine markdown files here are the authored prose. A JSON manifest one level up,
+Twenty markdown files here are the authored prose. A JSON manifest one level up,
 `pm-instruction-package.json`, declares which sections exist, what tier each is,
 and the ordered stream of blocks that fill them. At session launch a composer
 reads the manifest, resolves each block to text, folds in two pieces of
@@ -48,20 +48,45 @@ reproducible without any code knowing the running order.
 Nothing constrains order by section any more. A rule used to require that the
 four "floor" sections were the contiguous tail; it was deleted with the floor.
 
-## Customization tiers — `core` is the only protected section
+## The safety core — the only content a project cannot override
 
-Every section declares a `customization_tier`:
+Owner ruling 2026-09-24 (#8533): a small, named, documented safety core; every
+other section is replaceable. The core is enumerated once, in
+`instruction_safety_core.rs` (`SAFETY_CORE`), and a test fails if this table,
+the one in `tm-workflow.md`, or the manifest diverges from it:
 
-- `fixed` — **`core`, and only `core`.** A `CORE` marker in a project's
-  `CLAUDE.md` is declined and logged; the bundled core section stays in force.
-- `project` — **every other section**: `identity`, `memory`, `search`,
-  `workflow`, `agent-delegation`, `enforcement`, `non-overridable-rules`,
-  `framework-guaranteed-conventions`. A project may replace any of them.
+<!-- safety-core:start -->
+| Member | Section token | Kind |
+|---|---|---|
+| Memory & Instruction Sources | `CORE` | fixed section |
+| Customization Surface | `CORE` | fixed section |
+| Detected project stack | `CORE` | generated block |
+| Memory protocol | `MEMORY` | pinned block |
+| Code search protocol | `SEARCH` | pinned block |
+| Agent selection | `AGENT-DELEGATION` | pinned block |
+| Agent roster | `AGENT-DELEGATION` | generated block |
+<!-- safety-core:end -->
 
-`InstructionPackage::validate` enforces that as an **iff**: `core` must be
-`fixed` and nothing else may be. Both directions are red, because retiering
-`core` to `project` would leave nothing protected at all, and marking any other
-section `fixed` would quietly reinstate the floor described below.
+- **fixed section** — its section is tier `fixed`. `core.md` holds only these
+  rules. A `CORE` marker is declined and logged; the bundled text stays.
+- **pinned block** — an authored block marked `"pinned": true` in the
+  manifest. An override of its section replaces every other authored block and
+  keeps this one.
+- **generated block** — computed at launch; no override can author it.
+
+Every other section is tier `project`: `identity` (which opens the prompt),
+the nine sections #8533 split out of `core` (`pm-allowlist`,
+`delegation-mechanics`, `agent-routing`, `subagent-re-engagement`, `phases`,
+`qa-gate`, `git-file-tracking`, `tickets-prs-releases`,
+`messages-reports-sessions`), `autonomous-execution`, `memory`, `search`,
+`workflow`, `agent-delegation`, `enforcement`, `non-overridable-rules`,
+`framework-guaranteed-conventions`.
+
+`InstructionPackage::validate` enforces the tier as an **iff** against
+`SAFETY_CORE`: a safety-core section must be `fixed` and nothing else may be.
+Both directions are red, because retiering `core` to `project` would leave
+nothing protected, and marking any other section `fixed` would quietly
+reinstate the floor described below.
 
 ### Why there is no framework floor
 
@@ -87,7 +112,8 @@ coverage` (`workflow`). Overriding one section still takes only that section —
 a `WORKFLOW` block does not disturb `enforcement` — but nothing outside `core`
 is protected from a project that explicitly asks to replace it.
 
-Do not "fix" this by promoting content into `core.md`. That was considered and
+Do not "fix" this by promoting content into `core.md` or by pinning a block;
+a new safety-core member is an owner decision, recorded in `SAFETY_CORE`. That was considered and
 rejected: relocating content to preserve protection defeats the point of
 removing the mechanism, and would turn `core.md` into a dumping ground.
 
@@ -98,6 +124,12 @@ own words were "this should be part of the core instruction set." That is a
 deliberate placement decision by the same authority who made the ruling above,
 not a routine protection-seeking promotion. It is not precedent for moving
 other content into `core.md`.
+
+**The reverse move, 2026-09-21 (#8361):** `## Autonomous Execution` left
+`core.md` for its own tier-`project` section. Inside `core` no project could set
+its own comfort level, so on a session resume the PM read one rule telling it to
+continue and a skill telling it to confirm, with no override surface to settle
+the two. A project now answers that with an `AUTONOMOUS-EXECUTION` block.
 
 ## How a project overrides a section
 
@@ -113,8 +145,9 @@ The token is the section id, uppercased. Every token is accepted except `CORE`,
 which is always declined with a logged warning.
 
 An override replaces the section's authored blocks. It cannot touch that
-section's **generated** blocks — so an `AGENT-DELEGATION` override rewrites the
-routing doctrine and the live agent roster still follows it.
+section's **generated** or **pinned** blocks — so an `AGENT-DELEGATION`
+override rewrites the routing doctrine while the agent-selection note and the
+live agent roster still follow it.
 
 Everything fails toward more framework instruction, never less. An unclosed
 marker, an unknown token, an unknown version, an empty body, or an override that
@@ -165,9 +198,10 @@ other named override is reported as unapplied there rather than dropped silently
 | `assets/instructions/CLAUDE.md` | A dead stub, registered but never read back. Removed by #3374. |
 
 `base_pm()` in `instruction_pipeline.rs` and the former
-`# BASE_PM Framework Floor` heading are historical labels. The heading now reads
-`# Framework Instructions`; the function name survives and is misleading — see
-the findings below.
+`# BASE_PM Framework Floor` heading are historical labels. The later
+`# Framework Instructions` heading left with the old `identity.md` when #8533
+moved Identity to the top of the prompt; the function name survives and is
+misleading — see the findings below.
 
 ## Findings
 

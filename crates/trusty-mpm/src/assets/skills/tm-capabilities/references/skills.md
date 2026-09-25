@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-55 bundled skills.
+56 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -41,18 +41,19 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-cli-operations` | pm-reference | yes | Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics |
 | `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it |
 | `tm-doctor` |  | no | Run a full trusty-mpm system diagnostic checking instructions, agents, skills, memory, and search services |
+| `tm-epic` | pm-workflow | yes | Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the five tracker-update triggers, and the tm issue epic verbs that maintain the tracker. |
 | `tm-git-file-tracking` | pm-workflow | no | Protocol for tracking files immediately after agent creation, before marking work complete |
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
 | `tm-prose-style` | pm-workflow | yes | Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them. |
-| `tm-secrets` | pm-reference | yes | Operate tm secrets — 1Password / Keeper / macOS Keychain behind trusty-common, reference-key access, and exec-wrapper recipes for gh and other CLI integrations |
+| `tm-secrets` | pm-reference | yes | Where a trusty credential lives today — the 0600 file store and Keychain behind trusty-common, the two tm doctor rows that check them, and the rules for handling a secret value. The tm secrets CLI does not ship yet. |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |
 | `tm-slack` | pm-workflow | no | Deliver messages, canvases, and files to the user via Slack — routes through the native slack-mcp connector, not claude.ai's hosted Slack connector; canvas creation alone is never delivery |
 | `tm-teaching-templates` | pm-workflow | no | Progressive-disclosure teaching templates for onboarding users to trusty-mpm concepts |
-| `tm-ticketing` | pm-workflow | yes | The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, and attribution |
+| `tm-ticketing` | pm-workflow | yes | The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, attribution, and the project-root TICKETING.md that overrides these defaults |
 | `tm-tool-usage-guide` | pm-reference | no | Detailed tool usage patterns and examples for the trusty-mpm PM agent |
 | `tm-verification-protocols` | pm-workflow | no | QA verification gate and evidence requirements for the trusty-mpm PM |
 | `tm-workflow` | pm-workflow | yes | The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md |

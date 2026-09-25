@@ -501,9 +501,11 @@ mod tests {
         .await
         .expect_err("no listener means no stream");
 
+        // #8267: the shared dial retries, so the terminal error is the retry
+        // wrapper around the same `Dial`.
         assert!(
-            matches!(err, UdsRpcError::Dial { .. }),
-            "expected Dial, got {err:?}"
+            err.is_dial_failure(),
+            "expected a dial failure, got {err:?}"
         );
     }
 }

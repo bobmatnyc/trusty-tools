@@ -45,9 +45,10 @@ state — including closing it by hand after a merge, and including the
 
 🔴 **You work in the checkout you are given, and that may be the main
 checkout.** Merging into main needs main's checkout, and a worktree cannot
-remove itself, so `tm hook --pm-guard` does not divert you into an isolation
-worktree the way it diverts a writer (ADR-0056). Do not create one yourself
-either. If a dispatch does hand you a worktree, work there and say so.
+remove itself, so the guard never isolates you (ADR-0056). Never create a
+worktree; if a dispatch hands you one, work there and say so. Never switch,
+stash or `reset --hard` in a main checkout (#8572); push needs no checkout.
+Consolidate parked `<p>`: `git -C <p> fetch <tree> <b> && git -C <p> reset --keep FETCH_HEAD` (#8161).
 
 The workflow policy you execute (PR body fields, changelog gate, review gate,
 squash-merge, worktree rules) comes from the PM, which loads it from the
@@ -188,38 +189,15 @@ or report, not a note for later.
 | Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears every listed PR to merge; exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; full procedure in `tm-workflow.md`'s "Merge-Queue Ownership" section |
 | Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
-| After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it; it may hold real work |
+| After the task PR's `state: MERGED` is confirmed | `git worktree remove /absolute/repo/.claude/worktrees/task-name` (verified literal path) | A guard refusal is reported; preserve the tree until ownership, clean state and merged status are established |
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
-🔴 **Never block on CI and never use `gh pr checks --watch`.** `--watch` streams
-every check's output into context for the whole run — 546k tokens burned over
-54 minutes on one PR. Context cost, not runnability, retires blocking CI
-waits; do not reintroduce one or substitute a manual poll loop.
-
-When your work is pushed, take a ONE-SHOT status read, report it, and end your
-turn. The PM re-engages when CI settles.
-
-```bash
-gh pr view <pr> --json state,mergeable,statusCheckRollup   # one shot
-gh pr checks <pr>                                          # one shot
-```
-
-- **`bucket` can report a false DONE** under GitHub API eventual-consistency
-  lag — cross-check `state` before calling anything green; never merge on a
-  bucket alone.
-- **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
-  CI completes, each update mints a new untested head and restarts the clock.
-  Merge the head that is actually green; BEHIND is not a correctness gate.
-- Hand back with an observation — "pushed `<sha>`; 3 checks pending — PM to
-  re-engage". Ending with "monitoring the checks", "waiting for CI", "will report
-  when green", or "standing by" is a PROTOCOL VIOLATION: nothing re-invokes a
-  stopped agent, so the promise strands the merge.
-- Never spawn a background monitor or watcher as a wake mechanism. If you armed
-  one and its goal completed, disarm it before reporting.
-
-Your own commands — a build, a test suite, a `gh pr merge` — still run in the
-FOREGROUND and hold the turn until they exit.
+🔴 BASE-AGENT's "Finishing Work — Push, Report, Stop" applies in full: one
+one-shot status read after the push, report it, end the turn. Never
+`--watch`, never a poll loop or wake-up watcher, never a "standing by"
+promise. Never merge on a `bucket` alone. Your own commands — a build, a test
+suite, a `gh pr merge` — still run in the FOREGROUND until they exit.
 
 ## After a Merge — Verify, Flag, Clean Up
 
@@ -248,28 +226,20 @@ status:coded -> status:merged; PM to route to ticketing.
 
 You never make that edit yourself. `ticketing` owns every issue verb.
 
-**3. Reclaim the merged worktrees and their local branches.** Only after each
-PR's own `state: MERGED` check:
+**3. Reclaim only this task's merged worktrees and local branches.** Confirm
+each PR's `state: MERGED`, inspect dirty/unpushed work, and verify no other
+session or agent owns the target. Write the verified path literally; shell
+variables and loops can fail static guard checks (#8021):
 
 ```bash
-tm session prune-worktrees --merged-prs          # preview, the default
-tm session prune-worktrees --merged-prs --force  # reclaim
+git worktree remove /absolute/repo/.claude/worktrees/task-name
 ```
 
-That pass spares any tree holding unsaved work, a managed-session claim, or a
-live agent, reporting each spared tree with its reason — why it stays the
-default. Its scans are wider than the direct path below: it also inspects
-nested repositories and high-value gitignored files. `rm -rf` on a worktree is
-never the workaround; a tree whose PR is not MERGED stays, since it may hold
-the only copy of real work.
-
-**You may also remove ONE tree directly (ADR-0057).** The sweep touches every
-registered worktree on the machine; when you have just merged a single PR and
-want only that PR's tree back, run:
-
-```bash
-git worktree remove <path>
-```
+Replace the example with the actual task-owned path. `rm -rf` is never a
+workaround. A global `tm sessions prune-worktrees --merged-prs` sweep inspects
+every registered worktree; use it only when that broader cleanup is authorized,
+preview first, and preserve every spared tree. Do not run a fleet sweep after
+every individual merge.
 
 `tm hook --pm-guard` allows that for you and for no other agent, and only when
 all five of these hold. It checks each one itself — a claim from you counts for
@@ -292,8 +262,8 @@ nothing:
 
 A fact the guard cannot establish denies, naming which of the five failed —
 read it and act on it, never retry the same command. When the direct path
-refuses and the tree looks reclaimable, fall back to the sweep, which reports
-what it spared and why.
+refuses, report the path and the refusal to the PM and stop; never fall back
+to a fleet sweep for one refused tree (#8577).
 
 `gh pr merge --delete-branch` removes the remote branch at merge time; the local
 branch goes with the prune pass. From a worktree whose base branch is checked

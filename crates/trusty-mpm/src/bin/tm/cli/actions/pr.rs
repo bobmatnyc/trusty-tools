@@ -202,9 +202,15 @@ pub(crate) struct PrMergeArgs {
     #[arg(long)]
     pub(crate) auto: bool,
 
-    /// Keep the remote branch instead of deleting it at merge time.
+    /// Keep the remote branch instead of deleting it at merge time. Also skips
+    /// the post-merge local cleanup, which deletes branches (#8301).
     #[arg(long = "no-delete-branch")]
     pub(crate) no_delete_branch: bool,
+
+    /// Skip the post-merge local worktree and branch cleanup; run
+    /// `tm pr cleanup <n>` later instead (#8301).
+    #[arg(long = "no-cleanup", visible_alias = "keep-worktree")]
+    pub(crate) no_cleanup: bool,
 
     /// `owner/repo` (defaults to the cwd's git remote).
     #[arg(long)]

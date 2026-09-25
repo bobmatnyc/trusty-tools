@@ -103,7 +103,7 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             TrustyCommand::ManagedRuntimeStop { target: id.clone() }
         }
         SessionAction::ManagedResume { id } => TrustyCommand::ManagedResume { target: id.clone() },
-        SessionAction::Decommission { id } => {
+        SessionAction::Decommission { id, .. } => {
             TrustyCommand::ManagedDecommission { target: id.clone() }
         }
         // Every other variant is project-session / TUI / prune; not routed here.
@@ -442,7 +442,10 @@ mod tests {
             Some(TrustyCommand::ManagedResume { .. })
         ));
         assert!(matches!(
-            to_command(&SessionAction::Decommission { id: "x".into() }),
+            to_command(&SessionAction::Decommission {
+                id: "x".into(),
+                force: false,
+            }),
             Some(TrustyCommand::ManagedDecommission { .. })
         ));
         assert!(matches!(
@@ -505,12 +508,12 @@ mod tests {
             name: "tmpm-red-owl".into(),
             state: "Provisioning".into(),
             runtime: "claude-code".into(),
-            attach_cmd: "tmux attach -t tmpm-red-owl".into(),
+            attach_cmd: "tmux attach -t '=tmpm-red-owl'".into(),
         };
         let out = render_cli(&r);
         assert_eq!(
             out,
-            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t tmpm-red-owl"
+            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t '=tmpm-red-owl'"
         );
     }
 
@@ -551,9 +554,9 @@ mod tests {
         assert_eq!(
             render_cli(&CommandResult::ManagedAttachCmd {
                 id: "m-1".into(),
-                attach_cmd: "tmux attach -t tmpm-red-owl".into()
+                attach_cmd: "tmux attach -t '=tmpm-red-owl'".into()
             }),
-            "tmux attach -t tmpm-red-owl"
+            "tmux attach -t '=tmpm-red-owl'"
         );
     }
 

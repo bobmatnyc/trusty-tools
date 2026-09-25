@@ -123,6 +123,33 @@ fn stock_pm_agent_may_call_delegate_to_agent() {
     );
 }
 
+/// #8235 regression: `todo_write` is registered on the session agent
+/// unconditionally (`task::executor::run_and_record`) and stock `pm.md` does
+/// not list it, so without the harness exemption the gate refuses the agent's
+/// own checklist — which is how the tool's first end-to-end run failed, with
+/// `denied by policy (tcode_tools allowlist)`.
+#[test]
+fn stock_pm_agent_may_call_todo_write() {
+    let pm = stock_pm_agent();
+    let allowed = pm
+        .tools
+        .as_ref()
+        .and_then(|t| t.allowed.as_ref())
+        .expect("stock pm.md declares a tcode_tools allowlist");
+    assert!(
+        !allowed.iter().any(|t| t == "todo_write"),
+        "fixture premise: stock pm.md must still omit todo_write, got {allowed:?}"
+    );
+    assert_eq!(
+        PermissionGate::evaluate(
+            &pm,
+            "todo_write",
+            &json!({"todos": [{"content": "plan", "status": "in_progress"}]})
+        ),
+        Decision::Allow
+    );
+}
+
 /// Every tool the harness registers clears an allowlist naming none of them.
 #[test]
 fn harness_registered_tool_bypasses_the_legacy_allowlist() {

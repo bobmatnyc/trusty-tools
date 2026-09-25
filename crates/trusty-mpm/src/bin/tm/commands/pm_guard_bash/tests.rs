@@ -1834,6 +1834,30 @@ fn unresolved_target_is_none_once_home_expands_the_tilde() {
     }
 }
 
+/// #8572: a `$(…)` or backtick substitution survives resolution too, and
+/// every rule asking [`unresolved_target`] must see it.
+/// Test: itself.
+#[test]
+fn unresolved_target_reports_a_command_substitution() {
+    let env = PathEnv {
+        tmpdir: None,
+        tmp: None,
+        home: Some("/Users/bob".to_string()),
+    };
+    let base = Path::new("/repo/.claude/worktrees/agent-a");
+    for (token, expected) in [
+        ("$(cat /tmp/main)", "$("),
+        ("`cat /tmp/main`", "`"),
+        ("$(cat $MAIN)/sub", "$("),
+    ] {
+        let resolved = resolve_target_path(token, base, &env);
+        let unresolved =
+            unresolved_target(&resolved).unwrap_or_else(|| panic!("must be unresolved: {token}"));
+        assert_eq!(unresolved.token, expected, "token: {token}");
+        assert_eq!(unresolved.shown, resolved, "the whole path is quoted");
+    }
+}
+
 /// Whether any composition segment of `command` runs `git` as its command
 /// word — the question every git rule in this guard asks, resolved the way
 /// the production path resolves it (#6982).
@@ -2480,4 +2504,32 @@ fn the_first_refusing_target_wins() {
         p.starts_with("/full").then(|| "over threshold".to_string())
     });
     assert_eq!(reason.as_deref(), Some("over threshold"));
+}
+
+/// #8439: `classify_bash_segment` and the worktree-add walker do not read an
+/// unknown git global option as "not this verb" — every later token is a
+/// candidate subcommand, so the deny still fires.
+/// Test: itself.
+#[test]
+fn an_unknown_git_global_option_does_not_hide_a_denied_verb() {
+    for command in [
+        "git --shallow-file x apply p.diff",
+        "git --shallow-file status diff --output=/tmp/o.diff",
+    ] {
+        assert!(
+            evaluate_bash_command(command).is_some(),
+            "must deny: {command}"
+        );
+    }
+    assert_eq!(
+        extract_shell_edit_target("git --shallow-file x diff --output=/tmp/o.diff").as_deref(),
+        Some("/tmp/o.diff")
+    );
+    assert_eq!(
+        evaluate_worktree_add_command(
+            "git --shallow-file x worktree add /tmp/wt",
+            Path::new("/Users/x/proj")
+        ),
+        Some(WORKTREE_TMP_REASON)
+    );
 }

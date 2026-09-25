@@ -2,7 +2,7 @@
 name: rust-build-performance
 description: "Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks."
 user-invocable: false
-version: "1.0.0"
+version: "1.1.0"
 category: agent-reference
 effort: low
 ---
@@ -24,7 +24,7 @@ Practical inner loop, in order:
 
 Reach for `cargo check` by default; reach for a full build only when you
 actually need generated code (running the binary, running tests that need it,
-or the workspace-wide quality gate before shipping).
+or the project-required shipping gate).
 
 ## 2. `cargo check` While Coding
 
@@ -35,16 +35,21 @@ cargo check -p trusty-search # narrow to the crate you're actually editing
 
 `cargo check` runs the same type-checking and borrow-checking as `cargo
 build` but skips code generation, so it's dramatically faster for the
-edit-check-edit cycle. In a large workspace (this one has 21+ crates), always
+edit-check-edit cycle. In a large workspace, always
 narrow with `-p <crate>` unless you specifically need cross-crate diagnostics
 — checking the whole workspace on every keystroke-adjacent save wastes the
 exact time `cargo check` exists to save.
 
-**This does not change the shipping gate.** This project's quality bar still
-requires the full `cargo build --workspace`, `cargo test`, `cargo clippy
---workspace --all-targets -- -D warnings`, and `cargo fmt --check` before any
-change lands — see the project `CLAUDE.md` Build and Test Commands section.
-`cargo check` is for the inner loop only; it never substitutes for the gate.
+**The project's risk/stage test ladder defines the shipping gate.** Run its
+required crate, consumer and release checks; prose-only changes need its doc
+gates. Do not add a workspace build merely because work is ready to land.
+
+**Before a concurrent build**, name the actual assigned `CARGO_TARGET_DIR`,
+job limit, profile/features and lock-wait bound in the brief. Use the existing
+allocator if available; otherwise coordinate ownership with the PM. Do not
+invent a slot command or assume a fixed slot count. On a lock wait, identify
+the holder and report the bound; never kill another session's build or start
+a duplicate. Preserve the assigned cache across compatible runs. See #8021.
 
 ## 3. Measure Before Tuning
 
@@ -92,6 +97,24 @@ cargo tree --edges features   # which features are pulled in, and by what
 this repo's convention (see project `CLAUDE.md`) — never pin a dependency
 locally if it's already in the workspace table; a locally-pinned duplicate
 defeats both dependency-graph hygiene and cargo's version unification.
+
+**Dev-dependency edges are compile-graph edges, not favors.** The entire
+point of separate crates is a more efficient compilation process; a
+test-only edge that welds two crates' compile graphs together defeats it.
+
+- Never add a workspace crate as a `[dev-dependencies]` or
+  `[build-dependencies]` entry when it is absent from the consumer's normal
+  dependency tree.
+- A test that needs two crates lives in its own `publish = false` test crate
+  that depends on both, or in the crate that already depends on the other.
+- Re-declaring a normal dependency under `[dev-dependencies]` with extra
+  features compiles that crate a second time, under a different feature set.
+  Do this only when the feature must never leak into production, and say why
+  in a manifest comment.
+- Check it without a build: `cargo tree -p <crate> -e dev --prefix none` must
+  add no workspace crate that `-e normal` lacks.
+
+See #8341.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/features.html>,
 <https://doc.rust-lang.org/cargo/commands/cargo-tree.html>

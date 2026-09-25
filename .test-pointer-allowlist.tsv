@@ -166,7 +166,6 @@ crates/trusty-code/src/agent_loop/cadence.rs	stays_under_budget_every_turn
 crates/trusty-code/src/agent_loop/mod.rs	sink_receives_tool_error_for_fatal_failures
 crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
 crates/trusty-code/src/agent_loop/transcript.rs	maybe_compact_marks_middle_span_only
-crates/trusty-code/src/agent_loop/transcript.rs	push_response_appends_assistant
 crates/trusty-code/src/agents/config.rs	agent_config_llm_params
 crates/trusty-code/src/agents/config.rs	agent_config_runner_kind
 crates/trusty-code/src/agents/config.rs	agent_config_system_prompt
@@ -303,9 +302,6 @@ crates/trusty-memory/src/bootstrap/types.rs	bootstrap_palace_returns_per_file_co
 crates/trusty-memory/src/bootstrap/types.rs	bootstrap_palace_seeds_temporal_metadata_when_no_files
 crates/trusty-memory/src/commands/doctor/checks.rs	stale_lock_check_warns_when_lock_present
 crates/trusty-memory/src/commands/doctor/mod.rs	doctor_fix_palaces_lists_orphaned_dry_run
-crates/trusty-memory/src/commands/kuzu_migrate.rs	read_entities_returns_expected_count
-crates/trusty-memory/src/commands/kuzu_migrate.rs	read_relations_returns_expected_count
-crates/trusty-memory/src/commands/kuzu_migrate.rs	schema_table_names_are_defined
 crates/trusty-memory/src/commands/setup.rs	patch_one_installs_hook
 crates/trusty-memory/src/commands/setup.rs	patch_one_installs_session_start_hook
 crates/trusty-memory/src/commands/setup.rs	setup_creates_data_dir_under_override
@@ -515,8 +511,6 @@ crates/trusty-mpm/src/daemon/error.rs	invalid_transition_body_lists_allowed
 crates/trusty-mpm/src/daemon/idle_reaper.rs	counter_removed_after_action
 crates/trusty-mpm/src/daemon/idle_reaper.rs	new_state_is_empty
 crates/trusty-mpm/src/daemon/llm_overseer.rs	chat_history_is_capped
-crates/trusty-mpm/src/daemon/llm_overseer.rs	resolve_api_key_missing_is_empty
-crates/trusty-mpm/src/daemon/llm_overseer.rs	resolve_api_key_reads_env_var
 crates/trusty-mpm/src/daemon/managed_routes/activity.rs	activity_no_key_returns_raw_pane
 crates/trusty-mpm/src/daemon/managed_routes/fleet.rs	fleet_route_groups_by_project
 crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	isr_failure_auto_accepts
@@ -584,7 +578,6 @@ crates/trusty-mpm/src/runtime/claude_code.rs	session_id_exists_falls_back_to_hom
 crates/trusty-mpm/src/runtime/claude_code.rs	session_id_exists_prefers_config_dir_projects_when_present
 crates/trusty-mpm/src/runtime/claude_code.rs	spawn_resume_publishes_session_id_via_set_environment
 crates/trusty-mpm/src/runtime/mod.rs	claude_code_adapter_spawn_sends_env_scrub_command
-crates/trusty-mpm/src/runtime/mod.rs	spawn_resume_without_id_uses_continue_flag
 crates/trusty-mpm/src/services/discoverer/mod.rs	health_state_serialises_correctly
 crates/trusty-mpm/src/services/discoverer/mod.rs	probe_uptime_returns_none_for_unknown_pid
 crates/trusty-mpm/src/services/discoverer/mod.rs	probe_version_returns_first_line
@@ -915,7 +908,6 @@ crates/trusty-common/src/log_drain/single_source.rs	yaml_round_trips_every_field
 crates/trusty-common/src/memory_core/dream/fading.rs	palace_dream
 crates/trusty-common/src/memory_core/retrieval/handle.rs	idle_evict
 crates/trusty-common/src/memory_core/retrieval/types.rs	deferred_embed_backfills_vector_once_embedder_ready
-crates/trusty-common/src/memory_core/store/kg/ops.rs	kuzu_migrate
 crates/trusty-common/src/memory_core/store/payload_store/types.rs	iter_segment
 crates/trusty-common/src/memory_core/store/vector.rs	default_palace_used_when_arg_omitted
 crates/trusty-common/src/monitor/memory_tui/render.rs	test_render_with_drawer_pane_focus_marker
@@ -1000,7 +992,6 @@ crates/trusty-mpm/src/core/tmux.rs	send_keys_literal_argv
 crates/trusty-mpm/src/daemon/bug_report/ratelimit.rs	fingerprint_stamp_persists
 crates/trusty-mpm/src/daemon/bug_report/token.rs	mock_token_exchange
 crates/trusty-mpm/src/daemon/managed_routes/inproject.rs	create_session_worktree_writes_owner_sentinel
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	session_resume_unknown_id_errors
 crates/trusty-mpm/src/daemon/services/tmux_service.rs	send_command_returns_output_shape
 crates/trusty-mpm/src/daemon/state/overseer.rs	new_builds_audit_logger
 crates/trusty-mpm/src/daemon/tmux.rs	list_panes_argv

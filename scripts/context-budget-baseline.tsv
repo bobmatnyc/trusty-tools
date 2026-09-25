@@ -2,17 +2,27 @@
 # Regenerate with: bash scripts/check_context_budget.sh --update
 # Growing TOTAL past 5%, or one file past 10%, fails the gate until
 # the growth is recorded here in the same PR.
-CLAUDE.md	11106
-crates/trusty-mpm/src/assets/instructions/sections/README.md	11635
-crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md	2029
-crates/trusty-mpm/src/assets/instructions/sections/core.md	7534
-crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	3916
+CLAUDE.md	11406
+crates/trusty-mpm/src/assets/instructions/sections/README.md	13464
+crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md	1804
+crates/trusty-mpm/src/assets/instructions/sections/agent-routing.md	649
+crates/trusty-mpm/src/assets/instructions/sections/autonomous-execution.md	712
+crates/trusty-mpm/src/assets/instructions/sections/core.md	1666
+crates/trusty-mpm/src/assets/instructions/sections/delegation-mechanics.md	980
+crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	4305
 crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md	829
-crates/trusty-mpm/src/assets/instructions/sections/identity.md	466
-crates/trusty-mpm/src/assets/instructions/sections/memory.md	1052
-crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3614
+crates/trusty-mpm/src/assets/instructions/sections/git-file-tracking.md	257
+crates/trusty-mpm/src/assets/instructions/sections/identity.md	825
+crates/trusty-mpm/src/assets/instructions/sections/memory.md	1068
+crates/trusty-mpm/src/assets/instructions/sections/messages-reports-sessions.md	1355
+crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3734
+crates/trusty-mpm/src/assets/instructions/sections/phases.md	465
+crates/trusty-mpm/src/assets/instructions/sections/pm-allowlist.md	1113
 crates/trusty-mpm/src/assets/instructions/sections/prompt-self-improvement.md	264
+crates/trusty-mpm/src/assets/instructions/sections/qa-gate.md	300
 crates/trusty-mpm/src/assets/instructions/sections/search.md	202
-crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4341
-crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7988
-TOTAL	54976
+crates/trusty-mpm/src/assets/instructions/sections/subagent-re-engagement.md	309
+crates/trusty-mpm/src/assets/instructions/sections/tickets-prs-releases.md	674
+crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4704
+crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7984
+TOTAL	59069

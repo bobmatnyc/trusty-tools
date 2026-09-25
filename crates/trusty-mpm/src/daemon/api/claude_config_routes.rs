@@ -613,14 +613,19 @@ pub async fn restart_claude_code(
 ///
 /// # Errors
 ///
-/// [`DaemonError::Internal`] when tmux is absent or the recorded pane is
-/// confirmed gone (HTTP 500).
+/// [`DaemonError::InvalidRequest`] (HTTP 400) for an empty `tmux_session`
+/// (#8443: it used to render `=:`, which tmux resolves to the current
+/// session). [`DaemonError::Internal`] when tmux is absent or the recorded
+/// pane is confirmed gone (HTTP 500).
 ///
-/// Test: `restart_claude_code_handles_missing_tmux`.
+/// Test: `restart_claude_code_handles_missing_tmux`,
+/// `restart_route_rejects_an_empty_tmux_session`.
 pub async fn restart_claude_code_op(
     state: &Arc<DaemonState>,
     body: RestartRequest,
 ) -> Result<RestartResponse, DaemonError> {
+    crate::core::tmux::check_session_name(&body.tmux_session)
+        .map_err(|e| DaemonError::InvalidRequest(e.to_string()))?;
     let records = state.session_manager().await.list().await;
     let pane_id = select_restart_pane_id(&records, &body.tmux_session);
     crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(
@@ -639,6 +644,26 @@ pub async fn restart_claude_code_op(
 #[cfg(test)]
 mod restart_pane_selection_tests {
     use super::*;
+
+    /// #8443 critic HIGH: an empty `tmux_session` is a 400, never a restart
+    /// typed into whichever session `=:` resolves to.
+    #[tokio::test]
+    async fn restart_route_rejects_an_empty_tmux_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = crate::core::paths::FrameworkPaths::under(dir.path());
+        let state = Arc::new(DaemonState::with_paths(&paths));
+        for name in ["", "=", "  "] {
+            let status = restart_claude_code(
+                State(state.clone()),
+                Json(RestartRequest {
+                    tmux_session: name.to_string(),
+                }),
+            )
+            .await
+            .err();
+            assert_eq!(status, Some(StatusCode::BAD_REQUEST), "{name:?}");
+        }
+    }
     use crate::session_manager::record::ManagedSessionId;
 
     /// Builds a minimal, otherwise-default [`SessionRecord`] for the pure

@@ -3,17 +3,17 @@
 [![crates.io](https://img.shields.io/crates/v/trusty-memory.svg)](https://crates.io/crates/trusty-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Memory palace MCP server (HTTP/SSE) backed by `hnsw_rs` (HNSW) vector store,
-`redb` metadata and knowledge-graph stores, and `fastembed` embeddings. Stores
-and retrieves natural-language memories organized into named "palaces"
-(namespaces), with an optional knowledge-graph layer for structured triples.
+Memory palace MCP server (stdio + Unix socket) backed by `hnsw_rs` (HNSW)
+vector store, `redb` metadata and knowledge-graph stores, and `fastembed`
+embeddings. Stores and retrieves natural-language memories organized into
+named "palaces" (namespaces), with an optional knowledge-graph layer for
+structured triples.
 
 Claude Code and Codex integration uses `trusty-memory serve` — a direct
-stdio JSON-RPC MCP server that forwards every request to the running HTTP
-daemon and returns daemon responses verbatim. No Unix domain socket is
-involved. `serve --stdio` is the same server: the flag selects nothing since
-#5267, and `trusty-memory setup` rewrites a registration still carrying it
-(#5265).
+stdio JSON-RPC MCP server that forwards every request to the running daemon
+over its Unix domain socket and returns daemon responses verbatim.
+`serve --stdio` is the same server: the flag selects nothing since #5267, and
+`trusty-memory setup` rewrites a registration still carrying it (#5265).
 
 A DEPRECATED `trusty-memory-mcp-bridge` shim binary is also installed by
 `cargo install trusty-memory` so that existing `.mcp.json` configs that still
@@ -99,18 +99,20 @@ None — the daemon is self-contained and requires no external databases or conf
 
 #### Optional: OpenRouter API Key
 
-The embedded memory UI includes a chat panel that requires an OpenRouter API key for the language model integration. Set `OPENROUTER_API_KEY` in your environment or enter it in the UI to enable chat features.
+The daemon reads `OPENROUTER_API_KEY` for two features: the `memory.chat` MCP method, and the dream cycle's semantic-consolidation summarization pass. There is no UI to enter a key into — set it in the environment before starting the daemon.
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
-trusty-memory              # Start the daemon with chat enabled
+trusty-memory              # Start the daemon with chat and consolidation summaries enabled
 ```
 
-Chat is optional; the daemon fully functions without it.
+Both features are optional; the daemon fully functions without a key.
 
-#### Note: Embedded Svelte UI
+#### Note: no embedded UI
 
-This crate embeds a Svelte admin UI (built and compiled into the binary). The UI is pre-built and included in releases; no additional steps are needed. The embedded UI runs on `http://127.0.0.1:<port>` — see the daemon output for the live port.
+This crate has no embedded UI and no HTTP listener — it serves one Unix
+domain socket (`transport::uds`). The admin dashboard moved to the separate
+`trusty-console` crate; see [Web UI](#web-ui) below.
 
 ### Verify Installation
 
@@ -130,40 +132,32 @@ Expected output: the semantic version of the installed binary (e.g., `trusty-mem
 trusty-memory start
 ```
 
-`start` is the daemon verb: it spawns a detached background daemon and returns
-once the daemon answers `/health`. Bare `trusty-memory serve` speaks MCP over
-stdio (matching `trusty-search serve`), so use `start` — not `serve` — when you
-want a background daemon. The daemon binds HTTP/SSE on a dynamic port in the `7070..=7079`
-range (with OS fallback) and writes the resolved address to its
-discovery file. Pass `--foreground` to keep the daemon inline (used by
-launchd / systemd / Docker), or `--http <ADDR>` to pin a specific address.
+`start` is the daemon verb: it spawns a detached `serve --foreground` and
+returns once the socket answers `memory.health`. Bare `trusty-memory serve`
+speaks MCP over stdio (matching `trusty-search serve`), so use `start` — not
+`serve` — when you want a background daemon. The daemon binds a derived Unix
+domain socket (`trusty_common::daemon_socket_path`) — there is no port and no
+discovery file to publish. Pass `--foreground` to keep the daemon inline (used
+by launchd / systemd / Docker).
 
-### Check the listening port
+### Find the daemon's socket
 
 ```bash
-trusty-memory port               # bare port: 7070
-trusty-memory port --addr        # host:port: 127.0.0.1:7070
-trusty-memory port --json        # {"addr":"127.0.0.1","port":7070}
-
-# Shell substitution — stdout is clean (logs go to stderr):
-curl http://127.0.0.1:$(trusty-memory port)/health
+trusty-memory port               # socket path: /…/trusty-memory.sock
+trusty-memory port --addr        # same path, for a client that dials it
+trusty-memory port --json        # {"socket":"/…/trusty-memory.sock","serving":true}
 ```
 
 Exits non-zero with a message on stderr when no daemon is running, so shell
 substitution fails cleanly.
 
-### Browser dashboard + REST API
+### Dashboard
 
-The same `trusty-memory start` daemon serves the embedded Svelte admin UI
-at the bound address (printed by `trusty-memory monitor web` once the
-daemon is running) and a REST API under `/api/v1/`.
-
-Key REST API field names (verified against `src/transport/methods/palaces.rs`
-and `src/service/core.rs`):
-- Recall endpoints (`GET /api/v1/palaces/{id}/recall` and `GET /api/v1/recall`) accept
-  the query string as **`q`** (not `query`): `?q=my+search+term&top_k=5`.
-- Drawer-create body (`POST /api/v1/palaces/{id}/drawers`) expects a **`content`** field
-  (not `text`) for the drawer body.
+`trusty-memory start` serves no HTTP and no embedded UI — one Unix domain
+socket only. The dashboard lives in the separate `trusty-console` crate,
+which reads the daemon over that socket; see [Web UI](#web-ui) below. For the
+tool surface (MCP and the equivalent socket methods), see
+[Available MCP Tools](#available-mcp-tools).
 
 ### Bind to a named palace
 
@@ -205,12 +199,11 @@ Codex reads its own file. `trusty-memory setup` writes the same entrypoint into
 legacy `--stdio`, or nested-JSON-string vector without touching any other table
 or comment (#5265).
 
-`trusty-memory serve` is a pure daemon-bridge proxy: it ensures the
-HTTP daemon is running (auto-starting it if absent), then forwards every
-JSON-RPC request to `POST /rpc` on the daemon and returns the response
-verbatim. No Unix domain socket is involved. The stdio process never opens
-the redb write-lock directly, so it co-exists safely with the running HTTP
-daemon.
+`trusty-memory serve` is a pure daemon-bridge proxy: it ensures the daemon is
+running (auto-starting it if absent), then forwards every JSON-RPC request
+over the daemon's Unix domain socket and returns the response verbatim. The
+stdio process never opens the redb write-lock directly, so it co-exists
+safely with the running daemon.
 
 If you are switching from the legacy `kuzu-memory` server, run
 `trusty-memory migrate kuzu-memory` to rewrite all Claude settings files
@@ -245,8 +238,8 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-All tools are exposed via both the MCP protocol (over the `serve --stdio`
-path) and the HTTP API (`/api/v1/`). The `palace` argument is required unless
+All tools are exposed via the MCP protocol (over the `serve --stdio` path).
+The `palace` argument is required unless
 the server was started with `--palace <name>`, which makes it optional
 everywhere.
 
@@ -315,9 +308,10 @@ this table is generated from it, not maintained by hand.
 <!-- END GENERATED: mcp-tools -->
 
 Global daemon statistics (total drawers, vectors, KG triples) are available
-via `GET /api/v1/status` — an HTTP-only endpoint (`StatusPayload` in
-`src/service/types.rs`); there is no corresponding MCP tool, which is why the
-generated roster above does not list one.
+over the socket as `memory.status` (`StatusPayload` in
+`src/service/types.rs`, bound in `src/transport/uds.rs`); there is no
+corresponding MCP tool, which is why the generated roster above does not
+list one.
 
 ### Task drawers (protected memory)
 
@@ -400,7 +394,8 @@ cargo test -p trusty-common --features memory-core -- --include-ignored semantic
 Plus two CLI subcommands:
 
 - `trusty-memory send-message --to <palace> --purpose <p> --content <text> [--from <palace>]`
-  — non-MCP entry point. Posts to the daemon's `POST /api/v1/messages`.
+  — non-MCP entry point. Calls the daemon's `memory.message_send` socket method
+  (`src/commands/send_message.rs`).
 - `trusty-memory inbox-check [--palace <id>]` — installed as a Claude Code
   `SessionStart` hook by `setup`. Reads unread messages from the cwd-derived
   palace, prints them to stdout (Claude Code injects stdout as session
@@ -449,11 +444,11 @@ the existing `UserPromptSubmit` `prompt-context` hook). On every new Claude
 Code session, the hook:
 
 1. Resolves the receiver palace slug from cwd.
-2. Fetches unread messages from `GET /api/v1/messages?palace=<slug>&unread_only=true`.
+2. Fetches unread messages via the daemon's `memory.messages_list` socket
+   method (`src/commands/inbox_check.rs`).
 3. Prints each as a Markdown block to stdout — Claude Code injects stdout as
    session context.
-4. Atomically marks each delivered message read via
-   `POST /api/v1/messages/mark_read`.
+4. Atomically marks each delivered message read via `memory.message_mark_read`.
 
 The mark-read step uses an in-memory compare-and-swap on the palace's
 drawer table so two concurrent sessions opening at once cannot
@@ -550,11 +545,12 @@ existing palaces.
 
 ## Web UI
 
-When running in HTTP mode, the embedded Svelte admin dashboard is available at:
-
-```
-http://127.0.0.1:<port>/
-```
+trusty-memory has no HTTP listener or embedded UI of its own — the daemon
+serves one Unix domain socket ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286)).
+The admin dashboard moved to the separate `trusty-console` crate
+([#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155)), which reads
+the daemon over that socket and serves the dashboard at `/tools/memory/`.
+Install it separately: `cargo install trusty-console`.
 
 The dashboard provides:
 - Real-time palace overview (drawer counts, vector counts, KG triple counts)
@@ -569,7 +565,7 @@ The dashboard provides:
 | Variable | Default | Description |
 |---|---|---|
 | `RUST_LOG` | `warn` | Tracing filter. E.g. `RUST_LOG=info` or `RUST_LOG=trusty_memory=debug`. |
-| `OPENROUTER_API_KEY` | — | Enables chat completions via OpenRouter (`/api/v1/chat`). |
+| `OPENROUTER_API_KEY` | — | Enables chat completions via OpenRouter for the `memory.chat` MCP method and dream-cycle summarization. |
 | `TRUSTY_DATA_DIR_OVERRIDE` | — | Override the data directory (intended for tests). |
 
 ### Config file
@@ -605,13 +601,13 @@ Each palace directory contains:
 
 ```
 trusty-memory (this crate)          trusty-common `memory-core` feature
-  axum HTTP/SSE server     ──────►  PalaceRegistry
-  serve --stdio (JSON-RPC) ──────►  HNSW vector index (index.usearch)
-  embedded Svelte UI               redb metadata + KG (kg.redb)
-  MCP tool surface                 fastembed (AllMiniLML6V2Q)
+  serve/start (Unix socket) ─────►  PalaceRegistry
+  serve --stdio (JSON-RPC)  ─────►  HNSW vector index (index.usearch)
+  MCP tool surface                  redb metadata + KG (kg.redb)
+                                     fastembed (AllMiniLML6V2Q)
 
 Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
-                                  ──POST /rpc (HTTP)──► trusty-memory daemon
+                                  ──Unix socket──► trusty-memory daemon
 ```
 
 The `memory-core` feature of `trusty-common` owns the storage engine: `hnsw_rs` for approximate
@@ -619,20 +615,22 @@ nearest-neighbor search, `redb` for drawer metadata and knowledge-graph triples,
 `fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
 thin protocol layer on top.
 
-The embedded Svelte UI is compiled at build time and served via `rust-embed` —
-no separate web server or Node.js installation is needed at runtime.
+This crate has no embedded UI and no HTTP listener
+([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286)):
+`trusty_common::uds::server` serves one Unix domain socket, and
+`trusty-console` reads it to render the dashboard — see [Web UI](#web-ui).
 
 ## Feature Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `axum-server` | **enabled** | Compiles the HTTP server, SSE endpoint, and axum-based REST API. Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). |
+| `daemon` | **enabled** | Compiles the socket-serving surface (`transport::uds`, `serve` / `start`). Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
 
 ```toml
-# Full daemon build — no change needed (axum-server is on by default)
+# Full daemon build — no change needed (daemon is on by default)
 trusty-memory = { workspace = true }
 
-# rlib consumer — omit the HTTP stack
+# rlib consumer — omit the socket-serving surface
 trusty-memory = { workspace = true, default-features = false }
 ```
 
@@ -657,12 +655,11 @@ Auto-KG extraction skips drawers tagged `cross-project-qa`, `test`, or
 `fixture` so synthetic content never pollutes the graph. Drawers deleted via
 `memory_forget` cascade-delete their derived triples automatically.
 
-The REST endpoint `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` lets
-you remove a single active triple; `triple_id` is the base64url encoding of
-`subject + "\0" + predicate + "\0" + object`. Every object at a pair is a
-separate row, so the object is what makes the id name one of them — an id
-carrying only `subject + "\0" + predicate` is rejected with `400`, because
-that form used to close every object at the pair.
+The `kg_retract_triple` MCP tool (`palace`, `subject`, `predicate`, `object`)
+closes exactly one active triple — see [Available MCP Tools](#available-mcp-tools).
+Every object at a `(subject, predicate)` pair is a separate row, so the object
+is what makes the call name one of them; omitting it is rejected rather than
+closing every object at the pair.
 
 ### From kuzu-memory data (issue #277)
 
@@ -695,11 +692,11 @@ duplicate imports produce the same drawer ID and are silently skipped.
 ## Development
 
 ```bash
-# Build and run (background daemon, dynamic port)
+# Build and run (background daemon over a Unix socket)
 cargo run -p trusty-memory -- serve
 
-# Run inline on a specific address (foreground, useful for debuggers)
-cargo run -p trusty-memory -- serve --foreground --http 127.0.0.1:7880
+# Run inline (foreground, useful for debuggers)
+cargo run -p trusty-memory -- serve --foreground
 
 # Tests
 cargo test -p trusty-memory

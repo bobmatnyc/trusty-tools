@@ -69,7 +69,9 @@ fn run_pm_guard(stdin_json: &str, home: &std::path::Path) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// A `PreToolUse` Bash payload carrying `command`.
@@ -82,9 +84,21 @@ fn bash_payload(command: &str) -> String {
     input.to_string()
 }
 
+/// A fresh scratch `$HOME` whose config pins `disk.max_usage_pct: 100`.
+///
+/// Why: the `git worktree add` rows here reach the #7497 disk gate, which reads
+/// the host volume. Left at the 90% default, a nearly full disk turned an
+/// expected ALLOW into a disk-usage DENY, and let an expected DENY pass for the
+/// disk reason instead of the secret-path one.
+fn guard_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("tempdir");
+    common::write_disk_threshold(home.path(), 100);
+    home
+}
+
 /// Assert the guard ALLOWED `command` — an allow prints nothing at all.
 fn assert_allowed(command: &str) {
-    let home = tempfile::tempdir().expect("tempdir");
+    let home = guard_home();
     let stdout = run_pm_guard(&bash_payload(command), home.path());
     assert_eq!(
         stdout.trim(),
@@ -95,7 +109,7 @@ fn assert_allowed(command: &str) {
 
 /// Assert the guard DENIED `command`, with a non-empty reason.
 fn assert_denied(command: &str) {
-    let home = tempfile::tempdir().expect("tempdir");
+    let home = guard_home();
     let stdout = run_pm_guard(&bash_payload(command), home.path());
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(

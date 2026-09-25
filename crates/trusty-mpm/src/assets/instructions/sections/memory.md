@@ -1,6 +1,6 @@
-## Memory Protocol (Context-First)
-
-<!-- #7835: the section used to promise a per-prompt hook injection the PM
+<!-- #8533: the recall/remember protocol itself is a PINNED block in the
+     manifest, so a MEMORY override replaces only this elaboration.
+     #7835: the section used to promise a per-prompt hook injection the PM
      could rely on. The guaranteed seed is `catchup_context`, built once at
      launch by `core::session_launch::prepare_session` from
      `core::catchup::run_catchup_blocking` (`include_palace`); the
@@ -12,6 +12,5 @@
      `core::instruction_fold`. -->
 Palace context arrives ONCE per session, as the catch-up seed block injected at
 session start. Never assume a per-prompt hook refreshes it; that seed predates
-everything this session has learned. Call `memory_recall` for targeted recall
-BEFORE any research or delegation, never after. `session_context_catchup`
-re-reads the same launch digest on demand.
+everything this session has learned. `session_context_catchup` re-reads the
+same launch digest on demand.

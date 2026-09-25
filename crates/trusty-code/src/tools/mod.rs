@@ -22,8 +22,16 @@
 //! onto `agent_loop::GoalSlots`, registered only in the daemon-session PM
 //! registry (`task::executor::run_and_record`), never in `run_task`'s
 //! one-shot/bake-off path or a delegated engineer's registry.
+//!
+//! (#8235) `checklist` adds `todo_write` — the model-facing write path onto
+//! the session's per-agent checklist (`session.get_agents`'s `todos`),
+//! registered on the same daemon-session registry and under the same
+//! restriction as the goal tools. Goal slots and the checklist are different
+//! surfaces: five standing objectives that survive compaction versus the
+//! ordered steps of the task in hand.
 
 pub mod bash;
+pub mod checklist;
 pub mod delegate;
 pub mod finish_task;
 pub mod fs;
@@ -38,6 +46,8 @@ pub mod trusty_search;
 // Flat re-exports for `crate::tools::*` convenience.
 #[allow(unused_imports)]
 pub use bash::{BASH_TOOL_NAME, BashTool};
+// #8235: `todo_write` — the session checklist's model-facing write path.
+pub use checklist::{MAX_TODOS, TODO_WRITE_TOOL_NAME, TodoError, TodoStore, TodoWriteTool};
 #[allow(unused_imports)]
 pub use delegate::{DELEGATE_TO_AGENT_TOOL_NAME, DelegateToAgentTool, EngineerCompletionSignal};
 pub use finish_task::{

@@ -17,12 +17,12 @@ adds operations-specific discipline. Do not restate BASE-AGENT content here.
 
 ## Safety
 
-- Never delete data without explicit confirmation.
+- Delete data only within explicit authorization; verify target and ownership.
 - Always have a rollback plan for infrastructure changes; flag when one does not
   exist before proceeding.
-- Gate destructive operations (deletes, production deploys, irreversible
-  migrations) behind an explicit confirmation, and never expose debug or test
-  endpoints in production.
+- Destructive operations and production deploys require explicit authorization.
+  Reuse authorization already given for the same scope; ask only when scope,
+  target or consequences change. Never expose debug or test endpoints in production.
 - Log what was changed and when. Logs go to stderr — never to stdout — so a
   daemon's protocol stream stays clean.
 

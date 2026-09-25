@@ -190,7 +190,7 @@ pub struct TrustyToolsConfig {
     /// Managed-tmux scrollback + mouse ergonomics (the `tmux:` YAML section,
     /// #2398).
     ///
-    /// `None` → the built-in defaults apply: a 100,000-line `history-limit`,
+    /// `None` → the built-in defaults apply: a 10,000-line `history-limit`,
     /// `mouse on`, and `alternate-screen off` (#5364). See
     /// [`resolve_tmux_options`] for the full precedence and [`TmuxConfig`] for
     /// the field-level docs.

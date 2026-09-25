@@ -217,3 +217,13 @@ never appears in the PM's `## Delegation Authority` section, check the file name
 first, then run `tm doctor` — its `agents` check reports the deployed file count
 and the delegatable roster size side by side, and a gap between them is the
 symptom. `RUST_LOG=debug` logs every file this rule excludes, with its directory.
+
+🟡 **Seconds of lag per keystroke in every tmux pane** — a large tmux
+`history-limit` plus a pane holding tens of thousands of scrollback lines slows
+the whole tmux server, so every pane on the host lags, not only the full one
+(#8404). The code default (`DEFAULT_TMUX_HISTORY_LIMIT` in
+`crates/trusty-common/src/tmux.rs`) is 10,000 lines; it was 100,000 until
+#8404. Override it with `history_limit` under `tmux:` in
+`~/.trusty-tools/trusty-mpm/config.yaml`; a value below 1,000 is clamped up to
+1,000. The option applies to panes created after the change, so a pane already
+holding a large history needs `tmux clear-history -t <pane>` to recover.

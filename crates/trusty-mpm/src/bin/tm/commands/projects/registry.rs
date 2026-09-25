@@ -37,6 +37,24 @@ pub(crate) struct RegisterInput {
     pub gh_config_dir: Option<std::path::PathBuf>,
 }
 
+impl RegisterInput {
+    /// A registration carrying only the two required fields, every optional
+    /// one unset (#8587). Taking both as arguments keeps them required.
+    pub(crate) fn new(name: String, repo_url: String) -> Self {
+        Self {
+            name,
+            repo_url,
+            default_branch: None,
+            description: None,
+            tags: Vec::new(),
+            stack_hint: None,
+            gh_user: None,
+            gh_account: None,
+            gh_config_dir: None,
+        }
+    }
+}
+
 /// Build a `DaemonClient` from the CLI's shared `(reqwest::Client, url)` pair.
 fn daemon(client: &reqwest::Client, url: &str) -> DaemonClient {
     DaemonClient::with_client(client.clone(), url.to_string())

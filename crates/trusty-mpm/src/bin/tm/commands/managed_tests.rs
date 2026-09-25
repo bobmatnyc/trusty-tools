@@ -895,6 +895,288 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
     );
 }
 
+/// #7660 error arm: a kept workspace turns the decommission into an error
+/// that names the blocker; a removed or never-removable one does not.
+#[test]
+fn session_decommission_exits_non_zero_when_the_workspace_is_kept() {
+    let err = super::decommission_kept_error(Some("the dirty-tree guard kept it"))
+        .expect("a kept workspace must fail the command");
+    assert!(
+        err.to_string().contains("the dirty-tree guard kept it"),
+        "{err}"
+    );
+    assert!(super::decommission_kept_error(None).is_none());
+}
+
+/// `git -C <dir> <args>`, asserting success.
+fn git_ok(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "`git {}`: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A pushed repository with a tracked `.gitignore`, under a temp root.
+/// Returns `(guard, root, repo)`; the caller holds `guard` for the test's
+/// lifetime, and dropping it deletes the root (#7660 critic round 3).
+fn pushed_repo_7660() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = std::fs::canonicalize(tmp.path()).expect("canon");
+    let (remote, repo) = (root.join("remote.git"), root.join("repo"));
+    std::fs::create_dir_all(&remote).expect("mkdir remote");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    git_ok(&remote, &["init", "--bare", "--initial-branch=main"]);
+    git_ok(&repo, &["init", "--initial-branch=main"]);
+    for (k, v) in [
+        ("user.email", "ci@test.invalid"),
+        ("user.name", "CI"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_ok(&repo, &["config", k, v]);
+    }
+    std::fs::write(repo.join(".gitignore"), "target/\n").expect("write .gitignore");
+    git_ok(&repo, &["add", ".gitignore"]);
+    git_ok(&repo, &["commit", "-m", "base"]);
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().expect("utf8")],
+    );
+    git_ok(&repo, &["push", "origin", "main"]);
+    git_ok(&repo, &["fetch", "origin"]);
+    (tmp, root, repo)
+}
+
+/// Write `wt`'s ownership marker where tm writes it since #8511 — `git
+/// rev-parse --git-path trusty-mpm-worktree`, outside the working tree. The
+/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
+/// git for the same path.
+fn mark_owned_7660(wt: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "trusty-mpm-worktree",
+        ])
+        .output()
+        .expect("run git rev-parse");
+    assert!(out.status.success(), "git rev-parse --git-path failed");
+    let marker = String::from_utf8(out.stdout).expect("utf8 path");
+    std::fs::write(marker.trim(), b"").expect("write the admin-dir marker");
+}
+
+/// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
+/// `.gitignore` block, untracked settings files, and `CLAUDE.md`.
+fn provision_dirt_7660(ws: &std::path::Path) {
+    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(ws).expect("scaffold");
+    std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
+    std::fs::write(ws.join(".claude/settings.json"), "{}\n").expect("settings");
+    std::fs::write(ws.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");
+    std::fs::write(ws.join("CLAUDE.md"), "# tm\n").expect("CLAUDE.md");
+}
+
+/// A real daemon holding one session whose workspace is `ws`, recorded as
+/// not SM-owned — the shape both the in-project and the launch-on-main spawn
+/// paths write. Returns `(url, session id)`.
+async fn serve_session_on_7660(root: &std::path::Path, ws: &std::path::Path) -> (String, String) {
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.join("sm")).await);
+    let id = trusty_mpm::session_manager::ManagedSessionId::new();
+    state
+        .session_manager()
+        .await
+        .create_with_id(
+            id,
+            "regression: #7660 decommission end to end".to_string(),
+            Some(ws.to_path_buf()),
+            None,
+            Some(ws.to_path_buf()),
+            None,
+            None,
+            trusty_mpm::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(axum::serve(listener, api::router(state)).into_future());
+    (format!("http://{addr}"), id.to_string())
+}
+
+/// What a spawned #7660 daemon test holds: `(url, session id, workspace path,
+/// temp-root guard)`.
+type Served7660 = (String, String, std::path::PathBuf, tempfile::TempDir);
+
+/// A real daemon holding one in-project session whose `.worktrees/<name>` tree
+/// tm created (it carries the admin-dir ownership marker provisioning writes)
+/// and carries exactly tm's provisioning dirt (#7660).
+async fn spawn_daemon_with_provisioned_worktree() -> Served7660 {
+    let (tmp, root, repo) = pushed_repo_7660();
+    let wt = repo.join(".worktrees").join("decom-7660");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "session/decom-7660",
+            wt.to_str().expect("utf8"),
+        ],
+    );
+    mark_owned_7660(&wt);
+    provision_dirt_7660(&wt);
+    let (url, id) = serve_session_on_7660(&root, &wt).await;
+    (url, id, wt, tmp)
+}
+
+/// A real daemon holding one launch-on-main session: its workspace IS the
+/// repository's main checkout, dirty only from tm's provisioning — the live
+/// 1.7.2 shape (#7660).
+async fn spawn_daemon_on_the_main_checkout() -> Served7660 {
+    let (tmp, root, repo) = pushed_repo_7660();
+    provision_dirt_7660(&repo);
+    let (url, id) = serve_session_on_7660(&root, &repo).await;
+    (url, id, repo, tmp)
+}
+
+/// 🔴 #7660 critic MEDIUM-3, end to end: without `--force` the provisioned
+/// tree is kept, and `session_decommission_routed` returns an error carrying
+/// the daemon's reason — the non-zero exit a script sees.
+#[tokio::test]
+async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, false)
+        .await
+        .expect_err("a kept workspace must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("workspace NOT removed"), "{msg}");
+    assert!(
+        msg.contains("--force"),
+        "the reason must name the flag: {msg}"
+    );
+    assert!(wt.exists(), "the workspace must still be on disk");
+}
+
+/// #7660 end to end: `--force` removes a tree dirty only from provisioning.
+#[tokio::test]
+async fn session_decommission_routed_force_removes_a_provisioning_only_worktree() {
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
+    let client = reqwest::Client::new();
+
+    super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect("--force removes a provisioning-only tree");
+
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// 🔴 #7660 round 2, end to end: `--force` on a tm-created worktree holding a
+/// real user change keeps it, exits non-zero, and names the file.
+#[tokio::test]
+async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect_err("user work must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("notes.rs"), "the file must be named: {msg}");
+    assert!(wt.join("notes.rs").exists(), "the user's file must survive");
+}
+
+/// 🔴 #7660 round 2, the live 1.7.2 failure: `--force` on a launch-on-main
+/// session never removes the shared main checkout, and exits non-zero naming
+/// why. Fails on the 1.7.2 fix, which exited 0 with no reason.
+#[tokio::test]
+async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force() {
+    let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
+    let client = reqwest::Client::new();
+
+    let err = super::session_decommission_routed(&client, &url, &id, true)
+        .await
+        .expect_err("a kept main checkout must fail the command");
+
+    let msg = err.to_string();
+    assert!(msg.contains("main checkout"), "{msg}");
+    assert!(msg.contains("--force does not apply"), "{msg}");
+    assert!(repo.join(".git").is_dir(), "the main checkout must survive");
+    assert!(repo.join("CLAUDE.md").exists(), "nothing in it is removed");
+}
+
+/// #7660 round 2: a plain decommission that keeps the main checkout by design
+/// exits 0 and prints why in one line. Fails on the 1.7.2 fix, which printed
+/// no reason.
+#[tokio::test]
+async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
+    let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
+    let client = reqwest::Client::new();
+
+    let outcome = super::super::managed_route::executor(&client, &url)
+        .decommission_managed_target(&id, false)
+        .await
+        .expect("decommission");
+    let printed = super::decommission_report(&outcome);
+    let why = printed.lines().nth(1).expect("a by-design reason line");
+    assert!(why.contains("kept by design"), "{printed}");
+    assert!(why.contains("main checkout"), "{printed}");
+    assert_eq!(printed.lines().count(), 2, "one reason line: {printed}");
+    assert!(
+        super::decommission_kept_error(outcome.workspace_kept_reason.as_deref()).is_none(),
+        "a by-design keep is not a failure"
+    );
+
+    // The CLI entry point itself exits 0 on a second decommission of a
+    // fresh launch-on-main session.
+    let (url, id, repo2, _tmp2) = spawn_daemon_on_the_main_checkout().await;
+    super::session_decommission_routed(&client, &url, &id, false)
+        .await
+        .expect("a by-design keep exits 0");
+    assert!(repo.exists() && repo2.join(".git").is_dir());
+}
+
+/// #7660 round 3: a session whose worktree is already gone exits 0 and says
+/// nothing was on disk. Fails before the fix, which printed "workspace NOT
+/// removed (still on disk)" for a directory that did not exist.
+#[tokio::test]
+async fn decommission_report_says_nothing_was_on_disk_for_an_absent_workspace() {
+    let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
+    std::fs::remove_dir_all(&wt).expect("remove the worktree out of band");
+    let client = reqwest::Client::new();
+
+    let outcome = super::super::managed_route::executor(&client, &url)
+        .decommission_managed_target(&id, false)
+        .await
+        .expect("decommission");
+    let printed = super::decommission_report(&outcome);
+
+    assert!(printed.contains("no workspace was on disk"), "{printed}");
+    assert!(!printed.contains("still on disk"), "{printed}");
+    assert!(
+        super::decommission_kept_error(outcome.workspace_kept_reason.as_deref()).is_none(),
+        "an absent workspace is not a refusal"
+    );
+}
+
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
 /// `Err` — `prune.rs`'s bulk sweep records that `Err` as a failed row, and a
 /// softened 404 would make a raced session read as a clean teardown.
@@ -1064,6 +1346,14 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
     }
 }
 
+/// Slot-7 `tm-trusty-tools-01` in an unrecognised state, which has no row
+/// color (#8506), so the per-column hues are what the row carries.
+fn uncolored_state_session() -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = ls_session("tm-trusty-tools-01", 7);
+    s.state = "some-future-state".into();
+    s
+}
+
 /// Strip every ANSI SGR escape, leaving the text a terminal actually draws.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
@@ -1092,7 +1382,8 @@ fn strip_ansi(s: &str) -> String {
 /// Test: this test.
 #[test]
 fn ls_row_colors_num_and_name_in_distinct_hues() {
-    let row = format_ls_row(&ls_session("tm-trusty-tools-01", 7), true, 14, None);
+    // #8506: the column hues remain only on a row whose state has no color.
+    let row = format_ls_row(&uncolored_state_session(), true, 14, None);
     assert!(
         row.starts_with("\u{1b}[35m7\u{1b}[0m"),
         "NUM colored: {row:?}"
@@ -1176,7 +1467,7 @@ fn ls_row_alignment_matches_with_and_without_color() {
 /// Test: this test.
 #[test]
 fn ls_row_colors_id_column_dimmed() {
-    let s = ls_session("tm-trusty-tools-01", 7);
+    let s = uncolored_state_session();
     let row = format_ls_row(&s, true, 14, None);
     assert!(
         row.contains(&format!("\u{1b}[2m{}\u{1b}[0m", s.id)),
@@ -1274,6 +1565,87 @@ fn ls_table_columns_align_when_a_row_carries_an_annotation() {
             "padding must be measured on visible text, not the ANSI-wrapped string"
         );
     }
+}
+
+/// One `tm ls` row per state the #8506 mapping distinguishes, with the SGR
+/// parameter the whole row must be painted in (`None` = no row color).
+fn state_color_cases() -> Vec<(
+    trusty_mpm::client::ManagedSessionSummary,
+    Option<&'static str>,
+)> {
+    let with = |state: &str, edit: fn(&mut trusty_mpm::client::ManagedSessionSummary)| {
+        let mut s = ls_session("tm-trusty-tools-01", 7);
+        s.state = state.into();
+        edit(&mut s);
+        s
+    };
+    vec![
+        (with("active", |_| {}), Some("32")),
+        (with("stopped", |_| {}), Some("33")),
+        (with("errored", |_| {}), Some("31")),
+        (with("stopped", |s| s.unresumable = true), Some("31")),
+        (with("active", |s| s.attached = true), Some("1;36")),
+        (with("provisioning", |_| {}), Some("34")),
+        // #8506 owner ruling: decommissioned is dim/gray.
+        (with("decommissioned", |_| {}), Some("2")),
+        (with("some-future-state", |_| {}), None),
+    ]
+}
+
+/// Why (#8506): the owner asked for each `tm ls` row to be colored by its
+/// state — active green, stopped yellow, dead red — and the table colored only
+/// three columns, identically for every state.
+/// What: asserts each mapped row is exactly one escape pair around the plain
+/// row, so the whole row (not a cell) carries the color and the padding inside
+/// is untouched; an unmapped state keeps the column hues instead; the
+/// `-- deleted --` tombstone row is painted red.
+/// Test: this test.
+#[test]
+fn ls_rows_are_painted_whole_in_their_state_color() {
+    for (s, param) in state_color_cases() {
+        let plain = format_ls_row(&s, false, 14, None);
+        let colored = format_ls_row(&s, true, 14, None);
+        match param {
+            Some(p) => assert_eq!(
+                colored,
+                format!("\u{1b}[{p}m{plain}\u{1b}[0m"),
+                "state {:?} (unresumable={}, attached={})",
+                s.state,
+                s.unresumable,
+                s.attached
+            ),
+            None => assert!(
+                colored.starts_with("\u{1b}[35m7\u{1b}[0m"),
+                "an unmapped state keeps the NUM column hue: {colored:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        format_tombstone_row(7, true),
+        format!("\u{1b}[31m{}\u{1b}[0m", format_tombstone_row(7, false)),
+        "a tombstone row is painted red"
+    );
+}
+
+/// Why (#8506): a pipe, `NO_COLOR`, and every script must see the table bytes
+/// they saw before rows had colors, and a colored row must not shift a column.
+/// What: for every state, the `use_color == false` row carries no escape, and
+/// stripping the escapes from the colored row reproduces it byte-for-byte —
+/// which also proves the visible width is unchanged.
+/// Test: this test.
+#[test]
+fn ls_row_state_colors_never_reach_a_plain_table() {
+    for (s, _) in state_color_cases() {
+        let plain = format_ls_row(&s, false, 14, None);
+        assert!(!plain.contains('\u{1b}'), "no escapes: {plain:?}");
+        assert_eq!(
+            strip_ansi(&format_ls_row(&s, true, 14, None)),
+            plain,
+            "state {:?}: color must change bytes only inside the escapes",
+            s.state
+        );
+    }
+    assert!(!format_tombstone_row(7, false).contains('\u{1b}'));
 }
 
 /// Why (#7424): `tm session ls` is where an operator sees what each session

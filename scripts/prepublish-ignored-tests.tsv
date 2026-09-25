@@ -33,23 +33,29 @@ trusty-memory	transport::methods::health_tests::health_endpoint_includes_resourc
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_on_fresh_install_is_ok	loads the default ONNX embedder; fresh-install path a published daemon runs at first start
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_with_palace_is_ok	loads the default ONNX embedder; palace-backed round trip
 
-# THE UNSELECTED REMAINDER. 159 ignored tests are enumerable in this workspace;
-# the 11 rows above run, and 148 do not. The gate prints that number on every
+# THE UNSELECTED REMAINDER. 162 ignored tests are enumerable in this workspace;
+# the 11 rows above run, and 151 do not. The gate prints that number on every
 # run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
-# WHY 149 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# WHY 151 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
 # API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
 # TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
 # compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
-# torch venv, a real tmux host — and one pair with mutually exclusive
-# requirements ("requires claude binary absent from PATH", "only runs when tmux
-# is absent from PATH") that no single runner can satisfy at once.
+# torch or Python `kuzu`/`kuzu_memory` venv, a real tmux host — and one pair
+# with mutually exclusive requirements ("requires claude binary absent from
+# PATH", "only runs when tmux is absent from PATH") that no single runner can
+# satisfy at once.
 #
 # 321 of the ~442 `#[ignore]` attributes in the tree carry NO reason string at
 # all, which is why this is a count with a ratchet and not a complete per-test
 # manifest: classifying them is real work that does not belong in the PR that
 # builds the gate.
 #
+# #277 (kuzu-memory import) added four `trusty-memory` tests gated on
+# `TRUSTY_KUZU_PYTHON` (needs `kuzu` + `kuzu_memory` in a Python venv this
+# runner does not carry) without raising this baseline, which is why this
+# release cut is the one paying it down: 148 -> 151.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 148
+# UNSELECTED-BASELINE: 151

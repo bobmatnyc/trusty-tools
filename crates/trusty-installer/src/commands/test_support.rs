@@ -54,6 +54,42 @@ pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// `verify_tail::tests::verify_one_*`.
 pub(crate) const PROBEABLE_BINARY: &str = "sh";
 
+/// Write `contents` to `path` as a mode-0755 script the test will then exec.
+///
+/// Why: `execve` fails with `ETXTBSY` while any process holds a writable fd to
+/// the target. `std::fs::write` opens that fd in THIS process, so a sibling test
+/// that forks between the open and the close hands its child a copy that lives
+/// until the child's own exec — and the later spawn of the script fails with
+/// "Text file busy" (#3782, class epic #3451). #5391 closed that half with a
+/// retry around the spawn; here the spawns sit in production code
+/// (`trusty_common::update::verify_installed_binary_at_path`,
+/// `probe::spawn_json_at_path`), so the writer closes it instead.
+/// What: a `/bin/sh` child writes the bytes through a `printf` redirect and
+/// exits before this returns, so the only writable fd to `path` ever lives in
+/// that child. The mode is then set with `chmod(2)`, which opens no fd.
+/// Test: every test that execs a fake binary — `shadow_check::tests`,
+/// `probe::tests::spawn_json_at_path_gives_up_on_a_child_that_never_exits`,
+/// and the `plist_bootstrap_tests` version-probe cases.
+#[cfg(unix)]
+pub(crate) fn write_exec_script(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"printf '%s' "$1" > "$2""#)
+        .arg("sh")
+        .arg(contents)
+        .arg(path)
+        .status()
+        .expect("spawn /bin/sh to write the fake binary");
+    assert!(
+        status.success(),
+        "writing {} failed: {status}",
+        path.display()
+    );
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake binary");
+}
+
 /// Spawn a one-shot TCP server that answers the first request with a fixed
 /// HTTP response, and return its `host:port`.
 ///

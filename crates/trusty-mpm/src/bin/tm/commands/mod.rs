@@ -41,6 +41,8 @@ pub(crate) mod doctor_builder_cap;
 pub(crate) mod doctor_daemon_row;
 // #6649: `--fix-agents`, the agent mirror of `--fix-skills`.
 pub(crate) mod doctor_fix_agents;
+// #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
+pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
@@ -87,6 +89,9 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
+// #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
+// own file so the dispatcher stays a translation layer and stays under cap.
+pub(crate) mod memory_verbs;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only
@@ -109,9 +114,14 @@ pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_dispatch;
+pub(crate) mod pm_guard_dispatch_deny;
+// #8257: `tm repair delegation --list`.
+pub(crate) mod repair_delegation_list;
 // #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
 // left to succeed and wedge the agent — see its module doc for why the pin it
 // names belongs to the harness and cannot be moved from here.
+// #8547: which `subagent_type` names are known, and the refusal for the rest.
+pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_response;

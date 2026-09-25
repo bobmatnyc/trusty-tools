@@ -44,15 +44,14 @@ const TRUSTY_KEY: &str = "trusty-memory";
 /// clap) so additional sources can be added later without changing the
 /// CLI surface.
 /// What: two variants today — `kuzu-memory` (config migration) and
-/// `kuzu-data` (data migration from a kuzu-memory `store.redb`).
+/// `kuzu-data` (deprecated alias for `import kuzu`, #277).
 /// Test: `cargo run -p trusty-memory -- migrate bogus` → clap rejects with
 /// a usage hint.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum MigrateTarget {
     /// Migrate from kuzu-memory (rewrites Claude `mcpServers` entries).
     KuzuMemory,
-    /// Import entity/relation data from a kuzu-memory `store.redb` file into
-    /// a trusty-memory palace.
+    /// Deprecated alias for `import kuzu --from <path>` (#277).
     #[value(name = "kuzu-data")]
     KuzuData,
 }
@@ -91,8 +90,7 @@ pub struct ConfigMigrateResult {
 ///
 /// Why: a single command that switches a machine from kuzu-memory to
 /// trusty-memory. `kuzu-memory` rewrites every Claude MCP settings file.
-/// `kuzu-data` imports entity/relation data from a kuzu-memory `store.redb`
-/// into a target palace.
+/// `kuzu-data` forwards to `import kuzu` (deprecated, #277).
 /// What: dispatches to the appropriate handler based on the `target` variant.
 /// The `_config_only` flag is accepted for CLI parity with
 /// `trusty-search migrate` but only applies to `kuzu-memory` (the config
@@ -114,8 +112,9 @@ pub fn handle_migrate(
             run_config_phase(dry_run)
         }
         MigrateTarget::KuzuData => {
-            let from = kuzu_from
-                .ok_or_else(|| anyhow::anyhow!("migrate kuzu-data requires --from <store.redb>"))?;
+            let from = kuzu_from.ok_or_else(|| {
+                anyhow::anyhow!("migrate kuzu-data requires --from <.kuzu-memory>")
+            })?;
             let palace = kuzu_palace
                 .ok_or_else(|| anyhow::anyhow!("migrate kuzu-data requires --palace <name>"))?;
             crate::commands::kuzu_migrate::handle_kuzu_data_migrate(

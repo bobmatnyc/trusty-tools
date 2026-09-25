@@ -443,6 +443,37 @@ pub(crate) async fn create_index_report(
         );
         return Err(root_path_collision_response(&existing_id, &req.root_path));
     }
+    // #4289: the guard above is EXACT-match only. A candidate that sits inside
+    // an existing index's root, or that encloses one, was accepted — and an
+    // overlapping root is how #402 / #2178 let a reindex prune another index's
+    // corpus. An unrunnable check is an error, never an implicit "no overlap".
+    match super::root_overlap::find_root_overlap(&handles, &cold_entries, &req.root_path, Some(&id))
+    {
+        Ok(None) => {}
+        Ok(Some(conflict)) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' at {} — that root overlaps \
+                 index '{}' at {} (#4289)",
+                req.id,
+                req.root_path.display(),
+                conflict.index_id,
+                conflict.root_path.display(),
+            );
+            return Err(super::root_overlap::root_overlap_response(
+                &conflict,
+                &req.root_path,
+            ));
+        }
+        Err(failure) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' — its root could not be \
+                 checked against the registered roots: {} (#4289)",
+                req.id,
+                failure.reason,
+            );
+            return Err(super::root_overlap::overlap_check_failed_response(&failure));
+        }
+    }
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -470,13 +501,12 @@ pub(crate) async fn create_index_report(
     // Fix #483/#485: use `build_indexer_from_entry` with `colocated: true`
     // instead of `build_indexer_with_persisted_state` (which hard-codes
     // `colocated: false`).  The entry-aware builder routes the corpus store
-    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`,
-    // and crucially `colocated_redb_path` → `colocated_storage_dir` calls
-    // `create_dir_all` — so the `.trusty-search/` directory exists on-disk
-    // BEFORE the first reindex.  Every write-path probe
-    // (`has_colocated_storage` in persist.rs / reindex.rs) then sees the dir
-    // and routes HNSW + corpus writes to the colocated path too.  Without this
-    // fix the writer used the app-data path while the loader used the colocated
+    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`.
+    // #8438: every write path takes its layout from
+    // `StorageLayout::for_entry(init_entry)`, carried on the indexer, so HNSW
+    // and corpus writes follow the registry flag — never a probe of whether
+    // `.trusty-search/` exists on disk.  Without the entry-aware builder the
+    // writer used the app-data path while the loader used the colocated
     // path (because `indexes.toml` recorded `colocated = true`), producing 0
     // chunks and no corpus store after the first restart.  A missing corpus
     // store also causes `write_schema_version` to return

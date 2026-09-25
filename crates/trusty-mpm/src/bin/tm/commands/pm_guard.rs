@@ -106,6 +106,11 @@
 //! `.claude/worktrees/**` stay allowed. No daemon is consulted, so there is no
 //! unreachable-daemon arm to fail open through; see that module's doc for the
 //! registry it deliberately does not gate on and why.
+//! **Main-checkout HEAD switch (#8572):** right after it,
+//! [`crate::commands::pm_guard_bash::evaluate_main_checkout_head_switch`]
+//! refuses a dispatched AGENT's branch checkout, `switch`, `stash` or `bisect`
+//! in a main checkout that holds uncommitted work — or whose state
+//! `git status` cannot report, which fails closed.
 //! **Main-checkout write boundary (ADR-0044, enforced by ADR-0048):** the
 //! destructive-git rule above covers only whole-tree destruction, so an
 //! ordinary `Write` to a `.rs` file in a shared checkout — the write the
@@ -211,11 +216,12 @@ use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
-    docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
-    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add,
+    deny_linked_worktree_head_move, docs_commit_deny_reason, evaluate_bash_command,
+    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
+    evaluate_main_checkout_destructive_command, evaluate_main_checkout_head_switch,
+    evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
     evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, unclassifiable_command,
+    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -227,7 +233,7 @@ use crate::commands::pm_guard_fanout;
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 pub(crate) use crate::commands::pm_guard_response::{
-    build_pretooluse_context_response, build_pretooluse_deny_response,
+    build_pm_guard_deny_response, build_pretooluse_context_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use crate::commands::pm_guard_secret_read;
@@ -334,7 +340,7 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// `pm_guard_denies_an_empty_stdin_payload` and its siblings
 /// (`tests/tm_hook_pm_guard_stdin_7975.rs`); the pure policy by this module's
 /// unit tests.
-pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
+pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
     // Guard 2: universal opt-out for CI / build shells that can't edit
     // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
     // reordering from this function's original shape — see the code-critic
@@ -409,6 +415,8 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
+    // #8572: hoisted from the fan-out check below; the HEAD-switch rule needs it too.
+    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
 
     if tool_name == "Bash" {
         let command = tool_input
@@ -426,14 +434,23 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // keeps a rule added later from inheriting the same hole.
         if let Some(reason) = unclassifiable_command(command) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+            println!("{}", build_pm_guard_deny_response(reason));
+            return Ok(());
+        }
+        // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
+        // and ahead of Guards 1/4, because the caller it binds is always an agent.
+        if let Some(reason) =
+            evaluate_read_only_dispatch_command(command, DispatchIdentity::from_payload(&payload))
+        {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // #7497 joins #3955 here: same placement, same reason. `evaluate_worktree_add`
         // runs the temp-root denylist and the `disk.max_usage_pct` threshold.
         if let Some(reason) = evaluate_worktree_add(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (issue #4031) — the same placement, and for the same
@@ -452,7 +469,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // rule entirely — `git worktree remove` and `git branch -D`).
         if let Some(reason) = evaluate_destructive_delete_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+            println!("{}", build_pm_guard_deny_response(reason));
             return Ok(());
         }
         // ABSOLUTE guard (issue #7122) — the same placement, and for the same
@@ -467,7 +484,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // gitignore-verified `untracked_sync` channel).
         if let Some(reason) = evaluate_secret_file_copy_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0037) — the same placement, and for the same
@@ -480,7 +497,17 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // nothing wider) and for why no daemon is consulted.
         if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
+            println!("{}", build_pm_guard_deny_response(&reason));
+            return Ok(());
+        }
+        // #8572: ABSOLUTE, same placement and reason as the rule above — the
+        // incident was a dispatched agent switching HEAD over the operator's
+        // uncommitted edit. See `pm_guard_bash::head_switch`.
+        if let Some(reason) =
+            evaluate_main_checkout_head_switch(command, &hook_cwd, caller_is_subagent)
+        {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048, amended by
@@ -499,7 +526,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         match evaluate_main_checkout_commit_command(command, &hook_cwd) {
             Some(CommitVerdict::Deny(reason)) => {
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             Some(CommitVerdict::DocsOnly { root, dirs }) => {
@@ -511,7 +538,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 if !live.is_empty() {
                     let reason = docs_commit_deny_reason(&root, &live);
                     audit_denied_tool(url, session_id, tool_name, &reason).await;
-                    println!("{}", build_pretooluse_deny_response(&reason));
+                    println!("{}", build_pm_guard_deny_response(&reason));
                     return Ok(());
                 }
             }
@@ -543,9 +570,14 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             if !live.is_empty() {
                 let reason = head_move_deny_reason(&verb, &root, &live);
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
+        }
+        // #8161: the same move aimed at a LINKED worktree — see that module.
+        let linked = (command, hook_cwd.as_path(), caller_is_subagent);
+        if deny_linked_worktree_head_move(url, session_id, &payload, linked).await {
+            return Ok(());
         }
     }
 
@@ -560,7 +592,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // classifier it reads, and the key-name-only `grep` it still allows.
     if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input) {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -576,7 +608,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         pm_guard_write_boundary::evaluate_main_checkout_write(tool_name, tool_input, &hook_cwd)
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -590,11 +622,10 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // It fails OPEN: `caller_is_subagent` reports false whenever neither the
     // payload's `agent_id` nor `CLAUDE_MPM_SUB_AGENT` is present, so an
     // unrecognised context allows the dispatch rather than blocking the PM.
-    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
-
+    // (`caller_is_subagent` is resolved above, beside `hook_cwd` — #8572.)
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
-        println!("{}", build_pretooluse_deny_response(reason));
+        println!("{}", build_pm_guard_deny_response(reason));
         return Ok(());
     }
 
@@ -611,7 +642,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         &hook_cwd,
     ) {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -645,32 +676,17 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             WorktreeRemoveVerdict::Allow => {}
             WorktreeRemoveVerdict::Deny(reason) => {
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             WorktreeRemoveVerdict::ReCheck { target } => {
-                // The same directory-keyed route ADR-0048 decision 10's
-                // HEAD-move rule uses, so both rules read one answer built one
-                // way. Keyed on the TARGET, not the caller's cwd: the tree
-                // being deleted is the one whose owner matters, and the
-                // `version-control` agent's own record sits at the checkout it
-                // was dispatched into.
-                //
-                // `_or_deny`, NOT the fail-open reader the HEAD-move rule uses:
-                // an unreachable or silent daemon establishes nothing about who
-                // holds this tree, and an empty vec from such a reply would let
-                // the removal proceed over another agent's live work.
-                let live = pm_guard_dispatch::live_shared_tree_writers_or_deny(
-                    url, session_id, &target, &payload,
-                )
-                .await;
-                if let Some(reason) = evaluate_removal_rechecks(
-                    &target,
-                    live.as_deref().map_err(String::as_str),
-                    &trusty_mpm::core::worktree_removal_facts::GitAndGhProbe,
-                ) {
-                    audit_denied_tool(url, session_id, tool_name, &reason).await;
-                    println!("{}", build_pretooluse_deny_response(&reason));
+                // The daemon owner query (`_or_deny`, keyed on the TARGET) and
+                // every re-check run under one deadline that DENIES on expiry.
+                // #7889: the deny is printed before the audit, and the audit is
+                // bounded, so neither can push the decision past the hook's 5 s.
+                let deny = removal_recheck_deny(url, session_id, &target, &payload, started);
+                if let Some(reason) = deny.await {
+                    print_deny_then_audit(url, session_id, tool_name, &reason, started).await;
                     return Ok(());
                 }
             }
@@ -719,7 +735,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 {
                     Some(reason) => {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
-                        println!("{}", build_pretooluse_deny_response(&reason));
+                        println!("{}", build_pm_guard_deny_response(&reason));
                     }
                     // #6892: a granted worktree answers WHERE this agent writes,
                     // not whether the machine has room for another build. The
@@ -727,7 +743,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                     // grant prints and returns — a check after this block would
                     // never see a granted dispatch at all.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -741,8 +757,8 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
-                audit_denied_tool(url, session_id, tool_name, reason).await;
-                println!("{}", build_pretooluse_deny_response(reason));
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pm_guard_deny_response(&reason));
             }
             // #5814: this project declared `agent_worktree = false`, so the
             // dispatch keeps the checkout and is told the workflow that replaces
@@ -758,13 +774,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 {
                     Some(reason) => {
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
-                        println!("{}", build_pretooluse_deny_response(&reason));
+                        println!("{}", build_pm_guard_deny_response(&reason));
                     }
                     // #6892: as the Rewrite arm above — the machine cap is a
                     // separate question from where the agent writes, and this is
                     // the only place a rewritten dispatch can still be stopped.
                     None => {
-                        emit_builder_cap_or(
+                        pm_guard_builder_cap::emit_builder_cap_or(
                             url,
                             &payload,
                             tool_name,
@@ -798,7 +814,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
     {
         audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 
@@ -818,15 +834,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // classifies locally and returns before any network call for a non-builder
     // dispatch, so a daemon outage costs builder dispatches only. See its module
     // doc.
-    if !caller_is_subagent
-        && let Some(reason) = pm_guard_builder_cap::evaluate(
+    // #8261: this exit has no worktree rewrite to merge a slot notice into, so
+    // the notice `emit_builder_cap_or` merges into the grant object has nowhere
+    // to ride here. It is held instead and emitted at the plain ALLOW exit
+    // below, because a `PreToolUse` hook's stdout may carry exactly one object
+    // and the gates between here and there each print their own.
+    let mut slot_notice: Option<String> = None;
+    if !caller_is_subagent {
+        match pm_guard_builder_cap::evaluate(
             url, &payload, tool_name, tool_input, session_id, &hook_cwd,
         )
         .await
-    {
-        audit_denied_tool(url, session_id, tool_name, &reason).await;
-        println!("{}", build_pretooluse_deny_response(&reason));
-        return Ok(());
+        {
+            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pm_guard_deny_response(&reason));
+                return Ok(());
+            }
+            pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
+        }
     }
 
     // Text of a pending agent-cost notice, emitted at whichever subagent ALLOW
@@ -861,7 +887,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             {
                 let reason = agent_cost::stop_reason(tokens, cost_config.max_tokens);
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
+                println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
             BudgetStatus::Warning => {
@@ -910,7 +936,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             let status = pm_guard_deny_by_default::persona_status(url).await;
             if status.should_deny() {
                 audit_denied_tool(url, session_id, tool_name, PERSONA_DENY_REASON).await;
-                println!("{}", build_pretooluse_deny_response(PERSONA_DENY_REASON));
+                println!("{}", build_pm_guard_deny_response(PERSONA_DENY_REASON));
                 return Ok(());
             }
         }
@@ -923,7 +949,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     }
 
     let Some(reason) = evaluate_tool(tool_name, tool_input) else {
-        // ALLOW: exit 0 with no output so the normal permission flow applies.
+        // ALLOW: exit 0 with no output so the normal permission flow applies —
+        // unless #8261 admitted this dispatch to a builder slot, which is the
+        // one thing an allowed dispatch still has to be TOLD. This is the exit
+        // a PM's own `Agent` dispatch reaches: the two subagent exits above are
+        // unreachable with a slot notice in hand, because the claim runs only
+        // when `caller_is_subagent` is false and both of them require it true.
+        emit_slot_notice(slot_notice);
         return Ok(());
     };
 
@@ -959,7 +991,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                      Delegate further changes to {hint} via the Task/Agent tool."
                 );
                 audit_denied_tool(url, session_id, tool_name, &exhausted_reason).await;
-                println!("{}", build_pretooluse_deny_response(&exhausted_reason));
+                println!("{}", build_pm_guard_deny_response(&exhausted_reason));
                 Ok(())
             }
         };
@@ -971,7 +1003,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // and fires solely on the rare deny path, so the common ALLOW path adds
     // zero latency to every tool invocation.
     audit_denied_tool(url, session_id, tool_name, reason).await;
-    println!("{}", build_pretooluse_deny_response(reason));
+    println!("{}", build_pm_guard_deny_response(reason));
     Ok(())
 }
 
@@ -1167,6 +1199,31 @@ fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
     }
 }
 
+/// Emit an admitted builder's slot-directory notice at the plain ALLOW exit.
+///
+/// Why (#8261): the grant arms hand their notice to
+/// [`pm_guard_builder_cap::emit_builder_cap_or`], which merges it into the
+/// rewrite object they were already printing. The plain-dispatch exit prints no
+/// object at all, so without this the daemon recorded a slot the engineer was
+/// never told about and it built in the shared directory anyway — the exact
+/// contention #8261 exists to end.
+///
+/// It does NOT go through [`emit_cost_notice`]'s once-per-agent claim. That
+/// claim keys on `agent_id`, which a PM's own dispatch payload does not carry,
+/// so every slot notice in a session would fall back to the same `session_id`
+/// key and only the first builder would ever be told its directory.
+/// What: no-op on `None`; otherwise prints the single
+/// [`build_pretooluse_context_response`] object, carrying no
+/// `permissionDecision` so the normal permission flow still applies.
+/// Test: `pm_guard_tells_an_admitted_builder_its_slot_directory` in
+/// `tests/tm_hook_pm_guard.rs`; the JSON shape by
+/// `build_pretooluse_context_response_carries_no_decision`.
+fn emit_slot_notice(notice: Option<String>) {
+    if let Some(text) = notice {
+        println!("{}", build_pretooluse_context_response(&text));
+    }
+}
+
 /// Best-effort audit POST recording a PM-guard denial to the daemon.
 ///
 /// Why: enforcement actions should be observable (dashboard / audit log), but
@@ -1230,42 +1287,6 @@ async fn audit_agent_cost_warning(
         return;
     };
     let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
-}
-
-/// Print the builder-cap deny, or `allowed` when the machine has room (#6892).
-///
-/// Why: the worktree grant has two ALLOW exits and both print a rewrite and
-/// return, so the machine cap has to be asked at each of them or a granted
-/// dispatch escapes it entirely. Folded into one helper rather than written
-/// twice because the two arms differ only in which rewrite they emit, and a
-/// `PreToolUse` hook's stdout may carry exactly one object — duplicating the
-/// print/deny pair is how a second one gets emitted.
-/// What: runs [`pm_guard_builder_cap::evaluate`]; on a deny it audits and prints
-/// the deny, on an allow it prints `allowed` verbatim. Exactly one line reaches
-/// stdout either way.
-/// Test: `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and
-/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` in
-/// `tests/tm_hook_pm_guard.rs` cover the allow exits; the cap's own verdicts are
-/// covered in `commands::pm_guard_builder_cap`.
-#[allow(clippy::too_many_arguments)]
-async fn emit_builder_cap_or(
-    url: &str,
-    payload: &serde_json::Value,
-    tool_name: &str,
-    tool_input: Option<&serde_json::Value>,
-    session_id: &str,
-    hook_cwd: &std::path::Path,
-    allowed: &str,
-) {
-    match pm_guard_builder_cap::evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd)
-        .await
-    {
-        Some(reason) => {
-            audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
-        }
-        None => println!("{allowed}"),
-    }
 }
 
 /// The ceiling [`audit_denied_tool`] can spend before a deny reaches stdout.

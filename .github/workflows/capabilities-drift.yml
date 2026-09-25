@@ -186,6 +186,15 @@ jobs:
           # repo was over it — see the note on the test-shard cache in ci.yml.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # scripts/lib/run_or_cargo.sh (used by check_capabilities.sh) prefers an
+      # already-installed `tm` on PATH over `cargo run`, so installing it from
+      # THIS checkout here means the check step below takes that fast path
+      # against the same source it is meant to verify, instead of invoking
+      # `cargo run` itself.
+      - name: Install tm
+        if: steps.relevance.outputs.relevant != 'false'
+        run: cargo install --path crates/trusty-mpm --bin tm --locked --force
+
       - name: Check tm-capabilities generated skill for drift
         if: steps.relevance.outputs.relevant != 'false'
         run: bash scripts/check_capabilities.sh

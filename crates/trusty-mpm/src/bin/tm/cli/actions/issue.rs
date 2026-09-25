@@ -87,6 +87,9 @@ pub(crate) enum IssueCmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// File and maintain an epic tracker and its phase issues (#8447).
+    #[command(subcommand)]
+    Epic(EpicCmd),
     /// Resolve a mid-transition issue carrying multiple state labels.
     Repair {
         /// Issue number.
@@ -94,5 +97,78 @@ pub(crate) enum IssueCmd {
         /// Explicit path to an issue-state YAML (overrides discovery).
         #[arg(long)]
         config: Option<std::path::PathBuf>,
+    },
+}
+
+/// Verbs for the `tm issue epic` command group (#8447).
+///
+/// Why: filing an epic by hand is eleven ordered `gh` calls whose partway
+/// failure is normal, and regenerating its `phases` block by hand is a session
+/// retyping a markdown table — the drift `TICKETING.md`'s `epics.*` rules exist
+/// to prevent. Two verbs make the deterministic half code.
+/// What: `Create` (parse a committed plan document, file the tracker, rename it
+/// once its number is known, then file each phase as a native sub-issue),
+/// `Sync` (regenerate the `phases` block wholesale from live child state),
+/// `Defer` (append one row to the `deferred` block, #8448) and `Close` (refuse
+/// while a phase is open, post the outcome→evidence comment, close, #8448).
+/// Test: `cli_parses_issue_epic_create`,
+/// `cli_parses_issue_epic_create_repeatable_components`,
+/// `cli_parses_issue_epic_sync`, `cli_parses_issue_epic_defer`,
+/// `cli_parses_issue_epic_close`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum EpicCmd {
+    /// File an epic tracker and its phase issues from a committed plan document.
+    Create {
+        /// Path to the plan document; it must already be on `origin/main`.
+        #[arg(long, value_name = "PATH")]
+        from: std::path::PathBuf,
+        /// Milestone title applied to the tracker and to every phase.
+        #[arg(long, value_name = "TITLE")]
+        milestone: Option<String>,
+        /// Component label. Repeatable; at least one is required.
+        #[arg(long, value_name = "LABEL")]
+        component: Vec<String>,
+        /// Type label each phase issue carries (one of the existing six).
+        #[arg(long, value_name = "TYPE", default_value = "enhancement")]
+        phase_type: String,
+        /// Owner-scoped GitHub Projects number to attach each issue to.
+        #[arg(long, value_name = "NUMBER")]
+        project: Option<u64>,
+        /// Workstream name behind `ws/<session>`; defaults to the tmux session.
+        #[arg(long, value_name = "NAME")]
+        session: Option<String>,
+        /// Resume into an existing tracker instead of searching for one.
+        #[arg(long, value_name = "NUMBER")]
+        tracker: Option<u64>,
+        /// Report what would be filed without mutating anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Regenerate a tracker's `phases` block from its live child issues.
+    Sync {
+        /// The tracker's issue number.
+        epic: u64,
+    },
+    /// Append one row to a tracker's `deferred` block (#8448).
+    Defer {
+        /// The tracker's issue number.
+        epic: u64,
+        /// The scope removed from the plan, or the gap it leaves.
+        #[arg(long, value_name = "TEXT")]
+        item: String,
+        /// Why it left the plan.
+        #[arg(long, value_name = "TEXT")]
+        why: String,
+        /// Where it went — an issue reference, or `unscheduled`.
+        #[arg(long = "where", value_name = "TEXT")]
+        destination: String,
+    },
+    /// Close a tracker once every phase is closed, posting the outcome→evidence comment (#8448).
+    Close {
+        /// The tracker's issue number.
+        epic: u64,
+        /// `O<n>: <what proves it>` — exactly one per outcome the tracker body declares. Repeatable.
+        #[arg(long, value_name = "O<n>: TEXT")]
+        evidence: Vec<String>,
     },
 }

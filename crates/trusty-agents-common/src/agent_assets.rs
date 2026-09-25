@@ -402,7 +402,9 @@ mod tests {
             "`BASE-AGENT.md` must forbid an agent removing a worktree (#5791)"
         );
         assert!(
-            flat.contains("tm session prune-worktrees"),
+            flat.contains("the PM removes the task-owned path")
+                && flat.contains("git worktree remove /absolute/repo/.claude/worktrees/task-name")
+                && flat.contains("ownership, clean state, merged status and no other live"),
             "`BASE-AGENT.md` must name the PM's replacement command, not just \
              refuse (#5791)"
         );

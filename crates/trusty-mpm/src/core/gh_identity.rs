@@ -154,7 +154,7 @@ pub enum GhIdentityError {
 /// What: an ordered list of `(name, value)` pairs. Order is deterministic
 /// (identity var first when present, then `GH_HOST`) so tests can assert it.
 /// Test: every `resolve_*`/`precedence_*`/`host_*` test inspects `vars()`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct GhEnv {
     vars: Vec<(String, String)>,
     /// #6668: identity vars to REMOVE from the child so an inherited one
@@ -162,7 +162,52 @@ pub struct GhEnv {
     unset: Vec<String>,
 }
 
+/// #8510 r4: `vars` can hold a real token; `Debug` redacts every `*TOKEN` value.
+/// Test: `gh_env_debug_redacts_every_token`.
+impl std::fmt::Debug for GhEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GhEnv")
+            .field("vars", &RedactedVars(&self.vars))
+            .field("unset", &self.unset)
+            .finish()
+    }
+}
+
+/// `(name, value)` env pairs whose `Debug` shows `<redacted>` for every
+/// variable named `*TOKEN` (#8510 r4).
+/// Test: `gh_env_debug_redacts_every_token`, `spawn_env_debug_redacts_every_token`.
+pub(crate) struct RedactedVars<'a>(pub(crate) &'a [(String, String)]);
+
+/// Does `name` carry a token (`GH_TOKEN`, `GH_ENTERPRISE_TOKEN`, …)?
+fn is_token_var(name: &str) -> bool {
+    name.to_ascii_uppercase().ends_with("TOKEN")
+}
+
+impl std::fmt::Debug for RedactedVars<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, value)| {
+                let shown = if is_token_var(name) {
+                    "<redacted>"
+                } else {
+                    value.as_str()
+                };
+                (name.as_str(), shown)
+            }))
+            .finish()
+    }
+}
+
 impl GhEnv {
+    /// A binding that sets `vars` and clears every other inherited identity
+    /// var, for an identity no `GithubConfig` expresses — a token `GET /user`
+    /// proved (#8510).
+    /// Test: `an_account_only_pin_uses_a_token_proven_under_the_static_dir`.
+    pub(crate) fn from_identity_vars(vars: Vec<(String, String)>) -> Self {
+        let unset = inherited_identity_to_clear(&vars);
+        Self { vars, unset }
+    }
+
     /// Borrow the resolved `(name, value)` overrides.
     ///
     /// Why: callers iterate these to call `Command::env`; tests iterate them
@@ -228,9 +273,10 @@ impl GhEnv {
     /// nothing distinguished "used no config dir at all" from "used the wrong
     /// one". `GH_TOKEN`'s VALUE must never appear in a diagnostic string.
     /// What: `"no github: binding resolved …"` for an empty `GhEnv`, else the
-    /// resolved `VAR=value` pairs joined by `, `, with `GH_TOKEN`'s value
+    /// resolved `VAR=value` pairs joined by `, `, with every `*TOKEN` value
     /// redacted.
-    /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`.
+    /// Test: `describe_empty_env`, `describe_config_dir`, `describe_redacts_token`,
+    /// `describe_redacts_an_enterprise_token`.
     pub fn describe(&self) -> String {
         if self.is_empty() {
             return "no github: binding resolved — gh inherits the daemon's ambient \
@@ -242,7 +288,8 @@ impl GhEnv {
         self.vars
             .iter()
             .map(|(k, v)| {
-                if k == ENV_GH_TOKEN {
+                // #8510: `GH_ENTERPRISE_TOKEN` carries a token too.
+                if is_token_var(k) {
                     format!("{k}=<redacted>")
                 } else {
                     format!("{k}={v}")
@@ -390,7 +437,7 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
 /// Test: `binding_removes_the_inherited_identity_vars`,
 /// `absent_config_and_host_only_binding_remove_nothing`,
 /// `inherited_identity_to_clear_ignores_an_informational_only_binding`,
-/// and `gh_env_file_unsets_an_inherited_token` in
+/// and `env_unset_clears_an_inherited_gh_token` in
 /// `runtime::claude_code_gh_env_tests`.
 pub fn inherited_identity_to_clear(set_vars: &[(String, String)]) -> Vec<String> {
     let selects_identity = set_vars
@@ -988,5 +1035,27 @@ mod tests {
             !described.contains("ghp_super_secret"),
             "described: {described}"
         );
+    }
+
+    /// 🔴 #8510 r4: a `GhEnv` holding real tokens prints none of them in
+    /// `{:?}`; a non-token value still shows.
+    /// Test: itself.
+    #[test]
+    fn gh_env_debug_redacts_every_token() {
+        let env = GhEnv::from_identity_vars(vec![
+            ("GH_TOKEN".to_string(), "tok-secret-one".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "tok-secret-two".to_string(),
+            ),
+            ("GH_HOST".to_string(), "ghe.corp".to_string()),
+        ]);
+        let shown = format!("{env:?}");
+        assert!(!shown.contains("tok-secret"), "shown: {shown}");
+        assert!(
+            shown.contains("GH_TOKEN") && shown.contains("<redacted>"),
+            "shown: {shown}"
+        );
+        assert!(shown.contains("ghe.corp"), "shown: {shown}");
     }
 }

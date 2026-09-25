@@ -41,8 +41,70 @@
 const COMMENT_OPEN: &str = "<!--";
 /// Closing delimiter of an HTML comment.
 const COMMENT_CLOSE: &str = "-->";
-/// Fenced-code-block delimiter prefix.
-const FENCE: &str = "```";
+
+/// An open fenced code block: its marker character and run length.
+///
+/// Why (#8533): CommonMark closes a fence only with the character that opened
+/// it, repeated at least as often. Counting lines that start with three
+/// backticks mispaired a `~~~` fence and a four-backtick fence around a
+/// three-backtick one.
+/// Test: `tilde_and_long_backtick_fences_pair_by_character_and_length`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fence {
+    marker: char,
+    len: usize,
+}
+
+impl Fence {
+    /// The fence `line` opens: three or more backticks or tildes after any
+    /// indentation; a backtick fence's info string holds no backtick.
+    fn opened_by(line: &str) -> Option<Fence> {
+        let body = line.trim_start();
+        let marker = body.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+        let len = body.chars().take_while(|&c| c == marker).count();
+        let info = &body[len..];
+        (len >= 3 && !(marker == '`' && info.contains('`'))).then_some(Fence { marker, len })
+    }
+
+    /// Whether `line` closes this fence: only the same character, at least as
+    /// many of it, and whitespace.
+    fn closed_by(self, line: &str) -> bool {
+        let body = line.trim();
+        body.len() >= self.len && body.chars().all(|c| c == self.marker)
+    }
+
+    /// The line that closes this fence.
+    pub(crate) fn closing_line(self) -> String {
+        self.marker.to_string().repeat(self.len)
+    }
+}
+
+/// Advance the fence state `open` over `line`; `true` when `line` opens or
+/// closes a fence.
+///
+/// Test: `tilde_and_long_backtick_fences_pair_by_character_and_length`.
+pub(crate) fn step_fence(open: &mut Option<Fence>, line: &str) -> bool {
+    match *open {
+        Some(fence) if fence.closed_by(line) => {
+            *open = None;
+            true
+        }
+        Some(_) => false,
+        None => {
+            *open = Fence::opened_by(line);
+            open.is_some()
+        }
+    }
+}
+
+/// The fence `text` leaves open at its end, if any.
+pub(crate) fn open_fence_at_end(text: &str) -> Option<Fence> {
+    let mut open = None;
+    for line in text.lines() {
+        step_fence(&mut open, line);
+    }
+    open
+}
 
 /// Fold the composed PM prompt down to the bytes that carry instruction.
 ///
@@ -70,7 +132,7 @@ const FENCE: &str = "```";
 /// A delivered mixed line never reaches [`compact_row`] and never toggles fence
 /// state: it is pushed exactly as authored. `<!-- lang -->` followed by a fence
 /// marker is therefore NOT a fence open, because the delivered line does not
-/// satisfy `trim_start().starts_with("```")` — pinned by
+/// open a fence under [`step_fence`] — pinned by
 /// `a_mixed_comment_and_fence_line_does_not_open_a_fence`.
 ///
 /// Determinism: pure function of `text` — no clock, no environment, no I/O. It
@@ -88,7 +150,7 @@ const FENCE: &str = "```";
 pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let ends_with_newline = text.ends_with('\n');
     let mut out: Vec<String> = Vec::new();
-    let mut in_fence = false;
+    let mut fence: Option<Fence> = None;
     let mut in_comment = false;
 
     for line in text.lines() {
@@ -112,12 +174,12 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
             }
             continue;
         }
-        if line.trim_start().starts_with(FENCE) {
-            in_fence = !in_fence;
+        // #8533: a fence closes only on its own character and length.
+        if step_fence(&mut fence, line) {
             out.push(line.trim_end().to_string());
             continue;
         }
-        if in_fence {
+        if fence.is_some() {
             out.push(line.to_string());
             continue;
         }
@@ -151,6 +213,48 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let mut folded = out.join("\n");
     if ends_with_newline {
         folded.push('\n');
+    }
+    folded
+}
+
+/// Fold each part ON ITS OWN, then join the non-empty results with `separator`.
+///
+/// Why (#8533): the roster-absent string assembly carries project override
+/// bodies beside base text. Folded as one string, a body ending in an unclosed
+/// `<!--` hid every later part up to the next `-->` — the agent-selection note,
+/// the roster and the enforcement tables included. Folding each part alone
+/// confines a comment or fence to the part that opened it, as
+/// [`crate::core::instruction_package::InstructionPackage::compose`] does per block.
+/// What: trims each part and runs it through [`fold_block`], drops the ones the
+/// fold empties, joins the rest. A part is never folded twice, so no refold can
+/// re-pair state.
+/// Test: `an_unclosed_comment_in_one_part_hides_nothing_in_the_next`.
+pub(crate) fn fold_parts<S: AsRef<str>>(parts: &[S], separator: &str) -> String {
+    parts
+        .iter()
+        .map(|part| fold_block(part.as_ref().trim()))
+        .filter(|folded| !folded.is_empty())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+/// Fold one block on its own and close the fence it leaves open.
+///
+/// Why (#8533): the next block is joined straight after this one. A project
+/// body that opens a fence and never closes it turned every later block into
+/// code, the safety core included. Folding per block confines a comment to its
+/// block; closing the fence here does the same for a fence.
+/// What: [`fold_delivered_prompt`], then, when a fence is still open, a line
+/// closing it with the same character and length.
+/// Test: `a_block_closes_its_own_tilde_or_long_backtick_fence`,
+/// `an_override_ending_in_an_unclosed_fence_closes_it_in_its_own_block`.
+pub(crate) fn fold_block(text: &str) -> String {
+    let mut folded = fold_delivered_prompt(text);
+    if let Some(fence) = open_fence_at_end(&folded) {
+        if !folded.ends_with('\n') {
+            folded.push('\n');
+        }
+        folded.push_str(&fence.closing_line());
     }
     folded
 }

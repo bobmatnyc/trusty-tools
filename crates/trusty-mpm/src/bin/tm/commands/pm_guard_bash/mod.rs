@@ -53,22 +53,35 @@ mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
 mod disk_usage;
+// #8572: an agent's branch switch in a dirty main checkout.
+mod head_switch;
 mod heredoc;
+// #8161: HEAD moves into a linked worktree a live agent stands in.
+mod linked_worktree_head_move;
 mod main_checkout;
 mod path_tokens;
 mod persistence;
+// #8439: a read-only dispatch runs only allowlisted command shapes.
+mod read_only_allow;
+mod read_only_git;
+mod read_only_lex;
+mod read_only_programs;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
+mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
+pub(crate) use head_switch::evaluate_main_checkout_head_switch;
+pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
@@ -106,7 +119,8 @@ pub(crate) use shell_lex::git_argv_at_subcommand;
 pub(crate) use worktree_remove::{
     DispatchIdentity, WorktreeRemoveVerdict, evaluate_worktree_remove_command,
 };
-pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
+// #7889: the re-checks are reached only through their deadline.
+pub(crate) use worktree_remove_deadline::{print_deny_then_audit, removal_recheck_deny};
 
 use std::path::{Path, PathBuf};
 
@@ -447,8 +461,9 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
             // two-token `effective_tool_name` matcher below cannot see past the
             // global flags. On unbalanced quotes `git_subcommand` yields `None`
             // and we simply don't treat it as `git apply` (matching the prior
-            // allow-on-ambiguous-git-command behaviour).
-            "git" if shell_lex::git_subcommand(trimmed).as_deref() == Some("apply") => {
+            // allow-on-ambiguous-git-command behaviour). #8439: an unknown
+            // global option makes every later token a candidate `apply`.
+            "git" if shell_lex::git_may_run(trimmed, "apply") => {
                 return Some(SHELL_EDIT_REASON);
             }
             // #7399: `git diff --output=<file>`, `git format-patch -o <dir>`,
@@ -621,8 +636,7 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
             let program = program.as_str();
             let is_sed_awk_family =
                 matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
-            let is_git_apply =
-                program == "git" && shell_lex::git_subcommand(trimmed).as_deref() == Some("apply");
+            let is_git_apply = program == "git" && shell_lex::git_may_run(trimmed, "apply");
             if (is_sed_awk_family || is_git_apply)
                 && let Some(target) = trailing_file_token(trimmed)
             {
@@ -1027,7 +1041,9 @@ fn worktree_add_targets_in(command: &str, cwd: &Path, env: &PathEnv) -> Vec<Path
             }
             continue;
         }
-        if shell_lex::git_subcommand(trimmed).as_deref() != Some("worktree") {
+        // #8439: `git_may_run`, not `git_subcommand`, so an unknown global
+        // option cannot hide the `worktree add` behind it.
+        if !shell_lex::git_may_run(trimmed, "worktree") {
             continue;
         }
         let Some(argv) = shlex::split(trimmed) else {

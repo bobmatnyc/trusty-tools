@@ -624,9 +624,45 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::FallThrough;
     }
 
-    InPlaceOutcome::Result(exec_claude_in_place(build_inplace_exec_command(
-        &resume, &cwd,
+    // #8233 review (HIGH): resolve the session workspace's pinned `gh` identity
+    // — the pane shell stopped carrying it when the launch moved into a spec.
+    // A refusal here (the `account`-only strategy) is logged, not fatal: losing
+    // the relaunch entirely is worse than relaunching on the ambient identity,
+    // which is what every pre-#3025 session had.
+    let gh_env = crate::gh_identity::load_gh_env_for(&cwd).unwrap_or_else(|e| {
+        eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
+        trusty_mpm::core::gh_identity::GhEnv::default()
+    });
+
+    InPlaceOutcome::Result(exec_claude_in_place(inplace_exec_command_for(
+        // #8405: the operator's config decides the renderer.
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        &resume,
+        &cwd,
+        &gh_env,
     )))
+}
+
+/// The in-place relaunch command with the renderer the config under
+/// `config_root` decides (#8405).
+///
+/// Why: the one seam where the relaunch turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`build_inplace_exec_command`] with
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_in`].
+/// Test: `inplace_exec_command_for_follows_the_configured_renderer`.
+pub(crate) fn inplace_exec_command_for(
+    config_root: Option<&std::path::Path>,
+    resume: &trusty_mpm::runtime::InPlaceResumeCommand,
+    cwd: &std::path::Path,
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+) -> std::process::Command {
+    build_inplace_exec_command(
+        resume,
+        cwd,
+        gh_env,
+        trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
+    )
 }
 
 /// Assemble the [`std::process::Command`] the in-place relaunch execs — the
@@ -659,27 +695,44 @@ pub(crate) async fn run_inplace_relaunch(
 /// The scrub runs BEFORE the deliberate assignments below so it can never
 /// clobber `CLAUDE_CONFIG_DIR` (#4455) even if the marker list grew wrongly.
 ///
-/// Issues #6495/#7160: the same reasoning applies to the classic-renderer and
+/// Issues #6495/#7160/#8405: the same reasoning applies to the renderer and
 /// mouse-capture defaults — the `env NAME=VALUE` operands the tmux-pane paths
 /// carry cannot reach an exec, so
-/// [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets both here.
-/// It runs last and, for each variable independently, sets nothing when this
-/// pane already exports a value.
+/// [`trusty_mpm::core::alt_screen::apply_configured_to_command`] sets both here,
+/// last. The renderer is the one config `tmux.alternate_screen` decides,
+/// assigned whatever this pane exports; mouse capture still yields to it.
+///
+/// #8233 review (HIGH): `gh_env` is the pinned `gh` identity
+/// (`GH_TOKEN`/`GH_CONFIG_DIR`/`GH_HOST`, #3025/#6668), and it is applied FIRST
+/// so a later deliberate assignment always wins. Before #8233 the spawn wrote
+/// those exports into the PANE's shell by sourcing a temp file, so a bare-`tm`
+/// relaunch inherited them for free. The launch spec now delivers the
+/// environment to `claude` alone and the pane shell never sees it, so this path
+/// has to resolve the binding again — otherwise every in-place relaunch silently
+/// fell back to the ambient account, reintroducing #6668 for exactly this path.
+/// [`trusty_mpm::core::gh_identity::GhEnv::apply_to`] also REMOVES the inherited
+/// identity vars the binding outranks, which is the half a plain set would miss.
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
+/// `inplace_exec_command_carries_the_pinned_gh_identity`,
+/// `inplace_exec_command_clears_an_inherited_gh_token`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`,
-/// `inplace_exec_command_defaults_the_alternate_screen_off`,
+/// `inplace_exec_command_assigns_the_configured_renderer`,
 /// `inplace_exec_command_defaults_the_mouse_capture_off`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
+    gh_env: &trusty_mpm::core::gh_identity::GhEnv,
+    alternate_screen: bool,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(&resume.claude_bin);
     cmd.args(&resume.args)
         .current_dir(cwd)
         .env_remove("ANTHROPIC_API_KEY");
+    // #8233 review: the pinned `gh` identity the pane shell no longer carries.
+    gh_env.apply_to(&mut cmd);
     // #4467: strip Claude Code's inherited process-local session markers so the
     // relaunched session keeps native --resume/--continue/rewind recovery.
     trusty_mpm::core::claude_env_scrub::scrub_command(&mut cmd);
@@ -695,9 +748,8 @@ pub(crate) fn build_inplace_exec_command(
     for (name, value) in &resume.mcp_env {
         cmd.env(name, value);
     }
-    // #6495: relaunch on the classic renderer so the pane keeps its scrollback,
-    // unless this pane already carries an operator value.
-    trusty_mpm::core::alt_screen::apply_default_to_command(&mut cmd);
+    // #6495/#8405: the config-decided renderer, whatever this pane exports.
+    trusty_mpm::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd
 }
 

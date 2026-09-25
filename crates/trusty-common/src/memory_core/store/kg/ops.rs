@@ -456,27 +456,26 @@ impl KnowledgeGraph {
 
     /// Synchronous triple assert; see `KgWriter::assert_sync`.
     ///
-    /// Why: CLI commands (e.g. `migrate kuzu-data`) run outside a tokio
-    /// runtime and need a direct write path without spawning an executor.
+    /// Why: synchronous callers (the room backfill, sync test setup) need a
+    /// direct write path without spawning an executor.
     /// What: Delegates to `KgWriter::assert_sync` on the bypass path.
-    /// Test: Used by `kuzu_migrate::tests` and the fixture-based integration
-    /// test in `tests/kuzu_migrate_tests.rs`.
+    /// Test: `backfill_uses_kg_dictionary`.
     pub fn assert_sync(&self, triple: &Triple) -> Result<()> {
         self.writer.assert_sync(triple)
     }
 
     /// Synchronous drawer upsert; see `KgWriter::upsert_drawer_sync`.
     ///
-    /// Why: Same motivation as `assert_sync` — CLI migrate commands need a
-    /// synchronous write path.
+    /// Why: Same motivation as `assert_sync`.
     /// What: Delegates to `KgWriter::upsert_drawer_sync`.
-    /// Test: Used by `kuzu_migrate::tests`.
+    /// Test: `backfill_changes_no_drawer_rows`,
+    /// `expired_tier_c_drawer_survives_the_open_time_sweep`.
     pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> Result<()> {
         self.writer.upsert_drawer_sync(drawer)
     }
 
-    /// Expose the underlying store for read-only inspection (e.g. schema
-    /// discovery in migrate commands).
+    /// Expose the underlying store for inspection (e.g. the room backfill
+    /// and the share export).
     ///
     /// Why: CLI commands that need to call store methods not exposed on
     /// `KnowledgeGraph` directly (e.g. `query_active` in a sync context)
@@ -484,7 +483,7 @@ impl KnowledgeGraph {
     /// `Arc<KgStoreRedb>` so cloning it is cheap.
     /// What: Returns a clone of the `Arc<KgStoreRedb>` via the writer's
     /// `store()` accessor.
-    /// Test: Used by `kuzu_migrate` for idempotency checks.
+    /// Test: `backfill_changes_no_drawer_rows`, `backfill_is_idempotent`.
     pub fn store(&self) -> std::sync::Arc<KgStoreRedb> {
         self.writer.store()
     }

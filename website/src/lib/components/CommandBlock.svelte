@@ -7,7 +7,7 @@
 	 * substitute. Repeating that markup per block is how one of the three goes
 	 * missing.
 	 *
-	 * What: the `<pre>` + `CopyButton` pair the tga audit page established,
+	 * What: the `<pre>` + `CopyButton` pair the install walkthrough needs,
 	 * lifted into one component, plus the placeholder instruction. The
 	 * `min-w-0` and `pr-14` are that page's own containment fix: a `<pre>`
 	 * never wraps, so without them the flex child widens to the longest

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -16,7 +16,7 @@ import { STABLE_SET } from '../site';
 /**
  * Why: a published install command that does not work is the worst failure
  * this site has, and prose review does not catch it — `tctl install
- * trusty-code` reads exactly like the seven lines above it and fails with an
+ * trusty-code` reads exactly like the six lines above it and fails with an
  * unknown-member error. The macOS permission is the same class of defect with
  * a worse blast radius: telling a reader to grant `tm` the disk-wide category
  * would be a security regression, not a typo (#5110).
@@ -35,21 +35,6 @@ import { STABLE_SET } from '../site';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../../../..');
 
-/** Package name from a crate's own manifest — `trusty-git-analytics` is `tga`. */
-function packageNames(): Set<string> {
-	const cratesDir = path.join(REPO_ROOT, 'crates');
-	const names = new Set<string>();
-	for (const entry of readdirSync(cratesDir, { withFileTypes: true })) {
-		if (!entry.isDirectory()) continue;
-		const manifest = path.join(cratesDir, entry.name, 'Cargo.toml');
-		if (!existsSync(manifest)) continue;
-		// Anchored: a `[dependencies]` entry further down also matches `name`.
-		const declared = readFileSync(manifest, 'utf8').match(/^name\s*=\s*"([^"]+)"/m);
-		if (declared) names.add(declared[1]);
-	}
-	return names;
-}
-
 /** Every command block the page can render, audience commands and shared setup. */
 function allCommands(): CommandBlock[] {
 	return [
@@ -58,10 +43,12 @@ function allCommands(): CommandBlock[] {
 	];
 }
 
-describe('the nine install audiences', () => {
-	it('covers the nine paths the research doc establishes, with unique ids', () => {
-		expect(AUDIENCES.length).toBe(9);
-		expect(new Set(AUDIENCES.map((a) => a.id)).size).toBe(9);
+describe('the eight install audiences', () => {
+	it('covers eight of the nine paths the research doc establishes, with unique ids', () => {
+		// #8507: tga's row moved to its own site; eight of the doc's nine paths
+		// remain here.
+		expect(AUDIENCES.length).toBe(8);
+		expect(new Set(AUDIENCES.map((a) => a.id)).size).toBe(8);
 		expect(AUDIENCES.map((a) => a.id)).toEqual([
 			'trusty-memory',
 			'trusty-search',
@@ -70,8 +57,7 @@ describe('the nine install audiences', () => {
 			'trusty-review',
 			'trusty-mpm',
 			'trusty-code',
-			'trusty-agents',
-			'tga'
+			'trusty-agents'
 		]);
 	});
 
@@ -124,19 +110,6 @@ describe('every command is one the repository can actually run', () => {
 				}
 			}
 			expect(STABLE_SET).not.toContain(id);
-		}
-	});
-
-	it('names a real package on every cargo install line', () => {
-		const packages = packageNames();
-		const named = allCommands()
-			.flatMap((block) => block.command.split('\n'))
-			.map((line) => line.match(/^cargo install ([a-z0-9-]+) --locked$/))
-			.filter((match): match is RegExpMatchArray => match !== null)
-			.map((match) => match[1]);
-		expect(named.length).toBeGreaterThan(0);
-		for (const name of named) {
-			expect(packages, `cargo install ${name}`).toContain(name);
 		}
 	});
 
@@ -213,8 +186,7 @@ describe('macOS permission categories are per product and never widened', () => 
 			'trusty-memory',
 			'trusty-analyze',
 			'trusty-review',
-			'trusty-code',
-			'tga'
+			'trusty-code'
 		]);
 		for (const audience of none) {
 			expect(audience.tcc.summary, audience.id).not.toContain('Full Disk Access');
@@ -247,15 +219,5 @@ describe('the MCP registration each audience publishes', () => {
 				`${id} MCP args`
 			).toBe(true);
 		}
-	});
-
-	it('registers nothing for tga, which has no MCP transport', () => {
-		const tga = AUDIENCES.find((a) => a.id === 'tga')!;
-		for (const step of tga.steps) {
-			for (const block of step.commands) {
-				expect(block.command, 'tga').not.toContain('mcpServers');
-			}
-		}
-		expect(audienceText(tga)).toContain('no MCP transport');
 	});
 });

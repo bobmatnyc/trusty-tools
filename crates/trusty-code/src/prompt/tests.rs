@@ -540,6 +540,8 @@ fn known_tool_names() -> Vec<String> {
             crate::tools::RECALL_SESSION_TOOL_NAME,
             crate::tools::SET_GOAL_TOOL_NAME,
             crate::tools::CLEAR_GOAL_TOOL_NAME,
+            // #8235: needs a live session's checklist store to construct.
+            crate::tools::TODO_WRITE_TOOL_NAME,
         ]
         .iter()
         .map(|name| (*name).to_string()),
@@ -1072,4 +1074,56 @@ fn parity_ignores_skills_catalog() {
 
     assert_eq!(out, baseline);
     assert!(!out.contains("demo-skill"));
+}
+
+/// The delegate-mode PM's ASSEMBLED system prompt carries the routing block,
+/// with its three targets in DOC-75 §1's order (#8287).
+///
+/// Why: the card is only half the mechanism — the assembler is what the model
+/// actually reads, and it drops an agent prompt that is empty and gates every
+/// tool-instructing section on the run's registry. A routing table that survived
+/// the card but not assembly would leave #8287 open behind a green card test.
+/// This is also the closest deterministic stand-in for the scripted delegate turn
+/// #8287 describes: tcode's agent loop drives a live inference adapter, so the
+/// assembled prompt is the last artifact a test can pin without a model.
+/// What: resolves `pm` through the same embedded tier `delegate_to_agent` uses,
+/// assembles with `tools: None` — the delegating path's value, since
+/// `task::executor::pm_prompt_tools` returns `None` whenever `no_delegate` is
+/// false — then extracts the routing block from the ASSEMBLED text and asserts
+/// `crate::assets::PM_ROUTING_ORDER`'s names appear inside it, in order.
+/// Test: this test.
+#[test]
+fn delegate_mode_prompt_carries_the_routing_table() {
+    let pm = crate::agents::resolve_agent(
+        std::path::Path::new("/tcode-tests-no-such-agents-dir"),
+        "pm",
+    )
+    .expect("the embedded `pm` card must resolve");
+
+    let assembled = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &pm,
+        None,
+        None,
+        None,
+        // #4602/#8287: the delegating PM holds no filesystem registry, so the
+        // assembler is handed none — exactly what `task::executor` passes.
+        None,
+    );
+
+    let block = crate::assets::pm_routing_block(&assembled).unwrap_or_else(|| {
+        panic!("the assembled delegate-mode prompt carries no routing block (#8287)")
+    });
+
+    let mut cursor = 0usize;
+    for target in crate::assets::PM_ROUTING_ORDER {
+        let needle = format!("`{target}`");
+        let at = block[cursor..].find(&needle).unwrap_or_else(|| {
+            panic!(
+                "the assembled routing block names no `{target}` target at or after \
+                 byte {cursor} — DOC-75 §1 fixes the order research -> engineer -> qa"
+            )
+        });
+        cursor += at + needle.len();
+    }
 }

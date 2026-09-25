@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::worktree_owner_gate::{OwnerGate, SessionEnd, owner_refusal};
 use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
     read_sentinel_owner,
@@ -42,33 +43,36 @@ pub(crate) type AgentStateProbe<'a> = &'a dyn Fn(&AgentWorktreeOwner) -> AgentDe
 /// The merged-PR reclaim path never read the sentinel, so it deleted three live
 /// agents' worktrees on 2026-08-15/16, two of them holding unpushed commits.
 ///
-/// What: reads the sentinel through [`read_sentinel_owner`], the same tolerant
-/// parse the orphan path uses, and refuses on two answers.
+/// What: a tree inside the harness agent store ([`is_harness_agent_worktree`])
+/// is judged by [`owner_refusal`], the #7771 rule, with `owners` answering
+/// condition (d). Before #7771 an agent-store tree whose sentinel named nobody
+/// was refused forever, which kept every hand-made tree.
 ///
-/// 1. [`SentinelOwner::Agent`] whose agent the registry calls
-///    [`Live`](AgentDelegationState::Live). An
-///    [`Unknown`](AgentDelegationState::Unknown) registry answer (the map is
-///    rebuilt empty at every daemon boot) consults git's durable harness lock
-///    instead (#6561): `Released` permits; `Held` and `Undeterminable` refuse.
-/// 2. [`SentinelOwner::Unknown`] for ANY path inside the harness agent store
-///    ([`is_harness_agent_worktree`]), whether the sentinel is unreadable or
-///    absent. Nothing attributes that tree, so the question is undeterminable,
-///    not absent (#6561 critic round).
-///
-/// A worktree OUTSIDE the agent store with an absent or unparsable sentinel is
-/// left to the later gates; widening the refusal there would make the
-/// `.worktrees/` population permanently unreclaimable.
+/// Outside the store, the sentinel is read through [`read_sentinel_owner`] and
+/// [`SentinelOwner::Agent`] whose agent the registry calls
+/// [`Live`](AgentDelegationState::Live) refuses. An
+/// [`Unknown`](AgentDelegationState::Unknown) registry answer consults git's
+/// durable harness lock instead (#6561): `Released` permits; `Held` and
+/// `Undeterminable` refuse. An absent or unparsable sentinel there is left to
+/// the later gates.
 /// Test: `classify_blocks_a_live_agents_worktree`,
 /// `classify_blocks_an_agent_the_harness_still_holds_after_a_restart`,
 /// `classify_allows_a_finished_agents_merged_worktree`,
-/// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
-/// `an_unattributed_agent_store_worktree_is_never_reclaimable`,
+/// `worktree_7771_a_hand_made_tree_is_reclaimed`,
 /// `classify_allows_a_merged_agent_tree_the_harness_released`,
 /// `classify_blocks_an_agent_tree_git_cannot_be_asked_about`.
 pub(crate) fn agent_ownership_blocks(
     path: &Path,
     agent_state: AgentStateProbe<'_>,
+    owners: &SessionOwners,
 ) -> Option<String> {
+    // #7771: an agent-store tree, with or without an owner file, is judged by
+    // the session-safe rule — a live lock holder, a live delegation, a live
+    // foreign owning session, or a process standing in it keeps it.
+    if is_harness_agent_worktree(path) {
+        let session_end = |id: &str| owners.session_end(id);
+        return owner_refusal(path, &OwnerGate::host(agent_state, &session_end));
+    }
     match read_sentinel_owner(path) {
         SentinelOwner::Agent(owner, _) => match agent_state(&owner) {
             AgentDelegationState::Live => Some(format!(
@@ -94,16 +98,6 @@ pub(crate) fn agent_ownership_blocks(
             },
             AgentDelegationState::Ended => None,
         },
-        // #6561 critic round: absent and unreadable are BOTH undeterminable
-        // here — see this function's doc, refusal 2.
-        SentinelOwner::Unknown if is_harness_agent_worktree(path) => Some(
-            "names no owner inside the harness agent-worktree store — the sentinel is absent, \
-             empty, malformed or unreadable, so nothing attributes this tree to an agent and \
-             nothing says whether one is still working in it. An unanswerable ownership \
-             question on a destructive path is undeterminable, not absent (#5661, #6561, \
-             ADR-0045)"
-                .to_string(),
-        ),
         SentinelOwner::Known(..) | SentinelOwner::Unknown => None,
     }
 }
@@ -127,9 +121,78 @@ pub(crate) fn agent_ownership_blocks(
 pub(crate) struct SessionOwners {
     /// Session id (as `ManagedSessionId` displays it) → that record's liveness.
     by_id: Option<HashMap<String, ClaimLiveness>>,
+    /// #7771: the session running the reclaim, which may take its own trees.
+    caller: Option<String>,
+    /// #7771: Claude Code session id → every managed session id recording it.
+    /// An agent owner file names the dispatching CLAUDE session, not the
+    /// managed record, and a resumed session can be recorded more than once.
+    aliases: HashMap<String, Vec<String>>,
 }
 
 impl SessionOwners {
+    /// This map, naming the calling session (#7771).
+    pub(crate) fn with_caller(mut self, caller: Option<String>) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// This map, resolving Claude session ids to managed ids (#7771).
+    pub(crate) fn with_aliases(
+        mut self,
+        pairs: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        for (claude, managed) in pairs {
+            self.aliases.entry(claude).or_default().push(managed);
+        }
+        self
+    }
+
+    /// Whether session `id` (managed or Claude) is the caller or provably
+    /// ended (#7771 condition d).
+    ///
+    /// What: [`SessionEnd::Caller`] when `id` is the caller. A Claude id is
+    /// judged by EVERY managed record aliasing it, strictest first: any `Live`
+    /// record is `Live`, then any record nothing can judge is
+    /// `Undeterminable`, then a caller record is `Caller`; `Ended` needs every
+    /// record gone. One record is judged by [`Self::record_end`].
+    /// Test: `session_end_resolves_a_claude_id_through_its_alias`,
+    /// `session_end_keeps_a_claude_id_any_live_record_holds`,
+    /// `session_end_ranks_a_live_alias_above_the_caller_alias`,
+    /// `session_end_refuses_an_unread_map`.
+    pub(crate) fn session_end(&self, id: &str) -> SessionEnd {
+        if self.caller.as_deref() == Some(id) {
+            return SessionEnd::Caller;
+        }
+        // #7771 critic: a Claude session resumed into two records is not
+        // judged by whichever pair was recorded last.
+        self.aliases
+            .get(id)
+            .and_then(|records| {
+                records
+                    .iter()
+                    .map(|m| self.record_end(m))
+                    .max_by_key(strictness)
+            })
+            .unwrap_or_else(|| self.record_end(id))
+    }
+
+    /// One managed record's answer: the caller is `Caller`, then the #7652
+    /// evidence — `SessionGone` is `Ended`, `Live` is `Live`, and an unread map
+    /// or an unrecorded id is `Undeterminable`.
+    fn record_end(&self, managed: &str) -> SessionEnd {
+        if self.caller.as_deref() == Some(managed) {
+            return SessionEnd::Caller;
+        }
+        let Some(by_id) = &self.by_id else {
+            return SessionEnd::Undeterminable("the session store was not read".into());
+        };
+        match by_id.get(managed) {
+            Some(ClaimLiveness::SessionGone) => SessionEnd::Ended,
+            Some(ClaimLiveness::Live) => SessionEnd::Live,
+            None => SessionEnd::Undeterminable("no stored session record names it".into()),
+        }
+    }
+
     /// An owner map read from a store, one `(id, liveness)` pair per record.
     ///
     /// A duplicated id keeps `Live` if any entry says so: the fail-closed
@@ -142,7 +205,20 @@ impl SessionOwners {
                 *entry = ClaimLiveness::Live;
             }
         }
-        Self { by_id: Some(by_id) }
+        Self {
+            by_id: Some(by_id),
+            ..Self::default()
+        }
+    }
+}
+
+/// How strongly one record's [`SessionEnd`] keeps a tree; the strictest wins.
+fn strictness(end: &SessionEnd) -> u8 {
+    match end {
+        SessionEnd::Ended => 0,
+        SessionEnd::Caller => 1,
+        SessionEnd::Undeterminable(_) => 2,
+        SessionEnd::Live => 3,
     }
 }
 
@@ -159,12 +235,10 @@ impl SessionOwners {
 /// store holds a record with this id, its tmux name is managed-shaped, and a
 /// tmux probe that ANSWERED does not list it. That evidence does not depend on
 /// the record carrying a `workspace_path`, so a record without one is judged the
-/// same way. Every other answer refuses:
+/// same way. The calling session is permitted too (#7771). A tree in the
+/// harness agent store is gate 4's, judged by [`owner_refusal`] with the
+/// harness lock first (#7771). Every other answer refuses:
 ///
-/// - the tree is in the harness agent store and git reports the harness's
-///   agent-lifetime lock held, or cannot be asked (#7652 critic round). An
-///   agent-store sentinel can still name the parent session (#7958), so that
-///   session ending says nothing about the agent working in the tree;
 /// - the owner map was never read (an unreadable registry);
 /// - no stored record names the owner. The sentinel stores no pid or pane, so a
 ///   record is the only thing that could evidence that session's end, and its
@@ -186,29 +260,17 @@ impl SessionOwners {
 /// `worktree_7652_an_unread_owner_map_refuses`,
 /// `worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session`.
 pub(crate) fn session_ownership_blocks(path: &Path, owners: &SessionOwners) -> Option<String> {
+    // #7771: gate 4 already judged an agent-store tree by the full rule, the
+    // harness lock included.
+    if is_harness_agent_worktree(path) {
+        return None;
+    }
     let SentinelOwner::Known(owner, _) = read_sentinel_owner(path) else {
         return None;
     };
-    // #7652 critic round: in the agent store the harness lock outranks the
-    // sentinel's session — see this function's doc, first refusal.
-    if is_harness_agent_worktree(path) {
-        match harness_lock_state(path) {
-            HarnessLockState::Released => {}
-            HarnessLockState::Held => {
-                return Some(format!(
-                    "sentinel names session {owner}, but this tree is in the harness agent store \
-                     and git still reports the harness's agent-lifetime lock on it — an agent is \
-                     still working here, whatever that session's state (#7652, #6561)"
-                ));
-            }
-            HarnessLockState::Undeterminable => {
-                return Some(format!(
-                    "sentinel names session {owner}, this tree is in the harness agent store, and \
-                     git could not be asked whether the harness still holds it — undeterminable, \
-                     not absent (#7652, #6561, ADR-0045)"
-                ));
-            }
-        }
+    // #7771: the calling session may take a tree its own sentinel names.
+    if owners.session_end(&owner.to_string()) == SessionEnd::Caller {
+        return None;
     }
     let Some(by_id) = &owners.by_id else {
         return Some(format!(
@@ -257,6 +319,11 @@ pub(crate) fn unattributed_nested_blocks(path: &Path, claim: &ClaimState) -> Opt
     let ClaimState::ForeignNested { session, .. } = claim else {
         return None;
     };
+    // #7771: an agent-store tree nests under the shared checkout every session
+    // claims; gate 4 judged it by the full rule instead.
+    if is_harness_agent_worktree(path) {
+        return None;
+    }
     match read_sentinel_owner(path) {
         SentinelOwner::Unknown => Some(format!(
             "session {session} claims a workspace containing this worktree, and the ownership \

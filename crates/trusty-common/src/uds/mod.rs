@@ -65,6 +65,9 @@ mod tests;
 pub mod dir;
 mod peer;
 pub mod probe;
+// #8267: the bounded connect retry every framed dial runs under, so "the
+// daemon refused one connect" stops being a session-long MCP failure.
+pub mod retry;
 pub mod rpc;
 // #6277: the serving half of `rpc`, so a daemon migrating off HTTP under
 // ADR-0032 supplies a method table rather than a fourth hand-rolled accept loop.
@@ -118,9 +121,10 @@ pub use on_demand::{
 };
 pub use peer::{ensure_peer_is_self, peer_pid, peer_uid, self_uid};
 pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
+pub use retry::ConnectRetry;
 pub use rpc::{
     MAX_FRAME_BYTES, UdsRpcError, encode_frame, send_framed_notification, send_framed_request,
-    send_framed_request_capped, write_frame,
+    send_framed_request_capped, send_framed_request_retrying, write_frame,
 };
 pub use singleton::bind_singleton_hardened;
 pub use sockbuf::{

@@ -50,9 +50,9 @@ lsof -i :3000
 
 ### Rollback / Cleanup
 ```bash
-docker-compose down
-docker system prune -f    # only with explicit confirmation
-pm2 delete all
+docker-compose -p <task-owned-project> down
+pm2 delete <task-owned-process>
+# Global/volume pruning needs separately authorized scope.
 ```
 
 ## Database Lifecycle
@@ -68,21 +68,15 @@ npm run db:seed / mix run priv/repo/seeds.exs
 npm run db:rollback / mix ecto.rollback
 ```
 
-**Safety rule**: always require explicit confirmation before `db:reset`, `db:drop`, or volume pruning.
+**Safety rule**: `db:reset`, `db:drop` and volume pruning require explicit
+authorization for the exact target; do not repeat an approval already given.
 
 ## Quality Gates
 
-Run before any deployment or PR:
-```bash
-# Lint
-npm run lint / cargo clippy -- -D warnings / ruff check .
-
-# Tests
-npm test / cargo test / pytest --cov
-
-# Security scan
-npm audit / cargo audit / bandit -r src/
-```
+Use the project's risk/stage test ladder for lint, tests, security and build
+checks. Reuse matching raw evidence; run live health checks after deployment.
+A documentation-only PR does not owe every application gate. Preserve caches
+unless a specific invalidation or reproducibility check requires a cold run.
 
 Surface failures with the failing command output and remediation steps — do not silently swallow errors.
 
@@ -134,8 +128,8 @@ settles. Trust `bucket` only after cross-checking `state` — GitHub API
 eventual-consistency lag can surface a check as bucketed-complete before it has
 settled.
 
-- If a foreground invocation hits the 10-min tool ceiling, RE-ISSUE it in the
-  SAME turn and loop until it completes.
+- If a tool backgrounds the invocation, retain its task handle/PID and await
+  that run; never reissue the build merely because the tool returned early.
 - On failure, capture the output and report it — do not retry-by-waiting.
 - Ending a turn with "monitoring in the background", "will report back once…",
   or "standing by" is a PROTOCOL VIOLATION, not a status update.

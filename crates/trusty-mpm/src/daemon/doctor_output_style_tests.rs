@@ -245,6 +245,70 @@ fn output_style_project_scope_still_outranks_user_local() {
     assert!(check.message.contains("project"));
 }
 
+/// A project style `fixture-voice` under `project`, optionally with its composite.
+fn write_project_style(project: &Path, with_composite: bool) -> PathBuf {
+    let styles = project.join(crate::core::output_style::PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).unwrap();
+    let style = styles.join("fixture-voice.md");
+    std::fs::write(&style, "---\nname: fixture-voice\n---\nProject voice.\n").unwrap();
+    if with_composite {
+        std::fs::write(styles.join("fixture-voice.tm-floor.md"), "composite").unwrap();
+    }
+    style
+}
+
+#[test]
+fn output_style_ok_for_a_project_style_and_its_composite() {
+    // #8533 critic round 3: a project style id and its `.tm-floor` composite
+    // are valid values, not unknown ids.
+    let home = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let style = write_project_style(project.path(), true);
+    for id in ["fixture-voice", "fixture-voice.tm-floor"] {
+        write_local_settings(project.path(), &format!(r#"{{"outputStyle": "{id}"}}"#));
+        let check = check_output_style(Some(project.path()), home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "{id}: {}", check.message);
+        assert!(
+            check.message.contains(&style.display().to_string()),
+            "{id}: the project style path is named: {}",
+            check.message
+        );
+        assert!(check.message.contains("project-local"), "{}", check.message);
+    }
+    // An id that names no project style is still unknown.
+    write_local_settings(project.path(), r#"{"outputStyle": "nope.tm-floor"}"#);
+    let check = check_output_style(Some(project.path()), home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(check.message.contains("is not a known trusty-mpm style"));
+}
+
+#[test]
+fn output_style_project_style_without_composite_is_reported() {
+    // #8533: a composite id with no composite file names nothing Claude Code
+    // can load; a raw id with no composite loads without the floor.
+    let home = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    write_project_style(project.path(), false);
+    write_settings(
+        project.path(),
+        r#"{"outputStyle": "fixture-voice.tm-floor"}"#,
+    );
+    let check = check_output_style(Some(project.path()), home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains("fixture-voice.tm-floor.md"),
+        "{}",
+        check.message
+    );
+    write_settings(project.path(), r#"{"outputStyle": "fixture-voice"}"#);
+    let check = check_output_style(Some(project.path()), home.path());
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    // With no project dir, a project style id is unknown.
+    write_settings(home.path(), r#"{"outputStyle": "fixture-voice"}"#);
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+}
+
 #[test]
 fn output_style_warn_names_all_checked_layers_when_none_configured() {
     // The no-`outputStyle`-key-anywhere case (the writing project's real

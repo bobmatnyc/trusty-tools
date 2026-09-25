@@ -194,10 +194,19 @@ pub(crate) const GIT_ENV_REDIRECTS: &[&str] = &[
 ];
 
 /// Working-tree status for the candidate itself.
-const STATUS_ARGS: &[&str] = &[
+// #8572: `pub(crate)` so the main-checkout HEAD-switch guard reads dirt the same way.
+pub(crate) const STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain",
     "--untracked-files=normal",
+    "--ignore-submodules=none",
+];
+
+/// [`STATUS_ARGS`] with every untracked file listed on its own line (#7660).
+const STATUS_ARGS_PER_FILE: &[&str] = &[
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
     "--ignore-submodules=none",
 ];
 
@@ -323,6 +332,27 @@ pub fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
     inspect_dirt_at(path, true)
 }
 
+/// A predicate over one `git status --porcelain` line (#7660).
+pub(crate) type ExcuseEntry<'a> = &'a dyn Fn(&str) -> bool;
+
+/// [`inspect_dirt`], with the working-tree entries `excuse` accepts left
+/// uncounted (#7660).
+///
+/// Why: `tm sessions decommission --force` removes a workspace that is dirty
+/// only from tm's own provisioning files. Every other question this guard asks
+/// — unpushed commits, nested repositories, `.trusty-mpm/` work, the root
+/// identity check, and every fail-safe error arm — must still be asked, so the
+/// excuse is threaded through this one function rather than re-implemented.
+/// What: identical to [`inspect_dirt`] except that pass one of
+/// [`count_dirty_files`] lists untracked files one by one and skips a line
+/// `excuse` returns `true` for.
+/// Test: `force_decommission_removes_a_provisioning_only_worktree`,
+/// `force_decommission_still_refuses_user_work`,
+/// `force_decommission_still_refuses_unpushed_commits`.
+pub(crate) fn inspect_dirt_excusing(path: &Path, excuse: ExcuseEntry) -> Option<DirtyWorktree> {
+    inspect_dirt_with(path, true, Some(excuse))
+}
+
 /// [`inspect_dirt`], with the nested-repository scan switchable off.
 ///
 /// Why: the nested scan inspects each nested root by calling back into this
@@ -332,6 +362,15 @@ pub fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// What: `scan_nested = false` answers only questions 1, 2 and 4 for `path`.
 /// Test: `inspect_dirt_reports_nested_gitignored_worktree`.
 pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
+    inspect_dirt_with(path, scan_nested, None)
+}
+
+/// The body of [`inspect_dirt_at`] and [`inspect_dirt_excusing`] (#7660).
+fn inspect_dirt_with(
+    path: &Path,
+    scan_nested: bool,
+    excuse: Option<ExcuseEntry>,
+) -> Option<DirtyWorktree> {
     match is_worktree_root(path) {
         Ok(true) => {}
         // Not a git worktree root (or git cannot tell us) — fall back to the
@@ -339,7 +378,7 @@ pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWor
         Ok(false) | Err(_) => return non_git_dirt(path),
     }
 
-    let dirty_files = match count_dirty_files(path) {
+    let dirty_files = match count_dirty_files_with(path, excuse) {
         Ok(n) => n,
         Err(e) => {
             return Some(DirtyWorktree::new(
@@ -391,10 +430,22 @@ pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWor
 /// question instead of its own plain `git status --porcelain` count, which
 /// counted the harness's own ownership marker as the agent's unsaved work.
 pub(crate) fn count_dirty_files(path: &Path) -> Result<usize, String> {
-    let status = git_stdout(path, STATUS_ARGS)?;
+    count_dirty_files_with(path, None)
+}
+
+/// [`count_dirty_files`], skipping the pass-one lines `excuse` accepts (#7660).
+fn count_dirty_files_with(path: &Path, excuse: Option<ExcuseEntry>) -> Result<usize, String> {
+    // #7660: an excuse needs one line per file — `-unormal` would collapse an
+    // untracked `.claude/` into a single entry no excuse can vouch for.
+    let args = if excuse.is_some() {
+        STATUS_ARGS_PER_FILE
+    } else {
+        STATUS_ARGS
+    };
+    let status = git_stdout(path, args)?;
     let mut count = 0usize;
     for line in status.lines() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || excuse.is_some_and(|excused| excused(line)) {
             continue;
         }
         let entry = porcelain_path(line);
@@ -549,7 +600,8 @@ fn non_git_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// cannot answer (not a repository, git missing, spawn failure).
 /// Test: `inspect_dirt_treats_non_worktree_with_files_as_dirty` (the nested
 /// plain-directory case), `inspect_dirt_clean_pushed_worktree_is_none`.
-fn is_worktree_root(path: &Path) -> Result<bool, String> {
+// #8318: `pub(crate)` so adoption's branch release asks the same identity question.
+pub(crate) fn is_worktree_root(path: &Path) -> Result<bool, String> {
     let top = git_stdout(path, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.trim());
     if top.as_os_str().is_empty() {
@@ -943,7 +995,7 @@ fn landing_bases(path: &Path) -> Vec<String> {
 /// Test: `inspect_dirt_reports_unpushed_session_branch_when_head_moved`,
 /// `inspect_dirt_reports_unpushed_bare_leaf_branch_when_head_moved`,
 /// `inspect_dirt_does_not_double_count_the_checked_out_session_branch`.
-fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
+pub(crate) fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
     let Some(leaf) = path.file_name().and_then(|n| n.to_str()) else {
         return Ok(0);
     };

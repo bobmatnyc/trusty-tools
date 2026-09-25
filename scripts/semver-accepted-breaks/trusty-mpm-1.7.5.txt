@@ -1,0 +1,17 @@
+crate   trusty-mpm
+version 1.7.5
+reason  Owner ruling 2026-09-25 (#8533): local PM overrides split the PM prompt into per-section tokens (SectionId variants added and reordered; SectionId marked #[non_exhaustive]) and added ProjectLevelConfig.style and InstructionBlock.pinned.
+accept  constructible_struct_adds_field  ProjectLevelConfig.style
+accept  constructible_struct_adds_field  InstructionBlock.pinned
+accept  enum_marked_non_exhaustive  SectionId
+accept  enum_no_repr_variant_discriminant_changed  SectionId::AutonomousExecution
+accept  enum_no_repr_variant_discriminant_changed  SectionId::Memory
+accept  enum_no_repr_variant_discriminant_changed  SectionId::Search
+accept  enum_no_repr_variant_discriminant_changed  SectionId::Workflow
+accept  enum_no_repr_variant_discriminant_changed  SectionId::AgentDelegation
+accept  enum_no_repr_variant_discriminant_changed  SectionId::Enforcement
+accept  enum_no_repr_variant_discriminant_changed  SectionId::NonOverridableRules
+accept  enum_no_repr_variant_discriminant_changed  SectionId::FrameworkGuaranteedConventions
+accept  enum_variant_added  ValidationError:PinnedGeneratedBlock
+# reason: Owner ruling 2026-09-25 (#8535): the shared-tree writer query response gained tree_holders; a daemon HTTP response struct, read-only for callers.
+accept  constructible_struct_adds_field  SharedTreeWritersResponse.tree_holders

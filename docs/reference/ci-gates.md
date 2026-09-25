@@ -37,6 +37,53 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
 
+## A documentation change owes content gates, never a code test suite
+
+🔴 **Two rules, owner ruling 2026-09-18.** R1: the website's code unit suite
+(`Vitest (unit + smoke)`) runs for website CODE changes — anything under
+`website/**` except `website/src/content/**` — and not for a changelog
+fragment or a documentation change. Two Rust sources join that set because the
+suite reads them and pins values out of them:
+`crates/trusty-installer/src/commands/stable_set.rs` and
+`crates/trusty-installer/src/download/platform.rs`. They are named exactly, not
+as a `crates/*/src/**` prefix. R2: a DOCS-ONLY change never has to pass a
+code test suite; it may still owe CONTENT validation (fragment format, link
+and prose lints, and the changelog corpus check), which is a documentation
+gate and keeps running.
+
+**DOCS-ONLY** means every changed path matches one of `docs/**`, a repo-root
+`*.md`, `crates/*/changelog.d/**`, `crates/*/README.md`, `crates/*/CHANGELOG.md`,
+or `website/src/content/**`. Three path classes are **not** docs-only by
+design: anything under `crates/*/src/**` **even when it ends in `.md`** —
+bundled agent and skill assets are compiled into binaries with `include_str!`
+and tests assert on their text — plus `.github/**` and `scripts/**`.
+`scripts/detect-docs-only.sh` is the Cargo-side classifier;
+`scripts/ci-website-relevance.sh` is the website-side one.
+
+🟡 **`Refuse a test run that ran nothing` (`test-count.yml`) gates the same
+way** — it wraps two live `cargo test` invocations, so a Cargo-inert diff
+skips the toolchain, the cache and both cargo steps. Its shell fixtures still
+run on every PR, and the job still reports. The documentation gates —
+`check_sld.sh`, `check_test_pointers.sh`, the changelog-fragment check, the
+path-citation lint, the public-docs allowlist — are deliberately NOT gated
+this way: they are what a docs change owes.
+
+🟡 **New check name: `Website content corpus`** (`website-tests.yml`). Every
+website test that reads real repository content — the six-crate changelog
+parse, the 27-page docs corpus, the flagship pages, the landing-page claims
+grounded in `crates/**` — now lives in `*.corpus.test.ts` files and the vitest
+`corpus` project, so the `unit` project walks no repository content at all and
+a release PR's fragment no longer drags the whole website suite behind it (PR
+#8272, a Rust-only fix, went red on exactly that). `Website content corpus` is
+therefore the content gate a `docs/**`, `website/src/content/**`,
+`crates/*/changelog.d/**` or `crates/*/CHANGELOG.md` change owes, and the only
+website check such a change can turn red; `Vitest (unit + smoke)` stays off
+those paths, and reads root `Cargo.toml` only when the diff touches its
+`rust-version` line. All three jobs run unconditionally and gate only their
+costly steps, so the `paths:` filters are gone; adding `Website content corpus`
+to `required_status_checks.contexts` is a branch-protection decision, made by
+hand, not by this change.
+
 ## The pre-publish shards do not run on a PR
 
 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
@@ -52,9 +99,73 @@ processes (a fixed path, a fixed port, one real file): use
 `#[serial_test::file_serial]` for those, and keep redirecting `$HOME` per test.
 Measurements: [test-ladder-baseline.md](test-ladder-baseline.md).
 
-🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
-run the ladder rung your change earns before merging. Full suite on a branch:
+🟡 A PR proves every test target COMPILES, and executes the tests of the crates
+it affects (next section); the full workspace suite defers to `main`, so run
+the ladder rung your change earns before merging. Full suite on a branch:
 Actions → CI → "Run workflow".
+
+## `Rust tests (affected crates)` runs on every PR
+
+🟡 **Owner ruling 2026-09-23.** `ci.yml` runs `cargo test --no-fail-fast` on
+every pull request for the crates the PR touches plus their dependents. It is
+meant to become a required context once the owner confirms the
+branch-protection change; until then it is not required. Check the live list
+above.
+
+- **Crate set.** The `affected-plan` job resolves the merge-base of the PR's
+  merge commit with the refreshed base branch, then runs
+  `scripts/ci-affected-test-plan.sh`, a thin wrapper over
+  `scripts/select-test-crates.sh --range <merge-base>..HEAD`. The selector
+  returns each crate that owns a changed file, plus that crate's transitive
+  reverse-dependency closure (normal, dev and build edges). The wrapper adds
+  three rules. A `docs_only=true` verdict from the `changes` job selects
+  nothing. The four Tauri UI crates are dropped, because their own jobs test
+  them. What is left is split into at most 8 legs, largest test suite first.
+- **Workspace-wide inputs select every crate.** A change to the root
+  `Cargo.toml` or `Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `clippy.toml`,
+  `rustfmt.toml` or `deny.toml` selects every headless crate, and so does any
+  path the selector cannot classify.
+- **`scripts/**` and `.github/**` select narrowly** (owner ruling 2026-09-23,
+  #7777). A change to `ci.yml`, `select-test-crates.sh`,
+  `ci-affected-test-plan.sh`, their selftests, or the job's helpers
+  `ci-create-local-main.sh`, `ci-free-disk-space.sh` and `ci-apt-install.sh`
+  selects the canary
+  `trusty-common` + `trusty-mpm`, plus each Tauri UI crate
+  `ci-crate-relevance.sh` marks relevant (the wrapper then drops those). Any
+  other such path selects the crates whose `*.rs` source names it literally
+  on a non-comment line, found by `git grep` at plan time — for example
+  `scripts/check-ui-bundle-freshness.sh` selects `trusty-search` and
+  `trusty-console` through their `build.rs`. A literal counts only when the
+  file exists, or existed at the diff's base (a deleted or renamed script),
+  so a test fixture string such as `"scripts/go.sh"` selects nothing. A
+  `./`, `../`, `{root}/` or absolute prefix still names the path. Most
+  script and workflow PRs therefore select zero crates. A canary crate
+  missing from the workspace selects every crate.
+- **Codesign scripts select `trusty-common`.** A changed `scripts/<name>.sh`
+  directly in `scripts/` (no subdirectory) whose content contains
+  `codesign`, on disk or at the diff's base, selects `trusty-common`. The
+  rule mirrors the `codesign_scripts` directory scan in
+  `crates/trusty-common/src/launchd_labels/tests.rs`, which
+  `codesign_scripts_name_identifiers_by_convention` reads; change the two
+  together.
+- **Nothing to test still reports.** A docs-only PR, a push to `main` and a
+  `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
+  job, named exactly `Rust tests (affected crates)`, reports success with a
+  "no affected crates" line. The roll-up reads the plan's result, never the
+  skipped matrix, so a failed plan turns it red.
+- **Each leg matches `test-shard`**: the stable toolchain, the same apt
+  packages, the .NET SDK, `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, and a
+  read of the shared `test` rust-cache and the fastembed model cache. The one
+  test `test-shard` filters out,
+  `update::tests::cache_fresh_returns_some_when_newer`, is skipped in the main
+  run and re-run with `CI` unset. The leg that holds `trusty-common` also runs
+  the `codex-config` step. Nothing else is filtered: no `--lib`, no
+  `continue-on-error`, and no flake list.
+- 🟡 **Feature coverage is a subset of the shards'.** Each leg is its own
+  `cargo test -p …` invocation, so it resolves features only across that leg's
+  crates. `trusty-common` gets `--features trusty-common/unconditional-only`
+  (#4901), plus whatever its leg-mates unify in. Its tests that sit behind a
+  gated module run in full only on `main`.
 
 ## A red `main` files an issue
 

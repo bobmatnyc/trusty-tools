@@ -1,0 +1,137 @@
+toolchain: rustc 1.100.0-nightly (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+build-accel: sccache /opt/homebrew/bin/sccache (RUSTC_WRAPPER)
+CHECK trusty-mpm: 1.6.3 -> 1.6.4 (patch release), 11 feature(s)
+    Building trusty-mpm v1.6.4 (current)
+       Built [  19.957s] (current)
+     Parsing trusty-mpm v1.6.4 (current)
+      Parsed [   0.295s] (current)
+     Parsing trusty-mpm v1.6.3 (baseline, cached)
+      Parsed [   0.269s] (baseline)
+    Checking trusty-mpm v1.6.3 -> v1.6.4 (patch change)
+     Checked [   0.269s] 223 checks: 215 pass, 7 fail, 1 warn, 31 skip
+
+--- failure constructible_struct_adds_field: struct exhaustively constructible through public API adds field ---
+
+Description:
+A pub struct that could be exhaustively constructed with a literal using only public API has a new pub field, breaking existing exhaustive literals.
+        ref: https://doc.rust-lang.org/reference/expressions/struct-expr.html
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/constructible_struct_adds_field.ron
+
+Failed in:
+  field BuildersConfig.load_factor in /REPO/crates/trusty-mpm/src/core/builders.rs:168
+  field BuildersConfig.free_memory_floor_mb in /REPO/crates/trusty-mpm/src/core/builders.rs:174
+  field BuildersConfig.slot_pool_root in /REPO/crates/trusty-mpm/src/core/builders.rs:180
+  field BuilderSlotResponse.ceiling in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:105
+  field BuilderSlotResponse.capacity_reason in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:113
+  field BuilderSlotResponse.fail_closed_surface in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:117
+  field BuilderSlotResponse.slot_path in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:126
+  field BuilderSlotResponse.slot_seed in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:129
+  field BuilderSlotResponse.slot_notice in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:137
+  field BuilderSlotResponse.slot_refused in /REPO/crates/trusty-mpm/src/daemon/builder_slot_routes.rs:145
+
+--- failure derive_trait_impl_removed: built-in derived trait no longer implemented ---
+
+Description:
+A public type has stopped deriving one or more traits. This can break downstream code that depends on those types implementing those traits.
+        ref: https://doc.rust-lang.org/reference/attributes/derive.html#derive
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/derive_trait_impl_removed.ron
+
+Failed in:
+  type BuildersConfig no longer derives Eq, in /REPO/crates/trusty-mpm/src/core/builders.rs:151
+
+--- failure enum_no_repr_variant_discriminant_changed: enum variant had its discriminant change value ---
+
+Description:
+The enum's variant had its discriminant value change. This breaks downstream code that used its value via a numeric cast like `as isize`.
+        ref: https://doc.rust-lang.org/reference/items/enumerations.html#assigning-discriminant-values
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_no_repr_variant_discriminant_changed.ron
+
+Failed in:
+  variant SectionId::Memory 2 -> 3 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:152
+  variant SectionId::Search 3 -> 4 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:154
+  variant SectionId::Workflow 4 -> 5 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:156
+  variant SectionId::AgentDelegation 5 -> 6 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:158
+  variant SectionId::Enforcement 6 -> 7 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:170
+  variant SectionId::NonOverridableRules 7 -> 8 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:173
+  variant SectionId::FrameworkGuaranteedConventions 8 -> 9 in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:176
+
+--- failure enum_variant_added: enum variant added on exhaustive enum ---
+
+Description:
+A publicly-visible enum without #[non_exhaustive] has a new variant.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#enum-variant-new
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_variant_added.ron
+
+Failed in:
+  variant ManagedError:ResumeInFlight in /REPO/crates/trusty-mpm/src/session_manager/manager.rs:92
+  variant ManagedError:AutoResumeRecorded in /REPO/crates/trusty-mpm/src/session_manager/manager.rs:105
+  variant ManagedError:ResumeInFlight in /REPO/crates/trusty-mpm/src/session_manager/manager.rs:92
+  variant ManagedError:AutoResumeRecorded in /REPO/crates/trusty-mpm/src/session_manager/manager.rs:105
+  variant SectionId:AutonomousExecution in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:150
+  variant ResumeManagedError:AlreadyResuming in /REPO/crates/trusty-mpm/src/daemon/managed_routes/resume_error.rs:96
+
+--- failure function_parameter_count_changed: pub fn parameter count changed ---
+
+Description:
+A publicly-visible function now takes a different number of parameters.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#fn-change-arity
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_parameter_count_changed.ron
+
+Failed in:
+  trusty_mpm::runtime::build_adapter now takes 4 parameters instead of 3, in /REPO/crates/trusty-mpm/src/runtime/mod.rs:265
+
+--- failure method_parameter_count_changed: pub method parameter count changed ---
+
+Description:
+A publicly-visible method now takes a different number of parameters, not counting the receiver (self) parameter.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#fn-change-arity
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/method_parameter_count_changed.ron
+
+Failed in:
+  trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters in /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes 3 parameters in /REPO/crates/trusty-mpm/src/runtime/claude_code.rs:585
+
+--- failure struct_marked_non_exhaustive: struct marked #[non_exhaustive] ---
+
+Description:
+A public struct has been marked #[non_exhaustive], which will prevent it from being constructed using a struct literal outside of its crate. It previously had no private fields, so a struct literal could be used to construct it outside its crate.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#attr-adding-non-exhaustive
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/struct_marked_non_exhaustive.ron
+
+Failed in:
+  struct Delegation in /REPO/crates/trusty-mpm/src/core/agent.rs:233
+
+--- warning partial_ord_enum_variants_reordered: enum variants reordered in #[derive(PartialOrd)] enum ---
+
+Description:
+A public enum that derives PartialOrd had its variants reordered. #[derive(PartialOrd)] uses the enum variant order to set the enum's ordering behavior, so this change may break downstream code that relies on the previous order.
+        ref: https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html#derivable
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/partial_ord_enum_variants_reordered.ron
+
+Failed in:
+  SectionId::Memory moved from position 3 to 4, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:152
+  SectionId::Search moved from position 4 to 5, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:154
+  SectionId::Workflow moved from position 5 to 6, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:156
+  SectionId::AgentDelegation moved from position 6 to 7, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:158
+  SectionId::Enforcement moved from position 7 to 8, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:170
+  SectionId::NonOverridableRules moved from position 8 to 9, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:173
+  SectionId::FrameworkGuaranteedConventions moved from position 9 to 10, in /REPO/crates/trusty-mpm/src/core/instruction_package.rs:176
+
+     Summary semver requires new major version: 7 major and 0 minor checks failed
+     Warning produced 1 major and 0 minor level warnings
+    Finished [  23.827s] trusty-mpm
+FAIL trusty-mpm: cargo semver-checks exited 100 against baseline 1.6.3
+
+VERDICT: BREAK. A public API change requires a matching version bump.
+
+  0.x crates: a break needs the MINOR position (0.28.1 -> 0.29.0).
+  1.x+ crates: a break needs the MAJOR position (1.3.4 -> 2.0.0).
+
+Either bump the version in the crate's Cargo.toml, or make the change
+non-breaking. `#[non_exhaustive]` on a struct/enum makes future field and
+variant additions non-breaking by construction — the fix #4088 asked for.
+
+Explain any lint:  cargo semver-checks --explain <lint_name>
+
+This is not advisory. #4088: trusty-common 0.22.5 shipped exactly this class of
+break as a patch bump and bricked `cargo install` for every dependent on a
+^0.22 floor, costing trusty-analyze 0.7.3 a yank.

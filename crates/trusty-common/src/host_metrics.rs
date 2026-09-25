@@ -39,7 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disk, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 
 // #6641: the bounded sample history the console's real-time graphs read. It
@@ -326,6 +326,14 @@ pub struct HostSampler {
     disks: Disks,
     last_net_refresh: Instant,
     thresholds: HostThresholds,
+    /// How long a [`DiskMetrics`] snapshot stays warm before the next volume walk.
+    disk_interval: Duration,
+    /// `None` until the first sample, which always refreshes.
+    last_disk_refresh: Option<Instant>,
+    /// The snapshot served between refreshes; `Some` after the first sample.
+    cached_disks: Option<DiskMetrics>,
+    /// Volume walks performed so far — test instrumentation only.
+    disk_refreshes: u64,
 }
 
 impl HostSampler {
@@ -353,6 +361,30 @@ impl HostSampler {
     /// Test: `thresholds_are_configurable`.
     #[must_use]
     pub fn with_thresholds(thresholds: HostThresholds) -> Self {
+        Self::with_thresholds_and_disk_interval(
+            thresholds,
+            Duration::from_secs(history::DISK_SAMPLE_INTERVAL_SECS),
+        )
+    }
+
+    /// Construct a sampler with explicit thresholds and an explicit disk cadence.
+    ///
+    /// Why: disks refresh on their own, slower clock than the rest of the
+    ///      sample (see [`history::DISK_SAMPLE_INTERVAL_SECS`]). A caller with a
+    ///      CLI flag for it, and a test that must observe the gate without
+    ///      waiting 15 s, both need to set that clock; a separate constructor
+    ///      keeps the two-argument form off the existing call sites.
+    /// What: as [`HostSampler::with_thresholds`], but `disk_interval` is the
+    ///      minimum age of a cached [`DiskMetrics`] before the next volume walk.
+    ///      A zero interval means every sample refreshes — the pre-#6517-era
+    ///      behaviour, useful only in tests.
+    /// Test: `disk_refresh_is_skipped_inside_the_interval`,
+    ///      `disk_refresh_resumes_after_the_interval`.
+    #[must_use]
+    pub fn with_thresholds_and_disk_interval(
+        thresholds: HostThresholds,
+        disk_interval: Duration,
+    ) -> Self {
         let sys = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
@@ -368,7 +400,24 @@ impl HostSampler {
             disks,
             last_net_refresh: Instant::now(),
             thresholds,
+            disk_interval,
+            last_disk_refresh: None,
+            cached_disks: None,
+            disk_refreshes: 0,
         }
+    }
+
+    /// Volume walks performed since construction — test instrumentation.
+    ///
+    /// Why: the disk cadence is invisible in the returned snapshot (a cached
+    ///      `DiskMetrics` is indistinguishable from a freshly walked one), so a
+    ///      test asserting that the walk was SKIPPED has to count the walks.
+    /// What: the running count incremented by [`HostSampler::sample`] each time
+    ///      it refreshes the disk list.
+    /// Test: `disk_refresh_is_skipped_inside_the_interval`.
+    #[cfg(test)]
+    pub(crate) fn disk_refresh_count(&self) -> u64 {
+        self.disk_refreshes
     }
 
     /// Refresh every subsystem and return a [`HostMetrics`] snapshot.
@@ -376,12 +425,24 @@ impl HostSampler {
     /// Why: the dashboard poll calls this once per interval. As with the
     ///      per-process sampler, the CPU reading needs ~200 ms between refreshes
     ///      to be meaningful; a poll cadence of seconds satisfies that.
-    /// What: refreshes CPU usage, memory, the disk list, and the network list;
-    ///      computes network rates over the elapsed window; classifies each
-    ///      subsystem against the configured thresholds; and returns the
+    ///      Disks are the exception: their refresh is the expensive part of a
+    ///      sample — on macOS `sysinfo` walks every mounted volume through
+    ///      `CFURLCopyResourcePropertiesForKeys` and the CacheDelete free-space
+    ///      path, with os_log calls per volume, which is essentially the whole
+    ///      cost of a sample and held trusty-console at a continuous ~5% CPU at
+    ///      idle. So disks run on their own slower clock.
+    /// What: refreshes CPU usage, memory and the network list on every call and
+    ///      computes network rates over the elapsed window; refreshes the disk
+    ///      list only on the FIRST call and thereafter once `disk_interval`
+    ///      (default [`history::DISK_SAMPLE_INTERVAL_SECS`]) has elapsed,
+    ///      serving the cached [`DiskMetrics`] unchanged in between; classifies
+    ///      each subsystem against the configured thresholds; and returns the
     ///      combined snapshot. Never panics — a subsystem the OS cannot measure
     ///      reports zeros and `Nominal`.
-    /// Test: `sampler_produces_plausible_snapshot`.
+    /// Test: `sampler_produces_plausible_snapshot`,
+    ///      `disk_refresh_is_skipped_inside_the_interval`,
+    ///      `disk_refresh_resumes_after_the_interval`,
+    ///      `first_sample_always_refreshes_disks`.
     pub fn sample(&mut self) -> HostMetrics {
         let t = &self.thresholds;
 
@@ -410,9 +471,24 @@ impl HostSampler {
             pressure: Pressure::classify(mem_pct, t.memory_warning_pct, t.memory_critical_pct),
         };
 
-        // ── disks ────────────────────────────────────────────────────────────
-        self.disks.refresh(true);
-        let disks = self.build_disk_metrics();
+        // ── disks (own slower cadence) ───────────────────────────────────────
+        // The first sample always walks the volumes, so the graph is never
+        // empty; after that the cached snapshot is served until the interval
+        // has elapsed.
+        let due = self
+            .last_disk_refresh
+            .is_none_or(|last| last.elapsed() >= self.disk_interval);
+        if due {
+            self.disks.refresh(true);
+            self.last_disk_refresh = Some(Instant::now());
+            self.disk_refreshes = self.disk_refreshes.saturating_add(1);
+            let fresh = self.build_disk_metrics();
+            self.cached_disks = Some(fresh);
+        }
+        let disks = self
+            .cached_disks
+            .clone()
+            .expect("the first sample always refreshes, so the cache is populated here");
 
         // ── network ──────────────────────────────────────────────────────────
         self.networks.refresh(true);
@@ -685,6 +761,89 @@ mod tests {
         assert!(m.network.rx_bytes_per_sec >= 0.0);
         assert!(m.network.tx_bytes_per_sec >= 0.0);
         assert!(m.network.window_secs >= 0.0);
+    }
+
+    /// Why: the disk refresh is the entire cost of a host sample on macOS
+    ///      (`sysinfo` walks every mounted volume), and the console samples
+    ///      every second. Running that walk per tick is what held the console
+    ///      at ~5% CPU at idle, and nothing in the returned snapshot shows
+    ///      whether the walk happened — only the counter does.
+    /// What: with a 60 s disk interval, takes four samples and asserts exactly
+    ///      one volume walk happened and every snapshot after the first served
+    ///      the same cached figures.
+    /// Test: this test.
+    #[test]
+    fn disk_refresh_is_skipped_inside_the_interval() {
+        let mut s = HostSampler::with_thresholds_and_disk_interval(
+            HostThresholds::default(),
+            Duration::from_secs(60),
+        );
+        let first = s.sample();
+        for _ in 0..3 {
+            let later = s.sample();
+            assert_eq!(
+                later.disks.mounts.len(),
+                first.disks.mounts.len(),
+                "the cached DiskMetrics is served unchanged between refreshes"
+            );
+            assert_eq!(
+                later.disks.aggregate_total_bytes,
+                first.disks.aggregate_total_bytes
+            );
+            assert_eq!(
+                later.disks.aggregate_available_bytes,
+                first.disks.aggregate_available_bytes
+            );
+            assert_eq!(later.disks.pressure, first.disks.pressure);
+        }
+        assert_eq!(
+            s.disk_refresh_count(),
+            1,
+            "four samples inside one 60s disk interval must walk the volumes exactly once"
+        );
+    }
+
+    /// Why: a cache with no expiry would freeze the disk gauge for the life of
+    ///      the daemon — a filling disk would never show as filling.
+    /// What: with a 10 ms disk interval, samples, sleeps past the interval, and
+    ///      samples again; asserts the second sample walked the volumes.
+    /// Test: this test.
+    #[test]
+    fn disk_refresh_resumes_after_the_interval() {
+        let mut s = HostSampler::with_thresholds_and_disk_interval(
+            HostThresholds::default(),
+            Duration::from_millis(10),
+        );
+        let _ = s.sample();
+        assert_eq!(s.disk_refresh_count(), 1);
+        std::thread::sleep(Duration::from_millis(25));
+        let _ = s.sample();
+        assert_eq!(
+            s.disk_refresh_count(),
+            2,
+            "a sample taken after the disk interval elapsed must refresh again"
+        );
+    }
+
+    /// Why: if the cadence gate also skipped the FIRST sample, the dashboard
+    ///      would open with an empty disk card for up to 15 s after start.
+    /// What: with a one-hour disk interval — long enough that only the
+    ///      first-call rule can trigger a walk — asserts the single sample
+    ///      refreshed and carries real aggregate figures.
+    /// Test: this test.
+    #[test]
+    fn first_sample_always_refreshes_disks() {
+        let mut s = HostSampler::with_thresholds_and_disk_interval(
+            HostThresholds::default(),
+            Duration::from_secs(3600),
+        );
+        let m = s.sample();
+        assert_eq!(
+            s.disk_refresh_count(),
+            1,
+            "the first sample refreshes disks regardless of the interval"
+        );
+        assert!(m.disks.aggregate_usage_pct >= 0.0 && m.disks.aggregate_usage_pct <= 100.0);
     }
 
     /// Why: the tri-state classification is the whole point of the pressure

@@ -159,3 +159,57 @@ pub fn tm_spawn_home() -> &'static Path {
 pub fn tm_command() -> Command {
     tm_command_in(tm_spawn_home())
 }
+
+/// Write `disk.max_usage_pct: <pct>` into `home`'s trusty-mpm config (#7497).
+///
+/// Why: a spawned `tm hook --pm-guard` gates every `git worktree add` on the
+/// REAL volume's usage, and with no configured value the shipped 90% default
+/// decides the verdict — so a test's outcome would track how full the host
+/// disk is. An explicit threshold is the only seam; the gate has no env-var off
+/// switch by design (`core::disk_usage_guard` module doc).
+/// What: creates `<home>/.trusty-tools/trusty-mpm/config.yaml` holding only the
+/// `disk:` section.
+pub fn write_disk_threshold(home: &Path, pct: u8) {
+    let dir = home.join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {pct}\n"),
+    )
+    .expect("write config");
+}
+
+/// The prefix every `tm hook --pm-guard` refusal starts with (#8546).
+///
+/// Mirrors `PM_GUARD_REFUSAL_PREFIX` in the `tm` binary, which an integration
+/// target cannot import.
+pub const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
+
+/// Assert that every deny object in a `tm hook --pm-guard` stdout names its
+/// layer: the reason starts with [`PM_GUARD_REFUSAL_PREFIX`] and carries it
+/// exactly once (#8546).
+///
+/// Why: every pm-guard integration collector calls this, so a refusal path
+/// added later without the prefix fails the first test that exercises it —
+/// the test author does not have to remember to assert it.
+/// What: parses each stdout line; a line that is not a JSON deny is ignored,
+/// because an ALLOW prints nothing and a grant prints `updatedInput`.
+pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
+    for line in stdout.lines() {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let output = &parsed["hookSpecificOutput"];
+        if output["permissionDecision"] != "deny" {
+            continue;
+        }
+        let reason = output["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with(PM_GUARD_REFUSAL_PREFIX)
+                && reason.matches(PM_GUARD_REFUSAL_PREFIX.trim_end()).count() == 1,
+            "a tm pm-guard refusal must start with {PM_GUARD_REFUSAL_PREFIX:?} exactly once: {reason:?}"
+        );
+    }
+}

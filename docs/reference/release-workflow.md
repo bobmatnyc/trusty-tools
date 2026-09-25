@@ -121,6 +121,12 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 10. Install the binary locally with `cargo install --path crates/<dir> --locked`
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
    binary on PATH is always the version that was just released.
+11. Close the release's milestone the same day it publishes, and move any
+   issue still open in it to the next milestone of the same kind (bugfix or
+   feature) — the release report names the moved issues (owner ruling
+   2026-09-25). An issue whose fix shipped in this release and only awaits
+   live verification (`status:merged` or `status:tested`) stays in the
+   milestone that just closed.
 
 > **Site link (owner ruling):** every crate's `Cargo.toml` `homepage` field
 > points at `https://trustytools.dev`, and the `release` job in

@@ -10,7 +10,7 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// Build the canonical nine-section taxonomy with correct tiers.
+/// Build the canonical ten-section taxonomy with correct tiers.
 fn sections() -> Vec<InstructionSection> {
     SectionId::CANONICAL
         .iter()
@@ -36,6 +36,7 @@ fn text(section: SectionId, body: &str) -> InstructionBlock {
         },
         join_before: Join::Rule,
         optional: false,
+        pinned: false,
     }
 }
 
@@ -46,6 +47,7 @@ fn generated(section: SectionId, generator: Generator, optional: bool) -> Instru
         body: BlockBody::Generated { generator },
         join_before: Join::Rule,
         optional,
+        pinned: false,
     }
 }
 
@@ -54,6 +56,34 @@ fn generated(section: SectionId, generator: Generator, optional: bool) -> Instru
 /// Block order deliberately interleaves `core` with `memory`/`search` and puts
 /// the floor last, mirroring the shape a faithful lift of today's assets needs.
 fn fixture() -> InstructionPackage {
+    let mut pkg = fixture_without_split_sections();
+    // #8533: the nine sections split out of `core` each need a block; inserted
+    // after `AUTONOMY` so every index-addressed block above keeps its index.
+    let at = pkg
+        .blocks
+        .iter()
+        .position(|b| b.section == SectionId::Enforcement)
+        .expect("fixture has an enforcement block");
+    let split = SPLIT_SECTIONS.map(|id| text(id, &format!("{id:?}")));
+    pkg.blocks.splice(at..at, split);
+    pkg
+}
+
+/// The nine sections #8533 split out of `core`, in canonical order.
+const SPLIT_SECTIONS: [SectionId; 9] = [
+    SectionId::PmAllowlist,
+    SectionId::DelegationMechanics,
+    SectionId::AgentRouting,
+    SectionId::SubagentReEngagement,
+    SectionId::Phases,
+    SectionId::QaGate,
+    SectionId::GitFileTracking,
+    SectionId::TicketsPrsReleases,
+    SectionId::MessagesReportsSessions,
+];
+
+/// The pre-#8533 fixture block stream, before the split sections are added.
+fn fixture_without_split_sections() -> InstructionPackage {
     InstructionPackage {
         schema_version: SCHEMA_VERSION,
         package_id: "trusty-mpm/test".to_string(),
@@ -70,6 +100,10 @@ fn fixture() -> InstructionPackage {
             generated(SectionId::AgentDelegation, Generator::AgentRoster, false),
             generated(SectionId::Core, Generator::ProjectAddendum, true),
             text(SectionId::Identity, "IDENTITY"),
+            // #8361: placed after `IDENTITY` deliberately — several tests
+            // address `blocks[8]` by index, and appending past the floor would
+            // break the "ends with CONVENTIONS" assertion instead.
+            text(SectionId::AutonomousExecution, "AUTONOMY"),
             text(SectionId::Enforcement, "ENFORCEMENT"),
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
@@ -218,15 +252,18 @@ fn file_body_resolves_through_the_bundled_table() {
     // bytes an inline `text` block carrying that file would have produced. That
     // equivalence is what makes the v2 addition a pure authoring convenience
     // rather than a second content channel.
-    let source = crate::core::instruction_pipeline::SECTION_IDENTITY;
+    // #8533: a comment-free source; `identity.md` now carries authoring
+    // comments the compose-time fold removes.
+    let source = crate::core::instruction_pipeline::SECTION_PM_ALLOWLIST;
     let mut package = fixture();
     package.blocks[8] = InstructionBlock {
         section: SectionId::Identity,
         body: BlockBody::File {
-            path: "sections/identity.md".to_string(),
+            path: "sections/pm-allowlist.md".to_string(),
         },
         join_before: Join::Rule,
         optional: false,
+        pinned: false,
     };
 
     assert_eq!(package.validate(), Ok(()));
@@ -493,7 +530,7 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 9, "nine distinct sections");
+    assert_eq!(unique.len(), 19, "nineteen distinct sections (#8533)");
 }
 
 #[test]
@@ -863,6 +900,16 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ROSTER",
             "ADDENDUM",
             "IDENTITY",
+            "AUTONOMY",
+            "PmAllowlist",
+            "DelegationMechanics",
+            "AgentRouting",
+            "SubagentReEngagement",
+            "Phases",
+            "QaGate",
+            "GitFileTracking",
+            "TicketsPrsReleases",
+            "MessagesReportsSessions",
             "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",
@@ -1172,4 +1219,27 @@ fn schema_example_composes_deterministically() {
     let out = pkg.compose(&inputs()).expect("composes");
     assert!(out.contains("ROSTER"), "roster reaches the output: {out}");
     assert_eq!(out, pkg.compose(&inputs()).expect("composes"));
+}
+
+#[test]
+fn a_breaking_bullet_sits_in_a_breaking_fragment() {
+    // #8533 critic LOW: the `SectionId` library breaks were bullets prefixed
+    // "Breaking" inside a `Changed` fragment, so the assembled changelog filed
+    // a semver break under Changed. A fragment's first line is its category.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("changelog.d");
+    let mut misfiled = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("changelog.d") {
+        let path = entry.expect("entry").path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with(".md") || name == "README.md" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("fragment");
+        let mut lines = text.lines();
+        let category = lines.next().unwrap_or("").trim();
+        if category != "Breaking" && lines.any(|l| l.starts_with("- Breaking")) {
+            misfiled.push(name.to_string());
+        }
+    }
+    assert_eq!(misfiled, Vec::<String>::new());
 }

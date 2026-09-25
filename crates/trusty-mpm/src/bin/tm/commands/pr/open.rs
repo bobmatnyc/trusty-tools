@@ -247,11 +247,13 @@ fn head_branch(args: &PrOpenArgs) -> Option<&str> {
 /// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
 fn head_elsewhere_refusal(args: &PrOpenArgs) -> String {
     let head = head_branch(args).unwrap_or("HEAD");
+    // #8572: "Check `{head}` out" sent an agent to switch a dirty main checkout.
     format!(
         "--head `{head}` is not the commit this checkout stands on, and \
          scripts/check_changelog_fragment.sh takes only --base — it would judge \
-         origin/{}...HEAD, this checkout, rather than `{head}`. Check `{head}` out, \
-         or pass --docs-only if this PR changes no crate source.",
+         origin/{}...HEAD, this checkout, rather than `{head}`. Run `tm pr open` \
+         from the worktree that holds `{head}` (`git worktree list` names it); never \
+         switch a main checkout to it. Pass --docs-only if this PR changes no crate source.",
         args.base
     )
 }
@@ -620,7 +622,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         Ok(_) => {}
     }
 
-    let out = gh.run(&plan.argv)?;
+    // #8431: a repository with no `trusty-mpm` label gets it created, or the PR
+    // opens without it; every other create failure still fails below.
+    let repo = args.repo.as_deref().filter(|r| !r.trim().is_empty());
+    let (out, dropped) = super::missing_label::create(gh, &plan, repo)?;
     // #7869: `gh pr create` creates the PR and THEN applies the assignee and
     // labels over separate API calls. A 502 on one of those exits non-zero with
     // the PR already created, and bailing here printed no number at all — the
@@ -649,11 +654,12 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         .trim();
     let number = url.rsplit('/').next().unwrap_or("?");
     println!("opened PR #{number} — {url}");
-    println!(
-        "  labels: {}, {}",
-        policy_labels::CONVENTION_LABEL,
-        plan.workstream_label
-    );
+    let applied: Vec<String> = plan
+        .create_labels()
+        .into_iter()
+        .filter(|l| !dropped.contains(l))
+        .collect();
+    println!("  labels: {}", applied.join(", "));
     if let Some(rung) = args.rung {
         println!("  test-ladder rung claimed: {rung}");
     }
@@ -710,7 +716,7 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
 /// What: the last stdout line that starts with `http` and names a `/pull/` path.
 /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`,
 /// `pr_7869_a_create_that_fails_with_no_url_is_still_an_error`.
-fn created_pr_url(stdout: &str) -> Option<&str> {
+pub(crate) fn created_pr_url(stdout: &str) -> Option<&str> {
     stdout
         .lines()
         .map(str::trim)
@@ -748,6 +754,7 @@ fn record_for_cleanup<P: Preflight>(pre: &P, url: &str, number: &str) {
         repo_root: root,
         opened_at: chrono::Utc::now(),
         cleaned_at: None,
+        scope: Default::default(),
     };
     if let Err(e) = pre.cleanup_registry().record_open(entry) {
         eprintln!("tm pr open: could not record #{pr} for post-merge cleanup: {e:#}");

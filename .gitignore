@@ -1,5 +1,7 @@
 /target
 **/target/
+# Machine-local cargo config (shared CARGO_TARGET_DIR override, #8251)
+/.cargo/config.toml
 # #7177: worktree build output isolation. #7275: dispatch briefs name the dir
 # `target-<issue>` as often as `target-worktree`, and an unignored one makes
 # every such worktree read dirty, which blocks `tm pr cleanup` from reclaiming it.
@@ -202,7 +204,10 @@ docs/certificates/*.mobileprovision
 # >>> trusty-mpm harness scaffolding (auto-managed by tm, issue #3427) >>>
 .claude/agents/
 .claude/skills/*
-.claude/output-styles/
+.claude/output-styles/trusty-mpm.md
+.claude/output-styles/trusty-mpm-teacher.md
+.claude/output-styles/trusty-mpm-research.md
+.claude/output-styles/*.tm-floor.md
 .trusty-mpm/sessions/
 .trusty-mpm/logs/
 .trusty-mpm/last-instructions.md
