@@ -207,3 +207,26 @@ fn a_project_style_is_injected_when_native_is_unsupported() {
     );
     assert_eq!(native, "PROMPT");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_style_file_is_refused_and_the_default_used() {
+    // #8533 finding 4: `read_to_string` follows a symlink, so a style file
+    // linked to a file outside the project was injected into the PM prompt.
+    let dir = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside");
+    let target = outside.path().join("private-8533.txt");
+    std::fs::write(&target, "PRIVATE-TEXT-8533\n").expect("outside file");
+    let styles = dir.path().join(PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).expect("styles dir");
+    std::os::unix::fs::symlink(&target, styles.join("linked-voice.md")).expect("symlink");
+
+    let err = resolve_style_in_project(dir.path(), "linked-voice").expect_err("refused");
+    assert!(matches!(err, ProjectStyleError::Escapes { .. }), "{err}");
+
+    let (style, warning) = resolve_or_default(dir.path(), Some("linked-voice"));
+    assert_eq!(style.id(), crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID);
+    assert!(!style.content().contains("PRIVATE-TEXT-8533"));
+    let warning = warning.expect("a refused style is never a silent fallback");
+    assert!(warning.contains("symlink"), "{warning}");
+}

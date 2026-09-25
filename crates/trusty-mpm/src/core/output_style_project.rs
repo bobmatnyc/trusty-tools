@@ -45,6 +45,18 @@ pub enum ProjectStyleError {
         #[source]
         source: std::io::Error,
     },
+    /// The style file is a symlink, or resolves outside the styles directory.
+    #[error(
+        "output style '{id}' at {} is a symlink or resolves outside {PROJECT_STYLES_DIR}; \
+         refusing to inject it",
+        path.display()
+    )]
+    Escapes {
+        /// The requested id.
+        id: String,
+        /// The style file.
+        path: PathBuf,
+    },
 }
 
 /// A resolved output style: bundled, or authored in the project.
@@ -109,6 +121,26 @@ fn is_safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Whether `path` is a regular (non-symlink) file under `dir`, canonically.
+///
+/// Why (#8533): `read_to_string` follows symlinks, so a style file linked to a
+/// secret elsewhere on the host would be injected into the PM prompt. A path
+/// that does not exist passes: the read then reports it as unknown, which is
+/// the right message.
+/// Test: `a_symlinked_style_file_is_refused_and_the_default_used`.
+fn stays_in_styles_dir(dir: &Path, path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return true;
+    };
+    if meta.file_type().is_symlink() {
+        return false;
+    }
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(path)) {
+        (Ok(dir), Ok(path)) => path.starts_with(dir),
+        _ => false,
+    }
+}
+
 /// Ids of the project style files that are not bundled ids, sorted.
 ///
 /// Why: the unknown-id message lists what the operator could have meant, and
@@ -136,9 +168,13 @@ pub fn project_style_ids(project_dir: &Path) -> Vec<String> {
 /// into the project itself, so the project copy is a deployment artifact, not an
 /// override. Any other id must name a project file.
 /// What: bundled entry, else `<project>/.claude/output-styles/<id>.md` read
-/// whole; [`ProjectStyleError::Unreadable`] when that file exists but cannot be
-/// read; [`ProjectStyleError::Unknown`] listing bundled and project ids otherwise.
-/// Test: `a_project_style_file_resolves_by_id`,
+/// whole; [`ProjectStyleError::Escapes`] when that file is a symlink or its
+/// canonical path leaves the canonical styles directory (#8533: the file's
+/// text is injected into the prompt, so it must be the project's own);
+/// [`ProjectStyleError::Unreadable`] when it exists but cannot be read;
+/// [`ProjectStyleError::Unknown`] listing bundled and project ids otherwise.
+/// Test: `a_symlinked_style_file_is_refused_and_the_default_used`,
+/// `a_project_style_file_resolves_by_id`,
 /// `unknown_id_lists_bundled_and_project_styles`, `a_path_like_id_is_refused`,
 /// `an_unreadable_style_file_warns_and_keeps_the_prompt`.
 pub fn resolve_style_in_project(
@@ -149,9 +185,14 @@ pub fn resolve_style_in_project(
         return Ok(ActiveStyle::Bundled(style));
     }
     if is_safe_id(id) {
-        let path = project_dir
-            .join(PROJECT_STYLES_DIR)
-            .join(format!("{id}.md"));
+        let dir = project_dir.join(PROJECT_STYLES_DIR);
+        let path = dir.join(format!("{id}.md"));
+        if !stays_in_styles_dir(&dir, &path) {
+            return Err(ProjectStyleError::Escapes {
+                id: id.to_string(),
+                path,
+            });
+        }
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 return Ok(ActiveStyle::Project {
