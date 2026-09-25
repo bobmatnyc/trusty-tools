@@ -376,16 +376,41 @@ fn load_fails_closed_on_an_unreadable_project_store() {
 #[test]
 #[tracing_test::traced_test]
 fn load_warns_on_unparsable_store_without_echoing_it() {
-    let (storage, user_path, _) = scope_shadowed("corrupt-load");
+    // No project store: an unreadable user store is served as empty, loudly.
+    let dir =
+        std::env::temp_dir().join(format!("gw-storage-corrupt-load-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let user_path = dir.join("tokens.json");
     // serde's own message would quote this value back.
     std::fs::write(&user_path, r#"{"work": {"version": "echo-fixture-value"}}"#).unwrap();
+    let storage = TokenStorage::with_path(user_path);
 
     let loaded = storage.load().unwrap();
 
-    assert_eq!(loaded["work"].token.access_token, PROJECT_ACCESS);
+    assert!(loaded.is_empty());
     assert!(logs_contain("unreadable"));
     assert!(logs_contain("line 1"));
     assert!(!logs_contain("echo-fixture-value"));
+}
+
+#[test]
+fn get_default_fails_closed_when_the_user_store_is_unreadable() {
+    // User store: `personal` (bob, the default). Project store: only
+    // `client` (carol, not default). Losing the user store must not make
+    // every account-less call run as carol.
+    let mut carol = make_stored(3600);
+    carol.metadata.email = Some("carol@example.com".into());
+    let (storage, user_path, _) = two_tier(
+        "corrupt-user",
+        HashMap::new(),
+        HashMap::from([("client".to_string(), carol)]),
+    );
+    std::fs::write(&user_path, "{not json").unwrap();
+
+    assert!(
+        storage.get_default().is_err(),
+        "an unreadable user store beside a project store must fail closed"
+    );
 }
 
 #[test]

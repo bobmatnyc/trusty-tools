@@ -114,14 +114,17 @@ impl TokenStorage {
     /// are throttled (PR #2949 review).
     /// What: Returns the merged view built by [`TokenStorage::load_tiers`]:
     /// a profile in one store resolves to that entry; a profile in both
-    /// resolves per [`precedence::resolve`]. An unreadable project store is
-    /// an error — serving the user entries instead could act on a different
-    /// account than the project override names. An unreadable user store is
-    /// served as empty, with one warning per path and error kind.
+    /// resolves per [`precedence::resolve`]. With a project store, either
+    /// store being unreadable is an error — serving only the readable one
+    /// could act on a different account (the project override's, or the
+    /// project's lone profile as the default). With no project store, an
+    /// unreadable user store is served as empty, with one warning per path
+    /// and error kind.
     /// Test: `project_entry_lacking_scope_no_longer_shadows_fresh_user_entry`,
     /// `load_warns_once_naming_winner_without_token_values`,
     /// `load_warns_on_unparsable_store_without_echoing_it`,
-    /// `load_fails_closed_on_an_unreadable_project_store`.
+    /// `load_fails_closed_on_an_unreadable_project_store`,
+    /// `get_default_fails_closed_when_the_user_store_is_unreadable`.
     pub fn load(&self) -> Result<HashMap<String, StoredToken>> {
         Ok(self.load_tiers(self.project_store(), false)?.merged)
     }
@@ -132,15 +135,18 @@ impl TokenStorage {
     /// came from to write it back there, and must not write over a store it
     /// could not read (#8539); `load` needs only the merge.
     /// What: Reads the user store and `project` (if any). A project read
-    /// failure is always an error; a user read failure is an error with
-    /// `strict`, else a once-per-path warning and an empty store. For a
-    /// profile in both stores whose `token` fields differ, picks the winner
-    /// with [`precedence::resolve`] and warns once; identical tokens resolve
-    /// to the project entry silently.
+    /// failure is always an error. A user read failure is an error with
+    /// `strict` or when a project store is present, else a once-per-path
+    /// warning and an empty store. For a profile in both stores whose `token`
+    /// fields differ, picks the winner with [`precedence::resolve`] and warns
+    /// once; identical tokens resolve to the project entry silently.
     /// Test: `update_refuses_to_overwrite_an_unparsable_store`,
-    /// `load_fails_closed_on_an_unreadable_project_store`.
+    /// `load_fails_closed_on_an_unreadable_project_store`,
+    /// `get_default_fails_closed_when_the_user_store_is_unreadable`.
     fn load_tiers(&self, project: Option<&Path>, strict: bool) -> Result<Tiers> {
-        let user = self.read_tier(&self.user_path, strict)?;
+        // #8539: with a project store, a lost user store could make the
+        // project's lone profile the default; fail closed instead.
+        let user = self.read_tier(&self.user_path, strict || project.is_some())?;
         // #8539: fail closed; the project override may name another account.
         let project = match project {
             Some(path) => self.read_tier(path, true)?,

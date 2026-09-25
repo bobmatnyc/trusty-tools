@@ -104,8 +104,10 @@ pub(super) fn read_store(
 /// new one, never a partial one. A symlinked target file is resolved first,
 /// so the link survives. The temp file is removed on failure.
 /// Test: `write_store_replaces_the_file_by_rename`,
+/// `write_store_keeps_a_symlinked_target_file`,
 /// `save_restricts_permissions_on_unix`.
 pub(super) fn write_store(target: &Path, tokens: &HashMap<String, StoredToken>) -> Result<()> {
+    // #8539: resolve a symlinked file so the rename keeps the link.
     let target = target
         .canonicalize()
         .unwrap_or_else(|_| target.to_path_buf());
@@ -240,6 +242,41 @@ mod tests {
         assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
         let leftovers = std::fs::read_dir(&dir).unwrap().count();
         assert_eq!(leftovers, 1, "no temp file may be left behind");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_store_keeps_a_symlinked_target_file() {
+        let dir = std::env::temp_dir().join(format!("gw-atomic-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.json");
+        let link = dir.join("link.json");
+        std::fs::write(&real, "{}").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut entry: HashMap<String, StoredToken> = HashMap::new();
+        entry.insert(
+            "work".into(),
+            serde_json::from_str(
+                r#"{"metadata":{"service_name":"work","created_at":"2026-01-01T00:00:00Z"},
+                    "token":{"access_token":"link-fixture","expires_at":"2026-01-01T01:00:00Z"}}"#,
+            )
+            .unwrap(),
+        );
+
+        write_store(&link, &entry).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must survive the write"
+        );
+        assert!(
+            std::fs::read_to_string(&real)
+                .unwrap()
+                .contains("link-fixture")
+        );
     }
 
     #[test]
