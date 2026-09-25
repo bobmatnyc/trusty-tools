@@ -22,30 +22,20 @@ use std::time::{Duration, Instant};
 /// How long `stop` waits after SIGTERM before sending SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
-/// How a stop attempt ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StopOutcome {
-    /// Every targeted process exited.
-    Stopped,
-    /// A target was still alive after SIGKILL.
-    StillRunning,
-}
-
 /// Stop every live `trusty-memory` daemon owned by this user.
 ///
 /// Why: the process table is the source of truth for which daemon runs.
 /// Exits non-zero ("No daemon running") when nothing matches so
 /// shell-scripted callers can distinguish "I stopped it" from "nothing to
-/// stop".
+/// stop", and non-zero when a daemon is still alive after SIGKILL.
 /// What: [`stop_daemons_in`] over [`list_processes`]; on a clean stop, removes
 /// the stale address file.
 /// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
-/// `stop_reports_no_daemon_when_only_bridges_run`.
+/// `stop_reports_no_daemon_when_only_bridges_run`,
+/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
 pub async fn handle_stop() -> Result<()> {
-    let outcome = stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
-    if outcome == StopOutcome::Stopped {
-        cleanup_addr_file();
-    }
+    stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
+    cleanup_addr_file();
     Ok(())
 }
 
@@ -59,11 +49,13 @@ pub async fn handle_stop() -> Result<()> {
 ///
 /// # Errors
 ///
-/// "No daemon running" when `procs` holds no daemon.
+/// "No daemon running" when `procs` holds no daemon; "daemon still running"
+/// when a target is alive after SIGKILL.
 ///
 /// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
-/// `stop_reports_no_daemon_when_only_bridges_run`.
-pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> Result<StopOutcome> {
+/// `stop_reports_no_daemon_when_only_bridges_run`,
+/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
+pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> Result<()> {
     let targets = daemon_pids_in(procs, me);
     if targets.is_empty() {
         bail!("No daemon running");
@@ -87,7 +79,7 @@ pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> R
         std::thread::sleep(Duration::from_millis(100));
         if !targets.iter().any(|p| pid_alive(*p)) {
             println!("{} Daemon stopped", "✓".green());
-            return Ok(StopOutcome::Stopped);
+            return Ok(());
         }
         if Instant::now() >= deadline {
             break;
@@ -109,13 +101,17 @@ pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> R
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    if targets.iter().any(|p| pid_alive(*p)) {
-        println!("{} Daemon may still be shutting down", "⚠".yellow());
-        Ok(StopOutcome::StillRunning)
-    } else {
-        println!("{} Daemon stopped", "✓".green());
-        Ok(StopOutcome::Stopped)
+    let alive: Vec<u32> = targets.iter().copied().filter(|p| pid_alive(*p)).collect();
+    if !alive.is_empty() {
+        // #277 MEDIUM-4: a caller that goes on after `stop` must not meet a
+        // live daemon, so a survivor is an error, not a warning.
+        bail!(
+            "daemon still running after SIGKILL ({} process(es): {alive:?})",
+            alive.len()
+        );
     }
+    println!("{} Daemon stopped", "✓".green());
+    Ok(())
 }
 
 /// Remove the stale `~/.trusty-memory/http_addr` after a successful stop.

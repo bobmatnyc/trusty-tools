@@ -190,9 +190,7 @@ fn stop_terminates_the_daemon_and_spares_a_stdio_bridge() {
     let _daemon_stdin = daemon.stdin.take();
     let reaper = std::thread::spawn(move || daemon.wait());
 
-    let outcome = stop_daemons_in(&rows, std::process::id(), Duration::from_secs(5))
-        .expect("a daemon is running");
-    assert_eq!(outcome, StopOutcome::Stopped);
+    stop_daemons_in(&rows, std::process::id(), Duration::from_secs(5)).expect("the daemon stops");
     let status = reaper.join().expect("reaper").expect("wait");
     daemon_guard.0 = None;
     assert!(!status.success(), "daemon ended by a signal: {status:?}");
@@ -200,6 +198,24 @@ fn stop_terminates_the_daemon_and_spares_a_stdio_bridge() {
         bridge.0.try_wait().expect("try_wait").is_none(),
         "the stdio bridge must survive stop"
     );
+}
+
+/// Why (#277 MEDIUM-4): `stop` exited 0 when a daemon outlived SIGKILL, so a
+/// script (the import runbook's "stop, then import") went on against a live
+/// daemon. The stand-in is never reaped until the test ends, so after the
+/// signals it lingers as a zombie that `kill -0` still sees.
+#[cfg(unix)]
+#[test]
+fn stop_fails_when_a_daemon_is_still_alive_after_sigkill() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = KillOnDrop(spawn_stand_in(dir.path(), &["serve", "--foreground"]));
+    let pid = daemon.0.id();
+    let rows = live_rows_for(&[pid]);
+    assert_eq!(rows.len(), 1, "stand-in visible with argv: {rows:?}");
+
+    let err = stop_daemons_in(&rows, std::process::id(), Duration::from_millis(200))
+        .expect_err("a daemon that survives SIGKILL is a failed stop");
+    assert!(err.to_string().contains("still running"), "{err}");
 }
 
 #[cfg(unix)]
