@@ -194,7 +194,8 @@ pub(crate) const GIT_ENV_REDIRECTS: &[&str] = &[
 ];
 
 /// Working-tree status for the candidate itself.
-const STATUS_ARGS: &[&str] = &[
+// #8572: `pub(crate)` so the main-checkout HEAD-switch guard reads dirt the same way.
+pub(crate) const STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain",
     "--untracked-files=normal",

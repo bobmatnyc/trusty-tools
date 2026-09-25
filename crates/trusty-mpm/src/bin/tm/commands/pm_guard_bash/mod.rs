@@ -53,6 +53,8 @@ mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
 mod disk_usage;
+// #8572: an agent's branch switch in a dirty main checkout.
+mod head_switch;
 mod heredoc;
 mod main_checkout;
 mod path_tokens;
@@ -70,6 +72,7 @@ mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
+pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,

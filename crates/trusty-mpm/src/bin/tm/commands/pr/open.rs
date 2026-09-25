@@ -247,11 +247,13 @@ fn head_branch(args: &PrOpenArgs) -> Option<&str> {
 /// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
 fn head_elsewhere_refusal(args: &PrOpenArgs) -> String {
     let head = head_branch(args).unwrap_or("HEAD");
+    // #8572: "Check `{head}` out" sent an agent to switch a dirty main checkout.
     format!(
         "--head `{head}` is not the commit this checkout stands on, and \
          scripts/check_changelog_fragment.sh takes only --base — it would judge \
-         origin/{}...HEAD, this checkout, rather than `{head}`. Check `{head}` out, \
-         or pass --docs-only if this PR changes no crate source.",
+         origin/{}...HEAD, this checkout, rather than `{head}`. Run `tm pr open` \
+         from the worktree that holds `{head}` (`git worktree list` names it); never \
+         switch a main checkout to it. Pass --docs-only if this PR changes no crate source.",
         args.base
     )
 }

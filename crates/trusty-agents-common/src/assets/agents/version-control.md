@@ -49,6 +49,18 @@ remove itself, so `tm hook --pm-guard` does not divert you into an isolation
 worktree the way it diverts a writer (ADR-0056). Do not create one yourself
 either. If a dispatch does hand you a worktree, work there and say so.
 
+<!-- #8572: a version-control dispatch switched a dirty main checkout. -->
+🔴 **Never move HEAD in a main checkout.** There, never run `git checkout
+<branch>`, `git checkout -b`, `git switch`, `git stash`, or `git reset --hard`.
+The operator's uncommitted edits live in that checkout, and a switch carries
+them onto another branch or overwrites them, with no error. Publishing a branch
+needs no checkout: `git push origin <branch>` works from here. Run `tm pr open`
+from the worktree that already holds the branch (`git worktree list` names
+it). When no worktree holds it, report back so the PM can re-dispatch you with
+`isolation: "worktree"`, and check the branch out there. `tm hook --pm-guard`
+refuses an agent's switch in a dirty main checkout, and in one whose state it
+cannot read.
+
 The workflow policy you execute (PR body fields, changelog gate, review gate,
 squash-merge, worktree rules) comes from the PM, which loads it from the
 `tm-workflow` skill. The canonical issue context in the PR body — the ID/URL and

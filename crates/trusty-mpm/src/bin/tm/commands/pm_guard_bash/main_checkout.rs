@@ -282,9 +282,11 @@ pub(crate) enum CommitVerdict {
 /// Scope, stated because the near neighbours are tempting: `git checkout
 /// <branch>` and `git switch <branch>` are NOT covered here even though
 /// switching a branch under another session is part of the same incident.
-/// Their safe and unsafe forms differ by argument rather than by verb and a
-/// loose rule there costs a false deny on ordinary work — the failure #5356 was
-/// filed for. `merge` and `rebase` left that family in ADR-0048 decision 10 and
+/// Their safe and unsafe forms differ by argument rather than by verb, so they
+/// have their own argument-aware rule in [`super::head_switch`] (#8572): an
+/// AGENT's switch is refused only when the main checkout holds uncommitted
+/// work, which keeps a clean checkout clear of the #5356 false deny.
+/// `merge` and `rebase` left that family in ADR-0048 decision 10 and
 /// are handled by [`main_checkout_head_move`], which needs no argument
 /// analysis: neither has a form that leaves HEAD alone. `pull` was there too
 /// until ADR-0053 permitted it.
@@ -910,6 +912,23 @@ pub(super) fn git_verb_target_dir_with_tail(
     env: &PathEnv,
     matches: impl Fn(&str, &[String]) -> bool,
 ) -> Option<(String, PathBuf, Vec<String>)> {
+    git_verb_targets_with_tail(command, cwd, env, matches)
+        .into_iter()
+        .next()
+}
+
+/// Every segment's match, in order — one per segment (#8572).
+///
+/// Why: the HEAD-switch rule must judge `git -C <wt> checkout a && git
+/// checkout b` on its SECOND segment too; the first match alone misses it.
+/// Test: `head_switch_judges_every_segment`.
+pub(super) fn git_verb_targets_with_tail(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+    matches: impl Fn(&str, &[String]) -> bool,
+) -> Vec<(String, PathBuf, Vec<String>)> {
+    let mut found = Vec::new();
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -940,10 +959,11 @@ pub(super) fn git_verb_target_dir_with_tail(
                 Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
                 None => effective_cwd.clone(),
             };
-            return Some((subcommand.clone(), base, tail.to_vec()));
+            found.push((subcommand.clone(), base, tail.to_vec()));
+            break;
         }
     }
-    None
+    found
 }
 
 /// Whether a git subcommand, given its argv tail, overwrites or deletes work
@@ -964,7 +984,8 @@ pub(super) fn git_verb_target_dir_with_tail(
 ///   — UNLESS the command is a dry run (`-n`/`--dry-run`), which only prints.
 /// - `checkout`: the pathspec-restoring forms (`-- <pathspec>`, a bare `.`)
 ///   and `-f`/`--force`, which discards the whole tree. `checkout -b`, a
-///   plain branch switch, and a detaching `checkout <sha>` are untouched.
+///   plain branch switch, and a detaching `checkout <sha>` are untouched
+///   here; an agent's switch in a DIRTY checkout is [`super::head_switch`]'s.
 /// - `restore`: the modern equivalent of `checkout -- <pathspec>`, and the
 ///   easy one to miss. Its DEFAULT target is the working tree, so the rule
 ///   inverts: destructive unless `--staged`/`-S` is present without
