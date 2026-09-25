@@ -1,3 +1,0 @@
-Security
-- The memory secret filter (`check_secret`) now screens the key of a `KEY=value` token the way it screens a bare token. A random 40-character key in front of a path, such as `<key>=src/main.rs`, was admitted because only the key's characters were checked; it is now refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
-- The value of a `KEY=value` token is now screened the same way. A credential-shaped value with no `/`, such as `TOKEN=<base62 key>` or `TOKEN=<base64>==`, and a token with an empty key were admitted, although the value alone is refused; they are now refused. Ordinary values such as `LOG_LEVEL=debug`, `PORT=8080` and `RATE_SRC=src/main.rs` still store ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))

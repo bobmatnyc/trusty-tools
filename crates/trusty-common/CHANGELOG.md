@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.3] — 2026-09-25
+
+### Fixed
+
+- The memory secret filter (`check_secret`) no longer refuses relative source paths whose file or directory names are long CamelCase identifiers made of letters only, such as `src/main/java/com/example/ReservationForecastAdjustmentServiceImpl.java`. These paths were most of the memories a kuzu-memory import refused ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277), [#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+- A file name such as `BituKura.java` or `Oauth2ClientRegistration.java` now stores when its extension is 1 to 5 lowercase letters or digits and every word of its name opens with a capital (an acronym of up to 5 capitals counts), averages at least 4 letters, and the letters are at least 27% vowels, with at most one digit group and one single letter per `-`/`_`/`.` piece. A lowercase first word (`getUserId.java`), an acronym plus a short word (`GTSBejm.java`), and a name with a vowel-free word (`Http2ClientPool.java`) are still refused, because random keys take those shapes ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- A long CamelCase name now needs 27% vowels instead of 30% ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- These shapes now store: a GitHub noreply email (`12345+login@users.noreply.github.com`); `KEY=<url>` where the URL passes the ordinary-URL test and has no `user@` or `user:pass@`; an npm `name@1.2.3` path segment with a lowercase name and a semver version; and a ticket key with a CamelCase title (`AB-1234-FixRateLoader`) ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- Google Docs, Sheets, Slides and Drive URLs (`https://docs.google.com/spreadsheets/d/<id>`) now store. The document id is admitted only in its URL position on `docs.google.com` or `drive.google.com`, and only at a length Google issues (19, 28, 33 or 44 characters, or an 86-character `2PACX-` published id). A bare id is still refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+### Changed
+
+- The memory secret filter (`check_secret`) no longer refuses a path for the shape of a short file name. A `<stem>.<ext>` file name whose stem is 19 characters or fewer now stores whatever its word shape (`GTSBejm.java`, `getUserId.java`, `Http2ClientPool.java`), provided each `-`/`_`/`.` piece of the stem has at most one digit group and one single letter, and the stem plus every other path segment, before or after it, that is not plain lowercase adds up to at most 19 characters. A provider-prefixed or AWS-key-id stem, a stem of 20 or more characters, and a short stem beside mixed-case segments that reach credential length are still refused. In a kuzu-memory import dry run this admits 2,163 of the 3,057 memories the filter still refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+### Security
+
+- The memory secret filter (`check_secret`) now screens the key of a `KEY=value` token the way it screens a bare token. A random 40-character key in front of a path, such as `<key>=src/main.rs`, was admitted because only the key's characters were checked; it is now refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+- The value of a `KEY=value` token is now screened the same way. A credential-shaped value with no `/`, such as `TOKEN=<base62 key>` or `TOKEN=<base64>==`, and a token with an empty key were admitted, although the value alone is refused; they are now refused. Ordinary values such as `LOG_LEVEL=debug`, `PORT=8080` and `RATE_SRC=src/main.rs` still store ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
 ## [0.52.2] — 2026-09-25
 
 ### Documentation
