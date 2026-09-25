@@ -2363,3 +2363,70 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
         "project A's worktree has no merged pull request in its own repository"
     );
 }
+
+/// 🔴 REGRESSION (#8109): every surveyed worktree gets exactly ONE decision
+/// line naming its path and its verdict — a grant as much as a refusal.
+///
+/// Why: a no-PR worktree was reclaimed on 2026-09-16 with no reason logged,
+/// while its blocked siblings' entries carried one. Fails on origin/main
+/// `6e3203299`, where the sweep logs nothing per surveyed candidate.
+#[test]
+fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let fx = GitWorktreeFixture::new();
+    let granted = fx.add_worktree("decide-8109-merged");
+    let refused = fx.add_worktree("decide-8109-nopr");
+    land(&granted);
+    land(&refused);
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let out = tracing::subscriber::with_default(subscriber, || {
+        reclaim_with_probes(
+            &fx.repos_root,
+            &FreshProbes {
+                launched_from: &[],
+                keep_list: &no_keeps,
+                agent_state: &no_agents,
+                in_use_now: &|| Some(nobody()),
+                index_for: &|_: &Path| merged_index("session/decide-8109-merged", 41),
+            },
+            ReclaimMode::Report,
+            &[],
+        )
+    });
+    let lines = buffer.tail(256);
+    assert_eq!(
+        out.survey.candidates.len(),
+        2,
+        "{:?}",
+        out.survey.candidates
+    );
+    for candidate in &out.survey.candidates {
+        let path = candidate.path.display().to_string();
+        let decision = candidate.verdict.decision();
+        let matching: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("worktree-reclaim: ") && l.contains(&path))
+            .collect();
+        assert_eq!(matching.len(), 1, "one line for {path}: {lines:#?}");
+        assert!(matching[0].contains(&decision), "{decision}: {matching:?}");
+    }
+    let decisions: Vec<String> = out
+        .survey
+        .candidates
+        .iter()
+        .map(|c| c.verdict.decision())
+        .collect();
+    assert!(
+        decisions.contains(&"reclaimable — landing evidence is PR #41".to_string()),
+        "{decisions:?}"
+    );
+    assert!(
+        decisions.iter().any(|d| d.starts_with("refused at gate")),
+        "{decisions:?}"
+    );
+}

@@ -161,4 +161,33 @@ impl ReclaimVerdict {
             Self::Reclaimable { .. } | Self::ReclaimableLandedContent { .. }
         )
     }
+
+    /// This verdict as ONE operator-facing decision sentence (#8109).
+    ///
+    /// Why: a reclaim entry carried no reason while a blocked entry did, so a
+    /// no-PR worktree reclaimed on 2026-09-16 could not be audited the way its
+    /// blocked siblings could. #7885 has the same root: a pass that logs only
+    /// its deletions leaves no record of what it decided about the rest.
+    /// What: a rendered string rather than a `tracing` call, so a unit test
+    /// asserts the wording — the shape
+    /// [`RemovalAudit::line`](super::worktree_removal_audit::RemovalAudit::line)
+    /// already uses. A refusal names its gate and reason; a grant names its
+    /// landing evidence — the pull request, or the base holding its content.
+    /// Test: `a_decision_line_names_the_gate_and_the_reason`,
+    /// `a_decision_line_for_a_grant_names_its_landing_evidence`.
+    pub(crate) fn decision(&self) -> String {
+        match self {
+            Self::Reclaimable { pr } => format!("reclaimable — landing evidence is PR #{pr}"),
+            Self::ReclaimableLandedContent { base } => {
+                format!("reclaimable — landing evidence is its content, already on {base}")
+            }
+            Self::Blocked { gate, reason } | Self::BlockedByAgent { gate, reason } => {
+                format!("refused at {} — {reason}", gate.label())
+            }
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "worktree_reclaim_verdict_tests.rs"]
+mod worktree_reclaim_verdict_tests;

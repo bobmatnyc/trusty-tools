@@ -191,6 +191,42 @@ fn a_recheck_inside_the_deadline_returns_its_own_verdict() {
     assert!(!reason.contains("ran out of time"), "{reason}");
 }
 
+/// 🔴 REGRESSION (#8577): a refused removal — the timeout deny and an ordinary
+/// re-check deny alike — tells the agent to hand the tree back to the PM or
+/// `version-control`, and never names a `--force` sweep. On origin/main both
+/// said to run `tm session prune-worktrees --merged-prs --force`, and an agent
+/// did, over ~60 worktrees, after one timed-out removal.
+#[test]
+fn a_refused_removal_hands_the_worktree_back_and_never_suggests_a_force_sweep() {
+    let probe = |dirty| SlowProbe {
+        slow: Duration::ZERO,
+        dirty,
+        panics: false,
+    };
+    let timed_out =
+        evaluate_removal_rechecks_within(Path::new(WT), Ok(Vec::new()), probe(0), Duration::ZERO)
+            .expect("an expired deadline denies");
+    assert!(timed_out.contains("ran out of time"), "{timed_out}");
+    let dirty = evaluate_removal_rechecks_within(
+        Path::new(WT),
+        Ok(Vec::new()),
+        probe(2),
+        Duration::from_secs(10),
+    )
+    .expect("a dirty tree denies");
+    for reason in [&timed_out, &dirty] {
+        assert!(
+            reason.contains("Hand this worktree back"),
+            "names the hand-back: {reason}"
+        );
+        assert!(reason.contains("to the PM"), "{reason}");
+        assert!(reason.contains("`version-control`"), "{reason}");
+        assert!(reason.contains("this same single-path removal"), "{reason}");
+        assert!(!reason.contains("--force"), "no --force sweep: {reason}");
+        assert!(!reason.contains("prune-worktrees"), "no sweep: {reason}");
+    }
+}
+
 /// 🔴 #7889: a re-check thread that dies without answering denies.
 #[test]
 fn a_recheck_that_panics_denies() {
