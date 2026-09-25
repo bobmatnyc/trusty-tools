@@ -254,6 +254,20 @@ pub(crate) fn is_aws_access_key_id(token: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
+/// True when `token` carries a provider key: a [`SECRET_PREFIXES`] entry
+/// ([`carries_secret_prefix`]) or an AWS key-id opening
+/// ([`is_aws_access_key_id`]).
+///
+/// Why (#277 review): [`looks_like_secret`], [`is_google_doc_id`] and the
+/// #277 file-name rule each repeated this pair; one helper keeps them equal.
+/// What: lowercases `token` for the prefix test and passes it verbatim to
+/// the AWS shape test.
+/// Test: `known_key_prefixes_are_blocked`, `aws_access_key_ids_are_blocked`,
+/// `real_secrets_still_blocked_after_8589_path_rules`.
+pub(crate) fn is_provider_key(token: &str) -> bool {
+    carries_secret_prefix(&token.to_ascii_lowercase()) || is_aws_access_key_id(token)
+}
+
 /// Prefixes of vendor-issued PUBLIC resource ids — identifiers that appear in
 /// dashboard URLs and CLI output and are not credentials.
 ///
@@ -1173,8 +1187,7 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
         && seg
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        && !carries_secret_prefix(&seg.to_ascii_lowercase())
-        && !is_aws_access_key_id(seg)
+        && !is_provider_key(seg)
 }
 
 /// True when `token` is a structured path/slug/key=value/compound-identifier
@@ -1353,10 +1366,9 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     if token.len() < SECRET_MIN_LEN {
         return false;
     }
-    let lower = token.to_ascii_lowercase();
     // #7549: a provider prefix counts at a delimiter boundary, not only at
     // offset 0 — a lowercase segment typed in front used to hide the whole key.
-    if carries_secret_prefix(&lower) || is_aws_access_key_id(token) {
+    if is_provider_key(token) {
         return true;
     }
     // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)

@@ -3822,10 +3822,18 @@ fn noreply_key_url_npm_and_ticket_boundaries_after_277() {
         "70822+tahrisrut@users.noreply.github.com.evil.io",
         "7a822+Tahrisrut9@users.noreply.github.com",
         "70822+Tahri_srut9@users.noreply.github.com",
+        // noreply: a 13-digit id, a 40-char login, and a base62 key as the
+        // login, which only the `looks_like_secret(login)` screen refuses.
+        "1234567890123+tahrisrut@users.noreply.github.com",
+        "70822+tahrisrutkovudelamtafafeocozbimaselovipa@users.noreply.github.com",
+        "70822+aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1abcde@users.noreply.github.com", // pragma: allowlist secret
         // KEY=url: userinfo with and without a password, a secret in the path,
         // and a credential-shaped key.
         "DB_URL=postgres://svcuser:hunter2hunter2@db.example.com/app", // pragma: allowlist secret
         "DB_URL=postgres://Svcuser9@db.example.com:5432/app",
+        // `svcuser@1.2.3` reads as an npm segment, so `is_ordinary_url` passes
+        // this URL and only the `no_userinfo` clause refuses it.
+        "DB_URL=redis://svcuser@1.2.3/app",
         "HOOK_URL=https://hooks.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
         "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1=https://example.com/x", // pragma: allowlist secret
         // npm: a two-part version, an uppercase name.
@@ -3938,4 +3946,20 @@ fn random_stems_as_file_names_stay_flagged_after_277() {
              admitted {admits} of {N}, above the pinned ceiling {ceiling}"
         );
     }
+}
+
+/// Why (#277 review): `is_identifier_file_segment` judges a stem by word
+/// shape, so a passphrase built from words with one digit group reads as an
+/// identifier. It was refused before #277 and is admitted now.
+/// What: pins that bound, so a change in either direction is deliberate.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_277() {
+    assert!(
+        find_secret_token("vault/CorrectHorseBatteryStaple7.txt").is_none(),
+        "KNOWN ACCEPTED BOUND (#277): a word-composed passphrase with one digit \
+         group, used as a file stem, is admitted (same class as FN-2, #1484). \
+         If it now FLAGS, the bound tightened — update the doc on \
+         `is_identifier_file_segment`."
+    );
 }

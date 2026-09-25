@@ -13,8 +13,8 @@
 
 use super::{
     IDENTIFIER_DELIMITERS, MAX_ACRONYM_LEN, MIN_MEAN_CAMEL_WORD_LEN, MIN_VOWEL_PERCENT,
-    camel_words, carries_secret_prefix, digit_run_count, is_aws_access_key_id, is_ordinary_url,
-    looks_like_secret, meets_vowel_floor,
+    camel_words, digit_run_count, is_ordinary_url, is_provider_key, looks_like_secret,
+    meets_vowel_floor,
 };
 
 /// Longest file extension [`is_identifier_file_segment`] accepts (`java`,
@@ -74,6 +74,10 @@ pub(crate) fn is_identifier_word_run(run: &str) -> bool {
 /// digit-run and stray-letter caps (the #5043 discriminators) and by
 /// [`is_identifier_word_run`]; `random_stems_as_file_names_stay_flagged_after_277`
 /// pins the measured admits.
+/// Known accepted bound: a word-composed passphrase with one digit group,
+/// used as a file stem, is admitted (same class as FN-2, #1484) —
+/// `vault/CorrectHorseBatteryStaple7.txt`, pinned in
+/// `known_accepted_bounds_after_277`.
 /// What: the extension (after the last `.`) is 1 to [`MAX_FILE_EXTENSION_LEN`]
 /// lowercase letters or digits, opening with a letter. The stem is
 /// alphanumeric plus [`IDENTIFIER_DELIMITERS`] and carries no
@@ -96,7 +100,7 @@ pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
         && stem
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || IDENTIFIER_DELIMITERS.contains(&c));
-    if !ext_ok || !stem_charset_ok || carries_secret_prefix(&seg.to_ascii_lowercase()) {
+    if !ext_ok || !stem_charset_ok || is_provider_key(seg) {
         return false;
     }
     stem.split(IDENTIFIER_DELIMITERS)
@@ -110,7 +114,7 @@ pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
                     strays += usize::from(r.len() == 1);
                     r.len() == 1 || is_identifier_word_run(r)
                 });
-            runs_ok && strays <= 1 && digit_run_count(piece) <= 1 && !is_aws_access_key_id(piece)
+            runs_ok && strays <= 1 && digit_run_count(piece) <= 1 && !is_provider_key(piece)
         })
 }
 
@@ -122,7 +126,8 @@ pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
 /// id satisfies.
 /// What: exact [`GITHUB_NOREPLY_DOMAIN`] after the first `@`; before it, 1 to
 /// [`MAX_GITHUB_USER_ID_LEN`] digits, `+`, and a GitHub login (1 to
-/// [`MAX_GITHUB_LOGIN_LEN`] alphanumerics or single inner hyphens).
+/// [`MAX_GITHUB_LOGIN_LEN`] alphanumerics or single inner hyphens) that is
+/// not itself credential-shaped, as [`is_key_equals_url`] screens its key.
 /// Test: `noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277`,
 /// `noreply_key_url_npm_and_ticket_boundaries_after_277`.
 pub(crate) fn is_github_noreply_email(token: &str) -> bool {
@@ -142,6 +147,8 @@ pub(crate) fn is_github_noreply_email(token: &str) -> bool {
         && !login.starts_with('-')
         && !login.ends_with('-')
         && !login.contains("--")
+        // #277 review: an unscreened login let a 39-char base62 key through.
+        && !looks_like_secret(login)
 }
 
 /// True when `token` is `KEY=<ordinary URL>`, an environment variable holding
@@ -196,7 +203,7 @@ pub(crate) fn is_npm_package_version(seg: &str) -> bool {
         && name.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')
         })
-        && !carries_secret_prefix(name);
+        && !is_provider_key(name);
     let (core, prerelease) = match version.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
         None => (version, None),
