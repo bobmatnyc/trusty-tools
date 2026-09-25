@@ -96,7 +96,7 @@ trusty-search = { path = "../trusty-search", version = "0.54" }
 # `trusty-agents-common` comment below) — trusty-gworkspace is a plain
 # connector library, no cargo-cycle concern.
 trusty-channels = { path = "../trusty-channels", version = "0.1.0" }
-trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.2.2" }
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
 # trusty-kb: the deterministic KB store + OKG ingest engine (source registry,
 # per-item ledger, entity writes). The `okg_ingest_*` tools are thin agent-facing
 # wrappers over it — all idempotency logic lives in that crate, which stays pure
