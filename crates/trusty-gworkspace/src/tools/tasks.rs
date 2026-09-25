@@ -20,21 +20,32 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "account": account_schema(),
             "action": action_enum(&["list", "get", "create", "update", "delete"]),
             "tasklist_id": { "type": "string", "description": "Required for get/update/delete." },
-            "title": { "type": "string" },
-            "updates": { "type": "object" },
+            // #8629: `title` also renames on update; it was silently ignored there.
+            "title": { "type": "string", "description": "List title (create; update renames). Merged with 'updates'; a different value in both is an error." },
+            "updates": { "type": "object", "description": "Raw patch body (update). Merged with the flat 'title'." },
         }),
         &["action"],
     ));
+    // #8629: re-advertise the flat task fields (the Python gworkspace-mcp
+    // shape); the handler merges them with the `task` / `updates` object.
     tools.push(tool(
         "manage_tasks",
-        "CRUD, complete/move, get one, or search tasks within Google Tasks lists.",
+        "CRUD, complete/move, get one, or search tasks within Google Tasks lists. \
+         create/update take task fields flat (title, notes, due, status, completed), \
+         as a 'task' (create) or 'updates' (update) object, or both: the two are merged, \
+         and a field set in both with different values is an error.",
         json!({
             "account": account_schema(),
             "action": action_enum(&["list", "get", "create", "update", "delete", "complete", "move", "search"]),
-            "tasklist_id": { "type": "string" },
+            "tasklist_id": { "type": "string", "description": "Task list ID. Defaults to '@default'." },
             "task_id": { "type": "string", "description": "Required for get/update/delete/complete/move." },
-            "task": { "type": "object" },
-            "updates": { "type": "object" },
+            "title": { "type": "string", "description": "Task title (create/update)." },
+            "notes": { "type": "string", "description": "Task notes/description (create/update)." },
+            "due": { "type": "string", "description": "Due date, RFC3339 (e.g. 2026-09-28T00:00:00Z) (create/update)." },
+            "status": { "type": "string", "enum": ["needsAction", "completed"], "description": "Task status (create/update)." },
+            "completed": { "type": "string", "description": "Completion time, RFC3339 (create/update)." },
+            "task": { "type": "object", "description": "Raw Task resource (create). Merged with the flat fields." },
+            "updates": { "type": "object", "description": "Raw patch body (update). Merged with the flat fields." },
             "parent": { "type": "string" },
             "previous": { "type": "string" },
             "query": { "type": "string", "description": "search: case-insensitive substring matched against task title/notes across all lists." },
