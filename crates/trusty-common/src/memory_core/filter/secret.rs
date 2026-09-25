@@ -1067,7 +1067,9 @@ pub(crate) fn is_readable_path_segment(seg: &str) -> bool {
 /// trailing `/` produces).
 /// Test: `key_equals_slashpath_not_flagged`, `slash_bearing_base64_blobs_are_blocked`.
 pub(crate) fn is_slash_path(s: &str) -> bool {
-    s.contains('/') && s.split('/').all(is_readable_path_segment)
+    // #8589: a short file name is judged by its position, so the path is
+    // checked as a whole.
+    s.contains('/') && segments_read_as_path(&s.split('/').collect::<Vec<_>>())
 }
 
 /// True when `token` is an ordinary URL — one that carries no credential in its
@@ -1114,10 +1116,12 @@ pub(crate) fn is_ordinary_url(token: &str) -> bool {
     let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     let web = matches!(scheme, "https" | "http");
     // #8589: a Google document id is exempt by host and position only.
-    segments
-        .iter()
-        .enumerate()
-        .all(|(i, seg)| is_readable_path_segment(seg) || (web && is_google_doc_id(&segments, i)))
+    segments.iter().enumerate().all(|(i, seg)| {
+        is_readable_path_segment(seg)
+                // #8589: a short file name under plain directories.
+                || is_short_stem_file_at(&segments, i)
+                || (web && is_google_doc_id(&segments, i))
+    })
 }
 
 /// Hosts whose URLs carry a document id at a fixed path position.
@@ -1307,7 +1311,8 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
     // blob is pure alphanumeric, so the charset test exempted one in five of
     // them before the base64 branch could see them.
     if token.contains('/') {
-        return token.split('/').all(is_readable_path_segment);
+        // #8589: a short file name is judged by the segments before it.
+        return segments_read_as_path(&token.split('/').collect::<Vec<_>>());
     }
     // #5043: a `::`-joined symbol path is decided before branch (c), whose
     // case-uniformity rule a CamelCase segment can never satisfy.

@@ -3336,9 +3336,11 @@ fn camel_case_source_paths_are_not_flagged_after_8589() {
     // refused as a mixed-case credential unless its stem passes
     // `is_identifier_file_segment` (#277). `Http` has no vowel, which pulls
     // `Http2ClientPool` under the 27% floor; `OAuth` holds a one-letter word.
+    // #8589: a 15-character stem under plain directories now passes
+    // `is_short_stem_file_at`, so `Http2ClientPool` is admitted.
     for (path, refused) in [
         ("src/main/java/com/example/Http2ClientKit.java", false), // 19 chars
-        ("src/main/java/com/example/Http2ClientPool.java", true), // 20 chars
+        ("src/main/java/com/example/Http2ClientPool.java", false), // 20 chars
         (
             "src/main/java/com/example/Oauth2ClientRegistration.java",
             false,
@@ -3599,6 +3601,12 @@ fn real_secrets_still_blocked_after_8589_path_rules() {
 /// they exercise the long-run rule; a 15-byte blob (20 characters) never
 /// reaches it. The residue at 20-24 bytes is not this rule's: those blobs are
 /// short enough that a `/`-free run has no digit and falls to FN-2 (#1484).
+///
+/// #8589 (owner ruling): the short-stem rule leaves every row unchanged. A `/`
+/// inside the blob makes a short "stem"; admitting it alone measured 347 at
+/// 20 base64 bytes, so `is_short_stem_file_at` counts mixed-case directories
+/// toward the stem's length. Five further seeds also match their pre-rule
+/// counts.
 /// What: a ratchet, not a pass mark.
 /// Test: itself.
 #[test]
@@ -3677,13 +3685,15 @@ fn identifier_file_names_are_not_flagged_after_277() {
         mismatches.join("\n")
     );
     // KNOWN BOUND: an acronym plus a short word (vowel share 14%), a word
-    // mean of 3, and a lowercase first word are what random stems look like,
-    // so they stay refused. Most of the 3,057 memories the import still
-    // refuses carry the first shape.
+    // mean of 3, and a lowercase first word are what random stems look like.
+    // #8589: under plain directories and below 20 characters those stems are
+    // admitted now (`short_stem_file_names_are_not_flagged_after_8589`); the
+    // same shapes stay refused once a mixed-case directory or a 20th stem
+    // character takes them to credential length.
     let still_refused = [
-        "ucr/lnt/ruld/GTSBejm.java",
-        "abc/src/BanKovLet7SivDakTom.java",
-        "lib/utils/getUserId.java",
+        "src/RateForecasts/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTomP.java",
+        "lib/UtilsHelpers/getUserId.java",
     ];
     let moved = verdict_mismatches(&still_refused, true);
     assert!(
@@ -3755,10 +3765,11 @@ fn identifier_file_name_clause_boundaries_after_277() {
         "ona/sbw/Bora4Fuigeb7Waok.java",
         // Two stray letters in one piece.
         "ucr/lnt/BituKura-a7b.java",
-        // Mean word length 2.
-        "ucr/lnt/AbCdEfGh.json",
-        // A vowel-free word pulls a short stem under the vowel floor.
-        "src/main/java/com/example/Http2ClientPool.java",
+        // #8589: mean word length 2, once a mixed-case directory takes the
+        // stem past 19 characters.
+        "ucr/RateForecasts/AbCdEfGh.json",
+        // #8589: a vowel-free word, in a 20-character stem.
+        "src/main/java/com/example/Http2ClientPoolWorkr.java",
         // A stray capital inside a word.
         "src/main/java/OAuth2AuthorizationRequestRedirectFilter.java",
         // Credential stems.
@@ -3772,6 +3783,21 @@ fn identifier_file_name_clause_boundaries_after_277() {
         mismatches.is_empty(),
         "#277: these file names must STILL be refused:\n{}",
         mismatches.join("\n")
+    );
+    // #8589: these two rows were refused here before the owner ruling; their
+    // stems are under 20 characters under plain directories, so
+    // `is_short_stem_file_at` admits them.
+    let moved = verdict_mismatches(
+        &[
+            "ucr/lnt/AbCdEfGh.json",
+            "src/main/java/com/example/Http2ClientPool.java",
+        ],
+        false,
+    );
+    assert!(
+        moved.is_empty(),
+        "#8589: short stems under plain directories must pass:\n{}",
+        moved.join("\n")
     );
 }
 
@@ -3910,6 +3936,13 @@ fn random_stem(rng: &mut Xorshift, alphabet: &[u8], len: usize) -> String {
 ///
 /// A looser floor below 20 characters measured +212 and +233 at 16, and a
 /// lowercase first word +4 and +8; see `is_identifier_word_run`.
+///
+/// #8589 (owner ruling 2026-09-25): a stem under 20 characters under plain
+/// directories is no longer refused for its word shape
+/// (`is_short_stem_file_at`). The 16-character rows measure that rule, so
+/// they rise: base62 447 -> 2684, base64url 389 -> 3425. Each such stem is
+/// below `SECRET_MIN_LEN` and passes `check_secret` standing alone. The 20-,
+/// 24-, 32- and 40-character rows are unchanged.
 /// What: a ratchet, 20k stems per row at a fixed seed.
 /// Test: itself.
 #[test]
@@ -3919,12 +3952,14 @@ fn random_stems_as_file_names_stay_flagged_after_277() {
     let url_alphabet = b64_alphabet(true);
     let base62 = &url_alphabet[..62];
     for (label, alphabet, stem_len, ceiling) in [
-        ("base62", base62, 16usize, 447usize),
+        // #8589: 447 -> 2684, the short-stem rule's measured admits.
+        ("base62", base62, 16usize, 2684usize),
         ("base62", base62, 20, 205),
         ("base62", base62, 24, 2),
         ("base62", base62, 32, 0),
         ("base62", base62, 40, 0),
-        ("base64url", &url_alphabet[..], 16, 389),
+        // #8589: 389 -> 3425, the short-stem rule's measured admits.
+        ("base64url", &url_alphabet[..], 16, 3425),
         ("base64url", &url_alphabet[..], 20, 202),
         ("base64url", &url_alphabet[..], 24, 40),
         ("base64url", &url_alphabet[..], 32, 6),
@@ -3961,5 +3996,132 @@ fn known_accepted_bounds_after_277() {
          group, used as a file stem, is admitted (same class as FN-2, #1484). \
          If it now FLAGS, the bound tightened — update the doc on \
          `is_identifier_file_segment`."
+    );
+}
+
+// ---- Issue #8589, owner ruling 2026-09-25: short file stems ----
+
+/// Why (issue #8589): 2,237 of the 3,057 memories the kuzu import still
+/// refused failed only on a file name whose stem is under 20 characters and
+/// misses the #277 identifier floors. The owner ruled that such a stem is not
+/// refused for its shape alone.
+/// What: the three #277 known-bound shapes, a vowel-free word, a mean word
+/// length of 2, and a 19-character stem, each under plain directories, as a
+/// bare path, a URL path and a `KEY=path` value, and inside prose through
+/// the `FilterConfig` gate. Each was refused before the rule.
+/// Test: itself.
+#[test]
+fn short_stem_file_names_are_not_flagged_after_8589() {
+    let accepted = [
+        "ucr/lnt/ruld/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTom.java",
+        "lib/utils/getUserId.java",
+        "src/main/java/com/example/Http2ClientPool.java",
+        "ucr/lnt/AbCdEfGh.json",
+        "https://git.example.com/acme/rates/blob/main/src/GTSBejm.java",
+        "RATE_SRC=src/main/java/GTSBejm.java",
+        // A mixed-case directory counts toward the 19: 12 + 7.
+        "src/RateForecast/GTSBejm.java",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#8589: short stems under plain directories must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    let cfg = FilterConfig::default();
+    for path in accepted {
+        let prose = format!("The rate loader is defined in {path} for now");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#8589: the gate must ACCEPT prose carrying {path}"
+        );
+    }
+}
+
+/// Why (issue #8589): each clause of `is_short_stem_file_at` keeps one class
+/// of generated or credential-shaped file name out, and a secret used as a
+/// short stem must still be refused by the rule that catches it alone.
+/// What: an inside and an outside row per clause on the predicate, then
+/// end-to-end rows that `check_secret` must still refuse.
+/// Test: itself.
+#[test]
+fn short_stem_rule_boundaries_after_8589() {
+    for (clause, segments, admitted) in [
+        (
+            "stem of 19, inside",
+            &["abc", "BanKovLet7SivDakTom.java"][..],
+            true,
+        ),
+        (
+            "stem of 20, outside",
+            &["abc", "BanKovLet7SivDakTomP.java"][..],
+            false,
+        ),
+        (
+            "mixed dir 12 + 7, inside",
+            &["src", "RateForecast", "GTSBejm.java"][..],
+            true,
+        ),
+        (
+            "mixed dir 13 + 7, outside",
+            &["src", "RateForecasts", "GTSBejm.java"][..],
+            false,
+        ),
+        (
+            "digit dir counts, inside",
+            &["lib2", "GTSBejm.java"][..],
+            true,
+        ),
+        ("one digit run, inside", &["lnt", "GTSBejm7.java"][..], true),
+        (
+            "two digit runs, outside",
+            &["lnt", "GT5Bejm7.java"][..],
+            false,
+        ),
+        ("one stray letter, inside", &["lnt", "xAbCd.java"][..], true),
+        (
+            "two stray letters, outside",
+            &["lnt", "xAbC.java"][..],
+            false,
+        ),
+        (
+            "extension of 6, outside",
+            &["lnt", "GTSBejm.abcdef"][..],
+            false,
+        ),
+        (
+            "provider prefix stem, outside",
+            &["keys", "ghp_abcdefg.json"][..],
+            false,
+        ),
+        ("no extension, outside", &["lnt", "GTSBejm"][..], false),
+    ] {
+        let i = segments.len() - 1;
+        assert_eq!(
+            is_short_stem_file_at(segments, i),
+            admitted,
+            "#8589 {clause}: is_short_stem_file_at({segments:?}, {i})"
+        );
+    }
+    let refused = [
+        // A provider key or AWS key id as the stem.
+        "keys/AKIAIOSFODNN7EXAMPLE.json", // pragma: allowlist secret
+        "keys/ghp_abcdefghijklmn.json",   // pragma: allowlist secret
+        "keys/sk-abcdefghijklmnop.json",  // pragma: allowlist secret
+        // Encoder-shaped short stems: two digit runs, then two stray letters.
+        "keys/aB3dE5fG7hJ9.json", // pragma: allowlist secret
+        "keys/qXwErTyUiO.json",
+        // A mixed-case directory takes a short stem to credential length.
+        "https://git.example.com/x/RateForecasts/GTSBejm.java",
+        "RATE_SRC=src/RateForecasts/GTSBejm.java",
+        // A long secret stem is outside the rule.
+        "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json", // pragma: allowlist secret
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#8589: these file names must STILL be refused:\n{}",
+        mismatches.join("\n")
     );
 }
