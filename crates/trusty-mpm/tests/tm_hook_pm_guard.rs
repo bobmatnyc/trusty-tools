@@ -1443,7 +1443,7 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
 // reaches the agent in the documented deny shape.
 // ---------------------------------------------------------------------------
 
-/// Assert the printed deny names the ruling and the command that replaces it.
+/// Assert the printed deny names the ruling and the hand-back that replaces it.
 fn assert_worktree_remove_denied(stdout: &str) {
     assert_denied(stdout);
     let parsed: serde_json::Value =
@@ -1451,9 +1451,10 @@ fn assert_worktree_remove_denied(stdout: &str) {
     let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .expect("reason is a string");
+    // #8577: the remedy is a hand-back to the PM, never a `--force` sweep.
     assert!(
-        reason.contains("#5791") && reason.contains("tm session prune-worktrees"),
-        "the worktree-removal deny must name the ruling and the PM's command, got: {reason}"
+        reason.contains("#5791") && reason.contains("hand it back") && !reason.contains("--force"),
+        "the worktree-removal deny must name the ruling and the hand-back, got: {reason}"
     );
 }
 

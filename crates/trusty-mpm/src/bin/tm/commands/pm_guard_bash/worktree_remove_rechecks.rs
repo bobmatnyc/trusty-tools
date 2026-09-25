@@ -183,20 +183,27 @@ pub(crate) const CHECK_DISPATCH_IDENTITY: &str = "dispatch-identity";
 ///
 /// Why: one shape for all five, so a new check cannot ship a message that omits
 /// the fallback or the reason. It names the check, the directory, the specific
-/// finding, and the command that works when this path does not.
+/// finding, and what to do next: hand the one tree back, never widen the
+/// removal to other trees.
 /// What: the `permissionDecisionReason` string.
-/// Test: as the module doc.
+/// Test: as the module doc, plus
+/// `a_refused_removal_hands_the_worktree_back_and_never_suggests_a_force_sweep`.
 pub(crate) fn recheck_deny(check: &str, target: &Path, detail: &str) -> String {
+    // #8577: this text named `prune-worktrees --merged-prs --force` as the way
+    // out, and a version-control agent ran that fleet-wide sweep over ~60 trees
+    // after ONE timed-out removal. The fallback is now a hand-back to the PM.
     format!(
         "Worktree removal denied — ADR-0057 re-check `{check}` did not pass for {}: {detail} \
          `version-control` may remove a worktree directly only when the guard can establish, \
          itself, that the target is a harness worktree, that it holds no uncommitted or \
          untracked files and no unpushed commits, that its branch has a MERGED pull request on \
          GitHub, and that no other live agent or managed session holds it. A fact the guard \
-         cannot establish is never read as absent. Use \
-         `tm session prune-worktrees --merged-prs --force` instead — it reports every tree it \
-         spared and why. `rm -rf` on the directory is not the workaround: it destroys unsaved \
-         work and leaves a registry entry git still believes in.",
+         cannot establish is never read as absent. Hand this worktree back instead: report its \
+         path and this refusal to the PM (or to `version-control`, if you are not it), then \
+         stop. The only retry is this same single-path removal, once the finding above is \
+         resolved. A sweep over other worktrees is never the fallback for one refused removal. \
+         `rm -rf` on the directory is not the workaround either: it destroys unsaved work and \
+         leaves a registry entry git still believes in.",
         target.display()
     )
 }
@@ -535,8 +542,8 @@ fn detached_head_verdict(
         &format!(
             "{branch_error}, and no MERGED pull request in `{repo}` was opened from its commit \
              `{head}` either (resolved from this worktree's `origin` remote).{mismatch} Check \
-             the commit out on a branch and open a pull request for it, or reclaim the tree \
-             with `tm session prune-worktrees --merged-prs --force`.{local_only_note}",
+             the commit out on a branch and open a pull request for it, or hand the tree \
+             back as below.{local_only_note}",
             repo = found.repo
         ),
     ))
@@ -684,8 +691,8 @@ fn landing_evidence(
              worktree's `origin` remote){also}. Ancestry is not an acceptable substitute: a \
              squash merge leaves the branch tip no ancestry relationship to the squash commit, \
              so `git merge-base --is-ancestor` and `git cherry` both answer \"not merged\" for \
-             a tree that is safe to reclaim. Open a pull request for this branch, or reclaim \
-             the tree with `tm session prune-worktrees --merged-prs --force`.{notes}",
+             a tree that is safe to reclaim. Open a pull request for this branch, or hand the \
+             tree back as below.{notes}",
             repo = own.repo,
             also = if stem == branch {
                 String::new()

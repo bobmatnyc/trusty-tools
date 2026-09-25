@@ -2363,3 +2363,74 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
         "project A's worktree has no merged pull request in its own repository"
     );
 }
+
+/// 🔴 REGRESSION (#8109): every surveyed worktree gets exactly ONE decision
+/// line naming its path and its verdict — a grant as much as a refusal.
+///
+/// Why: a no-PR worktree was reclaimed on 2026-09-16 with no reason logged,
+/// while its blocked siblings' entries carried one. Fails on origin/main
+/// `6e3203299`, where the sweep logs nothing per surveyed candidate.
+#[test]
+fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let fx = GitWorktreeFixture::new();
+    let granted = fx.add_worktree("decide-8109-merged");
+    let refused = fx.add_worktree("decide-8109-nopr");
+    land(&granted);
+    // No pull request AND a commit no `origin` ref carries, so neither route to
+    // landing evidence admits it.
+    GitWorktreeFixture::commit_unpushed(&refused);
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let out = tracing::subscriber::with_default(subscriber, || {
+        reclaim_with_probes(
+            &fx.repos_root,
+            &FreshProbes {
+                launched_from: &[],
+                keep_list: &no_keeps,
+                agent_state: &no_agents,
+                in_use_now: &|| Some(nobody()),
+                index_for: &|_: &Path| merged_index("session/decide-8109-merged", 41),
+            },
+            ReclaimMode::Report,
+            &[],
+        )
+    });
+    let lines = buffer.tail(256);
+    // The main checkout is surveyed (and refused at gate 1) too, so every
+    // candidate is checked, and the two worktrees are then named explicitly.
+    for candidate in &out.survey.candidates {
+        // The exact field, not a substring: the main checkout's path is a
+        // prefix of every worktree path beneath it.
+        let field = format!(" path={} branch=", candidate.path.display());
+        let matching: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("(#8109)") && l.contains(&field))
+            .collect();
+        assert_eq!(matching.len(), 1, "one line for {field}: {lines:#?}");
+        let decision = candidate.verdict.decision();
+        assert!(matching[0].contains(&decision), "{decision}: {matching:?}");
+    }
+    let decision_of = |name: &str| {
+        out.survey
+            .candidates
+            .iter()
+            .find(|c| c.path.ends_with(name))
+            .map(|c| c.verdict.decision())
+            .unwrap_or_else(|| panic!("{name} surveyed: {:?}", out.survey.candidates))
+    };
+    assert_eq!(
+        decision_of("decide-8109-merged"),
+        "reclaimable — landing evidence is PR #41"
+    );
+    let refusal = decision_of("decide-8109-nopr");
+    assert!(refusal.starts_with("refused at gate"), "{refusal}");
+    assert!(
+        granted.exists() && refused.exists(),
+        "Report mode removes nothing"
+    );
+}

@@ -106,10 +106,13 @@ use crate::commands::hook_rewrite::first_command_token;
 ///
 /// Why: a bare refusal invites a retry with a different verb or a hand-rolled
 /// workaround, so the text names every denylisted category and the one
-/// sanctioned path for the worktree case (the PM's `tm session
-/// prune-worktrees`), the same way `WORKTREE_REMOVE_DENY_REASON`
-/// does for the sibling `git worktree remove` rule.
+/// sanctioned path for the worktree case (hand it back to the PM), the same way
+/// `WORKTREE_REMOVE_DENY_REASON` does for the sibling `git worktree remove`
+/// rule.
 /// What: the `permissionDecisionReason` string emitted on this deny.
+/// Test: `the_agent_side_worktree_denies_hand_back_and_never_name_a_force_sweep`.
+// #8577: the worktree remedy named a fleet-wide `--force` sweep; it is now the
+// single-tree hand-back.
 pub(crate) const DESTRUCTIVE_DELETE_REASON: &str = "`rm`/`rmdir`/`unlink`/`find -delete` must \
      not target a filesystem root or bare container (`/`, `/root`, `/Users`, `/Users/<name>`, \
      `/home`, `/home/<name>`, `/Volumes`, `/private`, `/var`, `/etc`, `/usr`, `/opt`, `/Library`, \
@@ -117,8 +120,9 @@ pub(crate) const DESTRUCTIVE_DELETE_REASON: &str = "`rm`/`rmdir`/`unlink`/`find 
      directory, or a `.claude/worktrees`/`.worktrees` entry (issue #4031) — each is either \
      unrecoverable data loss or another session's or workstream's uncommitted work. Ordinary file \
      and directory cleanup elsewhere (build artifacts, stale files, `git clean -fd`) is unaffected. \
-     To remove a worktree, ask the PM to run `tm session prune-worktrees --merged-prs --force` — \
-     `rm -rf` on a worktree directory is never the workaround.";
+     To remove a worktree, hand it back: report its path to the PM (or to `version-control`) \
+     and stop. `rm -rf` on a worktree directory is never the workaround, and neither is a sweep \
+     over other worktrees.";
 
 /// Deny reason when a segment contains a delete verb this classifier cannot
 /// resolve a target for — an unparseable segment (unbalanced quotes) that

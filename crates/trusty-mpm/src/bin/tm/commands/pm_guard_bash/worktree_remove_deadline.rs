@@ -19,7 +19,8 @@
 //! `a_recheck_inside_the_deadline_returns_its_own_verdict`,
 //! `a_recheck_that_panics_denies`,
 //! `a_silent_owner_query_denies_inside_the_remaining_budget` (#8082),
-//! `the_removal_deadlines_fit_inside_the_registered_hook_timeout` (#8082).
+//! `the_removal_deadlines_fit_inside_the_registered_hook_timeout` (#8082),
+//! `a_refused_removal_hands_the_worktree_back_and_never_suggests_a_force_sweep` (#8577).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
