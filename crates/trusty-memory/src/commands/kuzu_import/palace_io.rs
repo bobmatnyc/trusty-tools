@@ -98,7 +98,8 @@ pub fn store_is_live(dir: &str) -> bool {
 /// too: the drawers are the import ledger, and a partial ledger would
 /// re-import every memory it lost.
 /// Test: `corrupt_palace_json_fails_the_store_and_is_left_untouched`,
-/// `degraded_drawer_load_refuses_the_write_and_the_dry_run`.
+/// `degraded_drawer_load_refuses_the_write_and_the_dry_run`,
+/// `locked_palace_is_refused_and_the_message_names_any_holder`.
 pub fn open_palace_for_write(
     data_root: &Path,
     palace: &str,

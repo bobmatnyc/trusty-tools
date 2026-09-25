@@ -7,15 +7,20 @@
 //! its identity tag `source:kuzu-memory/<Memory.id>`, its hash tag
 //! `kuzu-hash:<content_hash>`, its provenance tag `kuzu-store:<store dir>`,
 //! and one tag per classification column. [`entity_triples`] and the edge
-//! helpers build the KG side.
+//! helpers build the KG side. Every store-supplied string that becomes a tag
+//! or a triple passes [`screen`] first (#277 MEDIUM-1); one that fails is
+//! dropped and its rule recorded. The `kuzu-store:` path is the operator's
+//! own filesystem path, not store data, so it is not screened.
 //! Test: `mapping_tags_identity_hash_and_columns`,
-//! `moved_store_reimports_nothing_and_shared_ids_are_reported`.
+//! `moved_store_reimports_nothing_and_shared_ids_are_reported`,
+//! `store_supplied_tags_and_triples_pass_the_secret_screen`.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
 use trusty_common::memory_core::store::kg::Triple;
 
 use super::bridge::{KuzuEntityRow, KuzuMemoryRow};
+use super::screen::{screen, SecretRule};
 
 /// Prefix of the identity tag every imported drawer carries.
 pub const SOURCE_TAG_PREFIX: &str = "source:kuzu-memory/";
@@ -65,6 +70,8 @@ pub struct MappedMemory {
     pub importance: f32,
     /// Every tag the finished drawer carries, identity and hash included.
     pub tags: Vec<String>,
+    /// Rules that refused a store-supplied tag value, which was dropped.
+    pub refused_tags: Vec<SecretRule>,
 }
 
 impl MappedMemory {
@@ -154,15 +161,28 @@ pub fn kuzu_content_hash(content: &str) -> String {
 /// token become up to [`MAX_META_TAGS`] `meta:<key>:<value>` tags. The hash is
 /// the row's `content_hash`, or [`kuzu_content_hash`] when the store has none.
 /// `store` is the canonical store directory, recorded as provenance only.
-/// Test: `mapping_tags_identity_hash_and_columns`.
+/// A column value, meta key or meta value, or `content_hash` that fails the
+/// secret screen is dropped (the hash falls back to [`kuzu_content_hash`])
+/// and its rule lands in `refused_tags`. The caller screens `Memory.id` and
+/// the content, which refuse the whole memory.
+/// Test: `mapping_tags_identity_hash_and_columns`,
+/// `store_supplied_tags_and_triples_pass_the_secret_screen`.
 pub fn map_memory(row: &KuzuMemoryRow, store: &str) -> Option<MappedMemory> {
     let memory_id = row.id.clone()?;
     let content = row.content.clone().filter(|c| !c.trim().is_empty())?;
-    let hash = row
-        .content_hash
-        .clone()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| kuzu_content_hash(&content));
+    let mut refused_tags = Vec::new();
+    // #277 MEDIUM-1: a store-supplied tag value passes the screen or is dropped.
+    let mut passes = |v: &str| match screen(v) {
+        Some(rule) => {
+            refused_tags.push(rule);
+            false
+        }
+        None => true,
+    };
+    let hash = match row.content_hash.as_deref().filter(|h| !h.is_empty()) {
+        Some(h) if passes(h) => h.to_string(),
+        _ => kuzu_content_hash(&content),
+    };
     let key = source_key(&memory_id);
     let mut tags = vec![
         format!("source:{key}"),
@@ -183,12 +203,12 @@ pub fn map_memory(row: &KuzuMemoryRow, store: &str) -> Option<MappedMemory> {
         let Some(v) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
             continue;
         };
-        if name == "agent" && v == "default" {
+        if (name == "agent" && v == "default") || !passes(v) {
             continue;
         }
         tags.push(format!("{name}:{v}"));
     }
-    tags.extend(metadata_tags(row.metadata.as_deref()));
+    tags.extend(metadata_tags(row.metadata.as_deref(), &mut passes));
     Some(MappedMemory {
         source_key: key,
         memory_id,
@@ -201,11 +221,13 @@ pub fn map_memory(row: &KuzuMemoryRow, store: &str) -> Option<MappedMemory> {
             .map(|i| (i as f32).clamp(0.0, 1.0))
             .unwrap_or(DEFAULT_IMPORTANCE),
         tags,
+        refused_tags,
     })
 }
 
 /// Scalar top-level entries of a JSON `metadata` string, as `meta:` tags.
-fn metadata_tags(raw: Option<&str>) -> Vec<String> {
+/// An entry whose key or value fails `passes` is dropped.
+fn metadata_tags(raw: Option<&str>, passes: &mut impl FnMut(&str) -> bool) -> Vec<String> {
     let Some(serde_json::Value::Object(map)) = raw.and_then(|r| serde_json::from_str(r).ok())
     else {
         return Vec::new();
@@ -220,6 +242,11 @@ fn metadata_tags(raw: Option<&str>) -> Vec<String> {
         };
         // #277 L4: the key comes from the store and becomes part of a tag.
         if !is_safe_token(&k) || value.is_empty() || value.chars().count() > MAX_META_VALUE_CHARS {
+            continue;
+        }
+        // Screened apart: inside `meta:k:v` a key-value token reads as
+        // structural to the detector and would pass it.
+        if !passes(&k) || !passes(&value) {
             continue;
         }
         out.push(format!("meta:{k}:{value}"));
@@ -270,32 +297,35 @@ pub fn triple(subject: String, predicate: &str, object: String, confidence: Opti
 ///
 /// Why: an Entity node's name and type are its only content, and a KG subject
 /// with no triples of its own is invisible to KG queries.
-pub fn entity_triples(entity: &KuzuEntityRow) -> Vec<Triple> {
+/// What: the triples, and the rule of each one dropped because its id, name
+/// or type failed the secret screen (#277 MEDIUM-1). A refused id drops both.
+/// Test: `store_supplied_tags_and_triples_pass_the_secret_screen`,
+/// `kuzu_import_never_writes_a_hot_predicate`.
+pub fn entity_triples(entity: &KuzuEntityRow) -> (Vec<Triple>, Vec<SecretRule>) {
+    let (mut out, mut refused) = (Vec::new(), Vec::new());
     let Some(id) = entity.id.as_deref().filter(|i| !i.is_empty()) else {
-        return Vec::new();
+        return (out, refused);
     };
-    let mut out = Vec::new();
-    if let Some(name) = entity.name.as_deref().filter(|n| !n.trim().is_empty()) {
-        out.push(triple(
-            entity_subject(id),
-            "has_name",
-            name.to_string(),
-            None,
-        ));
+    fn present(v: &Option<String>) -> Option<&str> {
+        v.as_deref().filter(|s| !s.trim().is_empty())
     }
-    if let Some(kind) = entity
-        .entity_type
-        .as_deref()
-        .filter(|k| !k.trim().is_empty())
-    {
-        out.push(triple(
-            entity_subject(id),
-            "entity_type",
-            kind.to_string(),
-            None,
-        ));
+    let id_rule = screen(id);
+    for (predicate, value) in [
+        ("has_name", present(&entity.name)),
+        ("entity_type", present(&entity.entity_type)),
+    ] {
+        let Some(value) = value else { continue };
+        match id_rule.or_else(|| screen(value)) {
+            Some(rule) => refused.push(rule),
+            None => out.push(triple(
+                entity_subject(id),
+                predicate,
+                value.to_string(),
+                None,
+            )),
+        }
     }
-    out
+    (out, refused)
 }
 
 /// Predicate for a RELATES_TO edge: `relates_to:<relationship_type>`.

@@ -537,6 +537,7 @@ fn ledger_plans_new_unchanged_changed() {
         created_at: None,
         importance: 0.5,
         tags: vec![],
+        refused_tags: vec![],
     };
     assert_eq!(
         Ledger::default().plan(&mapped("h"), &|_| false),
@@ -691,8 +692,8 @@ impl PalaceView for FailingSink {
     fn drawers(&self) -> Vec<Drawer> {
         self.inner.drawers()
     }
-    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError> {
-        self.inner.triple_is_active(t).await
+    async fn active_triples(&self, subject: &str) -> Result<Vec<Triple>, KuzuImportError> {
+        self.inner.active_triples(subject).await
     }
 }
 
@@ -717,6 +718,9 @@ impl PalaceSink for FailingSink {
     }
     async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError> {
         self.inner.assert_triple(t).await
+    }
+    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError> {
+        self.inner.retract_triple(t).await
     }
 }
 
@@ -855,7 +859,7 @@ fn deprecated_kuzu_data_forwards_to_import() {
         Path::new("/nonexistent/store.redb"),
         "p",
         true,
-        Some(3),
+        None,
     )
     .expect_err("not a store");
     assert!(

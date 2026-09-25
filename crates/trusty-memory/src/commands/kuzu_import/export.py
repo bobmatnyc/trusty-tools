@@ -68,6 +68,19 @@ def main(db_path, out_path):
             f"RETURN a.id AS from_id, b.id AS to_id, {kind} AS relationship_type, "
             f"{strength} AS strength"
         )
+    # #277 LOW-2: rows in relationship tables the import does not map are
+    # counted, so the report can say what was left behind. A failure here is
+    # reported by exception class and never stops the export.
+    other_edges = {}
+    other_edges_error = None
+    try:
+        for t in rows("CALL SHOW_TABLES() RETURN name, type"):
+            name = t["name"]
+            if str(t["type"]).upper().startswith("REL") and name not in ("MENTIONS", "RELATES_TO"):
+                n = rows(f"MATCH ()-[r:`{name}`]->() RETURN count(r) AS n")
+                other_edges[name] = n[0]["n"] if n else 0
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        other_edges_error = type(exc).__name__
     doc = {
         "format": "trusty-kuzu-export/1",
         "schema_version": "1.0",
@@ -78,6 +91,8 @@ def main(db_path, out_path):
         "entities": entities,
         "mentions": mentions,
         "relates_to": relates,
+        "other_edges": other_edges,
+        "other_edges_error": other_edges_error,
     }
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, default=str)

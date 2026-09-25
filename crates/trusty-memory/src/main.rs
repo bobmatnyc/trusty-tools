@@ -176,7 +176,7 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         palace: Option<String>,
 
-        /// Ignored: `import kuzu` has no limit (kept for script compatibility).
+        /// Refused: `import kuzu` has no limit; use --dry-run to preview.
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },

@@ -3714,6 +3714,7 @@ fn kuzu_import_never_writes_a_hot_predicate() {
         entity_type: Some("thing".to_string()),
     };
     let mut written: Vec<String> = entity_triples(&entity)
+        .0
         .into_iter()
         .map(|t| t.predicate)
         .collect();

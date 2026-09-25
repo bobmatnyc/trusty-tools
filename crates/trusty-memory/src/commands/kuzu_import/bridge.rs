@@ -16,6 +16,7 @@
 //! Test: `bridge_parses_real_export_shape`, `bridge_leaves_no_temp_output`,
 //! `bridge_failure_arms_are_typed_errors`, `resolve_python_reads_the_shebang`.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -183,6 +184,12 @@ pub struct KuzuExport {
     pub mentions: Vec<KuzuMention>,
     #[serde(default)]
     pub relates_to: Vec<KuzuRelatesTo>,
+    /// Row count per relationship table the import does not map (#277 LOW-2).
+    #[serde(default)]
+    pub other_edges: BTreeMap<String, usize>,
+    /// The exception class when `export.py` could not count those tables.
+    #[serde(default)]
+    pub other_edges_error: Option<String>,
 }
 
 impl KuzuExport {

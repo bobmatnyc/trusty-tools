@@ -183,8 +183,8 @@ impl PalaceView for ScriptedSink {
     fn drawers(&self) -> Vec<Drawer> {
         self.inner.drawers()
     }
-    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError> {
-        self.inner.triple_is_active(t).await
+    async fn active_triples(&self, subject: &str) -> Result<Vec<Triple>, KuzuImportError> {
+        self.inner.active_triples(subject).await
     }
 }
 
@@ -225,6 +225,9 @@ impl PalaceSink for ScriptedSink {
             ));
         }
         self.inner.assert_triple(t).await
+    }
+    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError> {
+        self.inner.retract_triple(t).await
     }
 }
 

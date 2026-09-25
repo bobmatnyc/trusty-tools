@@ -8,18 +8,19 @@
 //! MENTIONS / RELATES_TO edges resolved to `drawer:<uuid>` subjects. A triple
 //! is asserted only when the exact `(subject, predicate, object)` is not
 //! already active, because re-asserting an active triple closes its interval
-//! and writes a history row even though nothing changed. With no
-//! [`PalaceSink`] it only counts.
+//! and writes a history row even though nothing changed. Under `--update`,
+//! [`retract_stale`] then closes kuzu edges the source no longer carries.
+//! With no [`PalaceSink`] it only counts.
 //! Test: `import_twice_is_idempotent_on_palace_state`,
 //! `changed_hash_is_flagged_then_updated_in_place`,
 //! `partial_write_failure_is_reported_and_resumable`,
-//! `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`.
+//! `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`,
+//! `update_retracts_kuzu_edges_absent_from_the_source`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use trusty_common::memory_core::filter::check_secret;
 use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
 use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, RememberOptions};
 use trusty_common::memory_core::store::{Triple, VectorStore as _};
@@ -29,17 +30,30 @@ use super::bridge::KuzuExport;
 use super::ledger::{Ledger, MemoryPlan};
 use super::mapping::{
     drawer_subject, entity_subject, entity_triples, map_memory, merge_tags, relates_to_predicate,
-    triple, MappedMemory,
+    source_key, triple, MappedMemory,
 };
+use super::retract::{retract_stale, Retraction};
+use super::screen::{screen, tally, RuleTally, SecretRule};
 use super::KuzuImportError;
+
+/// What the report lists for a memory refused because its id is itself
+/// secret-shaped, in place of the id.
+pub const SECRET_SHAPED_ID: &str = "(secret-shaped id)";
 
 /// Read access to a palace: enough to plan and to count a dry run.
 #[async_trait]
 pub trait PalaceView: Send + Sync {
     /// Every drawer in the palace (imported or not).
     fn drawers(&self) -> Vec<Drawer>;
+    /// Every active triple whose subject is `subject`.
+    async fn active_triples(&self, subject: &str) -> Result<Vec<Triple>, KuzuImportError>;
     /// Whether `(subject, predicate, object)` is an active triple.
-    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError>;
+    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError> {
+        let active = self.active_triples(&t.subject).await?;
+        Ok(active
+            .iter()
+            .any(|a| a.predicate == t.predicate && a.object == t.object))
+    }
 }
 
 /// Write access to a palace.
@@ -52,11 +66,14 @@ pub trait PalaceSink: PalaceView {
     /// Re-embed and rewrite drawer `id` from `m`, identity included.
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError>;
     async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError>;
+    /// Close the active triple `t` (#277 MEDIUM-2).
+    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError>;
 }
 
 /// Counts for one store; the only thing the CLI prints about a store's data.
 ///
-/// `refused_ids` and `shared_ids` carry `Memory.id` values only, never content.
+/// `refused_ids`, `shared_ids` and `retracted` carry `Memory.id` values only,
+/// never content; `refusal_rules` carries rule labels, never the token.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StoreCounts {
     pub memories: usize,
@@ -77,12 +94,36 @@ pub struct StoreCounts {
     pub refused_ids: Vec<String>,
     /// Memories whose id another live store holds with other content (#277 H4).
     pub shared_ids: Vec<String>,
+    /// Store-supplied tag values dropped by the secret screen (#277 MEDIUM-1).
+    pub refused_tags: usize,
+    /// Triples dropped because a string in them failed the secret screen.
+    pub refused_triples: usize,
+    /// Every refusal above (memories, tags, triples) by rule (#277 MEDIUM-3).
+    pub refusal_rules: RuleTally,
+    /// Kuzu edges closed because the source no longer has them (#277 MEDIUM-2).
+    pub retracted: Vec<Retraction>,
+    /// Edge rows per relationship table the import does not map (#277 LOW-2).
+    pub unsupported_edges: BTreeMap<String, usize>,
+    /// Why the export could not count those tables, when it could not.
+    pub unsupported_error: Option<String>,
+}
+
+impl StoreCounts {
+    /// Record one refusal of kind `bucket` under `rule`.
+    fn refuse_under(&mut self, rule: SecretRule, bucket: fn(&mut Self) -> &mut usize) {
+        *bucket(self) += 1;
+        tally(&mut self.refusal_rules, rule);
+    }
 }
 
 /// One store's work, decided before anything is written.
 #[derive(Debug, Default)]
 pub struct StorePlan {
     pub memories: Vec<(MappedMemory, MemoryPlan)>,
+    /// Memory ids refused before mapping; their edges are skipped.
+    pub refused_memory_ids: Vec<String>,
+    /// Memory ids whose drawer `--update` may retract stale edges from.
+    pub retract_scope: HashSet<String>,
     pub entity_triples: Vec<Triple>,
     /// `(memory id, entity id, confidence)`.
     pub mentions: Vec<(String, String, Option<f64>)>,
@@ -93,7 +134,14 @@ pub struct StorePlan {
 
 /// Map `export` against `ledger`. Pure apart from `store_is_live`.
 ///
-/// Test: `ledger_plans_new_unchanged_changed`, `import_twice_is_idempotent_on_palace_state`.
+/// What: also runs the secret screen over every store-supplied string that
+/// would become a tag or a triple (#277 MEDIUM-1): a refused `Memory.id`
+/// refuses its memory, and a refused entity id, relationship type or edge
+/// endpoint drops the triple; each is counted with its rule. A drawer is in
+/// `retract_scope` unless its recorded store is another store that still
+/// exists, whose edges this store must not retract.
+/// Test: `ledger_plans_new_unchanged_changed`, `import_twice_is_idempotent_on_palace_state`,
+/// `store_supplied_tags_and_triples_pass_the_secret_screen`.
 pub fn plan_store(
     export: &KuzuExport,
     store: &str,
@@ -101,35 +149,77 @@ pub fn plan_store(
     store_is_live: &dyn Fn(&str) -> bool,
 ) -> StorePlan {
     let mut plan = StorePlan::default();
-    plan.counts.memories = export.memories.len();
-    plan.counts.edges = export.edge_count();
-    plan.counts.entities = export.entities.len();
+    let c = &mut plan.counts;
+    c.memories = export.memories.len();
+    c.edges = export.edge_count();
+    c.entities = export.entities.len();
+    (c.unsupported_edges, c.unsupported_error) = unsupported_edges(export);
     for row in &export.memories {
-        match map_memory(row, store) {
-            Some(m) => {
-                let p = ledger.plan(&m, store_is_live);
-                plan.memories.push((m, p));
-            }
-            None => plan.counts.skipped_empty += 1,
+        if let Some(rule) = row.id.as_deref().and_then(screen) {
+            // The id is the secret-shaped part, so the report lists neither.
+            tally(&mut c.refusal_rules, rule);
+            c.refused_ids.push(SECRET_SHAPED_ID.to_string());
+            plan.refused_memory_ids.extend(row.id.clone());
+            continue;
+        }
+        let Some(m) = map_memory(row, store) else {
+            c.skipped_empty += 1;
+            continue;
+        };
+        for rule in &m.refused_tags {
+            c.refuse_under(*rule, |c| &mut c.refused_tags);
+        }
+        let own = ledger
+            .get(&source_key(&m.memory_id))
+            .and_then(|d| d.store.as_deref());
+        if own.is_none_or(|s| s == store || !store_is_live(s)) {
+            plan.retract_scope.insert(m.memory_id.clone());
+        }
+        let p = ledger.plan(&m, store_is_live);
+        plan.memories.push((m, p));
+    }
+    for e in &export.entities {
+        let (triples, refused) = entity_triples(e);
+        plan.entity_triples.extend(triples);
+        for rule in refused {
+            c.refuse_under(rule, |c| &mut c.refused_triples);
         }
     }
-    plan.entity_triples = export.entities.iter().flat_map(entity_triples).collect();
     for m in &export.mentions {
-        if let (Some(mem), Some(ent)) = (&m.memory_id, &m.entity_id) {
-            plan.mentions.push((mem.clone(), ent.clone(), m.confidence));
-        } else {
-            plan.counts.dangling_edges += 1;
+        let (Some(mem), Some(ent)) = (&m.memory_id, &m.entity_id) else {
+            c.dangling_edges += 1;
+            continue;
+        };
+        match screen(ent) {
+            Some(rule) => c.refuse_under(rule, |c| &mut c.refused_triples),
+            None => plan.mentions.push((mem.clone(), ent.clone(), m.confidence)),
         }
     }
     for r in &export.relates_to {
-        if let (Some(a), Some(b)) = (&r.from_id, &r.to_id) {
-            let pred = relates_to_predicate(r.relationship_type.as_deref());
-            plan.relates.push((a.clone(), b.clone(), pred, r.strength));
-        } else {
-            plan.counts.dangling_edges += 1;
+        let (Some(a), Some(b)) = (&r.from_id, &r.to_id) else {
+            c.dangling_edges += 1;
+            continue;
+        };
+        match r.relationship_type.as_deref().and_then(screen) {
+            Some(rule) => c.refuse_under(rule, |c| &mut c.refused_triples),
+            None => {
+                let pred = relates_to_predicate(r.relationship_type.as_deref());
+                plan.relates.push((a.clone(), b.clone(), pred, r.strength));
+            }
         }
     }
     plan
+}
+
+/// The export's unmapped relationship tables with a row, and its count error.
+fn unsupported_edges(export: &KuzuExport) -> (BTreeMap<String, usize>, Option<String>) {
+    let tables = export
+        .other_edges
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(t, n)| (t.clone(), *n))
+        .collect();
+    (tables, export.other_edges_error.clone())
 }
 
 /// Where an edge endpoint's drawer stands.
@@ -146,15 +236,16 @@ enum Endpoint {
     Dangling,
 }
 
-/// Whether the secret screen refuses `m`'s content (#277 M6).
-fn is_secret_shaped(m: &MappedMemory) -> bool {
-    check_secret(m.content.trim()).is_err()
+/// The rule by which the secret screen refuses `m`'s content (#277 M6).
+fn content_rule(m: &MappedMemory) -> Option<SecretRule> {
+    screen(m.content.trim())
 }
 
-fn refuse(c: &mut StoreCounts, m: &MappedMemory) {
+fn refuse(c: &mut StoreCounts, m: &MappedMemory, rule: SecretRule) {
     // The id only: the content is the secret-shaped part.
-    tracing::warn!(memory_id = %m.memory_id, "kuzu import: refused a secret-shaped memory");
+    tracing::warn!(memory_id = %m.memory_id, rule = rule.label(), "kuzu import: refused a secret-shaped memory");
     c.refused_ids.push(m.memory_id.clone());
+    tally(&mut c.refusal_rules, rule);
 }
 
 /// Insert then stamp a new drawer; `Err` carries the id when the insert landed.
@@ -186,9 +277,13 @@ pub async fn execute(
     update: bool,
 ) -> StoreCounts {
     let mut ids: HashMap<String, Endpoint> = HashMap::new();
+    for id in &plan.refused_memory_ids {
+        ids.insert(id.clone(), Endpoint::Skipped);
+    }
     let memories = std::mem::take(&mut plan.memories);
     let c = &mut plan.counts;
     for (m, p) in &memories {
+        let rule = content_rule(m);
         let end = match *p {
             MemoryPlan::Unchanged(id) => {
                 c.unchanged += 1;
@@ -200,8 +295,8 @@ pub async fn execute(
             }
             MemoryPlan::Changed(id) => {
                 c.changed += 1;
-                if update && is_secret_shaped(m) {
-                    refuse(c, m);
+                if let (true, Some(r)) = (update, rule) {
+                    refuse(c, m, r);
                 } else if update {
                     match sink {
                         Some(s) => match s.update_memory(id, m).await {
@@ -213,8 +308,10 @@ pub async fn execute(
                 }
                 Endpoint::Drawer(id)
             }
-            _ if is_secret_shaped(m) => {
-                refuse(c, m);
+            _ if rule.is_some() => {
+                if let Some(r) = rule {
+                    refuse(c, m, r);
+                }
                 Endpoint::Skipped
             }
             // #277 M2: an earlier run inserted this drawer but its stamp failed.
@@ -280,6 +377,20 @@ pub async fn execute(
             _ => Err(Endpoint::Pending),
         });
     }
+    // #277 MEDIUM-2: every edge the source still names, written or not.
+    let keep: HashSet<(String, String, String)> = edges
+        .iter()
+        .flatten()
+        .map(|t| (t.subject.clone(), t.predicate.clone(), t.object.clone()))
+        .collect();
+    let scope: Vec<(String, Uuid)> = memories
+        .iter()
+        .filter(|(m, _)| plan.retract_scope.contains(&m.memory_id))
+        .filter_map(|(m, _)| match ids.get(&m.memory_id) {
+            Some(Endpoint::Drawer(id)) => Some((m.memory_id.clone(), *id)),
+            _ => None,
+        })
+        .collect();
     let c = &mut plan.counts;
     for edge in edges {
         match edge {
@@ -300,10 +411,14 @@ pub async fn execute(
             },
         }
     }
+    if update {
+        retract_stale(&scope, &keep, view, sink, c).await;
+    }
     plan.counts
 }
 
-fn fail(c: &mut StoreCounts, what: &str, e: &KuzuImportError) {
+/// Count one failed read or write; logs the error kind only.
+pub(super) fn fail(c: &mut StoreCounts, what: &str, e: &KuzuImportError) {
     // Counts only: an error can quote the drawer, and memory content from a
     // private store must not reach a log.
     tracing::warn!(error_kind = %e.kind(), "kuzu import: {what} failed");
@@ -330,16 +445,8 @@ impl PalaceView for HandleSink {
         self.handle.drawers.read().clone()
     }
 
-    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError> {
-        let active = self
-            .handle
-            .kg
-            .query_active(&t.subject)
-            .await
-            .map_err(sink_err)?;
-        Ok(active
-            .iter()
-            .any(|a| a.predicate == t.predicate && a.object == t.object))
+    async fn active_triples(&self, subject: &str) -> Result<Vec<Triple>, KuzuImportError> {
+        self.handle.kg.query_active(subject).await.map_err(sink_err)
     }
 }
 
@@ -410,6 +517,16 @@ impl PalaceSink for HandleSink {
     async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError> {
         self.handle.kg.assert(t).await.map_err(sink_err)
     }
+
+    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError> {
+        // One object only: a sibling edge on the same predicate stays (#5396).
+        self.handle
+            .kg
+            .retract_triple(&t.subject, &t.predicate, &t.object)
+            .await
+            .map(drop)
+            .map_err(sink_err)
+    }
 }
 
 impl HandleSink {
@@ -469,13 +586,10 @@ impl PalaceView for SnapshotView {
         self.drawers.clone()
     }
 
-    async fn triple_is_active(&self, t: &Triple) -> Result<bool, KuzuImportError> {
-        let Some(kg) = &self.kg else {
-            return Ok(false);
-        };
-        let active = kg.query_active(&t.subject).await.map_err(sink_err)?;
-        Ok(active
-            .iter()
-            .any(|a| a.predicate == t.predicate && a.object == t.object))
+    async fn active_triples(&self, subject: &str) -> Result<Vec<Triple>, KuzuImportError> {
+        match &self.kg {
+            Some(kg) => kg.query_active(subject).await.map_err(sink_err),
+            None => Ok(Vec::new()),
+        }
     }
 }

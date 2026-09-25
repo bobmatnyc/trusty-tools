@@ -45,7 +45,8 @@
 //! two stores in one run share is counted new in both.
 //!
 //! Test: `kuzu_import::tests`; the round-1 critic fixes in
-//! `kuzu_import::safety_tests`.
+//! `kuzu_import::safety_tests`; the r5 critic fixes in
+//! `kuzu_import::r5_critic_tests`.
 
 pub mod apply;
 pub mod bridge;
@@ -55,9 +56,13 @@ pub mod ledger;
 mod live_tests;
 pub mod mapping;
 pub mod palace_io;
+#[cfg(test)]
+mod r5_critic_tests;
 pub mod report;
+pub mod retract;
 #[cfg(test)]
 mod safety_tests;
+pub mod screen;
 #[cfg(test)]
 mod tests;
 
@@ -112,8 +117,12 @@ pub enum KuzuImportError {
          (`trusty-memory stop`), then re-run the import (a --dry-run needs no stop)"
     )]
     DaemonRunning(String),
+    // #277 LOW-3: the lock holder may be a daemon or another CLI (a second
+    // import, say); the message names both instead of guessing.
     #[error(
-        "palace '{0}' is locked by the running daemon; stop it (`trusty-memory stop`) and re-run"
+        "palace '{0}' is locked by another process — a trusty-memory daemon (`trusty-memory \
+         stop`) or another trusty-memory command such as a second import; let it finish or stop \
+         it, then re-run"
     )]
     PalaceLocked(String),
     #[error(
@@ -381,6 +390,10 @@ async fn import_one(
     report.palace = Some(target.palace.clone());
     report.source = Some(target.source);
     if is_empty(&export) {
+        // #277 LOW-2: a store with only unmapped edges still says so.
+        report.counts.unsupported_edges = export.other_edges.clone();
+        report.counts.unsupported_edges.retain(|_, n| *n > 0);
+        report.counts.unsupported_error = export.other_edges_error.clone();
         return report;
     }
     let store_tag = store.dir.to_string_lossy();
@@ -454,11 +467,12 @@ pub async fn run_plan(
 
 /// The terminal status implied by a store's counts.
 ///
-/// Test: `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`.
+/// Test: `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`,
+/// `each_retraction_is_reported_with_its_memory_id`.
 pub fn status_for(c: &StoreCounts, dry_run: bool) -> StoreStatus {
     if c.failed_writes > 0 {
         StoreStatus::Partial
-    } else if c.new_memories + c.updated + c.new_triples == 0 {
+    } else if c.new_memories + c.updated + c.new_triples + c.retracted.len() == 0 {
         StoreStatus::UpToDate
     } else if dry_run {
         StoreStatus::WouldImport
