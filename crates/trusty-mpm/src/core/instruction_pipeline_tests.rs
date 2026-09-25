@@ -1644,14 +1644,19 @@ fn no_seed_test_reads_the_ambient_home_directory() {
     );
 }
 
-/// The backtick-quoted words in `stub` between `from` and the next `until`.
-fn quoted_tokens_between<'a>(stub: &'a str, from: &str, until: &str) -> Vec<&'a str> {
-    let start = stub.find(from).expect("stub carries the opening phrase") + from.len();
-    let len = stub[start..].find(until).expect("stub carries the closing phrase");
-    stub[start..start + len]
+/// The backtick-quoted words in `stub` between `from` and the next `until`,
+/// with line wrapping folded to single spaces so a re-wrap cannot move them.
+fn quoted_tokens_between(stub: &str, from: &str, until: &str) -> Vec<String> {
+    let flat = stub.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat.find(from).expect("stub carries the opening phrase") + from.len();
+    let len = flat[start..]
+        .find(until)
+        .expect("stub carries the closing phrase");
+    flat[start..start + len]
         .split('`')
         .skip(1)
         .step_by(2)
+        .map(str::to_string)
         .collect()
 }
 
@@ -1667,11 +1672,8 @@ fn the_stub_lists_exactly_the_overridable_section_tokens() {
     use crate::core::instruction_package::SectionId;
     use crate::core::instruction_safety_core::{SAFETY_CORE, is_fixed_core_section};
 
-    let listed = quoted_tokens_between(CLAUDE_MD_STUB, "Tokens:", " is the one\ntoken");
-    let (fixed, overridable): (Vec<&str>, Vec<&str>) = (
-        listed[listed.len() - 1..].to_vec(),
-        listed[..listed.len() - 1].to_vec(),
-    );
+    let mut overridable = quoted_tokens_between(CLAUDE_MD_STUB, "Tokens:", " is the one token");
+    let fixed = overridable.split_off(overridable.len().saturating_sub(1));
     let expected: Vec<&str> = SectionId::CANONICAL
         .into_iter()
         .filter(|id| !is_fixed_core_section(*id))
