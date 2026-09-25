@@ -44,7 +44,8 @@
 //! dry run plans each store against the palace as it stands, so a `Memory.id`
 //! two stores in one run share is counted new in both.
 //!
-//! Test: `kuzu_import::tests`.
+//! Test: `kuzu_import::tests`; the round-1 critic fixes in
+//! `kuzu_import::safety_tests`.
 
 pub mod apply;
 pub mod bridge;
@@ -55,6 +56,8 @@ mod live_tests;
 pub mod mapping;
 pub mod palace_io;
 pub mod report;
+#[cfg(test)]
+mod safety_tests;
 #[cfg(test)]
 mod tests;
 
@@ -227,6 +230,9 @@ pub struct StoreReport {
 
 impl StoreReport {
     /// Whether this store makes the run exit non-zero.
+    ///
+    /// Test: `store_line_names_palace_source_and_every_notice`,
+    /// `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`.
     pub fn is_bad(&self) -> bool {
         matches!(self.status, StoreStatus::Failed(_) | StoreStatus::Partial)
             || self.flush_error.is_some()
@@ -447,6 +453,8 @@ pub async fn run_plan(
 }
 
 /// The terminal status implied by a store's counts.
+///
+/// Test: `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`.
 pub fn status_for(c: &StoreCounts, dry_run: bool) -> StoreStatus {
     if c.failed_writes > 0 {
         StoreStatus::Partial

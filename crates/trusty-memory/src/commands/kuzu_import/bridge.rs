@@ -280,7 +280,8 @@ pub fn validate_export(export: &KuzuExport) -> Result<(), KuzuImportError> {
 /// looked up on `path_var` and its shebang names the interpreter; an
 /// `#!/usr/bin/env python3` shebang is resolved on `path_var` too. Only an
 /// interpreter whose file name starts with `python` is accepted.
-/// Test: `resolve_python_reads_the_shebang`, `bridge_failure_arms_are_typed_errors`.
+/// Test: `resolve_python_reads_the_shebang`, `bridge_failure_arms_are_typed_errors`,
+/// `non_python_shebang_is_refused_with_the_python_hint`.
 pub fn resolve_python(
     explicit: Option<&Path>,
     path_var: Option<&OsStr>,

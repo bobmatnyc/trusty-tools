@@ -103,7 +103,9 @@ impl Ledger {
     /// stores disagree about one id, and the memory is [`MemoryPlan::SharedId`]
     /// rather than letting either store overwrite the other on alternate runs.
     /// Test: `ledger_plans_new_unchanged_changed`,
-    /// `moved_store_reimports_nothing_and_shared_ids_are_reported`.
+    /// `moved_store_reimports_nothing_into_the_palace`,
+    /// `moved_store_reimports_nothing_and_shared_ids_are_reported`,
+    /// `stamp_failure_leaves_a_pending_drawer_the_next_run_finishes`.
     pub fn plan(&self, memory: &MappedMemory, store_is_live: &dyn Fn(&str) -> bool) -> MemoryPlan {
         match self.get(&memory.source_key) {
             None => match self.pending.get(&memory.memory_id) {

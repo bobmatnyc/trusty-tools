@@ -12,7 +12,8 @@
 //! [`PalaceSink`] it only counts.
 //! Test: `import_twice_is_idempotent_on_palace_state`,
 //! `changed_hash_is_flagged_then_updated_in_place`,
-//! `partial_write_failure_is_reported_and_resumable`.
+//! `partial_write_failure_is_reported_and_resumable`,
+//! `stamp_or_triple_failure_is_partial_and_the_rerun_completes_it`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
