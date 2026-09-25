@@ -61,7 +61,7 @@ fn a_manifest_only_style_is_named_alike_by_the_report_and_the_launch() {
 
     let report = crate::core::output_style::describe_effective_style(&fw.root, project);
     assert!(
-        report.starts_with("output style: tm-demo-01 (project file "),
+        report.starts_with("output style: tm-demo-01 (project) + floor, file "),
         "the report names the style the launch wrote: {report}"
     );
     assert!(!report.contains("warning:"), "{report}");

@@ -182,30 +182,53 @@ fn an_unknown_style_warns_and_uses_the_default() {
 }
 
 #[test]
-fn a_project_style_is_injected_when_native_is_unsupported() {
+fn a_project_style_keeps_the_floor_with_and_without_native_support() {
+    // #8533 owner ruling 2026-09-25: a project style is delivered with the
+    // trusty-mpm floor appended, exactly once, on both launch paths.
     let dir = project_with_style("fixture-voice");
     std::fs::write(
         dir.path().join(".trusty-mpm.toml"),
         "[style]\nactive = \"fixture-voice\"\n",
     )
     .expect("project config");
-    let injected = super::super::apply_output_style_to_prompt_with_native(
-        dir.path(),
-        None,
-        "PROMPT".to_string(),
-        false,
-    );
+    let floor = super::super::style_floor();
+    let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
+    let apply = |native| {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            None,
+            "PROMPT".to_string(),
+            native,
+        )
+    };
+    // Injected: the project prose, then the floor, then the prompt.
+    let injected = apply(false);
     assert!(
-        injected.contains("Project voice.") && injected.ends_with("PROMPT"),
+        injected.contains(&format!("Project voice.{sep}{floor}{sep}PROMPT")),
         "{injected}"
     );
-    let native = super::super::apply_output_style_to_prompt_with_native(
-        dir.path(),
-        None,
-        "PROMPT".to_string(),
-        true,
-    );
-    assert_eq!(native, "PROMPT");
+    assert_eq!(injected.matches(&floor).count(), 1);
+    // Native: Claude Code delivers the prose; the floor heads the prompt.
+    assert_eq!(apply(true), format!("{floor}{sep}PROMPT"));
+}
+
+#[test]
+fn a_bundled_style_gets_no_second_floor_on_either_path() {
+    let dir = TempDir::new().expect("tempdir");
+    let apply = |native| {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            Some(crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID),
+            "PROMPT".to_string(),
+            native,
+        )
+    };
+    let injected = apply(false);
+    assert!(!injected.contains(super::super::STYLE_FLOOR_HEADING));
+    for heading in super::super::FLOOR_SECTIONS {
+        assert_eq!(injected.matches(heading).count(), 1, "{heading}");
+    }
+    assert_eq!(apply(true), "PROMPT");
 }
 
 #[cfg(unix)]

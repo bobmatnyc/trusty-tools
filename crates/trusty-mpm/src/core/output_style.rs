@@ -324,9 +324,14 @@ pub fn inject_style_into_prompt(style: &BundledStyle, prompt: &str) -> String {
 
 /// [`inject_style_into_prompt`] for a style's raw text, bundled or project (#8533).
 ///
-/// Test: `inject_prepends_style_block`, `a_project_style_is_injected_when_native_is_unsupported`.
+/// Test: `inject_prepends_style_block`,
+/// `a_project_style_keeps_the_floor_with_and_without_native_support`.
 pub fn inject_style_text(content: &str, prompt: &str) -> String {
-    let body = strip_frontmatter(content).trim();
+    inject_body(strip_frontmatter(content).trim(), prompt)
+}
+
+/// `body` (frontmatter already stripped) under [`INJECTED_STYLE_HEADING`], then `prompt`.
+fn inject_body(body: &str, prompt: &str) -> String {
     format!(
         "{INJECTED_STYLE_HEADING}\n\n{body}{sep}{prompt}",
         sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
@@ -406,12 +411,17 @@ pub fn apply_output_style_to_prompt(
 /// broke `prepare_session_stash_reflects_override` on CI (issue #1409). This
 /// seam lets tests pin the decision BOTH ways while production still does real
 /// version detection (and fails safe to injection) via the wrapper above.
-/// What: returns `prompt` unchanged when `native_supported`; otherwise injects
-/// the style [`select_style_under`] picks for the default framework root.
+/// What: selects the style [`select_style_under`] picks for the default
+/// framework root. When `native_supported`, Claude Code delivers the style
+/// file itself, so `prompt` is returned unchanged — preceded by the
+/// [`style_floor`] for a project style. Otherwise the style's
+/// [`delivered_style_text`] (a project style's prose plus the floor) is
+/// injected ahead of `prompt`.
 /// #8533: the style is chosen by [`effective_style_id`] and resolved
 /// against the project's own style files too, so a project style reaches an
 /// older Claude Code; an unknown id warns and injects the default.
-/// Test: `a_project_style_is_injected_when_native_is_unsupported`; the
+/// Test: `a_project_style_keeps_the_floor_with_and_without_native_support`,
+/// `a_bundled_style_gets_no_second_floor_on_either_path`; the
 /// stash/launch invariant under both flag values is covered by
 /// `prepare_session_stash_reflects_override` in `session_launch/tests.rs`.
 pub fn apply_output_style_to_prompt_with_native(
@@ -420,15 +430,30 @@ pub fn apply_output_style_to_prompt_with_native(
     prompt: String,
     native_supported: bool,
 ) -> String {
-    if native_supported {
-        return prompt;
-    }
     // #8533: the same selector the launch and `tm sessions instructions` use,
     // manifest tier included.
     let root = crate::core::paths::FrameworkPaths::default().root;
     let selected = select_style_under(&root, project_dir, explicit);
-    inject_style_text(selected.style.content(), &prompt)
+    if native_supported {
+        // #8533: Claude Code reads a project style file as authored; the floor
+        // rides at the head of the appended prompt instead.
+        return match floor_for(&selected.style) {
+            Some(floor) => format!(
+                "{floor}{sep}{prompt}",
+                sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
+            ),
+            None => prompt,
+        };
+    }
+    inject_body(&delivered_style_text(&selected.style), &prompt)
 }
+
+// #8533: the floor appended to a project style (owner ruling 2026-09-25).
+#[path = "output_style_floor.rs"]
+mod floor;
+pub use floor::{
+    FLOOR_SECTIONS, STYLE_FLOOR_HEADING, delivered_style_text, floor_for, style_floor,
+};
 
 // #8533: project-local styles live in a child module (SLOC headroom).
 #[path = "output_style_project.rs"]

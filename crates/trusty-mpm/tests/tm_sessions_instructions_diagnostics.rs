@@ -231,7 +231,7 @@ fn instructions_reports_section_status_and_project_style() {
     );
     for needle in [
         "instruction sections (core / overridable / overridden-by-project):",
-        "output style: fixture-voice (project file",
+        "output style: fixture-voice (project) + floor",
     ] {
         assert!(
             stderr.contains(needle),
@@ -259,4 +259,8 @@ fn instructions_reports_section_status_and_project_style() {
     );
     assert!(row("SEARCH").contains("overridable"), "{stderr}");
     assert!(!stderr.contains("NOT FOUND"), "{stderr}");
+    // #8533 owner ruling 2026-09-25: the project style keeps the floor, once,
+    // whether or not the host's Claude Code delivers the style natively.
+    let floor = trusty_mpm::core::output_style::style_floor();
+    assert_eq!(stdout.matches(floor.as_str()).count(), 1, "{stdout}");
 }

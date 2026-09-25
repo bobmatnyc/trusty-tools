@@ -98,11 +98,15 @@ impl ActiveStyle {
     }
 
     /// One-line description of where the style came from, for reports.
+    ///
+    /// A project style is named `<id> (project) + floor`: the launch appends
+    /// the trusty-mpm floor to it (#8533, [`super::style_floor`]).
+    /// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
     pub fn describe(&self) -> String {
         match self {
             ActiveStyle::Bundled(style) => format!("{} (bundled)", style.id),
             ActiveStyle::Project { id, path, .. } => {
-                format!("{id} (project file {})", path.display())
+                format!("{id} (project) + floor, file {}", path.display())
             }
         }
     }
@@ -366,7 +370,7 @@ pub fn select_style_under(
 /// Why: `tm sessions instructions` is where an operator checks what a session
 /// receives; the style is half of that (#8533).
 /// What: [`select_style_under`], rendered as
-/// `output style: <id> (bundled|project file <path>)`, plus a `warning:` line
+/// `output style: <id> (bundled)` or `<id> (project) + floor, file <path>`, plus a `warning:` line
 /// when the selected id is unknown or unreadable.
 /// Test: `instructions_reports_section_status_and_project_style`,
 /// `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
