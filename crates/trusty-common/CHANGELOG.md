@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.2] — 2026-09-25
+
+### Documentation
+
+- `KnowledgeGraph::assert_sync`, `upsert_drawer_sync` and `store` docs no longer cite the removed `kuzu_migrate` tests; their `Test:` pointers name the room-backfill and Tier C tests that call them.
+
 ## [0.52.1] — 2026-09-23
 
 ### Added
