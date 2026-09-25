@@ -73,8 +73,8 @@ pub struct Discovery {
 /// children are depth 1) is examined when `d <= max_depth`; a directory is
 /// entered only when `d < max_depth`. Symlinks are never followed, directory
 /// names in [`PRUNED`] are never entered, and a `.kuzu-memory` directory is
-/// never walked into. A `.kuzu-memory` directory with no `memories.db` is
-/// reported as skipped. Stores are de-duplicated by canonical path, so
+/// never walked into. A `.kuzu-memory` directory with no `memories.db`, and a
+/// `.kuzu-memory` symlink, are reported as skipped. Stores are de-duplicated by canonical path, so
 /// overlapping roots report each store once, and returned in sorted order.
 /// Test: `discovery_finds_nested_stores_and_reports_unreadable`,
 /// `discovery_does_not_follow_symlink_loops`.
@@ -114,11 +114,19 @@ fn walk_root(
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            let name = entry.file_name();
+            // #277 L7: a symlinked store is reported, not silently dropped.
+            if kind.is_symlink() && name == STORE_DIR_NAME {
+                skipped.push(SkippedPath {
+                    path: entry.path(),
+                    reason: "symlink not followed; pass its target with --from".to_string(),
+                });
+                continue;
+            }
             if !kind.is_dir() {
                 continue;
             }
             let path = entry.path();
-            let name = entry.file_name();
             if name == STORE_DIR_NAME {
                 match store_in_dir(&path) {
                     Some(store) => {

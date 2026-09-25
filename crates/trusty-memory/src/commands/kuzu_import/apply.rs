@@ -3,12 +3,13 @@
 //! Why: the planner must run identically in `--dry-run` and in a real run, and
 //! the writer must be swappable so a partial write failure is testable.
 //! What: [`plan_store`] maps an export against a [`Ledger`] with no palace
-//! access. [`execute`] then walks the plan: memories first (insert new, update
-//! changed under `--update`), then Entity triples, then MENTIONS / RELATES_TO
-//! edges resolved to `drawer:<uuid>` subjects. A triple is asserted only when
-//! the exact `(subject, predicate, object)` is not already active, because
-//! re-asserting an active triple closes its interval and writes a history row
-//! even though nothing changed. With no [`PalaceSink`] it only counts.
+//! access. [`execute`] then walks the plan: memories first (insert new, finish
+//! pending, update changed under `--update`), then Entity triples, then
+//! MENTIONS / RELATES_TO edges resolved to `drawer:<uuid>` subjects. A triple
+//! is asserted only when the exact `(subject, predicate, object)` is not
+//! already active, because re-asserting an active triple closes its interval
+//! and writes a history row even though nothing changed. With no
+//! [`PalaceSink`] it only counts.
 //! Test: `import_twice_is_idempotent_on_palace_state`,
 //! `changed_hash_is_flagged_then_updated_in_place`,
 //! `partial_write_failure_is_reported_and_resumable`.
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use trusty_common::memory_core::filter::check_secret;
 use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
 use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, RememberOptions};
 use trusty_common::memory_core::store::{Triple, VectorStore as _};
@@ -25,8 +27,8 @@ use uuid::Uuid;
 use super::bridge::KuzuExport;
 use super::ledger::{Ledger, MemoryPlan};
 use super::mapping::{
-    drawer_subject, entity_subject, entity_triples, map_memory, relates_to_predicate, triple,
-    MappedMemory,
+    drawer_subject, entity_subject, entity_triples, map_memory, merge_tags, relates_to_predicate,
+    triple, MappedMemory,
 };
 use super::KuzuImportError;
 
@@ -42,12 +44,18 @@ pub trait PalaceView: Send + Sync {
 /// Write access to a palace.
 #[async_trait]
 pub trait PalaceSink: PalaceView {
-    async fn insert_memory(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError>;
+    /// Insert a new drawer carrying [`MappedMemory::staging_tags`] only.
+    async fn insert_drawer(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError>;
+    /// Write identity, hash and `created_at` onto drawer `id` in one write.
+    async fn stamp_drawer(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError>;
+    /// Re-embed and rewrite drawer `id` from `m`, identity included.
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError>;
     async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError>;
 }
 
 /// Counts for one store; the only thing the CLI prints about a store's data.
+///
+/// `refused_ids` and `shared_ids` carry `Memory.id` values only, never content.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StoreCounts {
     pub memories: usize,
@@ -61,7 +69,13 @@ pub struct StoreCounts {
     pub new_triples: usize,
     pub existing_triples: usize,
     pub dangling_edges: usize,
+    /// Edges not written because an endpoint was refused or shared.
+    pub skipped_edges: usize,
     pub failed_writes: usize,
+    /// Memories the secret screen refused (#277 M6).
+    pub refused_ids: Vec<String>,
+    /// Memories whose id another live store holds with other content (#277 H4).
+    pub shared_ids: Vec<String>,
 }
 
 /// One store's work, decided before anything is written.
@@ -76,18 +90,23 @@ pub struct StorePlan {
     pub counts: StoreCounts,
 }
 
-/// Map `export` against `ledger`. Pure: reads nothing but its arguments.
+/// Map `export` against `ledger`. Pure apart from `store_is_live`.
 ///
 /// Test: `ledger_plans_new_unchanged_changed`, `import_twice_is_idempotent_on_palace_state`.
-pub fn plan_store(export: &KuzuExport, store_id: &str, ledger: &Ledger) -> StorePlan {
+pub fn plan_store(
+    export: &KuzuExport,
+    store: &str,
+    ledger: &Ledger,
+    store_is_live: &dyn Fn(&str) -> bool,
+) -> StorePlan {
     let mut plan = StorePlan::default();
     plan.counts.memories = export.memories.len();
     plan.counts.edges = export.edge_count();
     plan.counts.entities = export.entities.len();
     for row in &export.memories {
-        match map_memory(row, store_id) {
+        match map_memory(row, store) {
             Some(m) => {
-                let p = ledger.plan(&m);
+                let p = ledger.plan(&m, store_is_live);
                 plan.memories.push((m, p));
             }
             None => plan.counts.skipped_empty += 1,
@@ -113,14 +132,38 @@ pub fn plan_store(export: &KuzuExport, store_id: &str, ledger: &Ledger) -> Store
 }
 
 /// Where an edge endpoint's drawer stands.
+#[derive(Debug, Clone, Copy)]
 enum Endpoint {
     Drawer(Uuid),
-    /// Written by this run, or would be in a dry run.
+    /// Would be written by this run (dry run only).
     Pending,
-    /// Its memory failed to write this run.
+    /// Its memory failed to write this run; a re-run picks it up.
     Failed,
+    /// Refused or shared: no re-run will write it, so neither are its edges.
+    Skipped,
     /// Not a memory of this store (e.g. a row skipped for empty content).
     Dangling,
+}
+
+/// Whether the secret screen refuses `m`'s content (#277 M6).
+fn is_secret_shaped(m: &MappedMemory) -> bool {
+    check_secret(m.content.trim()).is_err()
+}
+
+fn refuse(c: &mut StoreCounts, m: &MappedMemory) {
+    // The id only: the content is the secret-shaped part.
+    tracing::warn!(memory_id = %m.memory_id, "kuzu import: refused a secret-shaped memory");
+    c.refused_ids.push(m.memory_id.clone());
+}
+
+/// Insert then stamp a new drawer; `Err` carries the id when the insert landed.
+async fn insert_new(
+    s: &dyn PalaceSink,
+    m: &MappedMemory,
+) -> Result<Uuid, (Option<Uuid>, KuzuImportError)> {
+    let id = s.insert_drawer(m).await.map_err(|e| (None, e))?;
+    s.stamp_drawer(id, m).await.map_err(|e| (Some(id), e))?;
+    Ok(id)
 }
 
 /// Walk `plan` against `view`, writing through `sink` when given.
@@ -128,29 +171,37 @@ enum Endpoint {
 /// What: see the module doc. `sink = None` is the dry run — every count is
 /// what a real run would do, and nothing is written. A write that fails is
 /// counted in `failed_writes` and the walk continues; edges that depend on a
-/// failed memory are counted as failed too, so a re-run picks them up.
+/// failed memory are counted as failed too, so a re-run picks them up. A
+/// secret-shaped memory is refused (counted, its id reported) and a shared id
+/// is skipped; neither fails the store, and their edges are skipped.
 /// Test: `import_twice_is_idempotent_on_palace_state`,
 /// `changed_hash_is_flagged_then_updated_in_place`,
 /// `partial_write_failure_is_reported_and_resumable`,
-/// `dry_run_writes_nothing_and_leaves_no_files`.
+/// `secret_shaped_memory_is_refused_without_failing_the_store`.
 pub async fn execute(
     mut plan: StorePlan,
     view: &dyn PalaceView,
     sink: Option<&dyn PalaceSink>,
     update: bool,
 ) -> StoreCounts {
-    let mut ids: HashMap<String, Option<Uuid>> = HashMap::new();
+    let mut ids: HashMap<String, Endpoint> = HashMap::new();
     let memories = std::mem::take(&mut plan.memories);
     let c = &mut plan.counts;
     for (m, p) in &memories {
-        let id = match *p {
+        let end = match *p {
             MemoryPlan::Unchanged(id) => {
                 c.unchanged += 1;
-                Some(id)
+                Endpoint::Drawer(id)
+            }
+            MemoryPlan::SharedId(_) => {
+                c.shared_ids.push(m.memory_id.clone());
+                Endpoint::Skipped
             }
             MemoryPlan::Changed(id) => {
                 c.changed += 1;
-                if update {
+                if update && is_secret_shaped(m) {
+                    refuse(c, m);
+                } else if update {
                     match sink {
                         Some(s) => match s.update_memory(id, m).await {
                             Ok(()) => c.updated += 1,
@@ -159,33 +210,49 @@ pub async fn execute(
                         None => c.updated += 1,
                     }
                 }
-                Some(id)
+                Endpoint::Drawer(id)
             }
-            MemoryPlan::New => match sink {
-                Some(s) => match s.insert_memory(m).await {
-                    Ok(id) => {
+            _ if is_secret_shaped(m) => {
+                refuse(c, m);
+                Endpoint::Skipped
+            }
+            // #277 M2: an earlier run inserted this drawer but its stamp failed.
+            MemoryPlan::Resume(id) => match sink {
+                Some(s) => match s.update_memory(id, m).await {
+                    Ok(()) => {
                         c.new_memories += 1;
-                        Some(id)
+                        Endpoint::Drawer(id)
                     }
                     Err(e) => {
-                        fail(c, "insert memory", &e);
-                        None
+                        fail(c, "finish pending memory", &e);
+                        Endpoint::Failed
                     }
                 },
                 None => {
                     c.new_memories += 1;
-                    None
+                    Endpoint::Drawer(id)
+                }
+            },
+            MemoryPlan::New => match sink {
+                Some(s) => match insert_new(s, m).await {
+                    Ok(id) => {
+                        c.new_memories += 1;
+                        Endpoint::Drawer(id)
+                    }
+                    Err((_, e)) => {
+                        fail(c, "insert memory", &e);
+                        Endpoint::Failed
+                    }
+                },
+                None => {
+                    c.new_memories += 1;
+                    Endpoint::Pending
                 }
             },
         };
-        ids.insert(m.memory_id.clone(), id);
+        ids.insert(m.memory_id.clone(), end);
     }
-    let resolve = |memory_id: &str| match ids.get(memory_id) {
-        Some(Some(id)) => Endpoint::Drawer(*id),
-        Some(None) if sink.is_none() => Endpoint::Pending,
-        Some(None) => Endpoint::Failed,
-        None => Endpoint::Dangling,
-    };
+    let resolve = |memory_id: &str| ids.get(memory_id).copied().unwrap_or(Endpoint::Dangling);
     let mut edges: Vec<Result<Triple, Endpoint>> = Vec::new();
     for t in std::mem::take(&mut plan.entity_triples) {
         edges.push(Ok(t));
@@ -207,6 +274,7 @@ pub async fn execute(
                 Ok(triple(drawer_subject(x), pred, drawer_subject(y), *conf))
             }
             (Endpoint::Dangling, _) | (_, Endpoint::Dangling) => Err(Endpoint::Dangling),
+            (Endpoint::Skipped, _) | (_, Endpoint::Skipped) => Err(Endpoint::Skipped),
             (Endpoint::Failed, _) | (_, Endpoint::Failed) => Err(Endpoint::Failed),
             _ => Err(Endpoint::Pending),
         });
@@ -216,6 +284,7 @@ pub async fn execute(
         match edge {
             Err(Endpoint::Pending) => c.new_triples += 1,
             Err(Endpoint::Dangling) => c.dangling_edges += 1,
+            Err(Endpoint::Skipped) => c.skipped_edges += 1,
             Err(_) => c.failed_writes += 1,
             Ok(t) => match view.triple_is_active(&t).await {
                 Ok(true) => c.existing_triples += 1,
@@ -275,28 +344,35 @@ impl PalaceView for HandleSink {
 
 #[async_trait]
 impl PalaceSink for HandleSink {
-    async fn insert_memory(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError> {
+    async fn insert_drawer(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError> {
         let opts = RememberOptions {
             force: true,
             enforce_min_tokens: false,
             classify_as: Some(DrawerType::Unknown),
             ..RememberOptions::default()
         };
-        let id = self
-            .handle
+        self.handle
             .remember_with_options(
                 m.content.clone(),
                 RoomType::General,
-                m.tags.clone(),
+                m.staging_tags(),
                 m.importance,
                 opts,
             )
             .await
-            .map_err(sink_err)?;
-        if let Some(created) = m.created_at {
-            self.rewrite(id, |d| d.created_at = created).await?;
-        }
-        Ok(id)
+            .map_err(sink_err)
+    }
+
+    async fn stamp_drawer(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
+        // #277 M2: identity, hash and created_at land in one drawer write.
+        let (tags, created) = (m.tags.clone(), m.created_at);
+        self.rewrite(id, move |d| {
+            d.tags = merge_tags(&d.tags, &tags);
+            if let Some(c) = created {
+                d.created_at = c;
+            }
+        })
+        .await
     }
 
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
@@ -320,7 +396,8 @@ impl PalaceSink for HandleSink {
         );
         self.rewrite(id, move |d| {
             d.set_content(content);
-            d.tags = tags;
+            // #277 L5: keep tags the importer did not generate.
+            d.tags = merge_tags(&d.tags, &tags);
             d.importance = importance;
             if let Some(c) = created {
                 d.created_at = c;
@@ -371,15 +448,18 @@ impl HandleSink {
     }
 }
 
-/// [`PalaceView`] over drawers and triples read without opening a handle.
+/// [`PalaceView`] over a throw-away copy of a palace's KG.
 ///
-/// Why: `PalaceHandle::open` sweeps expired drawers as it opens, which is a
-/// write; a dry run must not write. This view is filled from a
-/// `KnowledgeGraph` opened with `OpenIntent::ReadOnlyClient`, the same
-/// read-only open `kg_rebuild`'s report pass uses (#4678).
+/// Why (#277 M1): `PalaceHandle::open` sweeps expired drawers as it opens, and
+/// even a `ReadOnlyClient` KG open of the live `kg.redb` takes the write lock
+/// and runs a table-init write transaction when no daemon holds it. A dry run
+/// must not write, so it reads a copy in a temp directory instead.
+/// What: `drawers` and `kg` come from the copy; `snapshot_dir` owns the temp
+/// directory and is declared last so the KG closes before it is removed.
 pub struct SnapshotView {
     pub drawers: Vec<Drawer>,
     pub kg: Option<trusty_common::memory_core::store::KnowledgeGraph>,
+    pub snapshot_dir: Option<tempfile::TempDir>,
 }
 
 #[async_trait]

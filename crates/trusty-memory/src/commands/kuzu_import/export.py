@@ -52,9 +52,11 @@ def main(db_path, out_path):
     entities = select("(e:Entity)", "e", "Entity", ["id", "name", "entity_type"])
     mentions = []
     if "MENTIONS" in tables:
+        # #277 L3: older stores may lack the column, like RELATES_TO.strength.
+        conf = "r.confidence" if "confidence" in set(columns("MENTIONS")) else "NULL"
         mentions = rows(
             "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) "
-            "RETURN m.id AS memory_id, e.id AS entity_id, r.confidence AS confidence"
+            f"RETURN m.id AS memory_id, e.id AS entity_id, {conf} AS confidence"
         )
     relates = []
     if "RELATES_TO" in tables:

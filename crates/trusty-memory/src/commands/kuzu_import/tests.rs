@@ -4,7 +4,8 @@
 //! [`FakeRunner`], which writes a fixture export where `export.py` would.
 //! Fixtures follow the shapes in kuzu-memory's source — the Memory columns of
 //! `export_memories_to_json` and the edge rows `export.py` emits — and carry
-//! only synthetic text.
+//! only synthetic text. The round-2 safety tests live in `safety_tests.rs`
+//! and reuse the fixtures here; the Python-backed tests in `live_tests.rs`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -21,13 +22,14 @@ use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
 use super::bridge::{export_store, resolve_python, CommandRunner, KuzuExport, RunOutput};
 use super::discovery::{discover, resolve_from, DiscoveredStore};
 use super::ledger::{Ledger, MemoryPlan};
-use super::mapping::{kuzu_content_hash, map_memory, store_id, MappedMemory};
+use super::mapping::{kuzu_content_hash, map_memory, relates_to_predicate, MappedMemory};
+use super::palace_io::DaemonProbe;
 use super::*;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
 /// One Memory row with every column `export_memories_to_json` selects.
-fn memory_row(id: &str, content: &str, hash: &str) -> Value {
+pub(super) fn memory_row(id: &str, content: &str, hash: &str) -> Value {
     json!({
         "id": id,
         "content": content,
@@ -70,7 +72,7 @@ const COLUMNS: &[&str] = &[
 ];
 
 /// A three-memory store: two entities, three MENTIONS, one RELATES_TO.
-fn fixture() -> Value {
+pub(super) fn fixture() -> Value {
     json!({
         "format": "trusty-kuzu-export/1",
         "schema_version": "1.0",
@@ -98,15 +100,15 @@ fn fixture() -> Value {
 }
 
 /// Triples the fixture produces: 4 entity + 3 mentions + 1 relates_to.
-const FIXTURE_TRIPLES: usize = 8;
+pub(super) const FIXTURE_TRIPLES: usize = 8;
 
-fn export_of(v: &Value) -> KuzuExport {
+pub(super) fn export_of(v: &Value) -> KuzuExport {
     serde_json::from_value(v.clone()).expect("fixture parses")
 }
 
 /// What the fake child process does.
 #[derive(Clone)]
-enum Behavior {
+pub(super) enum Behavior {
     Write(String),
     Exit(i32, &'static str),
     SpawnError,
@@ -114,22 +116,22 @@ enum Behavior {
 }
 
 /// A [`CommandRunner`] that never starts a process.
-struct FakeRunner {
+pub(super) struct FakeRunner {
     behavior: Behavior,
     out_path: Mutex<Option<PathBuf>>,
 }
 
 impl FakeRunner {
-    fn new(behavior: Behavior) -> Self {
+    pub(super) fn new(behavior: Behavior) -> Self {
         Self {
             behavior,
             out_path: Mutex::new(None),
         }
     }
-    fn writing(v: &Value) -> Self {
+    pub(super) fn writing(v: &Value) -> Self {
         Self::new(Behavior::Write(v.to_string()))
     }
-    fn temp_dir(&self) -> Option<PathBuf> {
+    pub(super) fn temp_dir(&self) -> Option<PathBuf> {
         let out = self.out_path.lock().expect("lock").clone()?;
         out.parent().map(Path::to_path_buf)
     }
@@ -157,7 +159,7 @@ impl CommandRunner for FakeRunner {
 }
 
 /// A store directory on disk (`memories.db` is an empty placeholder file).
-fn store_on_disk(root: &Path, project: &str) -> DiscoveredStore {
+pub(super) fn store_on_disk(root: &Path, project: &str) -> DiscoveredStore {
     let dir = root.join(project).join(".kuzu-memory");
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join("memories.db"), b"KUZU").expect("db");
@@ -165,7 +167,7 @@ fn store_on_disk(root: &Path, project: &str) -> DiscoveredStore {
 }
 
 /// A real palace in a temp data root, with the mock embedder seeded.
-fn palace(data_root: &Path, name: &str) -> Arc<PalaceHandle> {
+pub(super) fn palace(data_root: &Path, name: &str) -> Arc<PalaceHandle> {
     trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
     PalaceRegistry::new()
         .create_palace(
@@ -182,15 +184,51 @@ fn palace(data_root: &Path, name: &str) -> Arc<PalaceHandle> {
 }
 
 /// (drawers, active triples, all triple rows including history).
-fn palace_state(h: &PalaceHandle) -> (usize, usize, usize) {
+pub(super) fn palace_state(h: &PalaceHandle) -> (usize, usize, usize) {
     let drawers = h.kg.load_drawers().expect("drawers").len();
     let active = h.kg.count_active_triples().expect("active");
     let all = h.kg.dump_all_triples().expect("dump").len();
     (drawers, active, all)
 }
 
-async fn write_run(sink: &dyn PalaceSink, v: &Value, update: bool) -> StoreCounts {
+pub(super) async fn write_run(sink: &dyn PalaceSink, v: &Value, update: bool) -> StoreCounts {
     run_plan(&export_of(v), "store1", Target::Write(sink), update).await
+}
+
+/// A [`DaemonProbe`] with a fixed answer.
+pub(super) struct FakeDaemon(pub Option<String>);
+
+#[async_trait]
+impl DaemonProbe for FakeDaemon {
+    async fn live_daemon(&self) -> Option<String> {
+        self.0.clone()
+    }
+}
+
+/// An [`ImportEnv`] over fakes, with no `TRUSTY_MEMORY_PALACE`.
+pub(super) fn env<'a>(
+    runner: &'a dyn CommandRunner,
+    daemon: &'a dyn DaemonProbe,
+    data_root: &'a Path,
+) -> ImportEnv<'a> {
+    ImportEnv {
+        runner,
+        daemon,
+        python: Path::new("py"),
+        data_root,
+        env_palace: None,
+    }
+}
+
+/// Import args naming one store and an explicit palace, so no test depends
+/// on the `TRUSTY_MEMORY_PALACE` of the shell running it.
+pub(super) fn args_for(store: &DiscoveredStore, palace: &str, dry_run: bool) -> KuzuImportArgs {
+    KuzuImportArgs {
+        from: Some(store.dir.clone()),
+        palace: Some(palace.to_string()),
+        dry_run,
+        ..KuzuImportArgs::default()
+    }
 }
 
 // ── discovery ───────────────────────────────────────────────────────────
@@ -254,8 +292,23 @@ fn discovery_does_not_follow_symlink_loops() {
     store_on_disk(root, "real");
     std::os::unix::fs::symlink(root, root.join("real/loop")).expect("loop");
     std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("alias");
+    std::fs::create_dir_all(root.join("linked")).expect("linked");
+    std::os::unix::fs::symlink(
+        root.join("real/.kuzu-memory"),
+        root.join("linked/.kuzu-memory"),
+    )
+    .expect("store link");
     let found = discover(&[root.to_path_buf(), root.to_path_buf()], 50);
     assert_eq!(found.stores.len(), 1, "one store, found once: {found:?}");
+    // #277 L7: the symlinked store is reported, not silently dropped.
+    assert!(
+        found
+            .skipped
+            .iter()
+            .any(|s| s.path.ends_with("linked/.kuzu-memory") && s.reason.contains("symlink")),
+        "{:?}",
+        found.skipped
+    );
 }
 
 /// Why: `--from` accepts the `.kuzu-memory` dir or the db inside it, and
@@ -392,8 +445,8 @@ fn resolve_python_reads_the_shebang() {
 fn mapping_tags_identity_hash_and_columns() {
     let export = export_of(&fixture());
     let m = map_memory(&export.memories[0], "s1").expect("mapped");
-    assert_eq!(m.source_key, "kuzu-memory/s1/m-1");
-    assert!(m.tags.contains(&"source:kuzu-memory/s1/m-1".to_string()));
+    assert_eq!(m.source_key, "kuzu-memory/m-1");
+    assert!(m.tags.contains(&"source:kuzu-memory/m-1".to_string()));
     assert!(m.tags.contains(&"kuzu-hash:h1".to_string()));
     assert!(m.tags.contains(&"memory_type:semantic".to_string()));
     assert!(m.tags.contains(&"meta:origin:fixture".to_string()));
@@ -417,42 +470,93 @@ fn mapping_tags_identity_hash_and_columns() {
     );
     old.content = Some("   ".to_string());
     assert!(map_memory(&old, "s1").is_none(), "empty content is skipped");
+
+    // #277 L4: store-supplied tokens are bounded to short safe tokens.
+    assert!(m_tags_have_store(&export, "s1"));
+    assert_eq!(
+        relates_to_predicate(Some("shared_entity")),
+        "relates_to:shared_entity"
+    );
+    assert_eq!(relates_to_predicate(Some("x y/z")), "relates_to");
+    assert_eq!(relates_to_predicate(Some(&"a".repeat(65))), "relates_to");
+    let mut odd = export.memories[0].clone();
+    odd.metadata = Some(r#"{"bad key": "v", "ok_key": "v"}"#.to_string());
+    let tags = map_memory(&odd, "s1").expect("mapped").tags;
+    assert!(tags.contains(&"meta:ok_key:v".to_string()));
+    assert!(!tags.iter().any(|t| t.starts_with("meta:bad")));
 }
 
-/// Why: acceptance 4 — the store id, and so the identity tag, is the same on
-/// every run from the same place and differs between stores.
-#[test]
-fn store_id_is_stable() {
+/// Whether the first memory carries the provenance tag for `store`.
+fn m_tags_have_store(export: &KuzuExport, store: &str) -> bool {
+    map_memory(&export.memories[0], store)
+        .is_some_and(|m| m.tags.contains(&format!("kuzu-store:{store}")))
+}
+
+/// Why: a real run refuses up front while a daemon is live; a dry run does
+/// not need the daemon stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_daemon_is_refused_before_any_store_is_read() {
     let tmp = tempfile::tempdir().expect("tmp");
-    let a = store_on_disk(tmp.path(), "a");
-    let b = store_on_disk(tmp.path(), "b");
-    assert_eq!(store_id(&a.dir), store_id(&a.dir));
-    assert_eq!(store_id(&a.dir).len(), 12);
-    assert_ne!(store_id(&a.dir), store_id(&b.dir));
+    let data_root = tmp.path().join("data");
+    let store = store_on_disk(tmp.path(), "proj");
+    let runner = FakeRunner::writing(&fixture());
+    let daemon = FakeDaemon(Some("pid [4242]".to_string()));
+    let err = run_import(
+        &args_for(&store, "kuzu-daemon", false),
+        std::slice::from_ref(&store),
+        &env(&runner, &daemon, &data_root),
+    )
+    .await
+    .expect_err("live daemon refused");
+    assert!(
+        err.to_string()
+            .contains("stop the trusty-memory daemon first"),
+        "{err}"
+    );
+    assert!(runner.temp_dir().is_none(), "no store was exported");
+    assert!(!data_root.exists(), "no palace was touched");
+    let reports = run_import(
+        &args_for(&store, "kuzu-daemon", true),
+        std::slice::from_ref(&store),
+        &env(&runner, &daemon, &data_root),
+    )
+    .await
+    .expect("a dry run proceeds");
+    assert!(matches!(reports[0].status, StoreStatus::WouldImport));
 }
 
 /// Why: acceptance 7 at the planning layer.
 #[test]
 fn ledger_plans_new_unchanged_changed() {
     let mapped = |hash: &str| MappedMemory {
-        source_key: "kuzu-memory/s/m".to_string(),
+        source_key: "kuzu-memory/m".to_string(),
         memory_id: "m".to_string(),
+        store: "s".to_string(),
         content: "c".to_string(),
         hash: hash.to_string(),
         created_at: None,
         importance: 0.5,
         tags: vec![],
     };
-    assert_eq!(Ledger::default().plan(&mapped("h")), MemoryPlan::New);
+    assert_eq!(
+        Ledger::default().plan(&mapped("h"), &|_| false),
+        MemoryPlan::New
+    );
     let mut d = Drawer::new(Uuid::nil(), "c");
     d.tags = vec![
-        "source:kuzu-memory/s/m".to_string(),
+        "source:kuzu-memory/m".to_string(),
         "kuzu-hash:h".to_string(),
     ];
     let ledger = Ledger::from_drawers([&d]);
     assert_eq!(ledger.len(), 1);
-    assert_eq!(ledger.plan(&mapped("h")), MemoryPlan::Unchanged(d.id));
-    assert_eq!(ledger.plan(&mapped("other")), MemoryPlan::Changed(d.id));
+    assert_eq!(
+        ledger.plan(&mapped("h"), &|_| false),
+        MemoryPlan::Unchanged(d.id)
+    );
+    assert_eq!(
+        ledger.plan(&mapped("other"), &|_| false),
+        MemoryPlan::Changed(d.id)
+    );
 }
 
 // ── palace state ────────────────────────────────────────────────────────
@@ -501,10 +605,7 @@ async fn changed_hash_is_flagged_then_updated_in_place() {
         h.drawers
             .read()
             .iter()
-            .find(|d| {
-                d.tags
-                    .contains(&"source:kuzu-memory/store1/m-2".to_string())
-            })
+            .find(|d| d.tags.contains(&"source:kuzu-memory/m-2".to_string()))
             .cloned()
             .expect("m-2 drawer")
     };
@@ -597,7 +698,7 @@ impl PalaceView for FailingSink {
 
 #[async_trait]
 impl PalaceSink for FailingSink {
-    async fn insert_memory(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError> {
+    async fn insert_drawer(&self, m: &MappedMemory) -> Result<Uuid, KuzuImportError> {
         let n = {
             let mut g = self.inserts.lock().expect("lock");
             *g += 1;
@@ -606,7 +707,10 @@ impl PalaceSink for FailingSink {
         if n == self.fail_on {
             return Err(KuzuImportError::Palace("injected".to_string()));
         }
-        self.inner.insert_memory(m).await
+        self.inner.insert_drawer(m).await
+    }
+    async fn stamp_drawer(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
+        self.inner.stamp_drawer(id, m).await
     }
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
         self.inner.update_memory(id, m).await
@@ -671,7 +775,8 @@ async fn failure_arms_and_empty_store_write_nothing() {
     ];
     for (i, b) in cases.into_iter().enumerate() {
         let runner = FakeRunner::new(b);
-        let report = import_one(&runner, Path::new("py"), &store, &args, &data_root).await;
+        let daemon = FakeDaemon(None);
+        let report = import_one(&env(&runner, &daemon, &data_root), &store, &args).await;
         let expect_empty = i == 4;
         assert_eq!(
             matches!(report.status, StoreStatus::Empty),

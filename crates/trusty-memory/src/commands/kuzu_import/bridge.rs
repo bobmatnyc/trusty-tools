@@ -17,8 +17,10 @@
 //! `bridge_failure_arms_are_typed_errors`, `resolve_python_reads_the_shebang`.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -51,22 +53,72 @@ pub trait CommandRunner {
     fn run(&self, program: &Path, args: &[OsString]) -> std::io::Result<RunOutput>;
 }
 
-/// [`CommandRunner`] over `std::process::Command`, stdin and stdout closed.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemRunner;
+/// [`CommandRunner`] over `std::process::Command`, stdin and stdout closed,
+/// killed once it outlives `timeout`.
+///
+/// Why (#277 L1): a wedged interpreter (a kuzu lock wait, a hung import) must
+/// not block the run forever. The bound is generous by default because a
+/// large store exports for a while.
+/// What: spawns the child, drains stderr on a thread so a full pipe cannot
+/// stall it, and polls `try_wait` until the deadline; past it the child is
+/// killed and reaped and the run fails with `ErrorKind::TimedOut`.
+/// Test: `system_runner_kills_a_child_past_its_timeout`.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemRunner {
+    pub timeout: Duration,
+}
+
+impl SystemRunner {
+    /// A runner that kills its child after `timeout`.
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl Default for SystemRunner {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(super::DEFAULT_BRIDGE_TIMEOUT_SECS))
+    }
+}
+
+/// How often a running child is polled for exit.
+const POLL: Duration = Duration::from_millis(50);
 
 impl CommandRunner for SystemRunner {
     fn run(&self, program: &Path, args: &[OsString]) -> std::io::Result<RunOutput> {
-        let out = Command::new(program)
+        let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .output()?;
+            .spawn()?;
+        let mut pipe = child.stderr.take();
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(p) = pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        let deadline = Instant::now() + self.timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("killed after {}s", self.timeout.as_secs()),
+                ));
+            }
+            std::thread::sleep(POLL);
+        };
         Ok(RunOutput {
-            success: out.status.success(),
-            code: out.status.code(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: status.success(),
+            code: status.code(),
+            stderr: reader.join().unwrap_or_default(),
         })
     }
 }
@@ -165,8 +217,12 @@ pub fn export_store(
         db.as_os_str().to_os_string(),
         out.clone().into_os_string(),
     ];
-    let run = runner.run(python, &args).map_err(|e| {
-        KuzuImportError::InterpreterNotFound(format!("could not run {}: {e}", python.display()))
+    let run = runner.run(python, &args).map_err(|e| match e.kind() {
+        // #277 L1: the runner killed a child that outlived its bound.
+        std::io::ErrorKind::TimedOut => KuzuImportError::BridgeTimedOut(e.to_string()),
+        _ => {
+            KuzuImportError::InterpreterNotFound(format!("could not run {}: {e}", python.display()))
+        }
     })?;
     if !run.success {
         return Err(KuzuImportError::BridgeFailed {
@@ -222,7 +278,8 @@ pub fn validate_export(export: &KuzuExport) -> Result<(), KuzuImportError> {
 /// uv venv, usually), not in whatever `python3` is first on `PATH`.
 /// What: `explicit` wins when given and must exist. Otherwise `kuzu-memory` is
 /// looked up on `path_var` and its shebang names the interpreter; an
-/// `#!/usr/bin/env python3` shebang is resolved on `path_var` too.
+/// `#!/usr/bin/env python3` shebang is resolved on `path_var` too. Only an
+/// interpreter whose file name starts with `python` is accepted.
 /// Test: `resolve_python_reads_the_shebang`, `bridge_failure_arms_are_typed_errors`.
 pub fn resolve_python(
     explicit: Option<&Path>,
@@ -268,6 +325,20 @@ pub fn resolve_python(
     } else {
         PathBuf::from(first)
     };
+    // #277 L2: a pip `#!/bin/sh` trampoline, or a shebang path with a space
+    // that whitespace-splitting cut short, names no python; say so.
+    let is_python = interpreter
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|n| n.starts_with("python"));
+    if !is_python {
+        return Err(KuzuImportError::InterpreterNotFound(format!(
+            "{}'s shebang names {}, which is not a python interpreter; pass --python \
+             <the interpreter kuzu-memory runs under>",
+            launcher.display(),
+            interpreter.display()
+        )));
+    }
     if interpreter.exists() {
         Ok(interpreter)
     } else {
