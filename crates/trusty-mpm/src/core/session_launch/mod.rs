@@ -136,6 +136,11 @@ mod tests_malformed_settings_7780;
 #[path = "tests_settings_lock_7762.rs"]
 mod tests_settings_lock_7762;
 
+// #8533: the launch and `tm sessions instructions` name one style.
+#[cfg(test)]
+#[path = "tests_style_selection_8533.rs"]
+mod tests_style_selection_8533;
+
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
@@ -809,12 +814,14 @@ pub(super) fn prepare_session_inner(
     // #8533: the committed `.trusty-mpm.toml` `[style] active` sits between the
     // flag and the host config, and a project style file resolves like a
     // bundled one.
-    let effective_style: Option<String> = crate::core::output_style::effective_style_id(
+    // The report (`describe_effective_style`) calls this same selector.
+    let selected_style = crate::core::output_style::select_style(
         project_dir,
         explicit_style,
         &config,
-        plan.style.as_deref(),
+        || plan.style.clone(),
     );
+    let effective_style: Option<String> = selected_style.id.clone();
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -870,9 +877,8 @@ pub(super) fn prepare_session_inner(
     // `build_system_prompt_for` seam.
     // #8533: an unknown id is never a silent fallback — the warning joins the
     // launch's asset notices, which every launch path prints.
-    let (active_style, style_notice) =
-        crate::core::output_style::resolve_or_default(project_dir, effective_style.as_deref());
-    let active_style_id = active_style.id();
+    let style_notice = selected_style.warning;
+    let active_style_id = selected_style.style.id();
 
     // Set the Claude Code output style so the launched session's status bar
     // reads `style:<active_style_id>`. A failure here is non-fatal: the session

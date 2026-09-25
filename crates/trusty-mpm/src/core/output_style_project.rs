@@ -201,11 +201,21 @@ pub fn effective_style_id(
     config: &MpmConfig,
     manifest: Option<&str>,
 ) -> Option<String> {
+    style_chain(project_dir, explicit, config, || manifest.map(str::to_string))
+}
+
+/// The precedence chain, reading the manifest tier only when it can win.
+fn style_chain(
+    project_dir: &Path,
+    explicit: Option<&str>,
+    config: &MpmConfig,
+    manifest: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     explicit
         .map(str::to_string)
         .or_else(|| project_selected_style(project_dir))
         .or_else(|| config.style.active.clone())
-        .or_else(|| manifest.map(str::to_string))
+        .or_else(manifest)
 }
 
 /// Resolve `id` (or the default), turning an unknown id into a warning.
@@ -239,17 +249,82 @@ pub fn resolve_or_default(project_dir: &Path, id: Option<&str>) -> (ActiveStyle,
     }
 }
 
+/// The style a launch selected: the chosen id, the resolved style, any warning.
+#[derive(Debug, Clone)]
+pub struct SelectedStyle {
+    /// The id the precedence chain chose; `None` means the default.
+    pub id: Option<String>,
+    /// The style that id resolved to, or the default after a warning.
+    pub style: ActiveStyle,
+    /// Why the chosen id fell back to the default, when it did.
+    pub warning: Option<String>,
+}
+
+/// Select and resolve the output style — the one function every path uses.
+///
+/// Why: `tm sessions instructions` named a different style from the launch
+/// whenever only the manifest tier set one, because each path assembled the
+/// chain itself (#8533). The launch and the report now both call this.
+/// What: the [`effective_style_id`] chain (flag > `.trusty-mpm.toml` > host
+/// config > manifest; `manifest` is called only when no higher tier sets a
+/// style), then [`resolve_or_default`] (unknown or unreadable → the default
+/// plus a warning).
+/// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
+pub fn select_style(
+    project_dir: &Path,
+    explicit: Option<&str>,
+    config: &MpmConfig,
+    manifest: impl FnOnce() -> Option<String>,
+) -> SelectedStyle {
+    let id = style_chain(project_dir, explicit, config, manifest);
+    let (style, warning) = resolve_or_default(project_dir, id.as_deref());
+    SelectedStyle { id, style, warning }
+}
+
+/// The harness manifest's `[style] active` for a launch in `project_dir`.
+///
+/// Why: the launch reads this tier from its `HarnessPlan`; a caller with no
+/// plan resolves the same manifest sources the launch does.
+/// What: `ManifestSources::resolve` against the framework's catalog root, then
+/// the merged manifest's style id — the value `HarnessPlan::style` carries.
+/// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
+pub fn manifest_style_id(framework_root: &Path, project_dir: &Path) -> Option<String> {
+    let catalog_root = crate::content::catalog_root_for(framework_root);
+    let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
+    crate::core::manifest::resolve_manifest(&sources)
+        .style
+        .and_then(|s| s.active)
+}
+
+/// [`select_style`] with the host config and manifest read from `framework_root`.
+///
+/// Why: the report and the prompt-injection seam have no preloaded config or
+/// plan; this reads both from the same root the launch reads them from.
+/// What: `MpmConfig::load(framework_root)` and [`manifest_style_id`], passed to
+/// [`select_style`].
+/// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
+pub fn select_style_under(
+    framework_root: &Path,
+    project_dir: &Path,
+    explicit: Option<&str>,
+) -> SelectedStyle {
+    let config = MpmConfig::load(framework_root);
+    select_style(project_dir, explicit, &config, || {
+        manifest_style_id(framework_root, project_dir)
+    })
+}
+
 /// One line naming the style a launch in `project_dir` uses, or the warning.
 ///
 /// Why: `tm sessions instructions` is where an operator checks what a session
 /// receives; the style is half of that (#8533).
-/// What: `output style: <id> (bundled|project file <path>)`, plus a
-/// `warning:` line when the selected id is unknown.
-/// Test: `instructions_reports_section_status_and_project_style`.
-pub fn describe_effective_style(project_dir: &Path) -> String {
-    let config = MpmConfig::load_default();
-    let id = effective_style_id(project_dir, None, &config, None);
-    let (style, warning) = resolve_or_default(project_dir, id.as_deref());
+/// What: [`select_style_under`], rendered as
+/// `output style: <id> (bundled|project file <path>)`, plus a `warning:` line
+/// when the selected id is unknown or unreadable.
+/// Test: `instructions_reports_section_status_and_project_style`,
+/// `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
+pub fn describe_effective_style(framework_root: &Path, project_dir: &Path) -> String {
+    let SelectedStyle { style, warning, .. } = select_style_under(framework_root, project_dir, None);
     let mut out = format!("output style: {}\n", style.describe());
     if let Some(warning) = warning {
         out.push_str(&format!("warning: {warning}\n"));

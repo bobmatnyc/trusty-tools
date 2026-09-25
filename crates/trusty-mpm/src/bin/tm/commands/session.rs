@@ -194,7 +194,10 @@ pub(crate) async fn session(
                     &path,
                     &resolved_prompt
                 ),
-                trusty_mpm::core::output_style::describe_effective_style(&path)
+                trusty_mpm::core::output_style::describe_effective_style(
+                    &trusty_mpm::core::paths::FrameworkPaths::default().root,
+                    &path
+                )
             );
             // #7422: the composed prompt goes to stdout so it can be piped; what
             // this project's sessions will NOT load goes to stderr beside it,

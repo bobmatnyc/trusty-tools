@@ -145,7 +145,8 @@ fn an_unreadable_style_file_warns_and_keeps_the_prompt() {
         injected.ends_with(&prompt),
         "the base prompt must survive whole"
     );
-    assert!(describe_effective_style(dir.path()).contains("unreadable"));
+    let fw_root = dir.path().join("fw-root");
+    assert!(describe_effective_style(&fw_root, dir.path()).contains("unreadable"));
 }
 
 #[test]

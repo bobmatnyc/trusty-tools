@@ -406,9 +406,9 @@ pub fn apply_output_style_to_prompt(
 /// broke `prepare_session_stash_reflects_override` on CI (issue #1409). This
 /// seam lets tests pin the decision BOTH ways while production still does real
 /// version detection (and fails safe to injection) via the wrapper above.
-/// What: loads [`MpmConfig::load_default`] and delegates to the pure
-/// [`maybe_inject_active_style`] core with the caller-supplied `native_supported`
-/// flag. #8533: the style is chosen by [`effective_style_id`] and resolved
+/// What: returns `prompt` unchanged when `native_supported`; otherwise injects
+/// the style [`select_style_under`] picks for the default framework root.
+/// #8533: the style is chosen by [`effective_style_id`] and resolved
 /// against the project's own style files too, so a project style reaches an
 /// older Claude Code; an unknown id warns and injects the default.
 /// Test: `a_project_style_is_injected_when_native_is_unsupported`; the
@@ -423,19 +423,20 @@ pub fn apply_output_style_to_prompt_with_native(
     if native_supported {
         return prompt;
     }
-    let config = MpmConfig::load_default();
-    let id = effective_style_id(project_dir, explicit, &config, None);
-    let (style, _warning) = resolve_or_default(project_dir, id.as_deref());
-    inject_style_text(style.content(), &prompt)
+    // #8533: the same selector the launch and `tm sessions instructions` use,
+    // manifest tier included.
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    let selected = select_style_under(&root, project_dir, explicit);
+    inject_style_text(selected.style.content(), &prompt)
 }
 
 // #8533: project-local styles live in a child module (SLOC headroom).
 #[path = "output_style_project.rs"]
 mod project;
 pub use project::{
-    ActiveStyle, PROJECT_STYLES_DIR, ProjectStyleError, describe_effective_style,
-    effective_style_id, project_selected_style, project_style_ids, resolve_or_default,
-    resolve_style_in_project,
+    ActiveStyle, PROJECT_STYLES_DIR, ProjectStyleError, SelectedStyle, describe_effective_style,
+    effective_style_id, manifest_style_id, project_selected_style, project_style_ids,
+    resolve_or_default, resolve_style_in_project, select_style, select_style_under,
 };
 
 #[cfg(test)]
