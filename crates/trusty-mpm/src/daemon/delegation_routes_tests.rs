@@ -985,6 +985,10 @@ async fn head_write_excludes_the_calling_sessions_own_delegation() {
     );
     assert_eq!(commit.total, 0);
     assert!(!commit.claimed, "a Bash query never claims the tree");
+    assert!(
+        !commit.tree_holders,
+        "no marker sent, so none echoed (#8161)"
+    );
 }
 
 /// #8161: the tree-holders marker lifts #6797's own-session exclusion, because a
@@ -1006,6 +1010,10 @@ async fn shared_tree_route_tree_holders_counts_the_callers_own_agent() {
 
     let answer = call(&state, session, query).await;
     assert_eq!(answer.total, 1, "{:?}", answer.agents);
+    assert!(
+        answer.tree_holders,
+        "the answer must echo the marker it honoured"
+    );
     assert!(!answer.claimed, "a Bash query never claims the tree");
 }
 

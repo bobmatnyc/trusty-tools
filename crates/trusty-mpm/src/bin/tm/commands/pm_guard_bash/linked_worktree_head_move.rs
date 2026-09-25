@@ -30,15 +30,13 @@
 //! round trip and never fails closed on one. The PM gets no such exemption:
 //! its cwd can be moved into an agent's worktree (#8535).
 //!
-//! Residuals, stated: only the FIRST HEAD-moving segment is classified, as in
-//! the main-checkout rule, so a later segment aimed at another tree is not
-//! asked about; `git pull` is not classified (ADR-0053); the own-tree
+//! Residuals, stated: `git pull` is not classified (ADR-0053); the own-tree
 //! exemption is lexical, so a subagent (payload `agent_id` or
 //! `CLAUDE_MPM_SUB_AGENT`) standing in ANOTHER agent's tree — a non-isolated
 //! dispatch from a PM whose cwd was moved there (#8535) — passes it unasked.
-//! Closing both means querying for every segment and excluding the caller's
-//! own `agent_id` daemon-side; that is left to a follow-up (#8161 critic
-//! round, finding 8).
+//! Closing that means querying anyway and excluding the caller's own
+//! `agent_id` daemon-side; that is left to a follow-up (#8161 critic round,
+//! finding 8).
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
@@ -48,7 +46,7 @@ use serde_json::Value;
 use trusty_mpm::core::project_aliases::worktree_root;
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
-use super::main_checkout::{git_verb_target_dir_with_tail, starts_a_head_move};
+use super::main_checkout::{git_verb_targets_with_tail, starts_a_head_move};
 use super::{PathEnv, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
@@ -95,15 +93,16 @@ fn moves_a_linked_head(subcommand: &str, tail: &[String]) -> bool {
 ///
 /// Why: the lexical half, kept pure apart from reading the process environment
 /// for `~`/`$HOME`, so the rule's scope is unit-testable with no daemon.
-/// What: `None` when no segment moves HEAD, when the target is not in a linked
-/// worktree, or when a subagent targets its own tree. `Deny` for an unresolved
-/// target. Otherwise `Query`.
+/// What: one check per HEAD-moving segment, in order (#8161 critic round 2:
+/// every segment, not the first). A segment whose target is not in a linked
+/// worktree, or is a subagent's own tree, yields nothing; an unresolved target
+/// yields `Deny`; the rest yield `Query`.
 /// Test: `classify_*` below.
 pub(crate) fn classify_linked_worktree_head_move(
     command: &str,
     cwd: &Path,
     caller_is_subagent: bool,
-) -> Option<LinkedHeadMoveCheck> {
+) -> Vec<LinkedHeadMoveCheck> {
     classify_in(command, cwd, caller_is_subagent, &PathEnv::from_process())
 }
 
@@ -113,8 +112,20 @@ fn classify_in(
     cwd: &Path,
     caller_is_subagent: bool,
     env: &PathEnv,
+) -> Vec<LinkedHeadMoveCheck> {
+    git_verb_targets_with_tail(command, cwd, env, moves_a_linked_head)
+        .into_iter()
+        .filter_map(|(verb, target, _)| classify_target(verb, target, cwd, caller_is_subagent))
+        .collect()
+}
+
+/// One HEAD-moving segment's check; see [`classify_linked_worktree_head_move`].
+fn classify_target(
+    verb: String,
+    target: PathBuf,
+    cwd: &Path,
+    caller_is_subagent: bool,
 ) -> Option<LinkedHeadMoveCheck> {
-    let (verb, target, _) = git_verb_target_dir_with_tail(command, cwd, env, moves_a_linked_head)?;
     // #8161: a target this cannot place is refused, whichever tree it names.
     if let Some(unresolved) = unresolved_target(&target) {
         return Some(LinkedHeadMoveCheck::Deny(unresolved_deny_reason(
@@ -191,12 +202,18 @@ pub(crate) async fn linked_worktree_head_move_deny(
     payload: &Value,
     caller_is_subagent: bool,
 ) -> Option<String> {
-    let mv = match classify_linked_worktree_head_move(command, cwd, caller_is_subagent)? {
-        LinkedHeadMoveCheck::Deny(reason) => return Some(reason),
-        LinkedHeadMoveCheck::Query(mv) => mv,
-    };
-    let live = tree_holders_or_deny(url, session_id, &[&mv.root, &mv.target], payload).await;
-    linked_head_move_verdict(&mv, live.as_deref().map_err(String::as_str))
+    for check in classify_linked_worktree_head_move(command, cwd, caller_is_subagent) {
+        let mv = match check {
+            LinkedHeadMoveCheck::Deny(reason) => return Some(reason),
+            LinkedHeadMoveCheck::Query(mv) => mv,
+        };
+        let live = tree_holders_or_deny(url, session_id, &[&mv.root, &mv.target], payload).await;
+        if let Some(reason) = linked_head_move_verdict(&mv, live.as_deref().map_err(String::as_str))
+        {
+            return Some(reason);
+        }
+    }
+    None
 }
 
 /// Who holds any of `dirs`, counting every session, failing CLOSED.

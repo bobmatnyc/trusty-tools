@@ -18,6 +18,8 @@ fn env() -> PathEnv {
 
 fn classify(command: &str, cwd: &str, subagent: bool) -> Option<LinkedHeadMoveCheck> {
     classify_in(command, Path::new(cwd), subagent, &env())
+        .into_iter()
+        .next()
 }
 
 fn parked_move(verb: &str) -> LinkedHeadMove {
@@ -70,6 +72,16 @@ fn classify_queries_the_consolidation_command_into_a_parked_worktree() {
     assert_eq!(
         classify(&ff, REPO, false),
         Some(LinkedHeadMoveCheck::Query(parked_move("merge")))
+    );
+}
+
+#[test]
+fn classify_judges_every_segment_not_only_the_first() {
+    // Critic round 2: a main-checkout merge first hid the parked reset.
+    let command = format!("git -C {REPO} merge x && git -C {PARKED} reset --keep FETCH_HEAD");
+    assert_eq!(
+        classify_in(&command, Path::new(REPO), false, &env()),
+        vec![LinkedHeadMoveCheck::Query(parked_move("reset"))]
     );
 }
 
