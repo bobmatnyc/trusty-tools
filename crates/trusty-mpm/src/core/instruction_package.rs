@@ -933,15 +933,15 @@ impl InstructionPackage {
     /// resolved (authored text, or the named generator's input) and trimmed; a
     /// block that resolves to nothing is dropped when `optional`, and is a hard
     /// [`CompositionError::MissingGeneratedInput`] otherwise. Each body is then
-    /// folded ON ITS OWN by
-    /// [`crate::core::instruction_fold::fold_delivered_prompt`], and a body the
-    /// fold empties emits nothing. Every emitted block after the first is
+    /// folded ON ITS OWN by [`crate::core::instruction_fold::fold_block`], which
+    /// closes a fence the body leaves open, and a body the fold empties emits
+    /// nothing. Every emitted block after the first is
     /// preceded by its declared [`Join`] bytes. `trailing_newline` appends one
     /// `\n`.
     ///
     /// Folding per block is a safety property, not a style choice (#8533): a
     /// project override body ending in an unclosed `<!--` hides only its own
-    /// tail. Folded as one string, it hid every later block up to the next
+    /// tail, and one ending in an open fence is closed where it ends. Folded as one string, it hid every later block up to the next
     /// `-->`, safety core included.
     ///
     /// Determinism: pure function of `(self, inputs)` — no map iteration, no
@@ -988,8 +988,9 @@ impl InstructionPackage {
 
             // #7616: the one transformation between the authored corpus and the
             // delivered bytes. #8533: applied per block, so no block's comment
-            // or fence state can reach the next one.
-            let folded = crate::core::instruction_fold::fold_delivered_prompt(body);
+            // or fence state can reach the next one: `fold_block` closes a
+            // fence the block leaves open.
+            let folded = crate::core::instruction_fold::fold_block(body);
             if folded.is_empty() {
                 continue;
             }

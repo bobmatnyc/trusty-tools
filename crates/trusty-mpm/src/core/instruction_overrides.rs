@@ -483,9 +483,9 @@ pub(crate) fn assemble_sections(
     // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
     // the same pass the packaged composer uses. #8533: each section, and each
     // part of the delegation section, is folded ON ITS OWN, so an override body
-    // ending in an unclosed `<!--` cannot hide the text after it.
-    use crate::core::instruction_fold::{fold_delivered_prompt, fold_parts};
-    let fold = |s: &str| fold_delivered_prompt(s.trim());
+    // ending in an unclosed `<!--` or fence cannot hide the text after it.
+    use crate::core::instruction_fold::{fold_block, fold_parts};
+    let fold = |s: &str| fold_block(s.trim());
     let mut sections: Vec<String> = vec![fold(pm_instructions()), fold(&stack)];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.

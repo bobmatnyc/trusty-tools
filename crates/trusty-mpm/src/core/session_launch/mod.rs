@@ -821,6 +821,41 @@ pub(super) fn prepare_session_inner(
         });
     let effective_style: Option<String> = selected_style.id.clone();
 
+    // Resolve the active output style for settings.json using the same
+    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
+    // An unknown id is logged and falls back to the professional default rather
+    // than failing the launch (DOC-17). The resolved id is written into
+    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
+    // it directly; older builds pick it up via prompt injection at the
+    // `build_system_prompt_for` seam.
+    // #8533: an unknown id is never a silent fallback — the warning joins the
+    // launch's asset notices, which every launch path prints. A project style
+    // is named through its composite (prose + floor), written before the prompt
+    // is built so the prompt seam sees it in place; a composite that cannot be
+    // written names the default style, which carries its own floor.
+    let mut style_notice = selected_style.warning;
+    let active_style_id =
+        match crate::core::output_style::native_style_id(project_dir, &selected_style.style) {
+            Ok(id) => id,
+            Err(err) => {
+                let warning = format!(
+                    "output style '{}': cannot write its composite with the trusty-mpm floor \
+                     ({err}); using `{OUTPUT_STYLE}` for native launches",
+                    selected_style.style.id()
+                );
+                tracing::warn!("{warning}");
+                style_notice.get_or_insert(warning);
+                OUTPUT_STYLE.to_string()
+            }
+        };
+
+    // Set the Claude Code output style so the launched session's status bar
+    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
+    // still launches, it just shows the operator's default style.
+    if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
+        tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
     // injection — so `tm session instructions` shows what was actually used,
@@ -864,25 +899,6 @@ pub(super) fn prepare_session_inner(
             "could not refresh the instruction stash at {} (non-fatal): {e}",
             stash.display()
         ),
-    }
-
-    // Resolve the active output style for settings.json using the same
-    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
-    // An unknown id is logged and falls back to the professional default rather
-    // than failing the launch (DOC-17). The resolved id is written into
-    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
-    // it directly; older builds pick it up via prompt injection at the
-    // `build_system_prompt_for` seam.
-    // #8533: an unknown id is never a silent fallback — the warning joins the
-    // launch's asset notices, which every launch path prints.
-    let style_notice = selected_style.warning;
-    let active_style_id = selected_style.style.id();
-
-    // Set the Claude Code output style so the launched session's status bar
-    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
-    // still launches, it just shows the operator's default style.
-    if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
-        tracing::warn!("failed to set trusty-mpm output style: {err}");
     }
 
     // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory

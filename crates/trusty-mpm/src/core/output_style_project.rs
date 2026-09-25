@@ -167,7 +167,11 @@ pub fn project_style_ids(project_dir: &Path) -> Vec<String> {
             let name = e.file_name().to_string_lossy().into_owned();
             name.strip_suffix(".md").map(str::to_string)
         })
-        .filter(|id| is_safe_id(id) && !OUTPUT_STYLES.iter().any(|s| s.id == id))
+        .filter(|id| {
+            is_safe_id(id)
+                && !super::is_composite_style_id(id)
+                && !OUTPUT_STYLES.iter().any(|s| s.id == id)
+        })
         .collect();
     ids.sort();
     ids
@@ -195,7 +199,9 @@ pub fn resolve_style_in_project(
     if let Ok(style) = resolve_style(id) {
         return Ok(ActiveStyle::Bundled(style));
     }
-    if is_safe_id(id) {
+    // #8533: a generated composite already carries the floor; selecting it as a
+    // project style would append a second one.
+    if is_safe_id(id) && !super::is_composite_style_id(id) {
         let dir = project_dir.join(PROJECT_STYLES_DIR);
         let path = dir.join(format!("{id}.md"));
         if !stays_in_styles_dir(project_dir, &path) {

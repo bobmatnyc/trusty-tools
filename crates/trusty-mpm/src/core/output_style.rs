@@ -414,7 +414,8 @@ pub fn apply_output_style_to_prompt(
 /// What: selects the style [`select_style_under`] picks for the default
 /// framework root. When `native_supported`, Claude Code delivers the style
 /// file itself, so `prompt` is returned unchanged — preceded by the
-/// [`style_floor`] for a project style. Otherwise the style's
+/// [`style_floor`] for a project style whose composite is not active
+/// ([`composite_is_active`]). Otherwise the style's
 /// [`delivered_style_text`] (a project style's prose plus the floor) is
 /// injected ahead of `prompt`.
 /// #8533: the style is chosen by [`effective_style_id`] and resolved
@@ -435,14 +436,15 @@ pub fn apply_output_style_to_prompt_with_native(
     let root = crate::core::paths::FrameworkPaths::default().root;
     let selected = select_style_under(&root, project_dir, explicit);
     if native_supported {
-        // #8533: Claude Code reads a project style file as authored; the floor
-        // rides at the head of the appended prompt instead.
+        // #8533: Claude Code reads the style file `outputStyle` names. When that
+        // is the current composite, the floor is already in it; otherwise the
+        // floor heads the appended prompt.
         return match floor_for(&selected.style) {
-            Some(floor) => format!(
+            Some(floor) if !composite_is_active(project_dir, &selected.style) => format!(
                 "{floor}{sep}{prompt}",
                 sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
             ),
-            None => prompt,
+            _ => prompt,
         };
     }
     inject_body(&delivered_style_text(&selected.style), &prompt)
@@ -452,7 +454,9 @@ pub fn apply_output_style_to_prompt_with_native(
 #[path = "output_style_floor.rs"]
 mod floor;
 pub use floor::{
-    FLOOR_SECTIONS, STYLE_FLOOR_HEADING, delivered_style_text, floor_for, style_floor,
+    COMPOSITE_STYLE_SUFFIX, FLOOR_SECTIONS, STYLE_FLOOR_HEADING, composite_is_active,
+    composite_style_id, composite_style_text, delivered_style_text, floor_for,
+    is_composite_style_id, native_style_id, style_floor,
 };
 
 // #8533: project-local styles live in a child module (SLOC headroom).
