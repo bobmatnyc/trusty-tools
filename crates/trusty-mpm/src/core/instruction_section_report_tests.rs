@@ -256,10 +256,17 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
         prompt,
         false,
     );
+    // The injected block is the project prose, then the floor (owner ruling
+    // 2026-09-25), then the prompt.
+    let floor = crate::core::output_style::style_floor();
     let body = styled
-        .split_once(crate::core::instruction_pipeline::SECTION_SEPARATOR)
+        .split_once(&format!(
+            "{floor}{}",
+            crate::core::instruction_pipeline::SECTION_SEPARATOR
+        ))
         .map(|(style, rest)| (style.to_string(), rest.to_string()))
-        .expect("an injected style block precedes the prompt");
+        .expect("an injected style block, floor last, precedes the prompt");
+    assert_eq!(styled.matches(&floor).count(), 1);
     assert!(
         body.0.contains("Speak as the fixture supervisor."),
         "{}",
