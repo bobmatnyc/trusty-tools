@@ -136,7 +136,7 @@ fn file_name_stem(seg: &str) -> Option<&str> {
     (ext_ok && stem_ok && !is_provider_key(seg)).then_some(stem)
 }
 
-/// Longest stem, plus the length of every mixed-case directory before it,
+/// Longest stem, plus the length of every other mixed-case path segment,
 /// that [`is_short_stem_file_at`] admits whatever its word shape: one under
 /// [`SECRET_MIN_LEN`], the length below which this module says a token cannot
 /// be a credential. See #8589.
@@ -165,7 +165,7 @@ pub(crate) fn is_plain_path_segment(seg: &str) -> bool {
 /// `/` inside a standard-base64 blob splits the blob into a short "stem" and a
 /// random directory before it, and admitting the stem alone raised the
 /// `path_wrapped_encoder_blobs_stay_flagged_after_8589` base64 row from 15 to
-/// 347. Counting every mixed-case directory toward the stem's length keeps
+/// 347. Counting every other mixed-case segment toward the stem's length keeps
 /// that row at 15 and five other seeds at their pre-change counts; the
 /// #5043 digit-run and stray-letter caps keep random 16-character stems to
 /// about one admit in seven.
@@ -175,8 +175,9 @@ pub(crate) fn is_plain_path_segment(seg: &str) -> bool {
 /// pins the count.
 /// What: `segments[i]` passes [`file_name_stem`]; every `-`/`_`/`.` piece of
 /// its stem holds at most one digit run and at most one single-letter CamelCase
-/// word; and the stem length plus the lengths of every earlier segment that is
-/// not [`is_plain_path_segment`] is at most [`MAX_SHORT_STEM_RUN`].
+/// word; and the stem length plus the lengths of every other segment, before
+/// or after it, that is not [`is_plain_path_segment`] is at most
+/// [`MAX_SHORT_STEM_RUN`].
 /// Test: `short_stem_file_names_are_not_flagged_after_8589`,
 /// `short_stem_rule_boundaries_after_8589`,
 /// `path_wrapped_encoder_blobs_stay_flagged_after_8589`,
@@ -189,10 +190,13 @@ pub(crate) fn is_short_stem_file_at(segments: &[&str], i: usize) -> bool {
         .split(IDENTIFIER_DELIMITERS)
         .filter(|p| !p.is_empty())
         .all(|p| digit_run_count(p) <= 1 && camel_word_stats(p).1 <= 1);
-    let mixed_dirs: usize = segments[..i]
+    // #8589 review: every other segment counts, before or after the file, so
+    // encoded material cannot be spread past the file name.
+    let mixed_dirs: usize = segments
         .iter()
-        .filter(|s| !is_plain_path_segment(s))
-        .map(|s| s.len())
+        .enumerate()
+        .filter(|&(j, s)| j != i && !is_plain_path_segment(s))
+        .map(|(_, s)| s.len())
         .sum();
     pieces_ok && stem.len() + mixed_dirs <= MAX_SHORT_STEM_RUN
 }

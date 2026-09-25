@@ -3942,7 +3942,9 @@ fn random_stem(rng: &mut Xorshift, alphabet: &[u8], len: usize) -> String {
 /// (`is_short_stem_file_at`). The 16-character rows measure that rule, so
 /// they rise: base62 447 -> 2684, base64url 389 -> 3425. Each such stem is
 /// below `SECRET_MIN_LEN` and passes `check_secret` standing alone. The 20-,
-/// 24-, 32- and 40-character rows are unchanged.
+/// 24-, 32- and 40-character rows are unchanged. Two `MainApp` rows keep the
+/// old 16-character ceilings (447, 389) on the #277 word floors: a 7-letter
+/// mixed-case directory takes the stem past the short-stem rule's 19.
 /// What: a ratchet, 20k stems per row at a fixed seed.
 /// Test: itself.
 #[test]
@@ -3951,25 +3953,29 @@ fn random_stems_as_file_names_stay_flagged_after_277() {
     const SEED: u64 = 0x0277_0000_0000_0001;
     let url_alphabet = b64_alphabet(true);
     let base62 = &url_alphabet[..62];
-    for (label, alphabet, stem_len, ceiling) in [
+    for (label, alphabet, dir, stem_len, ceiling) in [
         // #8589: 447 -> 2684, the short-stem rule's measured admits.
-        ("base62", base62, 16usize, 2684usize),
-        ("base62", base62, 20, 205),
-        ("base62", base62, 24, 2),
-        ("base62", base62, 32, 0),
-        ("base62", base62, 40, 0),
+        ("base62", base62, "main", 16usize, 2684usize),
+        ("base62", base62, "main", 20, 205),
+        ("base62", base62, "main", 24, 2),
+        ("base62", base62, "main", 32, 0),
+        ("base62", base62, "main", 40, 0),
         // #8589: 389 -> 3425, the short-stem rule's measured admits.
-        ("base64url", &url_alphabet[..], 16, 3425),
-        ("base64url", &url_alphabet[..], 20, 202),
-        ("base64url", &url_alphabet[..], 24, 40),
-        ("base64url", &url_alphabet[..], 32, 6),
-        ("base64url", &url_alphabet[..], 40, 3),
+        ("base64url", &url_alphabet[..], "main", 16, 3425),
+        ("base64url", &url_alphabet[..], "main", 20, 202),
+        ("base64url", &url_alphabet[..], "main", 24, 40),
+        ("base64url", &url_alphabet[..], "main", 32, 6),
+        ("base64url", &url_alphabet[..], "main", 40, 3),
+        // #8589 review: `MainApp` (7) + 16 is over 19, so these rows bypass
+        // `is_short_stem_file_at` and keep ratcheting the #277 word floors.
+        ("base62", base62, "MainApp", 16, 447),
+        ("base64url", &url_alphabet[..], "MainApp", 16, 389),
     ] {
         let mut rng = Xorshift(SEED);
         let admits = (0..N)
             .filter(|_| {
                 let tok = format!(
-                    "src/main/{}.json",
+                    "src/{dir}/{}.json",
                     random_stem(&mut rng, alphabet, stem_len)
                 );
                 find_secret_token(&tok).is_none()
@@ -3977,7 +3983,7 @@ fn random_stems_as_file_names_stay_flagged_after_277() {
             .count();
         assert!(
             admits <= ceiling,
-            "#277 ratchet: {label} stems of {stem_len} characters as file names \
+            "#277 ratchet: {label} stems of {stem_len} characters under `{dir}` \
              admitted {admits} of {N}, above the pinned ceiling {ceiling}"
         );
     }
@@ -4073,6 +4079,18 @@ fn short_stem_rule_boundaries_after_8589() {
             &["lib2", "GTSBejm.java"][..],
             true,
         ),
+        // #8589 review: 13 + 7 is 20.
+        (
+            "digit dir counts, outside",
+            &["lib234567890a", "GTSBejm.java"][..],
+            false,
+        ),
+        // #8589 review: a segment after the file counts too.
+        (
+            "mixed segment after the file, outside",
+            &["src", "GTSBejm.java", "RateForecasts"][..],
+            false,
+        ),
         ("one digit run, inside", &["lnt", "GTSBejm7.java"][..], true),
         (
             "two digit runs, outside",
@@ -4097,7 +4115,11 @@ fn short_stem_rule_boundaries_after_8589() {
         ),
         ("no extension, outside", &["lnt", "GTSBejm"][..], false),
     ] {
-        let i = segments.len() - 1;
+        // The file name is the first segment with a `.`, else the last.
+        let i = segments
+            .iter()
+            .position(|s| s.contains('.'))
+            .unwrap_or(segments.len() - 1);
         assert_eq!(
             is_short_stem_file_at(segments, i),
             admitted,
@@ -4115,6 +4137,8 @@ fn short_stem_rule_boundaries_after_8589() {
         // A mixed-case directory takes a short stem to credential length.
         "https://git.example.com/x/RateForecasts/GTSBejm.java",
         "RATE_SRC=src/RateForecasts/GTSBejm.java",
+        // #8589 review: the same material placed after the file name.
+        "https://git.example.com/x/GTSBejm.java/RateForecasts",
         // A long secret stem is outside the rule.
         "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json", // pragma: allowlist secret
     ];
@@ -4123,5 +4147,63 @@ fn short_stem_rule_boundaries_after_8589() {
         mismatches.is_empty(),
         "#8589: these file names must STILL be refused:\n{}",
         mismatches.join("\n")
+    );
+}
+
+/// Why (#8589 review): the `=` branch of `is_structural_token` checked the
+/// LHS only for its charset, so a random 40-character LHS was admitted in
+/// front of any path RHS.
+/// What: generated base62 and base64url LHS values in front of a path are
+/// refused, as is one fixed row; ordinary `KEY=path` rows still pass.
+/// Test: itself.
+#[test]
+fn key_equals_path_lhs_is_screened_after_8589() {
+    let refused = verdict_mismatches(
+        &["aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1AbCdEf=src/main.rs"], // pragma: allowlist secret
+        true,
+    );
+    assert!(
+        refused.is_empty(),
+        "#8589: a credential-shaped LHS must be refused:\n{}",
+        refused.join("\n")
+    );
+    let url_alphabet = b64_alphabet(true);
+    for (label, alphabet) in [
+        ("base62", &url_alphabet[..62]),
+        ("base64url", &url_alphabet[..]),
+    ] {
+        // The LHS gets the verdict it gets standing alone: only a bare-token
+        // miss (FN-2, mixed case with no digit, #1484) may pass as a key.
+        let mut rng = Xorshift(0x8589_0000_0000_00a1);
+        let (mut admits, mut unscreened) = (0usize, 0usize);
+        for _ in 0..2_000 {
+            let lhs = random_stem(&mut rng, alphabet, 40);
+            if check_secret(&format!("{lhs}=src/main.rs")).is_ok() {
+                admits += 1;
+                unscreened += usize::from(check_secret(&lhs).is_err());
+            }
+        }
+        assert_eq!(
+            unscreened, 0,
+            "#8589: {unscreened} random 40-char {label} LHS values refused alone \
+             were admitted as a key"
+        );
+        assert!(
+            admits <= 20,
+            "#8589: random 40-char {label} LHS admitted {admits} of 2000"
+        );
+    }
+    let accepted = verdict_mismatches(
+        &[
+            "RATE_SRC=src/main.rs",
+            "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+            "config_path=crates/trusty-common/src/lib.rs",
+        ],
+        false,
+    );
+    assert!(
+        accepted.is_empty(),
+        "#8589: ordinary KEY=path rows must pass:\n{}",
+        accepted.join("\n")
     );
 }

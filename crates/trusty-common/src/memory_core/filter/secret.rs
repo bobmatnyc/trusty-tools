@@ -1062,10 +1062,12 @@ pub(crate) fn is_readable_path_segment(seg: &str) -> bool {
 /// Why it is a named helper: the `=` branch of [`is_structural_token`] validates
 /// a `key=path/to/value` RHS with it without re-entering that function, keeping
 /// the check one level deep.
-/// What: requires at least one `/` and every segment passing
-/// [`is_readable_path_segment`] (which rejects the empty segment a doubled or
-/// trailing `/` produces).
-/// Test: `key_equals_slashpath_not_flagged`, `slash_bearing_base64_blobs_are_blocked`.
+/// What: requires at least one `/` and [`segments_read_as_path`] over the
+/// `/`-separated segments: each passes [`is_readable_path_segment`] (which
+/// rejects the empty segment a doubled or trailing `/` produces) or is a short
+/// file name in position ([`is_short_stem_file_at`], #8589).
+/// Test: `key_equals_slashpath_not_flagged`, `slash_bearing_base64_blobs_are_blocked`,
+/// `short_stem_file_names_are_not_flagged_after_8589`.
 pub(crate) fn is_slash_path(s: &str) -> bool {
     // #8589: a short file name is judged by its position, so the path is
     // checked as a whole.
@@ -1096,8 +1098,10 @@ pub(crate) fn is_slash_path(s: &str) -> bool {
 /// What: requires a `scheme://`, no `user:pass@` userinfo
 /// ([`is_url_credential_shaped`]), a non-empty remainder, and every non-empty
 /// `/`-separated segment of that remainder passing [`is_readable_path_segment`],
-/// or, on an `http(s)` URL, sitting in a Google document-id position
-/// ([`is_google_doc_id`], issue #8589). Empty segments are skipped rather than
+/// being a short file name in position (the [`segments_read_as_path`] rule,
+/// [`is_short_stem_file_at`], #8589), or, on an `http(s)` URL, sitting in a
+/// Google document-id position ([`is_google_doc_id`], issue #8589). Empty
+/// segments are skipped rather than
 /// rejected so `file:///Users/masa/x` and a trailing slash both decompose.
 /// Test: `bare_github_urls_are_not_flagged`,
 /// `url_path_secrets_are_still_blocked`, `url_shaped_prose_is_not_flagged`,
@@ -1231,10 +1235,11 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
 /// CamelCase title ([`is_ticket_camel_title`]);
 /// `+`-bearing tokens that are `+`-joined word phrases (checked next, and the
 /// only way a `+` token can be structural); (a) `=`-containing tokens where the
-/// LHS is a word segment and the RHS is itself structural (a word segment OR a
+/// LHS is a word segment that does not itself [`looks_like_secret`] (#8589
+/// review) and the RHS is itself structural (a word segment OR a
 /// slash-path), checked before the slash-path branch so that tokens like
-/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens where
-/// every `/`-segment reads as a path segment; or (c) `-`/`_`/`.`-segmented
+/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens whose
+/// `/`-segments pass [`segments_read_as_path`] (#8589); or (c) `-`/`_`/`.`-segmented
 /// compound identifiers where each segment is a single human-readable word.
 /// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
 /// `key_equals_slashpath_not_flagged` (issue #1676 regression tests),
@@ -1286,6 +1291,12 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
             let rhs = parts[1];
             if rhs.chars().all(|c| c == '=') {
                 return false; // pure base64 padding, not key=value
+            }
+            // #8589 review: `is_word_segment` is a charset test, so a random
+            // 40-character LHS rode in on any path RHS. The LHS gets the check
+            // a bare token gets; it holds no `=`, so this recurses once.
+            if looks_like_secret(lhs) {
+                return false;
             }
             if is_word_segment(lhs) && (is_word_segment(rhs) || is_slash_path(rhs)) {
                 return true;
