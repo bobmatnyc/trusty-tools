@@ -24,8 +24,6 @@ use crate::cli::ConfigAction;
 /// this handler's signature readable (clippy `too_many_arguments`).
 /// What: the register flags; `tags` is empty (not `None`) when unspecified.
 /// Test: covered via `register`'s live-HTTP path.
-// #8587: `Default` lets a caller that sets only name and URL say so.
-#[derive(Default)]
 pub(crate) struct RegisterInput {
     pub name: String,
     pub repo_url: String,
@@ -37,6 +35,24 @@ pub(crate) struct RegisterInput {
     pub gh_account: Option<String>,
     /// #5851: scoped `gh` config home written to `github.config_dir`.
     pub gh_config_dir: Option<std::path::PathBuf>,
+}
+
+impl RegisterInput {
+    /// A registration carrying only the two required fields, every optional
+    /// one unset (#8587). Taking both as arguments keeps them required.
+    pub(crate) fn new(name: String, repo_url: String) -> Self {
+        Self {
+            name,
+            repo_url,
+            default_branch: None,
+            description: None,
+            tags: Vec::new(),
+            stack_hint: None,
+            gh_user: None,
+            gh_account: None,
+            gh_config_dir: None,
+        }
+    }
 }
 
 /// Build a `DaemonClient` from the CLI's shared `(reqwest::Client, url)` pair.

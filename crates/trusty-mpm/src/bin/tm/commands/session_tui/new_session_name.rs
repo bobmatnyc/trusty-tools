@@ -154,14 +154,14 @@ impl NameStep {
 
 /// The status line after a create, naming the session when it was named.
 ///
-/// Why: the daemon picks the serial, and the TUI does not read it back; the
-/// `tm-<slug>-NN` form is the part the operator chose.
+/// Why: the daemon picks the serial and the TUI does not read it back, so the
+/// line names only the slug the operator chose — never a made-up full name.
 /// What: `new session in <project>` for an unnamed request, and
-/// `new session tm-<slug>-NN in <project>` for a named one.
+/// `new session named <slug> in <project>` for a named one.
 /// Test: `new_session_name_status_line_names_the_session`.
 pub(crate) fn created_message(request: &NewSessionRequest) -> String {
     match request.name_hint.as_deref() {
-        Some(slug) => format!("new session {PREFIX}{slug}-NN in {}", request.label),
+        Some(slug) => format!("new session named {slug} in {}", request.label),
         None => format!("new session in {}", request.label),
     }
 }

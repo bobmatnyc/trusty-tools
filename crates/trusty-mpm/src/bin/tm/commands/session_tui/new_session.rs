@@ -861,12 +861,8 @@ pub(crate) async fn perform(
             crate::commands::projects::registry::register(
                 client,
                 url,
-                RegisterInput {
-                    name: project.name,
-                    repo_url: project.repo_url,
-                    // #8587: every optional field unset, as before.
-                    ..RegisterInput::default()
-                },
+                // #8587: every optional field unset, as before.
+                RegisterInput::new(project.name, project.repo_url),
             )
             .await
         },

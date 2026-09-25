@@ -2652,8 +2652,43 @@ fn new_session_name_status_line_names_the_session() {
     assert_eq!(created_message(&apex_request(None)), "new session in apex");
     assert_eq!(
         created_message(&apex_request(Some("auth-refactor"))),
-        "new session tm-auth-refactor-NN in apex"
+        "new session named auth-refactor in apex"
     );
+}
+
+/// Backspace removes one CHARACTER, so a multi-byte letter goes whole.
+#[test]
+fn new_session_name_backspace_removes_a_whole_character() {
+    let sessions = fleet();
+    let mut state = naming_apex("café");
+    assert_eq!(state.apply(Input::Backspace, &sessions), Action::Redraw);
+    let naming = open_flow(&state).naming().expect("name step open");
+    assert_eq!(naming.typed(), "caf");
+}
+
+/// A name past the slug cap previews exactly what `leaf_slug_from_hint` sends.
+#[test]
+fn new_session_name_long_name_preview_matches_the_capped_slug() {
+    let name = "authentication refactor phase two";
+    let slug = trusty_common::session_naming::leaf_slug_from_hint(name);
+    assert!(!slug.ends_with('-'), "{slug}");
+    assert!(slug.len() < name.len(), "the cap must have cut: {slug}");
+    let state = naming_apex(name);
+    let naming = open_flow(&state).naming().expect("name step open");
+    let preview = naming.preview().expect("a long name still slugs");
+    assert_eq!(preview, format!("tm-{slug}-NN"));
+    assert!(!preview.trim_end_matches("-NN").ends_with('-'), "{preview}");
+}
+
+/// Arrow keys while naming move nothing: the step owns the keys.
+#[test]
+fn new_session_name_arrows_are_ignored_while_naming() {
+    let sessions = fleet();
+    let mut state = naming_apex("auth");
+    let before = open_flow(&state).clone();
+    assert_eq!(state.apply(Input::Down, &sessions), Action::Ignore);
+    assert_eq!(state.apply(Input::Up, &sessions), Action::Ignore);
+    assert_eq!(open_flow(&state), &before, "selection unchanged");
 }
 
 /// The typed name reaches the create leg — the fail-open check (#8587).
