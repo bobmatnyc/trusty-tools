@@ -35,10 +35,16 @@
 //! destructive rule, because both exemptions return ALLOW for exactly the
 //! dispatched agents this rule binds.
 //!
-//! Residuals, the same lexical ones [`super::main_checkout`] states: a `cd`/`-C`
-//! built from a command substitution, `--git-dir=`/`--work-tree=` and the
-//! `GIT_DIR=` prefix are not resolved into the target, a symlink into a checkout
-//! is not followed, and a verb inside `$(…)` is not scanned.
+//! A `cd`/`-C` directory the guard cannot expand — a `$NAME`, a surviving `~`,
+//! a `$(…)` or a backtick — is refused before any other test, from any cwd: an
+//! agent in its own worktree writing `git -C $MAIN checkout x` resolves to
+//! `<worktree>/$MAIN`, which reads as the worktree while the shell lands it in
+//! the main checkout.
+//!
+//! Residuals, the same lexical ones [`super::main_checkout`] states:
+//! `--git-dir=`/`--work-tree=` and the `GIT_DIR=` prefix are not resolved into
+//! the target, a symlink into a checkout is not followed, and a verb inside
+//! `$(…)` is not scanned.
 //!
 //! Test: `switches_head_*`, `head_switch_*` below;
 //! `pm_guard_refuses_an_agent_branch_switch_in_a_dirty_main_checkout` and
@@ -79,9 +85,9 @@ pub(crate) fn evaluate_main_checkout_head_switch(
 
 /// The policy, with the environment and the dirty-tree probe injected.
 ///
-/// What: for each segment that [`switches_head`], skips a directory outside
-/// any main checkout or inside a scratchpad clone, refuses an unresolved
-/// directory outright, and otherwise asks `dirty` about the checkout root:
+/// What: for each segment that [`switches_head`], refuses an unresolved
+/// directory outright, skips a directory outside any main checkout or inside a
+/// scratchpad clone, and otherwise asks `dirty` about the checkout root:
 /// `Some(false)` allows, `Some(true)` and `None` refuse.
 /// Test: `head_switch_denies_a_dirty_main_checkout`,
 /// `head_switch_allows_a_clean_main_checkout`,
@@ -89,6 +95,7 @@ pub(crate) fn evaluate_main_checkout_head_switch(
 /// `head_switch_allows_the_agents_own_worktree`,
 /// `head_switch_judges_every_segment`,
 /// `head_switch_refuses_an_unresolved_directory`,
+/// `head_switch_refuses_an_unresolved_directory_from_a_worktree`,
 /// `head_switch_allows_a_scratchpad_clone`.
 fn evaluate_head_switch_in(
     command: &str,
@@ -97,18 +104,15 @@ fn evaluate_head_switch_in(
     dirty: impl Fn(&Path) -> Option<bool>,
 ) -> Option<String> {
     for (verb, target, _) in git_verb_targets_with_tail(command, cwd, env, switches_head) {
+        // #8572: before any classification of `target`. From a worktree cwd,
+        // `-C $MAIN` resolves to `<worktree>/$MAIN`, which reads as the
+        // agent's own worktree while the shell lands it in the main checkout.
+        if let Some((shown, token)) = unresolved_directory(&target) {
+            return Some(unresolved_deny_reason(&verb, &shown, &token));
+        }
         let Some(root) = main_checkout_root(&target) else {
             continue;
         };
-        // #8572: an unexpanded `$WT` walks up to the launch directory's
-        // checkout, so it says nothing about where the switch lands.
-        if let Some(unresolved) = unresolved_target(&target) {
-            return Some(unresolved_deny_reason(
-                &verb,
-                &unresolved.shown,
-                &unresolved.token,
-            ));
-        }
         if write_lands_in_a_scratchpad_clone(&target, &root) {
             continue;
         }
@@ -171,6 +175,25 @@ fn checkout_switches_head(tail: &[String]) -> bool {
         })
 }
 
+/// The path to quote and the expansion the guard could not perform in
+/// `target`, if any.
+///
+/// Why: [`unresolved_target`] finds `$NAME` and `~` but not a command
+/// substitution, and `git -C $(…) checkout x` is the same bypass (#8572).
+/// What: the [`unresolved_target`] answer, else the first `$(` or backtick in
+/// the path text, with the whole path shown.
+/// Test: `head_switch_refuses_an_unresolved_directory_from_a_worktree`.
+fn unresolved_directory(target: &Path) -> Option<(std::path::PathBuf, String)> {
+    if let Some(unresolved) = unresolved_target(target) {
+        return Some((unresolved.shown, unresolved.token));
+    }
+    let text = target.to_string_lossy();
+    ["$(", "`"]
+        .into_iter()
+        .find(|token| text.contains(token))
+        .map(|token| (target.to_path_buf(), token.to_string()))
+}
+
 /// How the dirty arm describes the checkout.
 const DIRTY: &str = "holds uncommitted work (`git status --porcelain` lists changes)";
 
@@ -187,8 +210,9 @@ const UNREADABLE: &str = "could not be checked: `git status --porcelain` failed 
 /// `head_switch_fails_closed_when_the_dirty_state_is_unreadable`.
 fn deny_reason(verb: &str, root: &Path, state: &str) -> String {
     format!(
-        "HEAD switch denied in a main checkout (#8572): `git {verb}` would move HEAD or move \
-         work out of the working tree of {}, a project's main checkout that {state}. That work \
+        "HEAD switch denied in a main checkout (#8572): `git {verb}` would move HEAD, overwrite \
+         files, or move work out of the working tree of {}, a project's main checkout that \
+         {state}. That work \
          belongs to whoever stands in this checkout, usually the operator. A branch switch carries \
          it onto another branch, or overwrites or masks it where the branches differ, and git \
          reports no error. Use your own worktree instead: if a worktree already holds the branch, \
@@ -294,6 +318,9 @@ mod tests {
             "git switch main",
             "git checkout -b fix/x",
             "git stash && git checkout feat/x",
+            // A path restore without `--` is indistinguishable from a branch
+            // name, so it is refused too; the reason must cover it.
+            "git checkout src/lib.rs",
         ] {
             let reason = evaluate_head_switch_in(command, &repo, &env(), |_| Some(true))
                 .unwrap_or_else(|| panic!("`{command}` must be denied"));
@@ -301,6 +328,7 @@ mod tests {
             assert!(reason.contains(&repo.display().to_string()), "{reason}");
             assert!(reason.contains("uncommitted work"), "{reason}");
             assert!(reason.contains("isolation: \"worktree\""), "{reason}");
+            assert!(reason.contains("move HEAD, overwrite files"), "{reason}");
         }
     }
 
@@ -360,6 +388,29 @@ mod tests {
             evaluate_head_switch_in("git -C $WT checkout feat/x", &repo, &env(), |_| Some(false))
                 .expect("an unresolved directory must refuse");
         assert!(reason.contains("$WT"), "{reason}");
+    }
+
+    /// 🔴 REGRESSION (#8572 review): from the agent's own worktree, `-C $MAIN`
+    /// resolved to `<worktree>/$MAIN`, which read as the worktree, so the
+    /// switch was allowed while the shell ran it in the main checkout.
+    #[test]
+    fn head_switch_refuses_an_unresolved_directory_from_a_worktree() {
+        let (_dir, repo) = main_checkout();
+        let wt = repo.join(".claude/worktrees/agent-1");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: ../../.git/worktrees/agent-1").expect(".git");
+        for (command, token) in [
+            ("git -C $MAIN checkout feat/x", "$MAIN"),
+            ("cd $MAIN && git switch x", "$MAIN"),
+            ("git -C \"${MAIN}\" stash", "${MAIN}"),
+            ("git -C \"$(cat /tmp/main)\" checkout x", "$("),
+            ("cd \"`cat /tmp/main`\" && git checkout x", "`"),
+        ] {
+            let reason = evaluate_head_switch_in(command, &wt, &env(), |_| Some(false))
+                .unwrap_or_else(|| panic!("`{command}` from a worktree must be denied"));
+            assert!(reason.contains("unresolvable"), "{reason}");
+            assert!(reason.contains(token), "{command}: {reason}");
+        }
     }
 
     #[test]

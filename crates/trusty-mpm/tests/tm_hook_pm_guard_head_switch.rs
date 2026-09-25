@@ -179,3 +179,24 @@ fn pm_guard_allows_a_path_restore_in_the_agents_own_worktree() {
         assert_eq!(stdout.trim(), "", "`{command}` in own worktree: {stdout}");
     }
 }
+
+#[test]
+fn pm_guard_refuses_an_unresolved_directory_switch_from_the_agents_worktree() {
+    // #8572 review: from the agent's own worktree, `-C $MAIN` resolved to
+    // `<worktree>/$MAIN`, read as the worktree, and was allowed; the shell
+    // then ran the switch in the main checkout.
+    let (_dir, repo) = main_checkout();
+    let wt = repo.join(".claude/worktrees/agent-8572");
+    git(
+        &repo,
+        &["worktree", "add", "-q", &wt.display().to_string(), "feat/x"],
+    );
+    for command in [
+        "git -C $MAIN checkout feat/x",
+        "cd $MAIN && git switch main",
+    ] {
+        let stdout = run_pm_guard(&payload(command, &wt, AGENT), &wt);
+        assert_head_switch_denied(&stdout);
+        assert!(stdout.contains("$MAIN"), "{stdout}");
+    }
+}
