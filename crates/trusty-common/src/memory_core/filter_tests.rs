@@ -3293,3 +3293,673 @@ fn known_accepted_bounds_after_7549() {
          does not have — make both arms agree."
     );
 }
+
+// ---- Issues #8589 and #277: identifier paths and Google document URLs ----
+
+/// Why (issue #277, the kuzu-memory import): 9,058 of 9,171 refused memories
+/// were ordinary relative source paths. A Java or TSX class name is one long
+/// CamelCase run, so the old per-segment alphabetic-run cap of 20 read
+/// `ReservationForecastAdjustmentServiceImpl.java` as an encoded run and the
+/// path fell through to the base64 branch.
+/// What: asserts identifier paths pass `check_secret` and the
+/// `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn camel_case_source_paths_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    for path in [
+        "src/main/java/com/example/forecast/ReservationForecastAdjustmentServiceImpl.java",
+        "web/src/components/RoomTypeAvailabilityCalendarGrid.tsx",
+        "src/main/java/com/example/pricing/RateRecommendationEngineConfigurationProperties.java",
+        "src/test/java/com/example/forecast/ReservationForecastAdjustmentServiceImplTest.java",
+        "app/services/HTTPServerConnectionPoolManagerFactory.rb",
+        "lib/utils/getUserAccountPreferencesFromLocalStorage.ts",
+        "packages/ui/src/hooks/useDebouncedWindowResizeObserver.ts",
+        "src/main/java/com/example/repo/FindReservationByIdAndDateRangeQuery.java",
+        "src/main/java/com/example/http/HttpClientConfigurationFactory.java",
+    ] {
+        assert!(
+            check_secret(path).is_ok(),
+            "#277: an identifier path must pass check_secret: {path}; got {:?}",
+            check_secret(path)
+        );
+        let prose = format!("The forecast adjustment logic lives in {path} today");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // KNOWN BOUND: a file-name segment of SECRET_MIN_LEN (20) or more
+    // characters, extension included, that mixes case and carries a digit is
+    // refused as a mixed-case credential unless its stem passes
+    // `is_identifier_file_segment` (#277). `Http` has no vowel, which pulls
+    // `Http2ClientPool` under the 27% floor; `OAuth` holds a one-letter word.
+    for (path, refused) in [
+        ("src/main/java/com/example/Http2ClientKit.java", false), // 19 chars
+        ("src/main/java/com/example/Http2ClientPool.java", true), // 20 chars
+        (
+            "src/main/java/com/example/Oauth2ClientRegistration.java",
+            false,
+        ),
+        (
+            "src/main/java/com/example/OAuth2AuthorizationRequestRedirectFilter.java",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            check_secret(path).is_err(),
+            refused,
+            "#277 known bound moved for {path}; update the #8589 changelog"
+        );
+    }
+}
+
+/// Why (issue #8589 review): each clause of `is_readable_alpha_run` is what
+/// keeps one class of generated run out, so each needs a row that turns red
+/// when the clause is removed.
+/// What: pins the two generated runs the rule was built against, then one
+/// row just inside and one just outside each limit that has an outside.
+/// Test: itself.
+#[test]
+fn readable_alpha_run_clause_boundaries_after_8589() {
+    for (clause, run, readable) in [
+        // #277: MIN_VOWEL_PERCENT is 27. 6 vowels of 22 letters is 27.3%;
+        // 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel", true),
+        ("vowel floor, outside", "DrenkPlostVarmikStuvelGrap", false),
+        // A 5-capital acronym is MAX_ACRONYM_LEN; 6 is over.
+        ("acronym cap, inside", "ConnectionPoolHTTPSManager", true),
+        ("acronym cap, outside", "ConnectionPoolHTTPSXManager", false),
+        // 24 letters in 6 words is a mean of exactly 4; 23 letters is under.
+        ("mean word length, inside", "UserDataFormTypeCodeView", true),
+        (
+            "mean word length, outside",
+            "UserDataFormTypeCodeMap",
+            false,
+        ),
+        // A lowercase first word is admitted. There is no outside row:
+        // `camel_words` starts every later word at a capital, so an
+        // alphabetic run cannot hold a second all-lowercase word.
+        (
+            "lowercase first word, inside",
+            "getUserAccountPreferencesFromLocalStorage",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            is_readable_alpha_run(run),
+            readable,
+            "#8589 {clause}: is_readable_alpha_run({run})"
+        );
+    }
+    // Base64 runs from the #8589 ratchet corpus: a stray capital, and a run
+    // only the vowel floor refuses.
+    for run in [
+        "CtbSRaHnXUQBzuFosCPKRreEnRKPWJHoWU",
+        "SSJyphDcjmbsJvssQghrw",
+    ] {
+        assert!(!is_readable_alpha_run(run), "#8589: {run} must be refused");
+    }
+}
+
+/// Why (issue #8589): a Google Docs/Sheets/Drive URL carries a 33-44 character
+/// mixed-case document id in its path, which the per-segment readability test
+/// reads as a credential, so the URL was refused. The id is public by position:
+/// it sits after `/d/` (or `/folders/`) on a Google document host.
+/// What: asserts document URLs pass `check_secret` and the gate, with and
+/// without a trailing action, query or fragment.
+/// Test: itself.
+#[test]
+fn google_document_urls_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    // Every row but `edit#gid=0` and `edit?usp=sharing` fails with the
+    // document-id exemption switched off; those two passed before #8589 and
+    // stay as pins.
+    for url in [
+        // The #8589 reproduction, verbatim.
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit#gid=0",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit?usp=sharing",
+        "https://docs.google.com/spreadsheets/u/0/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/presentation/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U0/pub",
+        "https://drive.google.com/file/d/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw/view",
+        "https://drive.google.com/drive/folders/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw",
+        "https://drive.google.com/file/d/0BwwA4oUTeiV1TGRPeTVjaWRDY1E/view",
+        "https://drive.google.com/drive/folders/0AGRtHG9m3Z0-Uk9PVA",
+    ] {
+        assert!(
+            check_secret(url).is_ok(),
+            "#8589: a Google document URL must pass check_secret: {url}; got {:?}",
+            check_secret(url)
+        );
+        let prose = format!("The hotstats report source is {url} for this quarter");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#8589: the gate must ACCEPT prose carrying {url}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+/// Why (issues #8589, #277): both loosenings above touch the per-segment path
+/// test and the URL decomposition, which are what keep a `/`-bearing blob and
+/// a URL-path secret flagged. Every credential shape the fix was checked
+/// against is re-asserted here through `check_secret`, the call the kuzu
+/// importer makes.
+/// What: asserts each credential is refused bare, inside a path, and in the
+/// Google document-id position on a foreign host or with a provider-key shape.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_8589_path_rules() {
+    for (label, tok) in [
+        (
+            "40-char base64 blob with + and /",
+            "aGVsbG8+d29ybGQ/Zm9vYmFyQmF6UXV4MTIzNDU2", // pragma: allowlist secret
+        ),
+        ("AWS access key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        (
+            "GitHub ghp_ token",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", // pragma: allowlist secret
+        ),
+        (
+            "PEM block",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB\n-----END RSA PRIVATE KEY-----", // pragma: allowlist secret
+        ),
+        (
+            "34-char mixed-case alphanumeric, no path",
+            "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "provider key as a path segment",
+            "config/ghp_abcdefghijklmnopqrstuvwxyz0123456789/x", // pragma: allowlist secret
+        ),
+        (
+            "mixed-case blob as a path segment",
+            "src/main/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY/Impl.java", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id as a path segment",
+            "deploy/AKIAIOSFODNN7EXAMPLE/notes.md", // pragma: allowlist secret
+        ),
+        (
+            "all-uppercase webhook tail",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape on a foreign host",
+            "https://evil.example.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape without the /d/ marker",
+            "https://docs.google.com/spreadsheets/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "second blob after a Google document id",
+            "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AKIAIOSFODNN7EXAMPLE", // pragma: allowlist secret
+        ),
+        (
+            "GitHub token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        // Provider keys SECRET_PREFIXES does not list, in the /d/ position.
+        // Each length (32, 39, 26, 40, 37) sits outside GOOGLE_DOC_ID_LENS.
+        (
+            "Stripe live key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/sk_fake_agzEZ9gCn1PkSMUwlUWRUCM5", // pragma: allowlist secret
+        ),
+        (
+            "Google API key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AIzabIyOPcjDbcPPh0Gmu5TBGMCIPUkQEPOD9oQ", // pragma: allowlist secret
+        ),
+        (
+            "GitLab token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/glpfk-p22pgHyyOAS6GV1bzsfl", // pragma: allowlist secret
+        ),
+        (
+            "npm token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/npm_r98TKQUmou8MlZZVJRAXgazFWJ1OW6GtcyXF", // pragma: allowlist secret
+        ),
+        (
+            "Hugging Face token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/hf_Z687CfNSvP5QQzSxexvprga3UBkYilM0Zv", // pragma: allowlist secret
+        ),
+        (
+            "published id one character short of 86",
+            "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U/pub", // pragma: allowlist secret
+        ),
+        // Host tricks: the host must be the exact lowercase string. An
+        // uppercase host or an explicit :443 names the same server, but
+        // Google's share links carry neither, so they stay refused.
+        (
+            "Google host as userinfo before a foreign host",
+            "https://docs.google.com@evil.example/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host as a subdomain of a foreign host",
+            "https://docs.google.com.evil.com/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "uppercase Google host",
+            "https://DOCS.GOOGLE.COM/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host with an explicit port",
+            "https://docs.google.com:443/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+    ] {
+        assert!(
+            matches!(check_secret(tok), Err(FilterReject::PotentialSecret { .. })),
+            "#8589/#277 ({label}) must STILL be refused: {tok}"
+        );
+    }
+
+    // KNOWN BOUND: a BARE document id is character-for-character a 44-char
+    // mixed-case credential, so it stays refused. #8589's closure asks for it
+    // to store; no shape test can grant that without also admitting the 34-char
+    // credential above. Only the URL position is exempt.
+    assert!(
+        check_secret("17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk").is_err(),
+        "#8589: a bare document id is indistinguishable from a credential"
+    );
+}
+
+/// Why (issues #8589, #277): `is_readable_alpha_run` admits a long alphabetic
+/// run in a path segment, which is exactly where a generated blob parked as a
+/// filename lands. This corpus wraps encoder output in a Java source path and
+/// counts misses, so a loosening of the run rule shows up as a number.
+///
+/// Measured at this seed, 20k tokens per row. `origin/main` (`186b51e17`) and
+/// this branch are identical in every row. The first cut of #8589, which only
+/// capped the longest CamelCase word, raised the 20- and 24-byte rows:
+///
+/// ```text
+///   input bytes   base64 (main / first cut)   base64url (main / first cut)
+///        20             15 / 47                    19 / 53
+///        24             10 / 22                    10 / 22
+///        32              0 / 1                      0 / 0
+///        40              0                          0
+///        48              0                          0
+/// ```
+///
+/// The 40- and 48-byte rows (54 and 64 characters) were measured on this
+/// branch only. They carry alphabetic runs well past `MAX_PATH_WORD_LEN`, so
+/// they exercise the long-run rule; a 15-byte blob (20 characters) never
+/// reaches it. The residue at 20-24 bytes is not this rule's: those blobs are
+/// short enough that a `/`-free run has no digit and falls to FN-2 (#1484).
+/// What: a ratchet, not a pass mark.
+/// Test: itself.
+#[test]
+fn path_wrapped_encoder_blobs_stay_flagged_after_8589() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x8589_0000_0000_0001;
+    for (url_safe, input_len, ceiling) in [
+        (false, 20usize, 15usize),
+        (false, 24, 10),
+        (false, 32, 0),
+        (false, 40, 0),
+        (false, 48, 0),
+        (true, 20, 19),
+        (true, 24, 10),
+        (true, 32, 0),
+        (true, 40, 0),
+        (true, 48, 0),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(url_safe);
+        let mut buf = vec![0u8; input_len];
+        let mut misses = 0usize;
+        for _ in 0..N {
+            rng.fill(&mut buf);
+            let tok = format!("src/main/java/{}.java", b64_encode(&buf, &alphabet, false));
+            if find_secret_token(&tok).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#8589 ratchet: path-wrapped {} at {input_len} input bytes missed \
+             {misses} of {N}, above the pinned ceiling {ceiling}. The long-run \
+             rule in is_readable_alpha_run is admitting encoder output.",
+            if url_safe { "base64url" } else { "base64" }
+        );
+    }
+}
+
+// ---- Issues #277 and #8589, round 3: identifier filenames and small families ----
+
+/// Every row whose `check_secret` verdict is not `refused`, formatted for an
+/// assertion message, so one run names every mismatching row at once.
+fn verdict_mismatches(rows: &[&str], refused: bool) -> Vec<String> {
+    rows.iter()
+        .filter(|tok| check_secret(tok).is_err() != refused)
+        .map(|tok| format!("{tok} -> {:?}", check_secret(tok)))
+        .collect()
+}
+
+/// Why (issue #277): 70% of the memories the kuzu import still refused carry a
+/// `<Stem>.<ext>` file name that is an ordinary identifier but misses the
+/// `is_symbol_path_segment` word floor (`BituKura.java`: no word of five
+/// letters) or is a 20+ character name with a digit (`BorFuigebWaokdaw7.java`),
+/// which the whole-segment mixed-case test refuses.
+/// What: identifier file names in the shapes the import refused (letters
+/// invented), each refused before `is_identifier_file_segment`, then the
+/// shapes the rule still refuses on purpose.
+/// Test: itself.
+#[test]
+fn identifier_file_names_are_not_flagged_after_277() {
+    let accepted = [
+        // Two four-letter Title words.
+        "mape/hwl/niiw/BituKura.java",
+        // A four-capital acronym and two four-letter Title words.
+        "ucr/lnt/KDVBRolaTavu.java",
+        // A 17-character stem with one digit run.
+        "ona/sbw/ku/BorFuigebWaokdaw7.java",
+        // A 22-character stem with one digit run.
+        "edo/wkm/ceod/DoravelMunitokGesaPola7.java",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: identifier file names must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // KNOWN BOUND: an acronym plus a short word (vowel share 14%), a word
+    // mean of 3, and a lowercase first word are what random stems look like,
+    // so they stay refused. Most of the 3,057 memories the import still
+    // refuses carry the first shape.
+    let still_refused = [
+        "ucr/lnt/ruld/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTom.java",
+        "lib/utils/getUserId.java",
+    ];
+    let moved = verdict_mismatches(&still_refused, true);
+    assert!(
+        moved.is_empty(),
+        "#277 known bound moved; update the #8589 changelog:\n{}",
+        moved.join("\n")
+    );
+    let cfg = FilterConfig::default();
+    for path in accepted {
+        let prose = format!("The pricing adapter is defined in {path} for now");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}"
+        );
+    }
+}
+
+/// Why (issue #277): each clause of `is_identifier_file_segment` keeps one
+/// class of generated or credential-shaped file name out, so each needs a row
+/// just outside it.
+/// What: an inside and an outside row per clause of the predicate, then rows
+/// outside each clause refused end to end by `check_secret`.
+/// Test: itself.
+#[test]
+fn identifier_file_name_clause_boundaries_after_277() {
+    // The extension and acronym limits are pinned on the predicate: a
+    // six-letter extension or a six-capital acronym is itself a five-letter
+    // word, so `is_symbol_path_segment` admits those rows end to end anyway.
+    for (clause, seg, admitted) in [
+        ("extension of 5, inside", "BituKura.abcde", true),
+        ("extension of 6, outside", "BituKura.abcdef", false),
+        ("extension with a capital, outside", "BituKura.Java", false),
+        (
+            "extension opening with a digit, outside",
+            "BituKura.7z",
+            false,
+        ),
+        ("acronym of 5, inside", "KDVBQRolaTavu.java", true),
+        ("acronym of 6, outside", "KDVBQXRolaTavu.java", false),
+        ("one digit run, inside", "Bora4FuigebWaok.java", true),
+        ("two digit runs, outside", "Bora4Fuigeb7Waok.java", false),
+        ("one stray letter, inside", "BituKura-a7.java", true),
+        ("two stray letters, outside", "BituKura-a7b.java", false),
+        ("Title first word, inside", "RateCode.java", true),
+        ("lowercase first word, outside", "rateCode.java", false),
+        // 12 letters in 3 words is a mean of exactly 4; 11 is under.
+        ("mean word length 4, inside", "BankKovaLett.java", true),
+        ("mean word length 11/3, outside", "BankKovLett.java", false),
+        // 6 vowels of 22 letters is 27.3%; 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel.java", true),
+        (
+            "vowel floor, outside",
+            "DrenkPlostVarmikStuvelGrap.java",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            is_identifier_file_segment(seg),
+            admitted,
+            "#277 {clause}: is_identifier_file_segment({seg})"
+        );
+    }
+    let refused = [
+        // Extension of six characters, no five-letter word.
+        "ucr/lnt/BituKura.abc123",
+        // Extension with an uppercase letter.
+        "ucr/lnt/BituKura.Java",
+        // Two digit runs in one piece.
+        "ona/sbw/Bora4Fuigeb7Waok.java",
+        // Two stray letters in one piece.
+        "ucr/lnt/BituKura-a7b.java",
+        // Mean word length 2.
+        "ucr/lnt/AbCdEfGh.json",
+        // A vowel-free word pulls a short stem under the vowel floor.
+        "src/main/java/com/example/Http2ClientPool.java",
+        // A stray capital inside a word.
+        "src/main/java/OAuth2AuthorizationRequestRedirectFilter.java",
+        // Credential stems.
+        "keys/ghp_abcdefghijklmnopqrstuvwxyz0123456789.json", // pragma: allowlist secret
+        "keys/AKIAIOSFODNN7EXAMPLE.json",                     // pragma: allowlist secret
+        "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json",   // pragma: allowlist secret
+        "keys/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1.json",       // pragma: allowlist secret
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these file names must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): four small families of the refused import memories are
+/// not paths at all — a GitHub noreply commit email, an environment variable
+/// holding an ordinary URL, an npm `name@version` inside a path, and a ticket
+/// key leading a CamelCase title. Each has a fixed grammar, so each gets its
+/// own narrow matcher.
+/// What: three accepted rows per family (letters invented), each refused
+/// before the matcher existed.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277() {
+    let accepted = [
+        // GitHub noreply commit emails.
+        "70822+tahrisrut@users.noreply.github.com",
+        "603736402+Tafafeo-Coz@users.noreply.github.com",
+        "41234+Kovu7Delam@users.noreply.github.com",
+        // KEY=<ordinary URL>.
+        "WIDGET_CACHE_REDIS_URL=redis://cache-host:6379",
+        "METRICS_INGEST_ENDPOINT=https://metrics.example.com/v1/ingest",
+        "LIASRO_EEUPC_NOREPEVF_UKU=fcbp://wejemvovc:3073",
+        // npm name@version in a path.
+        "bovlat/zenimo-kr-tapuvelosk@3.1.5",
+        "node_modules/lekaro-vitun@2.14.0/dist/index.js",
+        "fomik/rudavel-sotep@12.0.4-beta.2",
+        // Ticket key plus CamelCase title.
+        "QX-4821-TelvoMarunDesiKobat",
+        "ABCDEFGHIJ-123456-VorinTapelMusko",
+        "KR-77-HovaPlentiDrasoMik",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): the four matchers above each admit one grammar, so a row
+/// just outside each grammar must fall back to the heuristics and be refused.
+/// What: boundary rows per family, all refused by `check_secret`.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_boundaries_after_277() {
+    let refused = [
+        // noreply: a lookalike host, a non-digit id, a login with `_`.
+        "70822+tahrisrut@users.noreply.github.com.evil.io",
+        "7a822+Tahrisrut9@users.noreply.github.com",
+        "70822+Tahri_srut9@users.noreply.github.com",
+        // noreply: a 13-digit id, a 40-char login, and a base62 key as the
+        // login, which only the `looks_like_secret(login)` screen refuses.
+        "1234567890123+tahrisrut@users.noreply.github.com",
+        "70822+tahrisrutkovudelamtafafeocozbimaselovipa@users.noreply.github.com",
+        "70822+aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1abcde@users.noreply.github.com", // pragma: allowlist secret
+        // KEY=url: userinfo with and without a password, a secret in the path,
+        // and a credential-shaped key.
+        "DB_URL=postgres://svcuser:hunter2hunter2@db.example.com/app", // pragma: allowlist secret
+        "DB_URL=postgres://Svcuser9@db.example.com:5432/app",
+        // `svcuser@1.2.3` reads as an npm segment, so `is_ordinary_url` passes
+        // this URL and only the `no_userinfo` clause refuses it.
+        "DB_URL=redis://svcuser@1.2.3/app",
+        "HOOK_URL=https://hooks.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1=https://example.com/x", // pragma: allowlist secret
+        // npm: a two-part version, an uppercase name.
+        "bovlat/zenimo-kr-tapuvelosk@3.15",
+        "bovlat/Zenimo-Kr-Tapuvelosk@3.1.5",
+        // Ticket: an 11-letter key, a 7-digit number, an underscore, a stray
+        // capital, a digit in the title.
+        "ABCDEFGHIJK-4821-TelvoMarunDesiKobat",
+        "QX-4821123-TelvoMarunDesiKobat",
+        "QX4821_TelvoMarunDesiKobat",
+        "QX-4821-TelvoXMarunDesiKobat",
+        "QX-4821-Telvo9MarunDesiKobat",
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): 545 refused import memories carry a long CamelCase class
+/// name whose vowel share sits between 27% and 30%, under the #8589 floor.
+/// English identifiers run 35-40% and base64 letters about 23%, so 27% keeps
+/// the margin over base64 while admitting those names.
+/// What: long runs at 27.3%, 27.6% and 28% vowels, in a file name, a directory
+/// and a URL path, each refused at the 30% floor.
+/// Test: itself.
+#[test]
+fn long_class_names_at_27_percent_vowels_are_not_flagged_after_277() {
+    let accepted = [
+        "ivp/bsl/DrenkPlostVarmikStuvel.java",
+        "src/main/GrintSkolvarMendrupTaskelFrom.java",
+        "lib/GrintSkolvarMendrupTaskel/core.py",
+        "https://git.example.com/tree/main/GrintSkolvarMendrupTaskel",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: long class names at 27% vowels must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // 7 vowels of 26 letters is 26.9%, under the floor.
+    assert!(
+        check_secret("ivp/bsl/DrenkPlostVarmikStuvelGrap.java").is_err(),
+        "#277: a 26.9% vowel share is under the 27% floor"
+    );
+}
+
+/// `len` characters drawn from `alphabet` by `rng`.
+fn random_stem(rng: &mut Xorshift, alphabet: &[u8], len: usize) -> String {
+    (0..len)
+        .map(|_| alphabet[(rng.next_u64() >> 24) as usize % alphabet.len()] as char)
+        .collect()
+}
+
+/// Why (issue #277): `is_identifier_file_segment` admits a file name by the
+/// shape of its stem, which is where a generated key saved as a file name
+/// lands. This corpus parks random base62 and base64url stems as
+/// `src/main/<stem>.json` and counts admits, so a loosening shows up as a
+/// number.
+///
+/// Measured at this seed, 20k stems per row, `c545780f4` before the rule and
+/// this change after it:
+///
+/// ```text
+///   stem chars   base62 (before / after)   base64url (before / after)
+///       16            445 / 447                  385 / 389
+///       20            203 / 205                  202 / 202
+///       24              2 / 2                     40 / 40
+///       32              0 / 0                      6 / 6
+///       40              0 / 0                      3 / 3
+/// ```
+///
+/// A looser floor below 20 characters measured +212 and +233 at 16, and a
+/// lowercase first word +4 and +8; see `is_identifier_word_run`.
+/// What: a ratchet, 20k stems per row at a fixed seed.
+/// Test: itself.
+#[test]
+fn random_stems_as_file_names_stay_flagged_after_277() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x0277_0000_0000_0001;
+    let url_alphabet = b64_alphabet(true);
+    let base62 = &url_alphabet[..62];
+    for (label, alphabet, stem_len, ceiling) in [
+        ("base62", base62, 16usize, 447usize),
+        ("base62", base62, 20, 205),
+        ("base62", base62, 24, 2),
+        ("base62", base62, 32, 0),
+        ("base62", base62, 40, 0),
+        ("base64url", &url_alphabet[..], 16, 389),
+        ("base64url", &url_alphabet[..], 20, 202),
+        ("base64url", &url_alphabet[..], 24, 40),
+        ("base64url", &url_alphabet[..], 32, 6),
+        ("base64url", &url_alphabet[..], 40, 3),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let admits = (0..N)
+            .filter(|_| {
+                let tok = format!(
+                    "src/main/{}.json",
+                    random_stem(&mut rng, alphabet, stem_len)
+                );
+                find_secret_token(&tok).is_none()
+            })
+            .count();
+        assert!(
+            admits <= ceiling,
+            "#277 ratchet: {label} stems of {stem_len} characters as file names \
+             admitted {admits} of {N}, above the pinned ceiling {ceiling}"
+        );
+    }
+}
+
+/// Why (#277 review): `is_identifier_file_segment` judges a stem by word
+/// shape, so a passphrase built from words with one digit group reads as an
+/// identifier. It was refused before #277 and is admitted now.
+/// What: pins that bound, so a change in either direction is deliberate.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_277() {
+    assert!(
+        find_secret_token("vault/CorrectHorseBatteryStaple7.txt").is_none(),
+        "KNOWN ACCEPTED BOUND (#277): a word-composed passphrase with one digit \
+         group, used as a file stem, is admitted (same class as FN-2, #1484). \
+         If it now FLAGS, the bound tightened — update the doc on \
+         `is_identifier_file_segment`."
+    );
+}
