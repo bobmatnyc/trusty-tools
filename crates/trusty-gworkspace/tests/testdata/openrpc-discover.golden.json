@@ -146,7 +146,7 @@
       ]
     },
     {
-      "description": "Create, read, update, or delete Google Calendars.",
+      "description": "Create, read, update, or delete Google Calendars. update takes summary, description and time_zone flat, as an 'updates' object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_calendars",
       "params": [
         {
@@ -183,36 +183,38 @@
           }
         },
         {
-          "description": "",
+          "description": "Calendar description (create/update).",
           "name": "description",
           "required": false,
           "schema": {
+            "description": "Calendar description (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "Calendar title (create).",
+          "description": "Calendar title (create/update).",
           "name": "summary",
           "required": false,
           "schema": {
-            "description": "Calendar title (create).",
+            "description": "Calendar title (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "IANA time zone, e.g. 'America/New_York' (create/update). Maps to timeZone.",
           "name": "time_zone",
           "required": false,
           "schema": {
+            "description": "IANA time zone, e.g. 'America/New_York' (create/update). Maps to timeZone.",
             "type": "string"
           }
         },
         {
-          "description": "Patch body for update.",
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
-            "description": "Patch body for update.",
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }
@@ -864,7 +866,7 @@
       "x-google-scopes": []
     },
     {
-      "description": "CRUD Gmail labels.",
+      "description": "CRUD Gmail labels. update takes name, label_list_visibility, message_list_visibility and color flat, as an 'updates' object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_gmail_labels",
       "params": [
         {
@@ -892,42 +894,56 @@
           }
         },
         {
-          "description": "",
+          "description": "Label color {textColor, backgroundColor} (update).",
+          "name": "color",
+          "required": false,
+          "schema": {
+            "description": "Label color {textColor, backgroundColor} (update).",
+            "type": "object"
+          }
+        },
+        {
+          "description": "Label ID (required for update/delete).",
           "name": "label_id",
           "required": false,
           "schema": {
+            "description": "Label ID (required for update/delete).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "labelShow, labelShowIfUnread or labelHide (create/update). Maps to labelListVisibility.",
           "name": "label_list_visibility",
           "required": false,
           "schema": {
+            "description": "labelShow, labelShowIfUnread or labelHide (create/update). Maps to labelListVisibility.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "show or hide (create/update). Maps to messageListVisibility.",
           "name": "message_list_visibility",
           "required": false,
           "schema": {
+            "description": "show or hide (create/update). Maps to messageListVisibility.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Label name (create/update).",
           "name": "name",
           "required": false,
           "schema": {
+            "description": "Label name (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }

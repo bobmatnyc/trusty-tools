@@ -13,17 +13,20 @@ use serde_json::{Value, json};
 /// What: Pushes `manage_calendars`, `manage_events`, and `query_free_busy`.
 /// Test: Covered via `tool_list_response()` in `tools::tests`.
 pub(super) fn append(tools: &mut Vec<Value>) {
+    // #8632: update applies the flat fields too; they were silently ignored.
     tools.push(tool(
         "manage_calendars",
-        "Create, read, update, or delete Google Calendars.",
+        "Create, read, update, or delete Google Calendars. update takes summary, \
+         description and time_zone flat, as an 'updates' object, or both: the two are \
+         merged, and a field set in both with different values is an error.",
         json!({
             "account": account_schema(),
             "action": action_enum(&["list", "create", "update", "delete"]),
             "calendar_id": { "type": "string", "description": "Calendar ID (required for update/delete)." },
-            "summary": { "type": "string", "description": "Calendar title (create)." },
-            "description": { "type": "string" },
-            "time_zone": { "type": "string" },
-            "updates": { "type": "object", "description": "Patch body for update." },
+            "summary": { "type": "string", "description": "Calendar title (create/update)." },
+            "description": { "type": "string", "description": "Calendar description (create/update)." },
+            "time_zone": { "type": "string", "description": "IANA time zone, e.g. 'America/New_York' (create/update). Maps to timeZone." },
+            "updates": { "type": "object", "description": "Raw patch body (update). Merged with the flat fields." },
         }),
         &["action"],
     ));
