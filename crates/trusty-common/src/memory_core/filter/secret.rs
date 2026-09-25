@@ -1235,9 +1235,9 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
 /// CamelCase title ([`is_ticket_camel_title`]);
 /// `+`-bearing tokens that are `+`-joined word phrases (checked next, and the
 /// only way a `+` token can be structural); (a) `=`-containing tokens where the
-/// LHS is a word segment that does not itself [`looks_like_secret`] (#8589
-/// review) and the RHS is itself structural (a word segment OR a
-/// slash-path), checked before the slash-path branch so that tokens like
+/// LHS is a non-empty word segment and the RHS is itself structural (a word
+/// segment OR a slash-path), and neither side [`looks_like_secret`] on its own
+/// (#8589 review), checked before the slash-path branch so that tokens like
 /// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens whose
 /// `/`-segments pass [`segments_read_as_path`] (#8589); or (c) `-`/`_`/`.`-segmented
 /// compound identifiers where each segment is a single human-readable word.
@@ -1279,10 +1279,12 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
     // and fails `is_word_segment`.
     //
     // Compositional rule (issue #1676): LHS must be a word segment AND the
-    // RHS must be EITHER a word segment OR a slash-path (all its `/`-separated
-    // segments are word-like). A RHS that is a high-entropy opaque blob — no
-    // slashes, not a simple word — is not structural, so the token falls
-    // through to the entropy heuristics and is correctly flagged.
+    // RHS must be EITHER a word segment that is not itself credential-shaped
+    // OR a slash-path (all its `/`-separated segments are readable). Neither
+    // side may `looks_like_secret` on its own (#8589 review): `is_word_segment`
+    // is a charset test, so a high-entropy RHS such as a base62 key used to
+    // pass it. A screened-out side makes the token non-structural, so it falls
+    // through to the entropy heuristics and is flagged.
     // Exception: RHS that is pure `=` padding is non-structural (base64).
     if token.contains('=') {
         let parts: Vec<&str> = token.splitn(2, '=').collect();
@@ -1295,10 +1297,16 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
             // #8589 review: `is_word_segment` is a charset test, so a random
             // 40-character LHS rode in on any path RHS. The LHS gets the check
             // a bare token gets; it holds no `=`, so this recurses once.
-            if looks_like_secret(lhs) {
+            if lhs.is_empty() || looks_like_secret(lhs) {
                 return false;
             }
-            if is_word_segment(lhs) && (is_word_segment(rhs) || is_slash_path(rhs)) {
+            // #8589 review: the RHS is screened the same way; a `==`-padded or
+            // bare base62 value passed the charset test and was admitted. The
+            // recursion is on a strictly shorter string, so it terminates.
+            let rhs_is_secret = looks_like_secret(rhs);
+            if is_word_segment(lhs)
+                && ((is_word_segment(rhs) && !rhs_is_secret) || is_slash_path(rhs))
+            {
                 return true;
             }
             // #4977: the OR fallback below must not rescue a `/`-bearing RHS
@@ -1311,7 +1319,9 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
             // Fall back to the original OR for semver-operator tokens like
             // `>=value` where the LHS may be a bare `>` and the RHS drives
             // the structural signal.
-            return is_word_segment(lhs) || is_word_segment(rhs);
+            // #8589 review: never on the LHS alone — the RHS must pass the
+            // bare-token check first.
+            return !rhs_is_secret && (is_word_segment(lhs) || is_word_segment(rhs));
         }
     }
     // (b) Path/slug shape: every `/`-separated segment reads as a path segment.

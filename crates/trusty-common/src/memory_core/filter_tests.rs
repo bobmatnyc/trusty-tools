@@ -4207,3 +4207,81 @@ fn key_equals_path_lhs_is_screened_after_8589() {
         accepted.join("\n")
     );
 }
+
+/// Why (#8589 review, CRITICAL): the `=` branch of `is_structural_token`
+/// checked a `/`-free RHS only for its charset, and its fallback admitted on
+/// a word-shaped LHS alone, so `TOKEN=<secret>` and `TOKEN=<base64>==` were
+/// admitted although the value alone is refused.
+/// What: a bare high-entropy RHS, a `==`-padded RHS and an empty LHS are
+/// refused; ordinary `KEY=value` rows pass; and a generated RHS gets the
+/// verdict it gets standing alone. Only the #1484 bare-token miss (mixed case
+/// with no digit, about 1 in 1,000 base62 values of 40 characters) may pass,
+/// so the ceiling is 20 of 2,000.
+/// Test: itself.
+#[test]
+fn key_equals_value_rhs_is_screened_after_8589() {
+    // Rows are assembled at run time so no `KEY=<value>` literal sits in the
+    // source for a push-time credential scanner to match.
+    let sample = "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1"; // pragma: allowlist secret
+    let blob = "Zm9vYmFyYmF6cXV4UXV1eFRlc3Q0MjAyNg";
+    let rows = [
+        format!("TOKEN={sample}"),
+        format!("TOKEN={blob}=="),
+        format!("api_key={sample}"),
+    ];
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let refused = verdict_mismatches(&rows, true);
+    assert!(
+        refused.is_empty(),
+        "#8589: a credential-shaped RHS must be refused:\n{}",
+        refused.join("\n")
+    );
+    // `find_secret_token` trims a leading `=`, so the empty-LHS shape is
+    // pinned on the predicate.
+    assert!(
+        !is_structural_token(&format!("={sample}")),
+        "#8589: an empty LHS must not make a token structural"
+    );
+    let url_alphabet = b64_alphabet(true);
+    for (label, alphabet) in [
+        ("base62", &url_alphabet[..62]),
+        ("base64url", &url_alphabet[..]),
+    ] {
+        let mut rng = Xorshift(0x8589_0000_0000_00b2);
+        let (mut admits, mut unscreened) = (0usize, 0usize);
+        for _ in 0..2_000 {
+            let rhs = random_stem(&mut rng, alphabet, 40);
+            if check_secret(&format!("TOKEN={rhs}")).is_ok() {
+                admits += 1;
+                unscreened += usize::from(check_secret(&rhs).is_err());
+            }
+        }
+        assert_eq!(
+            unscreened, 0,
+            "#8589: {unscreened} random 40-char {label} values refused alone \
+             were admitted after `TOKEN=`"
+        );
+        assert!(
+            admits <= 20,
+            "#8589: random 40-char {label} RHS admitted {admits} of 2000"
+        );
+    }
+    let accepted = verdict_mismatches(
+        &[
+            "SOME_ENV=src/x.rs",
+            "RATE_SRC=src/main.rs",
+            "LOG_LEVEL=debug",
+            "MODE=production",
+            "PORT=8080",
+            "RETRIES=3",
+            "region=us-east-1",
+            ">=2-medium->REQUEST_CHANGES",
+        ],
+        false,
+    );
+    assert!(
+        accepted.is_empty(),
+        "#8589: ordinary KEY=value rows must pass:\n{}",
+        accepted.join("\n")
+    );
+}
