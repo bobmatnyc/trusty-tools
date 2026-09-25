@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.27.0] — 2026-09-25
+
+### Added
+
+- `trusty-memory import kuzu` runs the palace's secret check on every string a kuzu store supplies that would become a tag or a triple, not only on memory content: user, session and other column values, metadata keys and values, `content_hash`, entity ids, names and types, relationship types, and `Memory.id`. A refused value is dropped and counted; a refused `Memory.id` refuses the whole memory, and the memory is listed as `(secret-shaped id)`.
+- Each store line and the run totals tally the refusals by detector rule class (`provider_prefix`, `aws_key_id`, `base64_blob`, `mixed_case_alnum`, `other`) and never print the refused token.
+- `import kuzu --update` retracts a kuzu-imported MENTIONS or RELATES_TO triple that the store no longer carries, and prints one line per retraction with its memory id; `--update --dry-run` counts the retractions without making them. Triples from other writers are never retracted, and neither are the edges of a drawer whose recorded store is another store that still exists.
+- The store line and the totals count memories skipped for empty content, and count the edges in relationship tables the import does not map (`HAS_KEYWORD`, `CO_OCCURS_WITH`, `CONSOLIDATED_INTO`, `BELONGS_TO_SESSION`) by table.
+- A palace locked by another process is refused with a message that names both possible holders, a daemon or another trusty-memory command.
+- `trusty-memory import kuzu` discovers kuzu-memory stores (`<project>/.kuzu-memory/memories.db`, walking `$HOME` to depth 5 with `--discover`, plus any `--root`) or takes one with `--from`, and imports their memories and knowledge-graph edges (Entity nodes, MENTIONS, RELATES_TO) into the palace `resolve_palace` names for each project; every store line names the palace and the rule that chose it. A walk refuses to run while `TRUSTY_MEMORY_PALACE` is set, since that variable would send every store into one palace. The store is read read-only through kuzu-memory's own Python interpreter (`--python` overrides it; `--bridge-timeout-secs` bounds each export). Re-running is idempotent: each drawer carries the store's `Memory.id` as its identity plus its content hash, so a moved or re-cloned store imports nothing new; unchanged memories and already-active triples are skipped, a memory changed in kuzu since import is reported and rewritten in place only with `--update`, a secret-shaped memory is refused and its id reported, and an id another live store holds with other content is skipped and reported. A palace whose metadata or drawer table cannot be read is left untouched. `--dry-run` reads each palace from a temporary copy, so it writes nothing to the palace and leaves no export file behind. A real run refuses to start while the trusty-memory daemon is running: stop the daemon first.
+
+### Fixed
+
+- `trusty-memory stop` finds the running daemon again. The process scan never loaded each process's command line, so it matched no process at all and `stop` always reported "No daemon running". The scan now reads the command line and matches only daemon-mode processes (`serve --foreground`, `serve --http`); it no longer counts the `serve --stdio` bridge that each MCP client session runs, so `stop` does not cut a session off from its memory tools.
+- `trusty-memory import kuzu` now refuses to run while the daemon is running, as documented; the same broken scan let it start while the daemon was still loading palaces and not yet listening on its socket.
+- `trusty-memory stop` exits non-zero when a daemon is still alive after SIGKILL. It used to print a warning and exit 0, so a script that stopped the daemon before an import went on against a live daemon.
+
+### Changed
+
+- `trusty-memory migrate kuzu-data` is deprecated: it prints a warning and forwards to `import kuzu --from <path> --palace <name>`. `--limit` is refused, because `import kuzu` has no limit and ignoring the flag would turn a trial run into a full import; use `--dry-run` to preview.
+
+### Removed
+
+- The `commands::kuzu_migrate` redb reader (`KuzuEntity`, `KuzuRelation`, `entity_uuid`, `entity_to_drawer`, `relation_to_triple`, `discover_schema`, `read_entities`, `read_relations`, `ENTITIES_TABLE`, `RELATIONS_TABLE`). It read a `store.redb` layout real kuzu-memory stores never had; `commands::kuzu_import` replaces it.
+
 ## [0.26.2] — 2026-09-23
 
 ### Fixed

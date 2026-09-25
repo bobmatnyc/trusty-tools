@@ -1,3 +1,0 @@
-Fixed
-- `trusty-memory stop` finds the running daemon again. The process scan never loaded each process's command line, so it matched no process at all and `stop` always reported "No daemon running". The scan now reads the command line and matches only daemon-mode processes (`serve --foreground`, `serve --http`); it no longer counts the `serve --stdio` bridge that each MCP client session runs, so `stop` does not cut a session off from its memory tools.
-- `trusty-memory import kuzu` now refuses to run while the daemon is running, as documented; the same broken scan let it start while the daemon was still loading palaces and not yet listening on its socket.
