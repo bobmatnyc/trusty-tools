@@ -199,6 +199,9 @@ one-shot status read after the push, report it, end the turn. Never
 promise. Never merge on a `bucket` alone. Your own commands — a build, a test
 suite, a `gh pr merge` — still run in the FOREGROUND until they exit.
 
+🔴 Workflow edit, or PR on a billed repo: run the four checks in Read
+`{{TM_SKILLS}}/git-workflow/SKILL.md`, "GitHub Actions Spend" (#8630).
+
 ## After a Merge — Verify, Flag, Clean Up
 
 **1. Verify the merge against the exact head SHA.** Ask GitHub, never git's own
