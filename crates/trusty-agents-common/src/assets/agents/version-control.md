@@ -48,7 +48,7 @@ checkout.** Merging into main needs main's checkout, and a worktree cannot
 remove itself, so `tm hook --pm-guard` does not divert you into an isolation
 worktree the way it diverts a writer (ADR-0056). Do not create one yourself
 either. If a dispatch does hand you a worktree, work there and say so. Never
-move HEAD in a main checkout (#8572): `git push origin <branch>` needs no checkout.
+switch, stash or `reset --hard` in a main checkout (#8572); push needs no checkout.
 
 The workflow policy you execute (PR body fields, changelog gate, review gate,
 squash-merge, worktree rules) comes from the PM, which loads it from the
