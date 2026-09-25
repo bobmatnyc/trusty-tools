@@ -249,27 +249,38 @@ pub fn select_asset_suffix(
 /// profile is out of scope for a clean install step, so we hand the user the
 /// exact commands instead of leaving a binary that silently fails to start.
 ///
-/// What: Returns a multi-line string with the ONNX Runtime 1.20.1 download URL
-/// and the `export ORT_DYLIB_PATH=…` line for the host architecture (`aarch64`
-/// for arm64 targets, `x64` otherwise), mirroring the `ORT-RUNTIME-NOTE.txt`
-/// the release workflow packages.
+/// What: Returns a multi-line string with the ONNX Runtime
+/// `ORT_RUNTIME_VERSION` download URL and the `export ORT_DYLIB_PATH=…` line
+/// for the host architecture (`aarch64` for arm64 targets, `x64` otherwise),
+/// mirroring the `ORT-RUNTIME-NOTE.txt` the release workflow packages.
 ///
-/// Test: `tests::instructions_mention_dylib_and_arch`.
+/// Test: `tests::instructions_mention_dylib_and_arch`,
+/// `tests::instructions_name_the_1_24_runtime_line`.
 pub fn ort_dylib_instructions(target: &str) -> String {
     let arch = if target.starts_with("aarch64") {
         "aarch64"
     } else {
         "x64"
     };
+    // #8612: was a hardcoded 1.20.1, which ort rc.12 (api-24) refuses to load.
+    let v = ORT_RUNTIME_VERSION;
     format!(
         "This portable ONNX-Runtime build loads libonnxruntime.so at runtime and \
-         will not start until ORT_DYLIB_PATH is set. Install ONNX Runtime 1.20.1 and \
-         export the path:\n  \
-         curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-{arch}-1.20.1.tgz | tar xz -C /opt\n  \
-         export ORT_DYLIB_PATH=/opt/onnxruntime-linux-{arch}-1.20.1/lib/libonnxruntime.so.1.20.1\n\
+         will not start until ORT_DYLIB_PATH is set. Install ONNX Runtime {v} (any \
+         1.24.x works; older runtimes are refused) and export the path:\n  \
+         curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v{v}/onnxruntime-linux-{arch}-{v}.tgz | tar xz -C /opt\n  \
+         export ORT_DYLIB_PATH=/opt/onnxruntime-linux-{arch}-{v}/lib/libonnxruntime.so.{v}\n\
          (add the export line to your shell profile to persist it)."
     )
 }
+
+/// ONNX Runtime release the load-dynamic install note points at.
+///
+/// #8612: `ort` 2.0.0-rc.12 with `api-24` refuses any runtime below 1.24, so
+/// the note named 1.20.1 sent users to a library that fails at startup. Keep
+/// equal to `ORT_VERSION` in `.github/workflows/al2023-build.yml`, whose
+/// runtime load check proves that version works.
+const ORT_RUNTIME_VERSION: &str = "1.24.2";
 
 #[cfg(test)]
 mod tests {
@@ -451,9 +462,26 @@ mod tests {
     fn instructions_mention_dylib_and_arch() {
         let x64 = ort_dylib_instructions(TARGET_LINUX_X86_64);
         assert!(x64.contains("ORT_DYLIB_PATH"));
-        assert!(x64.contains("onnxruntime-linux-x64-1.20.1"));
+        assert!(x64.contains("onnxruntime-linux-x64-1.24.2"));
 
         let arm = ort_dylib_instructions(TARGET_LINUX_ARM64);
-        assert!(arm.contains("onnxruntime-linux-aarch64-1.20.1"));
+        assert!(arm.contains("onnxruntime-linux-aarch64-1.24.2"));
+    }
+
+    /// Why (#8612): `ort` 2.0.0-rc.12 (`api-24`) refuses a runtime below 1.24,
+    /// so a note pointing at 1.20.1 hands the user a library that never loads.
+    /// What: Asserts the pinned version is on the 1.24 line and that the note
+    /// names it in both the download URL and the `ORT_DYLIB_PATH` line, with no
+    /// 1.20 reference left.
+    /// Test: This is the test.
+    #[test]
+    fn instructions_name_the_1_24_runtime_line() {
+        assert!(ORT_RUNTIME_VERSION.starts_with("1.24."));
+        for target in [TARGET_LINUX_X86_64, TARGET_LINUX_ARM64] {
+            let note = ort_dylib_instructions(target);
+            assert!(note.contains("/download/v1.24.2/"), "{note}");
+            assert!(note.contains("libonnxruntime.so.1.24.2"), "{note}");
+            assert!(!note.contains("1.20"), "stale 1.20 runtime in: {note}");
+        }
     }
 }
