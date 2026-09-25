@@ -4,7 +4,7 @@
 //! the 500-SLOC production cap. This is the credential-detection domain —
 //! `find_secret_token` and the `looks_like_secret` predicate tree it drives —
 //! that accreted across issues #1481, #2442, #2800, #4312, #4739, #4898, #4977,
-//! #5043, #5513 and #7482.
+//! #5043, #5513, #7482 and #8589.
 //! What: `check_secret` (the entry point `super::FilterConfig::apply` calls),
 //! `find_secret_token`, and the structural-token / charset predicates that
 //! separate real credentials from git SHAs, paths, URLs, and symbol paths.
@@ -677,31 +677,31 @@ pub(crate) const SYMBOL_SEGMENT_SHORT_WORD_LEN: usize = 3;
 /// Test: `rust_symbol_paths_are_not_flagged`,
 /// `symbol_path_keyhole_does_not_shelter_credentials`.
 pub(crate) fn camel_word_stats(seg: &str) -> (usize, usize) {
-    fn tally(word: &[u8], longest: &mut usize, strays: &mut usize) {
-        let letters = word.iter().filter(|b| b.is_ascii_alphabetic()).count();
-        *longest = (*longest).max(letters);
-        if letters == 1 {
-            *strays += 1;
-        }
-    }
-    let b = seg.as_bytes();
-    let (mut longest, mut strays, mut start) = (0usize, 0usize, 0usize);
-    for i in 1..b.len() {
-        let (prev, cur) = (b[i - 1], b[i]);
-        let boundary = (cur.is_ascii_uppercase() && !prev.is_ascii_uppercase())
-            || (cur.is_ascii_uppercase()
-                && prev.is_ascii_uppercase()
-                && b.get(i + 1).is_some_and(|n| n.is_ascii_lowercase()))
-            || (cur.is_ascii_digit() != prev.is_ascii_digit());
-        if boundary {
-            tally(&b[start..i], &mut longest, &mut strays);
+    camel_words(seg.as_bytes()).fold((0, 0), |(longest, strays), w| {
+        let letters = w.iter().filter(|b| b.is_ascii_alphabetic()).count();
+        (longest.max(letters), strays + usize::from(letters == 1))
+    })
+}
+
+/// The CamelCase words of `b`, split at the boundaries [`camel_word_stats`]
+/// documents. Shared by that function and [`is_readable_alpha_run`] (#8589).
+fn camel_words(b: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0usize;
+    (1..=b.len()).filter_map(move |i| {
+        let boundary = i == b.len() || {
+            let (prev, cur) = (b[i - 1], b[i]);
+            (cur.is_ascii_uppercase() && !prev.is_ascii_uppercase())
+                || (cur.is_ascii_uppercase()
+                    && prev.is_ascii_uppercase()
+                    && b.get(i + 1).is_some_and(|n| n.is_ascii_lowercase()))
+                || (cur.is_ascii_digit() != prev.is_ascii_digit())
+        };
+        boundary.then(|| {
+            let word = &b[start..i];
             start = i;
-        }
-    }
-    if start < b.len() {
-        tally(&b[start..], &mut longest, &mut strays);
-    }
-    (longest, strays)
+            word
+        })
+    })
 }
 
 /// Number of maximal ASCII-digit runs in `s`.
@@ -837,8 +837,8 @@ pub(crate) fn is_segmented_identifier(token: &str) -> bool {
     segments.iter().all(|s| is_human_word_segment(s))
 }
 
-/// Longest unbroken alphabetic run a `/`-segment may carry and still read as a
-/// path segment rather than an encoded run.
+/// Longest word a `/`-segment may carry and still read as a path segment rather
+/// than an encoded run.
 ///
 /// Why (issue #4977): the charset a path segment is drawn from is the charset an
 /// encoded blob is drawn from, so charset alone cannot separate them and neither
@@ -847,32 +847,86 @@ pub(crate) fn is_segmented_identifier(token: &str) -> bool {
 /// `real_secrets_still_blocked_after_4312_charset_gate` requires to stay flagged.
 /// Length is what separates them: a path segment's words are words, and words
 /// end.
-/// What: inclusive maximum; a segment carrying a longer alphabetic run is not a
-/// path segment. Tied to [`SECRET_MIN_LEN`] because that is already this
-/// module's statement of "shorter than this cannot be a credential" — the
-/// longest ordinary English word a URL slug carries (`internationalization`, 20)
-/// sits exactly at the boundary and is admitted.
+/// What: inclusive maximum length of an alphabetic run, and of any CamelCase
+/// word inside a longer run ([`is_readable_alpha_run`]); a segment carrying a
+/// longer word is not a path segment. Tied to [`SECRET_MIN_LEN`]
+/// because that is already this module's statement of "shorter than this cannot
+/// be a credential" — the longest ordinary English word a URL slug carries
+/// (`internationalization`, 20) sits exactly at the boundary and is admitted.
 /// Test: `slash_bearing_base64_blobs_are_blocked`,
-/// `bare_github_urls_are_not_flagged`.
+/// `bare_github_urls_are_not_flagged`,
+/// `camel_case_source_paths_are_not_flagged_after_8589`.
 pub(crate) const MAX_PATH_WORD_LEN: usize = SECRET_MIN_LEN;
 
-/// Length of the longest unbroken ASCII-alphabetic run in `s`.
+/// Longest all-uppercase word (`HTTP`, `HTTPS`, `DAO`) a long CamelCase run
+/// may carry. See [`is_readable_alpha_run`] (#8589).
+pub(crate) const MAX_ACRONYM_LEN: usize = 5;
+
+/// Minimum mean word length of a CamelCase run longer than
+/// [`MAX_PATH_WORD_LEN`]. See [`is_readable_alpha_run`] (#8589).
+pub(crate) const MIN_MEAN_CAMEL_WORD_LEN: usize = 4;
+
+/// Minimum share of vowels (`aeiouy`, percent) in a CamelCase run longer than
+/// [`MAX_PATH_WORD_LEN`]. English identifiers run 35-40%; base64 letters about
+/// 23%. See [`is_readable_alpha_run`] (#8589).
+pub(crate) const MIN_VOWEL_PERCENT: usize = 30;
+
+/// True when an alphabetic run reads as a path-segment word or a CamelCase
+/// identifier, rather than as an encoded run.
 ///
-/// Why: see [`MAX_PATH_WORD_LEN`] — the discriminator between a path segment and
-/// an encoded run at the one point where case and charset both fail.
-/// What: one pass, digits and punctuation break the run.
-/// Test: `slash_bearing_base64_blobs_are_blocked`.
-pub(crate) fn longest_alpha_run(s: &str) -> usize {
-    let (mut longest, mut cur) = (0usize, 0usize);
-    for c in s.chars() {
-        if c.is_ascii_alphabetic() {
-            cur += 1;
-            longest = longest.max(cur);
-        } else {
-            cur = 0;
-        }
+/// Why (issues #277, #8589): the cap here used to be the whole unbroken
+/// alphabetic run, so a class name such as
+/// `ReservationForecastAdjustmentServiceImpl` (40 letters, five words) read as
+/// an encoded run, and 9,058 of 9,171 memories a kuzu import refused were
+/// source paths. Measuring the longest CamelCase word instead was not enough:
+/// [`camel_words`] folds an uppercase streak into one acronym word, so a random
+/// base64 run such as `CtbSRaHnXUQBzuFosCPKRreEnRKPWJHoWU` decomposes into
+/// short words, passes [`is_symbol_path_segment`], and the
+/// `slash_bearing_base64_blobs_are_blocked` ratchet rose at 20, 24 and 32
+/// input bytes. A long run is therefore admitted only in identifier shape:
+/// every word Title-case or a short acronym (no stray letter), words long
+/// enough on average to be words, and a vowel share English words have.
+/// Base64 changes case about every other letter, so its mean CamelCase word
+/// is under three letters; the vowel floor removed the last generated blob the
+/// shape rules admitted (`SSJyphDcjmbsJvssQghrw`).
+/// What: a run of at most [`MAX_PATH_WORD_LEN`] letters passes unchanged. A
+/// longer run passes when every [`camel_words`] word has 2 to
+/// [`MAX_PATH_WORD_LEN`] letters, only the first is all-lowercase, no
+/// all-uppercase word exceeds [`MAX_ACRONYM_LEN`], the mean word length is at
+/// least [`MIN_MEAN_CAMEL_WORD_LEN`], and at least [`MIN_VOWEL_PERCENT`] of the
+/// letters are vowels. A single-case run
+/// is one word, so an ALL-UPPERCASE or all-lowercase run over the cap stays
+/// refused.
+/// Test: `camel_case_source_paths_are_not_flagged_after_8589`,
+/// `slash_bearing_base64_blobs_are_blocked`,
+/// `real_secrets_still_blocked_after_8589_path_rules`.
+pub(crate) fn is_readable_alpha_run(run: &str) -> bool {
+    if run.len() <= MAX_PATH_WORD_LEN {
+        return true;
     }
-    longest
+    let mut words = 0usize;
+    for w in camel_words(run.as_bytes()) {
+        let caps = w.iter().take_while(|b| b.is_ascii_uppercase()).count();
+        let shaped = match caps {
+            0 => words == 0,
+            n => n <= MAX_ACRONYM_LEN,
+        };
+        // A single-letter word, capital or not, is a stray, not a word.
+        if !shaped || w.len() < 2 || w.len() > MAX_PATH_WORD_LEN {
+            return false;
+        }
+        words += 1;
+    }
+    let vowels = run
+        .bytes()
+        .filter(|b| {
+            matches!(
+                b.to_ascii_lowercase(),
+                b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
+            )
+        })
+        .count();
+    run.len() >= MIN_MEAN_CAMEL_WORD_LEN * words && vowels * 100 >= run.len() * MIN_VOWEL_PERCENT
 }
 
 /// A "word segment" for slash/equals splitting: non-empty, containing only ASCII
@@ -939,7 +993,13 @@ pub(crate) fn is_word_segment(s: &str) -> bool {
 /// `bare_github_urls_are_not_flagged`, `structural_tokens_are_not_flagged`,
 /// `recurrence_corpus_has_no_false_positives`.
 pub(crate) fn is_readable_path_segment(seg: &str) -> bool {
-    if !is_word_segment(seg) || longest_alpha_run(seg) > MAX_PATH_WORD_LEN {
+    // #8589, #277: a long alphabetic run passes in CamelCase identifier shape
+    // — a class name is many short words.
+    if !is_word_segment(seg)
+        || !seg
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .all(is_readable_alpha_run)
+    {
         return false;
     }
     if seg.bytes().all(|b| b.is_ascii_digit()) {
@@ -988,11 +1048,13 @@ pub(crate) fn is_slash_path(s: &str) -> bool {
 ///
 /// What: requires a `scheme://`, no `user:pass@` userinfo
 /// ([`is_url_credential_shaped`]), a non-empty remainder, and every non-empty
-/// `/`-separated segment of that remainder passing [`is_readable_path_segment`].
-/// Empty segments are skipped rather than rejected so `file:///Users/masa/x` and
-/// a trailing slash both decompose.
+/// `/`-separated segment of that remainder passing [`is_readable_path_segment`],
+/// or, on an `http(s)` URL, sitting in a Google document-id position
+/// ([`is_google_doc_id`], issue #8589). Empty segments are skipped rather than
+/// rejected so `file:///Users/masa/x` and a trailing slash both decompose.
 /// Test: `bare_github_urls_are_not_flagged`,
-/// `url_path_secrets_are_still_blocked`, `url_shaped_prose_is_not_flagged`.
+/// `url_path_secrets_are_still_blocked`, `url_shaped_prose_is_not_flagged`,
+/// `google_document_urls_are_not_flagged_after_8589`.
 pub(crate) fn is_ordinary_url(token: &str) -> bool {
     let Some((scheme, rest)) = token.split_once("://") else {
         return false;
@@ -1004,9 +1066,62 @@ pub(crate) fn is_ordinary_url(token: &str) -> bool {
     if !scheme_ok || rest.is_empty() || is_url_credential_shaped(token) {
         return false;
     }
-    rest.split('/')
-        .filter(|s| !s.is_empty())
-        .all(is_readable_path_segment)
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let web = matches!(scheme, "https" | "http");
+    // #8589: a Google document id is exempt by host and position only.
+    segments
+        .iter()
+        .enumerate()
+        .all(|(i, seg)| is_readable_path_segment(seg) || (web && is_google_doc_id(&segments, i)))
+}
+
+/// Hosts whose URLs carry a document id at a fixed path position.
+///
+/// Why (issue #8589): a Google Docs/Sheets/Slides/Drive id is a 19-86 character
+/// base64url run, character-for-character a credential, so
+/// [`is_readable_path_segment`] refuses it and the whole URL was refused. What
+/// makes it safe to admit is where it sits, not its shape: after `/d/`,
+/// `/d/e/` or `/folders/` on one of these hosts. Keying on host and position
+/// keeps the exemption out of every other URL and out of bare tokens.
+/// What: exact host strings compared against the first URL segment.
+/// Test: `google_document_urls_are_not_flagged_after_8589`,
+/// `real_secrets_still_blocked_after_8589_path_rules`.
+pub(crate) const GOOGLE_DOC_HOSTS: &[&str] = &["docs.google.com", "drive.google.com"];
+
+/// Inclusive length window for a Google document id: a 19-character
+/// shared-drive folder id up to a published `2PACX-` id (about 86 characters),
+/// with headroom. See #8589.
+pub(crate) const GOOGLE_DOC_ID_LEN: std::ops::RangeInclusive<usize> = 19..=128;
+
+/// True when `segments[i]` is a document id on a [`GOOGLE_DOC_HOSTS`] URL.
+///
+/// Why (issue #8589): see [`GOOGLE_DOC_HOSTS`]. The provider-key checks repeat
+/// the prefix layer of [`looks_like_secret`] for this one position, because an
+/// AWS key id is recognised only at the start of a token and would otherwise
+/// ride in as a document id.
+/// What: `segments` are the non-empty `/`-segments after `scheme://`, host
+/// first. Requires a Google document host, a preceding `d`, `folders` or `d/e`
+/// marker, a length in [`GOOGLE_DOC_ID_LEN`], a base64url charset, and no
+/// [`SECRET_PREFIXES`] entry or AWS key-id shape.
+/// Test: `google_document_urls_are_not_flagged_after_8589`,
+/// `real_secrets_still_blocked_after_8589_path_rules`.
+pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
+    let at = |back: usize| i.checked_sub(back).and_then(|j| segments.get(j)).copied();
+    let Some(seg) = at(0) else {
+        return false;
+    };
+    let positioned =
+        matches!(at(1), Some("d" | "folders")) || (at(1) == Some("e") && at(2) == Some("d"));
+    positioned
+        && segments
+            .first()
+            .is_some_and(|h| GOOGLE_DOC_HOSTS.contains(h))
+        && GOOGLE_DOC_ID_LEN.contains(&seg.len())
+        && seg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        && !carries_secret_prefix(&seg.to_ascii_lowercase())
+        && !is_aws_access_key_id(seg)
 }
 
 /// True when `token` is a structured path/slug/key=value/compound-identifier

@@ -3293,3 +3293,219 @@ fn known_accepted_bounds_after_7549() {
          does not have — make both arms agree."
     );
 }
+
+// ---- Issues #8589 and #277: identifier paths and Google document URLs ----
+
+/// Why (issue #277, the kuzu-memory import): 9,058 of 9,171 refused memories
+/// were ordinary relative source paths. A Java or TSX class name is one long
+/// CamelCase run, so the old per-segment alphabetic-run cap of 20 read
+/// `ReservationForecastAdjustmentServiceImpl.java` as an encoded run and the
+/// path fell through to the base64 branch.
+/// What: asserts identifier paths pass `check_secret` and the
+/// `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn camel_case_source_paths_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    for path in [
+        "src/main/java/com/example/forecast/ReservationForecastAdjustmentServiceImpl.java",
+        "web/src/components/RoomTypeAvailabilityCalendarGrid.tsx",
+        "src/main/java/com/example/pricing/RateRecommendationEngineConfigurationProperties.java",
+        "src/test/java/com/example/forecast/ReservationForecastAdjustmentServiceImplTest.java",
+        "app/services/HTTPServerConnectionPoolManagerFactory.rb",
+        "lib/utils/getUserAccountPreferencesFromLocalStorage.ts",
+        "packages/ui/src/hooks/useDebouncedWindowResizeObserver.ts",
+        "src/main/java/com/example/repo/FindReservationByIdAndDateRangeQuery.java",
+        "src/main/java/com/example/http/HttpClientConfigurationFactory.java",
+    ] {
+        assert!(
+            check_secret(path).is_ok(),
+            "#277: an identifier path must pass check_secret: {path}; got {:?}",
+            check_secret(path)
+        );
+        let prose = format!("The forecast adjustment logic lives in {path} today");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+/// Why (issue #8589): a Google Docs/Sheets/Drive URL carries a 33-44 character
+/// mixed-case document id in its path, which the per-segment readability test
+/// reads as a credential, so the URL was refused. The id is public by position:
+/// it sits after `/d/` (or `/folders/`) on a Google document host.
+/// What: asserts document URLs pass `check_secret` and the gate, with and
+/// without a trailing action, query or fragment.
+/// Test: itself.
+#[test]
+fn google_document_urls_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    for url in [
+        // The #8589 reproduction, verbatim.
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit#gid=0",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit?usp=sharing",
+        "https://docs.google.com/spreadsheets/u/0/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/presentation/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEo/pub",
+        "https://drive.google.com/file/d/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw/view",
+        "https://drive.google.com/drive/folders/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw",
+    ] {
+        assert!(
+            check_secret(url).is_ok(),
+            "#8589: a Google document URL must pass check_secret: {url}; got {:?}",
+            check_secret(url)
+        );
+        let prose = format!("The hotstats report source is {url} for this quarter");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#8589: the gate must ACCEPT prose carrying {url}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+/// Why (issues #8589, #277): both loosenings above touch the per-segment path
+/// test and the URL decomposition, which are what keep a `/`-bearing blob and
+/// a URL-path secret flagged. Every credential shape the fix was checked
+/// against is re-asserted here through `check_secret`, the call the kuzu
+/// importer makes.
+/// What: asserts each credential is refused bare, inside a path, and in the
+/// Google document-id position on a foreign host or with a provider-key shape.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_8589_path_rules() {
+    for (label, tok) in [
+        (
+            "40-char base64 blob with + and /",
+            "aGVsbG8+d29ybGQ/Zm9vYmFyQmF6UXV4MTIzNDU2", // pragma: allowlist secret
+        ),
+        ("AWS access key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        (
+            "GitHub ghp_ token",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", // pragma: allowlist secret
+        ),
+        (
+            "PEM block",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB\n-----END RSA PRIVATE KEY-----", // pragma: allowlist secret
+        ),
+        (
+            "34-char mixed-case alphanumeric, no path",
+            "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "provider key as a path segment",
+            "config/ghp_abcdefghijklmnopqrstuvwxyz0123456789/x", // pragma: allowlist secret
+        ),
+        (
+            "mixed-case blob as a path segment",
+            "src/main/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY/Impl.java", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id as a path segment",
+            "deploy/AKIAIOSFODNN7EXAMPLE/notes.md", // pragma: allowlist secret
+        ),
+        (
+            "all-uppercase webhook tail",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape on a foreign host",
+            "https://evil.example.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape without the /d/ marker",
+            "https://docs.google.com/spreadsheets/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "second blob after a Google document id",
+            "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AKIAIOSFODNN7EXAMPLE", // pragma: allowlist secret
+        ),
+        (
+            "GitHub token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+    ] {
+        assert!(
+            matches!(check_secret(tok), Err(FilterReject::PotentialSecret { .. })),
+            "#8589/#277 ({label}) must STILL be refused: {tok}"
+        );
+    }
+
+    // KNOWN BOUND: a BARE document id is character-for-character a 44-char
+    // mixed-case credential, so it stays refused. #8589's closure asks for it
+    // to store; no shape test can grant that without also admitting the 34-char
+    // credential above. Only the URL position is exempt.
+    assert!(
+        check_secret("17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk").is_err(),
+        "#8589: a bare document id is indistinguishable from a credential"
+    );
+}
+
+/// Why (issues #8589, #277): `is_readable_alpha_run` admits a long alphabetic
+/// run in a path segment, which is exactly where a generated blob parked as a
+/// filename lands. This corpus wraps encoder output in a Java source path and
+/// counts misses, so a loosening of the run rule shows up as a number.
+///
+/// Measured at this seed, 20k tokens per row. `origin/main` (`186b51e17`) and
+/// this branch are identical in every row. The first cut of #8589, which only
+/// capped the longest CamelCase word, raised the 20- and 24-byte rows:
+///
+/// ```text
+///   input bytes   base64 (main / first cut)   base64url (main / first cut)
+///        15            217 / 217                  178 / 178
+///        20             15 / 47                    19 / 53
+///        24             10 / 22                    10 / 22
+///        32              0 / 1                      0 / 0
+/// ```
+///
+/// The residue at 15-24 bytes is not this rule's: those blobs are short
+/// enough that a `/`-free run has no digit and falls to FN-2 (issue #1484).
+/// What: a ratchet, not a pass mark.
+/// Test: itself.
+#[test]
+fn path_wrapped_encoder_blobs_stay_flagged_after_8589() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x8589_0000_0000_0001;
+    for (url_safe, input_len, ceiling) in [
+        (false, 15usize, 217usize),
+        (false, 20, 15),
+        (false, 24, 10),
+        (false, 32, 0),
+        (true, 15, 178),
+        (true, 20, 19),
+        (true, 24, 10),
+        (true, 32, 0),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(url_safe);
+        let mut buf = vec![0u8; input_len];
+        let mut misses = 0usize;
+        for _ in 0..N {
+            rng.fill(&mut buf);
+            let tok = format!("src/main/java/{}.java", b64_encode(&buf, &alphabet, false));
+            if find_secret_token(&tok).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#8589 ratchet: path-wrapped {} at {input_len} input bytes missed \
+             {misses} of {N}, above the pinned ceiling {ceiling}. The long-run \
+             rule in is_readable_alpha_run is admitting encoder output.",
+            if url_safe { "base64url" } else { "base64" }
+        );
+    }
+}
