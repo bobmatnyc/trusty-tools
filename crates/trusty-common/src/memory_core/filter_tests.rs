@@ -3330,6 +3330,80 @@ fn camel_case_source_paths_are_not_flagged_after_8589() {
             cfg.apply(&prose, false)
         );
     }
+
+    // KNOWN BOUND: a file-name segment of SECRET_MIN_LEN (20) or more
+    // characters, extension included, that mixes case and carries a digit is
+    // still refused as a mixed-case credential. The digit splits the letters
+    // into short runs, so `is_readable_alpha_run` never decides it.
+    for (path, refused) in [
+        ("src/main/java/com/example/Http2ClientKit.java", false), // 19 chars
+        ("src/main/java/com/example/Http2ClientPool.java", true), // 20 chars
+        (
+            "src/main/java/com/example/OAuth2AuthorizationRequestRedirectFilter.java",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            check_secret(path).is_err(),
+            refused,
+            "#277 known bound moved for {path}; update the #8589 changelog"
+        );
+    }
+}
+
+/// Why (issue #8589 review): each clause of `is_readable_alpha_run` is what
+/// keeps one class of generated run out, so each needs a row that turns red
+/// when the clause is removed.
+/// What: pins the two generated runs the rule was built against, then one
+/// row just inside and one just outside each limit that has an outside.
+/// Test: itself.
+#[test]
+fn readable_alpha_run_clause_boundaries_after_8589() {
+    for (clause, run, readable) in [
+        // 9 vowels of 30 letters is exactly MIN_VOWEL_PERCENT; 8 is under.
+        (
+            "vowel floor, inside",
+            "ScriptStackFrameBuilderHandler",
+            true,
+        ),
+        (
+            "vowel floor, outside",
+            "ScriptStackFrameScannerHandler",
+            false,
+        ),
+        // A 5-capital acronym is MAX_ACRONYM_LEN; 6 is over.
+        ("acronym cap, inside", "ConnectionPoolHTTPSManager", true),
+        ("acronym cap, outside", "ConnectionPoolHTTPSXManager", false),
+        // 24 letters in 6 words is a mean of exactly 4; 23 letters is under.
+        ("mean word length, inside", "UserDataFormTypeCodeView", true),
+        (
+            "mean word length, outside",
+            "UserDataFormTypeCodeMap",
+            false,
+        ),
+        // A lowercase first word is admitted. There is no outside row:
+        // `camel_words` starts every later word at a capital, so an
+        // alphabetic run cannot hold a second all-lowercase word.
+        (
+            "lowercase first word, inside",
+            "getUserAccountPreferencesFromLocalStorage",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            is_readable_alpha_run(run),
+            readable,
+            "#8589 {clause}: is_readable_alpha_run({run})"
+        );
+    }
+    // Base64 runs from the #8589 ratchet corpus: a stray capital, and a run
+    // only the vowel floor refuses.
+    for run in [
+        "CtbSRaHnXUQBzuFosCPKRreEnRKPWJHoWU",
+        "SSJyphDcjmbsJvssQghrw",
+    ] {
+        assert!(!is_readable_alpha_run(run), "#8589: {run} must be refused");
+    }
 }
 
 /// Why (issue #8589): a Google Docs/Sheets/Drive URL carries a 33-44 character
@@ -3342,6 +3416,9 @@ fn camel_case_source_paths_are_not_flagged_after_8589() {
 #[test]
 fn google_document_urls_are_not_flagged_after_8589() {
     let cfg = FilterConfig::default();
+    // Every row but `edit#gid=0` and `edit?usp=sharing` fails with the
+    // document-id exemption switched off; those two passed before #8589 and
+    // stay as pins.
     for url in [
         // The #8589 reproduction, verbatim.
         "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
@@ -3351,9 +3428,11 @@ fn google_document_urls_are_not_flagged_after_8589() {
         "https://docs.google.com/spreadsheets/u/0/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
         "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
         "https://docs.google.com/presentation/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
-        "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEo/pub",
+        "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U0/pub",
         "https://drive.google.com/file/d/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw/view",
         "https://drive.google.com/drive/folders/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw",
+        "https://drive.google.com/file/d/0BwwA4oUTeiV1TGRPeTVjaWRDY1E/view",
+        "https://drive.google.com/drive/folders/0AGRtHG9m3Z0-Uk9PVA",
     ] {
         assert!(
             check_secret(url).is_ok(),
@@ -3437,6 +3516,51 @@ fn real_secrets_still_blocked_after_8589_path_rules() {
             "GitHub token in the document-id position",
             "https://docs.google.com/spreadsheets/d/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
         ),
+        // Provider keys SECRET_PREFIXES does not list, in the /d/ position.
+        // Each length (32, 39, 26, 40, 37) sits outside GOOGLE_DOC_ID_LENS.
+        (
+            "Stripe live key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/sk_fake_agzEZ9gCn1PkSMUwlUWRUCM5", // pragma: allowlist secret
+        ),
+        (
+            "Google API key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AIzabIyOPcjDbcPPh0Gmu5TBGMCIPUkQEPOD9oQ", // pragma: allowlist secret
+        ),
+        (
+            "GitLab token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/glpfk-p22pgHyyOAS6GV1bzsfl", // pragma: allowlist secret
+        ),
+        (
+            "npm token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/npm_r98TKQUmou8MlZZVJRAXgazFWJ1OW6GtcyXF", // pragma: allowlist secret
+        ),
+        (
+            "Hugging Face token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/hf_Z687CfNSvP5QQzSxexvprga3UBkYilM0Zv", // pragma: allowlist secret
+        ),
+        (
+            "published id one character short of 86",
+            "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U/pub", // pragma: allowlist secret
+        ),
+        // Host tricks: the host must be the exact lowercase string. An
+        // uppercase host or an explicit :443 names the same server, but
+        // Google's share links carry neither, so they stay refused.
+        (
+            "Google host as userinfo before a foreign host",
+            "https://docs.google.com@evil.example/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host as a subdomain of a foreign host",
+            "https://docs.google.com.evil.com/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "uppercase Google host",
+            "https://DOCS.GOOGLE.COM/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host with an explicit port",
+            "https://docs.google.com:443/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
     ] {
         assert!(
             matches!(check_secret(tok), Err(FilterReject::PotentialSecret { .. })),
@@ -3465,14 +3589,18 @@ fn real_secrets_still_blocked_after_8589_path_rules() {
 ///
 /// ```text
 ///   input bytes   base64 (main / first cut)   base64url (main / first cut)
-///        15            217 / 217                  178 / 178
 ///        20             15 / 47                    19 / 53
 ///        24             10 / 22                    10 / 22
 ///        32              0 / 1                      0 / 0
+///        40              0                          0
+///        48              0                          0
 /// ```
 ///
-/// The residue at 15-24 bytes is not this rule's: those blobs are short
-/// enough that a `/`-free run has no digit and falls to FN-2 (issue #1484).
+/// The 40- and 48-byte rows (54 and 64 characters) were measured on this
+/// branch only. They carry alphabetic runs well past `MAX_PATH_WORD_LEN`, so
+/// they exercise the long-run rule; a 15-byte blob (20 characters) never
+/// reaches it. The residue at 20-24 bytes is not this rule's: those blobs are
+/// short enough that a `/`-free run has no digit and falls to FN-2 (#1484).
 /// What: a ratchet, not a pass mark.
 /// Test: itself.
 #[test]
@@ -3480,14 +3608,16 @@ fn path_wrapped_encoder_blobs_stay_flagged_after_8589() {
     const N: usize = 20_000;
     const SEED: u64 = 0x8589_0000_0000_0001;
     for (url_safe, input_len, ceiling) in [
-        (false, 15usize, 217usize),
-        (false, 20, 15),
+        (false, 20usize, 15usize),
         (false, 24, 10),
         (false, 32, 0),
-        (true, 15, 178),
+        (false, 40, 0),
+        (false, 48, 0),
         (true, 20, 19),
         (true, 24, 10),
         (true, 32, 0),
+        (true, 40, 0),
+        (true, 48, 0),
     ] {
         let mut rng = Xorshift(SEED);
         let alphabet = b64_alphabet(url_safe);

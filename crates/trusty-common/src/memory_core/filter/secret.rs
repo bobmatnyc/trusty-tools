@@ -891,13 +891,16 @@ pub(crate) const MIN_VOWEL_PERCENT: usize = 30;
 /// shape rules admitted (`SSJyphDcjmbsJvssQghrw`).
 /// What: a run of at most [`MAX_PATH_WORD_LEN`] letters passes unchanged. A
 /// longer run passes when every [`camel_words`] word has 2 to
-/// [`MAX_PATH_WORD_LEN`] letters, only the first is all-lowercase, no
-/// all-uppercase word exceeds [`MAX_ACRONYM_LEN`], the mean word length is at
-/// least [`MIN_MEAN_CAMEL_WORD_LEN`], and at least [`MIN_VOWEL_PERCENT`] of the
-/// letters are vowels. A single-case run
-/// is one word, so an ALL-UPPERCASE or all-lowercase run over the cap stays
+/// [`MAX_PATH_WORD_LEN`] letters, no word opens with more than
+/// [`MAX_ACRONYM_LEN`] capitals, the mean word length is at least
+/// [`MIN_MEAN_CAMEL_WORD_LEN`], and at least [`MIN_VOWEL_PERCENT`] of the
+/// letters are vowels. Only the first word can be all-lowercase, because
+/// [`camel_words`] starts every later word at a capital. A single-case run is
+/// one word, so an ALL-UPPERCASE or all-lowercase run over the cap stays
 /// refused.
-/// Test: `camel_case_source_paths_are_not_flagged_after_8589`,
+/// Test: `readable_alpha_run_clause_boundaries_after_8589`,
+/// `path_wrapped_encoder_blobs_stay_flagged_after_8589`,
+/// `camel_case_source_paths_are_not_flagged_after_8589`,
 /// `slash_bearing_base64_blobs_are_blocked`,
 /// `real_secrets_still_blocked_after_8589_path_rules`.
 pub(crate) fn is_readable_alpha_run(run: &str) -> bool {
@@ -907,12 +910,8 @@ pub(crate) fn is_readable_alpha_run(run: &str) -> bool {
     let mut words = 0usize;
     for w in camel_words(run.as_bytes()) {
         let caps = w.iter().take_while(|b| b.is_ascii_uppercase()).count();
-        let shaped = match caps {
-            0 => words == 0,
-            n => n <= MAX_ACRONYM_LEN,
-        };
         // A single-letter word, capital or not, is a stray, not a word.
-        if !shaped || w.len() < 2 || w.len() > MAX_PATH_WORD_LEN {
+        if caps > MAX_ACRONYM_LEN || w.len() < 2 || w.len() > MAX_PATH_WORD_LEN {
             return false;
         }
         words += 1;
@@ -1083,15 +1082,34 @@ pub(crate) fn is_ordinary_url(token: &str) -> bool {
 /// makes it safe to admit is where it sits, not its shape: after `/d/`,
 /// `/d/e/` or `/folders/` on one of these hosts. Keying on host and position
 /// keeps the exemption out of every other URL and out of bare tokens.
-/// What: exact host strings compared against the first URL segment.
+/// What: exact, case-sensitive host strings compared against the first URL
+/// segment, so userinfo (`docs.google.com@evil.example`), a lookalike suffix,
+/// an uppercase host and an explicit port are all refused. Google's share
+/// links carry neither uppercase nor a port.
 /// Test: `google_document_urls_are_not_flagged_after_8589`,
 /// `real_secrets_still_blocked_after_8589_path_rules`.
 pub(crate) const GOOGLE_DOC_HOSTS: &[&str] = &["docs.google.com", "drive.google.com"];
 
-/// Inclusive length window for a Google document id: a 19-character
-/// shared-drive folder id up to a published `2PACX-` id (about 86 characters),
-/// with headroom. See #8589.
-pub(crate) const GOOGLE_DOC_ID_LEN: std::ops::RangeInclusive<usize> = 19..=128;
+/// The exact document-id lengths Google issues (#8589):
+/// - 44: a Docs, Sheets or Slides file id (the #8589 reproduction, and the
+///   Sheets API sample `1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms`).
+/// - 33: a Drive file or folder id (`1` + 32 characters).
+/// - 28: a legacy Drive id (`0B` + 26), still live in old share links.
+/// - 19: a shared-drive id (`0A` + 17).
+///
+/// Why a set, not a window: a 19..=128 window admitted provider keys whose
+/// prefix [`SECRET_PREFIXES`] does not list — `sk_live_` + 24 (32 chars),
+/// `AIza` + 35 (39), `glpat-` + 20 (26), `npm_` + 36 (40), `hf_` + 34 (37).
+/// Test: `real_secrets_still_blocked_after_8589_path_rules`,
+/// `google_document_urls_are_not_flagged_after_8589`.
+pub(crate) const GOOGLE_DOC_ID_LENS: [usize; 4] = [19, 28, 33, 44];
+
+/// Prefix of a published-to-web id, the one form under `/d/e/`. See #8589.
+pub(crate) const GOOGLE_PUBLISHED_ID_PREFIX: &str = "2PACX-";
+
+/// Exact length of a published-to-web id: `2PACX-` plus 80 characters. See
+/// #8589.
+pub(crate) const GOOGLE_PUBLISHED_ID_LEN: usize = 86;
 
 /// True when `segments[i]` is a document id on a [`GOOGLE_DOC_HOSTS`] URL.
 ///
@@ -1101,7 +1119,8 @@ pub(crate) const GOOGLE_DOC_ID_LEN: std::ops::RangeInclusive<usize> = 19..=128;
 /// ride in as a document id.
 /// What: `segments` are the non-empty `/`-segments after `scheme://`, host
 /// first. Requires a Google document host, a preceding `d`, `folders` or `d/e`
-/// marker, a length in [`GOOGLE_DOC_ID_LEN`], a base64url charset, and no
+/// marker, a length in [`GOOGLE_DOC_ID_LENS`] (or a [`GOOGLE_PUBLISHED_ID_LEN`]
+/// id opening with [`GOOGLE_PUBLISHED_ID_PREFIX`]), a base64url charset, and no
 /// [`SECRET_PREFIXES`] entry or AWS key-id shape.
 /// Test: `google_document_urls_are_not_flagged_after_8589`,
 /// `real_secrets_still_blocked_after_8589_path_rules`.
@@ -1116,7 +1135,9 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
         && segments
             .first()
             .is_some_and(|h| GOOGLE_DOC_HOSTS.contains(h))
-        && GOOGLE_DOC_ID_LEN.contains(&seg.len())
+        && (GOOGLE_DOC_ID_LENS.contains(&seg.len())
+            || (seg.len() == GOOGLE_PUBLISHED_ID_LEN
+                && seg.starts_with(GOOGLE_PUBLISHED_ID_PREFIX)))
         && seg
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
