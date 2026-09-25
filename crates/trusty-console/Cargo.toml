@@ -108,6 +108,8 @@ chrono             = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
-tokio          = { workspace = true }
+# #8271: `test-util` gives the socket-budget tests a paused clock; it must
+# never reach the production build, so it lives here only.
+tokio          = { workspace = true, features = ["test-util"] }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
