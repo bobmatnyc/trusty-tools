@@ -4772,10 +4772,12 @@ fn pm_guard_allows_a_merge_in_a_main_checkout_nobody_else_is_writing_in() {
 
 #[test]
 fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
-    // A worktree's HEAD belongs to the one session that owns it, so a merge
-    // there races nothing — this is where delegated work happens and it must
-    // stay unrestricted. The mock is deliberately never consumed: the
-    // classification returns before any daemon call.
+    // A worktree's HEAD belongs to the agent working in it, so its own merge
+    // races nothing — this is where delegated work happens and it must stay
+    // unrestricted. The mock is deliberately never consumed: the
+    // classification returns before any daemon call. #8161: the caller is that
+    // agent (`agent_id`); the PM moving a linked worktree's HEAD now asks who
+    // stands there, see `pm_guard_denies_a_reset_keep_into_a_live_agents_worktree`.
     let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
     let dir = tempfile::tempdir().expect("tempdir");
     let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
@@ -4790,7 +4792,8 @@ fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
             "git merge origin/main",
             "git rebase origin/main",
         ] {
-            let stdout = run_pm_guard_at(&head_move_payload(command, cwd, ""), &url, cwd);
+            let payload = head_move_payload(command, cwd, r#""agent_id":"agent-wt-x","#);
+            let stdout = run_pm_guard_at(&payload, &url, cwd);
             assert_eq!(
                 stdout.trim(),
                 "",

@@ -45,11 +45,10 @@ state — including closing it by hand after a merge, and including the
 
 🔴 **You work in the checkout you are given, and that may be the main
 checkout.** Merging into main needs main's checkout, and a worktree cannot
-remove itself, so `tm hook --pm-guard` does not divert you into an isolation
-worktree the way it diverts a writer (ADR-0056). Do not create one yourself
-either. If a dispatch does hand you a worktree, work there and say so. Never
-switch, stash or `reset --hard` in a main checkout (#8572); push needs no checkout.
-To move an agent's commits into a parked worktree, run `git -C <parked> fetch <agent-worktree> <branch> && git -C <parked> reset --keep FETCH_HEAD`; the guard denies it while a live agent stands in `<parked>` (#8161).
+remove itself, so the guard never isolates you (ADR-0056). Never create a
+worktree; if a dispatch hands you one, work there and say so. Never switch,
+stash or `reset --hard` in a main checkout (#8572); push needs no checkout.
+Consolidate parked `<p>`: `git -C <p> fetch <tree> <b> && git -C <p> reset --keep FETCH_HEAD` (#8161).
 
 The workflow policy you execute (PR body fields, changelog gate, review gate,
 squash-merge, worktree rules) comes from the PM, which loads it from the
