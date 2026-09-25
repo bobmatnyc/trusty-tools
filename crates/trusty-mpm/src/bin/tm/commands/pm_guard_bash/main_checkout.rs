@@ -51,12 +51,20 @@
 //! classify; a git verb that is not in the destructive table is not this
 //! rule's business. The guard denies only on positive evidence of both halves.
 //!
+//! A `cd`/`-C` argument built from a shell variable, a surviving `~`, or a
+//! `$(…)`/backtick substitution is not resolved, and the rules here refuse
+//! rather than clear it ([`super::unresolved_target`]). The destructive rule
+//! refuses it from any cwd (#8572), including an unquoted multi-word `$(…)`
+//! before the subcommand. The commit rule refuses it only when the resolved
+//! path walks up into a main checkout, so from a worktree cwd
+//! `git -C $MAIN commit` is not refused. The HEAD-move rule does not ask at all.
+//!
 //! Residual bypasses, stated rather than hidden — each is the same shape the
 //! sibling `evaluate_worktree_add_command` documents, because both reuse the
-//! same lexical path resolution: a `cd`/`-C` argument built from a shell
-//! variable or a command substitution is not resolved; a symlink into a
-//! checkout is not followed; a destructive verb hidden inside a `$(…)`
-//! substitution is not scanned. And the Guard 2/3 operator escape hatches
+//! same lexical path resolution: a symlink into a checkout is not followed; a
+//! destructive verb hidden inside a `$(…)` substitution is not scanned; a `..`
+//! after an unresolved component (`$MAIN/..`) collapses it before the check
+//! sees it. And the Guard 2/3 operator escape hatches
 //! (`TRUSTY_MPM_DISABLE_HOOKS`, `TRUSTY_MPM_PM_UNRESTRICTED`) lift this rule
 //! along with every other, which remains tracked as #3981.
 //!
@@ -959,24 +967,53 @@ pub(super) fn git_verb_targets_with_tail(
         // #8439: every token that could be the subcommand. One when the global
         // options resolve; every non-option token after an unknown one, so
         // `git --shallow-file status checkout -- f` is judged as `checkout`.
-        let Some((argv, candidates)) = shell_lex::git_subcommand_candidates(trimmed) else {
+        let Some((argv, mut candidates)) = shell_lex::git_subcommand_candidates(trimmed) else {
             continue;
         };
+        // #8572: `git -C $(cat /tmp/main) checkout x` splits the substitution
+        // into `$(cat` and `/tmp/main)`, and the second reads as the
+        // subcommand. Every later non-option token becomes a candidate, and the
+        // directory is the substitution, which no rule can resolve.
+        let split = split_substitution_before(&argv, candidates.first().copied());
+        if let Some(at) = split {
+            candidates = (at + 1..argv.len())
+                .filter(|&i| !argv[i].starts_with('-'))
+                .collect();
+        }
         for idx in candidates {
             let subcommand = &argv[idx];
             let tail = &argv[idx + 1..];
             if !matches(subcommand, tail) {
                 continue;
             }
-            let base = match git_dash_c_override(&argv, idx) {
-                Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
-                None => effective_cwd.clone(),
+            let base = match (split, git_dash_c_override(&argv, idx)) {
+                (Some(at), _) => resolve_target_path(&argv[at], &effective_cwd, env),
+                (None, Some(dash_c)) => resolve_target_path(dash_c, &effective_cwd, env),
+                (None, None) => effective_cwd.clone(),
             };
             found.push((subcommand.clone(), base, tail.to_vec()));
             break;
         }
     }
     found
+}
+
+/// The index of the first token, up to and including `first_candidate`, that
+/// opens a `$(…)` or backtick substitution it does not close (#8572).
+///
+/// Why: shlex splits an unquoted `$(cat /tmp/main)` at the space, so the
+/// global-option walk takes `/tmp/main)` as the subcommand and the real verb
+/// is never classified. A balanced single-token substitution hides nothing
+/// and is left to [`super::unresolved_target`], so `git -c
+/// user.name=$(whoami) commit` keeps its ordinary verdict.
+/// What: `Some(index)` for a token with more `$(` than `)`, or an odd number of
+/// backticks; `None` when no such token precedes the subcommand.
+/// Test: `walker_sees_past_a_split_substitution`.
+fn split_substitution_before(argv: &[String], first_candidate: Option<usize>) -> Option<usize> {
+    let end = first_candidate.map_or(argv.len(), |i| i + 1);
+    argv[..end].iter().position(|t| {
+        t.matches("$(").count() > t.matches(')').count() || t.matches('`').count() % 2 == 1
+    })
 }
 
 /// Whether a git subcommand, given its argv tail, overwrites or deletes work
@@ -1365,16 +1402,55 @@ mod tests {
         let wt = checkout.path().join(".claude/worktrees/agent-a");
         std::fs::create_dir_all(&wt).expect("mkdir wt");
         std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
-        for command in ["git -C $MAIN reset --hard", "cd $MAIN && git checkout -- ."] {
+        for (command, token) in [
+            ("git -C $MAIN reset --hard", "$MAIN"),
+            ("cd $MAIN && git checkout -- .", "$MAIN"),
+            // #8572: a command substitution is unresolved the same way.
+            ("git -C \"$(cat /tmp/main)\" reset --hard", "$("),
+            ("cd \"`cat /tmp/main`\" && git clean -fdx", "`"),
+        ] {
             let reason = evaluate_main_checkout_destructive_command(command, &wt)
                 .unwrap_or_else(|| panic!("`{command}` from a worktree must be denied"));
-            assert!(reason.contains("$MAIN"), "{reason}");
+            assert!(reason.contains(token), "{command}: {reason}");
             assert!(reason.contains("unresolvable"), "{reason}");
         }
         assert!(
             evaluate_main_checkout_destructive_command("git reset --hard", &wt).is_none(),
             "the worktree's own destructive command stays allowed"
         );
+    }
+
+    /// #8572 review: an unquoted multi-word `$(…)` after `-C` hid the verb —
+    /// `/tmp/main)` read as the subcommand. A balanced one hides nothing.
+    #[test]
+    fn walker_sees_past_a_split_substitution() {
+        let checkout = main_checkout_dir();
+        let wt = checkout.path().join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        for command in [
+            "git -C $(cat /tmp/main) reset --hard",
+            "git -C `cat /tmp/main` checkout -- .",
+            "git $(echo -C /tmp/main) reset --hard",
+        ] {
+            let reason = evaluate_main_checkout_destructive_command(command, &wt)
+                .unwrap_or_else(|| panic!("`{command}` from a worktree must be denied"));
+            assert!(reason.contains("unresolvable"), "{command}: {reason}");
+        }
+        let env = PathEnv::from_process();
+        let any = |_: &str, _: &[String]| true;
+        let found = git_verb_targets_with_tail(
+            "git -C $(git rev-parse --show-toplevel) status",
+            &wt,
+            &env,
+            is_whole_tree_destructive,
+        );
+        assert!(found.is_empty(), "a read stays a read: {found:?}");
+        let found =
+            git_verb_targets_with_tail("git -c user.name=$(whoami) commit -m x", &wt, &env, any);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "commit");
+        assert_eq!(found[0].1, wt, "a balanced substitution leaves the cwd");
     }
 
     /// 🔴 REGRESSION (#8572 review): only the first destructive segment was

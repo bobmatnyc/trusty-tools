@@ -8,11 +8,16 @@ Fixed
   main checkout, the PM, and path restores inside the agent's own worktree
   stay allowed. Refs #8572.
 - `tm hook --pm-guard` refuses a HEAD switch or a whole-tree-destructive git
-  command whose `cd`/`git -C` directory it cannot expand (a `$MAIN`, and for a
-  HEAD switch also a `$(…)` or a backtick) from any working directory. Before,
-  an agent in its own worktree
-  could run `git -C $MAIN checkout <branch>` or `git -C $MAIN reset --hard`,
-  because the guard read the path as the worktree. Refs #8572.
+  command whose `cd`/`git -C` directory it cannot expand (a `$MAIN`, a `$(…)`
+  or a backtick, quoted or not) from any working directory. Before, an agent
+  in its own worktree could run `git -C $MAIN checkout <branch>` or
+  `git -C "$(cat f)" reset --hard`, because the guard read the path as the
+  worktree. The commit and worktree-removal rules now treat a `$(…)` or
+  backtick directory as unresolved too. Refs #8572.
+- `tm hook --pm-guard` judges every segment of a composed command for a
+  whole-tree-destructive git verb, not only the first. Before,
+  `git reset --hard && git -C <main> reset --hard` run from a worktree was
+  allowed. Refs #8572.
 - `tm pr open`'s refusal for a `--head` the changelog gate cannot judge no
   longer says to check the head out; it names the worktree that holds it.
   Refs #8572.

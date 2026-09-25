@@ -36,15 +36,18 @@
 //! dispatched agents this rule binds.
 //!
 //! A `cd`/`-C` directory the guard cannot expand — a `$NAME`, a surviving `~`,
-//! a `$(…)` or a backtick — is refused before any other test, from any cwd: an
-//! agent in its own worktree writing `git -C $MAIN checkout x` resolves to
-//! `<worktree>/$MAIN`, which reads as the worktree while the shell lands it in
-//! the main checkout.
+//! a `$(…)` or a backtick ([`super::unresolved_target`]) — is refused before
+//! any other test, from any cwd: an agent in its own worktree writing
+//! `git -C $MAIN checkout x` resolves to `<worktree>/$MAIN`, which reads as the
+//! worktree while the shell lands it in the main checkout. An unquoted
+//! multi-word `$(…)` before the subcommand is refused the same way; the shared
+//! walker sees the verb past it.
 //!
 //! Residuals, the same lexical ones [`super::main_checkout`] states:
 //! `--git-dir=`/`--work-tree=` and the `GIT_DIR=` prefix are not resolved into
-//! the target, a symlink into a checkout is not followed, and a verb inside
-//! `$(…)` is not scanned.
+//! the target, a symlink into a checkout is not followed, a verb inside `$(…)`
+//! is not scanned, and a `..` after an unresolved component (`$MAIN/..`)
+//! collapses it before the check sees it.
 //!
 //! Test: `switches_head_*`, `head_switch_*` below;
 //! `pm_guard_refuses_an_agent_branch_switch_in_a_dirty_main_checkout` and
@@ -107,8 +110,12 @@ fn evaluate_head_switch_in(
         // #8572: before any classification of `target`. From a worktree cwd,
         // `-C $MAIN` resolves to `<worktree>/$MAIN`, which reads as the
         // agent's own worktree while the shell lands it in the main checkout.
-        if let Some((shown, token)) = unresolved_directory(&target) {
-            return Some(unresolved_deny_reason(&verb, &shown, &token));
+        if let Some(unresolved) = unresolved_target(&target) {
+            return Some(unresolved_deny_reason(
+                &verb,
+                &unresolved.shown,
+                &unresolved.token,
+            ));
         }
         let Some(root) = main_checkout_root(&target) else {
             continue;
@@ -173,25 +180,6 @@ fn checkout_switches_head(tail: &[String]) -> bool {
         && args.iter().any(|t| {
             matches!(t.as_str(), "-b" | "-B" | "--orphan" | "--detach" | "-") || !t.starts_with('-')
         })
-}
-
-/// The path to quote and the expansion the guard could not perform in
-/// `target`, if any.
-///
-/// Why: [`unresolved_target`] finds `$NAME` and `~` but not a command
-/// substitution, and `git -C $(…) checkout x` is the same bypass (#8572).
-/// What: the [`unresolved_target`] answer, else the first `$(` or backtick in
-/// the path text, with the whole path shown.
-/// Test: `head_switch_refuses_an_unresolved_directory_from_a_worktree`.
-fn unresolved_directory(target: &Path) -> Option<(std::path::PathBuf, String)> {
-    if let Some(unresolved) = unresolved_target(target) {
-        return Some((unresolved.shown, unresolved.token));
-    }
-    let text = target.to_string_lossy();
-    ["$(", "`"]
-        .into_iter()
-        .find(|token| text.contains(token))
-        .map(|token| (target.to_path_buf(), token.to_string()))
 }
 
 /// How the dirty arm describes the checkout.
@@ -404,6 +392,7 @@ mod tests {
             ("cd $MAIN && git switch x", "$MAIN"),
             ("git -C \"${MAIN}\" stash", "${MAIN}"),
             ("git -C \"$(cat /tmp/main)\" checkout x", "$("),
+            ("git -C $(cat /tmp/main) checkout x", "$("),
             ("cd \"`cat /tmp/main`\" && git checkout x", "`"),
         ] {
             let reason = evaluate_head_switch_in(command, &wt, &env(), |_| Some(false))
