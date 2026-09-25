@@ -439,10 +439,6 @@ pub(crate) fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::TokenStorage;
-    use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
-    use chrono::{Duration as ChronoDuration, Utc};
-    use std::collections::HashMap;
     use wiremock::matchers::{header, method, path as wm_path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -451,33 +447,8 @@ mod tests {
     /// A client whose only profile ("a") holds a token an hour from expiry, so
     /// `get_access_token` never reaches the OAuth refresh path.
     fn client_with_token() -> BaseClient {
-        let dir = std::env::temp_dir().join(format!("gw-drive-update-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp token dir");
-        let client = BaseClient::for_test(TokenStorage::with_path(dir.join("tokens.json")));
-        let mut map = HashMap::new();
-        map.insert(
-            "a".to_string(),
-            StoredToken {
-                version: 1,
-                metadata: TokenMetadata {
-                    service_name: "a".into(),
-                    provider: "google".into(),
-                    created_at: Utc::now(),
-                    last_refreshed: None,
-                    email: Some("a@example.com".into()),
-                    is_default: true,
-                },
-                token: OAuthToken {
-                    access_token: "test-access-token".into(),
-                    refresh_token: Some("r".into()),
-                    expires_at: Utc::now() + ChronoDuration::seconds(3600),
-                    scopes: vec![],
-                    token_type: "Bearer".into(),
-                },
-            },
-        );
-        client.storage().save(&map).expect("seed token storage");
-        client
+        // #8629: shared with the Tasks wiremock tests.
+        BaseClient::for_test_with_token("a")
     }
 
     /// Mount the metadata GET the update action reads before doing anything.

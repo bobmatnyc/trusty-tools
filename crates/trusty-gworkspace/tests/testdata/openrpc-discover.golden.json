@@ -4235,18 +4235,20 @@
           }
         },
         {
-          "description": "",
+          "description": "List title (create; update renames). Merged with 'updates'; a different value in both is an error.",
           "name": "title",
           "required": false,
           "schema": {
+            "description": "List title (create; update renames). Merged with 'updates'; a different value in both is an error.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Raw patch body (update). Merged with the flat 'title'.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat 'title'.",
             "type": "object"
           }
         }
@@ -4263,7 +4265,7 @@
       ]
     },
     {
-      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists.",
+      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists. create/update take task fields flat (title, notes, due, status, completed), as a 'task' (create) or 'updates' (update) object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_tasks",
       "params": [
         {
@@ -4291,6 +4293,33 @@
               "move",
               "search"
             ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Completion time, RFC3339 (create/update).",
+          "name": "completed",
+          "required": false,
+          "schema": {
+            "description": "Completion time, RFC3339 (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Due date, RFC3339 (e.g. 2026-09-28T00:00:00Z) (create/update).",
+          "name": "due",
+          "required": false,
+          "schema": {
+            "description": "Due date, RFC3339 (e.g. 2026-09-28T00:00:00Z) (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Task notes/description (create/update).",
+          "name": "notes",
+          "required": false,
+          "schema": {
+            "description": "Task notes/description (create/update).",
             "type": "string"
           }
         },
@@ -4329,10 +4358,24 @@
           }
         },
         {
-          "description": "",
+          "description": "Task status (create/update).",
+          "name": "status",
+          "required": false,
+          "schema": {
+            "description": "Task status (create/update).",
+            "enum": [
+              "needsAction",
+              "completed"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw Task resource (create). Merged with the flat fields.",
           "name": "task",
           "required": false,
           "schema": {
+            "description": "Raw Task resource (create). Merged with the flat fields.",
             "type": "object"
           }
         },
@@ -4346,18 +4389,29 @@
           }
         },
         {
-          "description": "",
+          "description": "Task list ID. Defaults to '@default'.",
           "name": "tasklist_id",
           "required": false,
           "schema": {
+            "description": "Task list ID. Defaults to '@default'.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Task title (create/update).",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "description": "Task title (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }

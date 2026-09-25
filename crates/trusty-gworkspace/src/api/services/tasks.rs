@@ -4,14 +4,61 @@
 //! identical CRUD shapes — we expose them as two tools.
 //! What: `manage_task_lists` covers list-level CRUD; `manage_tasks` covers
 //! per-task CRUD plus "complete" and "move".
-//! Test: Live only.
+//! Test: Request shapes pinned against `wiremock` in `tests` below; the rest
+//! is live only.
 
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::api::client::BaseClient;
 use crate::api::constants::TASKS_API_BASE;
 use crate::api::services::{account_of, opt_str, require_str};
+
+/// Task resource fields `manage_tasks` accepts flat at the top level (#8629).
+const TASK_FLAT_FIELDS: [&str; 5] = ["title", "notes", "due", "status", "completed"];
+
+/// Build a Tasks request body from a nested object plus flat top-level fields.
+///
+/// Why: The Python `gworkspace-mcp` this crate ports took task fields flat
+/// (`title`, `notes`, `due`, ...), but the Rust port read only the nested
+/// `task` / `updates` object: a flat create was refused with "missing 'task'
+/// object" and a flat update PATCHed `{}` (#8629). Both shapes must work.
+/// What: Starts from `args[object_key]` (an error when present but not an
+/// object), then adds each of `flat_fields` present and non-null at the top
+/// level. Precedence rule — the body is the UNION of both shapes: a field
+/// given in both places with equal values is sent once; a field given in both
+/// places with different values is an error naming the field, so neither
+/// value is ever dropped silently. An empty union is an error naming both
+/// shapes.
+/// Test: `create_with_both_shapes_merges_disjoint_fields`,
+/// `create_with_conflicting_shapes_is_refused_without_a_request`,
+/// `create_with_no_task_fields_names_both_shapes`.
+fn merge_task_fields(args: &Value, object_key: &str, flat_fields: &[&str]) -> Result<Value> {
+    let mut body = match args.get(object_key) {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => return Err(anyhow!("'{object_key}' must be an object")),
+    };
+    for &field in flat_fields {
+        let Some(flat) = args.get(field).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        if body.get(field).is_some_and(|nested| nested != flat) {
+            return Err(anyhow!(
+                "'{field}' is set both at the top level and in '{object_key}' with \
+                 different values; pass it once"
+            ));
+        }
+        body.insert(field.to_string(), flat.clone());
+    }
+    if body.is_empty() {
+        return Err(anyhow!(
+            "no task fields provided: pass {} at the top level, or a '{object_key}' object",
+            flat_fields.join("/")
+        ));
+    }
+    Ok(Value::Object(body))
+}
 
 /// Convenience wrapper: list tasks from the default tasklist (`@default`).
 ///
@@ -77,34 +124,41 @@ pub async fn complete_task(client: &BaseClient, args: Value) -> Result<Value> {
 
 /// Why: Task list CRUD is small enough to share one tool action enum.
 /// What: Routes `list|get|create|update|delete` to `users/@me/lists`.
-/// Test: Live API.
+/// Test: `task_lists_update_applies_flat_title`; other actions live API.
 pub async fn manage_task_lists(client: &BaseClient, args: Value) -> Result<Value> {
+    manage_task_lists_at(client, args, TASKS_API_BASE).await
+}
+
+/// [`manage_task_lists`] against an injectable API base (#8629: lets tests
+/// assert the exact request against a `wiremock` server).
+async fn manage_task_lists_at(client: &BaseClient, args: Value, base: &str) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
     match action {
         "list" => {
-            let url = format!("{TASKS_API_BASE}/users/@me/lists");
+            let url = format!("{base}/users/@me/lists");
             client.get(&url, account).await
         }
         "get" => {
             let id = require_str(&args, "tasklist_id")?;
-            let url = format!("{TASKS_API_BASE}/users/@me/lists/{id}");
+            let url = format!("{base}/users/@me/lists/{id}");
             client.get(&url, account).await
         }
         "create" => {
             let title = require_str(&args, "title")?;
-            let url = format!("{TASKS_API_BASE}/users/@me/lists");
+            let url = format!("{base}/users/@me/lists");
             client.post(&url, json!({ "title": title }), account).await
         }
         "update" => {
             let id = require_str(&args, "tasklist_id")?;
-            let url = format!("{TASKS_API_BASE}/users/@me/lists/{id}");
-            let body = args.get("updates").cloned().unwrap_or_else(|| json!({}));
+            let url = format!("{base}/users/@me/lists/{id}");
+            // #8629: a flat `title` renames the list; it used to PATCH `{}`.
+            let body = merge_task_fields(&args, "updates", &["title"])?;
             client.patch(&url, body, account).await
         }
         "delete" => {
             let id = require_str(&args, "tasklist_id")?;
-            let url = format!("{TASKS_API_BASE}/users/@me/lists/{id}");
+            let url = format!("{base}/users/@me/lists/{id}");
             client.delete(&url, account).await
         }
         other => Err(anyhow!("unknown action for manage_task_lists: {other}")),
@@ -115,50 +169,57 @@ pub async fn manage_task_lists(client: &BaseClient, args: Value) -> Result<Value
 /// cross-list search agents frequently need ("find the task about X").
 /// What: Routes `list|get|create|update|delete|complete|move|search` to
 /// `lists/{id}/tasks`; `search` fans out across every tasklist.
-/// Test: `search` filter is unit-tested via `task_matches`; live 200 deferred.
+/// Test: `create_accepts_flat_payload_from_8629`,
+/// `create_accepts_task_object`, `update_applies_flat_fields`; `search`
+/// filter via `task_matches`.
 pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
+    manage_tasks_at(client, args, TASKS_API_BASE).await
+}
+
+/// [`manage_tasks`] against an injectable API base (#8629: lets tests assert
+/// the exact request against a `wiremock` server).
+async fn manage_tasks_at(client: &BaseClient, args: Value, base: &str) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
     let tasklist = opt_str(&args, "tasklist_id").unwrap_or("@default");
     match action {
         "list" => {
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks");
+            let url = format!("{base}/lists/{tasklist}/tasks");
             client.get(&url, account).await
         }
         "get" => {
             let id = require_str(&args, "task_id")?;
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}");
+            let url = format!("{base}/lists/{tasklist}/tasks/{id}");
             client.get(&url, account).await
         }
-        "search" => search_tasks(client, account, &args).await,
+        "search" => search_tasks(client, account, &args, base).await,
         "create" => {
-            let body = args
-                .get("task")
-                .cloned()
-                .ok_or_else(|| anyhow!("missing 'task' object"))?;
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks");
+            // #8629: accept the flat pre-port shape as well as a `task` object.
+            let body = merge_task_fields(&args, "task", &TASK_FLAT_FIELDS)?;
+            let url = format!("{base}/lists/{tasklist}/tasks");
             client.post(&url, body, account).await
         }
         "update" => {
             let id = require_str(&args, "task_id")?;
-            let body = args.get("updates").cloned().unwrap_or_else(|| json!({}));
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}");
+            // #8629: flat fields used to be ignored, PATCHing `{}`.
+            let body = merge_task_fields(&args, "updates", &TASK_FLAT_FIELDS)?;
+            let url = format!("{base}/lists/{tasklist}/tasks/{id}");
             client.patch(&url, body, account).await
         }
         "delete" => {
             let id = require_str(&args, "task_id")?;
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}");
+            let url = format!("{base}/lists/{tasklist}/tasks/{id}");
             client.delete(&url, account).await
         }
         "complete" => {
             let id = require_str(&args, "task_id")?;
             let body = json!({ "status": "completed" });
-            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}");
+            let url = format!("{base}/lists/{tasklist}/tasks/{id}");
             client.patch(&url, body, account).await
         }
         "move" => {
             let id = require_str(&args, "task_id")?;
-            let mut url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}/move");
+            let mut url = format!("{base}/lists/{tasklist}/tasks/{id}/move");
             let mut params = Vec::<String>::new();
             if let Some(parent) = opt_str(&args, "parent") {
                 params.push(format!("parent={parent}"));
@@ -183,7 +244,12 @@ pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
 /// `tasklist_id`/`tasklist_title`.
 /// Test: The per-task predicate is unit-tested via `task_matches`; the
 /// pagination termination condition via `next_page_token_present_and_absent`.
-async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) -> Result<Value> {
+async fn search_tasks(
+    client: &BaseClient,
+    account: Option<&str>,
+    args: &Value,
+    base: &str,
+) -> Result<Value> {
     let query = require_str(args, "query")?;
     let needle = query.to_ascii_lowercase();
     let show_completed = args
@@ -194,7 +260,7 @@ async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) 
     let list_items = fetch_all_items(
         client,
         account,
-        &format!("{TASKS_API_BASE}/users/@me/lists?maxResults=100"),
+        &format!("{base}/users/@me/lists?maxResults=100"),
     )
     .await?;
 
@@ -208,7 +274,7 @@ async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) 
         };
         let list_title = list.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let tasks_url = format!(
-            "{TASKS_API_BASE}/lists/{list_id}/tasks?showCompleted={show_completed}&showHidden=true&maxResults=100"
+            "{base}/lists/{list_id}/tasks?showCompleted={show_completed}&showHidden=true&maxResults=100"
         );
         let items = fetch_all_items(client, account, &tasks_url).await?;
         for task in items {
@@ -320,5 +386,136 @@ mod tests {
         // a token to loop forever on.
         let empty_token = json!({ "items": [], "nextPageToken": "" });
         assert_eq!(next_page_token(&empty_token), None);
+    }
+
+    // #8629: the request-shape tests below drive the real handler against a
+    // wiremock server and pin the exact method, path and JSON body sent.
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Mount a mock that must receive exactly `expect` requests with `body`.
+    async fn mount(server: &MockServer, verb: &str, at: &str, body: Value, expect: u64) {
+        Mock::given(method(verb))
+            .and(path(at))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "t1" })))
+            .expect(expect)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn create_accepts_flat_payload_from_8629() {
+        let server = MockServer::start().await;
+        // The pre-0.2.6 request: flat fields become the Task resource body.
+        let body =
+            json!({ "title": "[GitHub] PR", "notes": "Repo: x", "due": "2026-09-27T00:00:00Z" });
+        mount(&server, "POST", "/lists/tl-gh/tasks", body, 1).await;
+        let client = BaseClient::for_test_with_token("a");
+        // The exact caller payload from #8629.
+        let args = json!({
+            "action": "create",
+            "title": "[GitHub] PR",
+            "notes": "Repo: x",
+            "due": "2026-09-27T00:00:00Z",
+            "tasklist_id": "tl-gh",
+        });
+        let out = manage_tasks_at(&client, args, &server.uri()).await;
+        assert_eq!(out.expect("flat create succeeds")["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn create_accepts_task_object() {
+        let server = MockServer::start().await;
+        let task = json!({ "title": "T", "notes": "N", "due": "2026-09-27T00:00:00Z" });
+        mount(&server, "POST", "/lists/tl-gh/tasks", task.clone(), 1).await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({ "action": "create", "tasklist_id": "tl-gh", "task": task });
+        let out = manage_tasks_at(&client, args, &server.uri()).await;
+        assert_eq!(out.expect("task-object create succeeds")["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn create_with_both_shapes_merges_disjoint_fields() {
+        let server = MockServer::start().await;
+        // Keys from both shapes survive; a key given twice with the SAME
+        // value is not a conflict.
+        let body = json!({ "title": "T", "status": "needsAction", "notes": "N" });
+        mount(&server, "POST", "/lists/@default/tasks", body, 1).await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({
+            "action": "create",
+            "task": { "title": "T", "status": "needsAction" },
+            "title": "T",
+            "notes": "N",
+        });
+        let out = manage_tasks_at(&client, args, &server.uri()).await;
+        assert_eq!(out.expect("merged create succeeds")["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn create_with_conflicting_shapes_is_refused_without_a_request() {
+        let server = MockServer::start().await;
+        // Any request at all would mean one of the two titles was dropped.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({ "action": "create", "task": { "title": "A" }, "title": "B" });
+        let err = manage_tasks_at(&client, args, &server.uri())
+            .await
+            .expect_err("conflicting title must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("'title'"), "error names the field: {msg}");
+        assert!(msg.contains("'task'"), "error names the object: {msg}");
+    }
+
+    #[tokio::test]
+    async fn create_with_no_task_fields_names_both_shapes() {
+        let server = MockServer::start().await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({ "action": "create", "tasklist_id": "tl-gh" });
+        let err = manage_tasks_at(&client, args, &server.uri())
+            .await
+            .expect_err("a create with no fields is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("title") && msg.contains("'task'"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn update_applies_flat_fields() {
+        let server = MockServer::start().await;
+        // Flat fields were previously ignored: the PATCH body was `{}`.
+        let body = json!({ "title": "New", "due": "2026-10-01T00:00:00Z" });
+        mount(&server, "PATCH", "/lists/tl-gh/tasks/t1", body, 1).await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({
+            "action": "update",
+            "tasklist_id": "tl-gh",
+            "task_id": "t1",
+            "title": "New",
+            "updates": { "due": "2026-10-01T00:00:00Z" },
+        });
+        let out = manage_tasks_at(&client, args, &server.uri()).await;
+        assert_eq!(out.expect("flat update succeeds")["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn task_lists_update_applies_flat_title() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "PATCH",
+            "/users/@me/lists/L1",
+            json!({ "title": "Renamed" }),
+            1,
+        )
+        .await;
+        let client = BaseClient::for_test_with_token("a");
+        let args = json!({ "action": "update", "tasklist_id": "L1", "title": "Renamed" });
+        let out = manage_task_lists_at(&client, args, &server.uri()).await;
+        assert_eq!(out.expect("flat list rename succeeds")["id"], "t1");
     }
 }
