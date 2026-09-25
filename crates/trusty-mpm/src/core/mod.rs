@@ -359,6 +359,8 @@ pub mod stray_mcp;
 pub mod tmux;
 pub mod transcript_usage;
 pub mod trusty_tools_config;
+// #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
+pub mod uncommitted_changes;
 pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;

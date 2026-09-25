@@ -106,6 +106,11 @@
 //! `.claude/worktrees/**` stay allowed. No daemon is consulted, so there is no
 //! unreachable-daemon arm to fail open through; see that module's doc for the
 //! registry it deliberately does not gate on and why.
+//! **Main-checkout HEAD switch (#8572):** right after it,
+//! [`crate::commands::pm_guard_bash::evaluate_main_checkout_head_switch`]
+//! refuses a dispatched AGENT's branch checkout, `switch`, `stash` or `bisect`
+//! in a main checkout that holds uncommitted work — or whose state
+//! `git status` cannot report, which fails closed.
 //! **Main-checkout write boundary (ADR-0044, enforced by ADR-0048):** the
 //! destructive-git rule above covers only whole-tree destruction, so an
 //! ordinary `Write` to a `.rs` file in a shared checkout — the write the
@@ -213,9 +218,10 @@ use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
-    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
+    evaluate_main_checkout_head_switch, evaluate_read_only_dispatch_command,
+    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
+    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
+    print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -409,6 +415,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
+    // #8572: hoisted from the fan-out check below; the HEAD-switch rule needs it too.
+    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
 
     if tool_name == "Bash" {
         let command = tool_input
@@ -488,6 +496,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // to (irreversible destruction of another session's uncommitted work,
         // nothing wider) and for why no daemon is consulted.
         if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
+            return Ok(());
+        }
+        // #8572: ABSOLUTE, same placement and reason as the rule above — the
+        // incident was a dispatched agent switching HEAD over the operator's
+        // uncommitted edit. See `pm_guard_bash::head_switch`.
+        if let Some(reason) =
+            evaluate_main_checkout_head_switch(command, &hook_cwd, caller_is_subagent)
+        {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
             println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
@@ -599,8 +617,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // It fails OPEN: `caller_is_subagent` reports false whenever neither the
     // payload's `agent_id` nor `CLAUDE_MPM_SUB_AGENT` is present, so an
     // unrecognised context allows the dispatch rather than blocking the PM.
-    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
-
+    // (`caller_is_subagent` is resolved above, beside `hook_cwd` — #8572.)
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pm_guard_deny_response(reason));

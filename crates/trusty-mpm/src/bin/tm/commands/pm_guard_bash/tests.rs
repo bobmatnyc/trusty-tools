@@ -1834,6 +1834,30 @@ fn unresolved_target_is_none_once_home_expands_the_tilde() {
     }
 }
 
+/// #8572: a `$(…)` or backtick substitution survives resolution too, and
+/// every rule asking [`unresolved_target`] must see it.
+/// Test: itself.
+#[test]
+fn unresolved_target_reports_a_command_substitution() {
+    let env = PathEnv {
+        tmpdir: None,
+        tmp: None,
+        home: Some("/Users/bob".to_string()),
+    };
+    let base = Path::new("/repo/.claude/worktrees/agent-a");
+    for (token, expected) in [
+        ("$(cat /tmp/main)", "$("),
+        ("`cat /tmp/main`", "`"),
+        ("$(cat $MAIN)/sub", "$("),
+    ] {
+        let resolved = resolve_target_path(token, base, &env);
+        let unresolved =
+            unresolved_target(&resolved).unwrap_or_else(|| panic!("must be unresolved: {token}"));
+        assert_eq!(unresolved.token, expected, "token: {token}");
+        assert_eq!(unresolved.shown, resolved, "the whole path is quoted");
+    }
+}
+
 /// Whether any composition segment of `command` runs `git` as its command
 /// word — the question every git rule in this guard asks, resolved the way
 /// the production path resolves it (#6982).

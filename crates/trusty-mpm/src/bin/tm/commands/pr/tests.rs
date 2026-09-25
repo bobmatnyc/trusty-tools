@@ -929,8 +929,8 @@ fn open_head_drives_the_preflight_diff_revision() {
 /// have that gate judge the checkout instead of the PR, and a source PR with no
 /// fragment would pass it — the changelog gate silently evaluating the wrong
 /// ref (#7282 round 5, code-critic HIGH). The refusal has to name the
-/// obligation, because the caller's next move is either `--docs-only` or a real
-/// checkout of the head. #7747 moved the decision from the branch NAME to the
+/// obligation, because the caller's next move is either `--docs-only` or a run
+/// from the worktree that holds the head (#8572). #7747 moved the decision from the branch NAME to the
 /// gate's verdict; the refusal itself is unchanged.
 /// Test target: `head_elsewhere_refusal`, through `plan`.
 #[test]
@@ -958,6 +958,12 @@ fn open_head_without_docs_only_is_refused() {
     assert!(
         failures[0].contains("chore/sessions-abc"),
         "the refusal must name the head it is about: {failures:?}"
+    );
+    // #8572: the refusal must send the caller to a worktree, never to a
+    // checkout of the head in whatever tree it stands in.
+    assert!(
+        failures[0].contains("worktree") && !failures[0].contains("` out"),
+        "the refusal must not tell the caller to check the head out: {failures:?}"
     );
 }
 
