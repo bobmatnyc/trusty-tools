@@ -908,7 +908,6 @@ crates/trusty-common/src/log_drain/single_source.rs	yaml_round_trips_every_field
 crates/trusty-common/src/memory_core/dream/fading.rs	palace_dream
 crates/trusty-common/src/memory_core/retrieval/handle.rs	idle_evict
 crates/trusty-common/src/memory_core/retrieval/types.rs	deferred_embed_backfills_vector_once_embedder_ready
-crates/trusty-common/src/memory_core/store/kg/ops.rs	kuzu_migrate
 crates/trusty-common/src/memory_core/store/payload_store/types.rs	iter_segment
 crates/trusty-common/src/memory_core/store/vector.rs	default_palace_used_when_arg_omitted
 crates/trusty-common/src/monitor/memory_tui/render.rs	test_render_with_drawer_pane_focus_marker
