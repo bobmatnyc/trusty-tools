@@ -114,13 +114,16 @@ to start the embedding daemon. Two working options, in order of preference:
    arm64: it is built on Ubuntu 24.04 and carries a glibc 2.39 floor, so it
    fails to load on AL2023's glibc 2.34 (measured in PR #4822).
 2. **Build from source / crates.io with `load-dynamic`**, then point
-   `ORT_DYLIB_PATH` at a host-compatible `libonnxruntime.so` (e.g. the
-   official ORT 1.20.1 `linux-x64` release — or `linux-aarch64` on Graviton
-   — built on Ubuntu 20.04 / glibc 2.31, which satisfies AL2023's glibc
-   2.34):
+   `ORT_DYLIB_PATH` at a host-compatible `libonnxruntime.so` from the ONNX
+   Runtime **1.24.x** line (e.g. the official ORT 1.24.2 `linux-x64`
+   release — or `linux-aarch64` on Graviton — whose library needs only
+   glibc 2.27, so it runs on AL2023's glibc 2.34). The `ort` crate this
+   build uses (2.0.0-rc.12, `api-24`) refuses any older runtime with
+   `expected version >= '1.24.x'` (#8612):
    ```bash
    cargo install trusty-search --no-default-features --features load-dynamic --locked
-   export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+   curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz | tar xz -C /opt
+   export ORT_DYLIB_PATH=/opt/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2
    ```
 
 Both binaries this crate installs (`trusty-search` and the bundled

@@ -1375,10 +1375,11 @@ it with `ORT_DYLIB_PATH`. Always pair `--features cuda` with
 # Build trusty-search without bundled ORT (load-dynamic path)
 cargo install trusty-search --no-default-features --features cuda
 
-# Install ONNX Runtime GPU 1.20.x (built against glibc 2.31, runs on 2.34+)
-curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz \
+# Install ONNX Runtime GPU 1.24.x — ort 2.0.0-rc.12 (api-24) refuses any
+# older runtime (#8612)
+curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu-1.24.2.tgz \
   | sudo tar xz -C /opt
-sudo ln -s /opt/onnxruntime-linux-x64-gpu-1.20.1 /opt/onnxruntime
+sudo ln -s /opt/onnxruntime-linux-x64-gpu-1.24.2 /opt/onnxruntime
 
 # Point ort at the dynamic library and start the daemon
 export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so

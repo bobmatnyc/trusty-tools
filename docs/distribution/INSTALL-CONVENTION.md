@@ -331,15 +331,17 @@ everywhere.)
      --no-default-features --features load-dynamic --locked
    ```
 
-2. Install a compatible ONNX Runtime (e.g., glibc 2.31):
+2. Install an ONNX Runtime from the 1.24.x line — `ort` 2.0.0-rc.12
+   (`api-24`) refuses anything older with `expected version >= '1.24.x'`
+   (#8612). The 1.24.2 library needs only glibc 2.27:
    ```bash
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz \
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz \
      | sudo tar xz -C /opt
    ```
 
 3. Point the daemon to the installed library:
    ```bash
-   export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
+   export ORT_DYLIB_PATH=/opt/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2
    trusty-search start
    ```
 

@@ -8,7 +8,7 @@
 ```bash
 export TS_INDEX="main"                       # the index that returned total_files=0
 export TS_PORT="7878"
-export ORT_VERSION="1.20.1"
+export ORT_VERSION="1.24.2"                  # #8612: ort 2.0.0-rc.12 (api-24) needs ORT >= 1.24
 export ORT_PREFIX="/opt/onnxruntime"
 export ORT_DYLIB_PATH="${ORT_PREFIX}/lib/libonnxruntime.so.${ORT_VERSION}"
 ```
@@ -21,7 +21,8 @@ trusty-search --version || echo "not yet installed on PATH"
 which cargo || echo "install rustup first: https://rustup.rs"
 ```
 
-## 2. Install a glibc-compatible ORT 1.20.1 GPU runtime (once)
+## 2. Install a glibc-compatible ORT 1.24.x GPU runtime (once)
+An older runtime fails the load with `expected version >= '1.24.x'` (#8612).
 ```bash
 curl -fsSL --retry 3 \
   "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" \
@@ -41,7 +42,7 @@ trusty-search --version                        # expect: trusty-search 0.27.1
 **systemd-managed:**
 ```bash
 sudo systemctl edit trusty-search
-# under [Service]:  Environment=ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so.1.20.1
+# under [Service]:  Environment=ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so.1.24.2
 sudo systemctl daemon-reload
 ```
 **custom wrapper/screen/tmux:** add `export ORT_DYLIB_PATH=...` to the wrapper before `trusty-search start`.
@@ -73,5 +74,6 @@ sudo systemctl restart trusty-search
 
 ## Troubleshooting
 - **`total_files` still 0** → not running 0.27.1; re-check `trusty-search --version` and that the daemon actually restarted (no stale process). This is the version, not git `safe.directory` (the #1554 walk is internal, so host git config has no effect).
-- **Log shows `provider=CPU` / CUDA EP failed to register** → CUDA/cuDNN mismatch. ORT 1.20.1 GPU is built against CUDA 12.x + cuDNN 9.x; if the host toolkit is CUDA 13.x, install matching CUDA 12 runtime libs or use an ORT GPU build matching your CUDA major. Indexing still works on CPU meanwhile (the #1554 fix is provider-independent).
+- **Log shows `provider=CPU` / CUDA EP failed to register** → CUDA/cuDNN mismatch. Each ORT GPU release targets one CUDA/cuDNN major (see the release notes for the version you installed); install the matching runtime libs or an ORT 1.24.x GPU build that matches your CUDA major. Indexing still works on CPU meanwhile (the #1554 fix is provider-independent).
+- **Daemon hangs at `loading embedding model...` with no error** → the runtime at `ORT_DYLIB_PATH` is missing or older than 1.24; `ort` rc.12 hangs instead of exiting on a failed load (#8616). Check the path and that it names a 1.24.x library.
 - **`libonnxruntime.so` not found at startup** → `ORT_DYLIB_PATH` not in the daemon's persistent env (step 4); verify with `sudo systemctl show trusty-search -p Environment`.
