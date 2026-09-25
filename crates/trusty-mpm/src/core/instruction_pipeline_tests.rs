@@ -1685,7 +1685,10 @@ fn the_stub_lists_exactly_the_overridable_section_tokens() {
         .filter(|id| is_fixed_core_section(*id))
         .map(section_token)
         .collect();
-    assert_eq!(fixed, expected_fixed, "the one token the stub says is declined");
+    assert_eq!(
+        fixed, expected_fixed,
+        "the one token the stub says is declined"
+    );
 
     let keeps_core = quoted_tokens_between(CLAUDE_MD_STUB, "An override of", "replaces");
     let mut expected_core: Vec<&str> = SAFETY_CORE
@@ -1695,7 +1698,10 @@ fn the_stub_lists_exactly_the_overridable_section_tokens() {
         .collect();
     expected_core.dedup();
     assert_eq!(keeps_core, expected_core, "sections that keep a core block");
-    for member in SAFETY_CORE.iter().filter(|m| !is_fixed_core_section(m.section)) {
+    for member in SAFETY_CORE
+        .iter()
+        .filter(|m| !is_fixed_core_section(m.section))
+    {
         assert!(
             CLAUDE_MD_STUB.contains(&member.name.to_lowercase()),
             "the stub names safety-core member `{}`",

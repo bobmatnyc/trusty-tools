@@ -201,7 +201,9 @@ pub fn effective_style_id(
     config: &MpmConfig,
     manifest: Option<&str>,
 ) -> Option<String> {
-    style_chain(project_dir, explicit, config, || manifest.map(str::to_string))
+    style_chain(project_dir, explicit, config, || {
+        manifest.map(str::to_string)
+    })
 }
 
 /// The precedence chain, reading the manifest tier only when it can win.
@@ -324,7 +326,8 @@ pub fn select_style_under(
 /// Test: `instructions_reports_section_status_and_project_style`,
 /// `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
 pub fn describe_effective_style(framework_root: &Path, project_dir: &Path) -> String {
-    let SelectedStyle { style, warning, .. } = select_style_under(framework_root, project_dir, None);
+    let SelectedStyle { style, warning, .. } =
+        select_style_under(framework_root, project_dir, None);
     let mut out = format!("output style: {}\n", style.describe());
     if let Some(warning) = warning {
         out.push_str(&format!("warning: {warning}\n"));

@@ -815,12 +815,10 @@ pub(super) fn prepare_session_inner(
     // flag and the host config, and a project style file resolves like a
     // bundled one.
     // The report (`describe_effective_style`) calls this same selector.
-    let selected_style = crate::core::output_style::select_style(
-        project_dir,
-        explicit_style,
-        &config,
-        || plan.style.clone(),
-    );
+    let selected_style =
+        crate::core::output_style::select_style(project_dir, explicit_style, &config, || {
+            plan.style.clone()
+        });
     let effective_style: Option<String> = selected_style.id.clone();
 
     // Stash the EXACT text the launch path passes to
