@@ -5,7 +5,8 @@
 //! report name the default style while the launch wrote the manifest's.
 //! What: sets a style ONLY in the project manifest, runs the real launch, and
 //! compares the `outputStyle` it wrote with what the report names. A second
-//! test reads what a bare `claude` launch would load after a tm launch.
+//! test reads what a bare `claude` launch would load after a tm launch; a
+//! third makes the composite unwritable and checks the launch falls back.
 //! Test: this is the test module.
 
 use super::tests::EnvVarGuard;
@@ -129,4 +130,72 @@ fn a_bare_claude_launch_loads_the_project_prose_then_the_floor() {
     )
     .unwrap();
     assert!(!stash.contains(crate::core::output_style::STYLE_FLOOR_HEADING));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn an_unwritable_composite_names_the_default_style_and_keeps_the_floor() {
+    // #8533 critic round 3 LOW: a composite that cannot be written must not
+    // leave `outputStyle` naming a missing file, must be announced, and must
+    // leave the floor in the appended prompt.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    std::fs::write(
+        project.join(".trusty-mpm.toml"),
+        "[style]\nactive = \"tm-demo-01\"\n",
+    )
+    .unwrap();
+    let styles = project.join(crate::core::output_style::PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).unwrap();
+    std::fs::write(
+        styles.join("tm-demo-01.md"),
+        "---\nname: tm-demo-01\n---\nSpeak as the fixture voice.\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&styles, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root writes into a read-only directory regardless; skip rather than
+    // assert a false property.
+    let probe = styles.join("probe");
+    if std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&styles, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let report = prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        HostInputs::with_home(Some(tmp_home.path())),
+    );
+    std::fs::set_permissions(&styles, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = report.expect("the launch prepares");
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["outputStyle"], "trusty-mpm");
+    assert!(
+        report
+            .asset_notices
+            .iter()
+            .any(|n| n.contains("tm-demo-01") && n.contains("cannot write its composite")),
+        "{:?}",
+        report.asset_notices
+    );
+    let stash = std::fs::read_to_string(
+        crate::core::harness_root::harness_dir(project).join("last-instructions.md"),
+    )
+    .unwrap();
+    assert!(stash.contains(crate::core::output_style::STYLE_FLOOR_HEADING));
 }
