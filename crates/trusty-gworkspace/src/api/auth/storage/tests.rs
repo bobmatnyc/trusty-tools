@@ -2,8 +2,9 @@
 //!
 //! Why: split out of `storage/mod.rs` to keep the production file under the
 //! 500-SLOC cap (mirrors the `oauth/flow/mod.rs` + `flow/tests.rs` split).
-//! What: exercises `TokenStorage` load/save/permissions, the stale-shadow
-//! warning, `TokenStorage::update`'s concurrency guard, and the
+//! What: exercises `TokenStorage` load/save/permissions, the two-store
+//! precedence and shadow warning (#8539), `TokenStorage::update`'s write
+//! routing and concurrency guard, and the
 //! remove/default-reassignment pure helper.
 //! Test: this file IS the test module for `storage`.
 
@@ -74,7 +75,7 @@ fn save_still_round_trips_content() {
 }
 
 /// Build a `StoredToken` expiring `expires_in_secs` from now (negative =
-/// already expired) for the stale-shadow-warning tests below.
+/// already expired).
 fn make_stored(expires_in_secs: i64) -> StoredToken {
     StoredToken {
         version: 1,
@@ -96,142 +97,153 @@ fn make_stored(expires_in_secs: i64) -> StoredToken {
     }
 }
 
-#[test]
-fn warns_when_project_stale_and_user_fresh() {
-    let project = make_stored(-3600);
-    let user = make_stored(3600);
-    let info = stale_shadow_warning(
-        &project,
-        &user,
-        Path::new("/proj/.gworkspace-mcp/tokens.json"),
-        Path::new("/home/user/.gworkspace-mcp/tokens.json"),
-    )
-    .expect("must warn: project stale, user fresh");
-    assert_eq!(
-        info.project_path,
-        Path::new("/proj/.gworkspace-mcp/tokens.json")
-    );
-    assert_eq!(
-        info.user_path,
-        Path::new("/home/user/.gworkspace-mcp/tokens.json")
-    );
-    assert_eq!(info.project_expires_at, project.token.expires_at);
-    assert_eq!(info.user_expires_at, user.token.expires_at);
+const GMAIL_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
+const GMAIL_SETTINGS: &str = "https://www.googleapis.com/auth/gmail.settings.basic";
+const PROJECT_ACCESS: &str = "project-fixture-access";
+const USER_ACCESS: &str = "user-fixture-access";
+
+/// A `work` entry holding `scopes`, issued `issued_secs_ago` seconds ago and
+/// still valid, with fake (non-provider-shaped) token values.
+fn scoped_entry(scopes: &[&str], issued_secs_ago: i64, access: &str) -> StoredToken {
+    let mut entry = make_stored(3600 - issued_secs_ago);
+    entry.metadata.created_at = chrono::Utc::now() - chrono::Duration::seconds(issued_secs_ago);
+    entry.token.access_token = access.into();
+    entry.token.refresh_token = Some(format!("{access}-refresh"));
+    entry.token.scopes = scopes.iter().map(|s| (*s).to_string()).collect();
+    entry
 }
 
-#[test]
-fn no_warning_when_both_fresh() {
-    let project = make_stored(3600);
-    let user = make_stored(7200);
-    assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-}
-
-#[test]
-fn no_warning_when_both_stale() {
-    // Both stale is not the silent-shadow failure mode — the caller gets
-    // an expired token either way, so no extra signal is needed here.
-    let project = make_stored(-3600);
-    let user = make_stored(-7200);
-    assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-}
-
-#[test]
-fn no_warning_when_project_is_fresher() {
-    let project = make_stored(3600);
-    let user = make_stored(-3600);
-    assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-}
-
-/// Build a two-tier temp `TokenStorage` (separate user/project dirs) with
-/// a `work` profile present on both sides, and write the given
-/// user/project token maps to disk. Shared by the precedence and
-/// warn-capture tests below.
-fn temp_shadowed_storage(
+/// A two-tier temp `TokenStorage` (separate user and project dirs), each
+/// store seeded with the given map. Returns the storage and both paths.
+fn two_tier(
     label: &str,
-    user_expires_in_secs: i64,
-    project_expires_in_secs: i64,
-) -> TokenStorage {
+    user_tokens: HashMap<String, StoredToken>,
+    project_tokens: HashMap<String, StoredToken>,
+) -> (TokenStorage, PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("gw-storage-{label}-{}", uuid::Uuid::new_v4()));
-    let user_dir = dir.join("user");
-    let project_dir = dir.join("project");
-    std::fs::create_dir_all(&user_dir).unwrap();
-    std::fs::create_dir_all(&project_dir).unwrap();
-    let user_path = user_dir.join("tokens.json");
-    let project_path = project_dir.join("tokens.json");
+    let user_path = dir.join("user").join("tokens.json");
+    let project_path = dir.join("project").join("tokens.json");
+    TokenStorage::with_path(user_path.clone())
+        .save(&user_tokens)
+        .unwrap();
+    TokenStorage::with_path(project_path.clone())
+        .save(&project_tokens)
+        .unwrap();
+    let mut storage = TokenStorage::with_path(user_path.clone());
+    storage.project_path = Some(project_path.clone());
+    (storage, user_path, project_path)
+}
 
-    let mut user_tokens = HashMap::new();
-    user_tokens.insert("work".to_string(), make_stored(user_expires_in_secs));
-    std::fs::write(&user_path, serde_json::to_string(&user_tokens).unwrap()).unwrap();
-
-    let mut project_tokens = HashMap::new();
-    let mut project_stored = make_stored(project_expires_in_secs);
-    project_stored.token.access_token = "stale-access-token".into();
-    project_tokens.insert("work".to_string(), project_stored);
-    std::fs::write(
-        &project_path,
-        serde_json::to_string(&project_tokens).unwrap(),
-    )
-    .unwrap();
-
-    TokenStorage {
-        user_path,
-        project_path: Some(project_path),
-        warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
-        write_guard: Arc::new(Mutex::new(())),
-    }
+/// The #8539 shape: an unexpired project entry minted before a re-consent,
+/// lacking `gmail.settings.basic`, beside a fresh user entry that has it.
+fn scope_shadowed(label: &str) -> (TokenStorage, PathBuf, PathBuf) {
+    let user = HashMap::from([
+        (
+            "work".to_string(),
+            scoped_entry(&[GMAIL_MODIFY, GMAIL_SETTINGS], 600, USER_ACCESS),
+        ),
+        (
+            "personal".to_string(),
+            scoped_entry(&[GMAIL_MODIFY], 600, "personal-fixture-access"),
+        ),
+    ]);
+    let project = HashMap::from([(
+        "work".to_string(),
+        scoped_entry(&[GMAIL_MODIFY], 1800, PROJECT_ACCESS),
+    )]);
+    two_tier(label, user, project)
 }
 
 #[test]
-fn load_still_prefers_project_override_after_warning() {
-    // Regression guard for the precedence contract: this fix only adds a
-    // warning, it does not change which entry wins (see PR body) — a
-    // stale project override must still be served, just noisily.
-    let storage = temp_shadowed_storage("precedence", 3600, -3600);
+fn project_entry_lacking_scope_no_longer_shadows_fresh_user_entry() {
+    let (storage, _, _) = scope_shadowed("scope-shadow");
 
     let loaded = storage.load().unwrap();
     assert_eq!(
-        loaded["work"].token.access_token, "stale-access-token",
-        "project override must still win per the documented contract \
-             (warn, don't change precedence)"
+        loaded["work"].token.access_token, USER_ACCESS,
+        "the wider, newer user-level entry must win over a narrower project entry (#8539)"
+    );
+    assert!(
+        loaded["work"]
+            .token
+            .scopes
+            .iter()
+            .any(|s| s == GMAIL_SETTINGS)
     );
 }
 
 #[test]
 #[tracing_test::traced_test]
-fn load_warns_when_project_shadow_is_stale() {
-    let storage = temp_shadowed_storage("warns", 3600, -3600);
-
-    storage.load().unwrap();
-
-    assert!(logs_contain("work"));
-    assert!(logs_contain("STALE"));
-}
-
-#[test]
-#[tracing_test::traced_test]
-fn load_does_not_rewarn_on_second_load() {
-    // PR #2949 review (HIGH): load() sits on the per-request hot path —
-    // an unthrottled warn would repeat on every single MCP tool call.
-    // Two loads on the same TokenStorage must produce exactly one
-    // stale-shadow warning, not two.
-    let storage = temp_shadowed_storage("norewarn", 3600, -3600);
+fn load_warns_once_naming_winner_without_token_values() {
+    let (storage, _, _) = scope_shadowed("scope-warn");
 
     storage.load().unwrap();
     storage.load().unwrap();
 
     logs_assert(|lines: &[&str]| {
-        let count = lines
+        let warnings: Vec<&&str> = lines
             .iter()
-            .filter(|l| l.contains("STALE") && l.contains("work"))
-            .count();
-        if count == 1 {
-            Ok(())
-        } else {
-            Err(format!(
-                "expected exactly 1 stale-shadow warning after two load() calls, found {count}"
-            ))
+            .filter(|l| l.contains("WARN") && l.contains("work"))
+            .collect();
+        if warnings.len() != 1 {
+            return Err(format!(
+                "expected exactly 1 shadow warning after two loads, found {}",
+                warnings.len()
+            ));
         }
+        let w = warnings[0];
+        if !(w.contains("user-level") && w.contains("gmail.settings.basic")) {
+            return Err(format!("warning must name the winner and why: {w}"));
+        }
+        if lines.iter().any(|l| l.contains("fixture-access")) {
+            return Err("a token value reached the log".into());
+        }
+        Ok(())
     });
+}
+
+#[test]
+fn refresh_write_back_targets_the_winning_store() {
+    // Mirrors `OAuthManager::refresh`: read the winner, replace its token,
+    // write it back through `update`.
+    let (storage, user_path, project_path) = scope_shadowed("scope-refresh");
+    let mut stored = storage.get_profile("work").unwrap().unwrap();
+    stored.token.access_token = "refreshed-fixture-access".into();
+    stored.metadata.last_refreshed = Some(chrono::Utc::now());
+
+    storage
+        .update(|all| {
+            all.insert("work".to_string(), stored);
+            Ok(())
+        })
+        .unwrap();
+
+    let user = TokenStorage::with_path(user_path).load().unwrap();
+    let project = TokenStorage::with_path(project_path).load().unwrap();
+    assert_eq!(
+        user["work"].token.access_token, "refreshed-fixture-access",
+        "a refreshed user-level winner must be written to the user store"
+    );
+    assert_eq!(
+        project["work"].token.access_token, PROJECT_ACCESS,
+        "the project store must not receive the user-level winner's token"
+    );
+    assert!(
+        !project.contains_key("personal"),
+        "an unchanged user-level entry must not be copied into the project store"
+    );
+}
+
+#[test]
+fn remove_profile_clears_both_stores() {
+    let (storage, _, _) = scope_shadowed("scope-remove");
+
+    storage.remove_profile("work").unwrap();
+
+    assert!(
+        !storage.load().unwrap().contains_key("work"),
+        "removing a profile must not let its losing entry resurface"
+    );
 }
 
 /// Best-effort regression test for issue #3502: two threads racing a

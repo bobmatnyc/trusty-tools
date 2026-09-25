@@ -1,0 +1,4 @@
+Fixed
+- A project-level token entry (`./.gworkspace-mcp/`) no longer silently shadows a newer or wider-scoped user-level entry for the same profile. When both stores hold a profile, a strict scope superset wins, then the later issue or refresh time; a project entry naming a different account, or an exact tie, still wins. Gmail filter writes no longer fail with 403 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` after a re-consent made from another directory (#8539).
+- Every differing shadow now logs one warning per profile naming the winning store and the reason, never a token value; the old warning fired only when the project entry had expired (#8539).
+- Token refreshes and other writes go back to the store the entry was read from, instead of copying the merged view into the project store, and removing a profile clears it from both stores (#8539).

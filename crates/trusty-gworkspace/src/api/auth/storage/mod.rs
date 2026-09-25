@@ -3,42 +3,44 @@
 //! Why: We want to share `~/.gworkspace-mcp/tokens.json` between the Python
 //! CLI (which performs the interactive OAuth flow) and this Rust MCP server.
 //! What: Reads/writes a `HashMap<profile_name, StoredToken>` JSON object.
-//! Two-tier lookup: project-level `./.gworkspace-mcp/tokens.json` first,
-//! then `~/.gworkspace-mcp/tokens.json`. `load()` warns loudly (without
-//! changing the override contract) when a project-level entry shadowing a
-//! profile is expired while the user-level entry it hides is still valid
-//! (issue #2946 — a stale worktree-local override otherwise silently wins
-//! and re-poisons `save()` on every re-auth). [`TokenStorage::update`] guards
+//! Two-tier lookup: project-level `./.gworkspace-mcp/tokens.json` and
+//! `~/.gworkspace-mcp/tokens.json`. When both hold a profile, the newer or
+//! wider-scoped entry wins (see [`precedence::resolve`], #8539) and `load()`
+//! warns once naming the winner and why. [`TokenStorage::update`] guards
 //! every read-modify-write call site (refresh, consent persist, CLI
 //! `accounts default`/`accounts remove`) against concurrent writers losing
-//! each other's changes (issue #3502).
-//! Test: see integration test `tests/auth_models.rs`.
+//! each other's changes (issue #3502), and writes each changed entry back to
+//! the store it was read from (#8539).
+//! Test: `tests.rs` beside this file; `precedence.rs` for the rule itself.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use super::models::StoredToken;
 use crate::api::constants::DEFAULT_PROFILE;
+use precedence::{Resolution, Store, issued_at, resolve};
 
-/// Token file storage with two-tier lookup (project then user).
+mod precedence;
+
+/// Token file storage with two-tier lookup (project and user).
 ///
-/// Why: Matches Python `TokenStorage` semantics — project-level overrides
-/// user-level, while user-level is the durable fallback.
+/// Why: Matches Python `TokenStorage` semantics — a project-level store can
+/// override user-level per directory, while user-level is the durable
+/// fallback.
 /// What: Holds the user-level path (always `~/.gworkspace-mcp/tokens.json`)
 /// and an optional project-level path (`./.gworkspace-mcp/tokens.json`), plus
-/// a `warned_stale_shadows` set throttling the stale-shadow warning in
-/// [`TokenStorage::load`] to once per profile per process (see its doc).
-/// Test: integration test reads a temp file.
+/// a `warned_shadows` set throttling the shadow warning in
+/// [`TokenStorage::load`] to once per profile and winner per process.
+/// Test: `tests.rs` beside this file.
 #[derive(Debug, Clone)]
 pub struct TokenStorage {
     user_path: PathBuf,
     project_path: Option<PathBuf>,
-    warned_stale_shadows: Arc<Mutex<HashSet<String>>>,
+    warned_shadows: Arc<Mutex<HashSet<String>>>,
     /// In-process mutex serialising [`TokenStorage::update`] calls across
     /// every clone of this `TokenStorage` within the current process.
     ///
@@ -77,7 +79,7 @@ impl TokenStorage {
         Self {
             user_path,
             project_path,
-            warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
+            warned_shadows: Arc::new(Mutex::new(HashSet::new())),
             write_guard: Arc::new(Mutex::new(())),
         }
     }
@@ -87,7 +89,7 @@ impl TokenStorage {
         Self {
             user_path: path,
             project_path: None,
-            warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
+            warned_shadows: Arc::new(Mutex::new(HashSet::new())),
             write_guard: Arc::new(Mutex::new(())),
         }
     }
@@ -103,92 +105,117 @@ impl TokenStorage {
         Ok(map)
     }
 
-    /// Load merged tokens: user-level base, project-level overrides.
+    /// Load merged tokens: one entry per profile, across both stores.
     ///
-    /// Why: Preserves the documented override contract (project always wins
-    /// per profile key) so existing project-scoped setups keep working
-    /// unchanged. But a project override that is itself stale — e.g. minted
-    /// once inside a worktree and never refreshed since — silently wins over
-    /// a healthy user-level token and recreates the exact 401 loop from
-    /// issue #2946 with no signal to the operator. This surfaces that case
-    /// loudly instead of staying silent, without touching precedence. `load`
-    /// sits on the per-request hot path (`BaseClient::get_access_token` calls
-    /// it via `get_profile`/`get_default` on every MCP tool invocation, plus
-    /// again on the 401-retry path), so the warning is throttled to once per
-    /// profile per process by [`TokenStorage::warn_stale_shadow_once`]
-    /// (PR #2949 review) — otherwise a persistent stale shadow would repeat
-    /// the multi-line warning on every single call.
-    /// What: Merges project-level entries over user-level per profile key;
-    /// before merging, warns (at most once per profile) for every profile
-    /// where the project-level entry is expired while the user-level entry
-    /// it shadows is not.
-    /// Test: `load_warns_when_project_shadow_is_stale` (warning fires),
-    /// `load_does_not_rewarn_on_second_load` (throttled to once), plus
-    /// `load_still_prefers_project_override_after_warning` for the
-    /// unchanged-precedence contract.
+    /// Why: A project entry used to win unconditionally, so one minted before
+    /// a re-consent silently shadowed the fresh, wider user-level token and
+    /// Gmail filter writes got 403 (#8539). `load` sits on the per-request hot
+    /// path (`BaseClient::get_access_token` reaches it via
+    /// `get_profile`/`get_default` on every MCP tool call), so the shadow
+    /// warning is throttled (PR #2949 review).
+    /// What: Returns the merged view built by [`TokenStorage::load_tiers`]:
+    /// a profile in one store resolves to that entry; a profile in both
+    /// resolves per [`precedence::resolve`] (different account → project;
+    /// strict scope superset; later issue/refresh time; tie → project).
+    /// Test: `project_entry_lacking_scope_no_longer_shadows_fresh_user_entry`,
+    /// `load_warns_once_naming_winner_without_token_values`.
     pub fn load(&self) -> Result<HashMap<String, StoredToken>> {
-        let mut merged = Self::load_from(&self.user_path).unwrap_or_default();
-        if let Some(project_path) = &self.project_path {
-            let project_tokens = Self::load_from(project_path).unwrap_or_default();
-            for (profile, project_token) in &project_tokens {
-                if let Some(user_token) = merged.get(profile) {
-                    self.warn_stale_shadow_once(profile, project_token, user_token, project_path);
-                }
-            }
-            merged.extend(project_tokens);
-        }
-        Ok(merged)
+        Ok(self.load_tiers().merged)
     }
 
-    /// Emit the stale-project-shadow warning for `profile`, at most once per
-    /// profile for the lifetime of this `TokenStorage` (and every clone of
-    /// it, since `warned_stale_shadows` is `Arc`-shared).
+    /// Read both stores and resolve each profile to one entry.
     ///
-    /// Why: Isolated out of `load()` so the throttling mechanism (an
-    /// insert-returns-false-if-present check on a shared `HashSet`) is a
-    /// single, obviously-correct spot, and so the structured `tracing::warn!`
-    /// call site (house style: named fields, not a preformatted string) is
-    /// separate from the pure stale/fresh decision in
-    /// [`stale_shadow_warning`].
-    /// What: Computes [`stale_shadow_warning`]; on `Some`, inserts `profile`
-    /// into `warned_stale_shadows` and only logs when the insert reports the
-    /// profile was newly added (i.e. this is the first time this process has
-    /// seen this exact stale shadow for this profile). A poisoned mutex
-    /// (only reachable if a prior holder panicked mid-lock) recovers via
-    /// `into_inner` rather than propagating — a missed dedup entry is
-    /// harmless (one extra warning), unlike propagating a panic through the
-    /// hot read path.
-    /// Test: `load_warns_when_project_shadow_is_stale`,
-    /// `load_does_not_rewarn_on_second_load`.
-    fn warn_stale_shadow_once(
+    /// Why: [`TokenStorage::update`] must know which store each merged entry
+    /// came from to write it back there (#8539); `load` needs only the merge.
+    /// What: Reads each store (an unreadable or unparsable file counts as
+    /// empty, as before). For a profile in both stores whose `token` fields
+    /// differ, picks the winner with [`precedence::resolve`] and warns once;
+    /// identical tokens resolve to the project entry silently.
+    /// Test: `project_entry_lacking_scope_no_longer_shadows_fresh_user_entry`.
+    fn load_tiers(&self) -> Tiers {
+        let user = Self::load_from(&self.user_path).unwrap_or_default();
+        let project = match &self.project_path {
+            Some(path) => Self::load_from(path).unwrap_or_default(),
+            None => HashMap::new(),
+        };
+        let mut merged = HashMap::with_capacity(user.len() + project.len());
+        let mut origin = HashMap::with_capacity(user.len() + project.len());
+        for (profile, entry) in &project {
+            origin.insert(profile.clone(), Store::Project);
+            merged.insert(profile.clone(), entry.clone());
+        }
+        for (profile, u) in &user {
+            let winner = match project.get(profile) {
+                None => Store::User,
+                // #8539: identical credentials are not a shadow; keep project.
+                Some(p) if p.token == u.token => Store::Project,
+                // #8539: newer or wider wins, not project-always-wins.
+                Some(p) => {
+                    let resolution = resolve(p, u);
+                    self.warn_shadow_once(profile, &resolution, p, u);
+                    resolution.winner
+                }
+            };
+            if winner == Store::User {
+                origin.insert(profile.clone(), Store::User);
+                merged.insert(profile.clone(), u.clone());
+            }
+        }
+        Tiers {
+            user,
+            project,
+            merged,
+            origin,
+        }
+    }
+
+    /// Warn that `profile` has differing entries in both stores, once per
+    /// profile and winning store for the lifetime of this `TokenStorage` and
+    /// its clones (`warned_shadows` is `Arc`-shared).
+    ///
+    /// Why: A shadow is silent otherwise (#8539); the old warning fired only
+    /// when the project entry had expired. Throttled because `load` runs on
+    /// every MCP tool call (PR #2949 review).
+    /// What: Logs one structured `warn!` naming the profile, the winning
+    /// store, the reason, both paths, and both issue and expiry times. It
+    /// never logs a token value. A poisoned mutex recovers via `into_inner`:
+    /// a missed dedup entry costs one extra warning.
+    /// Test: `load_warns_once_naming_winner_without_token_values`.
+    fn warn_shadow_once(
         &self,
         profile: &str,
+        resolution: &Resolution,
         project: &StoredToken,
         user: &StoredToken,
-        project_path: &Path,
     ) {
-        let Some(info) = stale_shadow_warning(project, user, project_path, &self.user_path) else {
-            return;
-        };
+        let key = format!("{profile}\u{0}{}", resolution.winner);
         let mut warned = self
-            .warned_stale_shadows
+            .warned_shadows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !warned.insert(profile.to_string()) {
-            return; // already warned for this profile this process
+        if !warned.insert(key) {
+            return; // already warned for this profile and winner
         }
         drop(warned);
+        let project_path = self
+            .project_path
+            .as_deref()
+            .map(Path::display)
+            .map(|d| d.to_string())
+            .unwrap_or_default();
         warn!(
             profile = %profile,
-            project_path = %info.project_path.display(),
-            project_expires_at = %info.project_expires_at,
-            user_path = %info.user_path.display(),
-            user_expires_at = %info.user_expires_at,
-            "project-level tokens.json override is EXPIRED but shadows a valid user-level \
-             token for this profile — serving the STALE override per the documented \
-             project-overrides-user contract. Run setup from this directory, or remove the \
-             project override, to use the fresher token. (This warning fires once per \
-             profile per process.)"
+            winner = %resolution.winner,
+            reason = %resolution.reason,
+            project_path = %project_path,
+            project_issued_at = %issued_at(project),
+            project_expires_at = %project.token.expires_at,
+            user_path = %self.user_path.display(),
+            user_issued_at = %issued_at(user),
+            user_expires_at = %user.token.expires_at,
+            "project-level and user-level token stores hold different tokens for this \
+             profile; serving the winner's entry. Remove the losing entry to silence this. \
+             (Fires once per profile and winner per process.)"
         );
     }
 
@@ -198,23 +225,28 @@ impl TokenStorage {
     /// restrict it to owner-only (0600) so other local users/processes can't
     /// read it off disk. This crate is now a primary minting path (not just
     /// a reader of Python-written files), so it must not regress that.
-    /// What: Writes the pretty-printed JSON, then (Unix only) chmods the
-    /// file to 0600. Byte content is unchanged — this only affects file mode.
+    /// What: Writes `tokens` whole to one file via [`Self::write_store`]. Every
+    /// production mutation goes through [`Self::update`], which routes each
+    /// entry to its own store instead (#8539).
     /// Test: `save_restricts_permissions_on_unix` (cfg(unix)).
     pub fn save(&self, tokens: &HashMap<String, StoredToken>) -> Result<()> {
         let target = self
             .project_path
             .clone()
             .unwrap_or_else(|| self.user_path.clone());
+        Self::write_store(&target, tokens)
+    }
+
+    /// Write one store file: pretty JSON, then (Unix) mode 0600.
+    fn write_store(target: &Path, tokens: &HashMap<String, StoredToken>) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("mkdir {}", parent.display()))?;
         }
         let data = serde_json::to_string_pretty(tokens)?;
-        std::fs::write(&target, data)
+        std::fs::write(target, data)
             .with_context(|| format!("write tokens to {}", target.display()))?;
-        Self::restrict_permissions(&target)?;
-        Ok(())
+        Self::restrict_permissions(target)
     }
 
     /// Restrict the token file to owner read/write only (Unix: mode 0600).
@@ -237,46 +269,49 @@ impl TokenStorage {
         Ok(())
     }
 
-    /// The path `save()` actually writes to (project override if known, else
-    /// the user-level file) — also the file this process's writes must be
-    /// serialised against.
-    fn primary_path(&self) -> PathBuf {
-        self.project_path
-            .clone()
-            .unwrap_or_else(|| self.user_path.clone())
-    }
-
-    /// Sidecar lock file path for [`TokenStorage::update`]'s cross-process
-    /// lock — never contains token data itself.
-    fn lock_path(&self) -> PathBuf {
-        let target = self.primary_path();
-        let file_name = target
+    /// Open the sidecar `<store>.lock` file guarding `store` — it never
+    /// contains token data itself.
+    fn open_lock(store: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+        let file_name = store
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "tokens.json".to_string());
-        target.with_file_name(format!("{file_name}.lock"))
+        let lock_path = store.with_file_name(format!("{file_name}.lock"));
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        Ok(fd_lock::RwLock::new(file))
     }
 
     /// Perform an atomic read-modify-write on the stored token map.
     ///
     /// Why: `OAuthManager::refresh` and the consent flow's `persist` (and the
     /// CLI's `accounts default`/`accounts remove`) each used to do
-    /// `load()` -> mutate -> `save()` with no synchronization. Two concurrent
-    /// writers — different profiles refreshing at once, in the same or
-    /// different processes — could each `load()` the map before either
-    /// `save()`d, silently losing whichever write lost the race (issue
-    /// #3502). Centralising the whole cycle here, guarded by a lock, means
-    /// every call site gets the fix for free instead of re-deriving it.
-    /// What: Acquires an in-process mutex (serialises clones of this
-    /// `TokenStorage` within the current process) and, inside that, an
-    /// advisory exclusive lock on a sidecar `<path>.lock` file (serialises
-    /// across processes; blocks until acquired — contention here is brief:
-    /// one JSON parse + one JSON write). Reloads the map fresh under both
-    /// locks (never trusts a caller's possibly-stale copy), applies `f`, and
-    /// saves before releasing. Both locks release automatically on return
-    /// (including on error, via `?` and RAII guards) so a failure never
-    /// leaves the file locked.
-    /// Test: `concurrent_updates_do_not_lose_writes`.
+    /// `load()` -> mutate -> `save()` with no synchronization, losing
+    /// whichever concurrent write lost the race (issue #3502). Saving the
+    /// whole merged view to the project file also copied user-level entries
+    /// into it, and a refresh of a user-level winner landed in the project
+    /// store, leaving the user store stale (#8539).
+    /// What: Takes an in-process mutex, then an advisory exclusive lock on
+    /// each store's sidecar `<path>.lock` — user first, then project, a fixed
+    /// order that cannot deadlock. Reloads both stores under the locks,
+    /// applies `f` to the merged view, and routes the result with
+    /// [`route_writes`]: an unchanged entry is never copied across stores, a
+    /// changed entry goes back to the store it was read from, a new profile
+    /// goes to the project store if one exists (else user), and a removed
+    /// profile leaves both stores. Only a store whose content changed is
+    /// rewritten. Locks release on return, including on error.
+    /// Test: `concurrent_updates_do_not_lose_writes`,
+    /// `refresh_write_back_targets_the_winning_store`,
+    /// `remove_profile_clears_both_stores`.
     pub fn update<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut HashMap<String, StoredToken>) -> Result<T>,
@@ -286,26 +321,38 @@ impl TokenStorage {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let lock_path = self.lock_path();
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
-        }
-        let lock_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("open lock file {}", lock_path.display()))?;
-        let mut rw_lock = fd_lock::RwLock::new(lock_file);
-        let _file_guard = rw_lock
+        // #8539: writes can reach both stores, so both are locked.
+        let mut user_lock = Self::open_lock(&self.user_path)?;
+        let _user_guard = user_lock
             .write()
-            .with_context(|| format!("acquire lock on {}", lock_path.display()))?;
+            .with_context(|| format!("lock {}", self.user_path.display()))?;
+        let mut project_lock = self
+            .project_path
+            .as_deref()
+            .map(Self::open_lock)
+            .transpose()?;
+        let _project_guard = match project_lock.as_mut() {
+            Some(lock) => Some(lock.write().context("lock project-level tokens")?),
+            None => None,
+        };
 
-        let mut tokens = self.load()?;
-        let result = f(&mut tokens)?;
-        self.save(&tokens)?;
+        let tiers = self.load_tiers();
+        let mut merged = tiers.merged.clone();
+        let result = f(&mut merged)?;
+        let new_profiles = if self.project_path.is_some() {
+            Store::Project
+        } else {
+            Store::User
+        };
+        let (user, project) = route_writes(&tiers, &merged, new_profiles);
+        if user != tiers.user {
+            Self::write_store(&self.user_path, &user)?;
+        }
+        if let Some(path) = &self.project_path
+            && project != tiers.project
+        {
+            Self::write_store(path, &project)?;
+        }
         Ok(result)
     }
 
@@ -410,7 +457,7 @@ pub struct RemoveOutcome {
 ///
 /// Why: Isolated as a pure function (no I/O, no locking) so the exact
 /// reassignment rule is directly unit-testable against a plain `HashMap`,
-/// mirroring the `stale_shadow_warning` / `should_set_default` pattern
+/// mirroring the `precedence::resolve` / `should_set_default` pattern
 /// elsewhere in this crate.
 /// What: Errors if `name` is absent. Otherwise removes it; if it was
 /// `is_default` and `all` is non-empty afterward, marks the
@@ -445,54 +492,51 @@ fn remove_and_reassign_default(
     })
 }
 
-/// Structured detail of a stale project-level shadow, for the `tracing::warn!`
-/// fields in [`TokenStorage::warn_stale_shadow_once`].
-///
-/// Why: Split out of the message-formatting version of this check so `load`
-/// can log with named fields (house style) instead of a single preformatted
-/// string, while [`stale_shadow_warning`] stays a pure, directly-testable
-/// decision function.
-/// What: Owned copies of both paths and both `expires_at` timestamps.
-/// Test: covered transitively via [`stale_shadow_warning`]'s own tests and
-/// `load_warns_when_project_shadow_is_stale`.
-struct StaleShadowInfo {
-    project_path: PathBuf,
-    project_expires_at: DateTime<Utc>,
-    user_path: PathBuf,
-    user_expires_at: DateTime<Utc>,
+/// Both stores as read from disk, plus the merged view `load` serves and the
+/// store each merged entry came from.
+struct Tiers {
+    user: HashMap<String, StoredToken>,
+    project: HashMap<String, StoredToken>,
+    merged: HashMap<String, StoredToken>,
+    origin: HashMap<String, Store>,
 }
 
-/// Decide whether a project-level token entry shadows a user-level one for
-/// the same profile while itself being stale.
+/// Split an updated merged view back into the two stores.
 ///
-/// Why: Isolated as a pure predicate (no I/O, no logging) so the exact
-/// condition is directly unit-testable without a temp filesystem or a
-/// tracing-capturing test harness — mirrors the `refresh_failure_message`
-/// pattern in `oauth::errors`.
-/// What: Returns `Some(StaleShadowInfo)` naming both paths and both
-/// `expires_at` timestamps when `project` is expired and `user` is not;
-/// `None` in every other case (both fresh, both stale, or the project entry
-/// is the fresher one) — those cases are not the silent-stale-shadow failure
-/// mode this guards against.
-/// Test: `warns_when_project_stale_and_user_fresh`,
-/// `no_warning_when_both_fresh`, `no_warning_when_both_stale`,
-/// `no_warning_when_project_is_fresher`.
-fn stale_shadow_warning(
-    project: &StoredToken,
-    user: &StoredToken,
-    project_path: &Path,
-    user_path: &Path,
-) -> Option<StaleShadowInfo> {
-    if project.token.is_expired() && !user.token.is_expired() {
-        Some(StaleShadowInfo {
-            project_path: project_path.to_path_buf(),
-            project_expires_at: project.token.expires_at,
-            user_path: user_path.to_path_buf(),
-            user_expires_at: user.token.expires_at,
-        })
-    } else {
-        None
+/// Why: Writing the merged view to one file copied the other store's entries
+/// into it and sent a user-level winner's refresh to the project store
+/// (#8539). A pure function keeps the routing rule testable in isolation.
+/// What: Starts from each store's on-disk content. A profile dropped from
+/// the merged view is removed from both stores, so its losing entry cannot
+/// resurface. An entry equal to its pre-update value is left where it is. A
+/// changed entry goes to the store it was read from; a profile new to both
+/// stores goes to `new_profiles`. Returns `(user, project)`.
+/// Test: `refresh_write_back_targets_the_winning_store`,
+/// `remove_profile_clears_both_stores`.
+fn route_writes(
+    tiers: &Tiers,
+    merged: &HashMap<String, StoredToken>,
+    new_profiles: Store,
+) -> (HashMap<String, StoredToken>, HashMap<String, StoredToken>) {
+    let mut user = tiers.user.clone();
+    let mut project = tiers.project.clone();
+    for profile in tiers.merged.keys() {
+        if !merged.contains_key(profile) {
+            user.remove(profile);
+            project.remove(profile);
+        }
     }
+    for (profile, entry) in merged {
+        if tiers.merged.get(profile) == Some(entry) {
+            continue;
+        }
+        let target = match tiers.origin.get(profile).copied().unwrap_or(new_profiles) {
+            Store::User => &mut user,
+            Store::Project => &mut project,
+        };
+        target.insert(profile.clone(), entry.clone());
+    }
+    (user, project)
 }
 
 impl Default for TokenStorage {
