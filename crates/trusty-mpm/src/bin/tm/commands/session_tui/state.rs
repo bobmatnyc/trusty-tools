@@ -34,7 +34,9 @@ const PAGE: usize = 10;
 /// part of input handling — `d` is "delete" while browsing and a literal `d`
 /// while typing a name, so the mode-aware half has to see the character, not a
 /// pre-resolved command.
-/// What: the ten inputs [`TuiState::apply`] acts on.
+/// What: the inputs [`TuiState::apply`] acts on. Two Ctrl chords are modelled
+/// as their own variants ([`Input::Cancel`], [`Input::NameNew`]); every other
+/// modifier is dropped by `map_key`.
 /// Test: every `state_*` transition test constructs these directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Input {
@@ -60,6 +62,9 @@ pub(crate) enum Input {
     PageDown,
     /// Ctrl-C / Ctrl-D — leave, from any mode.
     Cancel,
+    /// Ctrl-N — in the new-session list, name the session before creating it
+    /// (#8587). Ignored everywhere else.
+    NameNew,
 }
 
 /// What the I/O driver should do after an [`Input`].

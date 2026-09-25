@@ -24,6 +24,8 @@ use crate::cli::ConfigAction;
 /// this handler's signature readable (clippy `too_many_arguments`).
 /// What: the register flags; `tags` is empty (not `None`) when unspecified.
 /// Test: covered via `register`'s live-HTTP path.
+// #8587: `Default` lets a caller that sets only name and URL say so.
+#[derive(Default)]
 pub(crate) struct RegisterInput {
     pub name: String,
     pub repo_url: String,

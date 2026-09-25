@@ -675,6 +675,26 @@ fn input_maps_ctrl_c_to_cancel() {
     }
 }
 
+/// #8587: Ctrl-N reaches the state machine; before this `map_key` dropped it.
+#[test]
+fn input_maps_ctrl_n_to_name_new() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let chords = [
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('N'), KeyModifiers::CONTROL),
+        KeyEvent::new(
+            KeyCode::Char('N'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+    ];
+    for key in chords {
+        assert_eq!(map_key(key), Some(Input::NameNew), "{key:?}");
+    }
+    // A bare `n` is still a character — the list filter and browse's `n`.
+    let plain = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+    assert_eq!(map_key(plain), Some(Input::Char('n')));
+}
+
 #[test]
 fn input_ignores_key_release() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -1167,6 +1187,7 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
             register: None,
             repo: apex.clone(),
             label: "apex".to_string(),
+            name_hint: None,
         }
     );
     assert_eq!(state.mode(), &Mode::Browse, "the overlay closes on confirm");
@@ -1178,7 +1199,7 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
             calls.borrow_mut().push(format!("register:{}", p.name));
             async { anyhow::Ok(()) }
         },
-        |repo: String| {
+        |repo: String, _: Option<String>| {
             calls.borrow_mut().push(format!("create:{repo}"));
             async { anyhow::Ok(AttachOutcome::Attached) }
         },
@@ -1307,6 +1328,7 @@ async fn new_session_unregistered_path_registers_before_creating() {
             // daemon resolve `source_id` for a checkout already on disk.
             repo: "/w/widgets".to_string(),
             label: "widgets".to_string(),
+            name_hint: None,
         }
     );
 
@@ -1317,7 +1339,7 @@ async fn new_session_unregistered_path_registers_before_creating() {
             calls.borrow_mut().push(format!("register:{}", p.repo_url));
             async { anyhow::Ok(()) }
         },
-        |repo: String| {
+        |repo: String, _: Option<String>| {
             calls.borrow_mut().push(format!("create:{repo}"));
             async { anyhow::Ok(AttachOutcome::Attached) }
         },
@@ -1343,12 +1365,13 @@ async fn new_session_a_failed_registration_never_creates() {
         }),
         repo: "/w/widgets".to_string(),
         label: "widgets".to_string(),
+        name_hint: None,
     };
     let created = std::cell::Cell::new(false);
     let err = new_session::perform_with(
         request,
         |_: NewProject| async { Err(anyhow::anyhow!("registry refused it")) },
-        |_: String| {
+        |_: String, _: Option<String>| {
             created.set(true);
             async { anyhow::Ok(AttachOutcome::Attached) }
         },
@@ -1888,6 +1911,7 @@ fn new_session_filter_keeps_the_selection_valid() {
             register: None,
             repo: fixture_checkout("zeta").display().to_string(),
             label: "zeta".to_string(),
+            name_hint: None,
         })
     );
 }
@@ -2213,6 +2237,7 @@ fn new_session_entry_builds_a_clone_and_register_request() {
             // The directory the daemon can actually start a session in.
             repo: fixture_checkout("widgets").display().to_string(),
             label: "widgets".to_string(),
+            name_hint: None,
         }
     );
     assert_ne!(request.repo, "https://github.com/acme/widgets");
@@ -2296,6 +2321,7 @@ fn new_session_entry_does_not_hijack_a_matching_filter() {
             register: None,
             repo: fixture_checkout("apex").display().to_string(),
             label: "apex".to_string(),
+            name_hint: None,
         })
     );
 }
@@ -2443,4 +2469,262 @@ fn render_draws_no_state_color_when_color_is_off() {
         assert_eq!(fg, Color::Reset, "row {name} must be uncolored");
         assert_eq!(modifier, Modifier::empty(), "row {name} must be unstyled");
     }
+}
+
+// ── new-session name step (#8587) ───────────────────────────────────────────
+
+/// The open new-session flow, or a panic naming the mode that is open instead.
+fn open_flow(state: &TuiState) -> &NewSessionFlow {
+    match state.mode() {
+        Mode::New(flow) => flow,
+        other => panic!("the new-session flow is not open: {other:?}"),
+    }
+}
+
+/// `creating()`, moved onto `apex`, with the name step open and `name` typed.
+fn naming_apex(name: &str) -> TuiState {
+    let sessions = fleet();
+    let mut state = creating();
+    state.apply(Input::Down, &sessions);
+    assert_eq!(state.apply(Input::NameNew, &sessions), Action::Redraw);
+    for c in name.chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    state
+}
+
+/// The request Enter on `apex` produces, named `name_hint`.
+fn apex_request(name_hint: Option<&str>) -> NewSessionRequest {
+    NewSessionRequest {
+        register: None,
+        repo: fixture_checkout("apex").display().to_string(),
+        label: "apex".to_string(),
+        name_hint: name_hint.map(str::to_string),
+    }
+}
+
+#[test]
+fn new_session_name_ctrl_n_opens_the_name_step() {
+    let sessions = fleet();
+    let mut state = creating();
+    assert!(open_flow(&state).naming().is_none());
+    assert_eq!(state.apply(Input::NameNew, &sessions), Action::Redraw);
+    let naming = open_flow(&state)
+        .naming()
+        .expect("Ctrl-N on a registered row opens the name step");
+    assert_eq!(naming.label(), "trusty-tools");
+    assert_eq!(naming.typed(), "");
+    // Ctrl-N while browsing does nothing; only the project list offers it.
+    let mut browse = browsing();
+    assert_eq!(browse.apply(Input::NameNew, &sessions), Action::Ignore);
+    assert_eq!(browse.mode(), &Mode::Browse);
+}
+
+#[test]
+fn new_session_name_ctrl_n_rejects_the_path_row() {
+    let sessions = fleet();
+    let mut state = creating();
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    assert_eq!(state.apply(Input::NameNew, &sessions), Action::Redraw);
+    assert_eq!(
+        state.message(),
+        Some((super::new_session_name::NOT_A_PROJECT, Severity::Error))
+    );
+    assert!(open_flow(&state).naming().is_none(), "no name step opened");
+}
+
+/// A row Enter refuses is refused at the Ctrl-N keypress, with Enter's words.
+#[test]
+fn new_session_name_ctrl_n_rejects_a_row_without_a_checkout() {
+    let flow = || {
+        NewSessionFlow::with_resolver(
+            new_session::targets_from_with(
+                &[project("cto", "https://github.com/bob-duetto/cto")],
+                &[],
+                missing_checkout,
+            ),
+            stub_identity,
+        )
+    };
+    let Step::Reject(on_enter) = flow().apply(Input::Enter) else {
+        panic!("Enter must refuse a row with no checkout");
+    };
+    let mut named = flow();
+    assert_eq!(named.apply(Input::NameNew), Step::Reject(on_enter));
+    assert!(named.naming().is_none(), "no name step opened");
+}
+
+#[test]
+fn new_session_name_enter_creates_with_the_slug() {
+    let sessions = fleet();
+    let mut state = naming_apex("Auth Refactor");
+    assert_eq!(
+        state.apply(Input::Enter, &sessions),
+        Action::Create(apex_request(Some("auth-refactor")))
+    );
+    assert_eq!(state.mode(), &Mode::Browse, "the overlay closes on create");
+}
+
+#[test]
+fn new_session_name_rejects_an_empty_slug() {
+    let sessions = fleet();
+    for typed in ["", "!!!"] {
+        let mut state = naming_apex(typed);
+        assert_eq!(state.apply(Input::Enter, &sessions), Action::Redraw);
+        let (message, severity) = state.message().expect("the refusal is shown");
+        assert_eq!(severity, Severity::Error);
+        assert!(message.contains("no letters or digits"), "{message}");
+        let naming = open_flow(&state)
+            .naming()
+            .expect("the name step stays open after a refusal");
+        assert_eq!(naming.typed(), typed);
+    }
+}
+
+/// Esc in the name step goes back ONE step: the filter and highlight survive.
+///
+/// Why: the flow's Esc arm clears a non-empty filter before anything else, so
+/// a name step routed after it would lose the filter instead of closing.
+#[test]
+fn new_session_name_escape_returns_to_the_list_intact() {
+    let sessions = fleet();
+    let mut state = creating();
+    for c in "ap".chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    let before = open_flow(&state).clone();
+    assert!(
+        before
+            .rows()
+            .iter()
+            .any(|r| r.starts_with('▸') && r.contains("duetto/apex")),
+        "{:?}",
+        before.rows()
+    );
+    state.apply(Input::NameNew, &sessions);
+    state.apply(Input::Char('x'), &sessions);
+    assert_eq!(state.apply(Input::Escape, &sessions), Action::Redraw);
+    assert_eq!(open_flow(&state), &before, "filter and selection intact");
+    assert_eq!(open_flow(&state).filter(), "ap");
+}
+
+#[test]
+fn new_session_name_preview_shows_the_slug() {
+    let named = naming_apex("Auth Refactor");
+    let naming = open_flow(&named).naming().expect("name step open");
+    assert_eq!(naming.preview().as_deref(), Some("tm-auth-refactor-NN"));
+    let symbols = naming_apex("!!!");
+    let naming = open_flow(&symbols).naming().expect("name step open");
+    assert_eq!(naming.preview(), None);
+}
+
+#[test]
+fn new_session_name_overlay_shows_the_text_and_preview() {
+    let sessions = fleet();
+    let mut picker = creating();
+    let joined = draw(110, 30, &sessions, &mut picker).join("\n");
+    assert!(
+        joined.contains("Ctrl-N"),
+        "the list must offer Ctrl-N:\n{joined}"
+    );
+
+    let mut state = naming_apex("Auth Refactor");
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("in apex"), "{joined}");
+    assert!(joined.contains("> Auth Refactor"), "{joined}");
+    assert!(joined.contains("tm-auth-refactor-NN"), "{joined}");
+    assert!(joined.contains("Esc goes back"), "{joined}");
+}
+
+#[test]
+fn render_help_overlay_lists_ctrl_n() {
+    let sessions = fleet();
+    let mut state = browsing();
+    state.apply(Input::Char('?'), &sessions);
+    let joined = draw(100, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("Ctrl-N"), "help omits Ctrl-N:\n{joined}");
+}
+
+#[test]
+fn new_session_name_status_line_names_the_session() {
+    use super::new_session_name::created_message;
+    assert_eq!(created_message(&apex_request(None)), "new session in apex");
+    assert_eq!(
+        created_message(&apex_request(Some("auth-refactor"))),
+        "new session tm-auth-refactor-NN in apex"
+    );
+}
+
+/// The typed name reaches the create leg — the fail-open check (#8587).
+///
+/// Why: a `name_hint` field can exist on the request and still be dropped by
+/// `perform_with`, which then creates a default-named session. Driven from the
+/// keystrokes, so the request is the one the TUI really builds.
+#[tokio::test]
+async fn new_session_name_reaches_the_create_leg() {
+    let sessions = fleet();
+    let mut state = naming_apex("Auth Refactor");
+    let Action::Create(request) = state.apply(Input::Enter, &sessions) else {
+        panic!("Enter in the name step must create");
+    };
+    let received = std::cell::RefCell::new(None);
+    new_session::perform_with(
+        request,
+        |_: NewProject| async { anyhow::Ok(()) },
+        |repo: String, name_hint: Option<String>| {
+            *received.borrow_mut() = Some((repo, name_hint));
+            async { anyhow::Ok(AttachOutcome::Attached) }
+        },
+    )
+    .await
+    .expect("the create leg must succeed");
+    assert_eq!(
+        received.into_inner(),
+        Some((
+            fixture_checkout("apex").display().to_string(),
+            Some("auth-refactor".to_string())
+        ))
+    );
+}
+
+/// `perform` puts the name on the daemon POST as `name_hint` (#8587).
+///
+/// Why: `perform_with` takes its legs as closures, so its test cannot see
+/// whether `perform`'s own create closure forwards the name. This one runs
+/// `perform` against a local server that records the POST body and answers
+/// 500, so the call stops after the POST.
+#[tokio::test]
+async fn new_session_name_reaches_the_daemon_post() {
+    use axum::{Json, Router, routing::post};
+    type Captured = std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>;
+    let captured: Captured = std::sync::Arc::default();
+    let sink = std::sync::Arc::clone(&captured);
+    let handler = move |Json(body): Json<serde_json::Value>| {
+        let sink = std::sync::Arc::clone(&sink);
+        async move {
+            *sink.lock().expect("capture mutex") = Some(body);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    let router = Router::new().route("/api/v1/sessions/managed", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    tokio::spawn(async move { axum::serve(listener, router).await.ok() });
+
+    let result = new_session::perform(
+        &reqwest::Client::new(),
+        &url,
+        apex_request(Some("auth-refactor")),
+    )
+    .await;
+    assert!(result.is_err(), "the server answers 500: {result:?}");
+    let body = captured
+        .lock()
+        .expect("capture mutex")
+        .clone()
+        .expect("perform must POST the create request");
+    assert_eq!(body["name_hint"], "auth-refactor", "{body}");
 }
