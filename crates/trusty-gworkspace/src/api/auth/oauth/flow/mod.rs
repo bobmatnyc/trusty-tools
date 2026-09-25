@@ -523,15 +523,19 @@ fn build_stored_token(
 /// through `TokenStorage::update` (#3502) so a concurrent write (e.g. another
 /// profile refreshing at the same moment) can't lose this one.
 /// What: Reloads the map under the shared lock, unsets other defaults when
-/// `set_default`, inserts the new entry, and saves.
-/// Test: `persist_marks_single_default` via a temp storage.
+/// `set_default`, inserts the new entry, and saves. The new entry goes to
+/// the project store when one exists, never over the user-level entry: the
+/// consent may be for a different account (#8539).
+/// Test: `persist_marks_single_default`,
+/// `persist_in_project_dir_does_not_overwrite_user_credential`.
 fn persist(
     storage: &TokenStorage,
     profile: &str,
     mut stored: StoredToken,
     set_default: bool,
 ) -> Result<()> {
-    storage.update(|all| {
+    // #8539: route as a new consent, not back to the entry's old store.
+    storage.update_consent(profile, |all| {
         if set_default {
             for entry in all.values_mut() {
                 entry.metadata.is_default = false;
