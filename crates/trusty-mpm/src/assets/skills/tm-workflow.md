@@ -935,7 +935,12 @@ The style id resolves in this order: `tm launch --style <id>`, then
 `[style] active`, then the harness manifest. A bundled id means the shipped
 style; any other id names `.claude/output-styles/<id>.md` in the project. An
 unknown or unreadable id is a visible warning, and the launch falls back to the
-default style. `last-instructions.md` is written by `prepare_session` every
+default style.
+
+A project style keeps its prose, and the launch appends the floor to it: the
+bundled style's **PRIMARY DIRECTIVE** and **Communication — Write Plainly**
+sections. The floor is not overridable, and `tm sessions instructions` names
+the style `<id> (project) + floor`. `last-instructions.md` is written by `prepare_session` every
 time a prompt is assembled, so the inspectable copy can never diverge from what
 the PM received (#382).
 

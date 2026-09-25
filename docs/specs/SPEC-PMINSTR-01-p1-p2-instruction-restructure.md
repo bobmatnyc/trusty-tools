@@ -1536,8 +1536,25 @@ seam and `tm sessions instructions` select the style through one function,
 3. the host config `[style] active`;
 4. the harness manifest `[style] active`.
 
-A bundled id resolves to the bundled style first. An unknown or unreadable id
-prints a warning and falls back to the default style.
+A bundled id resolves to the bundled style first. An unknown or unreadable id,
+or a style file that is a symlink or resolves outside the project's
+`.claude/output-styles/`, prints a warning and falls back to the default style.
+
+**The style floor** (owner ruling 2026-09-25). A project style keeps its prose
+as authored, and the launch appends the floor to it:
+`core::output_style::style_floor`, the bundled `trusty-mpm` style's
+**PRIMARY DIRECTIVE — MANDATORY DELEGATION** and **Communication — Write
+Plainly** sections, cut from that asset at launch. The PM prompt's "Prose
+Style — Write Plainly" pointer therefore names a section every style carries.
+
+- Injected (Claude Code without native `outputStyle`): the project prose,
+  folded on its own, then the floor. A trailing unclosed `<!--` or fence in
+  the prose ends with the prose; a heading that spoofs the floor adds nothing.
+- Native: Claude Code reads the style file as authored, and the floor heads
+  the appended prompt.
+- A bundled style gets no floor appended; each carries its own.
+
+`tm sessions instructions` names a project style `<id> (project) + floor`.
 
 ## 12. Workflow, Ticketing, and Version-Control Ownership {#SPEC-PMINSTR-12~draft}
 
