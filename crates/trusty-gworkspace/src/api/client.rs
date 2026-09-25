@@ -125,6 +125,47 @@ impl BaseClient {
         }
     }
 
+    /// Test-only client whose single default profile `profile` holds a token
+    /// an hour from expiry, backed by a fresh temp token file.
+    ///
+    /// Why: Service tests that drive a handler against a `wiremock` server need
+    /// `get_access_token` to succeed without ever reaching the OAuth refresh
+    /// path or the real `~/.gworkspace-mcp` store (shared by Drive and Tasks,
+    /// #8629).
+    /// What: Seeds a temp `TokenStorage` with one default profile and returns
+    /// a [`BaseClient::for_test`] over it.
+    /// Test: exercised by `drive::files::tests` and `tasks::tests`.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_token(profile: &str) -> Self {
+        use crate::api::auth::models::{OAuthToken, TokenMetadata};
+        use chrono::{Duration, Utc};
+
+        let dir = std::env::temp_dir().join(format!("gw-client-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp token dir");
+        let client = Self::for_test(TokenStorage::with_path(dir.join("tokens.json")));
+        let token = StoredToken {
+            version: 1,
+            metadata: TokenMetadata {
+                service_name: profile.into(),
+                provider: "google".into(),
+                created_at: Utc::now(),
+                last_refreshed: None,
+                email: Some(format!("{profile}@example.com")),
+                is_default: true,
+            },
+            token: OAuthToken {
+                access_token: "test-access-token".into(),
+                refresh_token: Some("r".into()),
+                expires_at: Utc::now() + Duration::seconds(3600),
+                scopes: vec![],
+                token_type: "Bearer".into(),
+            },
+        };
+        let map = std::collections::HashMap::from([(profile.to_string(), token)]);
+        client.storage().save(&map).expect("seed token storage");
+        client
+    }
+
     /// Resolve a stored token entry, preferring (in order):
     /// 1. The explicit `account` parameter
     /// 2. `GWORKSPACE_ACCOUNT` environment variable
