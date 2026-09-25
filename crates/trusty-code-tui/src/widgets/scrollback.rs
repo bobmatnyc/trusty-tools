@@ -317,18 +317,53 @@ pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'stati
     lines
 }
 
-/// Count chat content lines for layout sizing.
+/// Terminal ROWS `lines` occupy once [`draw_chat`]'s `Wrap { trim: false }`
+/// has re-flowed them.
+///
+/// Why (#8205): the pane's height came from counting logical lines while the
+/// pane renders through a WRAPPING `Paragraph`, so every line wider than the
+/// pane was under-reserved by a row and ratatui dropped its continuation past
+/// the pane's bottom edge. That is how the connect line lost `home <path>` at
+/// 80 columns — nothing clipped the string, the pane was simply one row too
+/// short to show the rest of it. `Paragraph::scroll` also advances by wrapped
+/// rows, so the same count is what keeps the bottom-pinning and the published
+/// scroll cap honest.
+/// What: asks ratatui for the answer. `Paragraph::line_count` measures through
+/// the very `WordWrapper` the renderer then wraps with, so cell width (a CJK
+/// glyph costs two columns), runs of interior whitespace (the banner's
+/// `/{:<12}` command column), and a preserved leading indent (the assistant
+/// continuation's three spaces, [`DELEGATED_GUTTER`]) are all counted the way
+/// they are drawn. A re-implementation has to re-derive each of those and got
+/// all three wrong. `width == 0` answers one row per line rather than the zero
+/// `line_count` reports, so a degenerate width cannot collapse the pane.
+/// Test: `tests::rendered_row_count_counts_the_rows_a_long_line_needs`, and
+/// `wrapped_row_geometry::row_count_agrees_with_a_real_render`, which checks
+/// every one of those shapes against a `TestBackend` render rather than
+/// against a hand-computed number.
+fn rendered_row_count(lines: &[Line<'_>], width: usize) -> usize {
+    if width == 0 {
+        return lines.len();
+    }
+    let width = u16::try_from(width).unwrap_or(u16::MAX);
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
+/// Count chat content ROWS for layout sizing.
 ///
 /// Why: [`crate::layout::draw`] needs to know the rendered content height
 /// *before* the vertical layout split so the chat pane can use
 /// `Constraint::Length(h)` instead of `Constraint::Min` — `Min` expands to
 /// fill all available space, pinning the input row to the screen bottom even
 /// when the conversation is short.
-/// What: returns the post-collapse, pre-pad line count from
-/// [`build_chat_lines`].
-/// Test: `tests::chat_line_count_is_zero_for_empty_chat_without_banner`.
+/// What: measures [`build_chat_lines`]'s post-collapse, pre-pad lines with
+/// [`rendered_row_count`], so a line the pane will wrap is reserved every row
+/// it actually needs (#8205).
+/// Test: `tests::chat_line_count_is_zero_for_empty_chat_without_banner`,
+/// `tests::chat_line_count_counts_wrapped_rows_not_logical_lines`.
 pub fn chat_line_count(app: &ReplApp, terminal_width: usize) -> usize {
-    build_chat_lines(app, terminal_width).len()
+    rendered_row_count(&build_chat_lines(app, terminal_width), terminal_width)
 }
 
 /// Render the chat pane into `area`, bottom-pinned when content fits.
@@ -339,20 +374,26 @@ pub fn chat_line_count(app: &ReplApp, terminal_width: usize) -> usize {
 /// What: pads with blank lines above the content when it fits; otherwise
 /// scrolls so the newest line stays in view (clamped by
 /// `app.scroll_offset`). Publishes the computed max scroll offset to
-/// `app.last_max_scroll` so `ReplApp::scroll` can clamp future deltas.
-/// Test: exercised via `draw` in [`crate::layout`]; the pure geometry
-/// (padding decision, max-offset computation) is covered indirectly through
-/// [`build_chat_lines`]'s tests plus [`ReplApp::scroll`]'s own tests in
-/// `crate::app::reduce`.
+/// `app.last_max_scroll` so `ReplApp::scroll` can clamp future deltas. Every
+/// one of those numbers counts WRAPPED rows ([`rendered_row_count`]), matching
+/// what the `Paragraph` renders and what its `scroll` advances by (#8205).
+/// Test: exercised via `draw` in [`crate::layout`], including
+/// `crate::layout::tests::draw_keeps_the_connect_line_home_segment_at_80_columns`;
+/// the pure geometry (padding decision, max-offset computation) is covered
+/// indirectly through [`build_chat_lines`]'s tests plus [`ReplApp::scroll`]'s
+/// own tests in `crate::app::reduce`.
 pub fn draw_chat(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
     let lines = build_chat_lines(app, area.width as usize);
 
     let visible = area.height as usize;
-    let total = lines.len();
+    // #8205: rows, not logical lines — `Paragraph` below wraps, and both the
+    // padding decision and the scroll offset are measured in rendered rows.
+    let total = rendered_row_count(&lines, area.width as usize);
 
+    let mut pad = 0usize;
     let final_lines = if !app.chat.is_empty() && total < visible {
-        let pad = visible - total;
-        let mut padded = Vec::with_capacity(visible);
+        pad = visible - total;
+        let mut padded = Vec::with_capacity(pad + lines.len());
         for _ in 0..pad {
             padded.push(Line::from(""));
         }
@@ -362,7 +403,7 @@ pub fn draw_chat(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
         lines
     };
 
-    let final_total = final_lines.len();
+    let final_total = total + pad;
     let max_offset = final_total.saturating_sub(visible);
     app.last_max_scroll
         .store(max_offset, std::sync::atomic::Ordering::Relaxed);
@@ -397,6 +438,48 @@ mod tests {
     fn chat_line_count_is_zero_for_empty_chat_without_banner() {
         let app = app_without_banner();
         assert_eq!(chat_line_count(&app, 80), 0);
+    }
+
+    /// #8205: a line the pane will wrap costs every row it wraps onto. A
+    /// blank line and a fitting line each cost exactly one.
+    #[test]
+    fn rendered_row_count_counts_the_rows_a_long_line_needs() {
+        let rows = |line: Line<'static>, w: usize| rendered_row_count(&[line], w);
+        assert_eq!(rows(Line::from(""), 80), 1);
+        assert_eq!(rows(Line::from("short"), 80), 1);
+        // 12 words of 9 columns: 8 fit the first row, the rest wrap.
+        assert_eq!(rows(Line::from(["123456789"; 12].join(" ")), 80), 2);
+        // One unbreakable token three panes wide spans three rows.
+        assert_eq!(rows(Line::from("x".repeat(30)), 10), 3);
+        // A zero-width pane must answer a row per line, not zero — the count
+        // sizes a pane, and a zero would collapse it.
+        assert_eq!(rendered_row_count(&[Line::from("anything")], 0), 1);
+        assert_eq!(rendered_row_count(&[], 80), 0);
+    }
+
+    /// #8205 regression: the height query must report ROWS. A status line
+    /// wider than the pane used to report 1, leaving the pane a row short and
+    /// the continuation clipped away by ratatui.
+    #[test]
+    fn chat_line_count_counts_wrapped_rows_not_logical_lines() {
+        let mut app = app_without_banner();
+        app.push_status(
+            "connected to tcode daemon at /Users/dev0/Library/Application Support/tcode/tcode.sock \
+             — home /private/tmp/q8230/repoA, solo agent (no delegation)",
+        );
+        let logical = build_chat_lines(&app, 80).len();
+        let rows = chat_line_count(&app, 80);
+        assert!(
+            rows > logical,
+            "a status line this wide must cost more rows ({rows}) than logical lines ({logical})"
+        );
+        // At 160 columns the same line fits, so the two counts agree — the
+        // extra rows are width-driven, not a constant fudge.
+        assert_eq!(
+            chat_line_count(&app, 160),
+            build_chat_lines(&app, 160).len(),
+            "a line that fits costs exactly one row"
+        );
     }
 
     #[test]
