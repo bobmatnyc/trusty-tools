@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.27.1] — 2026-09-25
+
+### Fixed
+
+- kuzu-import no longer refuses identifier paths, Google doc URLs and common
+  identifier shapes as secrets, picking up the trusty-common 0.52.3 filter fix
+  (Refs [#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
 ## [0.27.0] — 2026-09-25
 
 ### Added
