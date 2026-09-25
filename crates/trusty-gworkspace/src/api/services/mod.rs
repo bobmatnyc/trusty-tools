@@ -46,14 +46,13 @@ pub(crate) fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Build a PATCH body from an `updates`-style object plus flat top-level
-/// fields.
+/// Build a request body from a nested object (`task`, `updates`) plus flat
+/// top-level fields.
 ///
-/// Why: `manage_calendars` and `manage_gmail_labels` advertised flat fields
-/// (`summary`, `name`, ...) but their update actions read only the nested
-/// object, so a flat-shape caller PATCHed `{}` and got a silent no-op
-/// (#8632). Same rule as `merge_task_fields` in #8631 (Tasks), which should
-/// fold into this helper once both land.
+/// Why: Several tools advertise flat fields (`title`, `summary`, `name`, ...)
+/// but read only the nested object, so a flat-shape caller was refused or
+/// PATCHed `{}` as a silent no-op — Tasks (#8629) and Calendar/Gmail labels
+/// (#8632). One helper keeps the precedence rule identical across tools.
 /// What: `fields` pairs each flat argument name with the API body key it
 /// maps to (`("time_zone", "timeZone")`). Starts from `args[object_key]` (an
 /// error when present but not an object), then adds each flat field that is
@@ -64,7 +63,9 @@ pub(crate) fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// Test: `update_merges_flat_and_object`,
 /// `update_conflict_is_refused_without_a_request`,
 /// `update_with_no_fields_names_both_shapes` (in `calendar` and
-/// `gmail::labels`).
+/// `gmail::labels`); `create_with_both_shapes_merges_disjoint_fields`,
+/// `create_with_conflicting_shapes_is_refused_without_a_request`,
+/// `create_with_no_task_fields_names_both_shapes` (in `tasks`).
 pub(crate) fn merge_flat_fields(
     args: &Value,
     object_key: &str,
@@ -95,54 +96,20 @@ pub(crate) fn merge_flat_fields(
     if body.is_empty() {
         let names: Vec<&str> = fields.iter().map(|&(flat, _)| flat).collect();
         anyhow::bail!(
-            "no fields to update: pass {} at the top level, or a non-empty '{object_key}' object",
+            "no fields provided: pass {} at the top level, or a non-empty '{object_key}' object",
             names.join("/")
         );
     }
     Ok(Value::Object(body))
 }
 
-/// Shared fixtures for the `wiremock` request-shape tests (#8632).
+/// Shared fixtures for the `wiremock` request-shape tests (#8632). The token
+/// client is `BaseClient::for_test_with_token`.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::api::auth::TokenStorage;
-    use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
-    use crate::api::client::BaseClient;
-    use chrono::{Duration, Utc};
     use serde_json::{Value, json};
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// A client whose only profile `"a"` holds a token an hour from expiry,
-    /// backed by a fresh temp token file, so `get_access_token` never reaches
-    /// the OAuth refresh path or the real token store. Mirrors
-    /// `BaseClient::for_test_with_token` from #8631; fold into it once merged.
-    pub(crate) fn client_with_token() -> BaseClient {
-        let dir = std::env::temp_dir().join(format!("gw-svc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp token dir");
-        let client = BaseClient::for_test(TokenStorage::with_path(dir.join("tokens.json")));
-        let token = StoredToken {
-            version: 1,
-            metadata: TokenMetadata {
-                service_name: "a".into(),
-                provider: "google".into(),
-                created_at: Utc::now(),
-                last_refreshed: None,
-                email: Some("a@example.com".into()),
-                is_default: true,
-            },
-            token: OAuthToken {
-                access_token: "test-access-token".into(),
-                refresh_token: Some("r".into()),
-                expires_at: Utc::now() + Duration::seconds(3600),
-                scopes: vec![],
-                token_type: "Bearer".into(),
-            },
-        };
-        let map = std::collections::HashMap::from([("a".to_string(), token)]);
-        client.storage().save(&map).expect("seed token storage");
-        client
-    }
 
     /// `base` with every key of `extra` added, plus `"account": "a"` so a
     /// `GWORKSPACE_ACCOUNT` in the test environment cannot redirect the token

@@ -461,7 +461,7 @@ mod tests {
 
     // #8632: the request-shape tests below drive the real handler against a
     // wiremock server and pin the exact method, path and JSON body sent.
-    use crate::api::services::test_support::{client_with_token, mount_patch, with_args};
+    use crate::api::services::test_support::{mount_patch, with_args};
     use wiremock::MockServer;
 
     const CAL_PATH: &str = "/calendars/cal1";
@@ -469,7 +469,8 @@ mod tests {
     /// Run `manage_calendars` update on `cal1` with `extra` added to the args.
     async fn update(server: &MockServer, extra: Value) -> Result<Value> {
         let args = with_args(json!({ "action": "update", "calendar_id": "cal1" }), extra);
-        manage_calendars_at(&client_with_token(), args, &server.uri()).await
+        let client = BaseClient::for_test_with_token("a");
+        manage_calendars_at(&client, args, &server.uri()).await
     }
 
     #[tokio::test]

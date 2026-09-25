@@ -75,7 +75,7 @@ mod tests {
     // #8632: drive the real handler against a wiremock server and pin the
     // exact method, path and JSON body sent.
     use super::*;
-    use crate::api::services::test_support::{client_with_token, mount_patch, with_args};
+    use crate::api::services::test_support::{mount_patch, with_args};
     use wiremock::MockServer;
 
     const LABEL_PATH: &str = "/users/me/labels/Label_1";
@@ -83,7 +83,8 @@ mod tests {
     /// Run `manage_gmail_labels` update on `Label_1` with `extra` added.
     async fn update(server: &MockServer, extra: Value) -> Result<Value> {
         let args = with_args(json!({ "action": "update", "label_id": "Label_1" }), extra);
-        manage_gmail_labels_at(&client_with_token(), args, &server.uri()).await
+        let client = BaseClient::for_test_with_token("a");
+        manage_gmail_labels_at(&client, args, &server.uri()).await
     }
 
     #[tokio::test]

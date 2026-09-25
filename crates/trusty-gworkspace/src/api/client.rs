@@ -131,10 +131,11 @@ impl BaseClient {
     /// Why: Service tests that drive a handler against a `wiremock` server need
     /// `get_access_token` to succeed without ever reaching the OAuth refresh
     /// path or the real `~/.gworkspace-mcp` store (shared by Drive and Tasks,
-    /// #8629).
+    /// #8629; Calendar and Gmail labels, #8632).
     /// What: Seeds a temp `TokenStorage` with one default profile and returns
     /// a [`BaseClient::for_test`] over it.
-    /// Test: exercised by `drive::files::tests` and `tasks::tests`.
+    /// Test: exercised by `drive::files::tests`, `tasks::tests`,
+    /// `calendar::tests` and `gmail::labels::tests`.
     #[cfg(test)]
     pub(crate) fn for_test_with_token(profile: &str) -> Self {
         use crate::api::auth::models::{OAuthToken, TokenMetadata};

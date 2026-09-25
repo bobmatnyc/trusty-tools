@@ -8,57 +8,22 @@
 //! is live only.
 
 use anyhow::{Result, anyhow};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::api::client::BaseClient;
 use crate::api::constants::TASKS_API_BASE;
-use crate::api::services::{account_of, opt_str, require_str};
+use crate::api::services::{account_of, merge_flat_fields, opt_str, require_str};
 
-/// Task resource fields `manage_tasks` accepts flat at the top level (#8629).
-const TASK_FLAT_FIELDS: [&str; 5] = ["title", "notes", "due", "status", "completed"];
-
-/// Build a Tasks request body from a nested object plus flat top-level fields.
-///
-/// Why: The Python `gworkspace-mcp` this crate ports took task fields flat
-/// (`title`, `notes`, `due`, ...), but the Rust port read only the nested
-/// `task` / `updates` object: a flat create was refused with "missing 'task'
-/// object" and a flat update PATCHed `{}` (#8629). Both shapes must work.
-/// What: Starts from `args[object_key]` (an error when present but not an
-/// object), then adds each of `flat_fields` present and non-null at the top
-/// level. Precedence rule — the body is the UNION of both shapes: a field
-/// given in both places with equal values is sent once; a field given in both
-/// places with different values is an error naming the field, so neither
-/// value is ever dropped silently. An empty union is an error naming both
-/// shapes.
-/// Test: `create_with_both_shapes_merges_disjoint_fields`,
-/// `create_with_conflicting_shapes_is_refused_without_a_request`,
-/// `create_with_no_task_fields_names_both_shapes`.
-fn merge_task_fields(args: &Value, object_key: &str, flat_fields: &[&str]) -> Result<Value> {
-    let mut body = match args.get(object_key) {
-        None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(map)) => map.clone(),
-        Some(_) => return Err(anyhow!("'{object_key}' must be an object")),
-    };
-    for &field in flat_fields {
-        let Some(flat) = args.get(field).filter(|v| !v.is_null()) else {
-            continue;
-        };
-        if body.get(field).is_some_and(|nested| nested != flat) {
-            return Err(anyhow!(
-                "'{field}' is set both at the top level and in '{object_key}' with \
-                 different values; pass it once"
-            ));
-        }
-        body.insert(field.to_string(), flat.clone());
-    }
-    if body.is_empty() {
-        return Err(anyhow!(
-            "no task fields provided: pass {} at the top level, or a '{object_key}' object",
-            flat_fields.join("/")
-        ));
-    }
-    Ok(Value::Object(body))
-}
+/// Task resource fields `manage_tasks` accepts flat at the top level (#8629),
+/// paired with their API body keys (identical for Tasks). #8632: the merge
+/// itself is the shared [`merge_flat_fields`].
+const TASK_FLAT_FIELDS: [(&str, &str); 5] = [
+    ("title", "title"),
+    ("notes", "notes"),
+    ("due", "due"),
+    ("status", "status"),
+    ("completed", "completed"),
+];
 
 /// Convenience wrapper: list tasks from the default tasklist (`@default`).
 ///
@@ -153,7 +118,7 @@ async fn manage_task_lists_at(client: &BaseClient, args: Value, base: &str) -> R
             let id = require_str(&args, "tasklist_id")?;
             let url = format!("{base}/users/@me/lists/{id}");
             // #8629: a flat `title` renames the list; it used to PATCH `{}`.
-            let body = merge_task_fields(&args, "updates", &["title"])?;
+            let body = merge_flat_fields(&args, "updates", &[("title", "title")])?;
             client.patch(&url, body, account).await
         }
         "delete" => {
@@ -195,14 +160,14 @@ async fn manage_tasks_at(client: &BaseClient, args: Value, base: &str) -> Result
         "search" => search_tasks(client, account, &args, base).await,
         "create" => {
             // #8629: accept the flat pre-port shape as well as a `task` object.
-            let body = merge_task_fields(&args, "task", &TASK_FLAT_FIELDS)?;
+            let body = merge_flat_fields(&args, "task", &TASK_FLAT_FIELDS)?;
             let url = format!("{base}/lists/{tasklist}/tasks");
             client.post(&url, body, account).await
         }
         "update" => {
             let id = require_str(&args, "task_id")?;
             // #8629: flat fields used to be ignored, PATCHing `{}`.
-            let body = merge_task_fields(&args, "updates", &TASK_FLAT_FIELDS)?;
+            let body = merge_flat_fields(&args, "updates", &TASK_FLAT_FIELDS)?;
             let url = format!("{base}/lists/{tasklist}/tasks/{id}");
             client.patch(&url, body, account).await
         }
