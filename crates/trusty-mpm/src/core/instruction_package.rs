@@ -135,6 +135,8 @@ pub const SCHEMA_JSON: &str =
 /// Test: `canonical_order_is_sorted_and_complete`, `schema_enums_match_rust_enums`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+// #8533: new sections must not be a major-version break for downstream matches.
+#[non_exhaustive]
 pub enum SectionId {
     /// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
     Identity,
