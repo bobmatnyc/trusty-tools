@@ -337,9 +337,7 @@ fn ms(d: Duration) -> f64 {
 /// then a real (non-dry-run) `run_import` into a palace under a temp data
 /// root, and separately times one-at-a-time embedding of the same contents.
 /// It prints ms per memory and an extrapolation to [`EXTRAPOLATE_TO`]. The
-/// daemon probe is a fake: [`SystemDaemonProbe`](palace_io::SystemDaemonProbe)
-/// scans every `trusty-memory serve` process whatever the data root, so it
-/// refuses a temp-root import while any daemon or stdio bridge runs.
+/// daemon probe is faked so the timing never depends on the host's daemon.
 /// Must run alone, or an earlier test may have seeded the mock embedder.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread")]
