@@ -362,3 +362,22 @@ fn the_bundled_corpus_actually_shrinks() {
         "the fold recovered nothing: authored {authored} B, folded {folded} B"
     );
 }
+
+#[test]
+fn an_unclosed_comment_in_one_part_hides_nothing_in_the_next() {
+    // #8533: a project body ending inside `<!--` beside base text. Folded as one
+    // string the base text vanished; folded per part it survives.
+    let parts = [
+        "Project body.\n<!-- TODO",
+        "> **Agent selection.** base",
+        "",
+    ];
+    assert_eq!(
+        fold_parts(&parts, "\n\n"),
+        "Project body.\n\n> **Agent selection.** base"
+    );
+    assert_eq!(
+        fold_delivered_prompt(&parts[..2].join("\n\n")),
+        "Project body."
+    );
+}

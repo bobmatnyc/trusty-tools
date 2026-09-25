@@ -155,6 +155,26 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     folded
 }
 
+/// Fold each part ON ITS OWN, then join the non-empty results with `separator`.
+///
+/// Why (#8533): the roster-absent string assembly carries project override
+/// bodies beside base text. Folded as one string, a body ending in an unclosed
+/// `<!--` hid every later part up to the next `-->` — the agent-selection note,
+/// the roster and the enforcement tables included. Folding each part alone
+/// confines a comment or fence to the part that opened it, as
+/// [`crate::core::instruction_package::InstructionPackage::compose`] does per block.
+/// What: trims and folds each part, drops the ones the fold empties, joins the
+/// rest. A part is never folded twice, so no refold can re-pair state.
+/// Test: `an_unclosed_comment_in_one_part_hides_nothing_in_the_next`.
+pub(crate) fn fold_parts<S: AsRef<str>>(parts: &[S], separator: &str) -> String {
+    parts
+        .iter()
+        .map(|part| fold_delivered_prompt(part.as_ref().trim()))
+        .filter(|folded| !folded.is_empty())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 /// What follows the FIRST `-->` on a line, or `None` when the line has none.
 ///
 /// Why (#7616): this is the whole-line classifier, and it replaces a

@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use crate::core::claude_md_sections::{Rejection, scan_project, section_token};
 use crate::core::instruction_package::{InstructionPackage, SectionId};
-use crate::core::instruction_safety_core::{is_fixed_core_section, pinned_members_of};
+use crate::core::instruction_safety_core::{
+    is_fixed_core_section, missing_core_members, pinned_members_of,
+};
 
 /// What is in force for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,9 +180,17 @@ pub fn section_statuses(
 /// What: one line per section — token, state, marker location — plus
 /// `keeps: <member>` for an overridden section with a pinned safety-core block,
 /// and `NOT FOUND in the composed prompt` when an overridden section's first
-/// content line is absent from `prompt`.
-/// Test: `render_flags_an_override_missing_from_the_prompt`.
-pub fn render_section_report(statuses: &[SectionStatus], prompt: &str) -> String {
+/// content line is absent from `prompt`. Then one `safety core <name> NOT
+/// FOUND` line per [`missing_core_members`] of `prompt` — `roster` is the
+/// rendered roster the prompt was composed with, `None` when no agent is
+/// deployed. A `keeps:` claim is therefore checked, not asserted.
+/// Test: `render_flags_an_override_missing_from_the_prompt`,
+/// `render_flags_a_safety_core_member_missing_from_the_prompt`.
+pub fn render_section_report(
+    statuses: &[SectionStatus],
+    prompt: &str,
+    roster: Option<&str>,
+) -> String {
     let mut out =
         String::from("instruction sections (core / overridable / overridden-by-project):\n");
     for row in statuses {
@@ -200,6 +210,11 @@ pub fn render_section_report(statuses: &[SectionStatus], prompt: &str) -> String
         }
         out.push_str(&format!("  {:<34} {detail}{location}\n", row.token));
     }
+    for name in missing_core_members(prompt, roster) {
+        out.push_str(&format!(
+            "  safety core {name} NOT FOUND in the composed prompt\n"
+        ));
+    }
     out
 }
 
@@ -207,16 +222,18 @@ pub fn render_section_report(statuses: &[SectionStatus], prompt: &str) -> String
 ///
 /// Why: the one call `tm sessions instructions` makes, so the CLI cannot pick
 /// a different package or roster test than the composer.
-/// What: the bundled package, the live roster's presence, then
-/// [`section_statuses`] and [`render_section_report`].
+/// What: the bundled package, the live roster, then [`section_statuses`] and
+/// [`render_section_report`]. The roster is scanned again here; the agent tiers
+/// are machine-global, so a deploy between the two scans can flag the roster
+/// NOT FOUND — a false alarm, never a false pass.
 /// Test: `instructions_reports_section_status_and_project_style`.
 pub fn section_report_for(project_dir: &Path, prompt: &str) -> String {
-    let roster_present =
-        crate::core::delegation_authority::deployed_roster_section(project_dir).is_some();
+    let roster = crate::core::delegation_authority::deployed_roster_section(project_dir);
     match crate::core::bundled_pm_package::bundled_fallback_package() {
         Ok(package) => render_section_report(
-            &section_statuses(package, project_dir, roster_present),
+            &section_statuses(package, project_dir, roster.is_some()),
             prompt,
+            roster.as_deref(),
         ),
         Err(err) => format!("instruction sections: the bundled manifest is unusable: {err}\n"),
     }

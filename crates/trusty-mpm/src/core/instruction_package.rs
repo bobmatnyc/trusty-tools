@@ -929,9 +929,17 @@ impl InstructionPackage {
     /// What: validates, then walks `blocks` in array order. Each block's body is
     /// resolved (authored text, or the named generator's input) and trimmed; a
     /// block that resolves to nothing is dropped when `optional`, and is a hard
-    /// [`CompositionError::MissingGeneratedInput`] otherwise. Every emitted
-    /// block after the first is preceded by its declared [`Join`] bytes.
-    /// `trailing_newline` appends one `\n`.
+    /// [`CompositionError::MissingGeneratedInput`] otherwise. Each body is then
+    /// folded ON ITS OWN by
+    /// [`crate::core::instruction_fold::fold_delivered_prompt`], and a body the
+    /// fold empties emits nothing. Every emitted block after the first is
+    /// preceded by its declared [`Join`] bytes. `trailing_newline` appends one
+    /// `\n`.
+    ///
+    /// Folding per block is a safety property, not a style choice (#8533): a
+    /// project override body ending in an unclosed `<!--` hides only its own
+    /// tail. Folded as one string, it hid every later block up to the next
+    /// `-->`, safety core included.
     ///
     /// Determinism: pure function of `(self, inputs)` — no map iteration, no
     /// clock, no environment, no filesystem. Two calls with equal arguments
@@ -975,20 +983,24 @@ impl InstructionPackage {
                 });
             }
 
+            // #7616: the one transformation between the authored corpus and the
+            // delivered bytes. #8533: applied per block, so no block's comment
+            // or fence state can reach the next one.
+            let folded = crate::core::instruction_fold::fold_delivered_prompt(body);
+            if folded.is_empty() {
+                continue;
+            }
             if emitted {
                 out.push_str(block.join_before.as_str());
             }
-            out.push_str(body);
+            out.push_str(&folded);
             emitted = true;
         }
 
         if self.trailing_newline && !out.is_empty() {
             out.push('\n');
         }
-        // #7616: the one transformation between the authored corpus and the
-        // delivered bytes. Before it existed the "instruction-compression"
-        // technique folded nothing for a project that overrides no section.
-        Ok(crate::core::instruction_fold::fold_delivered_prompt(&out))
+        Ok(out)
     }
 
     /// Concatenate the AUTHORED blocks of `sections`, in block order.

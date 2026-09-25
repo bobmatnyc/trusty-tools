@@ -47,7 +47,10 @@ pub struct SafetyCoreMember {
     pub section: SectionId,
     /// How the member survives an override.
     pub kind: SafetyCoreKind,
-    /// Text the delivered prompt always carries while the member is in force.
+    /// A body sentence the delivered prompt carries while the member is in
+    /// force — never its heading, which an override could repeat (#8533). The
+    /// agent roster has no fixed sentence; [`missing_core_members`] checks the
+    /// rendered roster itself.
     pub marker: &'static str,
 }
 
@@ -66,37 +69,39 @@ pub const SAFETY_CORE: [SafetyCoreMember; 7] = [
         name: "Memory & Instruction Sources",
         section: SectionId::Core,
         kind: SafetyCoreKind::FixedSection,
-        marker: "## Memory & Instruction Sources",
+        marker: "`CLAUDE.md` is the only non-dynamic instruction source. Never create another.",
     },
     SafetyCoreMember {
         name: "Customization Surface",
         section: SectionId::Core,
         kind: SafetyCoreKind::FixedSection,
-        marker: "## Customization Surface",
+        marker: "Ad-hoc override channels are BANNED",
     },
     SafetyCoreMember {
         name: "Detected project stack",
         section: SectionId::Core,
         kind: SafetyCoreKind::GeneratedBlock(Generator::StackProfile),
-        marker: crate::core::stack_profile::STACK_PROFILE_HEADING,
+        // Both renderings (a detected stack and the neutral profile) carry it.
+        marker: "fall back to a default stack profile.",
     },
     SafetyCoreMember {
         name: "Memory protocol",
         section: SectionId::Memory,
         kind: SafetyCoreKind::PinnedBlock,
-        marker: "## Memory Protocol (Context-First)",
+        marker: "Call `memory_recall` for targeted recall BEFORE any research or delegation",
     },
     SafetyCoreMember {
         name: "Code search protocol",
         section: SectionId::Search,
         kind: SafetyCoreKind::PinnedBlock,
-        marker: "## Code Search Protocol (Context-First)",
+        marker: "Call `search` (`mcp__trusty-search__search`) BEFORE reading code files",
     },
     SafetyCoreMember {
         name: "Agent selection",
         section: SectionId::AgentDelegation,
         kind: SafetyCoreKind::PinnedBlock,
-        marker: "**Agent selection.**",
+        // The pinned note and `AGENT_SELECTION_WITHOUT_ROSTER` both carry it.
+        marker: "A prose title like \"Documentation Agent\" is not an agent and fails to dispatch",
     },
     SafetyCoreMember {
         name: "Agent roster",
@@ -105,6 +110,31 @@ pub const SAFETY_CORE: [SafetyCoreMember; 7] = [
         marker: "## Delegation Authority",
     },
 ];
+
+/// The safety-core members absent from a delivered `prompt`, by name.
+///
+/// Why: the section report and the override tests must ask one question —
+/// "is every core member still in this prompt?" — the same way (#8533).
+/// What: a member is present when `prompt` carries its body-sentence
+/// [`SafetyCoreMember::marker`]. The agent roster is present when `prompt`
+/// carries the rendered `roster` as the composer delivers it, and is skipped
+/// when `roster` is `None` (no agent deployed, nothing to deliver).
+/// Test: `the_roster_absent_path_keeps_every_core_member_but_the_roster`,
+/// `a_spoofed_heading_does_not_count_as_a_present_member`.
+pub fn missing_core_members(prompt: &str, roster: Option<&str>) -> Vec<&'static str> {
+    SAFETY_CORE
+        .iter()
+        .filter(|m| match m.kind {
+            SafetyCoreKind::GeneratedBlock(Generator::AgentRoster) => roster.is_some_and(|r| {
+                !prompt.contains(&crate::core::instruction_fold::fold_delivered_prompt(
+                    r.trim(),
+                ))
+            }),
+            _ => !prompt.contains(m.marker),
+        })
+        .map(|m| m.name)
+        .collect()
+}
 
 /// Whether `section` is a tier-`fixed` safety-core section.
 ///

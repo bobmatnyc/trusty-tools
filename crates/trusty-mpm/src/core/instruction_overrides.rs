@@ -463,9 +463,12 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// one implementation with the byte-equality oracle the package path is tested
 /// against — an oracle that is dead test code proves nothing.
 /// What: `PM_INSTRUCTIONS` → stack profile → optional memory block → workflow →
-/// delegation → optional addendum → the non-overridable floor, joined with
-/// [`SECTION_SEPARATOR`] and with empty sections dropped.
+/// delegation → optional addendum → the non-overridable floor, each folded on
+/// its own, joined with [`SECTION_SEPARATOR`] and with empty sections dropped.
+/// `delegation` arrives as parts (doctrine, agent-selection note, roster) so a
+/// project body among them is folded apart from the base text after it.
 /// Test: `no_overrides_uses_bundled`,
+/// `an_override_ending_in_an_unclosed_comment_hides_nothing_on_the_roster_absent_path`,
 /// `a_named_memory_override_is_slotted_on_the_roster_absent_path`, and
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` in
 /// `bundled_pm_package_tests.rs`.
@@ -473,32 +476,34 @@ pub(crate) fn assemble_sections(
     stack: String,
     memory_override: Option<String>,
     workflow: String,
-    delegation: String,
+    delegation: Vec<String>,
     addendum: Option<String>,
 ) -> String {
-    let mut sections: Vec<String> = vec![pm_instructions().trim().to_string(), stack];
+    // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
+    // the same pass the packaged composer uses. #8533: each section, and each
+    // part of the delegation section, is folded ON ITS OWN, so an override body
+    // ending in an unclosed `<!--` cannot hide the text after it.
+    use crate::core::instruction_fold::{fold_delivered_prompt, fold_parts};
+    let fold = |s: &str| fold_delivered_prompt(s.trim());
+    let mut sections: Vec<String> = vec![fold(pm_instructions()), fold(&stack)];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
     if let Some(memory) = memory_override {
-        sections.push(format!("{MEMORY_OVERRIDE_HEADING}\n\n{memory}"));
+        sections.push(fold(&format!("{MEMORY_OVERRIDE_HEADING}\n\n{memory}")));
     }
 
-    sections.push(workflow);
-    sections.push(delegation);
+    sections.push(fold(&workflow));
+    sections.push(fold_parts(&delegation, "\n\n"));
 
     // Additive project rules.
     if let Some(extra) = addendum {
-        sections.push(extra);
+        sections.push(fold(&extra));
     }
 
     // Non-overridable floor, always last.
-    sections.push(base_pm().trim().to_string());
+    sections.push(fold(base_pm()));
 
-    // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
-    // the same pass the packaged composer uses. Folding in one place only would
-    // break `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`
-    // and would hand a roster-absent project an unfolded prompt.
-    crate::core::instruction_fold::fold_delivered_prompt(&join_sections(sections))
+    join_sections(sections)
 }
 
 /// The DEFAULT delegation section: bundled routing doctrine + the live roster.
@@ -555,23 +560,43 @@ pub(crate) fn assemble_sections(
 /// What: returns the manifest's delegation doctrine (asset plus the precedence
 /// note) with the rendered `## Delegation Authority` block from
 /// [`crate::core::delegation_authority::deployed_roster_section`] appended when
-/// any agent is deployed. With no deployed agents the asset is returned alone,
-/// without the note — the note only makes sense above a roster (pre-#4069
-/// behaviour). Takes the already-rendered roster rather than scanning itself
-/// (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once whichever
-/// composition path it takes.
+/// any agent is deployed. With no deployed agents the asset is followed by
+/// [`AGENT_SELECTION_WITHOUT_ROSTER`] instead: the pinned note points at "the
+/// roster below", which is absent, yet agent selection is safety core and must
+/// be in force on every path (#8533). Returned as parts so
+/// [`assemble_sections`] folds each on its own. Takes the already-rendered
+/// roster rather than scanning itself (#4183) so `resolve_pm_prompt` scans the
+/// agent tiers exactly once whichever composition path it takes.
 /// Test: `bundled_delegation_appends_deployed_roster`, `no_overrides_uses_bundled`,
-/// `a_retired_delegation_file_no_longer_suppresses_the_live_roster`.
-pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
+/// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) fn delegation_with_roster(roster: Option<&str>) -> Vec<String> {
     match roster {
-        Some(roster) => format!(
-            "{}\n\n{}",
-            crate::core::instruction_pipeline::delegation_doctrine(),
-            roster.trim()
-        ),
-        None => AGENT_DELEGATION.trim().to_string(),
+        Some(roster) => vec![
+            crate::core::instruction_pipeline::delegation_doctrine().to_string(),
+            roster.trim().to_string(),
+        ],
+        None => vec![
+            AGENT_DELEGATION.trim().to_string(),
+            AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
+        ],
     }
 }
+
+/// The agent-selection rule for a prompt that carries no roster (#8533).
+///
+/// Why: the pinned note in the manifest refers to "the roster below", so it is
+/// emitted only above a roster; without this sentence the roster-absent prompt
+/// stated no agent-selection rule at all, with or without an override.
+/// What: the pinned note minus its roster references. It carries the same
+/// presence sentence ([`crate::core::instruction_safety_core::SAFETY_CORE`]'s
+/// agent-selection marker) as the pinned note.
+/// Test: `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) const AGENT_SELECTION_WITHOUT_ROSTER: &str = "> **Agent selection.** Dispatch a \
+     subagent only with the native Agent tool — `Agent(subagent_type=\"<name>\", ...)` — \
+     passing a name exactly as the harness's own `Available agent types for the Agent tool` \
+     listing spells it. A prose title like \"Documentation Agent\" is not an agent and \
+     fails to dispatch (#4594). That listing is authoritative for WHICH agents exist; \
+     routing tables are doctrine only (#4513).";
 
 /// The AGENT-DELEGATION section body when no legacy `AGENT_DELEGATION.md` file
 /// forced full replacement, honoring a CLAUDE.md named-section override if the
@@ -589,22 +614,31 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
 /// while the live roster — host-computed, never authored by a project — still
 /// follows when any agent is deployed.
 ///
-/// What: `Some(body)` returns `body` (trimmed), followed by the roster when
-/// `roster` is `Some`; `None` defers to [`delegation_with_roster`] unchanged.
+/// What: `Some(body)` returns `body` (trimmed), then the agent-selection rule —
+/// the pinned note above the roster when `roster` is `Some`,
+/// [`AGENT_SELECTION_WITHOUT_ROSTER`] when it is `None`; `None` defers to
+/// [`delegation_with_roster`] unchanged. Parts, not one string: the project
+/// body is folded apart from the base text after it.
 /// Test: `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`
-/// (`claude_md_sections_tests.rs`).
-fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
+/// (`claude_md_sections_tests.rs`),
+/// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) fn delegation_with_named_override(
+    named_override: Option<&str>,
+    roster: Option<&str>,
+) -> Vec<String> {
     match named_override {
-        // #8533: the pinned agent-selection note survives the override here as
-        // it does on the package path; like the default, it only precedes a roster.
+        // #8533: agent selection is safety core — it survives the override on
+        // this path as it does on the package path, with or without a roster.
         Some(body) => match roster {
-            Some(roster) => format!(
-                "{}\n\n{}\n\n{}",
-                body.trim(),
+            Some(roster) => vec![
+                body.trim().to_string(),
                 crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation),
-                roster.trim()
-            ),
-            None => body.trim().to_string(),
+                roster.trim().to_string(),
+            ],
+            None => vec![
+                body.trim().to_string(),
+                AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
+            ],
         },
         None => delegation_with_roster(roster),
     }

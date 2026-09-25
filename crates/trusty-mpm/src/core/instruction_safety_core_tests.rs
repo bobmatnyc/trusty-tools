@@ -41,14 +41,18 @@ fn prompt_for(dir: &TempDir) -> String {
     resolve_pm_prompt_with_roster(dir.path(), || Some(ROSTER.to_string())).0
 }
 
-/// Every safety-core marker is in `prompt`, or the missing member names.
-fn missing_core_members(prompt: &str) -> Vec<&'static str> {
-    SAFETY_CORE
-        .iter()
-        .filter(|m| !prompt.contains(m.marker))
-        .map(|m| m.name)
-        .collect()
+/// The safety-core members `prompt` lacks, against the fixed test roster.
+fn missing(prompt: &str) -> Vec<&'static str> {
+    missing_core_members(prompt, Some(ROSTER))
 }
+
+/// The prompt a roster-absent launch in `dir` composes (no agent deployed).
+fn roster_absent_prompt_for(dir: &TempDir) -> String {
+    resolve_pm_prompt_with_roster(dir.path(), || None).0
+}
+
+/// A project override body's tail that leaves the comment fold open.
+const UNCLOSED_TAIL: &str = "\n<!-- TODO";
 
 #[test]
 fn the_manifest_pins_exactly_the_safety_core() {
@@ -248,7 +252,7 @@ fn overriding_every_overridable_section_keeps_the_safety_core() {
             "{body} not applied once"
         );
     }
-    assert_eq!(missing_core_members(&prompt), Vec::<&str>::new());
+    assert_eq!(missing(&prompt), Vec::<&str>::new());
     assert!(prompt.contains("memory_recall") && prompt.contains("mcp__trusty-search__search"));
     assert!(prompt.contains("Agent(subagent_type="));
 }
@@ -266,7 +270,7 @@ fn a_malformed_marker_block_keeps_the_base_prompt_and_the_safety_core() {
          Nested core.\n<!-- TRUSTY-MPM: CORE END -->\n",
     );
     let prompt = prompt_for(&malformed);
-    assert_eq!(missing_core_members(&prompt), Vec::<&str>::new());
+    assert_eq!(missing(&prompt), Vec::<&str>::new());
     assert!(!prompt.contains("Nested core.") && !prompt.contains("Future memory."));
     assert_eq!(
         prompt, clean,
@@ -283,6 +287,137 @@ fn an_unreadable_claude_md_keeps_the_base_prompt_and_the_safety_core() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::create_dir(dir.path().join("CLAUDE.md")).expect("CLAUDE.md as a directory");
     let prompt = prompt_for(&dir);
-    assert_eq!(missing_core_members(&prompt), Vec::<&str>::new());
+    assert_eq!(missing(&prompt), Vec::<&str>::new());
     assert_eq!(prompt, clean);
+}
+
+#[test]
+fn an_override_ending_in_an_unclosed_comment_hides_nothing_outside_its_section() {
+    // #8533 finding 1: folded as one string, `<!-- TODO` at the end of any
+    // override body swallowed every later block — agent selection, the roster
+    // and the enforcement tables for AGENT-DELEGATION. Folded per block, the
+    // unclosed comment costs only its own tail: the prompt equals the one the
+    // same body composes without it.
+    for id in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| !is_fixed_core_section(*id))
+    {
+        let token = section_token(id);
+        let body = format!("Project text for {token}.");
+        let well_formed = prompt_for(&project_with_claude_md(&marker(token, &body)));
+        let unclosed = prompt_for(&project_with_claude_md(&marker(
+            token,
+            &format!("{body}{UNCLOSED_TAIL}"),
+        )));
+        assert_eq!(missing(&unclosed), Vec::<&str>::new(), "{token}");
+        assert!(
+            unclosed == well_formed,
+            "{token}: an unclosed comment in the override hid base text after it \
+             ({} bytes delivered, {} expected)",
+            unclosed.len(),
+            well_formed.len()
+        );
+    }
+}
+
+#[test]
+fn an_override_ending_in_an_unclosed_comment_hides_nothing_on_the_roster_absent_path() {
+    // The roster-absent string assembly places only these three overrides.
+    for id in [
+        SectionId::Memory,
+        SectionId::Workflow,
+        SectionId::AgentDelegation,
+    ] {
+        let token = section_token(id);
+        let body = format!("Project text for {token}.");
+        let well_formed = roster_absent_prompt_for(&project_with_claude_md(&marker(token, &body)));
+        let unclosed = roster_absent_prompt_for(&project_with_claude_md(&marker(
+            token,
+            &format!("{body}{UNCLOSED_TAIL}"),
+        )));
+        assert_eq!(
+            missing_core_members(&unclosed, None),
+            Vec::<&str>::new(),
+            "{token}"
+        );
+        assert!(
+            unclosed == well_formed,
+            "{token}: an unclosed comment in the override hid base text after it"
+        );
+    }
+}
+
+#[test]
+fn every_bundled_block_closes_its_own_comments_and_fences() {
+    // Folding per block is byte-neutral for the shipped corpus only while no
+    // block leaves a comment or fence open for the next one to depend on — the
+    // `core.md`-opens-with-a-comment case. A block that did would now lose the
+    // text after its opener instead of hiding a neighbour's.
+    let package = bundled_fallback_package().expect("manifest");
+    for (index, block) in package.blocks.iter().enumerate() {
+        let Some(Ok(body)) = block.body.authored() else {
+            continue;
+        };
+        let folded = crate::core::instruction_fold::fold_delivered_prompt(&format!(
+            "{}\nSENTINEL-8533",
+            body.trim()
+        ));
+        assert!(
+            folded.ends_with("SENTINEL-8533"),
+            "block {index} ({:?}) leaves a comment open",
+            block.section
+        );
+        let fences = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("```"))
+            .count();
+        assert_eq!(
+            fences % 2,
+            0,
+            "block {index} ({:?}) leaves a fence open",
+            block.section
+        );
+    }
+}
+
+#[test]
+fn the_roster_absent_path_keeps_every_core_member_but_the_roster() {
+    // #8533 finding 2: with no agent deployed the prompt stated no
+    // agent-selection rule, with or without an AGENT-DELEGATION override.
+    for text in [
+        "# Project\n".to_string(),
+        marker("AGENT-DELEGATION", "Project routing."),
+    ] {
+        let prompt = roster_absent_prompt_for(&project_with_claude_md(&text));
+        assert_eq!(
+            missing_core_members(&prompt, None),
+            Vec::<&str>::new(),
+            "{text}"
+        );
+        assert!(!prompt.contains("## Delegation Authority"));
+    }
+    let pinned = crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation);
+    let selection = SAFETY_CORE
+        .iter()
+        .find(|m| m.name == "Agent selection")
+        .expect("member");
+    for text in [
+        pinned.as_str(),
+        crate::core::instruction_overrides::AGENT_SELECTION_WITHOUT_ROSTER,
+    ] {
+        assert!(text.contains(selection.marker), "{text}");
+    }
+}
+
+#[test]
+fn a_spoofed_heading_does_not_count_as_a_present_member() {
+    // #8533 finding 3: the presence check reads body sentences, so an override
+    // that repeats every core heading while the core text is gone is caught.
+    let spoof = "## Memory & Instruction Sources\n\n## Customization Surface\n\n\
+                 ## Detected Project Stack (auto-derived)\n\n\
+                 ## Memory Protocol (Context-First)\n\n## Code Search Protocol (Context-First)\n\n\
+                 > **Agent selection.**\n\n## Delegation Authority\n";
+    let every: Vec<&str> = SAFETY_CORE.iter().map(|m| m.name).collect();
+    assert_eq!(missing(spoof), every);
+    assert_eq!(missing_core_members(spoof, None), every[..every.len() - 1]);
 }

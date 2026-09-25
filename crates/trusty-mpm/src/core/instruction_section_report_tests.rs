@@ -9,7 +9,8 @@ use crate::core::instruction_overrides::resolve_pm_prompt_with_roster;
 use tempfile::TempDir;
 
 const ROSTER: &str = "## Delegation Authority\n\n### ticketing\n\nHandles ticketing work.";
-const STACK: &str = "## Project Stack Profile\n\nDetected stack: Rust.";
+const STACK: &str =
+    "## Project Stack Profile\n\nDetected stack: Rust. Never fall back to a default stack profile.";
 
 /// A project whose `CLAUDE.md` carries the given `(token, body)` marker blocks.
 fn project(blocks: &[(&str, &str)]) -> TempDir {
@@ -87,7 +88,7 @@ fn identity_and_a_former_core_section_report_overridden() {
         SectionState::Overridable
     );
     assert_eq!(state_of(&rows, SectionId::Core), SectionState::Core);
-    let rendered = render_section_report(&rows, &prompt);
+    let rendered = render_section_report(&rows, &prompt, Some(ROSTER));
     assert!(!rendered.contains("NOT FOUND"), "{rendered}");
 }
 
@@ -104,7 +105,7 @@ fn a_core_override_reports_declined() {
         matches!(state_of(&rows, SectionId::Core), SectionState::CoreDeclined(ref r) if r.contains("admits no project override")),
         "{rows:?}"
     );
-    let rendered = render_section_report(&rows, &prompt);
+    let rendered = render_section_report(&rows, &prompt, Some(ROSTER));
     assert!(
         rendered.contains("core (project override declined:"),
         "{rendered}"
@@ -180,7 +181,7 @@ fn every_overridable_section_replaced_keeps_roster_memory_and_search() {
             (SectionId::AgentDelegation, vec!["Agent selection"]),
         ]
     );
-    let rendered = render_section_report(&rows, &prompt);
+    let rendered = render_section_report(&rows, &prompt, Some(ROSTER));
     assert!(
         rendered.contains("overridden-by-project (keeps: Memory protocol)"),
         "{rendered}"
@@ -210,7 +211,7 @@ fn render_flags_an_override_missing_from_the_prompt() {
     let dir = project(&[("PHASES", "Only research.")]);
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), true);
-    let rendered = render_section_report(&rows, "a prompt without the override");
+    let rendered = render_section_report(&rows, "a prompt without the override", Some(ROSTER));
     assert!(
         rendered.contains("NOT FOUND in the composed prompt"),
         "{rendered}"
@@ -220,7 +221,8 @@ fn render_flags_an_override_missing_from_the_prompt() {
 #[test]
 fn a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path() {
     let section =
-        super::super::delegation_with_named_override(Some("Project routing."), Some(ROSTER));
+        super::super::delegation_with_named_override(Some("Project routing."), Some(ROSTER))
+            .join("\n\n");
     assert!(section.starts_with("Project routing."));
     assert!(section.contains("Agent(subagent_type="), "{section}");
     assert!(section.ends_with("Handles ticketing work."));
@@ -280,4 +282,30 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
     );
     assert_eq!(style.id(), "fixture-voice");
     assert!(warning.is_none());
+}
+
+#[test]
+fn render_flags_a_safety_core_member_missing_from_the_prompt() {
+    // #8533 finding 3: the report printed `keeps: Agent selection` without
+    // checking the prompt. A core member absent from it is now named.
+    let dir = project(&[("AGENT-DELEGATION", "Project routing.")]);
+    let prompt = compose(&dir);
+    let package = bundled_fallback_package().expect("manifest");
+    let rows = section_statuses(package, dir.path(), true);
+    let clean = render_section_report(&rows, &prompt, Some(ROSTER));
+    assert!(!clean.contains("NOT FOUND"), "{clean}");
+
+    let stripped = prompt.replace("is not an agent and fails to dispatch", "");
+    let rendered = render_section_report(&rows, &stripped, Some(ROSTER));
+    assert!(
+        rendered.contains("safety core Agent selection NOT FOUND"),
+        "{rendered}"
+    );
+    // The roster is checked only when one was delivered.
+    let no_roster = prompt.replace("### ticketing", "");
+    assert!(
+        render_section_report(&rows, &no_roster, Some(ROSTER))
+            .contains("safety core Agent roster NOT FOUND")
+    );
+    assert!(!render_section_report(&rows, &no_roster, None).contains("NOT FOUND"));
 }

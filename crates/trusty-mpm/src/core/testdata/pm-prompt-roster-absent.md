@@ -309,6 +309,8 @@ appears there. What is bundled at all, and what deploys each:
 `framework-manifest.toml`, rendered in `tm-capabilities`'s
 `references/agents.md`.
 
+> **Agent selection.** Dispatch a subagent only with the native Agent tool — `Agent(subagent_type="<name>", ...)` — passing a name exactly as the harness's own `Available agent types for the Agent tool` listing spells it. A prose title like "Documentation Agent" is not an agent and fails to dispatch (#4594). That listing is authoritative for WHICH agents exist; routing tables are doctrine only (#4513).
+
 ---
 
 ## Prohibitions (CANONICAL -- single source of truth)
