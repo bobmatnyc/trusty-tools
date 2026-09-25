@@ -578,14 +578,6 @@ pub enum ValidationError {
         /// The owning section.
         section: SectionId,
     },
-    /// A generated block marked `pinned` (#8533); only authored blocks may be.
-    #[error("block {index} ({section:?}) is a generated block and may not be `pinned`")]
-    PinnedGeneratedBlock {
-        /// Index into `blocks`.
-        index: usize,
-        /// The owning section.
-        section: SectionId,
-    },
     /// An authored (`text` or `file`) block marked optional.
     #[error("block {index} ({section:?}) is an authored block and may not be `optional`")]
     OptionalAuthoredBlock {
@@ -638,6 +630,15 @@ pub enum ValidationError {
     )]
     SectionOnlyOptionalBlocks {
         /// The section that is not guaranteed to emit.
+        section: SectionId,
+    },
+    // #8533: appended last so no existing variant changes discriminant.
+    /// A generated block marked `pinned` (#8533); only authored blocks may be.
+    #[error("block {index} ({section:?}) is a generated block and may not be `pinned`")]
+    PinnedGeneratedBlock {
+        /// Index into `blocks`.
+        index: usize,
+        /// The owning section.
         section: SectionId,
     },
 }
