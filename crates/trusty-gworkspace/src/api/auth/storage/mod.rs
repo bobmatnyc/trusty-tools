@@ -22,10 +22,12 @@ use tracing::warn;
 
 use super::models::StoredToken;
 use crate::api::constants::DEFAULT_PROFILE;
-use precedence::{Resolution, Store, resolve, same_account};
+use precedence::{Resolution, Store, resolve};
+use routing::{Tiers, route_writes};
 
 mod files;
 mod precedence;
+mod routing;
 
 /// Token file storage with two-tier lookup (project and user).
 ///
@@ -112,13 +114,16 @@ impl TokenStorage {
     /// are throttled (PR #2949 review).
     /// What: Returns the merged view built by [`TokenStorage::load_tiers`]:
     /// a profile in one store resolves to that entry; a profile in both
-    /// resolves per [`precedence::resolve`]. A store that cannot be read is
-    /// served as empty, with one warning per path.
+    /// resolves per [`precedence::resolve`]. An unreadable project store is
+    /// an error — serving the user entries instead could act on a different
+    /// account than the project override names. An unreadable user store is
+    /// served as empty, with one warning per path and error kind.
     /// Test: `project_entry_lacking_scope_no_longer_shadows_fresh_user_entry`,
     /// `load_warns_once_naming_winner_without_token_values`,
-    /// `load_warns_on_unparsable_store_without_echoing_it`.
+    /// `load_warns_on_unparsable_store_without_echoing_it`,
+    /// `load_fails_closed_on_an_unreadable_project_store`.
     pub fn load(&self) -> Result<HashMap<String, StoredToken>> {
-        Ok(self.load_tiers(false)?.merged)
+        Ok(self.load_tiers(self.project_store(), false)?.merged)
     }
 
     /// Read both stores and resolve each profile to one entry.
@@ -126,17 +131,19 @@ impl TokenStorage {
     /// Why: [`TokenStorage::update`] must know which store each merged entry
     /// came from to write it back there, and must not write over a store it
     /// could not read (#8539); `load` needs only the merge.
-    /// What: Reads each store. With `strict`, a read or parse failure is
-    /// returned as an error; otherwise it warns once for that path and counts
-    /// the store as empty. For a profile in both stores whose `token` fields
-    /// differ, picks the winner with [`precedence::resolve`] and warns once;
-    /// identical tokens resolve to the project entry silently.
-    /// Test: `project_entry_lacking_scope_no_longer_shadows_fresh_user_entry`,
-    /// `update_refuses_to_overwrite_an_unparsable_store`.
-    fn load_tiers(&self, strict: bool) -> Result<Tiers> {
+    /// What: Reads the user store and `project` (if any). A project read
+    /// failure is always an error; a user read failure is an error with
+    /// `strict`, else a once-per-path warning and an empty store. For a
+    /// profile in both stores whose `token` fields differ, picks the winner
+    /// with [`precedence::resolve`] and warns once; identical tokens resolve
+    /// to the project entry silently.
+    /// Test: `update_refuses_to_overwrite_an_unparsable_store`,
+    /// `load_fails_closed_on_an_unreadable_project_store`.
+    fn load_tiers(&self, project: Option<&Path>, strict: bool) -> Result<Tiers> {
         let user = self.read_tier(&self.user_path, strict)?;
-        let project = match self.project_store() {
-            Some(path) => self.read_tier(path, strict)?,
+        // #8539: fail closed; the project override may name another account.
+        let project = match project {
+            Some(path) => self.read_tier(path, true)?,
             None => HashMap::new(),
         };
         let mut merged = HashMap::with_capacity(user.len() + project.len());
@@ -170,14 +177,20 @@ impl TokenStorage {
         })
     }
 
-    /// Read one store; see [`TokenStorage::load_tiers`] for `strict`.
+    /// Read one store; with `strict` a failure is an error, else a warning
+    /// (once per path and error kind) and an empty store.
     fn read_tier(&self, path: &Path, strict: bool) -> Result<HashMap<String, StoredToken>> {
         match files::read_store(path) {
             Ok(map) => Ok(map),
             // #8539: a write must never overwrite a store it could not read.
             Err(e) if strict => Err(e.into()),
             Err(e) => {
-                if self.first_time(format!("unreadable\u{0}{}", e.path().display())) {
+                let key = format!(
+                    "unreadable\u{0}{}\u{0}{}",
+                    e.path().display(),
+                    e.kind_label()
+                );
+                if self.first_time(key) {
                     // `e` carries the path and serde's position only, never file bytes.
                     warn!(error = %e, "token store unreadable; serving it as empty");
                 }
@@ -262,20 +275,24 @@ impl TokenStorage {
     /// refresh to the project store (#8539).
     /// What: Takes an in-process mutex, then an advisory exclusive lock on
     /// each store's sidecar `<path>.lock` — user first, then project, a fixed
-    /// order that cannot deadlock; a project path naming the user file is
-    /// locked once. Reloads both stores under the locks and fails, writing
-    /// nothing, if either cannot be read. Applies `f` to the merged view and
-    /// writes back per [`route_writes`]. Only a store whose content changed
-    /// is rewritten. Locks release on return, including on error.
+    /// order that cannot deadlock. A project path naming the user file, or a
+    /// project lock file that is the user lock file (same device and inode),
+    /// makes this a one-store update locked once. Reloads both stores under
+    /// the locks and fails, writing nothing, if either cannot be read.
+    /// Applies `f` to the merged view and writes back per [`route_writes`].
+    /// Only a store whose content changed is rewritten. Locks release on
+    /// return, including on error.
     /// Test: `concurrent_updates_do_not_lose_writes`,
     /// `refresh_write_back_targets_the_winning_store`,
     /// `update_does_not_deadlock_when_project_and_user_are_the_same_file`,
+    /// `update_does_not_deadlock_through_a_symlinked_project_dir`,
+    /// `update_does_not_deadlock_when_lock_files_are_hard_links`,
     /// `update_refuses_to_overwrite_an_unparsable_store`.
     pub fn update<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut HashMap<String, StoredToken>) -> Result<T>,
     {
-        self.update_routed(None, f)
+        Ok(self.update_routed(None, f)?.0)
     }
 
     /// [`Self::update`] for a newly consented credential for `profile`.
@@ -284,16 +301,20 @@ impl TokenStorage {
     /// Routing it like a refresh would overwrite the user-level credential
     /// from inside a project directory (#8539).
     /// What: As [`Self::update`], except `profile`'s entry is written to the
-    /// project store when one exists, else to the user store.
-    /// Test: `persist_in_project_dir_does_not_overwrite_user_credential`.
+    /// project store when one exists (else to the user store), and also to
+    /// the user store when its entry there names the same account.
+    /// Test: `persist_in_project_dir_does_not_overwrite_user_credential`,
+    /// `persist_same_account_in_project_dir_updates_both_stores`.
     pub fn update_consent<F, T>(&self, profile: &str, f: F) -> Result<T>
     where
         F: FnOnce(&mut HashMap<String, StoredToken>) -> Result<T>,
     {
-        self.update_routed(Some(profile), f)
+        Ok(self.update_routed(Some(profile), f)?.0)
     }
 
-    fn update_routed<F, T>(&self, consent: Option<&str>, f: F) -> Result<T>
+    /// Shared body of [`Self::update`] and [`Self::update_consent`]; also
+    /// returns the profiles whose user-level entry a removal kept.
+    fn update_routed<F, T>(&self, consent: Option<&str>, f: F) -> Result<(T, Vec<String>)>
     where
         F: FnOnce(&mut HashMap<String, StoredToken>) -> Result<T>,
     {
@@ -303,18 +324,25 @@ impl TokenStorage {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // #8539: writes can reach both stores, so both are locked.
-        let mut user_lock = files::open_lock(&self.user_path)?;
+        let user_file = files::open_lock(&self.user_path)?;
+        let mut project_path = self.project_store();
+        let project_file = project_path.map(files::open_lock).transpose()?;
+        // #8539: one lock file under two names (a hard link) is one store.
+        let project_file = project_file.filter(|p| !files::same_open_file(&user_file, p));
+        if project_file.is_none() {
+            project_path = None;
+        }
+        let mut user_lock = fd_lock::RwLock::new(user_file);
         let _user_guard = user_lock
             .write()
             .with_context(|| format!("lock {}", self.user_path.display()))?;
-        let project_path = self.project_store();
-        let mut project_lock = project_path.map(files::open_lock).transpose()?;
+        let mut project_lock = project_file.map(fd_lock::RwLock::new);
         let _project_guard = match project_lock.as_mut() {
             Some(lock) => Some(lock.write().context("lock project-level tokens")?),
             None => None,
         };
 
-        let tiers = self.load_tiers(true)?;
+        let tiers = self.load_tiers(project_path, true)?;
         let mut merged = tiers.merged.clone();
         let result = f(&mut merged)?;
         let new_profiles = if project_path.is_some() {
@@ -322,26 +350,33 @@ impl TokenStorage {
         } else {
             Store::User
         };
-        let (user, project) = route_writes(&tiers, &merged, new_profiles, consent);
-        if user != tiers.user {
-            files::write_store(&self.user_path, &user)?;
+        let routed = route_writes(&tiers, &merged, new_profiles, consent);
+        if routed.user != tiers.user {
+            files::write_store(&self.user_path, &routed.user)?;
         }
         if let Some(path) = project_path
-            && project != tiers.project
+            && routed.project != tiers.project
         {
-            files::write_store(path, &project)?;
+            files::write_store(path, &routed.project)?;
         }
-        Ok(result)
+        Ok((result, routed.kept_user_entries))
     }
 
     /// Return the default profile token (is_default=true), or the first one,
-    /// or the entry matching `DEFAULT_PROFILE`, else None.
+    /// or the entry matching `DEFAULT_PROFILE`, else None. Several defaults
+    /// resolve to the lowest profile name, so the choice is stable (#8539).
+    /// Test: `get_default_picks_the_lowest_name_among_several_defaults`.
     pub fn get_default(&self) -> Result<Option<StoredToken>> {
         let tokens = self.load()?;
         if tokens.is_empty() {
             return Ok(None);
         }
-        if let Some((_k, v)) = tokens.iter().find(|(_, v)| v.metadata.is_default) {
+        // #8539: HashMap order is random; pick the lowest name, not the first.
+        if let Some((_k, v)) = tokens
+            .iter()
+            .filter(|(_, v)| v.metadata.is_default)
+            .min_by(|a, b| a.0.cmp(b.0))
+        {
             return Ok(Some(v.clone()));
         }
         if let Some(v) = tokens.get(DEFAULT_PROFILE) {
@@ -403,20 +438,21 @@ impl TokenStorage {
     /// What: Errors if `name` is absent; otherwise removes it and, only when
     /// it had `is_default = true` and other profiles remain, marks the
     /// alphabetically-first remaining profile name as the new default. Saves
-    /// under [`Self::update`], which deletes a losing entry in the other
-    /// store only when it names the same account. Returns [`RemoveOutcome`]
-    /// naming the removed profile, the reassigned default, and whether a
-    /// user-level entry for `name` remains (#8539).
+    /// under the update lock, which deletes a losing entry in the other store
+    /// only when it names the same account. Returns [`RemoveOutcome`] naming
+    /// the removed profile, the reassigned default, and whether a user-level
+    /// entry for `name` was kept, decided under the lock (#8539).
     /// Test: `remove_deletes_profile` (via `cli::accounts`),
     /// `remove_default_reassigns_to_next_profile`,
     /// `remove_default_leaves_none_when_last_profile`,
     /// `remove_non_default_does_not_reassign`,
-    /// `remove_profile_keeps_a_different_account_user_entry`.
+    /// `remove_profile_keeps_a_different_account_user_entry`,
+    /// `remove_profile_never_leaves_two_defaults`.
     pub fn remove_profile(&self, name: &str) -> Result<RemoveOutcome> {
-        let mut outcome = self.update(|all| remove_and_reassign_default(all, name))?;
+        let (mut outcome, kept) =
+            self.update_routed(None, |all| remove_and_reassign_default(all, name))?;
         // #8539: a different- or unknown-account user entry is kept; say so.
-        outcome.user_entry_remains = self.project_store().is_some()
-            && files::read_store(&self.user_path).is_ok_and(|m| m.contains_key(name));
+        outcome.user_entry_remains = kept.iter().any(|p| p == name);
         Ok(outcome)
     }
 }
@@ -432,8 +468,10 @@ impl TokenStorage {
 /// default, or when it was but no profiles remain. `user_entry_remains` is
 /// true when a project-level entry was removed but a user-level entry for a
 /// different or unrecorded account was kept, and now serves the profile.
+/// `#[non_exhaustive]` so later fields are not breaking changes.
 /// Test: see [`TokenStorage::remove_profile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoveOutcome {
     pub removed: String,
     pub reassigned_default: Option<String>,
@@ -479,79 +517,6 @@ fn remove_and_reassign_default(
         reassigned_default,
         user_entry_remains: false,
     })
-}
-
-/// Both stores as read from disk, plus the merged view `load` serves and the
-/// store each merged entry came from.
-struct Tiers {
-    user: HashMap<String, StoredToken>,
-    project: HashMap<String, StoredToken>,
-    merged: HashMap<String, StoredToken>,
-    origin: HashMap<String, Store>,
-}
-
-/// Split an updated merged view back into the two stores.
-///
-/// Why: Writing the merged view to one file copied the other store's entries
-/// into it and sent a user-level winner's refresh to the project store
-/// (#8539). A pure function keeps the routing rule in one place.
-/// What: Starts from each store's on-disk content, then:
-///
-/// - A profile dropped from the merged view is removed from the store that
-///   served it. The other store's entry is removed too only when it names the
-///   same account ([`same_account`]); a different or unrecorded account is
-///   kept, so a removal never destroys another account's credential.
-/// - An entry equal to its pre-update value is left where it is, never copied
-///   into the other store.
-/// - The `consent` profile's entry goes to `new_profiles` (project if one
-///   exists, else user): a new consent may be a different account.
-/// - Any other changed entry goes back to the store it was read from; a
-///   profile new to both stores goes to `new_profiles`.
-///
-/// Refresh races are settled by the caller under the lock, not here: see
-/// `OAuthManager::refresh`. Returns `(user, project)`.
-/// Test: `refresh_write_back_targets_the_winning_store`,
-/// `remove_profile_clears_both_stores`,
-/// `remove_profile_keeps_a_different_account_user_entry`,
-/// `persist_in_project_dir_does_not_overwrite_user_credential`.
-fn route_writes(
-    tiers: &Tiers,
-    merged: &HashMap<String, StoredToken>,
-    new_profiles: Store,
-    consent: Option<&str>,
-) -> (HashMap<String, StoredToken>, HashMap<String, StoredToken>) {
-    let mut user = tiers.user.clone();
-    let mut project = tiers.project.clone();
-    for (profile, old) in &tiers.merged {
-        if merged.contains_key(profile) {
-            continue;
-        }
-        let (served, other) = match tiers.origin.get(profile) {
-            Some(Store::User) => (&mut user, &mut project),
-            _ => (&mut project, &mut user),
-        };
-        served.remove(profile);
-        // #8539: never delete another account's credential with this one.
-        if other.get(profile).is_some_and(|o| same_account(o, old)) {
-            other.remove(profile);
-        }
-    }
-    for (profile, entry) in merged {
-        if tiers.merged.get(profile) == Some(entry) {
-            continue;
-        }
-        // #8539: a consent is routed as new, a refresh back to its origin.
-        let target = if consent == Some(profile.as_str()) {
-            new_profiles
-        } else {
-            tiers.origin.get(profile).copied().unwrap_or(new_profiles)
-        };
-        match target {
-            Store::User => user.insert(profile.clone(), entry.clone()),
-            Store::Project => project.insert(profile.clone(), entry.clone()),
-        };
-    }
-    (user, project)
 }
 
 impl Default for TokenStorage {

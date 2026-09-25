@@ -43,6 +43,14 @@ impl StoreReadError {
             StoreReadError::Io { path, .. } | StoreReadError::Parse { path, .. } => path,
         }
     }
+
+    /// The error's kind (I/O) or category (parse), for the warn-once key.
+    pub(super) fn kind_label(&self) -> String {
+        match self {
+            StoreReadError::Io { kind, .. } => format!("{kind:?}"),
+            StoreReadError::Parse { category, .. } => format!("{category:?}"),
+        }
+    }
 }
 
 impl fmt::Display for StoreReadError {
@@ -86,20 +94,56 @@ pub(super) fn read_store(
     })
 }
 
-/// Write one store file: pretty JSON, then (Unix) mode 0600.
+/// Write one store file atomically: pretty JSON, mode 0600 on Unix.
 ///
-/// Why: `tokens.json` holds live OAuth refresh tokens; owner-only mode keeps
-/// other local users from reading it.
-/// What: Creates the parent directory, writes, then restricts permissions.
-/// Test: `save_restricts_permissions_on_unix`.
+/// Why: `tokens.json` holds live OAuth refresh tokens, so it is owner-only.
+/// `load` takes no lock, so a truncate-then-write let a concurrent reader
+/// parse a half-written file (#8539).
+/// What: Writes a sibling temp file, restricts it to 0600, `sync_all`s it,
+/// then renames it over the target, so a reader sees the old file or the
+/// new one, never a partial one. A symlinked target file is resolved first,
+/// so the link survives. The temp file is removed on failure.
+/// Test: `write_store_replaces_the_file_by_rename`,
+/// `save_restricts_permissions_on_unix`.
 pub(super) fn write_store(target: &Path, tokens: &HashMap<String, StoredToken>) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let parent = target
+        .parent()
+        .context("token store path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     let data = serde_json::to_string_pretty(tokens)?;
-    std::fs::write(target, data)
-        .with_context(|| format!("write tokens to {}", target.display()))?;
-    restrict_permissions(target)
+    let file_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tokens.json".to_string());
+    // #8539: temp + rename, so a lock-free reader never sees a partial file.
+    let temp = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let written = write_temp(&temp, data.as_bytes()).and_then(|()| {
+        std::fs::rename(&temp, &target)
+            .with_context(|| format!("replace tokens file {}", target.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+fn write_temp(temp: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(temp)
+        .with_context(|| format!("create {}", temp.display()))?;
+    file.write_all(data)
+        .with_context(|| format!("write {}", temp.display()))?;
+    restrict_permissions(temp)?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", temp.display()))
 }
 
 #[cfg(unix)]
@@ -116,7 +160,7 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 
 /// Open the sidecar `<store>.lock` file guarding `store`; it never holds
 /// token data.
-pub(super) fn open_lock(store: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+pub(super) fn open_lock(store: &Path) -> Result<std::fs::File> {
     let file_name = store
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -132,7 +176,21 @@ pub(super) fn open_lock(store: &Path) -> Result<fd_lock::RwLock<std::fs::File>> 
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("open lock file {}", lock_path.display()))?;
-    Ok(fd_lock::RwLock::new(file))
+    Ok(file)
+}
+
+/// Whether two opened lock files are the same file (same device and inode),
+/// which `same_store` can miss for hard links. Always false off Unix.
+pub(super) fn same_open_file(a: &std::fs::File, b: &std::fs::File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (a.metadata(), b.metadata()) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    let _ = (a, b);
+    false
 }
 
 /// Whether `a` and `b` name the same store file.
@@ -165,6 +223,24 @@ fn resolved(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn write_store_replaces_the_file_by_rename() {
+        // A rename installs a new inode; a truncate-write keeps the old one,
+        // which is what lets a lock-free reader see a partial file.
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("gw-atomic-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("tokens.json");
+        write_store(&path, &HashMap::new()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+
+        write_store(&path, &HashMap::new()).unwrap();
+
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 1, "no temp file may be left behind");
+    }
 
     #[test]
     #[cfg(unix)]

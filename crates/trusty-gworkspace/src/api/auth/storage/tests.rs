@@ -270,25 +270,67 @@ fn remove_profile_keeps_a_different_account_user_entry() {
     assert!(outcome.user_entry_remains);
 }
 
-#[test]
-fn update_does_not_deadlock_when_project_and_user_are_the_same_file() {
-    // cwd = $HOME makes both paths one file; two flocks on it self-deadlock.
-    let dir = std::env::temp_dir().join(format!("gw-storage-same-{}", uuid::Uuid::new_v4()));
-    let path = dir.join("tokens.json");
-    TokenStorage::with_path(path.clone())
-        .save(&HashMap::from([("work".to_string(), make_stored(3600))]))
-        .unwrap();
-    let mut storage = TokenStorage::with_path(path.clone());
-    storage.project_path = Some(path);
-
+/// Run `set_default_profile("work")` on a thread and fail if it hangs.
+fn assert_update_finishes(storage: TokenStorage, what: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(storage.set_default_profile("work").is_ok());
     });
     let ok = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("update deadlocked when project and user paths name one file");
-    assert!(ok, "set_default_profile failed");
+        .unwrap_or_else(|_| panic!("update deadlocked: {what}"));
+    assert!(ok, "set_default_profile failed: {what}");
+}
+
+/// Seed `path` with a single `work` entry.
+fn seed_work(path: &Path) {
+    TokenStorage::with_path(path.to_path_buf())
+        .save(&HashMap::from([("work".to_string(), make_stored(3600))]))
+        .unwrap();
+}
+
+#[test]
+fn update_does_not_deadlock_when_project_and_user_are_the_same_file() {
+    // cwd = $HOME makes both paths one file; two flocks on it self-deadlock.
+    let dir = std::env::temp_dir().join(format!("gw-storage-same-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("tokens.json");
+    seed_work(&path);
+    let storage = TokenStorage::with_paths(path.clone(), Some(path));
+    assert_update_finishes(storage, "project and user paths name one file");
+}
+
+#[test]
+#[cfg(unix)]
+fn update_does_not_deadlock_through_a_symlinked_project_dir() {
+    let dir = std::env::temp_dir().join(format!("gw-storage-link-{}", uuid::Uuid::new_v4()));
+    let real = dir.join("real");
+    seed_work(&real.join("tokens.json"));
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let storage =
+        TokenStorage::with_paths(real.join("tokens.json"), Some(link.join("tokens.json")));
+    assert_update_finishes(storage, "project dir is a symlink to the user dir");
+}
+
+#[test]
+#[cfg(unix)]
+fn update_does_not_deadlock_when_lock_files_are_hard_links() {
+    // Paths in different directories canonicalize apart; only (dev, ino)
+    // shows the two lock files are one.
+    let dir = std::env::temp_dir().join(format!("gw-storage-hard-{}", uuid::Uuid::new_v4()));
+    let user = dir.join("user").join("tokens.json");
+    let project = dir.join("project").join("tokens.json");
+    seed_work(&user);
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::hard_link(&user, &project).unwrap();
+    std::fs::write(user.with_file_name("tokens.json.lock"), b"").unwrap();
+    std::fs::hard_link(
+        user.with_file_name("tokens.json.lock"),
+        project.with_file_name("tokens.json.lock"),
+    )
+    .unwrap();
+    let storage = TokenStorage::with_paths(user, Some(project));
+    assert_update_finishes(storage, "lock files are hard links of one file");
 }
 
 #[test]
@@ -308,22 +350,96 @@ fn update_refuses_to_overwrite_an_unparsable_store() {
 }
 
 #[test]
-#[tracing_test::traced_test]
-fn load_warns_on_unparsable_store_without_echoing_it() {
-    let (storage, _, project_path) = scope_shadowed("corrupt-load");
-    // serde's own message would quote this value back.
+fn load_fails_closed_on_an_unreadable_project_store() {
+    // The project store may name another account; serving the user entry
+    // instead would act on the wrong mailbox.
+    let mut other = scoped_entry(&[GMAIL_MODIFY, GMAIL_SETTINGS], 60, USER_ACCESS);
+    other.metadata.email = Some("other@example.com".into());
+    let (storage, _, project_path) = two_tier(
+        "corrupt-project",
+        HashMap::from([("work".to_string(), other)]),
+        HashMap::new(),
+    );
     std::fs::write(
         &project_path,
         r#"{"work": {"version": "echo-fixture-value"}}"#,
     )
     .unwrap();
 
+    let err = storage
+        .get_profile("work")
+        .expect_err("an unreadable project store must not fall back to the user entry");
+    assert!(!format!("{err:#}").contains("echo-fixture-value"));
+    assert!(storage.load().is_err());
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn load_warns_on_unparsable_store_without_echoing_it() {
+    let (storage, user_path, _) = scope_shadowed("corrupt-load");
+    // serde's own message would quote this value back.
+    std::fs::write(&user_path, r#"{"work": {"version": "echo-fixture-value"}}"#).unwrap();
+
     let loaded = storage.load().unwrap();
 
-    assert_eq!(loaded["work"].token.access_token, USER_ACCESS);
+    assert_eq!(loaded["work"].token.access_token, PROJECT_ACCESS);
     assert!(logs_contain("unreadable"));
     assert!(logs_contain("line 1"));
     assert!(!logs_contain("echo-fixture-value"));
+}
+
+#[test]
+fn remove_profile_never_leaves_two_defaults() {
+    // Project `work` (the default) overrides a different-account user `work`
+    // that is also marked default. Removing it reassigns the default to
+    // `zeta`, so the kept user entry must drop its flag.
+    let mut project_work = scoped_entry(&[GMAIL_MODIFY], 1800, PROJECT_ACCESS);
+    project_work.metadata.is_default = true;
+    let mut user_work = scoped_entry(&[GMAIL_MODIFY], 600, USER_ACCESS);
+    user_work.metadata.email = Some("other@example.com".into());
+    user_work.metadata.is_default = true;
+    let (storage, _, _) = two_tier(
+        "two-defaults",
+        HashMap::from([
+            ("work".to_string(), user_work),
+            ("zeta".to_string(), make_stored(3600)),
+        ]),
+        HashMap::from([("work".to_string(), project_work)]),
+    );
+
+    let outcome = storage.remove_profile("work").unwrap();
+
+    assert!(outcome.user_entry_remains);
+    let defaults: Vec<String> = storage
+        .load()
+        .unwrap()
+        .into_iter()
+        .filter(|(_, e)| e.metadata.is_default)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(defaults, vec!["zeta".to_string()]);
+}
+
+#[test]
+fn get_default_picks_the_lowest_name_among_several_defaults() {
+    let dir = std::env::temp_dir().join(format!("gw-storage-defaults-{}", uuid::Uuid::new_v4()));
+    let storage = TokenStorage::with_path(dir.join("tokens.json"));
+    let mut all = HashMap::new();
+    for name in [
+        "delta", "alpha", "echo", "charlie", "bravo", "golf", "foxtrot",
+    ] {
+        let mut entry = make_stored(3600);
+        entry.metadata.service_name = name.into();
+        entry.metadata.is_default = true;
+        all.insert(name.to_string(), entry);
+    }
+    storage.save(&all).unwrap();
+
+    // Each load builds a new HashMap with its own iteration order.
+    for _ in 0..20 {
+        let chosen = storage.get_default().unwrap().unwrap();
+        assert_eq!(chosen.metadata.service_name, "alpha");
+    }
 }
 
 /// Best-effort regression test for issue #3502: two threads racing a

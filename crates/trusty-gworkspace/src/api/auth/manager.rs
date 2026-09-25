@@ -88,7 +88,7 @@ impl OAuthManager {
     /// global one — see [`resolve_client_creds_for_profile`]), POSTs to
     /// Google's OAuth endpoint with `grant_type=refresh_token`, parses the
     /// response, updates `expires_at` to `now + expires_in`, and writes the
-    /// updated `StoredToken` back to disk — but only if, under the storage
+    /// new token into the stored entry in place — but only if, under the storage
     /// lock, the stored entry still holds the refresh token that was used; a
     /// credential replaced mid-refresh is kept and the new token is returned
     /// unsaved (#8539). On an HTTP failure it returns
@@ -96,14 +96,15 @@ impl OAuthManager {
     /// re-auth command on `invalid_grant`).
     /// Test: `refresh_uses_per_profile_client_when_present`,
     /// `refresh_falls_back_to_global_client_when_absent`,
-    /// `refresh_does_not_overwrite_a_consent_that_landed_mid_refresh`; the failure-message
+    /// `refresh_does_not_overwrite_a_consent_that_landed_mid_refresh`,
+    /// `refresh_keeps_a_default_change_made_mid_refresh`; the failure-message
     /// mapping is covered by
     /// `refresh_failure_message_names_profile_and_setup_command`.
     pub async fn refresh(&self, storage: &TokenStorage, profile: &str) -> Result<OAuthToken> {
         let creds = resolve_client_creds_for_profile(profile)
             .with_context(|| format!("resolve OAuth client for profile '{profile}'"))?;
 
-        let mut stored: StoredToken = storage
+        let stored: StoredToken = storage
             .get_profile(profile)?
             .ok_or_else(|| anyhow!("no stored token for profile '{profile}'"))?;
         let refresh_token = stored
@@ -151,19 +152,19 @@ impl OAuthManager {
             token_type: parsed.token_type.unwrap_or_else(|| "Bearer".into()),
         };
 
-        stored.token = new_token.clone();
-        stored.metadata.last_refreshed = Some(Utc::now());
+        let refreshed_at = Utc::now();
 
         // Guard against a concurrent refresh of a different profile (or the
         // same one) losing this write — see `TokenStorage::update` (#3502).
         storage.update(|all| {
             // #8539: a consent that landed mid-refresh replaced the credential
-            // we refreshed; keep it, and hand back our token unsaved.
-            let current = all
-                .get(profile)
-                .and_then(|e| e.token.refresh_token.as_deref());
-            if current == Some(refresh_token.as_str()) {
-                all.insert(profile.to_string(), stored);
+            // we refreshed; keep it, and hand back our token unsaved. Patch in
+            // place so a concurrent metadata change (a new default) survives.
+            if let Some(entry) = all.get_mut(profile)
+                && entry.token.refresh_token.as_deref() == Some(refresh_token.as_str())
+            {
+                entry.token = new_token.clone();
+                entry.metadata.last_refreshed = Some(refreshed_at);
             } else {
                 warn!(
                     profile = %profile,
@@ -333,21 +334,20 @@ mod tests {
         assert_eq!(refreshed.access_token, "legacy-new-token");
     }
 
-    /// Token endpoint that lands a new consent for `work` while the refresh
-    /// is in flight, then answers the refresh.
-    struct ConsentLandsMidRefresh(TokenStorage);
+    /// Token endpoint that applies `edit` to the stored `work` entry while the
+    /// refresh is in flight, then answers the refresh.
+    struct EditMidRefresh(TokenStorage, fn(&mut StoredToken));
 
-    impl wiremock::Respond for ConsentLandsMidRefresh {
+    impl wiremock::Respond for EditMidRefresh {
         fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
             self.0
                 .update(|all| {
                     if let Some(entry) = all.get_mut("work") {
-                        entry.token.access_token = "consent-access".into();
-                        entry.token.refresh_token = Some("r-consent".into());
+                        (self.1)(entry);
                     }
                     Ok(())
                 })
-                .expect("simulated consent write");
+                .expect("simulated concurrent write");
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "refresh-access",
                 "expires_in": 3600,
@@ -371,7 +371,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/token"))
-            .respond_with(ConsentLandsMidRefresh(storage.clone()))
+            .respond_with(EditMidRefresh(storage.clone(), |entry| {
+                entry.token.access_token = "consent-access".into();
+                entry.token.refresh_token = Some("r-consent".into());
+            }))
             .mount(&server)
             .await;
 
@@ -386,6 +389,38 @@ mod tests {
             "a consent that landed mid-refresh must not be overwritten (#8539)"
         );
         assert_eq!(stored.token.access_token, "consent-access");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_keeps_a_default_change_made_mid_refresh() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        let home = isolated_home("refresh-default");
+        write_client_json(
+            &home.join(".gworkspace-mcp").join("oauth_client.json"),
+            "global-client",
+            "global-secret",
+        );
+        let storage = temp_storage_with_token("work", "r-work");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/token"))
+            .respond_with(EditMidRefresh(storage.clone(), |entry| {
+                entry.metadata.is_default = false;
+            }))
+            .mount(&server)
+            .await;
+
+        let mgr = OAuthManager::with_token_url(format!("{}/token", server.uri()));
+        mgr.refresh(&storage, "work").await.expect("refresh");
+
+        let stored = storage.get_profile("work").unwrap().unwrap();
+        assert_eq!(stored.token.access_token, "refresh-access");
+        assert!(
+            !stored.metadata.is_default,
+            "a refresh must not revert a default change made while it ran (#8539)"
+        );
     }
 
     #[tokio::test]

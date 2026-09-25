@@ -132,6 +132,61 @@ fn persist_in_project_dir_does_not_overwrite_user_credential() {
     );
 }
 
+/// A two-tier storage whose user store holds `work` = `user_work` and whose
+/// project store is empty. Returns the storage and both paths.
+fn project_dir_storage(
+    label: &str,
+    user_work: StoredToken,
+) -> (TokenStorage, std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("gw-{label}-{}", uuid::Uuid::new_v4()));
+    let user_path = dir.join("user").join("tokens.json");
+    let project_path = dir.join("project").join("tokens.json");
+    TokenStorage::with_path(user_path.clone())
+        .save(&HashMap::from([("work".to_string(), user_work)]))
+        .unwrap();
+    TokenStorage::with_path(project_path.clone())
+        .save(&HashMap::new())
+        .unwrap();
+    let storage = TokenStorage::with_paths(user_path.clone(), Some(project_path.clone()));
+    (storage, user_path, project_path)
+}
+
+#[test]
+fn persist_same_account_in_project_dir_updates_both_stores() {
+    // #8539: a re-consent for the same account must not leave the old
+    // user-level token serving every other directory.
+    let (storage, user_path, project_path) =
+        project_dir_storage("persist-same", make_stored("bob", true));
+    let mut fresh = make_stored("bob", false);
+    fresh.token.access_token = "fresh-consent".into();
+
+    persist(&storage, "work", fresh, false).unwrap();
+
+    let user = TokenStorage::with_path(user_path).load().unwrap();
+    let project = TokenStorage::with_path(project_path).load().unwrap();
+    assert_eq!(user["work"].token.access_token, "fresh-consent");
+    assert_eq!(project["work"].token.access_token, "fresh-consent");
+}
+
+#[test]
+fn persist_narrower_same_account_consent_replaces_wider_user_entry() {
+    // #8539: an older, wider user entry must not outrank a deliberate
+    // narrower re-consent for the same account.
+    let mut wide = make_stored("bob", true);
+    wide.metadata.created_at = Utc::now() - Duration::seconds(7200);
+    wide.token.scopes = vec!["openid".into(), "email".into()];
+    let (storage, _, _) = project_dir_storage("persist-narrow", wide);
+    let mut narrow = make_stored("bob", false);
+    narrow.token.access_token = "narrow-consent".into();
+
+    persist(&storage, "work", narrow, false).unwrap();
+
+    assert_eq!(
+        storage.load().unwrap()["work"].token.access_token,
+        "narrow-consent"
+    );
+}
+
 #[test]
 fn persist_false_does_not_steal_existing_default() {
     // Regression test: a second `setup` run with set_default=false (the
