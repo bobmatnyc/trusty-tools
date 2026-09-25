@@ -27,7 +27,10 @@ fn the_floor_is_cut_from_the_bundled_style() {
     assert!(floor.contains("YOU ARE STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY"));
     assert!(floor.contains("Banned word"));
     for neighbour in ["## Project Context", "## Identity", "## Error Handling"] {
-        assert!(!floor.contains(neighbour), "{neighbour} leaked into the floor");
+        assert!(
+            !floor.contains(neighbour),
+            "{neighbour} leaked into the floor"
+        );
     }
 }
 
@@ -37,7 +40,10 @@ fn a_project_style_is_delivered_as_its_prose_plus_the_floor_once() {
     let delivered = delivered_style_text(&style);
     assert_eq!(
         delivered,
-        format!("# Demo Voice\n\nSpeak briefly.{SECTION_SEPARATOR}{}", style_floor())
+        format!(
+            "# Demo Voice\n\nSpeak briefly.{SECTION_SEPARATOR}{}",
+            style_floor()
+        )
     );
     assert_eq!(delivered.matches(&style_floor()).count(), 1);
     assert!(!delivered.contains("name: tm-demo-01"));
@@ -53,7 +59,12 @@ fn the_bundled_styles_get_no_appended_floor() {
         assert!(!delivered.contains(STYLE_FLOOR_HEADING), "{}", bundled.id);
         // Each bundled style carries its own floor, once — so none needs ours.
         for heading in FLOOR_SECTIONS {
-            assert_eq!(delivered.matches(heading).count(), 1, "{}: {heading}", bundled.id);
+            assert_eq!(
+                delivered.matches(heading).count(),
+                1,
+                "{}: {heading}",
+                bundled.id
+            );
         }
     }
 }

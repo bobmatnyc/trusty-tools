@@ -143,7 +143,10 @@ fn stays_in_styles_dir(project_dir: &Path, path: &Path) -> bool {
     if meta.file_type().is_symlink() {
         return false;
     }
-    match (std::fs::canonicalize(project_dir), std::fs::canonicalize(path)) {
+    match (
+        std::fs::canonicalize(project_dir),
+        std::fs::canonicalize(path),
+    ) {
         (Ok(root), Ok(path)) => path.starts_with(root.join(PROJECT_STYLES_DIR)),
         _ => false,
     }
