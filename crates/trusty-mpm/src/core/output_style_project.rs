@@ -121,22 +121,26 @@ fn is_safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Whether `path` is a regular (non-symlink) file under `dir`, canonically.
+/// Whether `path` is a regular (non-symlink) file under the project's
+/// [`PROJECT_STYLES_DIR`], canonically.
 ///
 /// Why (#8533): `read_to_string` follows symlinks, so a style file linked to a
-/// secret elsewhere on the host would be injected into the PM prompt. A path
-/// that does not exist passes: the read then reports it as unknown, which is
-/// the right message.
-/// Test: `a_symlinked_style_file_is_refused_and_the_default_used`.
-fn stays_in_styles_dir(dir: &Path, path: &Path) -> bool {
+/// secret elsewhere on the host would be injected into the PM prompt. The
+/// styles directory is resolved from the canonical project root, so a symlinked
+/// `.claude` or `.claude/output-styles` directory escapes too. A path that does
+/// not exist passes: the read then reports it as unknown, which is the right
+/// message.
+/// Test: `a_symlinked_style_file_is_refused_and_the_default_used`,
+/// `a_style_in_a_symlinked_styles_dir_is_refused`.
+fn stays_in_styles_dir(project_dir: &Path, path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return true;
     };
     if meta.file_type().is_symlink() {
         return false;
     }
-    match (std::fs::canonicalize(dir), std::fs::canonicalize(path)) {
-        (Ok(dir), Ok(path)) => path.starts_with(dir),
+    match (std::fs::canonicalize(project_dir), std::fs::canonicalize(path)) {
+        (Ok(root), Ok(path)) => path.starts_with(root.join(PROJECT_STYLES_DIR)),
         _ => false,
     }
 }
@@ -187,7 +191,7 @@ pub fn resolve_style_in_project(
     if is_safe_id(id) {
         let dir = project_dir.join(PROJECT_STYLES_DIR);
         let path = dir.join(format!("{id}.md"));
-        if !stays_in_styles_dir(&dir, &path) {
+        if !stays_in_styles_dir(project_dir, &path) {
             return Err(ProjectStyleError::Escapes {
                 id: id.to_string(),
                 path,

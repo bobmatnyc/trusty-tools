@@ -230,3 +230,20 @@ fn a_symlinked_style_file_is_refused_and_the_default_used() {
     let warning = warning.expect("a refused style is never a silent fallback");
     assert!(warning.contains("symlink"), "{warning}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_style_in_a_symlinked_styles_dir_is_refused() {
+    // #8533: the file is regular, but `.claude/output-styles` itself links out
+    // of the project, so the file's text is not the project's own.
+    let dir = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside");
+    std::fs::write(outside.path().join("tm-demo-01.md"), "PRIVATE-TEXT-8533\n")
+        .expect("outside file");
+    std::fs::create_dir_all(dir.path().join(".claude")).expect(".claude");
+    std::os::unix::fs::symlink(outside.path(), dir.path().join(PROJECT_STYLES_DIR))
+        .expect("symlinked styles dir");
+
+    let err = resolve_style_in_project(dir.path(), "tm-demo-01").expect_err("refused");
+    assert!(matches!(err, ProjectStyleError::Escapes { .. }), "{err}");
+}
