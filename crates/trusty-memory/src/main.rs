@@ -30,6 +30,7 @@ use clap::{Parser, Subcommand};
 // stays under the 500-SLOC production cap.
 use std::net::SocketAddr;
 use trusty_memory::commands::inbox_check::handle_inbox_check;
+use trusty_memory::commands::kuzu_import::{handle_import, ImportSource};
 use trusty_memory::commands::link::handle_link;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
 use trusty_memory::commands::note::handle_note;
@@ -150,9 +151,8 @@ enum Command {
     /// Migrate from another memory MCP server to trusty-memory.
     ///
     /// For `kuzu-memory`: rewrites Claude `mcpServers` config entries.
-    /// For `kuzu-data`: imports entity/relation data from a kuzu-memory
-    /// `store.redb` file into a trusty-memory palace (requires `--from`
-    /// and `--palace`).
+    /// For `kuzu-data`: DEPRECATED alias for `import kuzu --from <path>
+    /// --palace <name>` (#277).
     Migrate {
         /// What to migrate from.
         #[arg(value_enum)]
@@ -167,8 +167,7 @@ enum Command {
         #[arg(long)]
         config_only: bool,
 
-        /// Path to the kuzu-memory `store.redb` file (required for
-        /// `kuzu-data`).
+        /// `kuzu-data`: a `.kuzu-memory` directory or its `memories.db`.
         #[arg(long, value_name = "PATH")]
         from: Option<std::path::PathBuf>,
 
@@ -177,9 +176,18 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         palace: Option<String>,
 
-        /// Maximum number of entities to import (default: import all).
+        /// Refused: `import kuzu` has no limit; use --dry-run to preview.
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
+    },
+
+    /// Import memories from another memory system.
+    ///
+    /// #277: `import kuzu` discovers kuzu-memory stores and imports memories
+    /// and knowledge-graph edges idempotently.
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
     },
 
     /// First-time setup: data dir + launchd (macOS) + Claude settings patch.
@@ -741,6 +749,7 @@ async fn main() -> Result<()> {
             palace,
             limit,
         } => handle_migrate(target, dry_run, config_only, from, palace, limit),
+        Command::Import { source } => handle_import(source).await,
         // #6307: `--client <name>` emits a GUI client's registration instead of
         // running the local install phases, which a GUI client does not need.
         Command::Setup { client } => match client {

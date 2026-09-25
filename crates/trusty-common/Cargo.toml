@@ -107,7 +107,12 @@ name = "trusty-common"
 # validate}`/`TmuxCommand::validate_targets`. `cargo-semver-checks` reports no
 # break; `TmuxTarget::as_target`'s rendered string changes (now `=`-exact) but
 # its signature is unchanged, so this stays PATCH under Cargo's 0.x rule.
-version = "0.52.1"
+# 0.52.2 (#277): patch — 0.52.1 is already live on crates.io and this PR
+# changes `src/memory_core/store/kg/ops.rs` (doc-comment `Test:` pointer
+# repoints only, no code behavior change), so the "PR version bump vs
+# crates.io" gate (#4421) requires a bump. No public item was added, removed,
+# or changed shape.
+version = "0.52.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
