@@ -88,7 +88,11 @@ trusty-gworkspace-mcp setup --profile work        # authorize a named profile
 `setup` opens your browser to Google's consent screen, captures the redirect on
 a loopback listener, and writes the minted token to `~/.gworkspace-mcp/tokens.json`.
 Access tokens are then refreshed automatically by the server; you only re-run
-`setup` when the refresh token itself is revoked or expired.
+`setup` when the refresh token itself is revoked or expired, or when a release
+adds a scope. A refresh keeps the scopes granted at consent, so a profile
+authorized before `gmail.settings.basic` was requested gets
+`403 ACCESS_TOKEN_SCOPE_INSUFFICIENT` from `manage_gmail_filters` and
+`manage_gmail_settings` until it re-runs `setup`.
 
 Default-profile rules: the first profile you authorize becomes the default; a
 later `setup` of a *different* profile leaves the existing default untouched.
