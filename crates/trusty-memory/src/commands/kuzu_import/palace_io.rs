@@ -185,10 +185,22 @@ pub trait DaemonProbe: Send + Sync {
 ///
 /// What: the socket probe `trusty-memory start` uses, then the daemon
 /// process scan `trusty-memory stop` uses, which also sees a daemon still
-/// hydrating palaces before it binds. Stdio bridges (`serve --stdio`) are not
-/// counted: they never open a palace (#1078), and every MCP client session
-/// runs one. A short-lived CLI that opens a palace directly is caught per
-/// palace by redb's lock, as [`KuzuImportError::PalaceLocked`].
+/// hydrating palaces before it binds.
+///
+/// Which processes refuse the run (#277):
+/// - The daemon (`serve --foreground` / `serve --http`): it opens and writes
+///   palaces, so it always refuses.
+/// - Stdio bridges (bare `serve` / `serve --stdio`) do not refuse. One runs
+///   per MCP client session. A bridge never opens redb (#1078); it forwards
+///   every call to the daemon's socket. It starts a daemon only once, at its
+///   own startup (#8351), so a bridge already running cannot start one
+///   mid-import. A bridge launched during the import starts one only where
+///   no launchd unit owns the socket; with a unit, it waits for launchd.
+/// - A daemon started that way, or a CLI that opens a palace (a second
+///   import, say), is caught per palace by redb's exclusive lock. When the
+///   importer opens second it gets a read-only snapshot and refuses it as
+///   [`KuzuImportError::PalaceLocked`]; when a daemon opens second, its
+///   `Writer` open fails (#1487) and that palace stays the importer's.
 pub struct SystemDaemonProbe;
 
 #[async_trait]

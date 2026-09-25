@@ -12,25 +12,59 @@
 //! to exit, and SIGKILLs stragglers. Mirrors the `trusty-search stop` flow so
 //! the two daemons share a stop UX.
 //! Test: `daemon_pids_in_returns_only_daemon_mode_serve_processes`,
-//! `find_daemon_pids_finds_a_live_serve_foreground_process`.
+//! `find_daemon_pids_finds_a_live_serve_foreground_process`,
+//! `stop_terminates_the_daemon_and_spares_a_stdio_bridge`.
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use std::time::{Duration, Instant};
 
+/// How long `stop` waits after SIGTERM before sending SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// How a stop attempt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// Every targeted process exited.
+    Stopped,
+    /// A target was still alive after SIGKILL.
+    StillRunning,
+}
+
 /// Stop every live `trusty-memory` daemon owned by this user.
 ///
-/// Why: the daemon writes no PID file (only an `http_addr` record), so the
-/// process table is the source of truth. [`find_daemon_pids`] matches only
-/// daemon-mode `serve` processes, so CLI calls and the stdio bridges each MCP
-/// client session runs cannot be hit (#277). Exits non-zero ("No daemon
-/// running") when nothing matches so shell-scripted callers can distinguish
-/// "I stopped it" from "nothing to stop".
-/// What: SIGTERM phase → 5 s poll → SIGKILL phase; finally removes the stale
-/// address file when every targeted process has exited.
-/// Test: target selection in `daemon_pids_in_returns_only_daemon_mode_serve_processes`.
+/// Why: the process table is the source of truth for which daemon runs.
+/// Exits non-zero ("No daemon running") when nothing matches so
+/// shell-scripted callers can distinguish "I stopped it" from "nothing to
+/// stop".
+/// What: [`stop_daemons_in`] over [`list_processes`]; on a clean stop, removes
+/// the stale address file.
+/// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
+/// `stop_reports_no_daemon_when_only_bridges_run`.
 pub async fn handle_stop() -> Result<()> {
-    let targets = find_daemon_pids();
+    let outcome = stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
+    if outcome == StopOutcome::Stopped {
+        cleanup_addr_file();
+    }
+    Ok(())
+}
+
+/// Signal the daemons in `procs` (excluding `me`) until they exit.
+///
+/// Why (#277): the targets are [`daemon_pids_in`]'s, so the stdio bridge each
+/// MCP client session runs is never signalled; killing one strands its
+/// session without memory tools. Split from [`handle_stop`] so a test can
+/// hand in a process table that holds only its own stand-ins.
+/// What: SIGTERM phase, poll up to `grace` for exit, SIGKILL phase.
+///
+/// # Errors
+///
+/// "No daemon running" when `procs` holds no daemon.
+///
+/// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
+/// `stop_reports_no_daemon_when_only_bridges_run`.
+pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> Result<StopOutcome> {
+    let targets = daemon_pids_in(procs, me);
     if targets.is_empty() {
         bail!("No daemon running");
     }
@@ -47,15 +81,13 @@ pub async fn handle_stop() -> Result<()> {
         let _ = send_signal(*pid, "TERM");
     }
 
-    // Phase 2: poll up to 5 s for every targeted PID to exit.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Phase 2: poll up to `grace` for every targeted PID to exit.
+    let deadline = Instant::now() + grace;
     loop {
         std::thread::sleep(Duration::from_millis(100));
-        let any_alive = targets.iter().any(|p| pid_alive(*p));
-        if !any_alive {
+        if !targets.iter().any(|p| pid_alive(*p)) {
             println!("{} Daemon stopped", "✓".green());
-            cleanup_addr_file();
-            return Ok(());
+            return Ok(StopOutcome::Stopped);
         }
         if Instant::now() >= deadline {
             break;
@@ -79,11 +111,11 @@ pub async fn handle_stop() -> Result<()> {
 
     if targets.iter().any(|p| pid_alive(*p)) {
         println!("{} Daemon may still be shutting down", "⚠".yellow());
+        Ok(StopOutcome::StillRunning)
     } else {
         println!("{} Daemon stopped", "✓".green());
-        cleanup_addr_file();
+        Ok(StopOutcome::Stopped)
     }
-    Ok(())
 }
 
 /// Remove the stale `~/.trusty-memory/http_addr` after a successful stop.
