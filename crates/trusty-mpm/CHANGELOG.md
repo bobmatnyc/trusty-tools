@@ -6,6 +6,115 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.5] — 2026-09-25
+
+### Breaking
+
+- Library API: `SectionId` gains nine variants and `SectionId::CANONICAL` grows from 10 to 19 entries; `InstructionBlock` gains a `pinned` field and `ValidationError` a `PinnedGeneratedBlock` variant (#8533).
+- Library API: `SectionId` is now `#[non_exhaustive]`, so a downstream `match` on it needs a wildcard arm (#8533).
+- Library API: `ProjectLevelConfig` gains a public `style: Option<ProjectStyleConfig>` field for the `.trusty-mpm.toml` `[style]` table, so a downstream struct literal must set it or use `..Default::default()` (#8533).
+
+### Added
+
+- `tm hook --pm-guard` governs a HEAD move into a linked worktree (#8161,
+  #8494): `reset --keep`/`--hard`/`--merge`, `merge` (including `--ff-only`)
+  or `rebase` whose target is a `.claude/worktrees/<name>` or
+  `.worktrees/<name>` tree is denied while the daemon reports a live agent
+  standing there, counting the asking session's own agents, and allowed when
+  the tree is idle. An unanswered daemon denies and names `tm repair
+  delegation`; an unresolved target denies and asks for the path spelled out.
+  An agent moving its own tree's HEAD is exempt. This is the consolidation
+  step of the "Resuming parked work" recipe in
+  `docs/reference/worktree-discipline.md`.
+- `tm doctor` row `bundled_asset_lag`: warns when the running binary's
+  compile-time-embedded skill assets differ from the `origin/main` source tree
+  they were built from, naming the lagging files, the binary's build timestamp
+  and the newest asset commit's. Applies only in `bobmatnyc/trusty-tools`;
+  reports UNKNOWN — never a pass — when the source tree cannot be read.
+  `skill_staleness` compares deployed files against those same embedded assets
+  (#4604) and is structurally unable to see this. Refs #8482.
+- `binary_provenance` no longer asserts "the binary is NOT stale" from a semver
+  comparison against cargo's registry ledger; the claim is scoped to what it
+  reads and points at `bundled_asset_lag`. Refs #8482.
+- A project's root `CLAUDE.md` can now replace every PM prompt section except a small safety core. The nine sections split out of `CORE` have their own tokens (`PM-ALLOWLIST`, `DELEGATION-MECHANICS`, `AGENT-ROUTING`, `SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`, `GIT-FILE-TRACKING`, `TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`), and the `CLAUDE.md` tm seeds into a new project lists every overridable token (#8533).
+- The safety core is listed once in `core::instruction_safety_core::SAFETY_CORE` and named in the `tm-workflow` skill: Memory & Instruction Sources and Customization Surface (the `CORE` section), the detected project stack and agent roster (generated), and the memory, code-search and agent-selection protocols (pinned blocks that survive an override of their section). Agent selection is stated whether or not an agent is deployed (#8533).
+- A project selects its own output style from `.claude/output-styles/<id>.md` with `[style] active = "<id>"` in `.trusty-mpm.toml`. The order is `--style`, then `.trusty-mpm.toml`, then the host config, then the manifest; an unknown or unreadable id, or a style file that is a symlink or resolves outside `.claude/output-styles/`, prints a warning and falls back to the default style (#8533).
+- `tm sessions instructions` prints one row per section on stderr — `core`, `overridable`, or `overridden-by-project`, with any declined override and its reason, and a `safety core <name> NOT FOUND` line for any safety-core member missing from the composed prompt — followed by the output style the launch uses, resolved by the same function as the launch, manifest tier included (#8533).
+- A project output style keeps the trusty-mpm floor: the launch appends the bundled style's PRIMARY DIRECTIVE and Communication — Write Plainly sections to the project's prose, and `tm sessions instructions` names the style `<id> (project) + floor`. Bundled styles are delivered unchanged (#8533).
+- The launch writes the project style and its floor to `.claude/output-styles/<id>.tm-floor.md` and names that file in `outputStyle`, so a bare `claude` launch in the project gets the floor too. The generated file is not selectable as a style itself (#8533).
+- `tm doctor`'s `output_style` check accepts a project style id or its `<id>.tm-floor` composite and names the project style file; it fails when a named composite is missing and warns when a raw project id has no composite (#8533).
+- On a native launch the floor heads the appended prompt unless the project's effective `outputStyle` — `.claude/settings.local.json` first, then `.claude/settings.json` — names the current composite (#8533).
+- `tm ls`: Ctrl-N on a project in the new-session list opens a name step.
+  The typed name is slugged the same way as the picker's `n <name>` ("Auth
+  Refactor" becomes `tm-auth-refactor-NN`), and the overlay shows that preview
+  as you type. Enter creates the session under that name; Esc goes back to the
+  list with the filter and selection unchanged. Enter on a project still
+  creates a default-named session. Refs #8587.
+
+### Fixed
+
+- `tm hook` no longer wraps a Bash command in `| tm compress` when the call
+  runs inside a `.claude/worktrees/` isolation worktree, or when the hook cannot
+  read the call's working directory. Claude Code's worktree-isolation
+  classifier refused the wrapped shape, so `git diff`, `ls -la` and
+  `cargo test` never ran for an isolated agent. Outside isolation worktrees the
+  rewrite is unchanged. Refs #7477.
+- A `CLAUDE.md` override body ending in an unclosed `<!--` no longer hides the prompt text after its section. Each section is folded on its own, so the comment ends with the body (#8533).
+- A `CLAUDE.md` override body or project output style that leaves a code fence open no longer turns the text after it into code: the fence is closed where the body ends. The fold now pairs `~~~` and four-backtick fences by character and length (#8533).
+- The daemon's shared-tree writer query places an agent by where its own
+  latest hook ran, not only by where its dispatcher stood (#8535). A dispatch
+  made after the harness moved the PM's cwd into an agent worktree no longer
+  reads as a second writer there once the agent reports a different harness
+  tree, so the #4480 guard stops refusing the next dispatch on it. An agent
+  standing in a linked worktree is now reported for that worktree.
+- `tm hook --pm-guard` refuses a dispatched agent's `git checkout <branch>`,
+  `git checkout -b`, `git switch`, `git stash` or `git bisect` step in a main
+  checkout that holds uncommitted work. The refusal names the checkout and
+  sends the agent to its own worktree. When `git status --porcelain` cannot
+  read the checkout, the switch is refused rather than assumed clean. A clean
+  main checkout, the PM, and path restores inside the agent's own worktree
+  stay allowed. Refs #8572.
+- `tm hook --pm-guard` refuses a HEAD switch or a whole-tree-destructive git
+  command whose `cd`/`git -C` directory it cannot expand (a `$MAIN`, a `$(…)`
+  or a backtick, quoted or not) from any working directory. Before, an agent
+  in its own worktree could run `git -C $MAIN checkout <branch>` or
+  `git -C "$(cat f)" reset --hard`, because the guard read the path as the
+  worktree. The commit and worktree-removal rules now treat a `$(…)` or
+  backtick directory as unresolved too. Refs #8572.
+- `tm hook --pm-guard` judges every segment of a composed command for a
+  whole-tree-destructive git verb, not only the first. Before,
+  `git reset --hard && git -C <main> reset --hard` run from a worktree was
+  allowed. Refs #8572.
+- `tm pr open`'s refusal for a `--head` the changelog gate cannot judge no
+  longer says to check the head out; it names the worktree that holds it.
+  Refs #8572.
+- Every worktree-removal refusal now tells the agent to hand the one worktree
+  back to the PM (or to `version-control`) and stop. None of them suggests
+  `tm session prune-worktrees --merged-prs --force` any more, which one agent
+  ran over ~60 worktrees after a single refused removal. This covers the
+  ADR-0057 re-check denies (the timeout included, and the no-merged-PR
+  details), the #5791 `git worktree remove` deny a subagent gets, and the
+  #4031 deny for `rm` on a worktree directory. Refs #8577.
+- The merged-PR worktree reclaim logs one INFO line per surveyed worktree,
+  naming its path, branch and verdict: the gate and reason for a refusal, the
+  landing evidence for a grant. A reclaimed entry is now as auditable as a
+  blocked one. Refs #8109.
+- `tm hook --pm-guard` lets a read-only agent (`research`, `code-critic`,
+  `code-analyzer`, `security`, `Explore`, `Plan`) run one leading
+  `cd <dir> && <read>`, so it can scan a worktree other than the PM's cwd.
+  The directory must be a plain path: a `$VAR`, `~`, `$(…)` or backtick is
+  refused. What follows the `cd` is judged exactly as it would be alone, so
+  `cd <dir> && rm …` and `cd <dir> && git diff > file` stay refused, and no
+  other `&&`, `;` or `|` chaining is widened. The refusal text now names
+  `git -C <dir>` and the `cd` prefix as the ways to read another tree.
+  Refs #8578.
+
+### Changed
+
+- The tm-managed `.gitignore` block no longer ignores all of `.claude/output-styles/`: it ignores the bundled style files and the generated `*.tm-floor.md` composites, so a project's own `<id>.md` style can be committed. An existing block is rewritten on the next launch; a hand-written line outside the block is left alone (#8533).
+- Prompt change: the delivered PM prompt now opens with `## Identity`, and the `# Framework Instructions` heading is gone (#8533).
+- An `IDENTITY` override now replaces the role statement where it opens the prompt; before, the identity block sat after the agent roster (#8533).
+
 ## [1.7.4] — 2026-09-24
 
 ### Added
