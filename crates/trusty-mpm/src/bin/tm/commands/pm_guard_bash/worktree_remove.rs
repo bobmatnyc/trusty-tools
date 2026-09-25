@@ -87,20 +87,21 @@ use super::{PathEnv, resolve_target_path, unresolved_target};
 /// Why: a bare refusal makes the model retry or hand-roll a `rm -rf`, which is
 /// the worse outcome — it destroys unsaved work and leaves a stale registry
 /// entry behind, so the text forecloses it explicitly rather than leaving it
-/// as the obvious next thing to try. The text also names the ruling, the one
-/// session allowed to run the removal, the exact command that does it, and
-/// what the agent should do instead — report and stop. It says which worktree
-/// verbs still work, so an agent reading a registry does not treat the whole
-/// subcommand as blocked. Since ADR-0057 it also names the one role the deny
-/// no longer reaches, so an agent that has seen `version-control` do this does
-/// not read its own deny as a bug.
+/// as the obvious next thing to try. The text also names the ruling and what
+/// the agent should do instead — hand the tree back and stop. It says which
+/// worktree verbs still work, so an agent reading a registry does not treat the
+/// whole subcommand as blocked. Since ADR-0057 it also names the one role the
+/// deny no longer reaches, so an agent that has seen `version-control` do this
+/// does not read its own deny as a bug.
 /// What: the `permissionDecisionReason` string emitted on this deny.
-/// Test: `denies_worktree_remove_from_a_subagent`.
+/// Test: `denies_worktree_remove_from_a_subagent`,
+/// `the_agent_side_worktree_denies_hand_back_and_never_name_a_force_sweep`.
+// #8577: the remedy named a fleet-wide `--force` sweep; it is now the same
+// single-tree hand-back `recheck_deny` gives.
 pub(crate) const WORKTREE_REMOVE_DENY_REASON: &str = "Worktree removal is PM-executed (#5791, owner ruling 2026-08-19): an agent never removes a \
-     worktree, its own included. Report back instead — name the merged PR and the worktree path, \
-     then stop. The PM confirms the work is done and reclaims the tree with \
-     `tm session prune-worktrees --merged-prs --force`, which spares any worktree still holding \
-     unsaved work or still owned by a live agent. `rm -rf` on the worktree directory is not the \
+     worktree, its own included. Instead, hand it back: report the worktree path and its merged \
+     PR to the PM (or to `version-control`), then stop. A sweep over other worktrees is never \
+     the fallback for one refused removal. `rm -rf` on the worktree directory is not the \
      workaround either — it destroys unsaved work and leaves a stale registry entry git still \
      believes in. `git worktree list` and `git worktree prune` are not blocked, and SendMessage \
      is never blocked — use it to report the path back. One role is exempt and it is not this \
@@ -973,7 +974,8 @@ mod tests {
             Path::new("/repo"),
         ));
         assert!(reason.contains("#5791"), "{reason}");
-        assert!(reason.contains("tm session prune-worktrees"), "{reason}");
+        // #8577: the remedy is a hand-back, not a fleet-wide prune.
+        assert!(reason.contains("hand it back"), "{reason}");
     }
 
     #[test]
@@ -1173,6 +1175,8 @@ mod tests {
             .expect("an unmerged branch must deny removal");
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("feat/thing"), "{reason}");
+        // #8577: the no-PR detail no longer offers a fleet-wide sweep.
+        assert!(!reason.contains("--force"), "{reason}");
     }
 
     /// 🔴 #7057: the refusal names the repository it searched.
@@ -1612,6 +1616,8 @@ mod tests {
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains(WORKTREE_HEAD), "{reason}");
         assert!(reason.contains(FAKE_REPO), "{reason}");
+        // #8577: the detached-head detail no longer offers a fleet-wide sweep.
+        assert!(!reason.contains("--force"), "{reason}");
     }
 
     /// 🔴 #7832, critic round: a count the policy cannot corroborate never

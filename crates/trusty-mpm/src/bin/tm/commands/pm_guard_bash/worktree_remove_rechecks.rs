@@ -542,8 +542,8 @@ fn detached_head_verdict(
         &format!(
             "{branch_error}, and no MERGED pull request in `{repo}` was opened from its commit \
              `{head}` either (resolved from this worktree's `origin` remote).{mismatch} Check \
-             the commit out on a branch and open a pull request for it, or reclaim the tree \
-             with `tm session prune-worktrees --merged-prs --force`.{local_only_note}",
+             the commit out on a branch and open a pull request for it, or hand the tree \
+             back as below.{local_only_note}",
             repo = found.repo
         ),
     ))
@@ -691,8 +691,8 @@ fn landing_evidence(
              worktree's `origin` remote){also}. Ancestry is not an acceptable substitute: a \
              squash merge leaves the branch tip no ancestry relationship to the squash commit, \
              so `git merge-base --is-ancestor` and `git cherry` both answer \"not merged\" for \
-             a tree that is safe to reclaim. Open a pull request for this branch, or reclaim \
-             the tree with `tm session prune-worktrees --merged-prs --force`.{notes}",
+             a tree that is safe to reclaim. Open a pull request for this branch, or hand the \
+             tree back as below.{notes}",
             repo = own.repo,
             also = if stem == branch {
                 String::new()

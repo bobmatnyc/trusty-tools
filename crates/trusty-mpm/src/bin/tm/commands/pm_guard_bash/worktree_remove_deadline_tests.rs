@@ -227,6 +227,27 @@ fn a_refused_removal_hands_the_worktree_back_and_never_suggests_a_force_sweep() 
     }
 }
 
+/// 🔴 REGRESSION (#8577): the other two worktree refusals — the #5791 deny a
+/// subagent gets for `git worktree remove`, and the #4031 deny for `rm` on a
+/// worktree directory — hand the tree back too, and never name a `--force`
+/// sweep. On origin/main both named `tm session prune-worktrees --merged-prs
+/// --force` as the remedy.
+#[test]
+fn the_agent_side_worktree_denies_hand_back_and_never_name_a_force_sweep() {
+    use crate::commands::pm_guard_bash::destructive_delete::DESTRUCTIVE_DELETE_REASON;
+    use crate::commands::pm_guard_bash::worktree_remove::WORKTREE_REMOVE_DENY_REASON;
+    for reason in [WORKTREE_REMOVE_DENY_REASON, DESTRUCTIVE_DELETE_REASON] {
+        assert!(
+            reason.contains("hand it back"),
+            "names the hand-back: {reason}"
+        );
+        assert!(reason.contains("to the PM"), "{reason}");
+        assert!(reason.contains("`version-control`"), "{reason}");
+        assert!(!reason.contains("--force"), "no --force sweep: {reason}");
+        assert!(!reason.contains("prune-worktrees"), "no sweep: {reason}");
+    }
+}
+
 /// 🔴 #7889: a re-check thread that dies without answering denies.
 #[test]
 fn a_recheck_that_panics_denies() {
