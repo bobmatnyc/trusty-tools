@@ -42,7 +42,6 @@
 
 use std::path::Path;
 
-use super::decommission::WORKTREE_SENTINEL_FILE;
 use super::record::ManagedSessionId;
 use super::worktree_ownership::{AgentDelegationState, SentinelOwner, sentinel_payload_bytes};
 
@@ -266,7 +265,7 @@ fn describe_owner(owner: &SentinelOwner) -> String {
 /// resolves through the session-record store, which has a real terminal state, so
 /// the adopted tree re-enters the ordinary reclaim lifecycle instead of becoming
 /// permanently unreclaimable.
-/// What: `<path>/.trusty-mpm-worktree` replaced with a payload naming
+/// What: the ownership marker (git admin dir, #8511) replaced with a payload naming
 /// `new_owner`, timestamped now. Refuses when `path` is not a directory, because
 /// writing a sentinel into a path that is not a worktree would manufacture a
 /// claim on nothing.
@@ -276,9 +275,17 @@ pub(crate) fn adopt_worktree(path: &Path, new_owner: ManagedSessionId) -> Result
     if !path.is_dir() {
         return Err(format!("{} is not a directory", path.display()));
     }
-    let sentinel = path.join(WORKTREE_SENTINEL_FILE);
-    std::fs::write(&sentinel, sentinel_payload_bytes(new_owner))
-        .map_err(|e| format!("could not write {}: {e}", sentinel.display()))
+    // #8511: through the location module, so the new owner wins on read.
+    super::worktree_ownership_location::write_sentinel_bytes(
+        path,
+        &sentinel_payload_bytes(new_owner),
+    )
+    .map_err(|e| {
+        format!(
+            "could not write the ownership marker in {}: {e}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]

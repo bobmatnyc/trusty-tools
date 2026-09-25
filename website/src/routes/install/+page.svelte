@@ -3,7 +3,7 @@
 	 * Why: the landing page's install section answers "how do I install
 	 * something" with three generic paths. It does not answer the question a
 	 * reader actually arrives with, which is "how do I install THIS one" — and
-	 * the nine answers differ in ways that are not guessable: two products
+	 * the eight answers differ in ways that are not guessable: two products
 	 * cannot be installed by tctl at all, one of them has no published crate,
 	 * one silently installs three crates, and the macOS permission is
 	 * per-product. Publishing that permission backwards would be a security
@@ -15,7 +15,7 @@
 	 * the `<svelte:head>` wiring and the outbound links. It is not built on
 	 * `ToolPage.svelte` for the same reason `/claude-mpm-migration` is not:
 	 * that component derives its heading and its single install line from one
-	 * `Tool` record, and this page is about nine products at once.
+	 * `Tool` record, and this page is about eight products at once.
 	 *
 	 * Test: `src/lib/install/render.test.ts` covers the walkthrough itself;
 	 * `tests/build-smoke.test.ts` asserts this route prerenders with every
@@ -26,11 +26,11 @@
 	import { GITHUB_URL } from '$lib/site';
 
 	const description =
-		'Install any of the nine trusty-tools products: the exact commands per product, what each needs first, which MCP entry to register, and which macOS permission it actually asks for.';
+		'Install any of the eight trusty-tools products: the exact commands per product, what each needs first, which MCP entry to register, and which macOS permission it actually asks for.';
 
 	const facts = [
 		{ label: 'Paths', value: `${AUDIENCES.length} audiences` },
-		{ label: 'Via tctl', value: '7 of 9' },
+		{ label: 'Via tctl', value: '6 of 8' },
 		{ label: 'MSRV', value: 'Rust 1.94' },
 		{ label: 'Prebuilt for', value: 'macOS arm64, Linux x86_64, Linux arm64' }
 	];
@@ -44,7 +44,7 @@
 <!-- HERO -->
 <section class="border-b border-foundry-border">
 	<div class="mx-auto max-w-content px-4 py-14 sm:px-6 sm:py-20">
-		<p class="eyebrow">Install · nine products, nine paths</p>
+		<p class="eyebrow">Install · eight products, eight paths</p>
 		<h1
 			class="mt-4 break-words font-display text-4xl font-bold leading-tight tracking-tight text-foundry-primary sm:text-5xl"
 		>

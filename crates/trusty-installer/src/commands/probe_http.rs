@@ -881,7 +881,11 @@ async fn probe_socket(socket: &std::path::Path, method: &str) -> ProbeOutcome {
     {
         Ok(frame) => classify_rpc_response(&frame),
         Err(trusty_common::uds::UdsRpcError::Timeout { .. }) => ProbeOutcome::Timeout,
-        Err(trusty_common::uds::UdsRpcError::Dial { .. }) => ProbeOutcome::Refused,
+        // #8267: a dial is retried under a bounded policy, so a refused socket
+        // can arrive wrapped in `ConnectRetriesExhausted`. `is_dial_failure`
+        // spans both shapes; matching the bare `Dial` variant would silently
+        // reclassify every refused daemon as `BadEnvelope`.
+        Err(e) if e.is_dial_failure() => ProbeOutcome::Refused,
         Err(e) => ProbeOutcome::BadEnvelope {
             got: sample(e.to_string().as_bytes()),
         },

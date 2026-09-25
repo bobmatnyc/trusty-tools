@@ -87,7 +87,36 @@ name = "trusty-mpm"
 # expect to find on crates.io. Patch: trusty-mpm is excluded from the semver
 # gate (binary-only consumer surface, no library dependents), and the changes
 # folded in here are fixes plus additive skill/agent assets.
-version = "1.6.3"
+# 1.7.1 (milestone #92, Refs #5850): patch — 1.7.0 is already published on
+# crates.io and this PR edits `src/**` (gh-account registry lookups), so the
+# "PR version bump vs crates.io" check (#4421) requires the bump. Patch:
+# trusty-mpm is excluded from the semver gate (binary-only consumer surface,
+# no library dependents), and the change is a bug fix with no signature break.
+# 1.7.2 (Refs #4421): patch — 1.7.1 is already published on crates.io (at
+# 4c2f99bff) and main has since gained further src/** changes (batch B #8487,
+# batch G #8481, #8465, #8488), so the "PR version bump vs crates.io" check
+# requires the bump. Patch: trusty-mpm is excluded from the semver gate
+# (binary-only consumer surface, no library dependents); changes are fixes
+# plus docs/changelog assembly, no signature break.
+# 1.7.3 (Refs #8439): patch — 1.7.2 is already published on crates.io (at
+# cfb3cf0f6) and this PR edits `src/**` (`tm hook --pm-guard` read-only
+# dispatch allowlist), so the "PR version bump vs crates.io" check requires
+# the bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
+# consumer surface, no library dependents); the change is a security-hardening
+# fix with no signature break.
+# 1.7.4 (Refs #8563): patch — 1.7.3 is already published on crates.io and
+# this PR edits `src/**` (scoped launchd secrets fix), so the "PR version
+# bump vs crates.io" check requires the bump. Patch: trusty-mpm is excluded
+# from the semver gate (binary-only consumer surface, no library
+# dependents); the change is a security-hardening fix with no signature
+# break. Ships alone per owner ruling.
+# 1.7.5 (Refs #8482): patch — 1.7.4 was published to crates.io at
+# 2026-09-24T22:37:43Z and this PR edits `src/**` (tm doctor bundled-asset-lag
+# detection), so the "PR version bump vs crates.io" check requires the bump.
+# Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
+# surface, no library dependents); the change is a new doctor check with no
+# signature break.
+version = "1.7.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -267,6 +296,10 @@ trusty-common = { workspace = true, features = [
     # unconditional dependency here, and this only turns on its disk/network
     # features.
     "host-metrics",
+    # #8261: `load_average::read_load_average` — the 1-minute load average the
+    # builder capacity formula reads. `host-metrics` above cannot answer it;
+    # its CPU figure is an instantaneous sample, not a sustained one.
+    "load-average",
     "intent-source",
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
@@ -449,15 +482,14 @@ trusty-common = { workspace = true, features = [
     "inference-client",
     "axum-server",
 ] }
-# DEV-ONLY (DOC-15 C5 / #1362): the cross-gate AC-18 golden test
-# (`tests/conformance_cross_gate.rs`) drives BOTH conformance gates from one
-# shared `trusty_common::intent_source::ResolvedIntent` — the trusty-mpm FRONT
-# gate (`front_gate_disposition`) and the trusty-review BACK gate
-# (`ConformanceSource::would_flag`). trusty-review is a dev-dependency ONLY (it
-# is NOT a runtime dependency of trusty-mpm, and neither crate depends on the
-# other normally, so this introduces no dependency cycle and adds zero cost to a
-# production `cargo build`).
-trusty-review = { workspace = true }
+# #8341: the `trusty-review` dev-dependency was REMOVED. It existed for the
+# cross-gate AC-18 golden test (DOC-15 C5 / #1362), which now lives in
+# `crates/trusty-crate-contracts/tests/conformance_cross_gate.rs` over NORMAL
+# dependencies on both gates. It added zero cost to a production `cargo build`
+# and eight crates (four AWS SDK crates, redb, hmac, arc-swap, trusty-review) to
+# every `cargo test -p trusty-mpm` and `cargo clippy -p trusty-mpm
+# --all-targets`, in every worktree — which is the cost that mattered.
+# `scripts/check_dev_dep_edges.sh` refuses a new edge of this shape.
 tempfile.workspace = true
 axum.workspace = true
 http-body-util.workspace = true

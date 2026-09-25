@@ -865,6 +865,10 @@ The grammar, matched whole-line (`claude_md_sections.rs:22-26`):
 The nine accepted section tokens, quoted exactly as
 `section_token()` spells them (`claude_md_sections.rs:111-121`):
 
+> Superseded on the tiering and the count: #4286 left `core` as the only
+> `fixed` section, and #8361 added a tenth token, `AUTONOMOUS-EXECUTION`, for
+> the autonomy rule it carved out of `core`. `section_token` is authoritative.
+
 ```rust
 SectionId::Identity => "IDENTITY",
 SectionId::Core => "CORE",

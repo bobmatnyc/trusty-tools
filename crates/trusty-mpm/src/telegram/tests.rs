@@ -10,21 +10,37 @@
 
 use super::*;
 
+/// Why (#8236 item 5): the bot token now comes from the shipped resolver, whose
+/// first tier is the process environment. The hand-rolled `.env`/`.env.local`
+/// scanner this replaced is gone.
+/// Test: this test.
 #[test]
-fn resolve_token_reads_dotenv() {
-    use std::io::Write;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(".env");
-    let mut file = std::fs::File::create(&path).unwrap();
-    writeln!(file, "TELEGRAM_BOT_TOKEN=\"123:ABC\"").unwrap();
-    let value = read_dotenv_key(&path, "TELEGRAM_BOT_TOKEN");
-    assert_eq!(value.as_deref(), Some("123:ABC"));
+fn resolve_token_reads_the_process_environment() {
+    // SAFETY: this module's token tests are the only readers of this var.
+    unsafe {
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "123:SYNTHETIC-NOT-A-TOKEN");
+    }
+    let value = resolve_token("TELEGRAM_BOT_TOKEN");
+    unsafe {
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+    }
+    assert_eq!(value.as_deref(), Some("123:SYNTHETIC-NOT-A-TOKEN"));
 }
 
+/// Why (#8236 item 7): an unresolvable credential leaves the bot DISABLED —
+/// `None`, with no fallback to the retired `.env` read.
+/// Test: this test.
+#[test]
+fn resolve_token_is_none_when_the_credential_is_unresolvable() {
+    assert!(resolve_token("TRUSTY_MPM_TEST_TELEGRAM_UNREGISTERED").is_none());
+}
+
+/// Why: the missing case is the one an operator hits first, and it must not
+/// panic or produce an empty-string "token".
+/// Test: this test.
 #[test]
 fn resolve_token_missing_is_none() {
-    let value = read_dotenv_key(Path::new("/no/such/.env"), "TELEGRAM_BOT_TOKEN");
-    assert!(value.is_none());
+    assert!(resolve_token("TRUSTY_MPM_TEST_TELEGRAM_ABSENT").is_none());
 }
 
 #[test]

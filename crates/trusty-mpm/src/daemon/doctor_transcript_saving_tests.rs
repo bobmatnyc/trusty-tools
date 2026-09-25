@@ -35,7 +35,7 @@ fn launch_lines_covers_every_builder() {
     let labels: Vec<&str> = lines.iter().map(|(label, _)| *label).collect();
 
     for expected in [
-        "runtime::claude_code::env_bin_prefix",
+        "runtime::managed_launch::managed_env_unset",
         "core::model_inject::build_claude_command",
         "core::model_inject::build_inplace_session_command",
         "core::model_inject::build_client_session_command",
@@ -121,8 +121,8 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "core/alt_screen.rs",
-        3,
-        "test fixtures for apply_default_when_unset (#6495, #7160) — not launch lines. \
+        5,
+        "test fixtures for apply_default_when_unset and apply_configured_to_command (#6495, #7160, #8405) — not launch lines. \
          The module emits no command of its own: it supplies the alt-screen and \
          mouse-capture defaults the real builders carry, as a shell operand or a \
          Command mutation",
@@ -244,19 +244,39 @@ fn ok_message_names_every_binary_crate_gap() {
 }
 
 /// The probe must supply an OAuth token, or an over-scrub of it stays invisible.
+///
+/// #8233: the daemon's launch is a structured spec, so "supplies a token" is now
+/// asserted on the shell-string builder this probe still parses — and the
+/// daemon's own list is checked directly for the inverse (it must not unset
+/// either deliberate variable).
 #[test]
 fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
-    let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[], true);
+    let prefix = crate::core::model_inject::build_claude_command_with_configured(
+        None,
+        None,
+        Some(&config_dir),
+        Some(PROBE_TOKEN),
+        &[],
+        None,
+        false,
+    );
     assert!(
         prefix.contains("CLAUDE_CODE_OAUTH_TOKEN="),
-        "the probe prefix must carry the token assignment: {prefix}"
+        "the probe line must carry the token assignment: {prefix}"
     );
     assert!(
         prefix.contains("CLAUDE_CONFIG_DIR="),
-        "the probe prefix must carry the config-dir assignment: {prefix}"
+        "the probe line must carry the config-dir assignment: {prefix}"
     );
+
+    let managed = crate::runtime::managed_env_unset(&[]);
+    for deliberate in DELIBERATE_SPAWN_ENV {
+        assert!(
+            !managed.iter().any(|n| n == deliberate),
+            "the daemon launch must never unset {deliberate}: {managed:?}"
+        );
+    }
 }
 
 #[test]

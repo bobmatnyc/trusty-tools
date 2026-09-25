@@ -209,6 +209,8 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 /// #2118 interception gate is unit tested in `commands::projects::tests`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // #7889: the pm-guard hook's decision deadline is measured from here.
+    let started = std::time::Instant::now();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -255,7 +257,11 @@ async fn main() -> anyhow::Result<()> {
     // `posix_spawn` + wait that exits with the child's code and never talks to
     // the daemon. (Emitted into the pane command by
     // `trusty_mpm::core::spawn_disclaim::disclaim_pane_command`.)
-    if let Some(Command::InternalSpawnDisclaimed { argv: spawn_argv }) = cli.command {
+    if let Some(Command::InternalSpawnDisclaimed {
+        launch_spec,
+        argv: spawn_argv,
+    }) = cli.command
+    {
         // #4398 HIGH (critic review on PR #4431): `infer_subcommands` makes
         // clap resolve ANY unambiguous prefix of "internal-spawn-disclaimed"
         // to this hidden variant — see `commands::spawn_disclaimed::
@@ -268,6 +274,17 @@ async fn main() -> anyhow::Result<()> {
                 trusty_mpm::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND
             );
             std::process::exit(2);
+        }
+        // #8233: the managed form. A spec that cannot be used must be LOUD in
+        // the pane and must not launch anything — the pane is the only place an
+        // operator will look, and the daemon's post-send check turns the absent
+        // runtime into an errored record.
+        if let Some(path) = launch_spec {
+            if let Err(e) = commands::spawn_disclaimed::run_launch_spec(&path) {
+                eprintln!("tm: {e:#}");
+                std::process::exit(1);
+            }
+            return Ok(());
         }
         return commands::spawn_disclaimed::run(spawn_argv);
     }
@@ -483,7 +500,7 @@ async fn main() -> anyhow::Result<()> {
             prompt_feedback,
         }) => {
             if pm_guard {
-                commands::pm_guard::pm_guard(&url).await
+                commands::pm_guard::pm_guard(&url, started).await
             // #6887: a separate hook mode, not a pm-guard variant.
             } else if divert_check {
                 commands::divert_check::divert_check().await

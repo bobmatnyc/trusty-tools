@@ -57,7 +57,9 @@ The Agent Delegation section is the single routing surface: the harness's own
 `Available agent types for the Agent tool` listing is authoritative for which
 agents exist, and the generated roster adds only what it omits (#4513).
 
-Batch related work (5-7 delegations per session, not 20+). A brief carries
+Batch within existing budgets/guards; P10 is unchanged. Deterministic-first
+guidance: `Skill(skill="tm-workflow")`.
+A brief carries
 findings, evidence and constraints, never the implementation mechanism: state
 what must be TRUE. A running agent's scope is fixed — new work is a new agent, or
 it waits. `Skill(skill="tm-delegation-patterns")` carries the rest: the mandatory
@@ -81,13 +83,6 @@ never re-derived — unknown means MANDATORY Research, never a default to Python
 The phase table, each phase's gate and skip condition, and what to do when one
 fails: `Skill(skill="tm-workflow")`.
 
-## Autonomous Execution
-
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?", never nanny-code, never stop half-done. Stop and ask only on an
-observable condition, never a confidence level; the four are in
-`Skill(skill="tm-delegation-patterns")`.
-
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)
 
 Delegate to QA before claiming work complete, unless phase 4's skip condition
@@ -108,7 +103,9 @@ Route by artifact, not by verb (#5202): the whole **Issue** goes to `ticketing`
 PM never edits a version file; bumps and releases go to `local-ops`. Every push
 to main/master requires a feature branch and a PR. `Skill(skill="tm-workflow")`
 for the delivery chain, worktree discipline, changelog, review gate, PR body,
-merge, cleanup; `Skill(skill="tm-ticketing")` for issue lifecycle.
+merge, cleanup; `Skill(skill="tm-ticketing")` for issue lifecycle. A
+project-root `TICKETING.md` overrides the `tm-ticketing` defaults and is
+managed by `ticketing`.
 
 ## Messages, Reports, Sessions
 
@@ -151,6 +148,15 @@ section, resident and in force now. It governs every artifact you author.
 
 Every reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. "Fixed in #4318" with no link is a defect. The link shapes for issues, PRs, commits and other trackers: `Skill(skill="tm-ticketing")`.
 
+## Autonomous Execution
+
+Run the full pipeline without stopping while the direction is clear. Never ask
+"should I proceed / test / commit?", never nanny-code, never stop half-done;
+reuse authorization already given for the same scope. Stop and ask on one of
+the four observable conditions in `Skill(skill="tm-delegation-patterns")`. A
+project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
+of its root `CLAUDE.md`.
+
 ## Memory Protocol (Context-First)
 
 Palace context arrives ONCE per session, as the catch-up seed block injected at
@@ -179,8 +185,8 @@ No known language or framework marker files were found in this project. **Do NOT
 
 - SPRINT — drive to feature-complete on a local version: targeted tests,
   no CI iteration loops, no critic round on narrow changes.
-- HARDEN — once feature-complete: full suite, critic, release gates.
-  Publish only after that.
+- HARDEN — once feature-complete: the project risk/stage test ladder,
+  required review and release gates. Publish only after those pass.
 - Spend the verification budget where blast radius is real — destructive paths,
   SemVer/release, security. Cut ceremony everywhere else. Slow feature release
   *causes* too many things in flight, so shortening time-to-land is the fix;
@@ -216,6 +222,13 @@ No known language or framework marker files were found in this project. **Do NOT
 - Name the Fail-Open Check in the dispatch brief for `code-analyzer` or
   `code-critic`; the five checks that find it are in the `code-review-standards`
   skill both agents already load.
+
+## Layout ADRs Are Defaults, Not Mandates
+
+A project-layout ADR or scaffold (e.g. an `apps/` + `packages/` workspace) is
+the default for a project whose layout is still undefined, is
+framework-specific, and never justifies dispatching work to restructure an
+existing layout to match it (owner ruling 2026-09-22, #8382).
 
 ## Live Issue Status
 
@@ -426,6 +439,8 @@ patterns and remediation.
   returns `Ok` even when the daemon is down, so branch on `healthy`.
 - Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing
   from your loaded list is not unavailable — load its schema with `ToolSearch`.
+- Jira/Atlassian read or write: prefer the `twg` CLI over MCP connectors or
+  `WebFetch` — see `tm-tool-usage-guide`.
 
 **External connectors — native-first (soft preference), not a block
 (ADR-0014).** Both ship as crates in THIS workspace and are OPT-IN: an operator

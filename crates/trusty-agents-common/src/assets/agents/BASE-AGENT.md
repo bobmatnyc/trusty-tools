@@ -83,7 +83,7 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 
 - Conventional commits: `feat/fix/docs/refactor/perf/test/chore: <subject>`.
 - Atomic commits — one logical change each.
-- Reference issues in the body (`Closes #N`) to auto-close on merge.
+- Use `Refs #N`; close issues through the project's verified lifecycle policy.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
 - **Fetch before you branch, and fetch again after you merge.** `git fetch
@@ -124,13 +124,13 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 - **A revert/bisect experiment's throwaway checkout is a disposable clone,
   never a worktree, against the main checkout.** Recipe: Read
   `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7628).
-- **Never remove a worktree — the PM runs the removal (#5791).** `tm hook
-  --pm-guard` denies an agent's `git worktree remove`, and `rm -rf` is never
-  the workaround. Report the merged PR, the worktree path, and the branch, then
-  stop — the PM reclaims the tree with `tm session prune-worktrees
-  --merged-prs --force`. #7723: `version-control` is the sole, guard-verified
-  exception (ADR-0056, ADR-0057), carrying the mechanics in its own body; every
-  other agent's refusal is unconditional.
+- **Never remove a worktree — the PM runs the removal (#5791).** Agents cannot
+  bypass `tm hook --pm-guard` with `rm -rf`. Report the merged PR, path and
+  branch; stop. Verify ownership, clean state, merged status and no other live
+  holder; then the PM removes the task-owned path:
+  `git worktree remove /absolute/repo/.claude/worktrees/task-name`. Global
+  prune needs separate scope and ownership checks. #7723: only `version-control`
+  has a guard-verified exception (ADR-0056, ADR-0057); its body carries the mechanics.
 - The commit and PR footer comes from the `attribution` key tm writes into the
   provisioned Claude Code settings; never restate it in prose.
 
@@ -203,6 +203,7 @@ is reserved for the top-level PM/orchestrator.
 - Mimic local patterns: naming, file structure, error handling.
 - Suggest improvements — max 2 per task unless security/data-loss critical.
   Give `file:line`, impact, suggestion, effort. Ask before implementing.
+- Never restructure an existing layout to match a layout ADR (#8382).
 
 ## File-Size Precheck
 
@@ -270,13 +271,12 @@ during verification can discard an uncommitted fix — WIP-commit first
 
 ### Direct observation of success (mandatory)
 
-Run the code and observe it succeed — full suite, real environment, clean
-build, no silent skips (cache hits are not a re-run), the entry point itself.
+Use the project risk/stage test ladder; reuse matching raw evidence and
+preserve caches. Verify runtime claims in the target environment; account for
+skipped tests and distinguish cached results from a fresh execution.
 #7723: full walkthrough, cache-hit pitfall, redirect/retry/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ### Gate Output: Quote Results, Summarize Progress
-
-<!-- #8274: mechanics live in the skill; this stays under the body budget. -->
 
 Show raw output. Never summarise test results in your own words. Raw evidence
 is the final `test result:` lines, the gate's exit status, and any compiler

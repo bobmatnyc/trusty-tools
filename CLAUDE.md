@@ -93,6 +93,7 @@ stale. Advance with `tm issue transition N status:merged`. Fix PRs use
 `status:merged`/`status:tested`. Rung 4–6 (CLI/daemon/hook fixes needing
 live proof) close only from `status:tested`; a merged fix failing
 verification stays open, returning to `status:coded` only via a follow-up fix.
+Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
 
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,

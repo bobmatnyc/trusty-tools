@@ -447,16 +447,48 @@ impl super::SessionManager {
     /// does not.
     /// Test: `the_supervisor_parks_a_flapping_session_after_k_cycles` in
     /// `resume_breaker_tests.rs`.
+    ///
+    /// #8233 (owner ruling 2026-09-18): `resume_inner` only prepares the PANE.
+    /// It marked the record `Active` and returned, so an auto-resume whose pane
+    /// had died produced a bare shell behind an `Active` record and every later
+    /// operator resume refused with "cannot resume a session in state 'active'".
+    /// The installed [`super::relaunch::RuntimeRelauncher`] runs the same
+    /// adapter path and the same post-send verification the interactive resume
+    /// uses; a relaunch that produces no verified runtime demotes the record to
+    /// `Errored` and fails the call, so `Active` after this function means a
+    /// runtime was SEEN.
     pub async fn resume_auto(
         &self,
         id: &ManagedSessionId,
     ) -> Result<super::SessionRecord, super::manager::ManagedError> {
+        // #8233 item 4: refuse before the breaker stamp, the relaunch and the
+        // `mark_errored` below, so a session the operator's resume already
+        // holds gets no second launch line and no appended error from this
+        // tick. Dropped on every exit path, including each `?` and a cancelled
+        // poller future.
+        let _in_flight = self.begin_resume(id)?;
         let record = self.resume_inner(id).await?;
         self.resume_breaker
             .write()
             .await
             .note_auto_resume(id, Utc::now())
             .await;
+        if let Some(relauncher) = self.relauncher()
+            && let Err(msg) = relauncher.relaunch(&record).await
+        {
+            let msg = format!("auto-resume relaunch did not take: {msg}");
+            // Fail-closed: the record must not stay `Active` behind a pane with
+            // nothing in it. `mark_errored` is best-effort in the sense that a
+            // store failure must not mask the relaunch failure below.
+            if let Err(e) = self.mark_errored(id, &msg).await {
+                tracing::error!(id = %id, "could not mark a failed auto-resume errored: {e}");
+            }
+            // #8233 round 3, finding 3: typed as ALREADY RECORDED. The
+            // supervisor's generic arm used to mark the record errored a second
+            // time, so one failed auto-resume left two `[error: …]` notes on the
+            // task the next relaunch feeds back to the runtime.
+            return Err(super::manager::ManagedError::AutoResumeRecorded(msg));
+        }
         Ok(record)
     }
 

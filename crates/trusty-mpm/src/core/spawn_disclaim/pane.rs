@@ -109,6 +109,27 @@ fn current_wrapper_bin() -> Option<String> {
     None
 }
 
+/// Resolve the `tm`/`trusty-mpm` binary a pane invokes for a launch-spec launch
+/// (#8233).
+///
+/// Why: distinct from [`current_wrapper_bin`], which answers "should this pane
+/// command be DISCLAIM-wrapped?" and is therefore macOS-only and honours the
+/// [`super::DISABLE_ENV`] escape hatch. A launch-spec launch always needs a tm
+/// binary — that process is what reads the spec and applies the cwd, env and
+/// argv — and whether it disclaims is decided INSIDE it by
+/// [`super::disclaimed_status`], which is already a no-op off macOS and under
+/// the escape hatch. Conflating the two would make the spec unreadable on Linux
+/// and under `TM_DISABLE_SPAWN_DISCLAIM`.
+/// What: `current_exe()` as UTF-8, on every platform. `None` only when the path
+/// cannot be read or is not UTF-8 — in which case the caller must FAIL the
+/// launch, never fall back to typing an unbounded shell line (#8233).
+/// Test: `launch_wrapper_bin_resolves_the_running_executable`.
+pub fn launch_wrapper_bin() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.to_str().map(str::to_owned))
+}
+
 /// Rewrite a pane-launched `claude` invocation so the pane's `claude` child is
 /// spawned disclaimed (its own TCC responsible process) instead of inheriting
 /// the shared tmux server's identity (issue #2997).
@@ -186,7 +207,14 @@ mod tests {
     /// in the disclaimed process instead of the shim spawning `claude` directly.
     #[test]
     fn wraps_the_scrubbed_launch_line_with_env_as_the_program() {
-        let line = crate::core::model_inject::build_claude_command(None, None, None, &[], None);
+        let line = crate::core::model_inject::build_claude_command_configured(
+            None,
+            None,
+            None,
+            &[],
+            None,
+            false,
+        );
         let out = disclaim_pane_command_with(Some("/w/tm"), &line);
 
         assert!(
@@ -202,6 +230,17 @@ mod tests {
             out.contains(" claude --"),
             "`claude` must follow the scrub flags, still carrying its own \
              flags: {out}"
+        );
+    }
+
+    /// #8233: a launch-spec launch needs a tm binary on EVERY platform, so this
+    /// resolver must not carry `current_wrapper_bin`'s macOS/escape-hatch gates.
+    #[test]
+    fn launch_wrapper_bin_resolves_the_running_executable() {
+        let bin = launch_wrapper_bin().expect("the test binary's own path must resolve");
+        assert!(
+            std::path::Path::new(&bin).is_absolute(),
+            "the wrapper path must be absolute — a pane inherits a minimal PATH: {bin}"
         );
     }
 

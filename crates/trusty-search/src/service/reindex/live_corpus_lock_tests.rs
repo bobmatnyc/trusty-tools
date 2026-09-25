@@ -59,7 +59,9 @@ fn staged_index(
     staging
         .write_reindex_checkpoint_sync(br#"{"probe":"7991"}"#)
         .expect("stamp checkpoint");
-    let mut indexer = CodeIndexer::new(index_id, &root);
+    let mut indexer = CodeIndexer::new(index_id, &root)
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
     indexer.set_corpus_store(std::sync::Arc::new(staging));
 
     let registry = IndexRegistry::new();

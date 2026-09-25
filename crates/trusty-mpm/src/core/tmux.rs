@@ -79,8 +79,10 @@ use tracing::warn;
 pub use trusty_common::tmux::{
     ALTERNATE_SCREEN_OPTION, DEFAULT_TMUX_ALTERNATE_SCREEN, DEFAULT_TMUX_HISTORY_LIMIT,
     DEFAULT_TMUX_MOUSE, HISTORY_LIMIT_OPTION, MOUSE_OPTION, PANE_LIST_FORMAT, SESSION_LIST_FORMAT,
-    TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT, managed_session_commands,
-    scrollback_option_commands, tmux_argv,
+    TmuxCommand, TmuxTarget, TmuxTargetError, WINDOW_LIST_FORMAT, check_session_name,
+    exact_pane_target, exact_session_target, exact_window_target, is_immutable_id,
+    managed_session_commands, scrollback_option_commands, shell_attach_command,
+    shell_exact_session_target, tmux_argv,
 };
 
 /// Resolve the `tmux` binary, preferring live `PATH` and falling back to
@@ -215,6 +217,9 @@ pub fn run_tmux_with_bin(
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
     host_state_guard()?;
+    // #8443: an empty session name addresses no session; never spawn for it.
+    cmd.validate_targets()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
 }
 
@@ -300,14 +305,14 @@ pub fn display_message_argv(target: Option<&TmuxTarget>, format: &str) -> Vec<St
 /// What: `name: None` renders untargeted (`show-environment <key>`, querying
 /// the CURRENT session — the only shape this issue's call site uses, since it
 /// only ever runs from inside the tmux client whose own session it wants);
-/// `Some(name)` renders `-t <name> <key>` for a caller that needs an
-/// explicit session.
+/// `Some(name)` renders `-t =<name> <key>` (exact match, #8443) for a caller
+/// that needs an explicit session.
 /// Test: `show_environment_argv_untargeted`, `show_environment_argv_session_targeted`.
 pub fn show_environment_argv(name: Option<&str>, key: &str) -> Vec<String> {
     let mut argv = vec!["show-environment".to_string()];
     if let Some(n) = name {
         argv.push("-t".to_string());
-        argv.push(n.to_string());
+        argv.push(exact_session_target(n));
     }
     argv.push(key.to_string());
     argv
@@ -841,6 +846,73 @@ pub(crate) fn probe_alternate_screen(bin: &str) -> Result<bool, String> {
         Ok(output) => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Ceiling on a SHELL COMMAND LINE typed into a pane, in bytes (#8233).
+///
+/// Why: a pane's tty is in CANONICAL mode until the shell's line editor takes
+/// over, and a canonical-mode line discipline buffers at most `MAX_CANON` bytes
+/// — 1024 on macOS (`sys/syslimits.h:89`; `fpathconf(pty, _PC_MAX_CANON)`
+/// returns 1024 on a live pty). `tmux send-keys` types into that buffer, so a
+/// longer command loses its tail with no error anywhere: session `dd0e2fb8-…`
+/// died with a 1054-byte launch line cut off mid-path at
+/// `internal-spawn-disclaimed /Use`. The bytes are dropped by the KERNEL, so
+/// nothing downstream can detect it — refusing to type the line is the only
+/// place the failure can be made visible.
+/// What: 960, leaving 64 bytes of headroom under `MAX_CANON` for the terminating
+/// newline and any line-discipline overhead. It is NOT the target size: every
+/// migrated builder emits a fixed-shape line well under 512 bytes (#8233). This
+/// is the backstop that makes a builder still composing an unbounded line fail
+/// LOUDLY instead of silently truncating.
+/// Test: `pane_command_limit_sits_below_max_canon`,
+/// `oversized_pane_command_is_refused`.
+pub const MAX_PANE_COMMAND_BYTES: usize = 960;
+
+/// Refuse a pane COMMAND line that the tty's canonical buffer would truncate.
+///
+/// Why: see [`MAX_PANE_COMMAND_BYTES`]. This is deliberately scoped to command
+/// lines — text typed at a SHELL — and is NOT applied to
+/// [`send_keys_literal`](crate::daemon::tmux::TmuxDriver::send_keys_literal) or
+/// to task injection. Once Claude Code's TUI owns the pane the tty is in RAW
+/// mode, where `MAX_CANON` does not apply and a multi-kilobyte task prompt is
+/// both legitimate and routine; refusing those would break task delivery to fix
+/// a limit that is not in force.
+/// What: `None` when `text` fits; otherwise a one-line operator-facing message
+/// naming the actual size, the limit, and the issue.
+/// Test: `oversized_pane_command_is_refused`, `pane_command_at_the_limit_is_allowed`.
+pub fn refuse_oversized_pane_command(text: &str) -> Option<String> {
+    if text.len() <= MAX_PANE_COMMAND_BYTES {
+        return None;
+    }
+    Some(format!(
+        "refusing to type a {}-byte command into a tmux pane: the tty's canonical-mode \
+         input buffer holds at most MAX_CANON (1024) bytes, so anything over \
+         {MAX_PANE_COMMAND_BYTES} would be silently truncated mid-command (#8233). The \
+         builder that produced this line must carry its parameters in a launch spec \
+         instead of in the typed line.",
+        text.len()
+    ))
+}
+
+/// [`send_line`] for a SHELL COMMAND, refusing an oversized line (#8233).
+///
+/// Why: the CLI/TUI launch paths type a composed `claude` invocation at the
+/// pane's shell prompt, which is exactly the canonical-mode case
+/// [`MAX_PANE_COMMAND_BYTES`] exists for. Routing them through this wrapper
+/// rather than [`send_line`] keeps the guard off the injection paths, which
+/// share the same primitive but type into a raw-mode TUI.
+/// What: [`refuse_oversized_pane_command`] first — on refusal NOTHING is typed
+/// and an `InvalidInput` error carries the message — else [`send_line`].
+/// Test: `send_command_line_refuses_an_oversized_line`.
+pub fn send_command_line(
+    tmux_bin: Option<&str>,
+    target: &TmuxTarget,
+    text: &str,
+) -> std::io::Result<std::process::Output> {
+    if let Some(msg) = refuse_oversized_pane_command(text) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    send_line(tmux_bin, target, text)
 }
 
 /// Type `text` into a tmux pane, then press Enter (#2398 consolidation).

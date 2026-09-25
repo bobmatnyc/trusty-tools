@@ -764,11 +764,15 @@ fn live_tmux_session_names() -> Option<HashSet<String>> {
 /// [`workspace_verified_gone`]'s parent check exists to prevent straight past
 /// the check. Requiring the CLI's own confirmation for EVERY record closes that.
 ///
-/// Dropping the short-circuit costs nothing in coverage: `is_unresumable`
-/// requires all three of `last_cwd`/`workspace_path`/`cwd` absent, so any record
-/// it flags is one this predicate also finds gone — provided the record carries
-/// a path on the wire. A legacy record with neither `workspace_path` nor `cwd`
-/// serialized is now kept rather than cleared; unverifiable is not dead.
+/// Since #8551 the daemon's flag covers MORE records than this predicate: a
+/// recorded `workspace_path` that is gone flags the record even when `cwd`
+/// still exists, while [`workspace_verified_gone`] requires every candidate
+/// gone. That gap is intended. The flag stays a picker label; it never deletes.
+/// 🔴 `is_dead_record` must NEVER short-circuit on `s.unresumable` — adding
+/// `s.unresumable ||` here would widen a record-deleting prune to every record
+/// the daemon's bare `try_exists` calls gone, unmounted volumes included (see
+/// #8551, PR #4725). A legacy record with neither `workspace_path` nor `cwd`
+/// serialized is kept rather than cleared; unverifiable is not dead.
 ///
 /// What: `is_clearable_state(s, live) && workspace_verified_gone(s)`.
 /// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`, in particular

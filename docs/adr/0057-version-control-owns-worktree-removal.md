@@ -189,6 +189,91 @@ the guard will establish every precondition itself.
      one direction available: a pull request GitHub named no `headRefOid` for, a
      HEAD git could not resolve, and any mismatch all leave the pre-#7958
      decision standing.
+
+     Amended by #7889 — landed CONTENT is landing evidence of its own, on both
+     reclaim paths. A donor branch fast-forwarded onto a sibling's head and
+     squash-merged under THAT name never acquires a pull request carrying its
+     own name, so this check's refusal is permanent for a tree that holds
+     nothing: nineteen clean worktrees were stuck that way across 2026-09-21 and
+     2026-09-22 — `fix/8351-bridge-session-recovery-critic-r1`,
+     `fix/8261-pm-guard-oracle`, `fix/8236-cache-race`, `fix/8361-context-budget`
+     among them — each holding a 10–25 GB `target-*/` directory, and each
+     byte-identical to `origin/main`. Owner ruling 2026-09-22: admit them.
+     A new `landed-content` admission runs after this check has ANSWERED with no
+     merged pull request. It refreshes `origin` under the same 3 s bound, then
+     asks whether merging HEAD into the landing base would change any file
+     (`git merge-tree --write-tree <base> HEAD`, then `git diff --name-only
+     <base> <tree>`). An empty answer grants and names the base commit; a
+     non-empty one refuses and names the first residual path. The base is
+     `origin/HEAD`, or `origin/main`/`origin/master` when the repository
+     declares none. The same predicate — one implementation, in
+     `core::worktree_landed_content` — decides gate 5 of `tm session
+     prune-worktrees --merged-prs`. The two paths do not ask it in the same
+     places. The guard never asks it once its own or a round sibling's pull
+     request has matched, and never for a detached HEAD, so on those paths it
+     is stricter than the sweep. Where they disagree, one of them refuses.
+     Making them agree would add a fetch and a `gh` call to a guard already
+     short of time. That strictness is about the landing question only. Every
+     guard grant — merged pull request, landed content, `local-only-commits`
+     or detached head — now ends with the sweep's scan for nested repositories
+     holding work and high-value gitignored files, inside the deadline, because
+     `git worktree remove --force` deletes ignored content. The guard does not
+     check commits on `session/<leaf>` that HEAD cannot reach, because
+     `git worktree remove` deletes no branch, and it does not read the sweep's
+     keep-list. On the sweep, gate 6 counts a donor branch's commits as
+     unpushed, because the squash also carried a sibling's work and no patch id
+     matches. That count lets the tree reach the admission, which judges only
+     the commits reachable from HEAD. Every other place work can live refuses
+     before anything is compared: an uncommitted file, a dirty nested
+     repository, and a commit on `session/<leaf>` or `<leaf>` that HEAD cannot
+     reach, which the removal's `git branch -D` would orphan. The admission can
+     take up to 40 s on the sweep, so a grant re-reads that dirt, and HEAD,
+     before it is returned. The residue diff runs with `--ignore-submodules=none`,
+     so a `diff.ignoreSubmodules` or `submodule.<name>.ignore` setting cannot
+     hide a gitlink bump. The pre-delete re-check asks the admission again
+     rather than demanding a merged pull request.
+
+     When `landed-content` does not admit, a second route is asked:
+     `merged-pr-ancestry` admits when HEAD is the head commit of a MERGED pull
+     request, or an ancestor of it (`gh pr list --state merged --search
+     <HEAD>`, then `git merge-base --is-ancestor HEAD <headRefOid>`). That is
+     the donor shape itself, and it still admits a donor whose change the pull
+     request later superseded, or whose files `main` has since edited so the
+     merge conflicts. Only that one direction counts: a pull request whose head
+     is BEHIND HEAD leaves commits here the merge never saw. On the sweep the
+     same pair of routes also judges a donor that gate 5 matched to its
+     sibling's merged pull request through the #7267 commit search, whose
+     commits gate 6 would otherwise count as unpushed.
+
+     Ancestry against the squash commit is still never evidence: `git
+     merge-base --is-ancestor` and `git cherry` both answer "not merged" for a
+     squash-merged branch, and neither is consulted that way. Being a
+     relaxation, it inherits decision 6 in the one direction available — a
+     failed or expired refresh, a base that will not resolve, a `merge-tree`
+     that errored or conflicted, a residual path, a commit search that did not
+     answer and an ancestry check that could not run all refuse, and so does an
+     unanswerable `gh` branch lookup, which never reaches the admission at all.
+     An open pull request, a dirty tree and a live owner are decided before it,
+     exactly as before.
+
+     Because the admission lengthens the refusing path, the owner query and
+     every re-check must now decide within 3.5 s of the `tm` process starting,
+     and DENY on expiry, naming the check still running. The `PreToolUse` hook
+     is killed at 5 s, and a killed hook returns no decision, which is not a
+     deny. The deny is printed and flushed before its audit, and the audit must
+     end 4.5 s after process start. The admission reuses the
+     `local-only-commits` fetch when that fetch succeeded, instead of fetching
+     a second time.
+
+     This SUPERSEDES half of the #7275 round-2 finding. The never-pushed branch
+     holding one empty or self-reverting commit is now admitted — not because
+     evidence stopped being required, but because the ruling makes the evidence
+     CONTENT, and such a tree demonstrably holds none the remote lacks. What
+     round 2 established still holds for the merged-PR route: its merge-tree
+     comparison against a pull request's base is never asked until that pull
+     request is in evidence. The `landed-content` comparison is separate. It
+     can grant without any pull request, but only after a successful refresh of
+     `origin` and after the clean-tree and ownership checks.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

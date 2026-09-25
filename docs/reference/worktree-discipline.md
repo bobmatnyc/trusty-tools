@@ -280,11 +280,12 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | `git diff --cached -- <path>`, `git diff <a>...<b>`, `git diff HEAD~2 HEAD -- <path>` | `git --no-pager diff …` |
 | a diff of one path at one commit | `git show <sha> -- <path>` |
 | `git log origin/main..<sha>` | `git --no-pager log …` |
+| a bare `git diff origin/main` or `git log --oneline` with no range, from the worktree's own cwd (#7477) | `git --no-pager diff origin/main -- <path>`, `git --no-pager log --oneline -<n>` |
 | `git -C .` — a relative `-C` reads as computed at runtime | `git -C <absolute worktree path>` |
 | `cd <worktree> && git diff …` | `git -C <absolute worktree path> diff …` |
 | a git command wrapped in the redirect-then-`echo` gate idiom | run the git command bare, one per Bash call |
 | a pathspec whose basename starts `tm-`, or a `$(git …)` substitution as a pathspec | quote a glob: `git --no-pager diff -- 'crates/*/src/assets/skills/tm-capa*'` |
-| `git checkout HEAD -- <paths>` | `git restore --source=HEAD --staged --worktree <paths>` |
+| `git checkout HEAD -- <paths>`, or `git checkout <sha> -- <paths>` from any other commit (#7477) | `git restore --source=<HEAD or sha> --staged --worktree <paths>` |
 | a `grep` pattern with no `git` in it at all — `grep -n caller_session <file>` refused, `grep -n 'caller' <same file>` allowed, same file both times | re-spell the pattern shorter, or read the file with the Read tool instead |
 | `gh pr create` / `tm pr open` refused because the PR body text carries an env-sample filename substring (a dotenv-style `.example` suffix) | reword the body text to avoid that literal substring, or pass the body via `--body-file <path>` |
 
@@ -316,6 +317,7 @@ re-execute themselves under bash, so `./scripts/<name>.sh` and
 | `xargs` piped into another program | one program per Bash call |
 | `sed -n` whose address is shell arithmetic, or whose path is a variable | a literal address and a literal path, or `grep` |
 | `export VAR=$PWD/… && cargo …`, `CARGO_TARGET_DIR=$PWD/… cargo …` | spell the absolute path literally in the assignment |
+| `HOME=<dir> cargo …` — an assignment that moves `HOME` in front of a command (#7477) | put the assignment and the command in a script written with the Write tool and run it as `./name.sh`; in a test, pass the path as a parameter instead (#5544) |
 | `$(pgrep …)` or any command substitution supplying an argument | a literal value, captured in a previous call |
 | an argument whose TEXT contains `git` — a grep pattern, a `perl -pi` regex, a filename | none; re-spell the pattern, or use the Write-a-script route |
 | a directory argument with a trailing `/` (`find crates/<crate>/ -name …`) | drop the trailing slash: `find crates/<crate> -name …` |
@@ -343,7 +345,7 @@ Every refusal costs the agent a full turn of its resident prompt, so reach for t
 | `cat >> <file> <<'EOF'` — heredoc append into a file | the Write tool or Edit tool |
 | `env HOME=<tmp> ./target/debug/deps/<bin>` — environment override in a test | inject the path as a parameter to the test (#5544), never set a global env var |
 | a filename containing the literal substring `diff` or `token` | rename the file to avoid that substring |
-| a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
+| a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`; `ls src/eval`, refused as running a string through `eval`, #7477) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
 | `cat -n <abs>/.gitignore` | the Read tool — `.gitignore` is an ordinary file here |
 | `git push origin HEAD:<pr-branch>` after creating a local branch from that PR branch (cross-branch push) | until the fast-forward exemption lands, set `TM_ALLOW_CROSS_BRANCH_PUSH=1` in the environment, and use `--force-with-lease` only after a rebase (#2867) |
 

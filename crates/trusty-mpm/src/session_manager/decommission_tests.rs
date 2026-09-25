@@ -155,7 +155,7 @@ fn worktrees_dirname_delegates_to_the_shared_resolver() {
 /// this assertion tested `<path>/.trusty-mpm-worktree` on a hardcoded
 /// nonexistent path, which could never fail (#6556 critic round, MEDIUM 5).
 /// Test: this test; `removal_permitted_admits_all_three_tiers` covers the tier
-/// that does admit it, and `an_unattributed_agent_store_worktree_is_never_reclaimable`
+/// that does admit it, and `worktree_7771_a_hand_made_tree_is_reclaimed`
 /// covers what still refuses to delete it.
 #[test]
 fn configured_base_can_never_claim_a_claude_agent_worktree() {

@@ -2,7 +2,7 @@
 name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
-version: "2.0.0"
+version: "2.1.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -203,11 +203,32 @@ derived rules live here because they apply only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom.
 
+## Deterministic Work
+
+Use existing search tools and CLIs for extraction, counts, comparisons and
+explicit rules before model synthesis. If none fits, delegate a bounded,
+read-only disposable helper; spot-check its inputs and representative output.
+Use the model for ambiguity and judgment. Recurring tools follow the project's
+implementation policy. Batch related routine work within existing budgets,
+ownership and guards; this does not relax P10 or require new approval for
+work already authorized. See #8021.
+
+## Task-Owned Cleanup
+
+Inventory only the paths this task owns; preserve other sessions and dirty or
+unpushed work. Confirm the merged PR and live ownership before removal. Route
+the operation through the authorized `version-control` agent. Use literal
+paths with the supported guard, not shell-variable loops, for example:
+`git -C /absolute/repo worktree remove /absolute/repo/.claude/worktrees/task-name`.
+The paths are placeholders to replace with verified targets, never a glob.
+A refusal is a finding to resolve, not permission to use `rm -rf` or global
+`tm sessions prune-worktrees --merged-prs --force`. See #8021.
+
 ## Test Scope Widens by Stage
 
-Unit tests run on the new or changed code only while developing, on the full
-test files that changed when merging, and on the full corpus only when
-publishing.
+The project risk/stage test ladder takes precedence. Where it defines no
+ladder, use the following stage defaults; widen for affected consumers and
+high-risk contracts, not simply for an engineer-to-QA handoff.
 
 | Stage | Scope |
 |---|---|
@@ -217,7 +238,7 @@ publishing.
 
 - **Developing** is the inner loop: the targeted test that proves the change,
   re-run as you edit. Nothing wider is owed while the code is still moving.
-- **Merging** widens to whole files, never to the whole repository. Every test
+- **Merging** defaults to whole affected test files. Every test
   file the diff touched runs in full — including the cases you did not edit, and
   any normally-skipped test that lives in one of those files. A change to a
   public interface or to shared test infrastructure alters what a dependent
@@ -383,6 +404,17 @@ wording.
 file-mutating agent, wait for it, dispatch the next. Serializing is always
 available and always correct. Hand-rolling a worktree in order to parallelize
 anyway is what this rule forbids.
+
+**A brief that needs a named branch names the BRANCH, never a second worktree
+(#8337).** An isolated agent that runs `git worktree add` for a ticket-named
+path gets the tree, then every Edit, `git -C`, `--git-dir` and removal against
+it is refused: Claude Code pins the agent to its assigned worktree, and no
+`tm` hook can move that pin. The sanctioned pattern: the agent stays in its
+assigned worktree and creates the target-convention local branch there,
+tracking the remote branch (`git checkout -b DE-2854 --track origin/DE-2854`),
+then pushes it. When the repository needs the directory itself to carry the
+ticket name, the PM creates that worktree before dispatch and serializes the
+work into it; the agent never creates it.
 
 The dispatch still forbids leaving the assigned tree into the main checkout, and
 forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
@@ -793,10 +825,11 @@ compile time via `bundled_pm_package.rs`. It declares section order and
 composition; the prose for each section is stored separately in
 `assets/instructions/sections/*.md`, pulled in as `include_str!` constants
 registered in the `SECTION_SOURCES` table (`core/instruction_pipeline.rs`) — a
-missing section file is a compile error, not a launch-time surprise. The nine
+missing section file is a compile error, not a launch-time surprise. The ten
 marker tokens (`core/claude_md_sections.rs::section_token`) are `IDENTITY`,
-`CORE`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
-`NON-OVERRIDABLE-RULES`, and `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+`CORE`, `AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`,
+`AGENT-DELEGATION`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, and
+`FRAMEWORK-GUARANTEED-CONVENTIONS`.
 
 **`CORE` is the only one a project cannot replace.** Every other section,
 including `NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS`, can be
@@ -848,6 +881,7 @@ optional or absent (#4069).
 | "remember/always/never/for this project" | Plain prose in `CLAUDE.md` (no marker needed) |
 | "use X agent for Y" / "route/change agent" | `<!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->` block in `CLAUDE.md` |
 | "add/change workflow phase" | `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` block in `CLAUDE.md` |
+| "stop and check with me more/less often" | `<!-- TRUSTY-MPM: AUTONOMOUS-EXECUTION START v=1 -->` block in `CLAUDE.md` — e.g. tightening it to "ask before dispatching after a resume" (#8361) |
 | "memory behavior" | `<!-- TRUSTY-MPM: MEMORY START v=1 -->` block in `CLAUDE.md` |
 
 After writing an override, confirm the marker to the user and note it "takes

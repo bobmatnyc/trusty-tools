@@ -237,10 +237,10 @@ fn format_managed_spawned() {
         name: "blue-otter".into(),
         state: "running".into(),
         runtime: "claude-code".into(),
-        attach_cmd: "tmux attach -t blue-otter".into(),
+        attach_cmd: "tmux attach -t '=blue-otter'".into(),
     });
     assert!(body.contains("✅ Spawned *blue-otter* (`abcdef01…`) [running] runtime=claude-code"));
-    assert!(body.contains("attach: `tmux attach -t blue-otter`"));
+    assert!(body.contains("attach: `tmux attach -t '=blue-otter'`"));
 }
 
 #[test]

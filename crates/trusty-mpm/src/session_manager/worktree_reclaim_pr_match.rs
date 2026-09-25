@@ -384,7 +384,7 @@ pub(crate) fn merged_prs_containing_in(
 ) -> Result<Vec<MergedPrHead>, String> {
     let stdout = worktree_reclaim_gh_gate::shared()
         .poll(registry_root, &format!("merged-sha:{repo}:{sha}"), || {
-            let gh_env = resolve_daemon_gh_env(registry_root);
+            let gh_env = resolve_daemon_gh_env(registry_root, repo)?;
             let mut cmd = gh_pr_list_command(registry_root, &gh_env, repo);
             cmd.args(["--state", "merged", "--search", sha, "--limit"])
                 .arg(COMMIT_SEARCH_LIMIT.to_string())

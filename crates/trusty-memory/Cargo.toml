@@ -32,7 +32,10 @@ name = "trusty-memory"
 # 0.26.0 (#6820): minor — `AppState` gained the public `machine` field. The struct
 # has public fields and is not `#[non_exhaustive]`, so a downstream struct literal
 # stops compiling; Cargo's 0.x rule puts that break in MINOR.
-version = "0.26.1"
+# 0.26.2 (#8267): patch — test-only stabilization in
+# `transport::uds_tests` following the trusty-common UDS retry/half-close
+# changes. No public item was removed or changed.
+version = "0.26.2"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -114,7 +117,7 @@ trusty-mcp = { workspace = true, features = ["daemon-bridge-json-rpc"] }
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-trusty-common = { path = "../trusty-common", version = "0.51", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds", "machine-tier"] }
+trusty-common = { path = "../trusty-common", version = "0.52", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds", "machine-tier"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -204,19 +207,16 @@ serial_test = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.51", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.52", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
-# #6555: `tests/uds_consumer_contract.rs` calls `tctl`'s real
-# `probe_daemon_http` against this daemon's real router. Every other arm hands
-# the daemon `json!({})` by hand, which is precisely what hid a probe that sent
-# no `params` at all and read a healthy daemon as `down`.
-#
-# PATH-ONLY, deliberately no `version`: `cargo package` strips a dev-dependency
-# that carries no version requirement, so this does NOT make trusty-memory's
-# publish wait for trusty-installer's. A `workspace = true` entry would carry
-# the version and create exactly that ordering constraint. No cycle either —
-# trusty-installer's own dependencies are trusty-common and trusty-progress.
-trusty-installer = { path = "../trusty-installer" }
+# #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
+# the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real
+# `probe_daemon_http` against this daemon's real router — which now lives in
+# `crates/trusty-crate-contracts/tests/memory_uds_consumer.rs` over NORMAL
+# dependencies on both crates. The edge added thirteen crates to every
+# `cargo test -p trusty-memory` and `cargo clippy -p trusty-memory
+# --all-targets`. `scripts/check_dev_dep_edges.sh` refuses a new edge of this
+# shape.
 
 [features]
 # Why (issue #226, renamed #6286): a library consumer that only needs

@@ -69,13 +69,35 @@ fn run_piped(
     extra_env: &[(&str, &str)],
     stdin_input: &str,
 ) -> (bool, String, String) {
-    run_piped_with_setup(extra_args, extra_env, stdin_input, |_| {})
+    run_piped_with_setup(extra_args, extra_env, stdin_input, |_| {}, || {})
+}
+
+/// Same as [`run_piped`], but blocks in `before_stdin()` after the child is
+/// spawned and before a single byte of `stdin_input` is written.
+///
+/// Why (#8355): a test whose subject is a BACKGROUND startup task cannot feed
+/// `/quit` up front. The REPL reads it the moment it reaches its read loop, so
+/// `run()` returns and `runtime::SHUTDOWN_GRACE`-bounded teardown cancels the
+/// background task mid-`await` — the child exits having never reached the
+/// state under test, and the test fails on its own "this never happened"
+/// diagnostic instead of on the behaviour it asserts. Gating the write on the
+/// real condition (never a sleep) makes the order deterministic.
+/// Test: `wedged_model_cache_cannot_block_process_exit`, this file's only
+/// gated caller.
+fn run_piped_gated(
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+    stdin_input: &str,
+    before_stdin: impl FnOnce(),
+) -> (bool, String, String) {
+    run_piped_with_setup(extra_args, extra_env, stdin_input, |_| {}, before_stdin)
 }
 
 /// Same as [`run_piped`], but calls `setup(tempdir_path)` after creating the
 /// isolated cwd and before spawning — lets a test seed fixture files (e.g. a
 /// minimal `assistant.toml`) into the isolated project without touching the
-/// real crate-root `.trusty-agents/`.
+/// real crate-root `.trusty-agents/`. `before_stdin` is [`run_piped_gated`]'s
+/// hook; pass `|| {}` when the child needs no gating.
 ///
 /// Also pins `$HOME` to a fresh, isolated tempdir by default (issue #3406
 /// follow-up). Why: since `runtime::startup::run_startup_init` now
@@ -94,6 +116,7 @@ fn run_piped_with_setup(
     extra_env: &[(&str, &str)],
     stdin_input: &str,
     setup: impl FnOnce(&Path),
+    before_stdin: impl FnOnce(),
 ) -> (bool, String, String) {
     let isolated_cwd = tempfile::tempdir().expect("create isolated tempdir for tagent cwd");
     setup(isolated_cwd.path());
@@ -110,12 +133,13 @@ fn run_piped_with_setup(
     let mut env: Vec<(&str, &str)> = vec![("TAGENT_NONINTERACTIVE", "1"), ("HOME", &home)];
     env.extend_from_slice(extra_env);
 
-    spawn_and_capture(
+    spawn_and_capture_gated(
         Path::new(BIN),
         isolated_cwd.path(),
         extra_args,
         &env,
         stdin_input,
+        before_stdin,
     )
 }
 
@@ -140,6 +164,30 @@ fn spawn_and_capture(
     env: &[(&str, &str)],
     stdin_input: &str,
 ) -> (bool, String, String) {
+    spawn_and_capture_gated(exe, cwd, args, env, stdin_input, || {})
+}
+
+/// [`spawn_and_capture`] with a condition gate: `before_stdin()` runs after the
+/// child is spawned and before `stdin_input` is written, so a caller can wait
+/// for the child to reach a state the input would otherwise race (#8355).
+///
+/// What: takes the child's stdin handle and starts the output-draining wait
+/// thread BEFORE calling the gate. Draining first matters — the gate can park
+/// this thread for a long time, and a child that filled the 64 KiB stdout pipe
+/// buffer meanwhile would block in `write` and never reach the condition the
+/// gate is waiting for. A no-op gate leaves the ungated callers' ordering
+/// unchanged. [`WAIT_TIMEOUT`] is charged from the write, not from the spawn,
+/// so a slow gate never eats the exit budget.
+/// Test: `wedged_model_cache_cannot_block_process_exit` exercises the gated
+/// path; every other `#[test]` in this file exercises the no-op one.
+fn spawn_and_capture_gated(
+    exe: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    stdin_input: &str,
+    before_stdin: impl FnOnce(),
+) -> (bool, String, String) {
     let mut cmd = Command::new(exe);
     cmd.args(args)
         .current_dir(cwd)
@@ -153,20 +201,22 @@ fn spawn_and_capture(
     }
 
     let mut child = cmd.spawn().expect("spawn tagent");
-    {
-        let mut stdin = child.stdin.take().expect("child stdin was piped");
-        stdin
-            .write_all(stdin_input.as_bytes())
-            .expect("write stdin");
-        // `stdin` drops here, closing the pipe (EOF) if the loop doesn't
-        // exit via `/quit` first.
-    }
+    let mut stdin = child.stdin.take().expect("child stdin was piped");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let out = child.wait_with_output();
         let _ = tx.send(out);
     });
+
+    before_stdin();
+
+    stdin
+        .write_all(stdin_input.as_bytes())
+        .expect("write stdin");
+    // Closing the pipe (EOF) ends the loop if `/quit` didn't.
+    drop(stdin);
+
     let out = rx
         .recv_timeout(WAIT_TIMEOUT)
         .unwrap_or_else(|_| {
@@ -267,8 +317,13 @@ fn plain_cli_defaults_active_agent_to_assistant_not_ctrl() {
     // exercise), not `ctrl` (the local-ollama machine-coordination
     // persona) — even though `TrustyAgentsRepl::new` itself still
     // constructs with `project_name = "ctrl"` / `active_persona = None`.
-    let (success, stdout, stderr) =
-        run_piped_with_setup(&["--plain"], &[], "/quit\n", seed_fixture_assistant_agent);
+    let (success, stdout, stderr) = run_piped_with_setup(
+        &["--plain"],
+        &[],
+        "/quit\n",
+        seed_fixture_assistant_agent,
+        || {},
+    );
     assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
     assert!(
         stdout.contains("Switched to: assistant"),
@@ -445,7 +500,16 @@ fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
 /// blocked and proves it actually got there — if fastembed's cache layout ever
 /// moves, the writer's `open` never returns and this test fails loudly rather
 /// than passing on an unreachable wedge.
-/// Test: itself. Against the pre-fix commit it fails on the 120s timeout.
+///
+/// #8355: `/quit` is written only AFTER that open returns. The watcher is
+/// fire-and-forget (`runtime::indexer::spawn_background_file_watcher`) and
+/// awaits a 500 ms daemon health probe before it ever reaches the model cache,
+/// so an up-front `/quit` raced it: teardown cancelled the task mid-`await`
+/// and the child exited having never touched the FIFO. Gating the write is
+/// what makes the wedge reached every run rather than most runs.
+/// Test: itself. Against the pre-fix commit the child never exits and the
+/// failure is `spawn_and_capture`'s `WAIT_TIMEOUT` panic — the wedge is still
+/// live at that point, so removing the shutdown bound still fails this test.
 #[cfg(unix)]
 #[test]
 fn wedged_model_cache_cannot_block_process_exit() {
@@ -480,18 +544,27 @@ fn wedged_model_cache_cannot_block_process_exit() {
         .to_str()
         .expect("tempdir path is valid UTF-8")
         .to_string();
-    let (success, _stdout, stderr) =
-        run_piped(&["--plain"], &[("HF_HOME", home_str.as_str())], "/quit\n");
+    let (success, _stdout, stderr) = run_piped_gated(
+        &["--plain"],
+        &[("HF_HOME", home_str.as_str())],
+        "/quit\n",
+        move || {
+            // The child holds stdin open until this returns, so the budget is
+            // the same "genuine load, not a hang" ceiling every other wait in
+            // this file uses — an unreachable wedge still fails, just later.
+            let reached = reached_rx.recv_timeout(WAIT_TIMEOUT).expect(
+                "child never opened the FIFO — fastembed's cache layout may have changed, so \
+                 this test was not exercising the wedge it claims to",
+            );
+            assert!(reached, "opening the FIFO's write end failed");
+        },
+    );
+    // The wedge is live and unkillable at this point: a blocking-pool thread is
+    // parked in the FIFO read forever. Exiting 0 anyway is the whole assertion.
     assert!(
         success,
         "tagent must still exit 0 with a wedged model cache; stderr:\n{stderr}"
     );
-
-    let reached = reached_rx.recv_timeout(Duration::from_secs(10)).expect(
-        "child never opened the FIFO — fastembed's cache layout may have changed, so this test \
-         was not exercising the wedge it claims to",
-    );
-    assert!(reached, "opening the FIFO's write end failed");
 }
 
 /// Why (#5944): `runtime::startup` resolves the directory it writes

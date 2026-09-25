@@ -404,6 +404,68 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
     (dir, override_guard)
 }
 
+/// A fake, executable `claude` first on `PATH`, plus the guard that restores
+/// `PATH` when the test ends (#7862).
+///
+/// Why: every route that reaches `ClaudeCodeAdapter::spawn_resume` resolves the
+/// `claude` binary before it types anything into the pane, so a test driving
+/// that route on a machine with no Claude Code install stops at the adapter and
+/// observes nothing past it — green on a developer laptop, red on every CI
+/// runner. Winning the lookup outright also stops a machine that DOES have
+/// `claude` from launching the operator's real one.
+/// What: writes `#!/bin/sh` + `exit 0` at `<tempdir>/claude`, mode 0755, and
+/// prepends that directory to `PATH` — `bin_resolve::resolve_binary` consults
+/// the live `PATH` before its well-known-dirs fallback. Both the directory and
+/// the previous `PATH` live in the returned guard, so the stub survives exactly
+/// as long as the test and `Drop` restores the environment on the unwind too.
+///
+/// Callers MUST be tagged `#[serial_test::serial]`: `PATH` is process-global.
+/// Test: `daemon::managed_routes::resume_claim_tests::the_claim_is_still_held_when_the_route_types_into_the_pane`.
+#[cfg(unix)]
+pub(crate) fn fake_claude_on_path() -> FakeClaudeOnPath {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = hermetic_temp_dir();
+    let exe = dir.path().join("claude");
+    std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write the fake claude");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod the fake claude");
+    let prev = std::env::var_os("PATH");
+    let mut entries = vec![dir.path().to_path_buf()];
+    if let Some(ref p) = prev {
+        entries.extend(std::env::split_paths(p));
+    }
+    let joined = std::env::join_paths(entries).expect("join PATH");
+    // SAFETY: callers are `#[serial]`, and `Drop` restores the previous value.
+    unsafe { std::env::set_var("PATH", joined) };
+    assert!(
+        trusty_common::bin_resolve::resolve_binary("claude").is_some_and(|found| found == exe),
+        "the planted stub must WIN the lookup, else the test it guards still \
+         depends on the host's own Claude Code install"
+    );
+    FakeClaudeOnPath { _dir: dir, prev }
+}
+
+/// The live half of [`fake_claude_on_path`] — see its doc.
+#[cfg(unix)]
+pub(crate) struct FakeClaudeOnPath {
+    /// Holds the stub's directory alive for the guard's lifetime.
+    _dir: TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(unix)]
+impl Drop for FakeClaudeOnPath {
+    fn drop(&mut self) {
+        // SAFETY: as in `fake_claude_on_path`.
+        unsafe {
+            match self.prev.take() {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
 /// Make `tracing` events reachable by a thread-local capturing subscriber, for
 /// the whole test process (#4931).
 ///

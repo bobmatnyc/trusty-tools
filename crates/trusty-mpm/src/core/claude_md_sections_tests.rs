@@ -413,6 +413,7 @@ fn content_sections_accept_a_project_override() {
     let package = bundled_fallback_package().expect("manifest parses");
     for section in [
         SectionId::Identity,
+        SectionId::AutonomousExecution,
         SectionId::Memory,
         SectionId::Search,
         SectionId::Workflow,

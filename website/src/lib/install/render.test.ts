@@ -44,7 +44,7 @@ function text(node: Element): string {
 }
 
 describe('every audience reaches the page', () => {
-	it('renders a tab and a panel for all nine', () => {
+	it('renders a tab and a panel for every audience', () => {
 		const root = render();
 		const tabs = root.querySelectorAll('[role="tab"]');
 		expect(tabs.length).toBe(AUDIENCES.length);

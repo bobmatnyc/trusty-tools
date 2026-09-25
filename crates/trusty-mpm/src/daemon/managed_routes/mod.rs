@@ -23,8 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
+use crate::session_manager::decommission_force::ProvisioningDirt;
 
 pub mod activity;
+pub(crate) mod auto_relaunch;
 pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;
@@ -62,6 +64,9 @@ pub(crate) mod residency;
 pub mod adopt_worktree;
 pub mod rename;
 mod resume_error;
+// #8233 item 1: the resume claim's span across `resume_managed`.
+#[cfg(test)]
+mod resume_claim_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
@@ -336,6 +341,8 @@ pub struct StoreHealthPayload {
 /// session had an owned workspace.
 /// Test: `decommission_workspace_removed_reflects_ownership` in managed_routes tests.
 #[derive(Debug, Serialize)]
+// #7660 owner ruling 2026-09-24: a later field is not a semver break.
+#[non_exhaustive]
 pub struct DecommissionResponse {
     /// Flat session summary (post-tombstone: state=decommissioned, workspace_path=None).
     #[serde(flatten)]
@@ -350,6 +357,18 @@ pub struct DecommissionResponse {
     /// Used by the CLI to locate the base git repo and run `git worktree prune`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path_was: Option<String>,
+    /// #7660: why decommission kept a workspace — the dirty-tree guard, a
+    /// refused `--force`, the containment guard, or a failed removal. Under
+    /// `--force` it also carries the keep of a workspace tm never removes (a
+    /// main checkout, a local-path or adopted directory). Absent when the
+    /// workspace was removed or already gone, and for a plain decommission's
+    /// by-design keep. The CLI exits non-zero when this is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes.
+    /// Informational — the CLI prints it and exits 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_by_design: Option<String>,
 }
 
 /// Query parameters for POST /api/v1/sessions/managed/{id}/delete (#2012).
@@ -655,6 +674,10 @@ pub async fn resume_managed_session(
 pub struct DecommissionQuery {
     #[serde(default)]
     pub record_only: bool,
+    /// #7660: `--force` — excuse tm's own provisioning files in the dirty-tree
+    /// guard. Never excuses other changes or unpushed commits.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
@@ -676,7 +699,16 @@ pub async fn decommission_managed_session(
     AxumPath(id_str): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<DecommissionQuery>,
 ) -> impl IntoResponse {
-    cores::decommission_core(&state, &id_str, q.record_only).await // #6288
+    cores::decommission_core(&state, &id_str, q.record_only, dirt_policy(q.force)).await // #6288
+}
+
+/// Map the wire's `force` flag onto the decommission dirt policy (#7660).
+pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
+    if force {
+        ProvisioningDirt::Discard
+    } else {
+        ProvisioningDirt::Refuse
+    }
 }
 
 #[cfg(test)]

@@ -681,9 +681,12 @@ assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Ava
 #
 # 5 -> 6: the `rustdoc-links` job (#5973) builds the whole workspace's
 # documentation, so it carries that disk pressure too.
+#
+# 6 -> 7: the `affected-test` legs (#7777) run `cargo test` for up to the
+# whole workspace, the same build `test-shard` does.
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
   "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
-assert_eq "all six disk-reclaim jobs call the helper" "6" \
+assert_eq "all seven disk-reclaim jobs call the helper" "7" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------
@@ -940,7 +943,8 @@ unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
-assert_eq "every apt step routes through the wrapper" "12" \
+# 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
+assert_eq "every apt step routes through the wrapper" "13" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1016,9 @@ assert_eq "the crate exclusions"      "true"  "$(gate_inputs_of 'scripts/semver-
 assert_eq "the feature exclusions"    "true"  "$(gate_inputs_of 'scripts/semver-checks-feature-exclusions.tsv')"
 assert_eq "a replayed tool capture"   "true"  "$(gate_inputs_of 'scripts/test-data/semver-gate/clean.out')"
 assert_eq "a rustdoc JSON fixture"    "true"  "$(gate_inputs_of 'scripts/test-data/semver-types/baseline.json')"
+assert_eq "the accepted-break step"   "true"  "$(gate_inputs_of 'scripts/semver_ci_accept.sh')"
+assert_eq "the accepted-break library" "true" "$(gate_inputs_of 'scripts/lib/semver_accepted_breaks.sh')"
+assert_eq "the break it replays"      "true"  "$(gate_inputs_of 'scripts/test-data/preflight-check5/break-lints.out')"
 assert_eq "crate source"              "false" "$(gate_inputs_of 'crates/trusty-common/src/lib.rs')"
 assert_eq "a manifest"                "false" "$(gate_inputs_of 'crates/trusty-common/Cargo.toml')"
 assert_eq "documentation"             "false" "$(gate_inputs_of 'docs/reference/semver-gate.md')"

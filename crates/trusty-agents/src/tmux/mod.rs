@@ -14,3 +14,6 @@ pub mod session;
 pub use error::{Result, TmuxError};
 pub use orchestrator::TmuxOrchestrator;
 pub use session::{TmuxPane, TmuxSession};
+
+#[cfg(test)]
+mod exact_target_tests;

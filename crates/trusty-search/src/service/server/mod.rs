@@ -38,6 +38,8 @@ mod indexes_relocate;
 mod quantize_handlers;
 mod reindex_handlers;
 mod residency_sweep;
+// #4289: the create-index-time containment guard over registered index roots.
+mod root_overlap;
 mod router;
 mod routing;
 mod search;
@@ -99,6 +101,9 @@ mod tests_6363;
 // #6380: a delete whose expected root moved must be refused, not applied.
 #[cfg(test)]
 mod tests_6380;
+// #8438: `delete_data` removes the directory the registry names, per source.
+#[cfg(test)]
+mod tests_8438;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
@@ -113,6 +118,9 @@ mod tests_5349;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;
+// #4289: the create-index-time root-containment guard.
+#[cfg(test)]
+mod tests_4289;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]

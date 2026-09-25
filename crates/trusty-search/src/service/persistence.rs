@@ -680,69 +680,62 @@ pub fn hnsw_staging_path(index_id: &str) -> Result<PathBuf> {
     Ok(index_data_dir(index_id)?.join("hnsw.reindex-staging.usearch"))
 }
 
-/// Resolve the HNSW snapshot path for `entry`, routing to colocated or legacy
-/// storage based on `entry.colocated`.
+/// Resolve `entry`'s storage directory through the registry-named layout
+/// (#8438).
 ///
-/// Why: the persistence path helpers take only an `index_id` but colocated
-/// indexes need the `root_path` to find `<root>/.trusty-search/hnsw.usearch`.
-/// This helper unifies both cases so callers do not have to branch.
-/// What: when `entry.colocated`, returns
-/// `<root_path>/.trusty-search/hnsw.usearch`; otherwise delegates to `hnsw_path`.
+/// Why: the one resolver both reads and writes share, so a read and a write
+/// for the same index can never disagree about where the index lives.
+/// What: delegates to `StorageLayout::for_entry(entry).storage_dir(..)` —
+/// `<root>/.trusty-search/` when `entry.colocated`, else
+/// `<data_dir>/indexes/<id>/`, with the #8438 write guard applied.
+/// Test: `service::storage_layout::storage_layout_8438_tests`.
+// #8438: private — the `*_for_entry` helpers below are its only callers.
+fn storage_dir_for(entry: &PersistedIndex) -> Result<PathBuf> {
+    crate::service::storage_layout::StorageLayout::for_entry(entry)
+        .storage_dir(&entry.id, &entry.root_path)
+}
+
+/// `storage_dir_for(entry)/<name>`, via the same resolver.
+fn storage_file_for(entry: &PersistedIndex, name: &str) -> Result<PathBuf> {
+    Ok(storage_dir_for(entry)?.join(name))
+}
+
+/// Resolve the HNSW snapshot path for `entry` through `storage_dir_for`.
+///
+/// Why: colocated indexes need the `root_path`, which the id-only helpers lack.
+/// What: `<storage dir>/hnsw.usearch`.
 /// Test: `colocated_hnsw_path_resolves_under_root` in `colocated_storage` tests.
 pub fn hnsw_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
-    if entry.colocated {
-        crate::service::colocated_storage::colocated_hnsw_path(&entry.root_path)
-    } else {
-        hnsw_path(&entry.id)
-    }
+    storage_file_for(entry, crate::service::storage_layout::HNSW_FILE)
 }
 
-/// Resolve the redb corpus path for `entry`, routing to colocated or legacy
-/// storage based on `entry.colocated`.
+/// Resolve the redb corpus path for `entry` through `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
-/// What: when `entry.colocated`, returns
-/// `<root_path>/.trusty-search/index.redb`; otherwise delegates to
-/// `corpus_redb_path`.
+/// What: `<storage dir>/index.redb`.
 /// Test: covered by colocated-index persistence integration tests.
 pub fn corpus_redb_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
-    if entry.colocated {
-        crate::service::colocated_storage::colocated_redb_path(&entry.root_path)
-    } else {
-        corpus_redb_path(&entry.id)
-    }
+    storage_file_for(entry, crate::service::storage_layout::REDB_FILE)
 }
 
-/// Resolve the schema-version stamp path for `entry`, routing to colocated or
-/// legacy storage based on `entry.colocated`.
+/// Resolve the schema-version stamp path for `entry` through
+/// `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
-/// What: when `entry.colocated`, returns
-/// `<root_path>/.trusty-search/schema_version.json`; otherwise delegates to
-/// `schema_version_path`.
+/// What: `<storage dir>/schema_version.json`.
 /// Test: covered by colocated-index persistence integration tests.
 pub fn schema_version_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
-    if entry.colocated {
-        crate::service::colocated_storage::colocated_schema_version_path(&entry.root_path)
-    } else {
-        schema_version_path(&entry.id)
-    }
+    storage_file_for(entry, crate::service::storage_layout::SCHEMA_VERSION_FILE)
 }
 
-/// Resolve the staging redb corpus path for `entry`, routing to colocated or
-/// legacy storage based on `entry.colocated`.
+/// Resolve the staging redb corpus path for `entry` through
+/// `storage_dir_for`.
 ///
 /// Why: see `hnsw_path_for_entry`.
-/// What: when `entry.colocated`, returns
-/// `<root_path>/.trusty-search/index.redb.tmp`; otherwise delegates to
-/// `corpus_redb_tmp_path`.
+/// What: `<storage dir>/index.redb.tmp`.
 /// Test: covered by colocated-index persistence integration tests.
 pub fn corpus_redb_tmp_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
-    if entry.colocated {
-        crate::service::colocated_storage::colocated_redb_tmp_path(&entry.root_path)
-    } else {
-        corpus_redb_tmp_path(&entry.id)
-    }
+    storage_file_for(entry, crate::service::storage_layout::REDB_TMP_FILE)
 }
 
 /// Load the registry file. Missing file → empty registry (first-run case).

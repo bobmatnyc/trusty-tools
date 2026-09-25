@@ -545,34 +545,6 @@ impl DaemonState {
         staled
     }
 
-    /// Terminalize every non-terminal delegation naming `agent_id` (#7602).
-    ///
-    /// Why: the operator repair verb's only write. It is separate from
-    /// [`Self::stale_delegations_of_dead_session`] because the two record
-    /// DIFFERENT facts: that sweep says "the owner is gone, tracking gave up"
-    /// and writes the non-terminal [`DelegationStatus::Stale`], which the
-    /// reclaim gate still reads as live; this says "an operator ended a record
-    /// nothing else could end" and writes a terminal status, which is what
-    /// actually releases the agent's worktree.
-    ///
-    /// What: [`DelegationStatus::Cancelled`] — never `Completed`, which would
-    /// claim the agent finished. The gate deciding whether this may run at all
-    /// is [`crate::daemon::services::delegation_repair::decide`]; this function
-    /// performs the write and nothing else.
-    /// Test: `repair_ends_a_stuck_record_of_a_dead_owner_7602`.
-    pub(crate) fn cancel_stuck_delegations_of_agent(&self, agent_id: &str) -> usize {
-        let mut ended = 0;
-        for mut entry in self.delegations.iter_mut() {
-            let d = entry.value_mut();
-            if d.agent_id.as_deref() != Some(agent_id) || d.status.is_terminal() {
-                continue;
-            }
-            d.status = DelegationStatus::Cancelled;
-            ended += 1;
-        }
-        ended
-    }
-
     /// Gather the tmux names tracked by BOTH session registries.
     ///
     /// Why: the orphan-GC's safety hinges on "absent from BOTH registries". The
@@ -898,6 +870,29 @@ impl DaemonState {
         include_reconciled: bool,
         exclude_session: Option<SessionId>,
     ) -> Vec<String> {
+        self.shared_tree_records(
+            cwd,
+            exclude_tool_use_id,
+            include_reconciled,
+            exclude_session,
+        )
+        .into_iter()
+        .map(|d| d.agent)
+        .collect()
+    }
+
+    /// [`Self::shared_tree_agents`]' one filter, returning the records (#8257),
+    /// so the dispatch deny and `tm repair delegation --list` can name each
+    /// blocking record's id, owner and age. `(cwd, exclude, true, None)` is
+    /// exactly [`Self::shared_tree_occupants`].
+    /// Test: `shared_tree_dispatch_route_names_each_blocking_record_8257`.
+    pub(crate) fn shared_tree_records(
+        &self,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+        include_reconciled: bool,
+        exclude_session: Option<SessionId>,
+    ) -> Vec<Delegation> {
         let now = chrono::Utc::now();
         self.delegations
             .iter()
@@ -921,7 +916,7 @@ impl DaemonState {
                         d.isolation.as_deref(),
                     )
             })
-            .map(|e| e.value().agent.clone())
+            .map(|e| e.value().clone())
             .collect()
     }
 
@@ -1256,9 +1251,15 @@ impl DaemonState {
     /// the fleet, the more recoverable of the two mistakes (`tm session stop`
     /// still records Deliberate on that host and still sticks).
     ///
+    /// #8233 — a session whose resume is IN FLIGHT is skipped entirely. See the
+    /// guard's own comment in the body for why a missing `tmux_name` proves
+    /// nothing while a resume is recreating that very session.
+    ///
     /// Test: `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
-    /// `reap_leaves_a_whole_server_loss_auto_resumable` in `super::tests`.
+    /// `reap_leaves_a_whole_server_loss_auto_resumable`,
+    /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
+    /// `super::tests`.
     pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
         let mgr = self.session_manager().await;
         let records = mgr.list().await;
@@ -1272,6 +1273,22 @@ impl DaemonState {
             if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
                 && !live.contains(&r.tmux_name)
             {
+                // #8233 acceptance item 4: `resume_inner`'s recreate branch
+                // KILLS and rebuilds this tmux session, so a `live` set snapshot
+                // taken before that kill reports the name missing while the
+                // resume is still mid-flight. Stopping here kills the pane the
+                // resume just made and stamps `Deliberate`, which no automatic
+                // path ever revives. The claim is not a lock this sweep can
+                // take (it must decline, not queue), so it reads it — the same
+                // rule `mark_runtime_exited_stopped` follows.
+                if mgr.is_resume_in_flight(&r.id) {
+                    tracing::info!(
+                        id = %r.id,
+                        name = %r.tmux_name,
+                        "reaper: a resume is in flight for this session; leaving it alone (#8233)"
+                    );
+                    continue;
+                }
                 match mgr.stop_with_cause(&r.id, cause).await {
                     Ok(_) => tracing::info!(
                         id = %r.id,

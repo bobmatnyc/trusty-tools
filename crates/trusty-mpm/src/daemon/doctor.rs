@@ -122,6 +122,15 @@ use doctor_skill_drift::check_skill_staleness;
 mod doctor_binary_provenance;
 use doctor_binary_provenance::check_binary_provenance;
 
+// #8482: the row above orders two RELEASE labels against cargo's registry
+// ledger and never reads the source tree; this one compares the binary's
+// EMBEDDED assets against `origin/main`, which is the only way a binary whose
+// bundled skills lag the repo is visible at all — `skill_staleness` compares
+// deployed files against those same embedded assets and is structurally blind.
+#[path = "doctor_bundled_asset_lag.rs"]
+mod doctor_bundled_asset_lag;
+use doctor_bundled_asset_lag::check_bundled_asset_lag;
+
 // #4605: the reachability half for SKILLS — `check_skill_staleness` above
 // compares against the deploy MANIFEST, so a bundled skill absent from that
 // manifest is outside everything it can see and reports a clean `Ok` while the
@@ -414,7 +423,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_six_checks`,
+/// Test: `run_doctor_produces_sixty_one_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -593,6 +602,17 @@ pub(crate) async fn run_doctor_with_claims(
     // since an audit that did not run has not found the tickets clean.
     checks.push(check_issue_audit_recent(project_dir).await);
     checks.push(check_oauth_token_config());
+    // #8236: the row above asks whether a credential is CONFIGURED; this asks
+    // whether one is sitting in plaintext in a user-readable LaunchAgent plist.
+    // Read-only and key-only — it never prints a credential value.
+    // `tm doctor --fix` removes the entries.
+    checks.push(crate::daemon::doctor_launchd_secrets::check_launchd_plist_secrets(&home));
+    // #8236 item 8: and now the other half — once the value is OUT of the
+    // plist, can the daemon's own resolver still get it? Bounded, so this row
+    // cannot hang on a Keychain approval dialog either.
+    // #8236: `spawn_blocking`, because each provider can park on the store's
+    // 3 s bound and this runs on a tokio worker serving `GET /api/v1/doctor`.
+    checks.push(crate::daemon::doctor_credential_reach::check_credential_reach_async().await);
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
     // #7490: the fourth is the inverse of the first — a lifecycle event a
@@ -639,6 +659,12 @@ pub(crate) async fn run_doctor_with_claims(
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
     checks.push(check_binary_provenance());
+    // #8482: and this is the half the row above cannot reach — the binary's
+    // own embedded skill assets against `origin/main`. Skips outside
+    // `bobmatnyc/trusty-tools`, where the comparison is meaningless; UNKNOWN,
+    // never Ok, whenever the source tree could not be read. Read-only: it
+    // never fetches, installs, or deploys.
+    checks.push(check_bundled_asset_lag(project_dir));
     // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
     // every write while `tm ls` keeps serving the daemon's in-memory copy, so
     // without this probe the condition is invisible until someone attempts a
@@ -670,6 +696,14 @@ pub(crate) async fn run_doctor_with_claims(
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
     checks.push(check_tmux_options());
+    // #8415: a tmux server inherits the launchd class of the job that started
+    // it; `Background` pinned every tm session to priority 4. Read-only.
+    checks.push(
+        super::doctor_launchd_process_type::check_launchd_process_type_in(
+            &super::doctor_launchd_process_type::launch_agents_dir(&home),
+        ),
+    );
+    checks.push(super::doctor_tmux_priority::check_tmux_priority());
     // #6529: every tmux pane holds a pseudo-terminal and macOS caps the total,
     // so a session leak becomes a bare ENXIO on the next spawn with nothing
     // naming the cause. Read-only — it counts device nodes and reaps nothing.
@@ -769,7 +803,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_six_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_one_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

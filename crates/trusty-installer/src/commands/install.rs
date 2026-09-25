@@ -445,31 +445,40 @@ async fn install_all(
                     m.binary.clone(),
                     binary_size(&installed.path),
                 ));
-                // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
+                // Phase 7: bootstrap trusty-mpm supervisor plist.
                 // #3527: gated behind the SAME `--no-service` /
                 // `TCTL_NO_SERVICE_BOOTSTRAP` decision as every other daemon —
                 // previously this ran unconditionally and could tear down /
                 // downgrade a live production supervisor regardless of the
                 // opt-out. A refusal from the downgrade guard inside
-                // `install_mpm_supervisor` also surfaces here as a (non-fatal)
-                // `Err`, which correctly leaves the running daemon untouched.
+                // `install_mpm_supervisor` is informational and leaves the
+                // running daemon untouched.
                 // #3554: passes `installed.path` — the CONCRETE binary this
                 // install just health-gated — as the supervisor's candidate
                 // version source, never a PATH-shadowable name lookup.
+                // #8415: a failed plist write or reload fails the install (it
+                // leaves the old job running); only the guard's refusal is info.
+                let mut supervisor_outcome = None;
                 if m.crate_name == "trusty-mpm" {
                     if plans_mpm_supervisor_bootstrap(m, service_enabled) {
-                        if let Err(e) =
-                            super::plist_bootstrap::install_mpm_supervisor(force, &installed.path)
-                        {
-                            let msg = format!(
-                                "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
-                            );
-                            if live {
-                                checklist.note(&format!("info: {msg}"));
+                        let verdict = super::plist_bootstrap::supervisor_bootstrap_verdict(
+                            force,
+                            &installed.path,
+                        );
+                        let msg = verdict.note();
+                        if live {
+                            let prefix = if verdict.is_failure() {
+                                "error"
                             } else {
-                                let _ = narr.info(&msg);
-                            }
+                                "info"
+                            };
+                            checklist.note(&format!("{prefix}: {msg}"));
+                        } else if verdict.is_failure() {
+                            let _ = narr.error(&msg);
+                        } else {
+                            let _ = narr.info(&msg);
                         }
+                        supervisor_outcome = Some(verdict.service_outcome());
                     } else {
                         let msg = "trusty-mpm supervisor bootstrap skipped (--no-service / \
                                     TCTL_NO_SERVICE_BOOTSTRAP)";
@@ -541,7 +550,9 @@ async fn install_all(
                 // one) and folds into `service_ok` / `all_ok` / the exit code
                 // (#2566 review — `--json` previously reported `all_ok: true`
                 // even when every daemon's service bootstrap had failed).
-                let (service_ok, service_detail) = if plans_service_bootstrap(m, service_enabled) {
+                let (service_ok, service_detail) = if let Some(outcome) = supervisor_outcome {
+                    outcome
+                } else if plans_service_bootstrap(m, service_enabled) {
                     // #4964 Phase 0.2: pass the CONCRETE path this install just
                     // wrote. Passing a bare name let `which::which` pick a
                     // stale earlier-on-PATH copy, whose `service install` bakes

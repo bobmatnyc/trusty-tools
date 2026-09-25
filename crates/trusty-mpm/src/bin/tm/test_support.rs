@@ -110,6 +110,59 @@ pub(crate) fn hermetic_temp_dir() -> TempDir {
         .expect("create hermetic test temp dir")
 }
 
+/// Raise the process-global tracing level so a thread-local capture can see
+/// `warn!` (#4931).
+///
+/// Why: `tracing`'s macros short-circuit on a process-global `MAX_LEVEL` that
+/// only a GLOBAL default subscriber raises, so a `with_default`/`set_default`
+/// capture records nothing unless something in the binary installed one first.
+/// `trusty_mpm::test_support::enable_event_capture` is the library's copy and is
+/// not reachable from this bin target; this is the bin's one copy (#8405 review).
+/// What: installs a bare registry once per process, then asserts the resulting
+/// level admits `WARN`, so a filtered global installed elsewhere fails here by
+/// name instead of as an empty capture.
+/// Test: `compress`'s warning-capture test and
+/// `session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config`
+/// are vacuous without it.
+pub(crate) fn enable_event_capture() {
+    static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
+    RAISE_MAX_LEVEL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+    assert!(
+        tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
+        "the process-global tracing level is {:?}, which discards WARN before \
+         any subscriber sees it (#4931)",
+        tracing::level_filters::LevelFilter::current()
+    );
+}
+
+/// A state root whose `config.yaml` sets `tmux.alternate_screen` (#8405).
+///
+/// Why: every CLI launch seam reads the renderer from a config root; its
+/// wiring test needs one holding a known value.
+/// What: a hermetic temp dir containing `config.yaml` with
+/// `tmux: { alternate_screen: <value> }`.
+/// Test: used by each `*_follows_the_configured_renderer` test.
+pub(crate) fn config_root_with_alternate_screen(alternate_screen: bool) -> TempDir {
+    let root = hermetic_temp_dir();
+    std::fs::write(
+        root.path().join("config.yaml"),
+        format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
+    )
+    .expect("write config.yaml");
+    root
+}
+
+/// The renderer operand a launch line carries for `alternate_screen` (#8405).
+pub(crate) fn renderer_operand(alternate_screen: bool) -> &'static str {
+    if alternate_screen {
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "
+    } else {
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

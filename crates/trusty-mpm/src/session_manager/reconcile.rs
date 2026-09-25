@@ -482,7 +482,20 @@ impl SessionManager {
             }
         }
 
-        if auto_resume && !to_resume.is_empty() {
+        // #8233 (owner ruling 2026-09-18): boot reconcile runs INSIDE the
+        // daemon's `session_manager()` initialisation, before the daemon can
+        // install the runtime relauncher — so resuming here would mark records
+        // `Active` behind panes with nothing in them, which is the fleet state
+        // the owner observed after a restart. Leaving them `Stopped` is both
+        // truthful and resumable: the supervisor's next sweep has a relauncher
+        // and resumes them through the real adapter path.
+        if auto_resume && !to_resume.is_empty() && self.relauncher().is_none() {
+            info!(
+                pending = to_resume.len(),
+                "reconcile: auto_resume deferred to the supervisor — no runtime relauncher is \
+                 installed yet, and a resume without one would mark a bare pane active (#8233)"
+            );
+        } else if auto_resume && !to_resume.is_empty() {
             info!(
                 "reconcile: auto_resume=true, resuming {} stopped sessions",
                 to_resume.len()

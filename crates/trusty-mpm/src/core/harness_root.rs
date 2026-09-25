@@ -114,7 +114,12 @@ pub(crate) fn protected_state_in(dir: &Path) -> Option<String> {
 }
 
 /// Environment variable carrying the managed session id inside a tm pane.
-const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";
+///
+/// // #8233: `pub` so `runtime::launch_spec` sets the same name it is read from
+/// here. The pane-shell `export` that used to publish it is now an `env` entry
+/// on the spawned process, and a second spelling of the name would silently
+/// break the in-place relaunch (#2023 component C).
+pub const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";
 
 /// Session-directory segment for a launch with no managed session identity.
 ///

@@ -222,8 +222,14 @@ pub enum DelegationSource {
 /// `parent` lets the TUI reconstruct that tree from a flat list.
 /// What: pairs the delegating relationship with the target agent, its model
 /// tier, current status, and the circuit-breaker state for that agent.
+///
+/// `#[non_exhaustive]` since #8261: the record has gained fields in three
+/// consecutive issues, and every one of them would be a breaking change for an
+/// out-of-crate struct literal. Nothing outside `trusty-mpm` builds one today,
+/// so the attribute costs nothing and stops the next field from being one.
 /// Test: `delegation_round_trips`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Delegation {
     /// Unique id for this delegation.
     pub id: DelegationId,
@@ -269,6 +275,41 @@ pub struct Delegation {
     /// Working directory the dispatch was issued from, when known.
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
+    /// Which builder slot this delegation leases, when it is a builder (#8261).
+    ///
+    /// Why: the lease IS this record (see `daemon::state::builder_slots`), so
+    /// the slot index belongs on it too — a parallel map would be a second
+    /// lifecycle to keep in sync, and the reason #6892 put the lease here in the
+    /// first place. Recording the INDEX rather than the path keeps the record
+    /// independent of where the operator moved `builders.slot_pool_root`.
+    /// What: `Some(n)` for a builder admitted since #8261; `None` for every
+    /// non-builder, and for a record written by a daemon predating it.
+    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
+    /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
+    #[serde(default)]
+    pub builder_slot: Option<u32>,
+    /// The private `CARGO_TARGET_DIR` this builder's slot resolved to (#8261).
+    ///
+    /// Why: the INDEX alone cannot be handed to an engineer — the path depends on
+    /// `builders.slot_pool_root` and on the repo identity, both of which the
+    /// daemon resolves and the hook does not. Recording the resolved path is what
+    /// lets the guard put it in the dispatch brief without re-deriving it.
+    /// What: `Some(dir)` once [`SlotPool::reserve_path`] has found the slot
+    /// seeded; `None` for a non-builder, for a builder admitted by a daemon
+    /// predating this field, and for one admitted onto a slot whose seed had not
+    /// run yet (#8261 critic round).
+    ///
+    /// [`SlotPool::reserve_path`]: crate::core::builder_slot_pool::SlotPool::reserve_path
+    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    #[serde(default)]
+    pub builder_slot_dir: Option<std::path::PathBuf>,
+    /// How [`Self::builder_slot_dir`] came to exist, rendered (#8261).
+    ///
+    /// Why: a cold slot and a clone-seeded one build at very different speeds, so
+    /// the operator surface has to be able to say which happened.
+    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    #[serde(default)]
+    pub builder_slot_seed: Option<String>,
     /// The working tree the subagent is actually running in, when it differs
     /// from [`Self::cwd`] (#4311).
     ///
@@ -353,6 +394,27 @@ pub struct Delegation {
     /// possibly-live record on that clock (#2864 re-review).
     #[serde(default)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Who ended this record through `tm repair delegation`, and on what
+    /// basis (#8257). `None` for every record no operator repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<DelegationRepair>,
+}
+
+/// The audit entry a `tm repair delegation` write leaves on the record (#8257).
+///
+/// Why: the owner ruling lets a live session clear its own record on its own
+/// word, so the record must say whose word ended it and why.
+/// What: the caller's session when the daemon could establish one, the basis
+/// (e.g. `owner-attested finished (#8257)`), and when.
+/// Test: `the_owning_session_clears_its_own_live_record_8257`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationRepair {
+    /// The session that asked for the repair, when it was established.
+    pub by_session: Option<SessionId>,
+    /// Why the record was allowed to end.
+    pub reason: String,
+    /// When the repair was written (UTC).
+    pub at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Delegation {
@@ -383,8 +445,12 @@ impl Delegation {
             last_agent_cwd: None,
             stale_by_agent_type: false,
             isolation: None,
+            builder_slot: None,
+            builder_slot_dir: None,
+            builder_slot_seed: None,
             started_at: None,
             ended_at: None,
+            repair: None,
         }
     }
 
@@ -425,8 +491,12 @@ impl Delegation {
             last_agent_cwd: None,
             stale_by_agent_type: false,
             isolation: None,
+            builder_slot: None,
+            builder_slot_dir: None,
+            builder_slot_seed: None,
             started_at: Some(now),
             ended_at: None,
+            repair: None,
         }
     }
 }

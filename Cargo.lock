@@ -6645,7 +6645,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11396,7 +11396,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11464,7 +11464,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
- "tga",
  "thiserror 1.0.69",
  "tokenizers 0.21.4",
  "tokio",
@@ -11488,10 +11487,7 @@ dependencies = [
  "tree-sitter-scala 0.24.1",
  "tree-sitter-swift",
  "tree-sitter-typescript",
- "trusty-audit",
  "trusty-common",
- "trusty-console",
- "trusty-installer",
  "trusty-mcp",
  "trusty-review",
  "which 6.0.3",
@@ -11636,7 +11632,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.51.1"
+version = "0.52.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11754,6 +11750,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-crate-contracts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tga",
+ "tokio",
+ "trusty-analyze",
+ "trusty-audit",
+ "trusty-common",
+ "trusty-console",
+ "trusty-installer",
+ "trusty-memory",
+ "trusty-mpm",
+ "trusty-review",
+]
+
+[[package]]
 name = "trusty-cto-db"
 version = "0.1.3"
 dependencies = [
@@ -11828,7 +11845,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.13.6"
+version = "0.13.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11877,7 +11894,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11894,7 +11911,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11927,14 +11944,13 @@ dependencies = [
  "tower",
  "tracing",
  "trusty-common",
- "trusty-installer",
  "trusty-mcp",
  "uuid",
 ]
 
 [[package]]
 name = "trusty-mpm"
-version = "1.6.3"
+version = "1.7.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11984,7 +12000,6 @@ dependencies = [
  "trusty-common",
  "trusty-mcp",
  "trusty-progress",
- "trusty-review",
  "unicode-width",
  "utoipa",
  "utoipa-swagger-ui",
@@ -12059,14 +12074,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-common",
- "trusty-console",
- "trusty-installer",
  "trusty-mcp",
 ]
 
 [[package]]
 name = "trusty-search"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "anyhow",
  "arc-swap",

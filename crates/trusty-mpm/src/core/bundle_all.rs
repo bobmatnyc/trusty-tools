@@ -195,6 +195,25 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/tm-slack.md", TM_SLACK),
     // --- Issue #7527 (epic #7517): tm secrets operator/PM reference skill ---
     overwrite("skills/tm-secrets.md", TM_SECRETS),
+    // --- Issue #8376 (Part A): tm-epic tracker + phase-issue skill, entry
+    // file plus four references/*.md (templates, gh procedure, anti-patterns) ---
+    overwrite("skills/tm-epic.md", TM_EPIC),
+    overwrite(
+        "skills/tm-epic/references/tracker-template.md",
+        TM_EPIC_TRACKER_TEMPLATE,
+    ),
+    overwrite(
+        "skills/tm-epic/references/phase-template.md",
+        TM_EPIC_PHASE_TEMPLATE,
+    ),
+    overwrite(
+        "skills/tm-epic/references/manual-procedure.md",
+        TM_EPIC_MANUAL_PROCEDURE,
+    ),
+    overwrite(
+        "skills/tm-epic/references/anti-patterns.md",
+        TM_EPIC_ANTI_PATTERNS,
+    ),
     // --- DOC-28 R1: canonical self-description doc ---
     overwrite("docs/WHAT-IS-TRUSTY-MPM.md", WHAT_IS_TRUSTY_MPM),
     // --- Issue #2034: architecture doc covering memory/sessions/search ---

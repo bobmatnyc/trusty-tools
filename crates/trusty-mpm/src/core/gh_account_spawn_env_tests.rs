@@ -37,6 +37,7 @@ use super::{
     GH_TOKEN_ENV_VAR, GH_USER_ENV_VAR, find_pinned_gh_identity,
     resolve_gh_account_env_for_registry, resolve_gh_account_env_with,
 };
+use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe, migrated_dir};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::Project;
 use crate::project::ProjectRegistry;
@@ -377,6 +378,144 @@ async fn resolve_gh_account_env_for_registry_registered_without_gh_account_is_no
     assert_eq!(found, None);
 }
 
+/// 🔴 #5850 REGRESSION: an unpinned duplicate record for the same repository
+/// must not hide the pinned one from a session spawn.
+///
+/// Why this shape: `ProjectRegistry::list` returns records in `HashMap` order,
+/// so the old first-match lookup picked an arbitrary record. Sixteen unpinned
+/// duplicates make that pick land on an unpinned record almost every run
+/// (16 in 17), which is enough to fail against the first-match code.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_skips_an_unpinned_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    for i in 0..16 {
+        registry
+            .register(project(
+                &format!("widget-{i:02}"),
+                "https://github.com/acme/widget.git",
+                None,
+            ))
+            .await
+            .expect("register");
+    }
+    registry
+        .register(project(
+            "widget",
+            "https://github.com/acme/widget",
+            Some("bobmatnyc"),
+        ))
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("the pinned record must be found past its unpinned duplicates");
+    assert_eq!(found.account.as_deref(), Some("bobmatnyc"));
+}
+
+/// 🔴 #5850 REGRESSION: two records pinning the SAME login give the session the
+/// one carrying a `config_dir`, not the global account.
+///
+/// Why: the `seed_from_config` record (login only) and the `tm --user` record
+/// (login plus scoped dir) are one identity. Treating them as a conflict spawned
+/// the session unpinned.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    registry
+        .register(project(
+            "jev",
+            "https://github.com/acme/widget",
+            Some("bob-duetto"),
+        ))
+        .await
+        .expect("register");
+    registry
+        .register(Project {
+            gh_account: Some("bob-duetto".to_string()),
+            ..project_with_config_dir(
+                "jev-matching",
+                "https://github.com/acme/widget",
+                &config_dir,
+            )
+        })
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("one login must resolve to a pin");
+    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
+}
+
+/// 🔴 #5850 REGRESSION: a no-login `config_dir` record next to a login record on
+/// the same dir gives the session that dir AND the login.
+///
+/// Why: the login keeps `configured_account_pair` enforcement armed; losing it,
+/// or refusing the pair, spawned the session as the global account.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    registry
+        .register(Project {
+            gh_account: None,
+            ..project_with_config_dir("jev", "https://github.com/acme/widget", &config_dir)
+        })
+        .await
+        .expect("register");
+    registry
+        .register(Project {
+            gh_account: Some("bob-duetto".to_string()),
+            github: Some(GithubConfig {
+                config_dir: Some(config_dir.clone()),
+                account: Some("bob-duetto".to_string()),
+                ..GithubConfig::default()
+            }),
+            ..project("widget", "https://github.com/acme/widget", None)
+        })
+        .await
+        .expect("register");
+
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget")
+        .await
+        .expect("a missing login is not a disagreement");
+    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
+}
+
+/// 🔴 #5850: two records pinning DIFFERENT accounts yield no pin for a session,
+/// where the daemon refuses the same registry — neither side guesses.
+/// Test: itself.
+#[tokio::test]
+async fn find_pinned_gh_identity_refuses_disagreeing_pins() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    for (name, account) in [("widget-a", "bobmatnyc"), ("widget-b", "bob-duetto")] {
+        registry
+            .register(project(
+                name,
+                "https://github.com/acme/widget",
+                Some(account),
+            ))
+            .await
+            .expect("register");
+    }
+    let found = find_pinned_gh_identity(&registry, "https://github.com/acme/widget").await;
+    assert_eq!(
+        found, None,
+        "disagreeing pins must not be resolved by position"
+    );
+}
+
 /// Why: a workspace with no git origin (a bare, non-git temp dir) must
 /// resolve to an EMPTY vec end-to-end via `resolve_gh_account_env_for_registry`
 /// itself — no regression for every workspace that predates #3025, and no
@@ -471,4 +610,324 @@ async fn registered_project_pinning_nothing_injects_nothing() {
 
     let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
     assert!(vars.is_empty(), "vars: {vars:?}");
+}
+
+// ── #8510: an account-only spawn pin never falls back to "no identity" ─────
+
+/// A repository whose registry record pins only an account.
+const SPAWN_ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
+
+/// An Enterprise Server repository whose registry record pins only an account.
+const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
+
+/// The account-only `octo-pinned` pin.
+fn account_only_pin() -> super::PinnedGhIdentity {
+    super::PinnedGhIdentity {
+        account: Some("octo-pinned".into()),
+        config_dir: None,
+    }
+}
+
+/// Spawn the account-only pin for `origin`, proving through one candidate
+/// dir with `probe` and `check` — the production prover over table fakes.
+fn spawn_with(
+    origin: &str,
+    dir: &Path,
+    probe: &TableProbe,
+    check: &TableCheck,
+) -> super::GhSpawnEnv {
+    let sources = crate::core::gh_account_dir::AccountDirSources {
+        own_config_dir: Some(dir.to_path_buf()),
+        ..Default::default()
+    };
+    let prover = crate::core::gh_account_proof::AccountProver {
+        sources: &sources,
+        probe,
+        check,
+        cache: None,
+    };
+    let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
+    super::pinned_spawn_env(&account_only_pin(), origin, |login| {
+        super::spawn_proof(&prover, login, origin, &aliases)
+    })
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs")
+}
+
+/// A github.com candidate dir whose `-u octo-pinned` token authenticates as
+/// `who`; `who: Err` is a failed `GET /user`.
+fn github_spawn(who: Result<&str, &str>) -> super::GhSpawnEnv {
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = migrated_dir(root.path());
+    let probe = TableProbe::default().answer(&dir, "github.com", "octo-pinned", Ok("tok-bob"));
+    let check = TableCheck::default().answer("https://api.github.com", "tok-bob", who);
+    spawn_with(SPAWN_ORIGIN, &dir, &probe, &check)
+}
+
+/// An account-only pin spawns with the proven token itself, never a config
+/// dir, and with the nobody-token for the other host class.
+/// Test: itself.
+#[test]
+fn an_account_only_spawn_pin_gets_the_proven_token() {
+    let env = github_spawn(Ok("octo-pinned"));
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob");
+    assert_eq!(
+        value_of(&env.vars, "GH_ENTERPRISE_TOKEN"),
+        super::REFUSED_GH_TOKEN
+    );
+    assert_eq!(value_of(&env.vars, "GH_USER"), "octo-pinned");
+    assert!(
+        !env.vars.iter().any(|(k, _)| k == GH_CONFIG_DIR),
+        "{:?}",
+        env.vars
+    );
+    assert!(env.warning.is_none(), "{:?}", env.warning);
+}
+
+/// 🔴 #8510: an account-only pin with no proven token must NOT spawn with no
+/// identity (the global account). Both token variables get the nobody-token,
+/// and a warning names the reason and the fix.
+/// Test: itself.
+#[test]
+fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
+    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, |_| {
+        Err("/x: the token gh returned for 'octo-pinned' authenticates as 'octo-other'".into())
+    })
+    .expect("a pinned account must never resolve to no identity")
+    .expect("the refusal rides the env, not an error");
+    for var in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
+        assert_eq!(value_of(&env.vars, var), super::REFUSED_GH_TOKEN, "{var}");
+    }
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(
+        warning.contains("authenticates as 'octo-other'")
+            && warning.contains(&format!(
+                "tm projects register <name> --repo-url {SPAWN_ORIGIN} --gh-account octo-pinned \
+                 --gh-config-dir <dir>"
+            )),
+        "got: {warning}"
+    );
+}
+
+/// A pinned `config_dir` is used as-is; no token is ever proven.
+/// Test: itself.
+#[test]
+fn a_config_dir_spawn_pin_never_asks_to_prove() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_hosts_yml(dir.path(), "octo-pinned");
+    let pinned = super::PinnedGhIdentity {
+        account: Some("octo-pinned".into()),
+        config_dir: Some(dir.path().to_path_buf()),
+    };
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |_| {
+        panic!("a pinned config_dir must not be replaced by a proven token")
+    })
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs");
+    assert_eq!(
+        value_of(&env.vars, GH_CONFIG_DIR),
+        dir.path().to_string_lossy()
+    );
+}
+
+/// 🔴 #8510 CRITICAL: `GET /user` says the token is another account's: the
+/// nobody-token, and the warning names no token.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_refuses_a_token_for_another_account() {
+    let env = github_spawn(Ok("octo-other"));
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(
+        warning.contains("authenticates as 'octo-other'") && !warning.contains("tok-"),
+        "got: {warning}"
+    );
+}
+
+/// 🔴 #8510 MEDIUM: the token lookup succeeds but `GET /user` times out: not
+/// proven, so the nobody-token — never the unchecked token.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_refuses_when_the_user_check_fails() {
+    let env = github_spawn(Err(
+        "GET https://api.github.com/user did not answer in time",
+    ));
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+    let warning = env.warning.expect("the refusal must be logged");
+    assert!(warning.contains("did not answer in time"), "got: {warning}");
+}
+
+/// 🔴 #8510 HIGH: gh on an Enterprise Server host reads `GH_ENTERPRISE_TOKEN`
+/// and ignores `GH_TOKEN`, so the proven token goes there, and `GH_TOKEN` gets
+/// the nobody-token so it never reaches api.github.com.
+/// Test: itself.
+#[test]
+fn a_ghes_spawn_pin_puts_the_token_in_gh_enterprise_token() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = migrated_dir(root.path());
+    let probe = TableProbe::default().answer(&dir, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
+    let check =
+        TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("octo-pinned"));
+    let env = spawn_with(GHES_ORIGIN, &dir, &probe, &check);
+    assert_eq!(value_of(&env.vars, "GH_ENTERPRISE_TOKEN"), "tok-ghe");
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+    assert!(env.warning.is_none(), "{:?}", env.warning);
+}
+
+/// 🔴 #8510 HIGH: an Enterprise Server pin with no proven token fails closed
+/// on that host too — `GH_ENTERPRISE_TOKEN` is the nobody-token.
+/// Test: itself.
+#[test]
+fn a_ghes_spawn_pin_refusal_blanks_both_token_vars() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = migrated_dir(root.path());
+    let probe = TableProbe::default().answer(&dir, "ghe.corp", "octo-pinned", Ok("tok-ghe"));
+    let check = TableCheck::default().answer("https://ghe.corp/api/v3", "tok-ghe", Ok("other"));
+    let env = spawn_with(GHES_ORIGIN, &dir, &probe, &check);
+    for var in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
+        assert_eq!(value_of(&env.vars, var), super::REFUSED_GH_TOKEN, "{var}");
+    }
+}
+
+/// 🔴 #8510 LOW: a pinned project whose identity task panicked fails closed
+/// instead of spawning with no vars (the global account).
+/// Test: itself.
+#[tokio::test]
+async fn a_panicked_spawn_env_task_fails_closed() {
+    let joined = tokio::task::spawn_blocking(|| -> Vec<(String, String)> {
+        panic!("identity task panicked")
+    })
+    .await;
+    let vars = super::joined_spawn_vars(
+        joined,
+        &account_only_pin(),
+        SPAWN_ORIGIN,
+        Path::new("/work/jev-matching"),
+    );
+    for var in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
+        assert_eq!(value_of(&vars, var), super::REFUSED_GH_TOKEN, "{var}");
+    }
+    assert_eq!(value_of(&vars, "GH_USER"), "octo-pinned");
+}
+
+/// A `tracing` writer that appends every formatted line to a shared buffer.
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run a github.com spawn whose token authenticates as `who` — resolution,
+/// proof and the production logger alike — under a capturing subscriber;
+/// return the injected vars and every log line.
+fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
+    let buffer = LogBuffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    // #8510 r6: the spawn itself runs under the subscriber, so a token logged
+    // while proving it is captured, not only what `log_spawn_env` writes.
+    let vars = tracing::subscriber::with_default(subscriber, || {
+        super::log_spawn_env(Some(Ok(github_spawn(who))), Path::new("/work/jev-matching"))
+    });
+    let bytes = buffer
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    (vars, String::from_utf8(bytes).expect("utf-8 log"))
+}
+
+/// 🔴 #8510 r4: a spawn env carrying the proven token prints no token in
+/// `{:?}`.
+/// Test: itself.
+#[test]
+fn spawn_env_debug_redacts_every_token() {
+    let env = github_spawn(Ok("octo-pinned"));
+    assert_eq!(value_of(&env.vars, "GH_TOKEN"), "tok-bob");
+    let shown = format!("{env:?}");
+    assert!(!shown.contains("tok-bob"), "shown: {shown}");
+    assert!(
+        shown.contains("GH_USER") && shown.contains("octo-pinned"),
+        "shown: {shown}"
+    );
+}
+
+/// 🔴 #8510 r4: an origin behind a `~/.ssh/config` alias proves on the host
+/// the alias names — the host the daemon's `repo_slug_for` derives — never on
+/// the alias itself; an alias nothing renames refuses.
+/// Test: itself.
+#[test]
+fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
+    let aliased = "git@github-duetto:duettoresearch/jev-matching.git";
+    let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::parse(
+        "Host github-duetto\n  HostName github.com\n",
+    );
+    let daemon_slug =
+        crate::session_manager::worktree_repo_slug::parse_repo_slug(aliased, &aliases)
+            .expect("the daemon resolves the alias");
+    assert_eq!(daemon_slug, "duettoresearch/jev-matching");
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = migrated_dir(root.path());
+    let probe = TableProbe::default().answer(&dir, "github.com", "octo-pinned", Ok("tok-bob"));
+    let check =
+        TableCheck::default().answer("https://api.github.com", "tok-bob", Ok("octo-pinned"));
+    let sources = crate::core::gh_account_dir::AccountDirSources {
+        own_config_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let prover = crate::core::gh_account_proof::AccountProver {
+        sources: &sources,
+        probe: &probe,
+        check: &check,
+        cache: None,
+    };
+    let proven = super::spawn_proof(&prover, "octo-pinned", aliased, &aliases)
+        .expect("the aliased origin proves on github.com");
+    assert_eq!(proven.host, "github.com");
+
+    let unresolved = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
+    let err = super::spawn_proof(&prover, "octo-pinned", aliased, &unresolved)
+        .expect_err("an alias nothing renames names no host");
+    assert!(err.contains("'github-duetto'"), "got: {err}");
+    assert_eq!(probe.calls().len(), 1, "the refusal never runs gh");
+}
+
+/// 🔴 #8510: no arm writes a token to the log — neither the injected proven
+/// token nor the unproven one a refusal rejected. The refusals still log their
+/// reason, so the capture is not vacuous.
+/// Test: itself.
+#[test]
+fn a_spawn_pin_logs_no_token_in_any_arm() {
+    let (vars, log) = logged_spawn(Ok("octo-pinned"));
+    assert_eq!(value_of(&vars, "GH_TOKEN"), "tok-bob");
+    assert!(!log.contains("tok-"), "a token reached the log: {log}");
+
+    for who in [
+        Ok("octo-other"),
+        Err("GET https://api.github.com/user answered HTTP 401"),
+    ] {
+        let (vars, log) = logged_spawn(who);
+        assert_eq!(value_of(&vars, "GH_TOKEN"), super::REFUSED_GH_TOKEN);
+        assert!(
+            log.contains("pinned to gh account 'octo-pinned'"),
+            "the refusal must be logged: {log}"
+        );
+        assert!(!log.contains("tok-"), "a token reached the log: {log}");
+    }
 }

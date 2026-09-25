@@ -379,3 +379,28 @@ fn with_session_lock_concurrent_stale_clear_is_race_free() {
         "the winner's freshly-acquired lock must still exist after the race settles"
     );
 }
+
+/// 🔴 #7766 pin: PM-owned worktree lifecycle commands never reach the budget.
+///
+/// Why: the budget gate in `pm_guard` counts a call only when `evaluate_tool`
+/// returns a file-change reason, so a `None` here means these commands consume
+/// no slot and are allowed with the budget exhausted. Already true on
+/// `origin/main` at `1c1ce516a`; this test keeps it true.
+#[test]
+fn worktree_lifecycle_commands_consume_no_budget_slot() {
+    use crate::commands::pm_guard::evaluate_tool;
+    for command in [
+        "git worktree remove .claude/worktrees/agent-ab542d7b51b9a2944",
+        "git worktree remove /repo/.claude/worktrees/agent-x",
+        "git worktree prune",
+        "git branch -D fix/merged-branch",
+        "git worktree remove .claude/worktrees/agent-x && git branch -D worktree-agent-x",
+    ] {
+        let input = serde_json::json!({ "command": command });
+        assert_eq!(
+            evaluate_tool("Bash", Some(&input)),
+            None,
+            "a worktree lifecycle command must not be budget-eligible: {command}"
+        );
+    }
+}

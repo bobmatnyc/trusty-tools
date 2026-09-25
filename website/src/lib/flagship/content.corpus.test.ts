@@ -17,10 +17,9 @@ import { clearDocSiteCache } from '../docs/site';
 import { TOOLS } from '../tools';
 import { buildFlagshipContent, clearFlagshipContentCache } from './content';
 
-/** The six slugs that render from markdown — trusty-audit stays Svelte. */
+/** The five slugs that render from markdown. */
 const MARKDOWN_SLUGS = [
 	'trusty-analyze',
-	'trusty-git-analytics',
 	'trusty-memory',
 	'trusty-mpm',
 	'trusty-review',
@@ -45,10 +44,9 @@ describe('the real flagship corpus', () => {
 		expect([...built.keys()].sort()).toEqual(MARKDOWN_SLUGS);
 	});
 
-	it('gives every markdown slug a tool record, and leaves trusty-audit alone', () => {
+	it('gives every markdown slug a tool record', () => {
 		const slugs = new Set(TOOLS.map((tool) => tool.slug));
 		for (const slug of MARKDOWN_SLUGS) expect(slugs.has(slug), slug).toBe(true);
-		expect(built.has('trusty-audit')).toBe(false);
 	});
 
 	it('renders real prose, not an empty frame', () => {

@@ -32,9 +32,11 @@ const TCTL_BOOTSTRAP =
  * How a crate is installed, and therefore what its Install section prints.
  *
  * Why a union rather than one string: `tctl` manages the crates in
- * `STABLE_SET`, and trusty-audit is not one of them — it is `publish = false`
- * and ships its own bootstrap script. Flattening both into a single command
- * string would leave the tctl prose on a page whose crate tctl cannot install.
+ * `STABLE_SET`, but a `publish = false` crate that ships its own bootstrap
+ * script is not a `STABLE_SET` member. Flattening both into a single command
+ * string would leave the tctl prose on a page whose crate tctl cannot
+ * install — no current TOOLS entry needs the `'script'` variant, but the
+ * shape stays available for one that does.
  */
 export type ToolInstall =
 	| {
@@ -80,15 +82,14 @@ export interface Tool {
 	 *
 	 * `$lib/changelog/site` fails the build for a crate whose `CHANGELOG.md`
 	 * parses to zero release sections, so a crate that has never shipped cannot
-	 * be in them. trusty-audit is `publish = false` and carries no release tag
-	 * yet; flip this to `true` in the same change that cuts its first release,
-	 * and both surfaces pick it up.
+	 * be in them. Flip this to `true` in the same change that cuts a new
+	 * flagship's first release, and both surfaces pick it up.
 	 */
 	released: boolean;
 	/**
 	 * The doc reader's page for this crate, at `/docs/tools/<crate>` — a
 	 * different URL from this page by one path segment. `null` for
-	 * trusty-review and trusty-audit, which publish no doc page.
+	 * trusty-review, which publishes no doc page.
 	 */
 	docsPath: string | null;
 }
@@ -220,59 +221,6 @@ export const TOOLS: Tool[] = [
 			{ label: 'MCP tools', value: 'review_pr, review_diff, review_health' }
 		],
 		install: { via: 'tctl', target: 'trusty-review' },
-		released: true,
-		docsPath: null
-	},
-	{
-		slug: 'trusty-git-analytics',
-		name: 'trusty-git-analytics',
-		cargoPackage: 'tga',
-		unit: 'UNIT 06',
-		tagline: 'Developer analytics from git',
-		points: [
-			'Walks local repositories into SQLite, then classifies every commit',
-			'A tiered classification cascade, with an optional LLM tier at the end',
-			'Per-author and per-week velocity, quality, and DORA reporting',
-			'CSV, JSON, and Markdown output from one `tga analyze` run'
-		],
-		lede: 'Turns git history into per-author and per-week reporting, with a classification cascade that names the work each commit did.',
-		facts: [
-			{ label: 'Package', value: 'tga' },
-			{ label: 'Binary', value: 'tga' },
-			{ label: 'Store', value: 'SQLite, on disk' },
-			{ label: 'Output', value: 'CSV, JSON, Markdown' }
-		],
-		install: { via: 'tctl', target: 'tga' },
-		released: true,
-		docsPath: '/docs/tools/trusty-git-analytics'
-	},
-	{
-		slug: 'trusty-audit',
-		name: 'trusty-audit',
-		cargoPackage: 'trusty-audit',
-		unit: 'UNIT 07',
-		tagline: 'Audit engagements at a client site',
-		points: [
-			'One command downloads the macOS binary, verifies its checksum, and launches it',
-			'Installs and version-pins the tga, trusty-search, trusty-analyze and trusty-review it runs',
-			'Registers GitHub repositories and JIRA or Linear boards, checking each can be read first',
-			'One resumable run — install, clone, audit, package — ending in a zip to send back'
-		],
-		lede: 'The client-side half of an audit engagement: it installs the tooling it pins, collects from the repositories you register, and writes one zip to return to your auditor.',
-		facts: [
-			{ label: 'Package', value: 'trusty-audit' },
-			{ label: 'Runs on', value: 'macOS, Apple Silicon' },
-			{ label: 'Needs', value: 'gh, authenticated' },
-			{ label: 'Returns', value: 'audit-return-package.zip' }
-		],
-		install: {
-			via: 'script',
-			// #5873 adds `crates/trusty-audit/install.sh`; this is the Usage line
-			// the script's own header documents.
-			command:
-				'curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh',
-			note: 'One command, macOS on Apple Silicon only. It verifies the release tarball against its published SHA-256 before anything reaches your PATH, installs into ${CARGO_HOME:-$HOME/.cargo}/bin with an atomic rename, and then launches the binary.'
-		},
 		released: true,
 		docsPath: null
 	}

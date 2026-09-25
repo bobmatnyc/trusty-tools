@@ -26,8 +26,9 @@
 //! renders as SKIP with the reason quoted, never as a pass — a reader must be
 //! able to tell "no milestone was needed, here is why" from "a milestone is
 //! present". `no-component-label: <reason>` is the same hatch for the component
-//! row (#7198): when no Cargo crate owns the changed path — a `website/` or
-//! CI-only issue — applying no component label is policy-correct.
+//! row (#7198): when no component unit owns the changed path — a Cargo crate
+//! here, an npm workspace package or a Go module elsewhere; a `website/` or
+//! CI-only issue is the shape — applying no component label is policy-correct.
 //! Relationships are always INFO: a standalone issue legitimately has
 //! no parent, no blocker, and no sub-issues, so their absence is a fact to
 //! report and never a violation.
@@ -57,10 +58,11 @@ pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
 
 /// The comment prefix that excuses an absent component label (#7198).
 ///
-/// Why: when no Cargo crate owns the changed path — a `website/` or CI-only
-/// issue — `tm-ticketing` policy is that applying no component label is
-/// correct, so the audit needs the same recorded-waiver escape hatch the
-/// milestone row already has.
+/// Why: when no component unit owns the changed path — the unit is a Cargo
+/// crate here and an npm package or Go module in another stack; a `website/` or
+/// CI-only issue is the shape — `tm-ticketing` policy is that applying no
+/// component label is correct, so the audit needs the same recorded-waiver
+/// escape hatch the milestone row already has.
 /// Test: `a_missing_component_label_with_a_reason_comment_is_a_skip`.
 pub const NO_COMPONENT_LABEL_PREFIX: &str = "no-component-label:";
 
@@ -221,6 +223,22 @@ pub struct AuditRow {
     pub verdict: Verdict,
     /// The evidence behind the verdict — the value found, or why it is absent.
     pub detail: String,
+}
+
+impl AuditRow {
+    /// Build a row.
+    ///
+    /// Why: the type is `#[non_exhaustive]`, so a caller outside this crate —
+    /// the `tm issue audit` epic rows (#8448) — cannot use a struct literal.
+    /// Test: `audit_rows_pass_a_tracker_whose_block_matches`.
+    #[must_use]
+    pub fn new(requirement: &'static str, verdict: Verdict, detail: impl Into<String>) -> Self {
+        Self {
+            requirement,
+            verdict,
+            detail: detail.into(),
+        }
+    }
 }
 
 /// One issue's complete audit.

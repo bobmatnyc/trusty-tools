@@ -70,6 +70,13 @@ struct RecordingTmux {
     /// Why: regression guard asserting the tmux session is created in the
     /// provisioned workspace, not $HOME.
     create_calls: std::sync::Mutex<Vec<(String, String)>>,
+    /// #8233: what this fake shell has PRINTED.
+    ///
+    /// The managed launch now confirms the pane executes what it is typed, by
+    /// running a short `echo` and waiting for its OUTPUT, so a driver that
+    /// prints nothing is an unresponsive shell and every resume here would be
+    /// refused for a reason the double invented. See [`RecordingTmux::run`].
+    printed: std::sync::Mutex<String>,
 }
 
 impl RecordingTmux {
@@ -77,7 +84,24 @@ impl RecordingTmux {
         Arc::new(Self {
             sends: std::sync::Mutex::new(Vec::new()),
             create_calls: std::sync::Mutex::new(Vec::new()),
+            printed: std::sync::Mutex::new(String::new()),
         })
+    }
+
+    /// Evaluate `text` as a shell would, returning `true` when it was a probe.
+    ///
+    /// What: `echo <word>` prints `<word>` with its shell quoting removed —
+    /// which is what makes the probe's PRINTED text differ from its TYPED text.
+    /// Probe lines are not recorded in `sends`, so every assertion on what the
+    /// adapter typed still sees exactly the launch lines it always did.
+    fn run(&self, text: &str) -> bool {
+        let Some(word) = text.strip_prefix("echo ") else {
+            return false;
+        };
+        let mut out = self.printed.lock().unwrap();
+        out.push_str(&word.replace(['"', '\''], ""));
+        out.push('\n');
+        true
     }
 }
 
@@ -93,14 +117,23 @@ impl ManagedTmuxDriver for RecordingTmux {
         Ok(())
     }
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.run(text) {
+            return Ok(());
+        }
         self.sends
             .lock()
             .unwrap()
             .push((name.to_owned(), text.to_owned()));
         Ok(())
     }
+    fn send_line_to_pane(&self, name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        self.send_line(name, text)
+    }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
-        Ok(String::new())
+        Ok(self.printed.lock().unwrap().clone())
+    }
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
@@ -158,6 +191,137 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.live.lock().unwrap().iter().cloned().collect())
+    }
+}
+
+/// A live pane whose SHELL works and whose runtime never comes up (#8233).
+///
+/// Why: the two failing arms of `resume_managed` are different bugs — the pane
+/// refusing the launch (pre-send) and the runtime never appearing after it was
+/// typed (post-send). A double that refuses the handshake can only ever reach
+/// the first. This one answers the pre-launch probe exactly as a working shell
+/// does, so the launch IS typed, and then reports no runtime.
+/// What: `list_sessions` names the session, so it is observable; `send_line`
+/// echoes a probe line's output into the captured tail; `runtime_ready` is
+/// always false.
+/// Test: `resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears`.
+struct BareShellTmux {
+    text: std::sync::Mutex<String>,
+    names: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl BareShellTmux {
+    fn new(name: &str) -> Arc<Self> {
+        let mut names = std::collections::HashSet::new();
+        names.insert(name.to_owned());
+        Arc::new(Self {
+            text: std::sync::Mutex::new("~ %".to_owned()),
+            names: std::sync::Mutex::new(names),
+        })
+    }
+
+    /// Emulate the shell half of the handshake protocol: `echo tm-rea"dy"-<n>`
+    /// prints `tm-ready-<n>`. The crate's own `probe_reply` helper is
+    /// `cfg(test)`-only and therefore not reachable from an integration test,
+    /// so the double spells the protocol out.
+    fn run(&self, text: &str) {
+        const PREFIX: &str = "echo tm-rea\"dy\"-";
+        if let Some(nonce) = text.strip_prefix(PREFIX) {
+            let mut t = self.text.lock().unwrap();
+            t.push('\n');
+            t.push_str(&format!("tm-ready-{nonce}"));
+        }
+    }
+}
+
+impl ManagedTmuxDriver for BareShellTmux {
+    fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        self.names.lock().unwrap().insert(name.to_owned());
+        Ok(())
+    }
+    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        self.run(text);
+        Ok(())
+    }
+    fn send_line_to_pane(&self, _n: &str, _p: &str, text: &str) -> Result<(), ManagedError> {
+        self.run(text);
+        Ok(())
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(self.text.lock().unwrap().clone())
+    }
+    fn capture_pane(&self, n: &str, _p: &str, l: usize) -> Result<String, ManagedError> {
+        self.capture(n, l)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(self.names.lock().unwrap().iter().cloned().collect())
+    }
+    fn runtime_ready(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+/// A live pane that refuses every launch line (#8233).
+///
+/// Why: the adapter-refusal arm needs a pane that is OBSERVABLE — since the
+/// handshake asks observability first, a driver naming no session is "cannot
+/// tell", which is deliberately not a refusal any more.
+/// What: names its session, answers the handshake probe, and errors on the
+/// launch line.
+/// Test: `resume_managed_returns_err_after_it_marks_the_record_errored`.
+struct RefusingTmux {
+    inner: Arc<BareShellTmux>,
+}
+
+impl RefusingTmux {
+    fn new(name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner: BareShellTmux::new(name),
+        })
+    }
+
+    fn is_probe(text: &str) -> bool {
+        text.starts_with("echo tm-rea\"dy\"-")
+    }
+}
+
+impl ManagedTmuxDriver for RefusingTmux {
+    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        self.inner.create_session(name, workdir)
+    }
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        self.inner.kill_session(name)
+    }
+    fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        if Self::is_probe(text) {
+            return self.inner.send_line(name, text);
+        }
+        Err(ManagedError::TmuxUnavailable(
+            "pane refuses the line".into(),
+        ))
+    }
+    fn send_line_to_pane(&self, n: &str, p: &str, text: &str) -> Result<(), ManagedError> {
+        if Self::is_probe(text) {
+            return self.inner.send_line_to_pane(n, p, text);
+        }
+        Err(ManagedError::TmuxUnavailable(
+            "pane refuses the line".into(),
+        ))
+    }
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        self.inner.capture(name, lines)
+    }
+    fn capture_pane(&self, n: &str, p: &str, l: usize) -> Result<String, ManagedError> {
+        self.inner.capture_pane(n, p, l)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        self.inner.list_sessions()
+    }
+    fn runtime_ready(&self, name: &str) -> bool {
+        self.inner.runtime_ready(name)
     }
 }
 
@@ -417,7 +581,10 @@ async fn handler_spawn_wires_provision_and_spawn() {
     );
 
     // Step 4: spawn the adapter (same as handler step 3).
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), None);
+    // #8233: a temp framework root, so this wiring test provisions nothing into
+    // the operator's own `~/.trusty-mpm`.
+    let root_dir = tempfile::tempdir().expect("framework root tempdir");
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), None, &root_dir.path().join(".trusty-mpm"));
     // `spawn` calls `which claude` — it may fail in CI where `claude` is
     // absent. We tolerate that error here since we're testing the wiring,
     // not the binary availability.
@@ -673,7 +840,14 @@ async fn tcode_session_spawns_and_accepts_commands() {
     // Build the tcode adapter the way the spawn handler does and spawn it.
     // `spawn` returns BinaryNotFound when `tcode` is not installed (CI); the
     // wiring under test is the adapter selection, which we assert via identify().
-    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), None);
+    // #8233: TcodeAdapter ignores the root, but the factory now requires one.
+    let root_dir = tempfile::tempdir().expect("framework root tempdir");
+    let adapter = build_adapter(
+        record.runtime,
+        mgr.tmux_driver(),
+        None,
+        &root_dir.path().join(".trusty-mpm"),
+    );
     assert_eq!(adapter.identify(), "tcode");
     let _ = adapter.spawn(
         &record.tmux_name,
@@ -772,21 +946,24 @@ impl Drop for PathGuard {
     }
 }
 
-/// Create a fake, executable `tm` binary at `<dir>/tm` so
-/// `trusty_common::bin_resolve::resolve_binary("tm")` resolves it.
+/// Create a fake, executable `name` binary at `<dir>/<name>` so
+/// `trusty_common::bin_resolve::resolve_binary(name)` resolves it.
 ///
 /// Why: `candidate()` (the leaf of `resolve_binary`) requires the file to
 /// exist AND carry an execute bit on Unix — an empty regular file is rejected.
+/// #7862: `claude` needs the identical stub, so the helper takes the name
+/// rather than growing a second copy of itself.
 /// What: writes a trivial shell script and chmods it `0o755`.
-/// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`.
-fn write_fake_tm_binary(dir: &std::path::Path) -> PathBuf {
-    let bin = dir.join("tm");
-    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake tm binary");
+/// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`
+/// and `resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears`.
+fn write_fake_binary(dir: &std::path::Path, name: &str) -> PathBuf {
+    let bin = dir.join(name);
+    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake binary");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake tm binary executable");
+            .expect("chmod fake binary executable");
     }
     bin
 }
@@ -868,6 +1045,154 @@ async fn resume_managed_backfills_missing_status_line() {
         content.contains("statusLine"),
         "resumed workspace settings.json must carry the statusLine key \
          (the #1913 self-heal); got: {content}"
+    );
+}
+
+/// #8233 review round 2 (finding 7): `resume_managed` must RETURN the failure
+/// it recorded, on BOTH failing arms.
+///
+/// Why: both arms — the adapter refusing to launch, and the post-send check
+/// finding no runtime — called `mark_errored` and then fell through to
+/// `Ok(record)`. The caller saw a successful resume and had to notice the
+/// record's state for itself. `guided_resume` did not, which is where the
+/// operator-visible "restarted but runtime failed to start (state=errored)"
+/// came from: a later, racing read of a record the handler had already given
+/// up on while reporting success.
+/// What: drives a resume whose pane cannot accept a launch (the hermetic
+/// driver is a pane nothing reads), and asserts the call is an `Err` whose
+/// message is the same one the record carries — not an `Ok` beside an errored
+/// record.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_returns_err_after_it_marks_the_record_errored() {
+    use trusty_mpm::session_manager::ManagedSessionState;
+    let root = tempfile::tempdir().expect("tempdir");
+    // #8233 round 3, finding 7: a LIVE pane that refuses the launch line. The
+    // hermetic noop driver no longer reaches any failing arm — an unobservable
+    // pane is "cannot tell", which changes nothing — so pinning this arm needs
+    // a pane that is observably there and observably refuses.
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            RefusingTmux::new("tmpm-seed"),
+        )
+        .await,
+    );
+    let mgr = state.session_manager().await;
+
+    let ws = root.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+    let record = mgr
+        .create(
+            "resume-err".into(),
+            Some(ws.clone()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("seed session");
+    let id = record.id;
+    mgr.set_workspace(&id, ws.clone(), ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+    mgr.stop(&id).await.expect("stop");
+
+    let result = resume_managed(&state, &id).await;
+
+    let err = result
+        .expect_err("a resume that could not put a runtime in the pane must not report success");
+    let message = err.to_string();
+    // #8233 round 3, finding 7: each test pins ONE arm. This driver's pane is
+    // never observable, so the launch fails at the adapter — the post-send arm
+    // is covered by its own test below.
+    assert!(
+        message.contains("spawn failed"),
+        "this driver must fail at the adapter, not somewhere else: {message}"
+    );
+
+    let after = mgr.get(&id).await.expect("the record survives");
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Errored,
+        "the record is errored, which is exactly why the call must not be Ok"
+    );
+    assert!(
+        after.task.contains("[error:"),
+        "the failure must also be recorded on the record: {}",
+        after.task
+    );
+}
+
+/// #8233 round 3, finding 7: the OTHER failing arm — the launch WAS typed and
+/// no runtime appeared.
+///
+/// Why: the sibling test above only ever reaches the adapter refusal, so the
+/// post-send check that #6766 added and #8233 made fatal had no end-to-end
+/// coverage at all through `resume_managed`. The two arms are different bugs
+/// with different operator remedies, and only this one proves a launch that
+/// LEFT the daemon is still turned into an errored record.
+/// What: a driver whose shell answers the pre-launch handshake (so the launch
+/// line is typed) and whose `runtime_ready` never becomes true, then asserts the
+/// returned error is the post-send wording, not the adapter's.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears() {
+    use trusty_mpm::session_manager::ManagedSessionState;
+    // #7862: `ClaudeCodeAdapter::spawn_resume` resolves the `claude` binary
+    // BEFORE it types anything, so with no Claude Code install the route ends
+    // at the adapter refusal — the arm the sibling test above already pins —
+    // and this one read green only on a developer machine. Same stub-on-PATH
+    // fixture as `tests/pane_launch_line_8233.rs`; `#[serial]` guards the
+    // process-global `PATH` (see `PathGuard`).
+    let bin_dir = tempfile::tempdir().expect("bin tempdir");
+    write_fake_binary(bin_dir.path(), "claude");
+    let _path_guard = PathGuard::prepend(bin_dir.path());
+    assert!(
+        trusty_common::bin_resolve::resolve_binary("claude")
+            .is_some_and(|found| found.starts_with(bin_dir.path())),
+        "the planted stub must WIN the lookup — otherwise this test runs the \
+         host's own Claude Code, or none at all, and proves nothing"
+    );
+    let root = tempfile::tempdir().expect("tempdir");
+    let ws = root.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+
+    // `create` below registers the session's real name through `create_session`,
+    // so the driver reports it live from then on.
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            BareShellTmux::new("tmpm-seed"),
+        )
+        .await,
+    );
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create("post-send".into(), Some(ws.clone()), None, None, None, None)
+        .await
+        .expect("seed session");
+    let id = record.id;
+    mgr.set_workspace(&id, ws.clone(), ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+    mgr.stop(&id).await.expect("stop");
+
+    let err = resume_managed(&state, &id)
+        .await
+        .expect_err("a launch that produced no runtime must not report success");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("NOT DELIVERED") || message.contains("ran and failed"),
+        "this arm is the POST-SEND check, not the adapter refusal: {message}"
+    );
+    assert_eq!(
+        mgr.get(&id).await.expect("the record survives").state,
+        ManagedSessionState::Errored,
+        "and the record carries the same verdict"
     );
 }
 
@@ -959,10 +1284,22 @@ async fn resume_managed_launches_despite_incomplete_deployment() {
         let _ = std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o755));
     }
 
-    let record = result.expect(
-        "resume_managed must still return Ok even when the deployment gate \
-         reports incomplete (P0 #2172) — the gate must never abort the handler",
+    // #8233 finding 7: `resume_managed` now RETURNS the failure it recorded
+    // instead of reporting `Ok` on a session it just marked errored, so a
+    // runtime adapter that cannot launch here (no real tmux/claude in CI) is
+    // legitimately an `Err`. The P0 property is unchanged and is asserted
+    // directly rather than through an `Ok` proxy: whatever happened, the
+    // deployment gate must not be what stopped it.
+    let failure = match &result {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        !failure.contains("deployment incomplete"),
+        "the #2158 deployment-completeness gate must be non-blocking (#2172): \
+         it must never be the reason a resume fails; got: {failure}"
     );
+    let record = mgr.get(&id).await.expect("the record survives the resume");
     assert!(
         !record.task.contains("deployment incomplete"),
         "the #2158 deployment-completeness gate must be non-blocking (#2172): \
@@ -985,7 +1322,7 @@ async fn resume_managed_launches_despite_incomplete_deployment() {
 /// What: seeds a workspace whose `.claude/settings.json` already has the exact
 /// pre-#1914 bare `statusLine.command`, resumes it, and asserts the on-disk
 /// command is upgraded to the fake, PATH-resolved `tm` binary this test seeds
-/// (see `PathGuard`/`write_fake_tm_binary`) rather than merely checking for a
+/// (see `PathGuard`/`write_fake_binary`) rather than merely checking for a
 /// `/` — #2229 made `current_exe()` always ineligible inside a `cargo test`
 /// binary (ephemeral `target/debug/deps/...`), so without a seeded PATH hit
 /// the outcome depends on whether the ambient environment happens to have
@@ -1003,9 +1340,9 @@ async fn resume_managed_heals_stale_bare_status_line_command() {
     // a dev machine with `~/.cargo/bin` on PATH, absent in CI, which is
     // exactly why this test flaked green-locally/red-in-CI) — prepend a fake,
     // executable `tm` onto `PATH` so the upgrade is deterministic in both
-    // environments. See `PathGuard`/`write_fake_tm_binary` above.
+    // environments. See `PathGuard`/`write_fake_binary` above.
     let fake_bin_dir = TempDir::new().unwrap();
-    let fake_tm = write_fake_tm_binary(fake_bin_dir.path());
+    let fake_tm = write_fake_binary(fake_bin_dir.path(), "tm");
     let _path_guard = PathGuard::prepend(fake_bin_dir.path());
 
     let root = TempDir::new().unwrap();
@@ -2270,7 +2607,11 @@ fn live_pane_scoped_send_targets_original_pane_not_sibling() {
     // active one — this is precisely the state that caused the hijack: any
     // SESSION-scoped send would now land here instead of the original pane.
     let status = std::process::Command::new("tmux")
-        .args(["new-window", "-t", &session_name])
+        .args([
+            "new-window",
+            "-t",
+            &trusty_mpm::core::tmux::exact_window_target(&session_name),
+        ])
         .status()
         .expect("spawn tmux new-window");
     assert!(status.success(), "tmux new-window must succeed");

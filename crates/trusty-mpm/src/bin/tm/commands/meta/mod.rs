@@ -117,10 +117,16 @@ pub(crate) async fn run(
         .with_context(|| format!("failed to create state dir: {}", state_dir.display()))?;
     let mgr = launch::new_session_manager(&state_dir).await?;
 
+    // #8233: this command entry point plays the role `DaemonState` plays on a
+    // daemon route — it names the ambient `~/.trusty-mpm` state root ONCE and
+    // hands it down, so the launch ritual never resolves a layout of its own
+    // (#4203).
+    let framework_root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+
     if demo {
-        run_demo(&mgr, &project, timeout).await
+        run_demo(&mgr, &project, &framework_root, timeout).await
     } else {
-        run_plain(&mgr, &project, timeout).await
+        run_plain(&mgr, &project, &framework_root, timeout).await
     }
 }
 
@@ -136,9 +142,10 @@ pub(crate) async fn run(
 async fn run_plain(
     mgr: &trusty_mpm::session_manager::SessionManager,
     project: &Path,
+    framework_root: &Path,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let report = launch::launch_and_wait(mgr, project, None, timeout).await?;
+    let report = launch::launch_and_wait(mgr, project, framework_root, None, timeout).await?;
     let summary = json!({
         "status": "launched",
         "demo": false,
@@ -167,6 +174,7 @@ async fn run_plain(
 async fn run_demo(
     mgr: &trusty_mpm::session_manager::SessionManager,
     project: &Path,
+    framework_root: &Path,
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let run_id = run_id();
@@ -174,7 +182,8 @@ async fn run_demo(
     let task = verify::demo_task(&run_id);
     info!(run_id = %run_id, "meta run --demo: bundled task prepared");
 
-    let report = launch::launch_and_wait(mgr, project, Some(&task), timeout).await?;
+    let report =
+        launch::launch_and_wait(mgr, project, framework_root, Some(&task), timeout).await?;
     let verdict = verify::verify_artifact(project, &expected);
 
     let summary = json!({

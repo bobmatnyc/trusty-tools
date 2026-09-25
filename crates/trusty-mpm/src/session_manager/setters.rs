@@ -56,6 +56,30 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Strip the `[error: …]` notes [`SessionManager::mark_errored`] appended.
+    ///
+    /// Why (#8233 acceptance item 3): `mark_errored` APPENDS its message to
+    /// `task`, and nothing ever removed it. A session that failed to launch
+    /// three times and then came up healthy showed three stale failures in
+    /// `tm ls` forever, which is how `tm-crm` sat `active` behind a live
+    /// `claude` still advertising "resume relaunch did not take". A verified
+    /// Running verdict is the moment those notes stop describing the session.
+    /// What: rewrites `task` with every `[error: …]` suffix removed, and
+    /// persists ONLY when something changed — a no-op costs no store write. The
+    /// state is not touched: this clears the note, never the verdict.
+    /// Test: `clear_error_note_strips_every_appended_error`,
+    /// `clear_error_note_leaves_a_clean_task_alone`.
+    pub async fn clear_error_note(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        let cleaned = strip_error_notes(&record.task);
+        if cleaned == record.task {
+            return Ok(());
+        }
+        record.task = cleaned;
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
     /// Update a session's workspace path and transition to a new state.
     ///
     /// Why: after the workspace path is resolved
@@ -229,5 +253,158 @@ impl SessionManager {
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
+    }
+}
+
+/// Remove every ` [error: …]` note from a task string.
+///
+/// Why: see [`SessionManager::clear_error_note`]. Pure, so the parsing of the
+/// shape `mark_errored` writes can be tested without a store.
+/// What: scans for the literal ` [error: ` opener and drops through the note's
+/// closing `]`. That close is the LAST `]` before the next opener (or before the
+/// end), not the first one after the opener — #8233 round 3, finding 8: a
+/// message containing its own `]` (`[error: launch spec [tm-x] unreadable]`)
+/// closed the note early and left the tail behind, which is precisely the stale
+/// text acceptance item 3 exists to remove. Nesting is impossible — the notes
+/// are appended, never wrapped — so a single forward scan is still exact. Text
+/// with no note is returned unchanged.
+/// Test: `strip_error_notes_removes_one`, `strip_error_notes_removes_several`,
+/// `strip_error_notes_leaves_unrelated_brackets_alone`,
+/// `strip_error_notes_removes_a_note_whose_message_contains_a_bracket`.
+pub(crate) fn strip_error_notes(task: &str) -> String {
+    const OPEN: &str = " [error: ";
+    let mut out = String::with_capacity(task.len());
+    let mut rest = task;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let body = &tail[OPEN.len()..];
+        let limit = body.find(OPEN).unwrap_or(body.len());
+        match body[..limit].rfind(']') {
+            Some(end) => rest = &body[end + 1..],
+            // An unterminated note is the whole remainder; drop it.
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::strip_error_notes;
+
+    #[test]
+    fn strip_error_notes_removes_one() {
+        assert_eq!(
+            strip_error_notes("do the thing [error: boom]"),
+            "do the thing"
+        );
+    }
+
+    #[test]
+    fn strip_error_notes_removes_several() {
+        assert_eq!(strip_error_notes("task [error: one] [error: two]"), "task");
+    }
+
+    /// #8233 round 3, finding 8: the note's own message can contain `]` — the
+    /// launch failures this issue produces name specs and panes in brackets.
+    /// Closing on the FIRST `]` left the rest of the message on the task
+    /// forever, which is the stale text acceptance item 3 removes.
+    /// Fails on e1ee6cf52 with `"do the thing unreadable]"`.
+    #[test]
+    fn strip_error_notes_removes_a_note_whose_message_contains_a_bracket() {
+        assert_eq!(
+            strip_error_notes("do the thing [error: launch spec [tm-x] unreadable]"),
+            "do the thing"
+        );
+        assert_eq!(
+            strip_error_notes("t [error: a [b] c] [error: d [e] f]"),
+            "t"
+        );
+    }
+
+    #[test]
+    fn strip_error_notes_leaves_unrelated_brackets_alone() {
+        assert_eq!(strip_error_notes("fix [#8233] now"), "fix [#8233] now");
+    }
+}
+
+/// Tests for the record-level clear, as opposed to the string helper above.
+///
+/// Why: `strip_tests` proves the substring rule; these prove the method applies
+/// it to a persisted record and leaves a clean one untouched, which is the
+/// #8233 acceptance-item-3 behaviour the caller depends on.
+#[cfg(test)]
+mod clear_error_note_tests {
+    use std::sync::Arc;
+
+    use crate::session_manager::{FakeNoopTmuxDriver, SessionManager};
+
+    /// A hermetic manager plus one session whose `task` the caller chooses.
+    async fn manager_with_task(
+        dir: &tempfile::TempDir,
+        task: &str,
+    ) -> (Arc<SessionManager>, crate::session_manager::SessionRecord) {
+        let mgr = Arc::new(
+            SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+                .await
+                .expect("session manager"),
+        );
+        let mut record = mgr
+            .create(
+                "clear-note".into(),
+                Some(dir.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        record.task = task.to_owned();
+        mgr.store
+            .write()
+            .await
+            .upsert(record.clone())
+            .await
+            .expect("seed the task");
+        (mgr, record)
+    }
+
+    #[tokio::test]
+    async fn clear_error_note_strips_every_appended_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mgr, record) = manager_with_task(
+            &dir,
+            "run the fleet [error: resume relaunch did not take] [error: no runtime came up]",
+        )
+        .await;
+
+        mgr.clear_error_note(&record.id).await.expect("clear");
+
+        let cleaned = mgr.get(&record.id).await.expect("record");
+        assert_eq!(
+            cleaned.task, "run the fleet",
+            "a Running verdict must leave no stale failure in `tm ls`"
+        );
+        assert_eq!(
+            cleaned.state, record.state,
+            "clearing the note must not touch the verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_error_note_leaves_a_clean_task_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mgr, record) = manager_with_task(&dir, "fix [#8233] now").await;
+
+        mgr.clear_error_note(&record.id).await.expect("clear");
+
+        assert_eq!(
+            mgr.get(&record.id).await.expect("record").task,
+            "fix [#8233] now",
+            "a task carrying no error note must survive byte-for-byte"
+        );
     }
 }

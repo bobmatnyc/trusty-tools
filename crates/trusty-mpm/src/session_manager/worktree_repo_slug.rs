@@ -248,28 +248,6 @@ pub(crate) fn repo_slug_for(dir: &Path) -> Result<String, String> {
 /// The remote name every caller means when it does not name one.
 pub(crate) const DEFAULT_REMOTE: &str = "origin";
 
-/// [`repo_slug_for`], asked of a named remote rather than of `origin` (#7850).
-///
-/// Why: `origin` is the right remote for the overwhelming majority of
-/// checkouts, and the wrong one for a fork workflow. In `breezeblue-ai/breeze-tts`
-/// local `main` tracks `fork` (`bobmatnyc/breeze-tts`) while `origin`
-/// (`breezeblue-ai/breeze-tts`) 403s for the operator's account; branch
-/// `fix/matsuoka-respelling` merged as `bobmatnyc/breeze-tts#5`, and the
-/// ADR-0057 removal gate still refused the worktree because it asked `origin`
-/// for a pull request that was never opened there. The question the gate means
-/// to ask is "did these commits land on the remote they were PUSHED to", so the
-/// caller resolves that remote ([`push_remote_for_branch`]) and states it here.
-///
-/// What: identical to [`repo_slug_for`] except for the remote whose URL is
-/// read, including the one-hop fallback to the owning checkout. `remote` is
-/// [`DEFAULT_REMOTE`] for every caller that has no better answer, which makes
-/// this function's behaviour there byte-identical to the pre-#7850 one.
-/// Test: `a_fork_branch_is_searched_in_the_repository_it_was_pushed_to`,
-/// `an_unknown_named_remote_refuses_rather_than_answering_for_origin`.
-pub(crate) fn repo_slug_for_remote(dir: &Path, remote: &str) -> Result<String, String> {
-    repo_slug_with_remote(dir, remote, &SshHostAliases::for_current_user())
-}
-
 /// The remote a branch's commits were pushed to, when it is not `origin`
 /// (#7850).
 ///
@@ -299,7 +277,73 @@ pub(crate) fn push_remote_for_branch(dir: &Path, branch: &str) -> Option<String>
     })
 }
 
-/// [`repo_slug_for_remote`], against a stated SSH alias table (#7196, #7850).
+/// The repositories a branch's merged-PR lookup searches, `origin` first
+/// (#8403).
+///
+/// Why: #7850 replaced `origin` with the branch's push remote outright, so a
+/// fork workflow whose pull request merged in `origin` — the common
+/// cross-repository case — searched only the fork (`<account>/<repo>`) and was
+/// refused. Repository identity comes from `origin`; the push remote is a
+/// second place to look, never a replacement.
+/// What: `[origin]`, plus the push remote's slug when [`push_remote_for_branch`]
+/// names a remote other than [`DEFAULT_REMOTE`] whose repository differs. An
+/// unreadable or unparseable URL for EITHER remote is an `Err` — fail closed,
+/// never a lookup aimed at a guess.
+/// Test: `a_fork_branch_searches_origin_first_then_its_push_remote`,
+/// `an_unparseable_origin_refuses_even_with_a_valid_push_remote`.
+pub(crate) fn merged_pr_search_repos_with(
+    dir: &Path,
+    branch: &str,
+    aliases: &SshHostAliases,
+) -> Result<Vec<String>, String> {
+    let mut repos = vec![repo_slug_with(dir, aliases)?];
+    if let Some(remote) = push_remote_for_branch(dir, branch).filter(|r| r != DEFAULT_REMOTE) {
+        let pushed = repo_slug_with_remote(dir, &remote, aliases)?;
+        if !repos.contains(&pushed) {
+            repos.push(pushed);
+        }
+    }
+    Ok(repos)
+}
+
+/// [`merged_pr_search_repos_with`] against the current user's SSH aliases.
+pub(crate) fn merged_pr_search_repos(dir: &Path, branch: &str) -> Result<Vec<String>, String> {
+    merged_pr_search_repos_with(dir, branch, &SshHostAliases::for_current_user())
+}
+
+/// The first repository in `repos` whose lookup reports a merged PR (#8403).
+///
+/// Why: a merged PR in any of the checkout's own remotes is positive evidence;
+/// an unanswerable repository is not evidence of absence (ADR-0045).
+/// What: returns the first `Ok` with `count > 0`. Otherwise any `Err` wins —
+/// joined, naming every repository that failed — so a repository that could
+/// not be asked denies; only when every repository answered is the last
+/// zero-count answer returned.
+/// Test: `a_merged_pr_in_origin_grants_when_the_fork_cannot_be_resolved`,
+/// `an_unanswerable_repository_denies_when_no_other_found_a_merge`.
+pub(crate) fn first_merged<T>(
+    repos: &[String],
+    mut ask: impl FnMut(&str) -> Result<T, String>,
+    merged: impl Fn(&T) -> bool,
+) -> Result<T, String> {
+    let mut failures = Vec::new();
+    let mut last = None;
+    for repo in repos {
+        match ask(repo) {
+            Ok(answer) if merged(&answer) => return Ok(answer),
+            Ok(answer) => last = Some(answer),
+            Err(e) => failures.push(e),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    last.ok_or_else(|| "no repository to search for a merged pull request".to_string())
+}
+
+/// [`repo_slug_with`], asked of a named remote rather than of `origin` (#7196,
+/// #7850). #8403: its only production caller is [`merged_pr_search_repos_with`],
+/// which asks `origin` first and the push remote second.
 ///
 /// Why: same reason as [`repo_slug_with`] — the operator's `~/.ssh/config` is
 /// not readable by a test that must answer the same on two machines.

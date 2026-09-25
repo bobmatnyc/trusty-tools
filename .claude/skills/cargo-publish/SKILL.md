@@ -169,8 +169,12 @@ version instead). Runs six checks and fails loud on any of them:
    block a bad publish — a crates.io upload is irreversible except by yank, and
    #4088 is what a gate arriving afterwards costs. Requires
    `cargo install cargo-semver-checks@0.50.0 --locked`; a missing tool is a
-   failure, not a skip. No override — the fix is to bump the breaking position,
-   which the gate then skips as an already-breaking release.
+   failure, not a skip. The fix is to bump the breaking position, which the
+   gate then skips as an already-breaking release. The one exception (owner
+   ruling 2026-09-22) is a committed
+   `scripts/semver-accepted-breaks/<package>-<version>.txt` that lists every
+   break with a reason; it prints `[WARN]` and fails closed on anything else —
+   see `docs/reference/semver-gate.md`, "Accepted breaks".
    `.github/workflows/semver-checks.yml` runs the same check on the tag push
    (step 4), so a red run there is visible before you reach step 6.
 
@@ -851,6 +855,11 @@ Before declaring a publish complete:
 - [ ] `<binary> --version` shows correct version
 - [ ] Worktree path and branch reported to the PM for its prune verb (#5791 — never removed by the agent)
 - [ ] Remote branch cleaned up
+- [ ] Milestone closed the same day, open issues moved to the next milestone
+      of the same kind (bugfix or feature); the release report names the
+      moved issues (owner ruling 2026-09-25). An issue only awaiting live
+      verification (`status:merged` or `status:tested`) stays in the closed
+      milestone.
 
 ## Connection-Safe Daemon Restart (issue #534)
 

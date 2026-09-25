@@ -121,13 +121,13 @@ impl AttachOutcome {
 /// `-c`), so a single combined builder would have to smuggle an `Option`
 /// through, reintroducing the "was a bare switch-client ever possible"
 /// ambiguity #2678 removes.
-/// What: returns `["attach-session", "-t", session]`.
+/// What: returns `["attach-session", "-t", "=<session>"]` (exact, #8443).
 /// Test: `attach_argv_uses_attach_session`.
 pub(crate) fn attach_argv(session: &str) -> Vec<String> {
     vec![
         "attach-session".to_string(),
         "-t".to_string(),
-        session.to_string(),
+        trusty_mpm::core::tmux::exact_session_target(session),
     ]
 }
 
@@ -142,7 +142,8 @@ pub(crate) fn attach_argv(session: &str) -> Vec<String> {
 /// crate MUST carry an explicit `-c <client_tty>` resolved by
 /// [`resolve_switch_target`] — there is no code path left that can construct
 /// a bare `switch-client`.
-/// What: returns `["switch-client", "-c", client_tty, "-t", session]`.
+/// What: returns `["switch-client", "-c", client_tty, "-t", "=<session>"]`
+/// (exact, #8443).
 /// Test: `switch_client_argv_targets_explicit_client`.
 pub(crate) fn switch_client_argv(session: &str, client_tty: &str) -> Vec<String> {
     vec![
@@ -150,7 +151,7 @@ pub(crate) fn switch_client_argv(session: &str, client_tty: &str) -> Vec<String>
         "-c".to_string(),
         client_tty.to_string(),
         "-t".to_string(),
-        session.to_string(),
+        trusty_mpm::core::tmux::exact_session_target(session),
     ]
 }
 
@@ -191,12 +192,13 @@ fn inside_tmux_from_env(tmux: Option<String>, tmux_pane: Option<String>) -> bool
 /// the env-presence gate that decides whether `switch_client_to` even
 /// attempts pane-targeted resolution is unit-testable independent of a live
 /// tmux server.
-/// What: `Some(value)` unchanged when non-empty; `None` for both an unset
-/// var and an empty-string export (a shell script edge case tmux itself
-/// never produces).
+/// What: `Some(value)` unchanged when it is an immutable `%N` pane id; `None`
+/// for an unset var, an empty-string export, or anything else (#8443).
 /// Test: `tmux_pane_env_gate_present_and_empty_matrix`.
 fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
-    value.filter(|s| !s.is_empty())
+    // #8443: only an immutable `%N` is acted on — the tmux-exact-targets
+    // allowlist excuses the bare `-t pane_id` below on exactly that basis.
+    value.filter(|s| s.starts_with('%') && trusty_mpm::core::tmux::is_immutable_id(s))
 }
 
 /// Resolve the tmux session name of the CURRENT client's pane (#2157 item 4).
@@ -323,7 +325,11 @@ pub(crate) fn parse_single_client_tty(list_clients_output: &str) -> Option<Strin
 pub(crate) fn resolve_switch_target(session: &str) -> Option<String> {
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
     let output = std::process::Command::new(&tmux_bin)
-        .args(["list-clients", "-t", session])
+        .args([
+            "list-clients",
+            "-t",
+            &trusty_mpm::core::tmux::exact_session_target(session),
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -477,8 +483,9 @@ fn print_fail_closed_hint(name: &str) {
          silently retarget an unrelated terminal)."
     );
     eprintln!(
-        "tm: attach from a fresh shell (outside any tmux client) with: tmux attach-session -t \
-         {name}"
+        "tm: attach from a fresh shell (outside any tmux client) with: \
+         {}",
+        trusty_mpm::core::tmux::shell_attach_command(name)
     );
 }
 
@@ -577,8 +584,9 @@ fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
     if !status.success() {
         anyhow::bail!(
             "tmux switch-client exited with failure — the target session '{name}' may be \
-             attached on a different tmux server; try `tmux -L <socket> switch-client -t \
-             {name}` or detach the other client first"
+             attached on a different tmux server; try \
+             `tmux -L <socket> switch-client -t {}` or detach the other client first",
+            trusty_mpm::core::tmux::shell_exact_session_target(name)
         );
     }
     Ok(AttachOutcome::Switched)
@@ -639,7 +647,7 @@ mod tests {
     fn attach_argv_uses_attach_session() {
         assert_eq!(
             attach_argv("my-session"),
-            vec!["attach-session", "-t", "my-session"]
+            vec!["attach-session", "-t", "=my-session"]
         );
     }
 
@@ -656,7 +664,7 @@ mod tests {
                 "-c",
                 "/dev/ttys021",
                 "-t",
-                "tmpm-mcp-a-protocol-00f6f5ef"
+                "=tmpm-mcp-a-protocol-00f6f5ef"
             ]
         );
     }
@@ -792,6 +800,28 @@ mod tests {
         );
         assert_eq!(tmux_pane_id_from_env(Some(String::new())), None);
         assert_eq!(tmux_pane_id_from_env(None), None);
+    }
+
+    /// #8443: the bare `-t pane_id` in `session_for_pane`/`pane_tty_for` is
+    /// only exact because this gate admits an immutable `%N` and nothing else.
+    #[test]
+    fn tmux_pane_env_gate_admits_only_an_immutable_pane_id() {
+        for bad in ["tm-cto", "=tm-cto", "%", "%12a", "$3", "@4", "0.1"] {
+            assert_eq!(tmux_pane_id_from_env(Some(bad.to_string())), None, "{bad}");
+        }
+        assert_eq!(
+            tmux_pane_id_from_env(Some("%7".to_string())),
+            Some("%7".to_string())
+        );
+    }
+
+    /// #8443: operator hints normalize and quote the name like tmux does.
+    #[test]
+    fn attach_hints_normalize_and_quote_the_session_name() {
+        assert_eq!(
+            trusty_mpm::core::tmux::shell_attach_command("tm:proj:0"),
+            "tmux attach-session -t '=tm_proj_0'"
+        );
     }
 
     /// The composed guard sequence, end to end: every step resolves and

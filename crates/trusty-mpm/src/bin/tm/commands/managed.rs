@@ -594,6 +594,67 @@ pub(crate) async fn session_decommission(
     Ok(())
 }
 
+/// `tm session decommission <id> [--force]` — resolve, tear down, and fail
+/// when the workspace is kept (#7660).
+///
+/// Why: decommission exited 0 while leaving a workspace on disk, so scripted
+/// cleanup read success; and it never said what blocked the removal.
+/// What: resolves `target` like every managed verb, sends `force`, prints
+/// [`decommission_message`], and returns [`decommission_kept_error`] when the
+/// daemon reports a kept-workspace reason.
+/// Test: `session_decommission_routed_fails_naming_why_the_workspace_was_kept`,
+/// `session_decommission_routed_force_removes_a_provisioning_only_worktree`.
+pub(crate) async fn session_decommission_routed(
+    client: &reqwest::Client,
+    url: &str,
+    target: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let outcome = super::managed_route::executor(client, url)
+        .decommission_managed_target(target, force)
+        .await?;
+    println!("{}", decommission_report(&outcome));
+    match decommission_kept_error(outcome.workspace_kept_reason.as_deref()) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// What `tm sessions decommission` prints on stdout (#7660): the verdict line,
+/// then the one-line by-design reason when the daemon kept a workspace tm
+/// never removes. A `false` verdict with nothing kept and no path left on the
+/// tombstone means nothing was on disk, and says so instead of "still on disk".
+/// Test: `session_decommission_routed_says_why_it_kept_the_main_checkout`,
+/// `decommission_report_says_nothing_was_on_disk_for_an_absent_workspace`.
+pub(crate) fn decommission_report(
+    outcome: &trusty_mpm::client::ManagedDecommissionOutcome,
+) -> String {
+    // #7660: the tombstone keeps `workspace_path` only while the directory is
+    // on disk, so an empty one with no kept reason is an absent workspace.
+    if outcome.workspace_removed == Some(false)
+        && outcome.workspace_kept_reason.is_none()
+        && outcome.workspace_kept_by_design.is_none()
+        && outcome.summary.workspace_path.is_none()
+    {
+        return format!(
+            "decommissioned {} — tombstone record kept; no workspace was on disk to remove",
+            outcome.summary.id
+        );
+    }
+    let verdict = decommission_message(&outcome.summary.id, outcome.workspace_removed);
+    match outcome.workspace_kept_by_design.as_deref() {
+        Some(why) => format!("{verdict}\n{why}"),
+        None => verdict,
+    }
+}
+
+/// The error a kept workspace turns into, or `None` (#7660).
+///
+/// Test: `session_decommission_exits_non_zero_when_the_workspace_is_kept`.
+pub(crate) fn decommission_kept_error(reason: Option<&str>) -> Option<anyhow::Error> {
+    reason.map(|r| anyhow::anyhow!("workspace NOT removed: {r}"))
+}
+
 // #2012: `tm session delete` lives in the sibling `commands::delete` module —
 // this file is at the 500-SLOC production cap, mirroring the pattern used to
 // keep `session_manager`'s files under the same cap (`adopt.rs`/`decommission.rs`/

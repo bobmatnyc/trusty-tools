@@ -53,7 +53,7 @@
 #     completion recurses (GitHub caps the chain at three levels).
 #   - Every watched completion creates a run of this workflow, green or not. The
 #     job is skipped on a green one and consumes no runner, but the Actions list
-#     shows the entry. That noise buys a signal for all 19 siblings at once.
+#     shows the entry. That noise buys a signal for all 21 siblings at once.
 name: Red main notifier
 
 on:
@@ -76,6 +76,7 @@ on:
       - "Teardown guard" # teardown-guard.yml
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
+      - "Tmux exact targets" # tmux-exact-targets.yml
       - "Token drift" # token-drift.yml
       - "trusty-audit installer" # trusty-audit-install.yml
       - "UI bundle freshness" # ui-bundle-freshness.yml

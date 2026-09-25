@@ -271,3 +271,43 @@ pub const TM_SLACK: &str = include_str!("../assets/skills/tm-slack.md");
 /// What: embedded markdown skill file deployed to `skills/tm-secrets.md`.
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
 pub const TM_SECRETS: &str = include_str!("../assets/skills/tm-secrets.md");
+
+/// `/tm-epic` — tracker + phase-issue authoring (issue #8376, Part A).
+///
+/// Why: an epic's tracker and its phase sub-issues followed an owner pattern
+/// that lived in one person's head; this skill carries the judgement half
+/// (the gate test, the four rules, acceptance-criteria writing, the four
+/// tracker-update triggers) and points at the reference files below for the
+/// templates and the manual `gh` sequence. No `tm` verb wraps it yet — the
+/// CLI is a later phase, and the skill says so.
+/// What: embedded markdown skill file deployed to `skills/tm-epic.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_EPIC: &str = include_str!("../assets/skills/tm-epic.md");
+
+/// `tm-epic` tracker body template — the three marker blocks (#8376).
+///
+/// What: deployed to `skills/tm-epic/references/tracker-template.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_EPIC_TRACKER_TEMPLATE: &str =
+    include_str!("../assets/skills/tm-epic/references/tracker-template.md");
+
+/// `tm-epic` five-heading phase body template (#8376).
+///
+/// What: deployed to `skills/tm-epic/references/phase-template.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_EPIC_PHASE_TEMPLATE: &str =
+    include_str!("../assets/skills/tm-epic/references/phase-template.md");
+
+/// `tm-epic` ordered `gh` sequence, verified against the installed gh (#8376).
+///
+/// What: deployed to `skills/tm-epic/references/manual-procedure.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_EPIC_MANUAL_PROCEDURE: &str =
+    include_str!("../assets/skills/tm-epic/references/manual-procedure.md");
+
+/// `tm-epic` anti-pattern table (#8376).
+///
+/// What: deployed to `skills/tm-epic/references/anti-patterns.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_EPIC_ANTI_PATTERNS: &str =
+    include_str!("../assets/skills/tm-epic/references/anti-patterns.md");

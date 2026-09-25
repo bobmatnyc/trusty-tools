@@ -10,7 +10,7 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// Build the canonical nine-section taxonomy with correct tiers.
+/// Build the canonical ten-section taxonomy with correct tiers.
 fn sections() -> Vec<InstructionSection> {
     SectionId::CANONICAL
         .iter()
@@ -70,6 +70,10 @@ fn fixture() -> InstructionPackage {
             generated(SectionId::AgentDelegation, Generator::AgentRoster, false),
             generated(SectionId::Core, Generator::ProjectAddendum, true),
             text(SectionId::Identity, "IDENTITY"),
+            // #8361: placed after `IDENTITY` deliberately — several tests
+            // address `blocks[8]` by index, and appending past the floor would
+            // break the "ends with CONVENTIONS" assertion instead.
+            text(SectionId::AutonomousExecution, "AUTONOMY"),
             text(SectionId::Enforcement, "ENFORCEMENT"),
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
@@ -493,7 +497,7 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 9, "nine distinct sections");
+    assert_eq!(unique.len(), 10, "ten distinct sections");
 }
 
 #[test]
@@ -863,6 +867,7 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ROSTER",
             "ADDENDUM",
             "IDENTITY",
+            "AUTONOMY",
             "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",

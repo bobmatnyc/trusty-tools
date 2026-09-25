@@ -6,8 +6,8 @@
 
 - SPRINT — drive to feature-complete on a local version: targeted tests,
   no CI iteration loops, no critic round on narrow changes.
-- HARDEN — once feature-complete: full suite, critic, release gates.
-  Publish only after that.
+- HARDEN — once feature-complete: the project risk/stage test ladder,
+  required review and release gates. Publish only after those pass.
 - Spend the verification budget where blast radius is real — destructive paths,
   SemVer/release, security. Cut ceremony everywhere else. Slow feature release
   *causes* too many things in flight, so shortening time-to-land is the fix;
@@ -43,6 +43,13 @@
 - Name the Fail-Open Check in the dispatch brief for `code-analyzer` or
   `code-critic`; the five checks that find it are in the `code-review-standards`
   skill both agents already load.
+
+## Layout ADRs Are Defaults, Not Mandates
+
+A project-layout ADR or scaffold (e.g. an `apps/` + `packages/` workspace) is
+the default for a project whose layout is still undefined, is
+framework-specific, and never justifies dispatching work to restructure an
+existing layout to match it (owner ruling 2026-09-22, #8382).
 
 ## Live Issue Status
 

@@ -381,6 +381,16 @@ impl ProviderRegistry {
     /// Test: side-effect-only env read; logic covered via the explicit-field
     /// constructor used by `registry_*` tests.
     pub fn from_env() -> Self {
+        // #8236: the two INFERENCE credentials resolve through the shipped
+        // resolver (process env → `.env.local` → the bounded credential store),
+        // so they no longer require a plaintext file. Every failure arm returns
+        // `None` there, after an ERROR log by name and kind, which lands this
+        // registry in `Degraded` rather than silently un-credentialled.
+        // The AWS markers below stay a raw env probe on purpose: they are
+        // presence FLAGS, not credentials, and the SDK chain is the authority.
+        let secret = |k: &str| {
+            crate::secret_source::resolve_secret(k).filter(|v: &String| !v.trim().is_empty())
+        };
         let non_empty = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let aws_credentials_available = ["AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_ROLE_ARN"]
             .iter()
@@ -412,9 +422,9 @@ impl ProviderRegistry {
         }
 
         Self {
-            anthropic_api_key: non_empty("ANTHROPIC_API_KEY"),
+            anthropic_api_key: secret("ANTHROPIC_API_KEY"),
             aws_credentials_available,
-            openrouter_api_key: non_empty("OPENROUTER_API_KEY"),
+            openrouter_api_key: secret("OPENROUTER_API_KEY"),
         }
     }
 

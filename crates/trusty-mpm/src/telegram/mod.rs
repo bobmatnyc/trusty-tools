@@ -30,7 +30,6 @@ pub mod formatter;
 pub mod supervisor;
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -135,47 +134,22 @@ pub struct BotOptions {
     pub alert_chat_id: Option<i64>,
 }
 
-/// Resolve a secret the same way the LLM overseer does: `.env.local`, then
-/// `.env`, then the process environment.
+/// Resolve the bot token the same way the LLM overseer does.
 ///
-/// Why: the operator stores the bot token in `.env.local` (gitignored) exactly
-/// as they store `OPENROUTER_API_KEY`; the bot must honour that same resolution
-/// order so a single dotenv file configures the whole tool.
-/// What: returns the first non-empty value found for `var_name`, or `None`.
-/// Test: `resolve_token_reads_dotenv`, `resolve_token_missing_is_none`.
+/// Why (#8236): this used to read `.env.local`, then `.env`, then
+/// `std::env::var` by hand, which could not reach the `0600` credential store
+/// or the Keychain — so `TELEGRAM_BOT_TOKEN` had to sit in a plaintext file,
+/// and on the #8236 host it sat in a `0644` LaunchAgent plist.
+/// What: delegates to [`crate::secret_source::resolve_secret`] — process env,
+/// then `.env.local`, then the bounded credential store. `None` on EVERY
+/// failure, which is the existing "the bot does not start" signal; the failure
+/// is logged at ERROR by name and kind there, and nothing here retries or falls
+/// back to the retired `.env` read.
+/// Test: `resolve_token_reads_the_process_environment`,
+/// `resolve_token_missing_is_none`,
+/// `resolve_token_is_none_when_the_credential_is_unresolvable`.
 pub fn resolve_token(var_name: &str) -> Option<String> {
-    for file in [".env.local", ".env"] {
-        if let Some(value) = read_dotenv_key(Path::new(file), var_name) {
-            return Some(value);
-        }
-    }
-    std::env::var(var_name).ok().filter(|v| !v.is_empty())
-}
-
-/// Read a single `KEY=value` pair from a dotenv-style file.
-///
-/// Why: pulling the parse out keeps [`resolve_token`] testable against a temp
-/// file. Mirrors the daemon's `read_dotenv_key`.
-/// What: returns the trimmed, unquoted value for `var_name`, or `None` if the
-/// file is absent or the key is not present / empty.
-/// Test: `resolve_token_reads_dotenv`.
-fn read_dotenv_key(path: &Path, var_name: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=')
-            && key.trim() == var_name
-        {
-            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    crate::secret_source::resolve_secret(var_name)
 }
 
 /// True if a message from `user_id` may be processed under `options`.

@@ -107,7 +107,9 @@ pub(crate) struct Cli {
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 
-    /// Select which logged-in `gh` account clones/runs a managed repo (#7166).
+    /// Select which logged-in `gh` account clones/runs a managed repo (alias:
+    /// `--user`). The value must be a login `gh auth status` already lists on
+    /// this host (#7166, #5850).
     ///
     /// Why: `tm <url>` fails on a private repo when every credential path on
     /// the machine resolves to one identity (an exported `GH_TOKEN`, git's
@@ -135,13 +137,37 @@ pub(crate) struct Cli {
     /// then builds and reuses its own isolated `gh` config dir for that login
     /// automatically (#7166); it never runs `gh auth switch`, so a
     /// concurrently-running session under a different account is unaffected.
-    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
-    #[arg(long, global = true)]
+    /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
+    /// second one — the owner reached for that spelling (`tm <url> --user
+    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// every parse position and the `is_name_segment` validation in
+    /// [`crate::commands::register_args::resolve_account`] carry over
+    /// unchanged; no validation against `gh auth status` exists for either
+    /// spelling, and none is added here (a network/subprocess call at parse
+    /// time is not this flag's job).
+    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
+    /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_rejects_a_blank_account_flag_before_the_repository`.
+    // #5850: a blank value is refused here, not read as absent downstream.
+    #[arg(long, visible_alias = "user", global = true, value_parser = non_blank_login)]
     pub(crate) account: Option<String>,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// Parse `--account`/`--user`, refusing a blank or whitespace-only login.
+///
+/// Why: `resolve_account` reads a blank flag as absent, so `tm --user= <url>`
+/// would run as the machine's global `gh` account (#5850).
+/// What: returns the value unchanged when it has any non-whitespace character.
+/// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
+fn non_blank_login(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+    }
+    Ok(value.to_string())
 }
 
 /// Top-level CLI subcommands.
@@ -245,17 +271,28 @@ pub(crate) enum Command {
     /// tmux server. Hidden because it is an internal launch shim
     /// (`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`), never a
     /// user-facing verb.
-    /// What: spawns `argv[0]` with `argv[1..]` via
-    /// [`trusty_mpm::core::spawn_disclaim::disclaimed_status`] (inherited stdio),
-    /// waits, and exits with the child's status code. On non-macOS the disclaim
-    /// is a no-op pass-through to a plain `Command::status()`.
+    /// What: with `--launch-spec <path>` (#8233, the managed form) it reads a
+    /// [`trusty_mpm::runtime::launch_spec::LaunchSpec`] — cwd, program, argv,
+    /// env unsets and assignments — deletes it, and spawns from that; with a
+    /// trailing argv it spawns `argv[0]` with `argv[1..]`. Either way the spawn
+    /// goes through [`trusty_mpm::core::spawn_disclaim::disclaimed_status`]
+    /// (inherited stdio), waits, and exits with the child's status code. On
+    /// non-macOS the disclaim is a no-op pass-through to a plain
+    /// `Command::status()`.
     /// Test: `cli_parses_internal_spawn_disclaimed` (in `tests.rs`) covers the
-    /// trailing-argv parse; the spawn behaviour is covered by
+    /// trailing-argv parse and `cli_parses_internal_spawn_disclaimed_launch_spec`
+    /// the spec form; the spawn behaviour is covered by
     /// `crate::core::spawn_disclaim`'s `disclaimed_status_*` tests.
     #[command(name = "internal-spawn-disclaimed", hide = true)]
     InternalSpawnDisclaimed {
-        /// The program to launch, followed by its arguments.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        /// Read cwd, argv and environment from a launch spec instead of argv
+        /// (#8233) — the managed-session form, which keeps the pane's typed
+        /// line a fixed size no matter how large the launch is.
+        #[arg(long = "launch-spec", value_name = "PATH")]
+        launch_spec: Option<std::path::PathBuf>,
+        /// The program to launch, followed by its arguments. Empty when
+        /// `--launch-spec` is given.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
     },
     /// Manage the project registry (registry B) and its Deliverable/Milestone
@@ -578,15 +615,26 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DivertAction,
     },
-    /// Deterministic trusty-memory palace maintenance (issue #4837).
+    /// Palace access and maintenance without MCP (#4837, #8352).
+    ///
+    /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the
+    /// `mcp__trusty-memory__*` tools are unavailable — a dead MCP connection
+    /// does not cut this session off from memory. They call the same daemon
+    /// methods the MCP tools do (`memory_recall`, `memory_remember`,
+    /// `memory_note`) over its Unix socket, honour the session's own palace
+    /// (`TRUSTY_MEMORY_PALACE`, then the committed pin, then the repo slug)
+    /// with a `--palace` override, and print a stable envelope under `--json`.
+    /// With the daemon down each exits non-zero naming the socket it dialled.
     ///
     /// Why: bulk-loading a directory of memory files into a palace is ETL —
     /// read file, map frontmatter onto drawer fields, write. Routing it
     /// through an agent cost 622k tokens for 120 files, because every tool
     /// round re-sends the agent's accumulated context. This group is the
     /// zero-inference path, and the prerequisite for issue #4834.
-    /// What: the `tm memory <action>` command group (currently `import`).
-    /// Test: `cli_parses_memory_import*` in `tests.rs`.
+    /// What: the `tm memory <action>` command group — `recall`, `remember`,
+    /// `note`, `import` and `import-auto-memory`.
+    /// Test: `cli_parses_memory_import*`, `cli_parses_memory_recall` in
+    /// `tests.rs`.
     Memory {
         /// Action to run.
         #[command(subcommand)]
@@ -1503,9 +1551,9 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
-/// The `writes` group holds the three whose destructive half DEFAULTS TO A
-/// PREVIEW (`--fix`, `--fix-skills`, `--quarantine-mcp`) so `--yes` can promote
-/// any of them without naming each.
+/// The `writes` group holds the flags whose destructive half DEFAULTS TO A
+/// PREVIEW (`--fix`, `--fix-skills`, `--fix-agents`, `--fix-launchd-secrets`,
+/// `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1519,7 +1567,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "fix_skills", "fix_agents", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1605,6 +1653,25 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_agents: bool,
 
+    /// Run ONLY the LaunchAgent credential strip (`launchd_secrets`). DRY RUN
+    /// unless `--yes`.
+    ///
+    /// Why (#8236): `--fix` runs every repair class machine-wide, so there was
+    /// no way to fix one credential exposure without the other writes.
+    /// What: migrates each registry-mapped plist credential into the store
+    /// when the store holds nothing for it, confirms it by byte-equal
+    /// read-back, and strips only the confirmed keys. A store that already
+    /// holds the same value counts as imported with no write; a store that
+    /// holds a DIFFERENT value is never overwritten, and that key stays in the
+    /// plist. Then tightens every regular-file `com.trusty.*.plist` wider than
+    /// `0600` to `0600`, including one that holds no credential; a symlink is
+    /// never touched. Writes nothing without `--yes`. Prints key names and
+    /// outcomes, never a value. No other repair runs. A running daemon keeps
+    /// its old environment until `launchctl bootout` and `launchctl bootstrap`
+    /// reload the unit; `launchctl kickstart -k` does not.
+    #[arg(long)]
+    pub fix_launchd_secrets: bool,
+
     /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
     ///
     /// Why (#4948): doctor checks were pull-only, so findings persisted
@@ -1641,7 +1708,8 @@ pub struct DoctorFlags {
     /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
     /// itself while writing the other half made the printed "dry run" untrue.
     /// What: promotes `--fix`, BOTH `--fix-skills` halves, `--fix-agents`
-    /// (#6649) and `--quarantine-mcp` from a dry run to an applied run.
+    /// (#6649), `--fix-launchd-secrets` (#8236) and `--quarantine-mcp` from a
+    /// dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

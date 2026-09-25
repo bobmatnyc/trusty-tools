@@ -18,6 +18,11 @@
 #              test-shard.
 #   test     – roll-up over the shards AND test-doc; inherits the same trigger
 #              scope
+#   affected-plan / affected-test / affected – "Rust tests (affected
+#              crates)": PULL REQUESTS. cargo test --no-fail-fast for the
+#              crates the PR touches plus their dependents
+#              (scripts/select-test-crates.sh), in up to 8 legs; the
+#              `affected` roll-up is the one context
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
 #   audit-ui – cargo clippy + test -p trusty-audit-ui (same runner shape, #5477)
@@ -1393,6 +1398,231 @@ jobs:
             exit 1
           fi
           echo "every test shard and the doctest job succeeded"
+
+  # --------------------------------------------------------------------------
+  # Rust tests (affected crates): the PR-time test run (owner ruling
+  # 2026-09-23). The shards above stay post-merge; this runs `cargo test
+  # --no-fail-fast` for the crates a PR touches plus their dependents.
+  #
+  # Three jobs, one context. `affected-plan` computes the crate set with
+  # scripts/ci-affected-test-plan.sh (a thin wrapper over
+  # scripts/select-test-crates.sh from the PR's merge-base); `affected-test`
+  # runs it as a dynamic matrix of up to 8 legs; `affected` rolls both up under
+  # the single name `Rust tests (affected crates)`, the context meant to become
+  # required. That name must always REPORT: the roll-up is `!cancelled()`, and
+  # a docs-only PR, a push to main or a dispatch plans zero crates and reports
+  # success in seconds. Only the legs are skipped, and only when the plan
+  # itself says there is nothing to run; the roll-up then checks the plan,
+  # never the skipped matrix.
+  #
+  # A workspace-wide input (root Cargo.toml / Cargo.lock, deny.toml,
+  # rust-toolchain, .cargo/**) selects every crate — that is the selector's own
+  # rule. The 8-leg split keeps that run inside one leg's timeout; trusty-mpm,
+  # the largest suite, lands in a leg of its own. scripts/** and .github/**
+  # select narrowly (#7777): this file and the selector select trusty-common +
+  # trusty-mpm; any other such path selects only the crates whose Rust source
+  # names it, often none, and a zero-crate plan reports success.
+  #
+  # Toolchain, env, cache and fastembed handling copy `test-shard`, so the
+  # restored `test` cache matches. Not copied: nextest (`cargo test` runs the
+  # doctests of the selected crates too), and the fastembed pre-seed/save —
+  # the legs only restore the model cache `test-shard` saves on main.
+  # --------------------------------------------------------------------------
+  affected-plan:
+    name: Rust tests (affected crates) — plan
+    needs: [changes]
+    # `!cancelled()`: a failed `changes` job leaves `docs_only` empty, which
+    # the plan reads as "not Cargo-inert" and plans in full.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      reason: ${{ steps.plan.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Same stale-merge-base fix as the `changes` job (#4688).
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Install stable toolchain
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      # Both selectors' fixtures run before the step that consults them.
+      - name: Crate-selection selftests
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        run: |
+          bash scripts/select-test-crates_selftest.sh
+          bash scripts/ci-affected-test-plan-selftest.sh
+
+      - name: Select affected crates
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            reason="no affected crates: ${EVENT_NAME} run — the pre-publish shards test the whole workspace"
+            printf 'count=0\nmatrix={"include":[]}\nreason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
+            echo "$reason"
+            exit 0
+          fi
+          # An unresolvable merge-base passes an empty range, which the
+          # selector answers with EVERY crate (its FAIL OPEN rule).
+          range=""
+          if merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"; then
+            range="${merge_base}..HEAD"
+          else
+            echo "::warning::cannot resolve a merge-base against origin/${BASE_REF} — testing every crate"
+          fi
+          bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" -- --range "$range"
+
+  affected-test:
+    name: Rust tests (affected crates) — leg ${{ matrix.leg }} of ${{ matrix.total }}
+    needs: [affected-plan]
+    # Skipped only when the plan succeeded and selected nothing; the `affected`
+    # roll-up below reads the plan, so a skip here can never report green on
+    # its own.
+    if: ${{ !cancelled() && needs.affected-plan.result == 'success' && needs.affected-plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    # `test-shard` legs run 13-27 min (build ~9-12 min from the shared cache).
+    timeout-minutes: 45
+    strategy:
+      # Every leg runs to completion, as in `test-shard`.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.affected-plan.outputs.matrix) }}
+    env:
+      # Both copied from `test-shard`; CARGO_PROFILE_TEST_DEBUG must match for
+      # the restored `test` cache to hit (rust-cache hashes CARGO* env vars).
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Create local main branch for git tests
+        run: bash scripts/ci-create-local-main.sh
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/ci-apt-install.sh \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      - name: Install .NET SDK (for trusty-analyze's C# Roslyn adapter tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # Restore only: `test-shard` on main is the sole writer of this key.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: Resolve fastembed model cache key
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      - name: Restore fastembed model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      # `--skip` mirrors `test-shard`'s nextest filter: that one test needs CI
+      # unset and is re-run below with the override.
+      - name: cargo test (this leg's crates)
+        env:
+          LEG_CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          args=()
+          for c in $LEG_CRATES; do
+            args+=(-p "$c")
+            # #4901: trusty-common has an empty default feature set; same
+            # override as `select-test-crates.sh --cargo-args`.
+            if [ "$c" = "trusty-common" ]; then
+              args+=(--features trusty-common/unconditional-only)
+            fi
+          done
+          echo "cargo test ${args[*]} --no-fail-fast"
+          cargo test "${args[@]}" --no-fail-fast \
+            -- --skip update::tests::cache_fresh_returns_some_when_newer
+
+      - name: cargo test -p trusty-common (cache-freshness, CI unset)
+        if: contains(format(' {0} ', matrix.crates), ' trusty-common ')
+        env:
+          CI: ""
+        run: |
+          cargo test -p trusty-common --lib --features update-check \
+            update::tests::cache_fresh_returns_some_when_newer -- --exact
+
+      - name: cargo test -p trusty-common --features codex-config
+        if: contains(format(' {0} ', matrix.crates), ' trusty-common ')
+        run: cargo test -p trusty-common --lib --features codex-config codex_config
+
+  # The single context for this suite. "Must equal success" polarity, as in
+  # `test` above, so a failed or skipped plan fails closed.
+  affected:
+    name: Rust tests (affected crates)
+    needs: [affected-plan, affected-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the plan and every leg to have succeeded
+        env:
+          PLAN_RESULT: ${{ needs.affected-plan.result }}
+          PLAN_COUNT: ${{ needs.affected-plan.outputs.count }}
+          PLAN_REASON: ${{ needs.affected-plan.outputs.reason }}
+          LEGS_RESULT: ${{ needs.affected-test.result }}
+        run: |
+          set -euo pipefail
+          if [ "${PLAN_RESULT}" != "success" ]; then
+            echo "::error::Rust tests (affected crates) is red: the plan job reported '${PLAN_RESULT}'."
+            exit 1
+          fi
+          if [ "${PLAN_COUNT}" = "0" ]; then
+            echo "${PLAN_REASON}"
+            exit 0
+          fi
+          echo "${PLAN_REASON}"
+          if [ "${LEGS_RESULT}" != "success" ]; then
+            echo "::error::Rust tests (affected crates) is red: the leg matrix reported '${LEGS_RESULT}'. Open the 'Rust tests (affected crates) — leg N of M' jobs for the failing crate."
+            exit 1
+          fi
+          echo "every affected-crate leg succeeded"
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.

@@ -109,6 +109,16 @@ pub mod claude_mpm_session;
 // the memory-tier default table, and the one host-root resolution site.
 pub mod builders;
 
+// #8261: the capacity formula that replaces the cap's fixed number — measured
+// 1-minute load average and free memory against the operator's ceiling, with
+// the fail-closed and never-revoke invariants.
+pub mod builder_capacity;
+
+// #8261: the pool of persistent per-slot `CARGO_TARGET_DIR` directories a
+// leased builder compiles into, so concurrent builds stop serialising on one
+// shared cargo build-directory lock.
+pub mod builder_slot_pool;
+
 // #7123: the component labels an issue audit ACCEPTS — the seed table plus the
 // repository's own crate labels. Distinct from `policy_labels`, which answers
 // which labels the harness CREATES.
@@ -138,12 +148,22 @@ pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+// #8510: the gh config dirs an account-only pin may ask for a candidate token.
+pub(crate) mod gh_account_dir;
+// #8510: proves a candidate token is the pinned account's with `GET /user`.
+pub(crate) mod gh_account_proof;
+// #5850: the ProjectRegistry half of `gh_account`, read synchronously for a
+// daemon-side checkout. `pub(crate)` throughout — nothing outside this crate
+// resolves a pin from a bare directory.
+pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
 pub mod gh_scoped_stub;
 pub mod git_identity;
+// #8511: keep the harness's own files out of every registered project's `git status`.
+pub(crate) mod harness_exclude;
 pub mod harness_root;
 pub mod home_trust_seed;
 pub mod hook;
@@ -187,6 +207,9 @@ pub mod auto_memory_import;
 // #7685: auto memory is a FALLBACK — every write site that turns it off asks
 // this module whether trusty-memory is available first.
 pub mod memory_reachable;
+// #8352: `tm memory recall|remember|note` — palace access over the daemon
+// socket, so a dead MCP connection does not cut the session off from memory.
+pub mod memory_verbs;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
@@ -337,7 +360,11 @@ pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+// #7889: route (c) of the landing admission — HEAD inside a merged PR's history.
+pub mod worktree_carried_by_pr;
 pub mod worktree_index;
+// #7889: the landed-content admission both reclaim ladders share.
+pub mod worktree_landed_content;
 pub mod worktree_naming;
 // See ADR-0057 — the facts the pm-guard's removal re-checks ask git and GitHub.
 pub mod worktree_removal_facts;

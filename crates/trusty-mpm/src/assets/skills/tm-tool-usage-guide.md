@@ -86,6 +86,16 @@ for the design and lifecycle.
 | `memory_recall` | Recall relevant context by query — call BEFORE research/delegation |
 | `memory_recall_deep` / `memory_recall_all` | Cross-palace / exhaustive recall |
 | `memory_remember` / `memory_note` | Store important findings immediately, not at session end |
+
+**These tools unavailable? Use the `tm memory` verbs instead (#8352).** A dead
+MCP connection does not cut this session off from the palace: `tm memory recall
+<query>`, `tm memory remember <text>` and `tm memory note <text>` call the same
+daemon methods over its Unix socket, in this session's own palace, with
+`--palace` to override it, `--top-k` / `--room` / `--tag` mirroring the tool
+arguments, and `--json` for a parseable envelope (`verb`, `palace`, `socket`,
+`count`, `result`). With trusty-memory down each exits non-zero naming the
+socket. This is the ONE Bash exception to the memory rule — the MCP tools stay
+first whenever they answer.
 | `task_add` / `task_list` / `task_complete` | Lightweight session-local task tracking (see `tm-session-management`, `tm-ticketing`) |
 | `get_prompt_context` | Load current aliases/conventions at turn start — pass a `query` to scope it |
 | `kg_assert` / `kg_query` / `kg_gaps` | Knowledge-graph assertions and structural recall |
@@ -113,6 +123,19 @@ for the design and lifecycle.
 | `review_pr` | Review an open PR — pairs with the QA gate (CB#8) |
 | `review_health` | Liveness check for the review daemon |
 
+## twg — Jira and Atlassian Content
+
+Prefer the `twg` CLI (`~/.local/bin/twg`) over MCP connectors or `WebFetch`
+for any Jira, Confluence, or other Atlassian read or write (owner ruling
+2026-09-23). Always pass `--output json` for machine-readable results.
+Credentials come from twg's own `auth.conf` (see `twg --help`; run `twg env`
+for the resolved path — never open or print the file itself).
+
+**Example** (from `twg --help`):
+```
+twg jira workitem get PROJ-123 -o json
+```
+
 ## Read Tool — Strict Limit
 
 The PM must never read source code files directly (CB#2 in
@@ -129,7 +152,8 @@ read this turn? does my task contain investigation keywords ("check",
 ## Bash Tool — Navigation and Git Tracking Only
 
 **Allowed**: `ls`, `pwd`, `cd`; `git status`, `git add`, `git commit`, `git
-log`, `git diff`.
+log`, `git diff`; `tm memory recall|remember|note` when the
+`mcp__trusty-memory__*` tools are unavailable (#8352).
 
 **Forbidden (delegate instead)**:
 - Verification commands (`curl`, `lsof`, `ps`, `wget`, `nc`, `make`, `pytest`,

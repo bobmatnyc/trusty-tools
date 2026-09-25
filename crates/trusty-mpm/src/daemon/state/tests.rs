@@ -1018,12 +1018,56 @@ async fn reap_dead_managed_sessions_marks_stopped() {
     assert!(after.is_auto_resumable());
 }
 
+/// #8233 acceptance item 4: the reaper leaves a session another path is
+/// resuming exactly as it found it.
+///
+/// Why: `resume_inner`'s recreate branch kills and rebuilds the tmux session,
+/// so a sweep whose `live` snapshot predates that kill sees the name missing
+/// and — before this guard — stopped the record, killed the pane the resume had
+/// just made, and stamped `Deliberate`, which no automatic path revives.
+/// What: holds the real claim, sweeps with a live set that omits the session,
+/// and asserts the record is untouched — still `Active`, and with NO stop cause
+/// written, because a skipped session must not be half-acted-on either.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reap_managed_against_skips_a_session_whose_resume_is_in_flight() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), MinFakeDriver::new())
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+    let id = active_session_in_state(&mgr, "resuming", "/tmp/test-reap-in-flight").await;
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    // The claim the resume route holds for its whole span.
+    let claim = mgr.begin_resume(&id).expect("claim granted");
+    // A non-empty live set that does NOT contain this session: the exact
+    // observation the recreate branch produces mid-resume.
+    let mut live = std::collections::HashSet::new();
+    live.insert("some-other-live-session".to_string());
+    state.reap_managed_against(&live).await;
+
+    let after = mgr.get(&id).await.expect("get after reap");
+    assert_eq!(
+        after.state,
+        crate::session_manager::ManagedSessionState::Active,
+        "the reaper must not stop a session whose resume is in flight (#8233)"
+    );
+    assert_eq!(
+        after.stop_cause, None,
+        "and must write no stop cause for it either — a `Deliberate` stamp here \
+         is what made such a session permanently un-auto-resumable"
+    );
+    drop(claim);
+}
+
 /// Seed one Active managed session rooted at `workspace`, wired into a state.
 ///
 /// Why: the two #6194 reaper tests below differ only in the live set they reap
 /// against, so the six-step create/promote/wire sequence is shared.
 /// Test: `reap_marks_a_targeted_kill_deliberate`,
-/// `reap_leaves_a_whole_server_loss_auto_resumable`.
+/// `reap_leaves_a_whole_server_loss_auto_resumable`,
+/// `reap_managed_against_skips_a_session_whose_resume_is_in_flight`.
 async fn active_session_in_state(
     mgr: &std::sync::Arc<crate::session_manager::SessionManager>,
     task: &str,

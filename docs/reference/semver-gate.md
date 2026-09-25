@@ -119,11 +119,18 @@ It runs **only when the gate actually compared the crate that run**. Every SKIP
 branch in `check_semver.sh` returns before `cargo-semver-checks` is invoked, so a
 skipped crate gets no fresh rustdoc — and a `target/semver-checks/` directory
 left by an earlier out-of-band run at the same version string would otherwise be
-diffed against source that is not HEAD. `trusty-mpm` is the live case: excluded
-by `semver-checks-crate-exclusions.tsv` and published through this path. A run
-that compared nothing prints `[WARN] semver-types: NOT RUN` and reads no cache.
+diffed against source that is not HEAD. `trusty-mpm` was the live case until
+#8341 deleted its exclusion row; the file carries no rows now, so the exclusion
+branch reaches this only if a new one is added. A run that compared nothing
+prints `[WARN] semver-types: NOT RUN` and reads no cache.
 For a permanently-excluded crate the only route is two hand-built documents
 passed to `--baseline-json` / `--current-json`.
+
+The cache must also sit where the differ looks. `check_semver.sh` unsets
+`CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` for the `cargo-semver-checks`
+subprocess. It cannot unset a `build.target-dir` set in a `.cargo/config.toml`
+above the checkout: cargo then writes the current crate's JSON flat, to
+`<target-dir>/doc/<crate>.json`, and the differ reports `NO VERDICT`.
 
 That is a deliberate posture, not an oversight. The differ compares *rendered*
 types, so a lifetime rename or a re-export path shift is a real signature
@@ -318,21 +325,23 @@ checked versus skipped, so a run that verified nothing says so.
 compare, one per row, each carrying a written reason. It is keyed by package
 name (`tga`), not the `crates/` directory name.
 
-| Crate | Reason |
-|---|---|
-| `trusty-mpm` | binary-only consumer surface — installed as the `tm` executable via `cargo install trusty-mpm` |
+**The file carries no rows today.** `tga` lost its row in #6300 and `trusty-mpm`
+in #8341, both for the same reason: the claim each rested on stopped being true.
+Every crate in the workspace is gated.
 
 The gate protects **library** consumers: a dependent that re-resolves a version
 floor on a lockfile-free `cargo install` and stops compiling. That is #4088, and
 it mattered because `trusty-common` has 17 in-repo consumers. A binary user gets
-a whole new executable on every install, so the library API `trusty-mpm` happens
-to expose is not part of what they consume, and comparing it protects nobody.
+a whole new executable on every install, so the library API a binary-only crate
+happens to expose is not part of what they consume, and comparing it protects
+nobody. That was `trusty-mpm`'s row, and it held until
+`crates/trusty-crate-contracts` declared a normal `trusty-mpm` dependency to host
+a cross-crate test (#8341).
 
-The row is therefore a claim about consumption, not about the API: **no crate
-depends on `trusty-mpm` as a library.** Verified from the manifests via
-`cargo metadata --no-deps` — zero of the 29 workspace packages declare it as a
-dependency, in any dependency table — and crates.io reported 0 reverse
-dependencies on 2026-08-12.
+A row is therefore a claim about consumption, not about the API — **no crate
+depends on this one as a library** — and it is checkable two ways: from the
+manifests via `cargo metadata --no-deps`, which the gate itself re-runs, and
+against crates.io for out-of-repo consumers, which it cannot see.
 
 Every row is a coverage hole, so a reason has to be a fact about how the crate is
 consumed. "It is slow", "it always fails", and "we are mid-refactor" are not
@@ -348,8 +357,11 @@ gating and is the intended fix.
 ```
 FAIL: EXCLUSION NO LONGER HOLDS — trusty-mpm is excluded from the SemVer gate
       because nothing depends on its library, but these workspace crates now do:
-        - trusty-code
+        - trusty-crate-contracts
 ```
+
+That is the verbatim #8341 run: the guard fired the day the dependency landed,
+and the fix was to delete the row, not to re-word it.
 
 What that guard cannot see is an **out-of-repo consumer**: a crate on crates.io
 depending on `trusty-mpm` as a library is invisible to a workspace-local check,
@@ -568,10 +580,69 @@ construction — the fix #4088 asked for and deferred.
 cargo semver-checks --explain constructible_struct_adds_field
 ```
 
-A break has no override, and none is needed. Bumping the breaking position turns
-the run into an advisory inventory, so a false positive and a real break have the
-same safe remedy. `PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run,
-never one that ran and said no.
+Bumping the breaking position turns the run into an advisory inventory, so a
+false positive and a real break have the same safe remedy.
+`PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run, never one that
+ran and said no. A break has one narrow override, below.
+
+### Accepted breaks (owner ruling 2026-09-22)
+
+The owner ruled on 2026-09-22: "accept the breaking API changes on main and keep
+the existing release plan. Override the semver gate (CHECK 5) so 1.x releases can
+publish with them", because "the user base is small, and it does not dictate the
+release model."
+
+A release that ships a break without a breaking bump carries a committed
+declaration, `scripts/semver-accepted-breaks/<package>-<version>.txt`. It names
+the crate, the exact version, a reason, and one `accept <lint> <item>...` row per
+accepted break. Format:
+[`scripts/semver-accepted-breaks/README.md`](../../scripts/semver-accepted-breaks/README.md).
+When it covers the gate's output, CHECK 5 prints `[WARN] semver: ACCEPTED BREAK`
+with the crate, the version, the reason, every accepted lint, the declaration's
+commit, and the full list of breaks the gate computed. It never prints `[PASS]`,
+and the run's final line says the release ships a break.
+
+It fails closed. CHECK 5 stays `[FAIL]` when:
+
+- the gate computed a break the declaration does not list — every `Failed in:`
+  entry needs a row for its lint whose item tokens match as whole tokens;
+- the file inside names a different crate or version, or the only declaration is
+  for another version;
+- the declared version is not the one the gate compared. `check_semver.sh`
+  compares the manifest version, so a declaration for a hypothetical version
+  argument accepts nothing. A full (non-`--check-only`) run also refuses a
+  version argument that differs from the manifest (`[FAIL] version-arg`);
+- the `reason` row is missing or blank, a row is unknown, or no `accept` row
+  exists;
+- the break list does not parse completely: the tool's failed-lint count and the
+  failure blocks disagree, a block has no entries, or the gate also reported NO
+  VERDICT.
+
+A declaration never covers a blind gate. That arm stays governed by
+`PREFLIGHT_SEMVER_UNVERIFIED` alone, and CHECK 5 says so when a declaration is
+present there. With no declaration, CHECK 5 behaves as before.
+
+The file is the audit trail. It must be a plain tracked file (git mode 100644),
+and CHECK 5 reads it from the commit at HEAD (`git cat-file`), not through the
+filesystem. A symlink, any other mode, an untracked file, or a working copy that
+differs from HEAD is `[FAIL]`. Only `--check-only` previews an uncommitted copy,
+marked `NOT COMMITTED`; a symlink fails there too. It names one release, so a
+later version needs a new file and a new review. It changes no exclusion TSV and
+no other check.
+
+The **Public API / SemVer** PR check honours the same declaration through
+`scripts/semver_ci_accept.sh`, which sources the same library: it passes with
+the `ACCEPTED BREAK` warning only when every crate's break is covered, and reads
+the declaration from the PR head commit, which the checked-out merge commit's
+copy must match.
+
+**Declare first.** A PR cannot accept its own break. Land the declaration on
+`main` in its own PR, then open or re-run the release PR that needs it. The PR
+check accepts a declaration only when the same file, byte-identical, is already
+on the PR's base — the first parent of the merge commit it checks out. A
+declaration that exists only on the PR branch, or that the PR changes, stays
+`[FAIL]`. A tag or `workflow_dispatch` run has no base, so it reads the file at
+the checked-out commit and accepts it only when that commit is on `main`.
 
 ## Reading the gate's result
 
@@ -602,7 +673,8 @@ together**, and each outcome gets its own label:
 | `[PASS]` | ≥ 1 crate compared — a pass/fail run or an inventory that ran — and no unbumped break | proceeds |
 | `[SKIP]` | 0 compared because no comparison was *possible*: no baseline on crates.io, no library target, or a row in `semver-checks-crate-exclusions.tsv` | proceeds |
 | `[WARN]` | 0 compared because the gate was blind, and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
-| `[FAIL]` | a computed break, a blind gate with no override, or a gate that malfunctioned | stops |
+| `[WARN] … ACCEPTED BREAK` | a computed break that a committed declaration for this crate and version lists in full ([Accepted breaks](#accepted-breaks-owner-ruling-2026-09-22)) | proceeds |
+| `[FAIL]` | a computed break with no valid, complete declaration, a blind gate with no override, or a gate that malfunctioned | stops |
 
 `[PASS]` states how many crates it compared. `[SKIP]` permits without an override
 because the reason is a fact about the crate that is already recorded in a
@@ -719,7 +791,10 @@ that was wrong in #5620. Its twelve cases pin every way the gate can conclude
 against the label and the permit/stop it must produce, including the
 trusty-review 0.16.0 run verbatim as case 3. `PREFLIGHT_SELFTEST_SCRIPT` points
 it at another revision of `preflight-publish.sh`, which is how the red-then-green
-is shown: against `main` before the fix, case 3 permits the publish.
+is shown: against `main` before the fix, case 3 permits the publish. Its
+accepted-break cases (a)-(g) run declarations against the real trusty-mpm 1.6.3
+-> 1.6.4 break (`break-lints.out`); each fails against a script with no
+declaration support.
 
 `scripts/check_semver_selftest.sh` runs first in CI. Cases 1-4 cover the gate's
 original fail-open surfaces — an unscanned diff and an unreachable or erroring
@@ -755,11 +830,15 @@ and reports an empty inventory on the second. Their fixture, `all-skipped.out`,
 is the former `clean.out` — the case that was supposed to prove the gate can pass
 a crate was itself being satisfied by a run that checked nothing.
 
-Cases 23-24 pin the crate-exclusion arm: `trusty-mpm` must be skipped with its
-reason on the line and no comparison attempted, and an exclusion listing a crate
-that a workspace package actually depends on must refuse the skip and exit 3.
-Case 24 uses `trusty-agents-common` — which three crates do depend on — against a
-fixture exclusions file, so it fails the moment the dependent check is removed.
+Cases 23-24 pin the crate-exclusion arm: an excluded crate must be skipped with
+its reason on the line and no comparison attempted, and an exclusion listing a
+crate that a workspace package actually depends on must refuse the skip and exit
+3. Both drive a fixture exclusions file rather than the real one. Case 23 picks
+its crate from `cargo metadata` — any publishable lib crate with no workspace
+dependent, so the premise check grants the skip; case 24 names
+`trusty-agents-common`, which three crates do depend on, so it fails the moment
+the dependent check is removed. Case 23 named `trusty-mpm` until #8341 and broke
+when that crate gained a dependent, which is why it picks now.
 Case 8 is what keeps the exclusion from leaking: it runs a non-excluded crate
 through a full clean comparison against the real exclusions file.
 

@@ -74,6 +74,20 @@ it('offers gworkspace with its own destination placeholder',async()=>{
  expect(document.body.textContent).toContain('Gmail listener polling the bound mailbox');
  const receive=[...document.querySelectorAll('label')].find(label=>label.textContent?.trim()==='Receive updates')!.querySelector('input') as HTMLInputElement;expect(receive.disabled).toBe(false);
 });
+// #8187 (critic round, MEDIUM): the GET reports `inert_overlays` and no UI read
+// it, so a binding orphaned by a global delete was invisible everywhere. Pre-fix
+// the first assertion fails — the id appears nowhere in the rendered view. The
+// empty-list half guards the opposite error of heading an always-present panel.
+it('flags each binding whose global channel was deleted, offering no control for it',async()=>{
+ const c=config();c.inert_overlays=['no-such-global'];vi.mocked(fetchChannels).mockResolvedValue(c);await render();
+ const panel=document.querySelector('[aria-label="Inert channel bindings"]')!;
+ expect(panel.textContent).toContain('Global channel no-such-global was deleted; this binding is inert.');
+ expect(panel.querySelectorAll('button,input,select,textarea')).toHaveLength(0);
+ expect(panel.textContent).toContain('Re-declare the channel in the Global scope');
+});
+it('shows no inert-binding panel when the assistant has none',async()=>{
+ await render();expect(document.querySelector('[aria-label="Inert channel bindings"]')).toBeNull();expect(document.body.textContent).not.toContain('address nothing');
+});
 it('keeps a draft visible and editable when reload removes every binding',async()=>{
  await render();input('[aria-label="Channel message"]','Keep this draft');await settle();vi.mocked(fetchChannels).mockResolvedValue({...config(),revision:'r2',bindings:[]});button('Reload').click();await settle();const composer=document.querySelector('[aria-label="Channel message"]') as HTMLTextAreaElement;expect(composer.value).toBe('Keep this draft');expect(composer.disabled).toBe(false);expect((document.querySelector('[aria-label="Send channel message"]') as HTMLButtonElement).disabled).toBe(true);
 });

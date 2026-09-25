@@ -1369,3 +1369,255 @@ async fn supervisor_metrics_merge_reports_real_run_stats() {
         "the daemon must report the supervisor's real auto-resume count: {block}"
     );
 }
+
+/// A relauncher whose verdict the test chooses, counting its calls.
+struct ScriptedRelauncher {
+    calls: std::sync::atomic::AtomicUsize,
+    verdict: Result<(), String>,
+}
+
+#[async_trait::async_trait]
+impl crate::session_manager::relaunch::RuntimeRelauncher for ScriptedRelauncher {
+    async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.verdict.clone()
+    }
+}
+
+/// #8233 round 3, finding 3: ONE failed auto-resume leaves exactly ONE
+/// `[error: …]` note on the record.
+///
+/// Why: `resume_auto` marks the record errored itself, and the supervisor's
+/// generic failure arm marked it errored a second time — so the task grew two
+/// notes per failure, and `auto_relaunch` hands that task straight to the next
+/// relaunch. The count still has to rise; only the second note goes.
+/// What: drives a real tick whose relaunch fails, then counts the notes. Fails
+/// on e1ee6cf52 with two.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn one_failed_auto_resume_appends_exactly_one_error_note() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+    let relauncher = Arc::new(ScriptedRelauncher {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        verdict: Err("no runtime came up in pane 'tmpm-fleet-0'".to_owned()),
+    });
+    assert!(mgr.install_relauncher(relauncher.clone()));
+
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert_eq!(
+        report.resume_failures, 1,
+        "the failure must still be counted — the fix removes a note, not the count"
+    );
+    let record = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        record.task.matches("[error:").count(),
+        1,
+        "one failure, one note — the task is what the next relaunch is handed: {}",
+        record.task
+    );
+    assert_eq!(
+        record.state,
+        ManagedSessionState::Errored,
+        "and the record is still errored, which `resume_auto` did"
+    );
+}
+
+/// #8233 item 4: a tick observes a session another path is resuming and does
+/// NOTHING — no launch, no error note, no counted failure.
+///
+/// Why: the acceptance criterion in full. The supervisor is the second writer
+/// in the live race; the record it sees is `Stopped` for the whole first half of
+/// the other path's resume, so state alone admits it.
+/// What: holds a real claim on the session — the claim `resume_managed` now
+/// holds for its whole body — and runs a tick against it. Deterministic: the
+/// claim is taken before the tick starts, never raced into place.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+    let before = mgr.get(&ids[0]).await.expect("record").task;
+
+    let claim = mgr
+        .begin_resume(&ids[0])
+        .expect("the first claim is granted");
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert!(report.resumed.is_empty(), "no launch: {:?}", report.resumed);
+    assert_eq!(report.resume_failures, 0, "and nothing failed either");
+    let record = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        record.state,
+        ManagedSessionState::Stopped,
+        "the tick must leave the record to the path that holds it"
+    );
+    assert_eq!(record.task, before, "and append nothing to its task");
+    assert_eq!(
+        *tmux.create_calls.lock().unwrap(),
+        0,
+        "above all, no second launch line reaches the pane"
+    );
+
+    // Released, the session is admitted again — a claim that outlived its
+    // resume would make it permanently unresumable.
+    drop(claim);
+    let after = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    assert_eq!(
+        after.resumed.len(),
+        1,
+        "once the claim is gone the sweep resumes it as usual: {after:?}"
+    );
+}
+
+// ── #8396: a resume refused because the session is already active ────────────
+
+/// REGRESSION (#8396): a stale `Stopped` read of a session another path has
+/// already made `Active` is resume's goal reached, not a failure.
+///
+/// Why: the sweep's generic arm marked the refusal errored, which demoted a
+/// running session and appended "cannot resume a session in state 'active'" to
+/// its task on every sweep — two to eight copies were observed live.
+/// What: seeds an `Active` record, takes the real refusal `resume_auto`
+/// returns for it, and settles it twice through the sweep's failure handler
+/// with a stale `Stopped` snapshot. The record must stay `Active` with an
+/// unchanged task, and no failure may be counted.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_already_active_session_is_not_marked_errored_by_a_stale_resume() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let fresh = mgr.get(&ids[0]).await.expect("record");
+    let mut stale = fresh.clone();
+    stale.state = ManagedSessionState::Stopped;
+
+    let mut report = super::poller::TickReport::default();
+    for _ in 0..2 {
+        let refusal = mgr
+            .resume_auto(&ids[0])
+            .await
+            .expect_err("an active session cannot be resumed");
+        assert!(
+            matches!(refusal, ManagedError::InvalidState(..)),
+            "{refusal:?}"
+        );
+        super::poller::settle_failed_resume(&mgr, &stale, refusal, &mut report).await;
+    }
+
+    assert_eq!(report.resume_failures, 0, "nothing failed: {report:?}");
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
+    assert_eq!(after.task, fresh.task, "no note accumulates on the task");
+}
+
+/// #8396 error arm: an `InvalidState` refusal for a state that is NOT active
+/// is still a real failure — marked errored and counted.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_resume_refusal_for_a_non_active_state_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Provisioning, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+    let refusal = mgr
+        .resume_auto(&ids[0])
+        .await
+        .expect_err("a provisioning session cannot be resumed");
+    assert!(
+        matches!(refusal, ManagedError::InvalidState(..)),
+        "{refusal:?}"
+    );
+
+    let mut report = super::poller::TickReport::default();
+    super::poller::settle_failed_resume(&mgr, &record, refusal, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert_eq!(after.task.matches("[error: auto-resume failed").count(), 1);
+}
+
+/// #8396 error arm: any other resume error keeps the #5208 handling.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_non_state_resume_error_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+
+    let mut report = super::poller::TickReport::default();
+    let err = ManagedError::TmuxUnavailable("tmux server went away".to_owned());
+    super::poller::settle_failed_resume(&mgr, &record, err, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert!(
+        after.task.contains("tmux server went away"),
+        "{}",
+        after.task
+    );
+}
+
+/// #8301 critic: a claim recorded under another spelling of the tree — a
+/// symlink, or macOS's `/private` prefix — is still that tree's claim. A path
+/// that cannot be resolved falls back to the raw comparison and keeps its
+/// holder too.
+///
+/// Fails at 4b1f480af: the byte comparison missed the symlinked holder, so the
+/// sweep never saw the claim it had to judge.
+#[tokio::test]
+async fn session_claims_match_a_workspace_spelled_through_a_symlink() {
+    use crate::core::pr_cleanup::ClaimEnder;
+    use crate::supervisor::pr_cleanup_tick::SessionClaims;
+    let dir = TempDir::new().expect("store dir");
+    let ws = TempDir::new().expect("workspace dir");
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let tree = ws.path().join("tree");
+    std::fs::create_dir(&tree).expect("create the tree");
+    let alias = ws.path().join("alias");
+    std::os::unix::fs::symlink(&tree, &alias).expect("symlink the tree");
+    let gone = ws.path().join("gone");
+    let mut via_alias = rec(ManagedSessionState::Active, None);
+    via_alias.workspace_path = Some(alias);
+    let mut on_gone = rec(ManagedSessionState::Active, None);
+    on_gone.workspace_path = Some(gone.clone());
+    let (alias_id, gone_id) = (via_alias.id.to_string(), on_gone.id.to_string());
+    {
+        let mut store = mgr.store.write().await;
+        store
+            .upsert(via_alias)
+            .await
+            .expect("upsert the alias record");
+        store.upsert(on_gone).await.expect("upsert the gone record");
+    }
+    let claims = SessionClaims::new(&mgr);
+
+    let on_tree = claims.claims_on(&tree).await.expect("claims on the tree");
+    assert_eq!(on_tree, [alias_id], "the symlinked spelling holds the tree");
+    let on_missing = claims
+        .claims_on(&gone)
+        .await
+        .expect("claims on a gone path");
+    assert_eq!(
+        on_missing,
+        [gone_id],
+        "an unresolvable path keeps its holder"
+    );
+}

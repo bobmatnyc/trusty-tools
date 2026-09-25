@@ -109,6 +109,9 @@ pub struct DecommissionParams {
     /// an absent query parameter does.
     #[serde(default)]
     pub record_only: bool,
+    /// #7660: `--force`, as on the HTTP route.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// `mpm.managed.delete` parameters: the id plus `?force=`.
@@ -326,9 +329,14 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
             move |req: DecommissionParams| {
                 let state = Arc::clone(&dec_s);
                 async move {
-                    cores::decommission_core(&state, &req.id, req.record_only)
-                        .await
-                        .into_rpc()
+                    cores::decommission_core(
+                        &state,
+                        &req.id,
+                        req.record_only,
+                        crate::daemon::managed_routes::dirt_policy(req.force),
+                    )
+                    .await
+                    .into_rpc()
                 }
             },
         )

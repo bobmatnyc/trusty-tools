@@ -334,11 +334,19 @@ pub(crate) enum SessionAction {
     /// Why: the ONLY operation that removes the workspace directory. Unlike
     /// `runtime-stop`, decommission is terminal — no further resume is possible.
     /// A tombstone record is kept for `ls` history.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/decommission`.
-    /// Test: `cli_parses_session_decommission`.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/decommission`. Exits non-zero
+    /// when the daemon keeps a workspace it could have removed, naming why
+    /// (#7660).
+    /// Test: `cli_parses_session_decommission`,
+    /// `cli_parses_session_decommission_force`.
     Decommission {
         /// Managed session id.
         id: String,
+        /// Remove the workspace even when it is dirty from tm's own
+        /// provisioning files (.gitignore, .claude/settings.json[.bak],
+        /// CLAUDE.md). Other changes and unpushed commits still block it.
+        #[arg(long)]
+        force: bool,
     },
     /// Hard-delete a managed session RECORD from the store (#2012).
     ///

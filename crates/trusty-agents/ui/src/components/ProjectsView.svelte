@@ -44,6 +44,7 @@
     type Project,
   } from '../stores/app';
   import { relativeTime, githubUrl } from '../lib/utils';
+  import { shellAttachCommand } from '../lib/tmuxAttach';
   import { recaps } from '../stores/recap';
   import ProjectFilesPanel from './ProjectFilesPanel.svelte';
 
@@ -242,7 +243,8 @@
 
   async function copyAttachCommand() {
     if (!attachModalName) return;
-    const cmd = `tmux attach-session -t ${attachModalName}`;
+    // #8443: exact, normalized, quoted target — see lib/tmuxAttach.ts.
+    const cmd = shellAttachCommand(attachModalName);
     try {
       await navigator.clipboard.writeText(cmd);
       attachCopied = true;
@@ -798,7 +800,7 @@
         </p>
         <pre
           class="mb-3 overflow-x-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 text-xs font-mono text-foundry-light-text dark:text-foundry-text"
-        ><code>tmux attach-session -t {attachModalName}</code></pre>
+        ><code>{attachModalName ? shellAttachCommand(attachModalName) : ''}</code></pre>
         <div class="flex justify-end gap-2">
           <button
             type="button"

@@ -273,7 +273,7 @@ fn managed_adopted_renders_and_escapes_cwd() {
         state: "active".into(),
         cwd: "/Users/op/work/<proj>&x".into(),
         runtime: "claude-code".into(),
-        attach_cmd: "tmux attach -t tmpm-hand-started".into(),
+        attach_cmd: "tmux attach -t '=tmpm-hand-started'".into(),
     };
     let text = TelegramFormatter::format(&adopted);
     assert!(

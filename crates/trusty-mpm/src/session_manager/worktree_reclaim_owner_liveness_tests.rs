@@ -186,7 +186,9 @@ fn refused(v: &ReclaimVerdict, owner: &ManagedSessionId) -> String {
         ReclaimVerdict::Blocked { reason, .. } | ReclaimVerdict::BlockedByAgent { reason, .. } => {
             reason.clone()
         }
-        ReclaimVerdict::Reclaimable { .. } => {
+        // #7889: both grant kinds are the same failure here — gate 4b must
+        // refuse before either can be reached.
+        ReclaimVerdict::Reclaimable { .. } | ReclaimVerdict::ReclaimableLandedContent { .. } => {
             panic!("a session-owned tree whose owner is not proven gone was reclaimable: {v:?}")
         }
     };

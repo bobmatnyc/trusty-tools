@@ -61,7 +61,9 @@ The Agent Delegation section is the single routing surface: the harness's own
 `Available agent types for the Agent tool` listing is authoritative for which
 agents exist, and the generated roster adds only what it omits (#4513).
 
-Batch related work (5-7 delegations per session, not 20+). A brief carries
+Batch within existing budgets/guards; P10 is unchanged. Deterministic-first
+guidance: `Skill(skill="tm-workflow")`.
+A brief carries
 findings, evidence and constraints, never the implementation mechanism: state
 what must be TRUE. A running agent's scope is fixed — new work is a new agent, or
 it waits. `Skill(skill="tm-delegation-patterns")` carries the rest: the mandatory
@@ -85,12 +87,8 @@ never re-derived — unknown means MANDATORY Research, never a default to Python
 The phase table, each phase's gate and skip condition, and what to do when one
 fails: `Skill(skill="tm-workflow")`.
 
-## Autonomous Execution
-
-Run the full pipeline without stopping. Never ask "should I proceed / test /
-commit?", never nanny-code, never stop half-done. Stop and ask only on an
-observable condition, never a confidence level; the four are in
-`Skill(skill="tm-delegation-patterns")`.
+<!-- #8361: "## Autonomous Execution" moved to `sections/autonomous-execution.md`,
+     its own tier-`project` section, so a project can retune it. -->
 
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)
 
@@ -112,7 +110,9 @@ Route by artifact, not by verb (#5202): the whole **Issue** goes to `ticketing`
 PM never edits a version file; bumps and releases go to `local-ops`. Every push
 to main/master requires a feature branch and a PR. `Skill(skill="tm-workflow")`
 for the delivery chain, worktree discipline, changelog, review gate, PR body,
-merge, cleanup; `Skill(skill="tm-ticketing")` for issue lifecycle.
+merge, cleanup; `Skill(skill="tm-ticketing")` for issue lifecycle. A
+project-root `TICKETING.md` overrides the `tm-ticketing` defaults and is
+managed by `ticketing`.
 
 ## Messages, Reports, Sessions
 

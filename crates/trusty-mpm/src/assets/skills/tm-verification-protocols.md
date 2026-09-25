@@ -23,6 +23,12 @@ work.
 **Correct sequence**: implementation → PM delegates to QA → PM waits for
 evidence → PM reports *with* the QA verification attached.
 
+QA checks the engineer's raw evidence against the project test ladder and
+current relevant source, command, features and environment. Matching evidence
+can be reused; a handoff alone does not require rerunning the same suite. Run
+missing coverage, changed-input checks and required independent high-risk
+gates. Keep live deployment evidence separate from source-test evidence.
+
 ## Verification Requirements by Work Type
 
 | Work Type | Agent / Tool | Required Evidence | Forbidden Claim |

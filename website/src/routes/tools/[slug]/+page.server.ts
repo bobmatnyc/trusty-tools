@@ -1,6 +1,6 @@
 /**
- * Why: one route serves every markdown-driven flagship page. Six per-tool
- * `+page.server.ts` files would be six copies of this eight-line load, and the
+ * Why: one route serves every markdown-driven flagship page. Five per-tool
+ * `+page.server.ts` files would be five copies of this eight-line load, and the
  * whole point of the markdown migration (#6960) is that adding or changing a
  * flagship page touches no `.ts` and no `.svelte`.
  *
