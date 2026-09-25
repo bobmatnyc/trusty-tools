@@ -2378,7 +2378,9 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
     let granted = fx.add_worktree("decide-8109-merged");
     let refused = fx.add_worktree("decide-8109-nopr");
     land(&granted);
-    land(&refused);
+    // No pull request AND a commit no `origin` ref carries, so neither route to
+    // landing evidence admits it.
+    GitWorktreeFixture::commit_unpushed(&refused);
     crate::test_support::enable_event_capture();
     let buffer = trusty_common::log_buffer::LogBuffer::new(256);
     let subscriber = tracing_subscriber::registry().with(
@@ -2399,34 +2401,36 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
         )
     });
     let lines = buffer.tail(256);
-    assert_eq!(
-        out.survey.candidates.len(),
-        2,
-        "{:?}",
-        out.survey.candidates
-    );
+    // The main checkout is surveyed (and refused at gate 1) too, so every
+    // candidate is checked, and the two worktrees are then named explicitly.
     for candidate in &out.survey.candidates {
-        let path = candidate.path.display().to_string();
-        let decision = candidate.verdict.decision();
+        // The exact field, not a substring: the main checkout's path is a
+        // prefix of every worktree path beneath it.
+        let field = format!(" path={} branch=", candidate.path.display());
         let matching: Vec<&String> = lines
             .iter()
-            .filter(|l| l.contains("worktree-reclaim: ") && l.contains(&path))
+            .filter(|l| l.contains("(#8109)") && l.contains(&field))
             .collect();
-        assert_eq!(matching.len(), 1, "one line for {path}: {lines:#?}");
+        assert_eq!(matching.len(), 1, "one line for {field}: {lines:#?}");
+        let decision = candidate.verdict.decision();
         assert!(matching[0].contains(&decision), "{decision}: {matching:?}");
     }
-    let decisions: Vec<String> = out
-        .survey
-        .candidates
-        .iter()
-        .map(|c| c.verdict.decision())
-        .collect();
-    assert!(
-        decisions.contains(&"reclaimable — landing evidence is PR #41".to_string()),
-        "{decisions:?}"
+    let decision_of = |name: &str| {
+        out.survey
+            .candidates
+            .iter()
+            .find(|c| c.path.ends_with(name))
+            .map(|c| c.verdict.decision())
+            .unwrap_or_else(|| panic!("{name} surveyed: {:?}", out.survey.candidates))
+    };
+    assert_eq!(
+        decision_of("decide-8109-merged"),
+        "reclaimable — landing evidence is PR #41"
     );
+    let refusal = decision_of("decide-8109-nopr");
+    assert!(refusal.starts_with("refused at gate"), "{refusal}");
     assert!(
-        decisions.iter().any(|d| d.starts_with("refused at gate")),
-        "{decisions:?}"
+        granted.exists() && refused.exists(),
+        "Report mode removes nothing"
     );
 }
