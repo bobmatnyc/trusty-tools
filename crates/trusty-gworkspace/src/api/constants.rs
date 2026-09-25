@@ -47,15 +47,20 @@ pub const OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 /// `~/.gworkspace-mcp/tokens.json` (Google keys refresh tokens by the exact
 /// granted scope set; a mismatch would force re-consent and could invalidate
 /// a token shared with the Python implementation).
-/// What: `openid` plus nine Google API scopes covering userinfo, Calendar,
-/// Gmail (modify), Drive, Docs, Tasks, Sheets, and Slides.
-/// Test: `oauth::flow::assemble_scope_string` unit test asserts order/content.
+/// A token minted before a scope was added keeps its old grant; that profile
+/// must re-run `setup` to pick the new scope up (#8539).
+/// What: `openid` plus ten Google API scopes covering userinfo, Calendar,
+/// Gmail (modify, settings.basic), Drive, Docs, Tasks, Sheets, and Slides.
+/// Test: `scope_string_matches_constant_set`,
+/// `every_tool_scope_is_requested_at_consent`.
 pub const OAUTH_SCOPES: &[&str] = &[
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/gmail.modify",
+    // #8539: Gmail filters/settings need it; gmail.modify does not cover settings.
+    "https://www.googleapis.com/auth/gmail.settings.basic",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/tasks",

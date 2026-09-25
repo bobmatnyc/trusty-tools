@@ -294,6 +294,38 @@ mod tests {
         }
     }
 
+    /// Why: a tool whose declared scope is never requested at consent fails
+    /// live with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT` (#8539).
+    /// What: every scope from `scopes_for_tool` must be in `OAUTH_SCOPES`, or
+    /// be implied by a requested broader scope per Google's scope docs
+    /// (developers.google.com/workspace/gmail/api/auth/scopes and
+    /// developers.google.com/workspace/calendar/api/auth).
+    /// Test: this test.
+    #[test]
+    fn every_tool_scope_is_requested_at_consent() {
+        use crate::api::constants::OAUTH_SCOPES;
+        // (narrow scope, broader scope in OAUTH_SCOPES that grants it)
+        const IMPLIED_BY: &[(&str, &str)] = &[
+            (scopes::GMAIL_SEND, scopes::GMAIL_MODIFY),
+            (scopes::GMAIL_LABELS, scopes::GMAIL_MODIFY),
+            (scopes::CALENDAR_EVENTS, scopes::CALENDAR),
+        ];
+        let tools = tool_list_response();
+        for tool in tools["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            for scope in scopes_for_tool(name) {
+                let granted = OAUTH_SCOPES.contains(scope)
+                    || IMPLIED_BY
+                        .iter()
+                        .any(|(narrow, broad)| narrow == scope && OAUTH_SCOPES.contains(broad));
+                assert!(
+                    granted,
+                    "tool {name} needs {scope}, which the consent flow never requests"
+                );
+            }
+        }
+    }
+
     #[test]
     fn method_params_match_input_schema_required() {
         let doc = discover_response();

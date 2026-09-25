@@ -14,6 +14,8 @@ fn scope_string_matches_constant_set() {
     let s = assemble_scope_string();
     assert!(s.starts_with("openid "));
     assert!(s.contains("https://www.googleapis.com/auth/gmail.modify"));
+    // #8539: Gmail filters/settings 403 without this scope in the consent request.
+    assert!(s.contains("https://www.googleapis.com/auth/gmail.settings.basic"));
     assert!(s.contains("https://www.googleapis.com/auth/presentations"));
     assert_eq!(s.split(' ').count(), OAUTH_SCOPES.len());
 }
