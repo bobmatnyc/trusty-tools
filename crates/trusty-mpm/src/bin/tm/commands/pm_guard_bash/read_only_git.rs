@@ -30,7 +30,8 @@
 //! Out of scope: a program run by configuration that already exists —
 //! `core.fsmonitor`, `diff.external`, a textconv driver, `gpg.program`,
 //! `core.pager` — and `git status` refreshing `.git/index`.
-//! Test: `read_only_allow_tests::git_reads_pass_and_everything_else_is_refused`.
+//! Test: `read_only_allow_tests::git_reads_pass_and_everything_else_is_refused`,
+//! `read_only_allow_tests::git_dash_c_is_judged_as_its_plain_form` (#8578).
 
 use super::read_only_programs::Arg;
 

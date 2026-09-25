@@ -17,9 +17,11 @@
 //!   led by `-` or bare paths led by `/` or `~/`, and `"$NAME"` is the only
 //!   variable the body may name.
 //!
+//! Any of the three may follow one leading `cd <dir> &&`, where `<dir>` is a
+//! literal that [`super::path_tokens::unresolved_target`] can resolve (#8578).
 //! A body is one or more pipelines separated by `;` or newlines. Every command
 //! must be on the allowlist in [`super::read_only_programs`]. Everything else
-//! is refused, including `&&`, `||`, `&`, any redirect other than `2>&1` and
+//! is refused, including any other `&&`, `||`, `&`, any redirect other than `2>&1` and
 //! `2>/dev/null`, an assignment or wrapper before the program, and any
 //! expansion outside the `for` shape. No filesystem or daemon is consulted, so
 //! the rule has no I/O arm to fail open through.
@@ -32,8 +34,12 @@
 //! host target, and an `rg` config file named by `RIPGREP_CONFIG_PATH`, which
 //! can carry `--pre`.
 //! Test: `read_only_allow_tests` — `refuses_the_incident_plutil_extract_json_form`,
-//! `legitimate_reads_stay_allowed`, `critic_round_three_probes_are_refused`.
+//! `legitimate_reads_stay_allowed`, `critic_round_three_probes_are_refused`,
+//! `a_leading_cd_reaches_another_worktree`, `a_leading_cd_never_admits_a_write`.
 
+use std::path::Path;
+
+use super::path_tokens::unresolved_target;
 use super::read_only_lex::{Tok, Word, WordKind, lex};
 use super::read_only_programs::{Arg, check_command};
 use super::worktree_remove::DispatchIdentity;
@@ -78,6 +84,12 @@ pub(super) fn judge(command: &str) -> Result<(), String> {
     let toks = lex(command)?;
     let mut p = Parser { toks: &toks, at: 0 };
     p.skip_seps();
+    // #8578: a read-only agent inherits the PM's cwd; one leading `cd` lets it
+    // point at another worktree. Every other `&&` stays refused.
+    p.cd_prefix()?;
+    if toks[p.at..].contains(&Tok::AndIf) {
+        return Err("`&&` other than after one leading `cd <dir>`".into());
+    }
     if p.keyword("if") {
         p.if_shape()?;
     } else if p.keyword("for") {
@@ -123,6 +135,34 @@ impl Parser<'_> {
             return Ok(());
         }
         Err(format!("a compound command without its `{kw}`"))
+    }
+
+    /// Consume a leading `cd <dir> &&` (#8578).
+    ///
+    /// Why: a read-only dispatch inherits the PM's cwd, so scanning another
+    /// worktree needs `cd <wt> && git diff A..B`, which the `&&` refusal broke.
+    /// What: no-op unless the next word is `cd`. Then requires exactly one
+    /// literal, non-option `<dir>` that `unresolved_target` resolves (no `$`,
+    /// `~`, `$(…)` or backtick), then `&&`, then a word. `cd` itself changes
+    /// no file; what follows is judged as a whole command.
+    /// Test: `a_leading_cd_reaches_another_worktree`,
+    /// `a_leading_cd_never_admits_a_write`.
+    fn cd_prefix(&mut self) -> Result<(), String> {
+        if !matches!(self.toks.get(self.at), Some(Tok::Word(w)) if w.is_keyword("cd")) {
+            return Ok(());
+        }
+        let dir = match self.toks.get(self.at + 1..self.at + 4) {
+            Some([Tok::Word(d), Tok::AndIf, Tok::Word(_)]) => d.lit(),
+            _ => None,
+        };
+        let plain = dir.filter(|d| {
+            !d.is_empty() && !d.starts_with('-') && unresolved_target(Path::new(d)).is_none()
+        });
+        if plain.is_none() {
+            return Err("a `cd` other than `cd <plain directory> && <read>`".into());
+        }
+        self.at += 3;
+        Ok(())
     }
 
     /// Require at least one separator.
@@ -262,11 +302,12 @@ fn deny_reason(agent: &str, what: &str) -> String {
     format!(
         "Read-only dispatch refused a command (#8439): `{agent}` is a read-only agent, and this \
          command has {what}. A read-only agent runs only allowlisted reads, one per call, with \
-         literal arguments: git status/log/diff/show/grep/rev-parse/ls-files/merge-base/\
-         ls-remote/branch --list/worktree list; cat/head/tail/wc/ls/grep/rg; find without \
+         literal arguments: git [-C <dir>] status/log/diff/show/grep/rev-parse/ls-files/\
+         merge-base/ls-remote/branch --list/worktree list; cat/head/tail/wc/ls/grep/rg; find without \
          -exec/-delete/-fprint; sed -n with a print script; plutil -p/-lint; defaults read; \
          launchctl print/list; tmux capture-pane -p; cargo metadata/tree; echo; pwd. A pipe \
-         into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1` and `2>/dev/null`. If \
+         into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` and one \
+         leading `cd <dir> &&` with a literal path. If \
          the task needs a write, report back so the PM dispatches a writing agent."
     )
 }
