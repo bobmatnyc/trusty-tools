@@ -361,7 +361,8 @@ fn an_override_ending_in_an_unclosed_fence_closes_it_in_its_own_block() {
         SectionId::Workflow,
         SectionId::AgentDelegation,
     ];
-    let paths: [(&[SectionId], fn(&TempDir) -> String); 2] = [
+    type Compose = fn(&TempDir) -> String;
+    let paths: [(&[SectionId], Compose); 2] = [
         (&packaged, prompt_for),
         (&roster_absent, roster_absent_prompt_for),
     ];
