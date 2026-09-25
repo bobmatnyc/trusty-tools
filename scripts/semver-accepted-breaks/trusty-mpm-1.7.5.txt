@@ -13,3 +13,5 @@ accept  enum_no_repr_variant_discriminant_changed  SectionId::Enforcement
 accept  enum_no_repr_variant_discriminant_changed  SectionId::NonOverridableRules
 accept  enum_no_repr_variant_discriminant_changed  SectionId::FrameworkGuaranteedConventions
 accept  enum_variant_added  ValidationError:PinnedGeneratedBlock
+# reason: Owner ruling 2026-09-25 (#8535): the shared-tree writer query response gained tree_holders; a daemon HTTP response struct, read-only for callers.
+accept  constructible_struct_adds_field  SharedTreeWritersResponse.tree_holders
