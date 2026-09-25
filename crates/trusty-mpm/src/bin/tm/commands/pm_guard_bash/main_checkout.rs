@@ -146,8 +146,9 @@ use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 /// ([`PathEnv::from_process`]) happens in exactly one place and the policy
 /// underneath stays testable without it.
 /// What: `Some(reason)` — naming the verb, the directory, and the remedy —
-/// when [`git_verb_target_dir`] finds a destructive verb whose target
-/// directory [`is_main_checkout`]; `None` (ALLOW) otherwise.
+/// for the first segment, in command order, whose destructive verb targets a
+/// directory that [`is_main_checkout`] or that the guard cannot resolve;
+/// `None` (ALLOW) otherwise. Every segment is judged (#8572).
 ///
 /// A `-C` or `cd` path the guard could not fully expand still denies, but with
 /// its OWN reason (#7100): `git -C $WT checkout -- <path>` resolved to
@@ -171,6 +172,7 @@ use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 /// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
 /// `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`,
 /// `destructive_denies_an_unresolved_directory_from_a_worktree` (#8572),
+/// `destructive_judges_every_segment` (#8572),
 /// `destructive_allows_a_path_restoring_checkout_in_a_sibling_worktree`,
 /// `destructive_allows_a_checkout_in_a_scratchpad_clone_only` (#8339); the
 /// composition runs end to end in `tests/tm_hook_pm_guard.rs`.
@@ -193,36 +195,43 @@ fn evaluate_main_checkout_destructive_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<String> {
-    let (verb, target) = git_verb_target_dir(command, cwd, env, is_whole_tree_destructive)?;
-    // #7100: an unexpanded variable in the path is not evidence about which
-    // tree this lands in, so the refusal must not read as if it were.
-    // #7234: a `~` left literal because `$HOME` was unset says the same thing.
-    // #8572: checked before `is_main_checkout` — from a worktree cwd,
-    // `-C $MAIN` resolves to `<worktree>/$MAIN`, which reads as a worktree.
-    // The same ordering keeps a scratchpad cwd from clearing a literal `$WT`.
-    if let Some(unresolved) = unresolved_target(&target) {
-        return Some(unresolved_directory_deny_reason(
-            DESTRUCTIVE_UNRESOLVED_HEADLINE,
-            &verb,
-            &unresolved.shown,
-            &unresolved.token,
-        ));
-    }
-    if !is_main_checkout(&target) {
-        return None;
-    }
-    // #8339: a disposable clone under the session scratchpad is nobody's shared
-    // tree — the #7778 proof, canonicalized.
-    // Residual (#5769, module doc): `--git-dir=`/`--work-tree=` and a
-    // `GIT_DIR=`/`GIT_WORK_TREE=` prefix are never resolved into the target, so
-    // from a scratchpad clone (or any non-repo cwd) they still reach a main
-    // checkout unrefused.
-    if main_checkout_root(&target)
-        .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
+    // #8572: every destructive segment is judged, not only the first — from a
+    // worktree, `git reset --hard && git -C $MAIN reset --hard` was cleared on
+    // its first segment.
+    for (verb, target, _) in
+        git_verb_targets_with_tail(command, cwd, env, is_whole_tree_destructive)
     {
-        return None;
+        // #7100: an unexpanded variable in the path is not evidence about which
+        // tree this lands in, so the refusal must not read as if it were.
+        // #7234: a `~` left literal because `$HOME` was unset says the same thing.
+        // #8572: checked before `is_main_checkout` — from a worktree cwd,
+        // `-C $MAIN` resolves to `<worktree>/$MAIN`, which reads as a worktree.
+        // The same ordering keeps a scratchpad cwd from clearing a literal `$WT`.
+        if let Some(unresolved) = unresolved_target(&target) {
+            return Some(unresolved_directory_deny_reason(
+                DESTRUCTIVE_UNRESOLVED_HEADLINE,
+                &verb,
+                &unresolved.shown,
+                &unresolved.token,
+            ));
+        }
+        if !is_main_checkout(&target) {
+            continue;
+        }
+        // #8339: a disposable clone under the session scratchpad is nobody's
+        // shared tree — the #7778 proof, canonicalized.
+        // Residual (#5769, module doc): `--git-dir=`/`--work-tree=` and a
+        // `GIT_DIR=`/`GIT_WORK_TREE=` prefix are never resolved into the
+        // target, so from a scratchpad clone (or any non-repo cwd) they still
+        // reach a main checkout unrefused.
+        if main_checkout_root(&target)
+            .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
+        {
+            continue;
+        }
+        return Some(deny_reason(&verb, &target));
     }
-    Some(deny_reason(&verb, &target))
+    None
 }
 
 /// What a `git commit` aimed at a main checkout is allowed to do (ADR-0049).
@@ -366,9 +375,10 @@ fn evaluate_main_checkout_commit_command_in(
 /// the read describes an index the commit never sees. Both were denied before
 /// ADR-0049 and must stay denied.
 ///
-/// The sibling destructive rule scans every segment and so has neither problem;
-/// this one cannot fix it the same way, because scanning further segments still
-/// would not tell it what the index holds by the time they run. The only
+/// The sibling destructive rule judges every segment (#8572), which suffices
+/// there because each verdict depends only on that segment's verb and
+/// directory. This rule cannot fix it the same way: judging later segments
+/// still would not tell it what the index holds by the time they run. The only
 /// defensible answer is to refuse the composition.
 ///
 /// What: `true` when every non-empty segment is either a `cd` — which moves no
@@ -1365,6 +1375,30 @@ mod tests {
             evaluate_main_checkout_destructive_command("git reset --hard", &wt).is_none(),
             "the worktree's own destructive command stays allowed"
         );
+    }
+
+    /// 🔴 REGRESSION (#8572 review): only the first destructive segment was
+    /// judged, so the worktree's own `git reset --hard` cleared a second
+    /// segment aimed at the main checkout.
+    #[test]
+    fn destructive_judges_every_segment() {
+        let checkout = main_checkout_dir();
+        let wt = checkout.path().join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let spelled_out = format!(
+            "git reset --hard && git -C {} reset --hard",
+            checkout.path().display()
+        );
+        for command in [
+            "git reset --hard && git -C $MAIN reset --hard",
+            spelled_out.as_str(),
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(command, &wt).is_some(),
+                "`{command}` from a worktree must be denied"
+            );
+        }
     }
 
     /// #8439: an unknown git global option cannot hide a destructive verb —
