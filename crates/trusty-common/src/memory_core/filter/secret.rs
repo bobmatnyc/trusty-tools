@@ -12,6 +12,11 @@
 
 use super::{FilterReject, is_git_sha_like};
 
+// #277: the fixed-grammar and identifier-filename predicates live in a child
+// module so this file stays under the 500-SLOC production cap.
+mod shapes;
+pub(crate) use shapes::*;
+
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly
 /// allowlisting git-SHA-shaped hex tokens.
@@ -869,7 +874,24 @@ pub(crate) const MIN_MEAN_CAMEL_WORD_LEN: usize = 4;
 /// Minimum share of vowels (`aeiouy`, percent) in a CamelCase run longer than
 /// [`MAX_PATH_WORD_LEN`]. English identifiers run 35-40%; base64 letters about
 /// 23%. See [`is_readable_alpha_run`] (#8589).
-pub(crate) const MIN_VOWEL_PERCENT: usize = 30;
+// #277: 30 -> 27. 545 refused import memories held class names at 27-30%.
+pub(crate) const MIN_VOWEL_PERCENT: usize = 27;
+
+/// True when at least `percent`% of the letters of `run` are vowels
+/// (`aeiouy`, either case). Shared by [`is_readable_alpha_run`] and the #277
+/// identifier-shape predicates in `shapes`.
+pub(crate) fn meets_vowel_floor(run: &str, percent: usize) -> bool {
+    let vowels = run
+        .bytes()
+        .filter(|b| {
+            matches!(
+                b.to_ascii_lowercase(),
+                b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
+            )
+        })
+        .count();
+    vowels * 100 >= run.len() * percent
+}
 
 /// True when an alphabetic run reads as a path-segment word or a CamelCase
 /// identifier, rather than as an encoded run.
@@ -916,16 +938,7 @@ pub(crate) fn is_readable_alpha_run(run: &str) -> bool {
         }
         words += 1;
     }
-    let vowels = run
-        .bytes()
-        .filter(|b| {
-            matches!(
-                b.to_ascii_lowercase(),
-                b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
-            )
-        })
-        .count();
-    run.len() >= MIN_MEAN_CAMEL_WORD_LEN * words && vowels * 100 >= run.len() * MIN_VOWEL_PERCENT
+    run.len() >= MIN_MEAN_CAMEL_WORD_LEN * words && meets_vowel_floor(run, MIN_VOWEL_PERCENT)
 }
 
 /// A "word segment" for slash/equals splitting: non-empty, containing only ASCII
@@ -981,6 +994,14 @@ pub(crate) fn is_word_segment(s: &str) -> bool {
 /// - **[`is_symbol_path`]** — a `::`-joined symbol path standing as one segment,
 ///   `error.rs::response_or_body_error` (issue #2442).
 ///
+/// Two narrower arms were added for #277, each checked before the arm it
+/// bypasses:
+/// - **[`is_npm_package_version`]** — `name@1.2.3`, checked first because `@`
+///   is outside [`is_word_segment`]'s charset.
+/// - **[`is_identifier_file_segment`]** — a `<Stem>.<ext>` file name whose
+///   stem is Title-case identifier words, checked before the whole-segment
+///   [`looks_like_secret`] test that refuses `BorFuigebWaokdaw7.java`.
+///
 /// Why the recursion into [`looks_like_secret`] is bounded, stated because a
 /// reader will rely on it: a segment reaching this function was produced by
 /// splitting on `/`, so it contains no `/`. Branch (b) requires one, and
@@ -990,8 +1011,14 @@ pub(crate) fn is_word_segment(s: &str) -> bool {
 /// recursion is what catches a provider key parked in a URL path.
 /// Test: `slash_bearing_base64_blobs_are_blocked`,
 /// `bare_github_urls_are_not_flagged`, `structural_tokens_are_not_flagged`,
-/// `recurrence_corpus_has_no_false_positives`.
+/// `recurrence_corpus_has_no_false_positives`,
+/// `identifier_file_names_are_not_flagged_after_277`,
+/// `noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277`.
 pub(crate) fn is_readable_path_segment(seg: &str) -> bool {
+    // #277: an npm `name@version` segment carries the `@` is_word_segment refuses.
+    if is_npm_package_version(seg) {
+        return true;
+    }
     // #8589, #277: a long alphabetic run passes in CamelCase identifier shape
     // — a class name is many short words.
     if !is_word_segment(seg)
@@ -1002,6 +1029,11 @@ pub(crate) fn is_readable_path_segment(seg: &str) -> bool {
         return false;
     }
     if seg.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    // #277: a `<stem>.<ext>` file name is judged by its stem's identifier
+    // shape, not by the word floor or the whole-segment mixed-case test.
+    if is_identifier_file_segment(seg) {
         return true;
     }
     // #4977: a segment that is itself a credential is never a path segment.
@@ -1177,6 +1209,9 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
 /// rather than two exemptions drifting apart.
 /// What: returns `true` for (0) a userinfo-free URL whose every authority/path
 /// segment reads as a path segment ([`is_ordinary_url`], checked first);
+/// then (issue #277) a GitHub noreply email ([`is_github_noreply_email`]),
+/// `KEY=<ordinary URL>` ([`is_key_equals_url`]) or a ticket key plus a
+/// CamelCase title ([`is_ticket_camel_title`]);
 /// `+`-bearing tokens that are `+`-joined word phrases (checked next, and the
 /// only way a `+` token can be structural); (a) `=`-containing tokens where the
 /// LHS is a word segment and the RHS is itself structural (a word segment OR a
@@ -1190,12 +1225,18 @@ pub(crate) fn is_google_doc_id(segments: &[&str], i: usize) -> bool {
 /// `three_4898_reproductions_are_not_flagged` (issue #4898),
 /// `slash_bearing_base64_blobs_are_blocked` (issue #4977),
 /// `bare_github_urls_are_not_flagged`, `url_path_secrets_are_still_blocked`
-/// (issue #5513).
+/// (issue #5513), `noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277`,
+/// `noreply_key_url_npm_and_ticket_boundaries_after_277` (issue #277).
 pub(crate) fn is_structural_token(token: &str) -> bool {
     // #5513: a URL is decomposed at `://` and `/` and decided segment by
     // segment, before the `+` guard so `mongodb+srv://host/db` is read as a URL.
     // A `user:pass@` URL is not ordinary and falls through to the heuristics.
     if is_ordinary_url(token) {
+        return true;
+    }
+    // #277: three fixed grammars that are not paths. Before the `+` guard,
+    // because a noreply email carries a `+`.
+    if is_github_noreply_email(token) || is_key_equals_url(token) || is_ticket_camel_title(token) {
         return true;
     }
     // #4898: a `+`-bearing token is decided here and nowhere else — it is

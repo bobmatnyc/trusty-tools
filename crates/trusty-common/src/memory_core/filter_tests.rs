@@ -3333,11 +3333,16 @@ fn camel_case_source_paths_are_not_flagged_after_8589() {
 
     // KNOWN BOUND: a file-name segment of SECRET_MIN_LEN (20) or more
     // characters, extension included, that mixes case and carries a digit is
-    // still refused as a mixed-case credential. The digit splits the letters
-    // into short runs, so `is_readable_alpha_run` never decides it.
+    // refused as a mixed-case credential unless its stem passes
+    // `is_identifier_file_segment` (#277). `Http` has no vowel, which pulls
+    // `Http2ClientPool` under the 27% floor; `OAuth` holds a one-letter word.
     for (path, refused) in [
         ("src/main/java/com/example/Http2ClientKit.java", false), // 19 chars
         ("src/main/java/com/example/Http2ClientPool.java", true), // 20 chars
+        (
+            "src/main/java/com/example/Oauth2ClientRegistration.java",
+            false,
+        ),
         (
             "src/main/java/com/example/OAuth2AuthorizationRequestRedirectFilter.java",
             true,
@@ -3360,17 +3365,10 @@ fn camel_case_source_paths_are_not_flagged_after_8589() {
 #[test]
 fn readable_alpha_run_clause_boundaries_after_8589() {
     for (clause, run, readable) in [
-        // 9 vowels of 30 letters is exactly MIN_VOWEL_PERCENT; 8 is under.
-        (
-            "vowel floor, inside",
-            "ScriptStackFrameBuilderHandler",
-            true,
-        ),
-        (
-            "vowel floor, outside",
-            "ScriptStackFrameScannerHandler",
-            false,
-        ),
+        // #277: MIN_VOWEL_PERCENT is 27. 6 vowels of 22 letters is 27.3%;
+        // 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel", true),
+        ("vowel floor, outside", "DrenkPlostVarmikStuvelGrap", false),
         // A 5-capital acronym is MAX_ACRONYM_LEN; 6 is over.
         ("acronym cap, inside", "ConnectionPoolHTTPSManager", true),
         ("acronym cap, outside", "ConnectionPoolHTTPSXManager", false),
@@ -3636,6 +3634,308 @@ fn path_wrapped_encoder_blobs_stay_flagged_after_8589() {
              {misses} of {N}, above the pinned ceiling {ceiling}. The long-run \
              rule in is_readable_alpha_run is admitting encoder output.",
             if url_safe { "base64url" } else { "base64" }
+        );
+    }
+}
+
+// ---- Issues #277 and #8589, round 3: identifier filenames and small families ----
+
+/// Every row whose `check_secret` verdict is not `refused`, formatted for an
+/// assertion message, so one run names every mismatching row at once.
+fn verdict_mismatches(rows: &[&str], refused: bool) -> Vec<String> {
+    rows.iter()
+        .filter(|tok| check_secret(tok).is_err() != refused)
+        .map(|tok| format!("{tok} -> {:?}", check_secret(tok)))
+        .collect()
+}
+
+/// Why (issue #277): 70% of the memories the kuzu import still refused carry a
+/// `<Stem>.<ext>` file name that is an ordinary identifier but misses the
+/// `is_symbol_path_segment` word floor (`BituKura.java`: no word of five
+/// letters) or is a 20+ character name with a digit (`BorFuigebWaokdaw7.java`),
+/// which the whole-segment mixed-case test refuses.
+/// What: identifier file names in the shapes the import refused (letters
+/// invented), each refused before `is_identifier_file_segment`, then the
+/// shapes the rule still refuses on purpose.
+/// Test: itself.
+#[test]
+fn identifier_file_names_are_not_flagged_after_277() {
+    let accepted = [
+        // Two four-letter Title words.
+        "mape/hwl/niiw/BituKura.java",
+        // A four-capital acronym and two four-letter Title words.
+        "ucr/lnt/KDVBRolaTavu.java",
+        // A 17-character stem with one digit run.
+        "ona/sbw/ku/BorFuigebWaokdaw7.java",
+        // A 22-character stem with one digit run.
+        "edo/wkm/ceod/DoravelMunitokGesaPola7.java",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: identifier file names must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // KNOWN BOUND: an acronym plus a short word (vowel share 14%), a word
+    // mean of 3, and a lowercase first word are what random stems look like,
+    // so they stay refused. Most of the 3,057 memories the import still
+    // refuses carry the first shape.
+    let still_refused = [
+        "ucr/lnt/ruld/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTom.java",
+        "lib/utils/getUserId.java",
+    ];
+    let moved = verdict_mismatches(&still_refused, true);
+    assert!(
+        moved.is_empty(),
+        "#277 known bound moved; update the #8589 changelog:\n{}",
+        moved.join("\n")
+    );
+    let cfg = FilterConfig::default();
+    for path in accepted {
+        let prose = format!("The pricing adapter is defined in {path} for now");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}"
+        );
+    }
+}
+
+/// Why (issue #277): each clause of `is_identifier_file_segment` keeps one
+/// class of generated or credential-shaped file name out, so each needs a row
+/// just outside it.
+/// What: an inside and an outside row per clause of the predicate, then rows
+/// outside each clause refused end to end by `check_secret`.
+/// Test: itself.
+#[test]
+fn identifier_file_name_clause_boundaries_after_277() {
+    // The extension and acronym limits are pinned on the predicate: a
+    // six-letter extension or a six-capital acronym is itself a five-letter
+    // word, so `is_symbol_path_segment` admits those rows end to end anyway.
+    for (clause, seg, admitted) in [
+        ("extension of 5, inside", "BituKura.abcde", true),
+        ("extension of 6, outside", "BituKura.abcdef", false),
+        ("extension with a capital, outside", "BituKura.Java", false),
+        (
+            "extension opening with a digit, outside",
+            "BituKura.7z",
+            false,
+        ),
+        ("acronym of 5, inside", "KDVBQRolaTavu.java", true),
+        ("acronym of 6, outside", "KDVBQXRolaTavu.java", false),
+        ("one digit run, inside", "Bora4FuigebWaok.java", true),
+        ("two digit runs, outside", "Bora4Fuigeb7Waok.java", false),
+        ("one stray letter, inside", "BituKura-a7.java", true),
+        ("two stray letters, outside", "BituKura-a7b.java", false),
+        ("Title first word, inside", "RateCode.java", true),
+        ("lowercase first word, outside", "rateCode.java", false),
+        // 12 letters in 3 words is a mean of exactly 4; 11 is under.
+        ("mean word length 4, inside", "BankKovaLett.java", true),
+        ("mean word length 11/3, outside", "BankKovLett.java", false),
+        // 6 vowels of 22 letters is 27.3%; 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel.java", true),
+        (
+            "vowel floor, outside",
+            "DrenkPlostVarmikStuvelGrap.java",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            is_identifier_file_segment(seg),
+            admitted,
+            "#277 {clause}: is_identifier_file_segment({seg})"
+        );
+    }
+    let refused = [
+        // Extension of six characters, no five-letter word.
+        "ucr/lnt/BituKura.abc123",
+        // Extension with an uppercase letter.
+        "ucr/lnt/BituKura.Java",
+        // Two digit runs in one piece.
+        "ona/sbw/Bora4Fuigeb7Waok.java",
+        // Two stray letters in one piece.
+        "ucr/lnt/BituKura-a7b.java",
+        // Mean word length 2.
+        "ucr/lnt/AbCdEfGh.json",
+        // A vowel-free word pulls a short stem under the vowel floor.
+        "src/main/java/com/example/Http2ClientPool.java",
+        // A stray capital inside a word.
+        "src/main/java/OAuth2AuthorizationRequestRedirectFilter.java",
+        // Credential stems.
+        "keys/ghp_abcdefghijklmnopqrstuvwxyz0123456789.json", // pragma: allowlist secret
+        "keys/AKIAIOSFODNN7EXAMPLE.json",                     // pragma: allowlist secret
+        "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json",   // pragma: allowlist secret
+        "keys/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1.json",       // pragma: allowlist secret
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these file names must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): four small families of the refused import memories are
+/// not paths at all — a GitHub noreply commit email, an environment variable
+/// holding an ordinary URL, an npm `name@version` inside a path, and a ticket
+/// key leading a CamelCase title. Each has a fixed grammar, so each gets its
+/// own narrow matcher.
+/// What: three accepted rows per family (letters invented), each refused
+/// before the matcher existed.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277() {
+    let accepted = [
+        // GitHub noreply commit emails.
+        "70822+tahrisrut@users.noreply.github.com",
+        "603736402+Tafafeo-Coz@users.noreply.github.com",
+        "41234+Kovu7Delam@users.noreply.github.com",
+        // KEY=<ordinary URL>.
+        "WIDGET_CACHE_REDIS_URL=redis://cache-host:6379",
+        "METRICS_INGEST_ENDPOINT=https://metrics.example.com/v1/ingest",
+        "LIASRO_EEUPC_NOREPEVF_UKU=fcbp://wejemvovc:3073",
+        // npm name@version in a path.
+        "bovlat/zenimo-kr-tapuvelosk@3.1.5",
+        "node_modules/lekaro-vitun@2.14.0/dist/index.js",
+        "fomik/rudavel-sotep@12.0.4-beta.2",
+        // Ticket key plus CamelCase title.
+        "QX-4821-TelvoMarunDesiKobat",
+        "ABCDEFGHIJ-123456-VorinTapelMusko",
+        "KR-77-HovaPlentiDrasoMik",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): the four matchers above each admit one grammar, so a row
+/// just outside each grammar must fall back to the heuristics and be refused.
+/// What: boundary rows per family, all refused by `check_secret`.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_boundaries_after_277() {
+    let refused = [
+        // noreply: a lookalike host, a non-digit id, a login with `_`.
+        "70822+tahrisrut@users.noreply.github.com.evil.io",
+        "7a822+Tahrisrut9@users.noreply.github.com",
+        "70822+Tahri_srut9@users.noreply.github.com",
+        // KEY=url: userinfo with and without a password, a secret in the path,
+        // and a credential-shaped key.
+        "DB_URL=postgres://svcuser:hunter2hunter2@db.example.com/app", // pragma: allowlist secret
+        "DB_URL=postgres://Svcuser9@db.example.com:5432/app",
+        "HOOK_URL=https://hooks.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1=https://example.com/x", // pragma: allowlist secret
+        // npm: a two-part version, an uppercase name.
+        "bovlat/zenimo-kr-tapuvelosk@3.15",
+        "bovlat/Zenimo-Kr-Tapuvelosk@3.1.5",
+        // Ticket: an 11-letter key, a 7-digit number, an underscore, a stray
+        // capital, a digit in the title.
+        "ABCDEFGHIJK-4821-TelvoMarunDesiKobat",
+        "QX-4821123-TelvoMarunDesiKobat",
+        "QX4821_TelvoMarunDesiKobat",
+        "QX-4821-TelvoXMarunDesiKobat",
+        "QX-4821-Telvo9MarunDesiKobat",
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): 545 refused import memories carry a long CamelCase class
+/// name whose vowel share sits between 27% and 30%, under the #8589 floor.
+/// English identifiers run 35-40% and base64 letters about 23%, so 27% keeps
+/// the margin over base64 while admitting those names.
+/// What: long runs at 27.3%, 27.6% and 28% vowels, in a file name, a directory
+/// and a URL path, each refused at the 30% floor.
+/// Test: itself.
+#[test]
+fn long_class_names_at_27_percent_vowels_are_not_flagged_after_277() {
+    let accepted = [
+        "ivp/bsl/DrenkPlostVarmikStuvel.java",
+        "src/main/GrintSkolvarMendrupTaskelFrom.java",
+        "lib/GrintSkolvarMendrupTaskel/core.py",
+        "https://git.example.com/tree/main/GrintSkolvarMendrupTaskel",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: long class names at 27% vowels must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // 7 vowels of 26 letters is 26.9%, under the floor.
+    assert!(
+        check_secret("ivp/bsl/DrenkPlostVarmikStuvelGrap.java").is_err(),
+        "#277: a 26.9% vowel share is under the 27% floor"
+    );
+}
+
+/// `len` characters drawn from `alphabet` by `rng`.
+fn random_stem(rng: &mut Xorshift, alphabet: &[u8], len: usize) -> String {
+    (0..len)
+        .map(|_| alphabet[(rng.next_u64() >> 24) as usize % alphabet.len()] as char)
+        .collect()
+}
+
+/// Why (issue #277): `is_identifier_file_segment` admits a file name by the
+/// shape of its stem, which is where a generated key saved as a file name
+/// lands. This corpus parks random base62 and base64url stems as
+/// `src/main/<stem>.json` and counts admits, so a loosening shows up as a
+/// number.
+///
+/// Measured at this seed, 20k stems per row, `c545780f4` before the rule and
+/// this change after it:
+///
+/// ```text
+///   stem chars   base62 (before / after)   base64url (before / after)
+///       16            445 / 447                  385 / 389
+///       20            203 / 205                  202 / 202
+///       24              2 / 2                     40 / 40
+///       32              0 / 0                      6 / 6
+///       40              0 / 0                      3 / 3
+/// ```
+///
+/// A looser floor below 20 characters measured +212 and +233 at 16, and a
+/// lowercase first word +4 and +8; see `is_identifier_word_run`.
+/// What: a ratchet, 20k stems per row at a fixed seed.
+/// Test: itself.
+#[test]
+fn random_stems_as_file_names_stay_flagged_after_277() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x0277_0000_0000_0001;
+    let url_alphabet = b64_alphabet(true);
+    let base62 = &url_alphabet[..62];
+    for (label, alphabet, stem_len, ceiling) in [
+        ("base62", base62, 16usize, 447usize),
+        ("base62", base62, 20, 205),
+        ("base62", base62, 24, 2),
+        ("base62", base62, 32, 0),
+        ("base62", base62, 40, 0),
+        ("base64url", &url_alphabet[..], 16, 389),
+        ("base64url", &url_alphabet[..], 20, 202),
+        ("base64url", &url_alphabet[..], 24, 40),
+        ("base64url", &url_alphabet[..], 32, 6),
+        ("base64url", &url_alphabet[..], 40, 3),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let admits = (0..N)
+            .filter(|_| {
+                let tok = format!(
+                    "src/main/{}.json",
+                    random_stem(&mut rng, alphabet, stem_len)
+                );
+                find_secret_token(&tok).is_none()
+            })
+            .count();
+        assert!(
+            admits <= ceiling,
+            "#277 ratchet: {label} stems of {stem_len} characters as file names \
+             admitted {admits} of {N}, above the pinned ceiling {ceiling}"
         );
     }
 }
