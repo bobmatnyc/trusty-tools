@@ -20,6 +20,8 @@ pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
 mod sm;
+// #8535, #8161: which records write in a given tree.
+mod tree_membership;
 
 #[cfg(test)]
 mod tests;
