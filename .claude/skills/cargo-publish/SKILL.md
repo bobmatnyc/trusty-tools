@@ -855,6 +855,11 @@ Before declaring a publish complete:
 - [ ] `<binary> --version` shows correct version
 - [ ] Worktree path and branch reported to the PM for its prune verb (#5791 — never removed by the agent)
 - [ ] Remote branch cleaned up
+- [ ] Milestone closed the same day, open issues moved to the next milestone
+      of the same kind (bugfix or feature); the release report names the
+      moved issues (owner ruling 2026-09-25). An issue only awaiting live
+      verification (`status:merged` or `status:tested`) stays in the closed
+      milestone.
 
 ## Connection-Safe Daemon Restart (issue #534)
 

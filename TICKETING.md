@@ -115,6 +115,8 @@ Each crate maintains two types of patch-release milestones (owner convention 202
 
 **Rollover rule (PM default):** when an odd-patch release ships, bugs still open in its bugfix milestone move to the next odd patch's bugfix milestone.
 
+**Milestone closure on publish (owner ruling 2026-09-25):** when a release publishes, close its milestone the same day and move any issue still open in it to the next milestone of the same kind (bugfix or feature); the release report names the moved issues. An issue whose fix shipped in that release and only awaits live verification (`status:merged` or `status:tested`) stays in the closed milestone.
+
 ## Projects
 
 Live projects, by number, owner `bobmatnyc`:
