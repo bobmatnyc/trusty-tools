@@ -251,6 +251,16 @@ This agent is isolated in the worktree …, refusing
 … is too complex to verify that it stays inside the worktree
 ```
 
+`tm` used to produce some of these refusals itself. `tm hook` rewrote covered
+commands (`cargo test`, `git diff`, `grep`, `ls`, …) into
+`{ <cmd>; printf …; } | tm compress --tool "<name>"`, and the classifier
+refused that shape. Since
+[#7477](https://github.com/bobmatnyc/trusty-tools/issues/7477), `tm` no longer
+wraps a Bash command whose working directory is inside a `.claude/worktrees/`
+isolation worktree, or whose working directory the hook cannot read. The
+command reaches the harness as written. If a refusal quotes `tm compress`, the
+installed `tm` predates that fix.
+
 Those strings live only in the harness bundle. `tm hook --pm-guard` clears every
 shape reported on [#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982):
 it resolves `git` by token position rather than by substring, and it frames
