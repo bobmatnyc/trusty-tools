@@ -1305,3 +1305,122 @@ fn head_write_without_a_caller_excludes_nothing() {
         "and naming that session must exclude its own record"
     );
 }
+
+/// The #8161 half of the tree-membership rule. A `reset --keep` into a parked
+/// worktree asks who holds it, and the answer used to omit the one agent that
+/// matters: an isolated agent standing in its own tree carries the checkout it
+/// was dispatched FROM, so no directory-keyed query on the tree matched it.
+///
+/// Fails before the fix: the filter keyed on `Delegation::cwd` alone.
+#[test]
+fn a_live_agent_is_counted_in_the_worktree_it_stands_in() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-parked");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.isolation = Some("worktree".to_string());
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.join("crates/foo"));
+    state.upsert_delegation(d);
+
+    assert_eq!(
+        state.live_shared_tree_writers_excluding(&tree, None, None),
+        vec!["rust-engineer".to_string()],
+        "a tree-holders query must name the agent standing in the tree"
+    );
+    assert!(
+        state
+            .live_shared_tree_writers_excluding(&tree, None, Some(id))
+            .is_empty(),
+        "a session-scoped HEAD write still excludes its own session (#6797)"
+    );
+    assert!(
+        state.live_shared_tree_writers(&checkout, None).is_empty(),
+        "and the agent is still not a writer in the checkout it left"
+    );
+}
+
+/// The #8535 regression. The harness moved the PM's cwd into an agent's
+/// worktree, so a qa dispatch made from there was stamped with that worktree,
+/// and when the harness then isolated the agent anyway the record still read
+/// as a second writer in the PM's directory until its ownership claim landed.
+/// Here the claim has not landed (`worktree_path` is `None`) but the agent's
+/// own hook already reports a different harness tree.
+///
+/// Fails before the fix: `holds_its_own_tree` needed `worktree_path`, so the
+/// record fell through to the isolation test and was reported.
+#[test]
+fn a_record_stamped_in_a_relocated_pm_cwd_is_not_a_writer_there() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let relocated = std::path::PathBuf::from("/repo/main/.claude/worktrees/agent-engineer");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &relocated);
+    d.agent = "qa".to_string();
+    d.last_agent_cwd = Some(std::path::PathBuf::from(
+        "/repo/main/.claude/worktrees/agent-qa/tests",
+    ));
+    state.upsert_delegation(d);
+
+    assert!(
+        state.shared_tree_occupants(&relocated, None).is_empty(),
+        "an agent standing in another harness tree is not a writer in the PM's cwd"
+    );
+}
+
+/// #8161 critic round: rule 1 on the DISPATCH question. When the PM's cwd sits
+/// inside a live agent's worktree (#8535), an unisolated dispatch from there
+/// would join that agent's tree, so the agent occupies it even though its
+/// record carries the checkout it was dispatched from.
+///
+/// Fails before the fix: the filter matched `Delegation::cwd` only.
+#[test]
+fn a_live_agent_occupies_its_worktree_for_a_dispatch_from_inside_it() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-live");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.isolation = Some("worktree".to_string());
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.clone());
+    state.upsert_delegation(d);
+
+    assert_eq!(
+        state.shared_tree_occupants(&tree, None),
+        vec!["rust-engineer".to_string()]
+    );
+    assert!(state.shared_tree_occupants(&checkout, None).is_empty());
+}
+
+/// The control for the #8161 rule: a positively read-only agent standing in a
+/// parked worktree does not block consolidating into it.
+#[test]
+fn a_read_only_agent_in_a_linked_worktree_is_not_a_writer() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-parked");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.agent = "research".to_string();
+    d.last_agent_cwd = Some(tree.clone());
+    state.upsert_delegation(d);
+
+    assert!(
+        state
+            .live_shared_tree_writers_excluding(&tree, None, None)
+            .is_empty()
+    );
+}

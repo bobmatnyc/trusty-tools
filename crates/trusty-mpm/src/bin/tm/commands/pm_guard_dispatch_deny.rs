@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use trusty_mpm::core::project_aliases::worktree_root;
 use trusty_mpm::daemon::services::delegation_records::DelegationRecordView;
 
 /// Build the deny message for a blocked concurrent dispatch.
@@ -35,13 +36,25 @@ use trusty_mpm::daemon::services::delegation_records::DelegationRecordView;
 /// excluded for exactly the reason above.
 /// What: a single-paragraph `permissionDecisionReason`; the caller appends
 /// [`blocking_records`].
+///
+/// #8535: when `cwd` is itself a linked worktree the text says so — the
+/// harness can move the PM's cwd into an agent's worktree, and the PM then
+/// reads a deny about "its" checkout that is really about that agent's tree.
 /// Test: `denies_a_second_concurrent_unisolated_engineer`,
-/// `deny_reason_offers_only_remedies_that_always_work`.
+/// `deny_reason_offers_only_remedies_that_always_work`,
+/// `deny_reason_names_a_cwd_inside_a_linked_worktree_8535`.
 pub(crate) fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
     let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
     names.sort_unstable();
     names.dedup();
     let running = names.join(", ");
+    let relocated = if worktree_root(cwd).is_some() {
+        " This directory is a linked worktree, not a main checkout: this session's \
+         working directory is inside another agent's tree, which the harness can do on its \
+         own (#8535). Declaring `isolation: \"worktree\"` works from here too."
+    } else {
+        ""
+    };
     format!(
         "Concurrent shared-worktree dispatch denied (#4480): {running} is already running in \
          {} without a worktree of its own — possibly dispatched by a different session standing \
@@ -54,7 +67,7 @@ pub(crate) fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
          serialize instead: dispatch one file-mutating agent at a time from now on. Do not \
          hand-roll a `git worktree add` in the prompt — this guard reads the declared \
          isolation parameter, never the prompt, so a self-made worktree still counts as \
-         sharing this HEAD (#5649).",
+         sharing this HEAD (#5649).{relocated}",
         cwd.display()
     )
 }
@@ -353,6 +366,16 @@ mod tests {
         for banned in ["wait for", "wait on", "wait until", "waiting for"] {
             assert!(!reason.contains(banned), "found {banned:?}: {reason}");
         }
+    }
+
+    #[test]
+    fn deny_reason_names_a_cwd_inside_a_linked_worktree_8535() {
+        let tree = Path::new("/repo/.claude/worktrees/agent-a");
+        let reason = deny_reason("qa", tree, &["qa".to_string()]);
+        assert!(reason.contains("#8535"), "{reason}");
+        assert!(reason.contains("isolation: \"worktree\""), "{reason}");
+        let checkout = deny_reason("qa", Path::new("/repo"), &["qa".to_string()]);
+        assert!(!checkout.contains("#8535"), "{checkout}");
     }
 
     #[test]
