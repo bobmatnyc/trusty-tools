@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.0] — 2026-09-25
+
+### Fixed
+
+- A project-level token entry (`./.gworkspace-mcp/`) no longer silently shadows a newer or wider-scoped user-level entry for the same profile. When both stores hold a profile, a project entry naming a different account, or recording no account email, still wins; otherwise a strict scope superset wins, then the later consent time (refresh time only breaks a tie), and an exact tie keeps the project entry. Gmail filter writes no longer fail with 403 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` after a re-consent made from another directory (#8539).
+- Every differing shadow now logs one warning per profile naming the winning store and the reason, never a token value; the old warning fired only when the project entry had expired (#8539).
+- Token refreshes and other writes go back to the store the entry was read from, instead of copying the merged view into the project store. A new consent made in a project directory is written to the project store, and also replaces the user-level entry when it is the same account; it never overwrites a different account's user-level credential (#8539).
+- A refresh no longer overwrites a credential that a consent replaced while the refresh was in flight, and no longer reverts a default-profile change made while it ran (#8539).
+- Token store files are written atomically (temp file, 0600, sync, rename), so a concurrent reader never sees a partial file (#8539).
+- A token store that cannot be read or parsed no longer counts as empty for writes: updates fail and leave both files untouched. When a project store exists, either store being unreadable is now an error on read too, rather than silently serving the other store's entries, which may belong to another account or make the project's lone profile the default. With no project store, an unreadable user store warns once per file and error kind with only the path and parse position, never the file's content (#8539).
+- Token writes no longer hang forever when the project and user store are the same file (running from `$HOME`, a symlinked `.gworkspace-mcp`, or hard-linked files) (#8539).
+- Removing a profile deletes the other store's entry only when it names the same account, and a kept entry never becomes a second default. `accounts remove` and the `remove_account` tool report a kept user-level entry. When several profiles are marked default, the lowest profile name is used, so the choice is stable (#8539).
+- `manage_tasks` accepts the flat task shape again (`title`, `notes`, `due`, `status`, `completed` at the top level) alongside the `task` (create) and `updates` (update) objects, and advertises those fields in its input schema. A flat create no longer fails with "missing 'task' object", and a flat update no longer sends an empty PATCH. When both shapes are given they are merged; a field set in both with different values is refused with an error naming the field, and a create or update with no task fields at all is refused ([#8629](https://github.com/bobmatnyc/trusty-tools/issues/8629))
+- `manage_task_lists` `update` applies a flat `title` (merged with `updates` under the same rule) instead of sending an empty PATCH ([#8629](https://github.com/bobmatnyc/trusty-tools/issues/8629))
+- `manage_calendars` `update` applies the flat `summary`, `description` and `time_zone` fields, and `manage_gmail_labels` `update` applies the flat `name`, `label_list_visibility`, `message_list_visibility` and `color` fields, instead of sending an empty PATCH. When both the flat fields and the `updates` object are given they are merged; a field set in both with different values is refused with an error naming the field, and an update with no fields at all is refused. Both tool schemas describe the flat fields, and `manage_gmail_labels` now advertises `color` ([#8632](https://github.com/bobmatnyc/trusty-tools/issues/8632))
+
+### Changed
+
+- **Breaking API change:** `RemoveOutcome` gains the public field `user_entry_remains` and is now `#[non_exhaustive]`, so code outside the crate can no longer build it with a struct literal. The next trusty-gworkspace release is 0.3.0 (#8539).
+
 ## [0.2.6] — 2026-09-25
 
 ### Added
