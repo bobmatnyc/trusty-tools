@@ -193,34 +193,11 @@ or report, not a note for later.
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
-🔴 **Never block on CI and never use `gh pr checks --watch`.** `--watch` streams
-every check's output into context for the whole run — 546k tokens burned over
-54 minutes on one PR. Context cost, not runnability, retires blocking CI
-waits; do not reintroduce one or substitute a manual poll loop.
-
-When your work is pushed, take a ONE-SHOT status read, report it, and end your
-turn. The PM re-engages when CI settles.
-
-```bash
-gh pr view <pr> --json state,mergeable,statusCheckRollup   # one shot
-gh pr checks <pr>                                          # one shot
-```
-
-- **`bucket` can report a false DONE** under GitHub API eventual-consistency
-  lag — cross-check `state` before calling anything green; never merge on a
-  bucket alone.
-- **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
-  CI completes, each update mints a new untested head and restarts the clock.
-  Merge the head that is actually green; BEHIND is not a correctness gate.
-- Hand back with an observation — "pushed `<sha>`; 3 checks pending — PM to
-  re-engage". Ending with "monitoring the checks", "waiting for CI", "will report
-  when green", or "standing by" is a PROTOCOL VIOLATION: nothing re-invokes a
-  stopped agent, so the promise strands the merge.
-- Never spawn a background monitor or watcher as a wake mechanism. If you armed
-  one and its goal completed, disarm it before reporting.
-
-Your own commands — a build, a test suite, a `gh pr merge` — still run in the
-FOREGROUND and hold the turn until they exit.
+🔴 BASE-AGENT's "Finishing Work — Push, Report, Stop" applies in full: one
+one-shot status read after the push, report it, end the turn. Never
+`--watch`, never a poll loop or wake-up watcher, never a "standing by"
+promise. Never merge on a `bucket` alone. Your own commands — a build, a test
+suite, a `gh pr merge` — still run in the FOREGROUND until they exit.
 
 ## After a Merge — Verify, Flag, Clean Up
 
