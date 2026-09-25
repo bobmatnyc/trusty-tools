@@ -29,11 +29,9 @@ pub(crate) const SECTION_AGENT_ROUTING: &str =
 pub(crate) const SECTION_SUBAGENT_RE_ENGAGEMENT: &str =
     include_str!("../assets/instructions/sections/subagent-re-engagement.md");
 /// The 5-phase workflow summary. Split out of `core.md` by #8533; tier `project`.
-pub(crate) const SECTION_PHASES: &str =
-    include_str!("../assets/instructions/sections/phases.md");
+pub(crate) const SECTION_PHASES: &str = include_str!("../assets/instructions/sections/phases.md");
 /// The QA verification gate. Split out of `core.md` by #8533; tier `project`.
-pub(crate) const SECTION_QA_GATE: &str =
-    include_str!("../assets/instructions/sections/qa-gate.md");
+pub(crate) const SECTION_QA_GATE: &str = include_str!("../assets/instructions/sections/qa-gate.md");
 /// The git file-tracking protocol. Split out of `core.md` by #8533; tier `project`.
 pub(crate) const SECTION_GIT_FILE_TRACKING: &str =
     include_str!("../assets/instructions/sections/git-file-tracking.md");
@@ -101,14 +99,26 @@ pub(crate) const SECTION_SOURCES: [(&str, &str); 19] = [
     ("sections/identity.md", SECTION_IDENTITY),
     ("sections/core.md", SECTION_CORE),
     ("sections/pm-allowlist.md", SECTION_PM_ALLOWLIST),
-    ("sections/delegation-mechanics.md", SECTION_DELEGATION_MECHANICS),
+    (
+        "sections/delegation-mechanics.md",
+        SECTION_DELEGATION_MECHANICS,
+    ),
     ("sections/agent-routing.md", SECTION_AGENT_ROUTING),
-    ("sections/subagent-re-engagement.md", SECTION_SUBAGENT_RE_ENGAGEMENT),
+    (
+        "sections/subagent-re-engagement.md",
+        SECTION_SUBAGENT_RE_ENGAGEMENT,
+    ),
     ("sections/phases.md", SECTION_PHASES),
     ("sections/qa-gate.md", SECTION_QA_GATE),
     ("sections/git-file-tracking.md", SECTION_GIT_FILE_TRACKING),
-    ("sections/tickets-prs-releases.md", SECTION_TICKETS_PRS_RELEASES),
-    ("sections/messages-reports-sessions.md", SECTION_MESSAGES_REPORTS_SESSIONS),
+    (
+        "sections/tickets-prs-releases.md",
+        SECTION_TICKETS_PRS_RELEASES,
+    ),
+    (
+        "sections/messages-reports-sessions.md",
+        SECTION_MESSAGES_REPORTS_SESSIONS,
+    ),
     (
         "sections/autonomous-execution.md",
         SECTION_AUTONOMOUS_EXECUTION,

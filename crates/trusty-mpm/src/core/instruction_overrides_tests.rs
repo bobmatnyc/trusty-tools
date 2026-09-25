@@ -99,7 +99,7 @@ fn bundled_delegation_appends_deployed_roster() {
     // mode fully loads. Both are resolved by the note between them, which
     // must be present whenever a roster is rendered.
     assert!(
-        prompt.contains("trust the harness listing"),
+        prompt.contains("authoritative for WHICH agents exist"),
         "#4513: the harness's own listing, not the roster, is now the block \
          declared authoritative over the stale doctrine table"
     );
@@ -110,9 +110,11 @@ fn bundled_delegation_appends_deployed_roster() {
 
     // Ordering: doctrine first, note, roster after, BASE_PM floor last.
     let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
-    let note = prompt.find("trust the harness listing").expect("note");
+    let note = prompt
+        .find("authoritative for WHICH agents exist")
+        .expect("note");
     let roster = prompt.find("## Delegation Authority").expect("roster");
-    let base = prompt.find("# Framework Instructions").expect("base");
+    let base = prompt.find("## Prohibitions (CANONICAL").expect("base");
     assert!(doctrine < note, "doctrine precedes the note");
     assert!(note < roster, "the note precedes the roster it governs");
     assert!(roster < base, "BASE_PM floor stays last");
@@ -128,9 +130,9 @@ fn no_overrides_uses_bundled() {
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
 
-    let base = prompt.find("# Framework Instructions").expect("base");
+    let base = prompt.find("## Prohibitions (CANONICAL").expect("base");
     let delegation = prompt.find("# Agent Delegation Routing").expect("deleg");
     assert!(base > delegation, "BASE_PM floor must be last");
 }
@@ -160,7 +162,7 @@ fn a_retired_instructions_file_no_longer_reaches_the_prompt() {
     // The bundled sections are unaffected.
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
 
 #[test]
@@ -244,7 +246,7 @@ fn a_retired_deployed_file_no_longer_replaces_the_body() {
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
 }
 
@@ -402,7 +404,7 @@ fn missing_override_dir_uses_bundled() {
     assert!(!tmp.path().join(OVERRIDE_DIR_NAME).exists());
     let prompt = resolve_pm_prompt(tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
 
 #[test]
@@ -419,7 +421,7 @@ fn a_directory_in_a_retired_files_place_is_not_detected_and_not_fatal() {
     assert!(detect_legacy_overrides(tmp.path()).is_empty());
     let prompt = resolve_pm_prompt(tmp.path());
     assert!(prompt.contains("# PM Workflow Configuration"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
 
 #[test]
@@ -435,7 +437,7 @@ fn an_empty_retired_file_is_still_detected() {
     assert_eq!(detect_legacy_overrides(tmp.path()).len(), 1);
     let prompt = resolve_pm_prompt(tmp.path());
     assert!(prompt.contains("# PM Workflow Configuration"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
 
 #[test]
@@ -462,7 +464,7 @@ fn stack_profile_present_when_detected() {
 
     let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
     let stack = prompt.find(STACK_PROFILE_HEADING).expect("stack");
-    let base = prompt.find("# Framework Instructions").expect("base");
+    let base = prompt.find("## Prohibitions (CANONICAL").expect("base");
     assert!(pm < stack, "stack profile follows PM_INSTRUCTIONS");
     assert!(stack < base, "stack profile precedes the BASE_PM floor");
 }

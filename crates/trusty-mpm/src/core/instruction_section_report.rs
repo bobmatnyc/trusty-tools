@@ -3,8 +3,8 @@
 //! Why: `tm sessions instructions` logged "applying ... section=Identity" while
 //! the package `## Identity` still opened the prompt, so the report and the
 //! outcome disagreed. The operator needs one table that says, per section,
-//! whether the package text, the project's text, or a decline is in force —
-//! and that table must be checked against the prompt actually composed.
+//! whether it is safety core, overridable, or overridden by the project — and
+//! that table must be checked against the prompt actually composed.
 //! What: [`section_statuses`] derives each section's state from the same scan
 //! and the same [`InstructionPackage::with_overrides`] call the composer runs;
 //! [`render_section_report`] prints it and flags any overridden section whose
@@ -15,16 +15,38 @@ use std::path::{Path, PathBuf};
 
 use crate::core::claude_md_sections::{Rejection, scan_project, section_token};
 use crate::core::instruction_package::{InstructionPackage, SectionId};
+use crate::core::instruction_safety_core::{is_fixed_core_section, pinned_members_of};
 
 /// What is in force for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionState {
-    /// The bundled package text.
-    Package,
-    /// The project's override text replaces the package text.
-    Overridden,
-    /// The project declared an override and it was not applied; the reason.
-    Declined(String),
+    /// A safety-core section: the bundled text, which no override replaces.
+    Core,
+    /// A replaceable section carrying the bundled text.
+    Overridable,
+    /// The project's override text replaces the bundled text.
+    OverriddenByProject,
+    /// A safety-core section whose project override was declined; the reason.
+    CoreDeclined(String),
+    /// A replaceable section whose override was not applied; the reason.
+    OverridableDeclined(String),
+}
+
+impl SectionState {
+    /// The state as the report prints it.
+    pub fn label(&self) -> String {
+        match self {
+            SectionState::Core => "core".to_string(),
+            SectionState::Overridable => "overridable".to_string(),
+            SectionState::OverriddenByProject => "overridden-by-project".to_string(),
+            SectionState::CoreDeclined(reason) => {
+                format!("core (project override declined: {reason})")
+            }
+            SectionState::OverridableDeclined(reason) => {
+                format!("overridable (project override declined: {reason})")
+            }
+        }
+    }
 }
 
 /// One row of the section report.
@@ -40,8 +62,8 @@ pub struct SectionStatus {
     pub source: Option<(PathBuf, usize)>,
     /// First content line of the override body, used to check the prompt.
     pub probe: Option<String>,
-    /// Whether a pinned framework-feature block stays in force (#8533).
-    pub pinned_kept: bool,
+    /// Pinned safety-core members that stay in force under the override.
+    pub kept: Vec<&'static str>,
 }
 
 /// The section a rejection names; `None` for a whole-package revert.
@@ -71,9 +93,10 @@ fn probe_line(body: &str) -> Option<String> {
 /// selects the composer, and the roster-absent string assembly can place only
 /// `WORKFLOW`, `MEMORY` and `AGENT-DELEGATION`.
 /// What: one row per [`SectionId::CANONICAL`] entry. A section with no marker
-/// block is [`SectionState::Package`]; one whose override the composer applied
-/// is [`SectionState::Overridden`]; one whose override it declined carries the
-/// reason.
+/// block is [`SectionState::Core`] or [`SectionState::Overridable`] by the
+/// safety core's list; one whose override the composer applied is
+/// [`SectionState::OverriddenByProject`]; one whose override it declined
+/// carries the reason.
 /// Test: `identity_and_a_former_core_section_report_overridden`,
 /// `a_core_override_reports_declined`, `the_roster_absent_path_reports_what_it_cannot_place`.
 pub fn section_statuses(
@@ -122,19 +145,23 @@ pub fn section_statuses(
         .into_iter()
         .map(|section| {
             let over = scanned.overrides.iter().find(|o| o.section == section);
+            let core = is_fixed_core_section(section);
             let state = match (over, declined.iter().find(|(s, _)| *s == section)) {
-                (None, _) => SectionState::Package,
-                (Some(_), Some((_, reason))) => SectionState::Declined(reason.clone()),
-                (Some(_), None) => SectionState::Overridden,
+                (None, _) if core => SectionState::Core,
+                (None, _) => SectionState::Overridable,
+                (Some(_), Some((_, reason))) if core => SectionState::CoreDeclined(reason.clone()),
+                (Some(_), Some((_, reason))) => SectionState::OverridableDeclined(reason.clone()),
+                (Some(_), None) => SectionState::OverriddenByProject,
+            };
+            let kept = if state == SectionState::OverriddenByProject {
+                pinned_members_of(section)
+            } else {
+                Vec::new()
             };
             SectionStatus {
                 section,
                 token: section_token(section),
-                pinned_kept: state == SectionState::Overridden
-                    && package
-                        .blocks
-                        .iter()
-                        .any(|b| b.section == section && b.pinned),
+                kept,
                 state,
                 source: over.map(|o| (o.host.clone(), o.line)),
                 probe: over.and_then(|o| probe_line(&o.body)),
@@ -149,32 +176,28 @@ pub fn section_statuses(
 /// checking each override's text against the delivered prompt is what makes a
 /// disagreement visible instead of silent (#8533).
 /// What: one line per section — token, state, marker location — plus
-/// `framework feature kept` for an overridden section with a pinned block, and
-/// `NOT FOUND in the composed prompt` when an overridden section's first content
-/// line is absent from `prompt`.
+/// `keeps: <member>` for an overridden section with a pinned safety-core block,
+/// and `NOT FOUND in the composed prompt` when an overridden section's first
+/// content line is absent from `prompt`.
 /// Test: `render_flags_an_override_missing_from_the_prompt`.
 pub fn render_section_report(statuses: &[SectionStatus], prompt: &str) -> String {
-    let mut out = String::from("instruction sections (package / overridden / declined):\n");
+    let mut out =
+        String::from("instruction sections (core / overridable / overridden-by-project):\n");
     for row in statuses {
         let location = row
             .source
             .as_ref()
             .map(|(host, line)| format!("  {}:{line}", host.display()))
             .unwrap_or_default();
-        let detail = match &row.state {
-            SectionState::Package => "package".to_string(),
-            SectionState::Overridden => {
-                let mut s = "overridden".to_string();
-                if row.pinned_kept {
-                    s.push_str(" (framework feature kept)");
-                }
-                if row.probe.as_deref().is_some_and(|p| !prompt.contains(p)) {
-                    s.push_str(" (override text NOT FOUND in the composed prompt)");
-                }
-                s
-            }
-            SectionState::Declined(reason) => format!("declined: {reason}"),
-        };
+        let mut detail = row.state.label();
+        if !row.kept.is_empty() {
+            detail.push_str(&format!(" (keeps: {})", row.kept.join(", ")));
+        }
+        if row.state == SectionState::OverriddenByProject
+            && row.probe.as_deref().is_some_and(|p| !prompt.contains(p))
+        {
+            detail.push_str(" (override text NOT FOUND in the composed prompt)");
+        }
         out.push_str(&format!("  {:<34} {detail}{location}\n", row.token));
     }
     out

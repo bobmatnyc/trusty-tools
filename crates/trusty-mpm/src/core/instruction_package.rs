@@ -781,7 +781,9 @@ impl InstructionPackage {
         // `core` to `project` (losing the one protection) and retiering any
         // other section to `fixed` (quietly reinstating a floor).
         for section in &self.sections {
-            let should_be_fixed = section.id == SectionId::Core;
+            // #8533: the fixed set is the safety core's, enumerated once.
+            let should_be_fixed =
+                crate::core::instruction_safety_core::is_fixed_core_section(section.id);
             let is_fixed = section.customization_tier == CustomizationTier::Fixed;
             if should_be_fixed != is_fixed {
                 return Err(ValidationError::TierNotCoreOnly {

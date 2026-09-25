@@ -178,6 +178,9 @@ pub mod instruction_overrides;
 // + validation only; `bundled_pm_package` is its first composing call site.
 pub mod instruction_package;
 pub mod instruction_pipeline;
+// Issue #8533: the one enumeration of the prompt content no project override
+// can remove.
+pub mod instruction_safety_core;
 // Epic #4183: committed snapshots of the fully composed PM prompt. The
 // delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;

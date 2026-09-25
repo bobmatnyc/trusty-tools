@@ -825,18 +825,44 @@ compile time via `bundled_pm_package.rs`. It declares section order and
 composition; the prose for each section is stored separately in
 `assets/instructions/sections/*.md`, pulled in as `include_str!` constants
 registered in the `SECTION_SOURCES` table (`core/instruction_pipeline.rs`) — a
-missing section file is a compile error, not a launch-time surprise. The ten
-marker tokens (`core/claude_md_sections.rs::section_token`) are `IDENTITY`,
-`CORE`, `AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`,
-`AGENT-DELEGATION`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, and
-`FRAMEWORK-GUARANTEED-CONVENTIONS`.
+missing section file is a compile error, not a launch-time surprise. The
+nineteen marker tokens (`core/claude_md_sections.rs::section_token`), in prompt
+order, are `IDENTITY`, `CORE`, `PM-ALLOWLIST`, `DELEGATION-MECHANICS`,
+`AGENT-ROUTING`, `SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`,
+`GIT-FILE-TRACKING`, `TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`,
+`AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
+`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, and `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+`IDENTITY` opens the prompt, so its override replaces the opening role
+statement in place (#8533).
 
-**`CORE` is the only one a project cannot replace.** Every other section,
-including `NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS`, can be
-overridden — there is no separate "floor" concept anymore (the
-`is_floor()`/`instruction_floor.sha256` machinery was retired by #4286, being the
-appearance of a control rather than one a project-owned `CLAUDE.md` could
-enforce).
+### The Safety Core (#8533)
+
+Every section is replaceable except a small safety core. The core is
+enumerated once in code, `core/instruction_safety_core.rs::SAFETY_CORE`; a test
+fails if this table and that list diverge.
+
+<!-- safety-core:start -->
+| Member | Section token | Kind |
+|---|---|---|
+| Memory & Instruction Sources | `CORE` | fixed section |
+| Customization Surface | `CORE` | fixed section |
+| Detected project stack | `CORE` | generated block |
+| Memory protocol | `MEMORY` | pinned block |
+| Code search protocol | `SEARCH` | pinned block |
+| Agent selection | `AGENT-DELEGATION` | pinned block |
+| Agent roster | `AGENT-DELEGATION` | generated block |
+<!-- safety-core:end -->
+
+- A **fixed section** declines a marker naming it. The decline is logged and
+  reported, and the bundled text stays.
+- A **pinned block** survives an override of its section; the project's text
+  replaces the rest of that section.
+- A **generated block** is computed at launch; no override can author or
+  remove it.
+
+There is no other floor: the `is_floor()`/`instruction_floor.sha256` machinery
+was retired by #4286, being the appearance of a control rather than one a
+project-owned `CLAUDE.md` could enforce.
 
 At session start, `core/instruction_overrides.rs::resolve_pm_prompt` (reached via
 `build_system_prompt_for*`) composes the final prompt. It is not a file a user
@@ -844,7 +870,7 @@ edits — it is composed fresh per launch.
 
 ### The One Customization Surface
 
-A project customizes any non-`CORE` section exactly one way: a named-section
+A project customizes any section outside the safety core exactly one way: a named-section
 marker, `<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `<!-- TRUSTY-MPM: <TOKEN> END
 -->`, in the project's root `CLAUDE.md` — the sole marker host
 (`core/claude_md_sections.rs::HOST_FILES`). This replaces exactly the matching
@@ -883,6 +909,7 @@ optional or absent (#4069).
 | "add/change workflow phase" | `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` block in `CLAUDE.md` |
 | "stop and check with me more/less often" | `<!-- TRUSTY-MPM: AUTONOMOUS-EXECUTION START v=1 -->` block in `CLAUDE.md` — e.g. tightening it to "ask before dispatching after a resume" (#8361) |
 | "memory behavior" | `<!-- TRUSTY-MPM: MEMORY START v=1 -->` block in `CLAUDE.md` |
+| "this project's voice / output style" | `.claude/output-styles/<id>.md`, selected by `[style] active = "<id>"` in `.trusty-mpm.toml` |
 
 After writing an override, confirm the marker to the user and note it "takes
 effect at next session startup" — the resolved prompt is assembled at
@@ -897,7 +924,18 @@ cat .trusty-mpm/last-instructions.md   # the exact stash resolve_pm_prompt wrote
 
 `tm sessions instructions` reports every applied, declined, and shadowed marker
 on **stderr**, so `tm sessions instructions >/dev/null` alone answers "why didn't
-my override apply?". `last-instructions.md` is written by `prepare_session` every
+my override apply?". Below the markers it prints one row per section — `core`,
+`overridable`, or `overridden-by-project` — and the output style the launch
+uses (#8533).
+
+### Output Style Selection (#8533)
+
+The style id resolves in this order: `tm launch --style <id>`, then
+`[style] active` in the committed `.trusty-mpm.toml`, then the host config's
+`[style] active`, then the harness manifest. A bundled id means the shipped
+style; any other id names `.claude/output-styles/<id>.md` in the project. An
+unknown or unreadable id is a visible warning, and the launch falls back to the
+default style. `last-instructions.md` is written by `prepare_session` every
 time a prompt is assembled, so the inspectable copy can never diverge from what
 the PM received (#382).
 

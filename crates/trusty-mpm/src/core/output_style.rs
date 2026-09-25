@@ -433,9 +433,9 @@ pub fn apply_output_style_to_prompt_with_native(
 #[path = "output_style_project.rs"]
 mod project;
 pub use project::{
-    ActiveStyle, PROJECT_STYLES_DIR, describe_effective_style, effective_style_id,
-    project_selected_style,
-    project_style_ids, resolve_or_default, resolve_style_in_project,
+    ActiveStyle, PROJECT_STYLES_DIR, ProjectStyleError, describe_effective_style,
+    effective_style_id, project_selected_style, project_style_ids, resolve_or_default,
+    resolve_style_in_project,
 };
 
 #[cfg(test)]

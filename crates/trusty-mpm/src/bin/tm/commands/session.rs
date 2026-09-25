@@ -190,7 +190,10 @@ pub(crate) async fn session(
             // against the prompt just printed, then the style it launches with.
             eprint!(
                 "\n{}{}",
-                trusty_mpm::core::instruction_overrides::section_report_for(&path, &resolved_prompt),
+                trusty_mpm::core::instruction_overrides::section_report_for(
+                    &path,
+                    &resolved_prompt
+                ),
                 trusty_mpm::core::output_style::describe_effective_style(&path)
             );
             // #7422: the composed prompt goes to stdout so it can be piped; what

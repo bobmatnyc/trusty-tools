@@ -1,7 +1,9 @@
 //! Tests for the per-section report and the #8533 override guarantees.
 
 use super::*;
-use crate::core::bundled_pm_package::{bundled_fallback_package, compose_bundled_fallback_with_overrides};
+use crate::core::bundled_pm_package::{
+    bundled_fallback_package, compose_bundled_fallback_with_overrides,
+};
 use crate::core::claude_md_sections::scan_project;
 use crate::core::instruction_overrides::resolve_pm_prompt_with_roster;
 use tempfile::TempDir;
@@ -24,7 +26,8 @@ fn project(blocks: &[(&str, &str)]) -> TempDir {
 
 fn compose(dir: &TempDir) -> String {
     let scanned = scan_project(dir.path());
-    let (composed, _) = compose_bundled_fallback_with_overrides(STACK, ROSTER, None, &scanned.overrides);
+    let (composed, _) =
+        compose_bundled_fallback_with_overrides(STACK, ROSTER, None, &scanned.overrides);
     composed.expect("composes")
 }
 
@@ -42,7 +45,10 @@ const ALLOWLIST_BODY: &str = "## Direct Work\n\nRun read-only commands directly.
 fn identity_and_a_former_core_section_report_overridden() {
     // Against origin/main: PM-ALLOWLIST is an unknown token, and the IDENTITY
     // override lands after the roster while `## Identity` opens the prompt.
-    let dir = project(&[("IDENTITY", IDENTITY_BODY), ("PM-ALLOWLIST", ALLOWLIST_BODY)]);
+    let dir = project(&[
+        ("IDENTITY", IDENTITY_BODY),
+        ("PM-ALLOWLIST", ALLOWLIST_BODY),
+    ]);
     let prompt = compose(&dir);
 
     assert!(
@@ -51,20 +57,36 @@ fn identity_and_a_former_core_section_report_overridden() {
         &prompt[..prompt.len().min(200)]
     );
     assert_eq!(prompt.matches("You administer a fleet").count(), 1);
-    assert_eq!(prompt.matches("Run read-only commands directly.").count(), 1);
+    assert_eq!(
+        prompt.matches("Run read-only commands directly.").count(),
+        1
+    );
     for package_text in [
         "PM = orchestrator + QA coordinator",
         "# PM Agent -- Trusty MPM",
         "## PM Allowlist (unbudgeted",
     ] {
-        assert!(!prompt.contains(package_text), "package text {package_text:?} survived its override");
+        assert!(
+            !prompt.contains(package_text),
+            "package text {package_text:?} survived its override"
+        );
     }
 
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), true);
-    assert_eq!(state_of(&rows, SectionId::Identity), SectionState::Overridden);
-    assert_eq!(state_of(&rows, SectionId::PmAllowlist), SectionState::Overridden);
-    assert_eq!(state_of(&rows, SectionId::Workflow), SectionState::Package);
+    assert_eq!(
+        state_of(&rows, SectionId::Identity),
+        SectionState::OverriddenByProject
+    );
+    assert_eq!(
+        state_of(&rows, SectionId::PmAllowlist),
+        SectionState::OverriddenByProject
+    );
+    assert_eq!(
+        state_of(&rows, SectionId::Workflow),
+        SectionState::Overridable
+    );
+    assert_eq!(state_of(&rows, SectionId::Core), SectionState::Core);
     let rendered = render_section_report(&rows, &prompt);
     assert!(!rendered.contains("NOT FOUND"), "{rendered}");
 }
@@ -79,11 +101,14 @@ fn a_core_override_reports_declined() {
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), true);
     assert!(
-        matches!(state_of(&rows, SectionId::Core), SectionState::Declined(ref r) if r.contains("admits no project override")),
+        matches!(state_of(&rows, SectionId::Core), SectionState::CoreDeclined(ref r) if r.contains("admits no project override")),
         "{rows:?}"
     );
     let rendered = render_section_report(&rows, &prompt);
-    assert!(rendered.contains("CORE") && rendered.contains("declined:"), "{rendered}");
+    assert!(
+        rendered.contains("core (project override declined:"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -93,43 +118,91 @@ fn every_overridable_section_replaced_keeps_roster_memory_and_search() {
     let bodies: Vec<(&str, String)> = SectionId::CANONICAL
         .into_iter()
         .filter(|id| *id != SectionId::Core)
-        .map(|id| (section_token(id), format!("Project text for {}.", section_token(id))))
+        .map(|id| {
+            (
+                section_token(id),
+                format!("Project text for {}.", section_token(id)),
+            )
+        })
         .collect();
     let blocks: Vec<(&str, &str)> = bodies.iter().map(|(t, b)| (*t, b.as_str())).collect();
     let dir = project(&blocks);
     let prompt = compose(&dir);
 
     for (token, body) in &bodies {
-        assert_eq!(prompt.matches(body.as_str()).count(), 1, "{token} override not applied once");
+        assert_eq!(
+            prompt.matches(body.as_str()).count(),
+            1,
+            "{token} override not applied once"
+        );
     }
-    assert!(prompt.contains("### ticketing"), "the agent roster was dropped");
-    assert!(prompt.contains("Agent(subagent_type="), "agent selection was dropped");
-    assert!(prompt.contains("## Memory Protocol (Context-First)") && prompt.contains("memory_recall"));
+    assert!(
+        prompt.contains("### ticketing"),
+        "the agent roster was dropped"
+    );
+    assert!(
+        prompt.contains("Agent(subagent_type="),
+        "agent selection was dropped"
+    );
+    assert!(
+        prompt.contains("## Memory Protocol (Context-First)") && prompt.contains("memory_recall")
+    );
     assert!(prompt.contains("## Code Search Protocol (Context-First)"));
-    assert!(prompt.contains("mcp__trusty-search__search"), "the search protocol was dropped");
-    assert!(!prompt.contains("## Prohibitions (CANONICAL"), "replaced package text survived");
+    assert!(
+        prompt.contains("mcp__trusty-search__search"),
+        "the search protocol was dropped"
+    );
+    assert!(
+        !prompt.contains("## Prohibitions (CANONICAL"),
+        "replaced package text survived"
+    );
 
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), true);
     for row in &rows {
         let expected = if row.section == SectionId::Core {
-            SectionState::Package
+            SectionState::Core
         } else {
-            SectionState::Overridden
+            SectionState::OverriddenByProject
         };
         assert_eq!(row.state, expected, "{:?}", row.section);
     }
-    let kept: Vec<SectionId> = rows.iter().filter(|r| r.pinned_kept).map(|r| r.section).collect();
-    assert_eq!(kept, [SectionId::Memory, SectionId::Search, SectionId::AgentDelegation]);
+    let kept: Vec<(SectionId, Vec<&str>)> = rows
+        .iter()
+        .filter(|r| !r.kept.is_empty())
+        .map(|r| (r.section, r.kept.clone()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (SectionId::Memory, vec!["Memory protocol"]),
+            (SectionId::Search, vec!["Code search protocol"]),
+            (SectionId::AgentDelegation, vec!["Agent selection"]),
+        ]
+    );
+    let rendered = render_section_report(&rows, &prompt);
+    assert!(
+        rendered.contains("overridden-by-project (keeps: Memory protocol)"),
+        "{rendered}"
+    );
 }
 
 #[test]
 fn the_roster_absent_path_reports_what_it_cannot_place() {
-    let dir = project(&[("IDENTITY", IDENTITY_BODY), ("WORKFLOW", "Project workflow.")]);
+    let dir = project(&[
+        ("IDENTITY", IDENTITY_BODY),
+        ("WORKFLOW", "Project workflow."),
+    ]);
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), false);
-    assert!(matches!(state_of(&rows, SectionId::Identity), SectionState::Declined(_)));
-    assert_eq!(state_of(&rows, SectionId::Workflow), SectionState::Overridden);
+    assert!(matches!(
+        state_of(&rows, SectionId::Identity),
+        SectionState::OverridableDeclined(_)
+    ));
+    assert_eq!(
+        state_of(&rows, SectionId::Workflow),
+        SectionState::OverriddenByProject
+    );
 }
 
 #[test]
@@ -138,12 +211,16 @@ fn render_flags_an_override_missing_from_the_prompt() {
     let package = bundled_fallback_package().expect("manifest");
     let rows = section_statuses(package, dir.path(), true);
     let rendered = render_section_report(&rows, "a prompt without the override");
-    assert!(rendered.contains("NOT FOUND in the composed prompt"), "{rendered}");
+    assert!(
+        rendered.contains("NOT FOUND in the composed prompt"),
+        "{rendered}"
+    );
 }
 
 #[test]
 fn a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path() {
-    let section = super::super::delegation_with_named_override(Some("Project routing."), Some(ROSTER));
+    let section =
+        super::super::delegation_with_named_override(Some("Project routing."), Some(ROSTER));
     assert!(section.starts_with("Project routing."));
     assert!(section.contains("Agent(subagent_type="), "{section}");
     assert!(section.ends_with("Handles ticketing work."));
@@ -153,7 +230,10 @@ fn a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path
 fn fixture_project_overrides_identity_a_core_section_and_the_style() {
     // #8533 acceptance fixture: IDENTITY + a formerly-CORE section + a
     // project output style selected by the committed `.trusty-mpm.toml`.
-    let dir = project(&[("IDENTITY", IDENTITY_BODY), ("PM-ALLOWLIST", ALLOWLIST_BODY)]);
+    let dir = project(&[
+        ("IDENTITY", IDENTITY_BODY),
+        ("PM-ALLOWLIST", ALLOWLIST_BODY),
+    ]);
     let styles = dir.path().join(".claude/output-styles");
     std::fs::create_dir_all(&styles).expect("styles dir");
     std::fs::write(
@@ -161,8 +241,11 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
         "---\nname: fixture-voice\ndescription: fixture\n---\n\nSpeak as the fixture supervisor.\n",
     )
     .expect("style");
-    std::fs::write(dir.path().join(".trusty-mpm.toml"), "[style]\nactive = \"fixture-voice\"\n")
-        .expect("project config");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
 
     let (prompt, _) = resolve_pm_prompt_with_roster(dir.path(), || Some(ROSTER.to_string()));
     let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
@@ -175,11 +258,21 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
         .split_once(crate::core::instruction_pipeline::SECTION_SEPARATOR)
         .map(|(style, rest)| (style.to_string(), rest.to_string()))
         .expect("an injected style block precedes the prompt");
-    assert!(body.0.contains("Speak as the fixture supervisor."), "{}", body.0);
-    assert!(!body.0.contains("name: fixture-voice"), "frontmatter must be stripped");
+    assert!(
+        body.0.contains("Speak as the fixture supervisor."),
+        "{}",
+        body.0
+    );
+    assert!(
+        !body.0.contains("name: fixture-voice"),
+        "frontmatter must be stripped"
+    );
     assert!(body.1.starts_with("# Fixture Supervisor"));
     assert!(!body.1.contains("PM = orchestrator + QA coordinator"));
-    assert_eq!(body.1.matches("Run read-only commands directly.").count(), 1);
+    assert_eq!(
+        body.1.matches("Run read-only commands directly.").count(),
+        1
+    );
 
     let (style, warning) = crate::core::output_style::resolve_or_default(
         dir.path(),

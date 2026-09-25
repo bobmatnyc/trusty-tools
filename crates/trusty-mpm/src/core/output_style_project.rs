@@ -22,6 +22,31 @@ use crate::core::config::MpmConfig;
 /// Project-relative directory holding project output styles.
 pub const PROJECT_STYLES_DIR: &str = ".claude/output-styles";
 
+/// Why a style id did not resolve against the bundle and the project.
+///
+/// Why: "unknown" and "present but unreadable" need different fixes, and a
+/// launch reports either one rather than falling back in silence (#8533).
+/// Test: `unknown_id_lists_bundled_and_project_styles`,
+/// `an_unreadable_style_file_warns_and_keeps_the_prompt`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProjectStyleError {
+    /// Neither a bundled style nor a project style file has this id.
+    #[error(transparent)]
+    Unknown(#[from] StyleError),
+    /// The project style file exists and could not be read.
+    #[error("output style '{id}' at {} is unreadable: {source}", path.display())]
+    Unreadable {
+        /// The requested id.
+        id: String,
+        /// The style file.
+        path: PathBuf,
+        /// The read error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 /// A resolved output style: bundled, or authored in the project.
 ///
 /// Why: the injection path needs the style's text and the settings writer
@@ -111,29 +136,47 @@ pub fn project_style_ids(project_dir: &Path) -> Vec<String> {
 /// into the project itself, so the project copy is a deployment artifact, not an
 /// override. Any other id must name a project file.
 /// What: bundled entry, else `<project>/.claude/output-styles/<id>.md` read
-/// whole; [`StyleError::Unknown`] listing bundled and project ids otherwise.
+/// whole; [`ProjectStyleError::Unreadable`] when that file exists but cannot be
+/// read; [`ProjectStyleError::Unknown`] listing bundled and project ids otherwise.
 /// Test: `a_project_style_file_resolves_by_id`,
-/// `unknown_id_lists_bundled_and_project_styles`, `a_path_like_id_is_refused`.
-pub fn resolve_style_in_project(project_dir: &Path, id: &str) -> Result<ActiveStyle, StyleError> {
+/// `unknown_id_lists_bundled_and_project_styles`, `a_path_like_id_is_refused`,
+/// `an_unreadable_style_file_warns_and_keeps_the_prompt`.
+pub fn resolve_style_in_project(
+    project_dir: &Path,
+    id: &str,
+) -> Result<ActiveStyle, ProjectStyleError> {
     if let Ok(style) = resolve_style(id) {
         return Ok(ActiveStyle::Bundled(style));
     }
     if is_safe_id(id) {
-        let path = project_dir.join(PROJECT_STYLES_DIR).join(format!("{id}.md"));
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            return Ok(ActiveStyle::Project {
-                id: id.to_string(),
-                path,
-                content,
-            });
+        let path = project_dir
+            .join(PROJECT_STYLES_DIR)
+            .join(format!("{id}.md"));
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                return Ok(ActiveStyle::Project {
+                    id: id.to_string(),
+                    path,
+                    content,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            // #8533: present but unreadable is its own report, not "unknown".
+            Err(source) => {
+                return Err(ProjectStyleError::Unreadable {
+                    id: id.to_string(),
+                    path,
+                    source,
+                });
+            }
         }
     }
     let mut valid = vec![super::valid_style_ids()];
     valid.extend(project_style_ids(project_dir));
-    Err(StyleError::Unknown {
+    Err(ProjectStyleError::Unknown(StyleError::Unknown {
         requested: id.to_string(),
         valid: valid.join(", "),
-    })
+    }))
 }
 
 /// The committed `.trusty-mpm.toml` `[style] active`, if the project sets one.
@@ -171,8 +214,10 @@ pub fn effective_style_id(
 /// either (#8533). The warning is returned so each launch path prints it where
 /// its operator looks.
 /// What: `None` → the bundled default. A resolvable id → its style. An unknown
-/// id → the bundled default plus `"<error>; using `trusty-mpm` instead"`.
-/// Test: `an_unknown_style_warns_and_uses_the_default`.
+/// or unreadable id → the bundled default plus
+/// `"<error>; using `trusty-mpm` instead"`.
+/// Test: `an_unknown_style_warns_and_uses_the_default`,
+/// `an_unreadable_style_file_warns_and_keeps_the_prompt`.
 pub fn resolve_or_default(project_dir: &Path, id: Option<&str>) -> (ActiveStyle, Option<String>) {
     let fallback = || {
         OUTPUT_STYLES

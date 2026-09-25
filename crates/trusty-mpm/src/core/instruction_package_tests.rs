@@ -56,6 +56,34 @@ fn generated(section: SectionId, generator: Generator, optional: bool) -> Instru
 /// Block order deliberately interleaves `core` with `memory`/`search` and puts
 /// the floor last, mirroring the shape a faithful lift of today's assets needs.
 fn fixture() -> InstructionPackage {
+    let mut pkg = fixture_without_split_sections();
+    // #8533: the nine sections split out of `core` each need a block; inserted
+    // after `AUTONOMY` so every index-addressed block above keeps its index.
+    let at = pkg
+        .blocks
+        .iter()
+        .position(|b| b.section == SectionId::Enforcement)
+        .expect("fixture has an enforcement block");
+    let split = SPLIT_SECTIONS.map(|id| text(id, &format!("{id:?}")));
+    pkg.blocks.splice(at..at, split);
+    pkg
+}
+
+/// The nine sections #8533 split out of `core`, in canonical order.
+const SPLIT_SECTIONS: [SectionId; 9] = [
+    SectionId::PmAllowlist,
+    SectionId::DelegationMechanics,
+    SectionId::AgentRouting,
+    SectionId::SubagentReEngagement,
+    SectionId::Phases,
+    SectionId::QaGate,
+    SectionId::GitFileTracking,
+    SectionId::TicketsPrsReleases,
+    SectionId::MessagesReportsSessions,
+];
+
+/// The pre-#8533 fixture block stream, before the split sections are added.
+fn fixture_without_split_sections() -> InstructionPackage {
     InstructionPackage {
         schema_version: SCHEMA_VERSION,
         package_id: "trusty-mpm/test".to_string(),
@@ -224,12 +252,14 @@ fn file_body_resolves_through_the_bundled_table() {
     // bytes an inline `text` block carrying that file would have produced. That
     // equivalence is what makes the v2 addition a pure authoring convenience
     // rather than a second content channel.
-    let source = crate::core::instruction_pipeline::SECTION_IDENTITY;
+    // #8533: a comment-free source; `identity.md` now carries authoring
+    // comments the compose-time fold removes.
+    let source = crate::core::instruction_pipeline::SECTION_PM_ALLOWLIST;
     let mut package = fixture();
     package.blocks[8] = InstructionBlock {
         section: SectionId::Identity,
         body: BlockBody::File {
-            path: "sections/identity.md".to_string(),
+            path: "sections/pm-allowlist.md".to_string(),
         },
         join_before: Join::Rule,
         optional: false,
@@ -500,7 +530,7 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 10, "ten distinct sections");
+    assert_eq!(unique.len(), 19, "nineteen distinct sections (#8533)");
 }
 
 #[test]
@@ -871,6 +901,15 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ADDENDUM",
             "IDENTITY",
             "AUTONOMY",
+            "PmAllowlist",
+            "DelegationMechanics",
+            "AgentRouting",
+            "SubagentReEngagement",
+            "Phases",
+            "QaGate",
+            "GitFileTracking",
+            "TicketsPrsReleases",
+            "MessagesReportsSessions",
             "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",

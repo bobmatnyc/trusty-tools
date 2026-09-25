@@ -230,7 +230,7 @@ fn instructions_reports_section_status_and_project_style() {
         "the IDENTITY override must replace the package opening"
     );
     for needle in [
-        "instruction sections (package / overridden / declined):",
+        "instruction sections (core / overridable / overridden-by-project):",
         "output style: fixture-voice (project file",
     ] {
         assert!(
@@ -245,9 +245,18 @@ fn instructions_reports_section_status_and_project_style() {
             .unwrap_or_default()
             .to_string()
     };
-    assert!(row("IDENTITY").contains("overridden"), "{stderr}");
-    assert!(row("PM-ALLOWLIST").contains("overridden"), "{stderr}");
-    assert!(row("CORE").contains("declined:"), "{stderr}");
-    assert!(row("SEARCH").contains("package"), "{stderr}");
+    assert!(
+        row("IDENTITY").contains("overridden-by-project"),
+        "{stderr}"
+    );
+    assert!(
+        row("PM-ALLOWLIST").contains("overridden-by-project"),
+        "{stderr}"
+    );
+    assert!(
+        row("CORE").contains("core (project override declined:"),
+        "{stderr}"
+    );
+    assert!(row("SEARCH").contains("overridable"), "{stderr}");
     assert!(!stderr.contains("NOT FOUND"), "{stderr}");
 }
