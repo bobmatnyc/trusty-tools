@@ -6,6 +6,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.2] — 2026-09-25
+
+### Added
+
+- the `ticketing` agent reads the project-root `TICKETING.md` before any create, label, comment, or transition in any tracker, generates it from the skill skeleton plus the observed repository state when absent, and never overwrites an existing one ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376))
+  - the file's behaviour settings are honoured, its contents are treated as data, and it outranks a conflicting brief unless the brief cites an owner ruling
+  - component labels are chosen from the project's own stack unit rather than an assumed Cargo crate, and the `no-component-label:` waiver reason names that unit
+  - epics follow the tracker + phase-issue pattern — `[EPIC <epic#>] <outcome>` (created `[EPIC]`, renamed once the number is known), `[EPIC_<epic#> PHASE_<n>]` sub-issues, a wholesale-regenerated phases block, four update triggers, phase numbers never reused — and a tracker links to its committed research doc instead of carrying findings
+  - follow-ups are budgeted per phase issue, and stale-issue recommendations are posted per epic as one digest
+
+### Fixed
+
+- The `version-control` agent's composed body is back under its 47,500-byte resident budget (#7727). Its CI-waits section, which #8601 pushed over the ceiling, now points at BASE-AGENT's "Finishing Work — Push, Report, Stop" instead of restating it; the agent-specific rules stay.
+- The `version-control` agent no longer falls back to a fleet-wide
+  `prune-worktrees` sweep when the guard refuses one worktree removal. It
+  reports the path and the refusal to the PM and stops. Refs #8577.
+
+### Changed
+
+- Align shared agent verification, authorization, issue references, and build waiting with scoped operational work.
+- The `version-control` agent names the command that moves an agent's commits
+  into a parked worktree (#8161).
+- The shared `ticketing` agent asset now carries the epic/phase mechanics — the `[EPIC N]` / `[EPIC_N PHASE_M]` title forms, the two-step tracker create, native sub-issue linking, the three tracker marker blocks, and the rule that the `phases` block is regenerated from live child state and never hand-patched — and its gh-version claim now matches the installed 2.96 ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
+- BASE-AGENT.md now forbids moving, renaming, or restructuring an existing top-level directory to satisfy a layout ADR, scaffold, or monorepo convention (Refs #8382).
+- The `version-control` agent never switches branches, stashes or runs
+  `reset --hard` in a main checkout; it publishes a branch with
+  `git push origin <branch>`, which needs no checkout. Refs #8572.
+
+### Documentation
+
+- The `AttachHandle::ShellCommand` example is now the exact, quoted form `tmux attach -t '=tmpm-a1b2c3'` that trusty-mpm returns (#8443).
+
 ## [0.8.1] — 2026-09-18
 
 ### Fixed
