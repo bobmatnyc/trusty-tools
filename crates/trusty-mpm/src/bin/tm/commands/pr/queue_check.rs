@@ -14,7 +14,8 @@
 //!   2. a hold label (`do-not-merge*`, `hold`)
 //!   3. `reviewDecision: CHANGES_REQUESTED`
 //!   4. an unresolved `code-critic` BLOCK in the PR comments
-//!   5. a required status context missing, or not `SUCCESS`, on the head SHA
+//!   5. a required status context missing, pending, or not `SUCCESS` on the
+//!      head SHA — judged on its latest run when it ran more than once (#8638)
 //!
 //! Order matters: the required contexts are the LAST gate, not the first, so a
 //! draft PR reports "draft" rather than "checks pending". Required contexts
@@ -26,6 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::rollup::{RollupRun, latest_named};
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -89,6 +91,23 @@ struct RollupEntry {
     conclusion: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    // #8638: the recency keys that pick the latest of duplicate runs.
+    #[serde(default, rename = "completedAt")]
+    completed_at: Option<String>,
+    #[serde(default, rename = "startedAt")]
+    started_at: Option<String>,
+}
+
+impl RollupRun for RollupEntry {
+    fn run_name(&self) -> Option<&str> {
+        self.label()
+    }
+    fn completed_at(&self) -> Option<&str> {
+        self.completed_at.as_deref()
+    }
+    fn started_at(&self) -> Option<&str> {
+        self.started_at.as_deref()
+    }
 }
 
 impl RollupEntry {
@@ -111,6 +130,25 @@ impl RollupEntry {
     fn is_success(&self) -> bool {
         let v = self.conclusion.as_deref().or(self.state.as_deref());
         v.is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
+    }
+
+    /// Is this run still going?
+    ///
+    /// Why (#8638): a newer run with no result yet supersedes an older
+    /// result, so it must read as pending, not as the older verdict.
+    /// What: no non-empty `conclusion` and no terminal `state`.
+    /// Test: `queue_duplicate_success_then_running_is_pending`.
+    fn is_pending(&self) -> bool {
+        let concluded = self
+            .conclusion
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty());
+        let terminal = self.state.as_deref().is_some_and(|s| {
+            ["SUCCESS", "FAILURE", "ERROR"]
+                .iter()
+                .any(|t| s.eq_ignore_ascii_case(t))
+        });
+        !concluded && !terminal
     }
 }
 
@@ -148,7 +186,10 @@ struct PrView {
 /// Test: `queue_stop_order_prefers_draft`, `queue_stop_order_prefers_hold`,
 /// `queue_stop_order_prefers_changes_requested`,
 /// `queue_stop_order_prefers_critic_block`,
-/// `queue_required_context_missing`, `queue_required_context_not_success`.
+/// `queue_required_context_missing`, `queue_required_context_not_success`,
+/// `queue_duplicate_cancelled_then_success_is_mergeable`,
+/// `queue_duplicate_success_then_failure_is_blocked`,
+/// `queue_duplicate_success_then_running_is_pending`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -167,14 +208,16 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
         return Some("unresolved code-critic BLOCK in the PR comments".to_string());
     }
     for context in required {
-        match view
-            .rollup
-            .iter()
-            .find(|e| e.label() == Some(context.as_str()))
-        {
+        // #8638: the latest run of the context decides, never the first listed.
+        match latest_named(&view.rollup, context) {
             None => {
                 return Some(format!(
                     "required context `{context}` is missing on the head SHA"
+                ));
+            }
+            Some(e) if e.is_pending() => {
+                return Some(format!(
+                    "required context `{context}` is pending: its latest run has no result yet"
                 ));
             }
             Some(e) if !e.is_success() => {

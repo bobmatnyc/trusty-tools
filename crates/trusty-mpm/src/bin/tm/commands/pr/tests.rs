@@ -2435,6 +2435,75 @@ fn queue_accepts_status_context() {
     assert_eq!(first_reason(json), None);
 }
 
+/// A PR view whose `Clippy` is green and whose `Rust tests` ran as `runs`.
+fn duplicate_run_view(runs: &str) -> String {
+    format!(
+        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "statusCheckRollup":[
+              {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS",
+                "startedAt":"2026-09-25T22:40:00Z","completedAt":"2026-09-25T22:45:00Z"}},
+              {runs}],
+            "comments":[]}}"#
+    )
+}
+
+/// REGRESSION (#8638): PR #8637's rollup — a concurrency-cancelled run listed
+/// before the fresh SUCCESS on the same head SHA. The latest run decides.
+#[test]
+fn queue_duplicate_cancelled_then_success_is_mergeable() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"CANCELLED",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:51:10Z","completedAt":"2026-09-25T22:53:26Z"}"#,
+    );
+    assert_eq!(first_reason(&json), None);
+}
+
+/// REGRESSION (#8638): the fail-open order. A stale SUCCESS listed first must
+/// not shadow the later FAILURE of the same context.
+#[test]
+fn queue_duplicate_success_then_failure_is_blocked() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"FAILURE",
+            "startedAt":"2026-09-25T22:52:00Z","completedAt":"2026-09-25T22:55:00Z"}"#,
+    );
+    let reason = first_reason(&json).expect("a red latest run blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
+/// REGRESSION (#8638): a newer run still in flight is pending, not the older
+/// SUCCESS. `gh` prints a running check's `completedAt` as Go's zero time.
+#[test]
+fn queue_duplicate_success_then_running_is_pending() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"IN_PROGRESS","conclusion":"",
+            "startedAt":"2026-09-25T22:52:00Z","completedAt":"0001-01-01T00:00:00Z"}"#,
+    );
+    let reason = first_reason(&json).expect("a running latest run blocks");
+    assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+}
+
+/// #8638: a context that ran once is judged exactly as before.
+#[test]
+fn queue_single_run_is_unchanged() {
+    let green = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"}"#,
+    );
+    assert_eq!(first_reason(&green), None);
+    let red = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"FAILURE",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"}"#,
+    );
+    let reason = first_reason(&red).expect("red blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
 #[test]
 fn queue_exits_1_when_any_pr_blocked() {
     let gh = FakeGh::new().on("branches/main/protection", REQUIRED).on(

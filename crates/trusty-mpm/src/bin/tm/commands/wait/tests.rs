@@ -311,6 +311,31 @@ fn check_condition_empty_rollup_is_pending() {
     ));
 }
 
+/// REGRESSION (#8638): a concurrency-cancelled run superseded by a fresh
+/// SUCCESS of the same check is not a live failure; a newer run still in
+/// flight keeps the wait pending.
+#[test]
+fn check_condition_duplicate_run_uses_latest() {
+    let settled = r#"{"state":"OPEN","statusCheckRollup":[
+        {"__typename":"CheckRun","name":"Tests","status":"COMPLETED","conclusion":"CANCELLED",
+         "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+        {"__typename":"CheckRun","name":"Tests","status":"COMPLETED","conclusion":"SUCCESS",
+         "startedAt":"2026-09-25T22:51:10Z","completedAt":"2026-09-25T22:53:26Z"}
+    ]}"#;
+    let Poll::Met(detail) = check_with(settled, false) else {
+        panic!("the latest run settled");
+    };
+    assert!(detail.contains("1 check(s) settled, 0 failing"), "{detail}");
+
+    let running = r#"{"state":"OPEN","statusCheckRollup":[
+        {"__typename":"CheckRun","name":"Tests","status":"COMPLETED","conclusion":"SUCCESS",
+         "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+        {"__typename":"CheckRun","name":"Tests","status":"IN_PROGRESS","conclusion":"",
+         "startedAt":"2026-09-25T22:52:00Z","completedAt":"0001-01-01T00:00:00Z"}
+    ]}"#;
+    assert!(matches!(check_with(running, false), Poll::Pending(_)));
+}
+
 /// Why: a legacy commit status carries `state`, not `status`/`conclusion`.
 #[test]
 fn check_condition_settles_status_contexts() {

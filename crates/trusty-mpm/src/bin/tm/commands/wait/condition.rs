@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use crate::commands::pr::rollup::{RollupRun, latest_per_name};
+
 /// One poll's verdict.
 ///
 /// Why: the driver only needs "done or not", plus a human-readable reason it
@@ -373,6 +375,28 @@ struct RollupEntry {
     /// `StatusContext` result: `PENDING` / `EXPECTED` / `SUCCESS` / `FAILURE` / `ERROR`.
     #[serde(default)]
     state: Option<String>,
+    /// #8638: recency key that picks the latest of duplicate runs.
+    #[serde(default, rename = "completedAt")]
+    completed_at: Option<String>,
+    /// #8638: fallback recency key.
+    #[serde(default, rename = "startedAt")]
+    started_at: Option<String>,
+}
+
+impl RollupRun for RollupEntry {
+    fn run_name(&self) -> Option<&str> {
+        self.name
+            .as_deref()
+            .or(self.context.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+    fn completed_at(&self) -> Option<&str> {
+        self.completed_at.as_deref()
+    }
+    fn started_at(&self) -> Option<&str> {
+        self.started_at.as_deref()
+    }
 }
 
 impl RollupEntry {
@@ -428,9 +452,10 @@ impl RollupEntry {
 /// Why: separating the decision from the `gh` call is what makes the
 /// eventual-consistency guard testable against canned JSON.
 /// What: MERGED/CLOSED short-circuits to `Met`; an absent or empty rollup is
-/// `Pending` unless `allow_empty`; otherwise every entry must be
-/// [`RollupEntry::settled`].
-/// Test: the `check_condition_*` family.
+/// `Pending` unless `allow_empty`; otherwise the latest run of every check
+/// name must be [`RollupEntry::settled`], and only those runs are counted.
+/// Test: the `check_condition_*` family, including
+/// `check_condition_duplicate_run_uses_latest`.
 fn settle(view: &PrView, allow_empty: bool) -> Poll {
     let pr_state = view.state.as_deref().unwrap_or("UNKNOWN");
     if pr_state.eq_ignore_ascii_case("MERGED") || pr_state.eq_ignore_ascii_case("CLOSED") {
@@ -453,10 +478,12 @@ fn settle(view: &PrView, allow_empty: bool) -> Poll {
         };
     }
 
+    // #8638: a superseded run of the same check is neither pending nor failing.
+    let entries = latest_per_name(entries);
     let unsettled: Vec<String> = entries
         .iter()
         .filter(|e| !e.settled())
-        .map(RollupEntry::label)
+        .map(|e| e.label())
         .collect();
     if unsettled.is_empty() {
         let failed = entries.iter().filter(|e| e.failed()).count();
