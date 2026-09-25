@@ -780,32 +780,29 @@ fn strip_delegation_block_noop_when_absent() {
 }
 
 #[test]
-fn pm_instructions_is_its_four_sections() {
+fn pm_instructions_is_the_pm_body_sections() {
     // #4183: the legacy PM body is RECONSTITUTED, never kept as a fourth copy
     // on disk. #4318 moved the source of that reconstitution from the
     // `include_str!` constants to the MANIFEST, because the manifest may now
     // author a rule inline — rebuilding from the constants would deliver such a
     // rule to the packaged composer and not to the legacy override assembly,
     // which is the split-brain this asserts against.
+    // #8533: Identity opens the prompt and `core` was split into nine
+    // sections, so the body is every section before the stack profile.
     let body = pm_instructions();
-    let projected = crate::core::bundled_pm_package::authored_run(&[
-        SectionId::Core,
-        SectionId::AutonomousExecution,
-        SectionId::Memory,
-        SectionId::Search,
-    ])
-    .expect("the manifest is readable");
+    let projected = crate::core::bundled_pm_package::authored_run(&PM_BODY_SECTIONS)
+        .expect("the manifest is readable");
     assert_eq!(body, format!("{projected}\n"));
+    assert!(
+        body.starts_with(SECTION_IDENTITY.trim()),
+        "Identity opens the body"
+    );
 
     // Every section source is still delivered in full, in order, and the
     // manifest-authored rules ride along.
-    for expected in [
-        SECTION_CORE.trim(),
-        SECTION_AUTONOMOUS_EXECUTION.trim(),
-        SECTION_MEMORY.trim(),
-        SECTION_SEARCH.trim(),
-    ] {
-        assert!(body.contains(expected), "a section source went missing");
+    for id in PM_BODY_SECTIONS {
+        let expected = fallback_source(id).expect("every PM-body section has a source");
+        assert!(body.contains(expected.trim()), "{id:?} went missing");
     }
     // #8361: autonomy is its own section now. On the legacy path it lives
     // inside this blob, so omitting it from the run would drop the rule from
@@ -828,7 +825,7 @@ fn pm_instructions_is_its_four_sections() {
 }
 
 #[test]
-fn base_pm_is_its_four_sections() {
+fn base_pm_is_its_three_tail_sections() {
     // Same no-second-copy property for the non-overridable floor, plus the
     // one reordering #4183 makes: the tool-priority mandate travels with the
     // other non-overridable rules and so now precedes the conventions.
@@ -838,12 +835,12 @@ fn base_pm_is_its_four_sections() {
     // legacy branch appends, including the `PM_INSTRUCTIONS_DEPLOYED.md` full
     // replacement — is what proves the tier change alone did not leave the
     // legacy paths without the authority tables.
+    // #8533: Identity moved to the top of the prompt, out of this tail.
     let floor = base_pm();
     assert_eq!(
         floor,
         format!(
-            "{}\n\n{}\n\n{}\n\n{}\n",
-            SECTION_IDENTITY.trim(),
+            "{}\n\n{}\n\n{}\n",
             SECTION_ENFORCEMENT.trim(),
             SECTION_NON_OVERRIDABLE_RULES.trim(),
             SECTION_FRAMEWORK_CONVENTIONS.trim()
@@ -888,7 +885,9 @@ fn delegation_doctrine_carries_the_precedence_note() {
     let doctrine = delegation_doctrine();
     assert!(doctrine.starts_with(AGENT_DELEGATION.trim()));
     assert!(doctrine.ends_with("do not retry the same agent."));
-    assert!(doctrine.contains("trust the harness listing"));
+    // #8533: the note is now the pinned agent-selection block.
+    assert!(doctrine.contains("**Agent selection.**"));
+    assert!(doctrine.contains("authoritative for WHICH agents exist"));
 }
 
 #[test]
@@ -915,14 +914,14 @@ fn assemble_system_prompt_contains_all_sections() {
     // bundled section must be present and joined with the `---` rule.
     let prompt = assemble_system_prompt();
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-    assert!(prompt.contains("# Framework Instructions"));
+    assert!(prompt.contains("## Prohibitions (CANONICAL"));
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("# Agent Delegation Routing"));
     // The Trusty tool-priority block now lives inside the BASE_PM floor.
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(prompt.contains("\n\n---\n\n"));
-    // BASE_PM is the non-overridable floor: it must come last.
-    let base = prompt.find("# Framework Instructions").expect("base_pm");
+    // The former floor (#8533: now opening with the Prohibitions) comes last.
+    let base = prompt.find("## Prohibitions (CANONICAL").expect("base_pm");
     let delegation = prompt
         .find("# Agent Delegation Routing")
         .expect("delegation");
@@ -1643,4 +1642,70 @@ fn no_seed_test_reads_the_ambient_home_directory() {
         0,
         "pass a fixture home under the test's temp dir, not the ambient one"
     );
+}
+
+/// The backtick-quoted words in `stub` between `from` and the next `until`,
+/// with line wrapping folded to single spaces so a re-wrap cannot move them.
+fn quoted_tokens_between(stub: &str, from: &str, until: &str) -> Vec<String> {
+    let flat = stub.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat.find(from).expect("stub carries the opening phrase") + from.len();
+    let len = flat[start..]
+        .find(until)
+        .expect("stub carries the closing phrase");
+    flat[start..start + len]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// #8533: the seeded `CLAUDE.md` named the pre-split token set, so a new
+/// project was told `CORE` held the allowlist, phases and QA gate it no longer
+/// does. Both lists are checked against the one source of truth — every
+/// overridable `SectionId`, and every overridable section owning a safety-core
+/// member — so a new section or a new core member fails here until the stub
+/// names it.
+#[test]
+fn the_stub_lists_exactly_the_overridable_section_tokens() {
+    use crate::core::claude_md_sections::section_token;
+    use crate::core::instruction_package::SectionId;
+    use crate::core::instruction_safety_core::{SAFETY_CORE, is_fixed_core_section};
+
+    let mut overridable = quoted_tokens_between(CLAUDE_MD_STUB, "Tokens:", " is the one token");
+    let fixed = overridable.split_off(overridable.len().saturating_sub(1));
+    let expected: Vec<&str> = SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| !is_fixed_core_section(*id))
+        .map(section_token)
+        .collect();
+    assert_eq!(overridable, expected, "the stub's Tokens: list");
+    let expected_fixed: Vec<&str> = SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| is_fixed_core_section(*id))
+        .map(section_token)
+        .collect();
+    assert_eq!(
+        fixed, expected_fixed,
+        "the one token the stub says is declined"
+    );
+
+    let keeps_core = quoted_tokens_between(CLAUDE_MD_STUB, "An override of", "replaces");
+    let mut expected_core: Vec<&str> = SAFETY_CORE
+        .iter()
+        .filter(|m| !is_fixed_core_section(m.section))
+        .map(|m| section_token(m.section))
+        .collect();
+    expected_core.dedup();
+    assert_eq!(keeps_core, expected_core, "sections that keep a core block");
+    for member in SAFETY_CORE
+        .iter()
+        .filter(|m| !is_fixed_core_section(m.section))
+    {
+        assert!(
+            CLAUDE_MD_STUB.contains(&member.name.to_lowercase()),
+            "the stub names safety-core member `{}`",
+            member.name
+        );
+    }
 }

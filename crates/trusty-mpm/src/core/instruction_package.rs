@@ -127,19 +127,42 @@ pub const SCHEMA_JSON: &str =
 /// | `## Trusty Tool Priority (Non-Overridable)` | [`SectionId::NonOverridableRules`] |
 /// | `## Framework-Guaranteed Conventions (Non-Overridable)` | [`SectionId::FrameworkGuaranteedConventions`] |
 ///
-/// The tool-priority block stays whole in the fixed floor deliberately: the
-/// *mandate* to reach for memory and code search before grep is non-overridable
-/// even though the memory/search *guidance* sections a project may tune are
-/// tier `project`.
+/// Since #8533 every section but [`SectionId::Core`] is tier `project`; what no
+/// override removes is the safety core
+/// ([`crate::core::instruction_safety_core::SAFETY_CORE`]), not a floor of
+/// whole sections.
 ///
 /// Test: `canonical_order_is_sorted_and_complete`, `schema_enums_match_rust_enums`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+// #8533: new sections must not be a major-version break for downstream matches.
+#[non_exhaustive]
 pub enum SectionId {
-    /// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
+    /// Absorbed BASE_PM `## Identity` — who the PM is. Opens the prompt; an
+    /// `IDENTITY` override replaces it in place (#8533).
     Identity,
-    /// The PM's core operating instructions (today's `PM_INSTRUCTIONS.md` body).
+    /// The safety core — the only tier-`fixed` section (#8533): Memory &
+    /// Instruction Sources and the Customization Surface.
     Core,
+    /// The PM allowlist. Split out of [`SectionId::Core`] by #8533.
+    PmAllowlist,
+    /// Delegation mechanics. Split out of [`SectionId::Core`] by #8533.
+    DelegationMechanics,
+    /// Agent routing and delegating well. Split out of [`SectionId::Core`] by #8533.
+    AgentRouting,
+    /// Parked-subagent re-engagement. Split out of [`SectionId::Core`] by #8533.
+    SubagentReEngagement,
+    /// The 5-phase workflow summary. Split out of [`SectionId::Core`] by #8533.
+    Phases,
+    /// The QA verification gate. Split out of [`SectionId::Core`] by #8533.
+    QaGate,
+    /// The git file-tracking protocol. Split out of [`SectionId::Core`] by #8533.
+    GitFileTracking,
+    /// Tickets, PRs and releases. Split out of [`SectionId::Core`] by #8533.
+    TicketsPrsReleases,
+    /// Messages, reports, sessions, prose style and clickable references.
+    /// Split out of [`SectionId::Core`] by #8533.
+    MessagesReportsSessions,
     /// When the PM runs without stopping, and when it may stop and ask.
     ///
     /// Was prose inside [`SectionId::Core`] until #8361. `core` is tier `fixed`,
@@ -156,8 +179,8 @@ pub enum SectionId {
     Workflow,
     /// Delegation routing — dynamic, built from the deployed-agent roster.
     AgentDelegation,
-    /// The canonical Prohibitions and Circuit Breakers tables. Floor, tier
-    /// `fixed` (#4573).
+    /// The canonical Prohibitions and Circuit Breakers tables. Tier `fixed`
+    /// from #4573 until #8533 made it tier `project`.
     ///
     /// These two tables ARE the PM's delegation-enforcement authority, and they
     /// shipped inside [`SectionId::Core`] at tier `project` — so a three-line
@@ -169,10 +192,12 @@ pub enum SectionId {
     /// every override tier.
     Enforcement,
     /// Absorbed BASE_PM non-overridable rules + customization contract + the
-    /// Trusty tool-priority mandate. Floor, tier `fixed`.
+    /// Trusty tool-priority mandate. Tier `project` since #8533; the name is
+    /// historical.
     NonOverridableRules,
     /// Absorbed BASE_PM framework-guaranteed conventions (attribution footer,
-    /// documentation proportionality, ticket attribution). Floor, tier `fixed`.
+    /// documentation proportionality, ticket attribution). Tier `project` since
+    /// #8533.
     FrameworkGuaranteedConventions,
 }
 
@@ -182,12 +207,20 @@ impl SectionId {
     /// Why: `sections` must be declared in this order so a package manifest
     /// reads the same way in every project; the order is also the enum's `Ord`,
     /// so the check is a simple sortedness test.
-    /// What: the ten ids, floor-first-and-last around the six content
-    /// sections.
+    /// What: the nineteen ids, in prompt order of their first block.
     /// Test: `canonical_order_is_sorted_and_complete`.
-    pub const CANONICAL: [SectionId; 10] = [
+    pub const CANONICAL: [SectionId; 19] = [
         SectionId::Identity,
         SectionId::Core,
+        SectionId::PmAllowlist,
+        SectionId::DelegationMechanics,
+        SectionId::AgentRouting,
+        SectionId::SubagentReEngagement,
+        SectionId::Phases,
+        SectionId::QaGate,
+        SectionId::GitFileTracking,
+        SectionId::TicketsPrsReleases,
+        SectionId::MessagesReportsSessions,
         SectionId::AutonomousExecution,
         SectionId::Memory,
         SectionId::Search,
@@ -427,6 +460,15 @@ pub struct InstructionBlock {
     /// the structural guard against #4196.
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
+    /// Whether this authored block survives a named-section override (#8533).
+    ///
+    /// Why: agent selection, memory and code search are framework features, not
+    /// prose a project tunes. A pinned block carries a feature's statement inside
+    /// an otherwise replaceable section, so an override of that section still
+    /// emits it. Only an authored block may be pinned; a generated block is
+    /// already out of an override's reach.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 /// Serde helper: skip serializing `join_before` when it is the default.
@@ -595,6 +637,15 @@ pub enum ValidationError {
         /// The section that is not guaranteed to emit.
         section: SectionId,
     },
+    // #8533: appended last so no existing variant changes discriminant.
+    /// A generated block marked `pinned` (#8533); only authored blocks may be.
+    #[error("block {index} ({section:?}) is a generated block and may not be `pinned`")]
+    PinnedGeneratedBlock {
+        /// Index into `blocks`.
+        index: usize,
+        /// The owning section.
+        section: SectionId,
+    },
 }
 
 /// A failure while composing a validated package.
@@ -736,7 +787,9 @@ impl InstructionPackage {
         // `core` to `project` (losing the one protection) and retiering any
         // other section to `fixed` (quietly reinstating a floor).
         for section in &self.sections {
-            let should_be_fixed = section.id == SectionId::Core;
+            // #8533: the fixed set is the safety core's, enumerated once.
+            let should_be_fixed =
+                crate::core::instruction_safety_core::is_fixed_core_section(section.id);
             let is_fixed = section.customization_tier == CustomizationTier::Fixed;
             if should_be_fixed != is_fixed {
                 return Err(ValidationError::TierNotCoreOnly {
@@ -752,6 +805,13 @@ impl InstructionPackage {
 
         for (index, block) in self.blocks.iter().enumerate() {
             let Some(authored) = block.body.authored() else {
+                // #8533: pinning is meaningful only for authored text.
+                if block.pinned {
+                    return Err(ValidationError::PinnedGeneratedBlock {
+                        index,
+                        section: block.section,
+                    });
+                }
                 continue;
             };
             let body = match authored {
@@ -872,9 +932,17 @@ impl InstructionPackage {
     /// What: validates, then walks `blocks` in array order. Each block's body is
     /// resolved (authored text, or the named generator's input) and trimmed; a
     /// block that resolves to nothing is dropped when `optional`, and is a hard
-    /// [`CompositionError::MissingGeneratedInput`] otherwise. Every emitted
-    /// block after the first is preceded by its declared [`Join`] bytes.
-    /// `trailing_newline` appends one `\n`.
+    /// [`CompositionError::MissingGeneratedInput`] otherwise. Each body is then
+    /// folded ON ITS OWN by [`crate::core::instruction_fold::fold_block`], which
+    /// closes a fence the body leaves open, and a body the fold empties emits
+    /// nothing. Every emitted block after the first is
+    /// preceded by its declared [`Join`] bytes. `trailing_newline` appends one
+    /// `\n`.
+    ///
+    /// Folding per block is a safety property, not a style choice (#8533): a
+    /// project override body ending in an unclosed `<!--` hides only its own
+    /// tail, and one ending in an open fence is closed where it ends. Folded as one string, it hid every later block up to the next
+    /// `-->`, safety core included.
     ///
     /// Determinism: pure function of `(self, inputs)` — no map iteration, no
     /// clock, no environment, no filesystem. Two calls with equal arguments
@@ -918,20 +986,25 @@ impl InstructionPackage {
                 });
             }
 
+            // #7616: the one transformation between the authored corpus and the
+            // delivered bytes. #8533: applied per block, so no block's comment
+            // or fence state can reach the next one: `fold_block` closes a
+            // fence the block leaves open.
+            let folded = crate::core::instruction_fold::fold_block(body);
+            if folded.is_empty() {
+                continue;
+            }
             if emitted {
                 out.push_str(block.join_before.as_str());
             }
-            out.push_str(body);
+            out.push_str(&folded);
             emitted = true;
         }
 
         if self.trailing_newline && !out.is_empty() {
             out.push('\n');
         }
-        // #7616: the one transformation between the authored corpus and the
-        // delivered bytes. Before it existed the "instruction-compression"
-        // technique folded nothing for a project that overrides no section.
-        Ok(crate::core::instruction_fold::fold_delivered_prompt(&out))
+        Ok(out)
     }
 
     /// Concatenate the AUTHORED blocks of `sections`, in block order.
@@ -963,7 +1036,7 @@ impl InstructionPackage {
     ///
     /// Test: `authored_run_projects_blocks_in_order_with_joins`,
     /// `authored_run_skips_generated_blocks`,
-    /// `pm_instructions_is_its_four_sections`.
+    /// `pm_instructions_is_the_pm_body_sections`.
     pub fn authored_run(&self, sections: &[SectionId]) -> String {
         let mut out = String::new();
         let mut emitted = false;

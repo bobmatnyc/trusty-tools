@@ -1,20 +1,74 @@
 {
   "schema_version": 2,
   "package_id": "trusty-mpm.pm.bundled-fallback",
-  "description": "The DEFAULT PM instruction package (#4318). This file — not a Rust literal — is the authored manifest: the section taxonomy with its customization tiers, the ordered block stream, every join, and the declared composition-time generators. Bulk prose lives in `sections/*.md` and is referenced by `file` bodies; a rule authored here rather than in a section file uses a `text` body. Composition is byte-deterministic for a given manifest and roster (see `instruction_package::InstructionPackage::compose`). Deliberately carries NO `$schema` key: every object in the format sets `additionalProperties: false` / `deny_unknown_fields`, so an unrecognised key is a hard parse error rather than dropped instruction content. Validate against `instruction-package.schema.json` out of band.",
+  "description": "The DEFAULT PM instruction package (#4318). This file — not a Rust literal — is the authored manifest: the section taxonomy with its customization tiers, the ordered block stream, every join, and the declared composition-time generators. Bulk prose lives in `sections/*.md` and is referenced by `file` bodies; a rule authored here rather than in a section file uses a `text` body. Composition is byte-deterministic for a given manifest and roster (see `instruction_package::InstructionPackage::compose`). Deliberately carries NO `$schema` key: every object in the format sets `additionalProperties: false` / `deny_unknown_fields`, so an unrecognised key is a hard parse error rather than dropped instruction content. Validate against `instruction-package.schema.json` out of band. #8533: `core` is the safety core; every other section is replaceable, and a block marked `pinned` (the agent-selection, memory and code-search protocols) survives an override of its section.",
   "trailing_newline": false,
   "sections": [
     {
       "id": "identity",
       "title": "Identity",
       "customization_tier": "project",
-      "description": "Who the PM is. Framework floor."
+      "description": "Who the PM is. Opens the prompt, so an IDENTITY override replaces the opening role statement in place (#8533); before #8533 the opening `## Identity` lived in `core` and an IDENTITY override landed late while the package identity still opened the prompt."
     },
     {
       "id": "core",
-      "title": "Core PM Instructions",
+      "title": "Safety Core",
       "customization_tier": "fixed",
-      "description": "Core operating instructions, including response format and prose rules."
+      "description": "The ONLY non-overridable section (#8533): Memory & Instruction Sources and the Customization Surface — the rules that protect the instruction system itself. Also owns the host-computed stack-profile and project-addendum blocks."
+    },
+    {
+      "id": "pm-allowlist",
+      "title": "PM Allowlist",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "delegation-mechanics",
+      "title": "Delegation Mechanics",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "agent-routing",
+      "title": "Agent Routing and Delegating Well",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "subagent-re-engagement",
+      "title": "Parked-Subagent Re-Engagement",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "phases",
+      "title": "Workflow (5-phase)",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "qa-gate",
+      "title": "QA Verification Gate",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "git-file-tracking",
+      "title": "Git File Tracking Protocol",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "tickets-prs-releases",
+      "title": "Tickets, PRs, and Releases",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533."
+    },
+    {
+      "id": "messages-reports-sessions",
+      "title": "Messages, Reports, Sessions",
+      "customization_tier": "project",
+      "description": "Split out of `core` by #8533, with the prose-style pointer and the clickable-references rule."
     },
     {
       "id": "autonomous-execution",
@@ -25,12 +79,14 @@
     {
       "id": "memory",
       "title": "Memory Protocol",
-      "customization_tier": "project"
+      "customization_tier": "project",
+      "description": "The recall/remember protocol is a pinned block (#8533); a MEMORY override replaces only the elaboration."
     },
     {
       "id": "search",
       "title": "Code Search Protocol",
-      "customization_tier": "project"
+      "customization_tier": "project",
+      "description": "The search-before-reading protocol is a pinned block (#8533); a SEARCH override adds project guidance after it."
     },
     {
       "id": "workflow",
@@ -42,38 +98,118 @@
       "id": "agent-delegation",
       "title": "Agent Delegation",
       "customization_tier": "project",
-      "description": "Routing doctrine; the live roster is appended by the `agent-roster` generator."
+      "description": "Routing doctrine. The agent-selection note is pinned and the live roster is generated, so an AGENT-DELEGATION override replaces the doctrine only (#8533)."
     },
     {
       "id": "enforcement",
       "title": "Delegation Enforcement",
       "customization_tier": "project",
-      "description": "The canonical Prohibitions and Circuit Breakers tables — the PM's entire delegation-enforcement authority. Framework floor. Was tier `project` inside `core` until #4573, where a three-line `CLAUDE.md` CORE override deleted both tables outright and left the floor asserting a table that was no longer in the prompt."
+      "description": "The canonical Prohibitions and Circuit Breakers tables — the PM's entire delegation-enforcement authority. Was tier `project` inside `core` until #4573, where a three-line `CLAUDE.md` CORE override deleted both tables outright and left the floor asserting a table that was no longer in the prompt."
     },
     {
       "id": "non-overridable-rules",
       "title": "Non-Overridable Rules",
       "customization_tier": "project",
-      "description": "Non-overridable rules, the customization contract, and the Trusty tool-priority mandate. Framework floor."
+      "description": "Non-overridable rules, the customization contract, and the Trusty tool-priority mandate."
     },
     {
       "id": "framework-guaranteed-conventions",
       "title": "Framework-Guaranteed Conventions",
       "customization_tier": "project",
-      "description": "Attribution footer, documentation proportionality, ticket attribution. Framework floor."
+      "description": "Attribution footer, documentation proportionality, ticket attribution."
     }
   ],
   "blocks": [
     {
-      "section": "core",
+      "section": "identity",
       "join_before": "rule",
+      "body": {
+        "kind": "file",
+        "path": "sections/identity.md"
+      }
+    },
+    {
+      "section": "core",
+      "join_before": "blank",
       "body": {
         "kind": "file",
         "path": "sections/core.md"
       }
     },
     {
-      "section": "core",
+      "section": "pm-allowlist",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/pm-allowlist.md"
+      }
+    },
+    {
+      "section": "delegation-mechanics",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/delegation-mechanics.md"
+      }
+    },
+    {
+      "section": "agent-routing",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/agent-routing.md"
+      }
+    },
+    {
+      "section": "subagent-re-engagement",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/subagent-re-engagement.md"
+      }
+    },
+    {
+      "section": "phases",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/phases.md"
+      }
+    },
+    {
+      "section": "qa-gate",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/qa-gate.md"
+      }
+    },
+    {
+      "section": "git-file-tracking",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/git-file-tracking.md"
+      }
+    },
+    {
+      "section": "tickets-prs-releases",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/tickets-prs-releases.md"
+      }
+    },
+    {
+      "section": "messages-reports-sessions",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/messages-reports-sessions.md"
+      }
+    },
+    {
+      "section": "messages-reports-sessions",
       "join_before": "blank",
       "body": {
         "kind": "text",
@@ -92,6 +228,15 @@
       "section": "memory",
       "join_before": "blank",
       "body": {
+        "kind": "text",
+        "text": "## Memory Protocol (Context-First)\n\nCall `memory_recall` for targeted recall BEFORE any research or delegation, never after, and store durable findings with `memory_remember` / `memory_note` as you learn them. The trusty-memory palace is the memory; this protocol stays in force under any project override."
+      },
+      "pinned": true
+    },
+    {
+      "section": "memory",
+      "join_before": "blank",
+      "body": {
         "kind": "file",
         "path": "sections/memory.md"
       }
@@ -102,7 +247,8 @@
       "body": {
         "kind": "file",
         "path": "sections/search.md"
-      }
+      },
+      "pinned": true
     },
     {
       "section": "core",
@@ -142,8 +288,9 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "> The harness's own `Available agent types for the Agent tool` listing is authoritative for WHICH agents exist; the tables above are routing doctrine only. Where the two disagree, trust the harness listing. The roster below adds only the agents that listing does not carry (#4513).\n>\n> Depending on how this session was launched, a listed agent may not be loadable. If a dispatch fails with an unknown agent type, re-route to the closest listed alternative — do not retry the same agent."
-      }
+        "text": "> **Agent selection.** Dispatch a subagent only with the native Agent tool — `Agent(subagent_type=\"<name>\", ...)` — passing a name exactly as the harness's own `Available agent types for the Agent tool` listing or the roster below spells it. A prose title like \"Documentation Agent\" is not an agent and fails to dispatch (#4594). That listing is authoritative for WHICH agents exist; routing tables are doctrine only, and the roster below adds only the agents the listing does not carry (#4513).\n>\n> Depending on how this session was launched, a listed agent may not be loadable. If a dispatch fails with an unknown agent type, re-route to the closest listed alternative — do not retry the same agent."
+      },
+      "pinned": true
     },
     {
       "section": "agent-delegation",
@@ -163,16 +310,8 @@
       "optional": true
     },
     {
-      "section": "identity",
-      "join_before": "rule",
-      "body": {
-        "kind": "file",
-        "path": "sections/identity.md"
-      }
-    },
-    {
       "section": "enforcement",
-      "join_before": "blank",
+      "join_before": "rule",
       "body": {
         "kind": "file",
         "path": "sections/enforcement.md"

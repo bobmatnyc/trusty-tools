@@ -2,9 +2,6 @@
 
 ## Routing Table
 
-- Every agent name is a deployed `subagent_type`, spelled exactly as the Agent
-  tool takes it. Pass it verbatim — a prose title like "Documentation Agent" or
-  "API QA" is not an agent and fails to dispatch (issue #4594).
 - Default to delegation for ALL ops / infrastructure / deployment / build work.
 - ALL `make` and `mise run` targets are delegated —
   the PM never runs one directly.

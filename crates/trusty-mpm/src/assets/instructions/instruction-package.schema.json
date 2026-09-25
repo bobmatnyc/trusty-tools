@@ -49,11 +49,20 @@
   },
   "$defs": {
     "section-id": {
-      "description": "The closed section taxonomy, in canonical declaration order. `core` is the only section a named-section override cannot replace (tier `fixed`); every other section is tier `project` and is replaceable (#4286).",
+      "description": "The closed section taxonomy, in canonical declaration order. `core` is the only section a named-section override cannot replace (tier `fixed`); every other section is tier `project` and is replaceable (#4286). #8533 split the former `core` headings into their own sections; `core` is now the safety core.",
       "type": "string",
       "enum": [
         "identity",
         "core",
+        "pm-allowlist",
+        "delegation-mechanics",
+        "agent-routing",
+        "subagent-re-engagement",
+        "phases",
+        "qa-gate",
+        "git-file-tracking",
+        "tickets-prs-releases",
+        "messages-reports-sessions",
         "autonomous-execution",
         "memory",
         "search",
@@ -210,6 +219,11 @@
           "description": "Only a `generated` block may be optional. An optional block is dropped when its generator supplies no content; a non-optional block whose content is missing or empty is a hard composition error, never a silent drop (issue #4196 — the computed 42-agent roster was discarded at the final composition step and the prompt shipped naming 8).",
           "type": "boolean",
           "default": false
+        },
+        "pinned": {
+          "description": "#8533: an authored block that survives a named-section override of its section — the carrier for a framework feature (agent selection, memory, code search) inside a replaceable section. Only a `text` or `file` block may be pinned.",
+          "type": "boolean",
+          "default": false
         }
       }
     }
@@ -231,6 +245,51 @@
           "id": "core",
           "title": "Core PM Instructions",
           "customization_tier": "fixed"
+        },
+        {
+          "id": "pm-allowlist",
+          "title": "pm-allowlist",
+          "customization_tier": "project"
+        },
+        {
+          "id": "delegation-mechanics",
+          "title": "delegation-mechanics",
+          "customization_tier": "project"
+        },
+        {
+          "id": "agent-routing",
+          "title": "agent-routing",
+          "customization_tier": "project"
+        },
+        {
+          "id": "subagent-re-engagement",
+          "title": "subagent-re-engagement",
+          "customization_tier": "project"
+        },
+        {
+          "id": "phases",
+          "title": "phases",
+          "customization_tier": "project"
+        },
+        {
+          "id": "qa-gate",
+          "title": "qa-gate",
+          "customization_tier": "project"
+        },
+        {
+          "id": "git-file-tracking",
+          "title": "git-file-tracking",
+          "customization_tier": "project"
+        },
+        {
+          "id": "tickets-prs-releases",
+          "title": "tickets-prs-releases",
+          "customization_tier": "project"
+        },
+        {
+          "id": "messages-reports-sessions",
+          "title": "messages-reports-sessions",
+          "customization_tier": "project"
         },
         {
           "id": "autonomous-execution",
@@ -287,6 +346,78 @@
           }
         },
         {
+          "section": "pm-allowlist",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## pm-allowlist"
+          }
+        },
+        {
+          "section": "delegation-mechanics",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## delegation-mechanics"
+          }
+        },
+        {
+          "section": "agent-routing",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## agent-routing"
+          }
+        },
+        {
+          "section": "subagent-re-engagement",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## subagent-re-engagement"
+          }
+        },
+        {
+          "section": "phases",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## phases"
+          }
+        },
+        {
+          "section": "qa-gate",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## qa-gate"
+          }
+        },
+        {
+          "section": "git-file-tracking",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## git-file-tracking"
+          }
+        },
+        {
+          "section": "tickets-prs-releases",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## tickets-prs-releases"
+          }
+        },
+        {
+          "section": "messages-reports-sessions",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "## messages-reports-sessions"
+          }
+        },
+        {
           "section": "autonomous-execution",
           "join_before": "blank",
           "body": {
@@ -300,6 +431,15 @@
           "body": {
             "kind": "text",
             "text": "## Context-First Protocol"
+          },
+          "pinned": true
+        },
+        {
+          "section": "memory",
+          "join_before": "blank",
+          "body": {
+            "kind": "text",
+            "text": "Memory elaboration."
           }
         },
         {

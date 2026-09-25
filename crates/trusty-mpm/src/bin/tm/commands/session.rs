@@ -186,6 +186,19 @@ pub(crate) async fn session(
             // source of truth for what Claude received (issue #382).
             let (resolved_prompt, _output, _stash) = compose_session_instructions(&path)?;
             print!("{resolved_prompt}");
+            // #8533: per-section package / overridden / declined, checked
+            // against the prompt just printed, then the style it launches with.
+            eprint!(
+                "\n{}{}",
+                trusty_mpm::core::instruction_overrides::section_report_for(
+                    &path,
+                    &resolved_prompt
+                ),
+                trusty_mpm::core::output_style::describe_effective_style(
+                    &trusty_mpm::core::paths::FrameworkPaths::default().root,
+                    &path
+                )
+            );
             // #7422: the composed prompt goes to stdout so it can be piped; what
             // this project's sessions will NOT load goes to stderr beside it,
             // the same channel the override applied/declined markers use.

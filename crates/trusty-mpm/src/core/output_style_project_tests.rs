@@ -1,0 +1,365 @@
+//! Tests for project-local output styles (#8533).
+
+use super::*;
+use tempfile::TempDir;
+
+fn project_with_style(id: &str) -> TempDir {
+    let dir = TempDir::new().expect("tempdir");
+    let styles = dir.path().join(PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).expect("styles dir");
+    std::fs::write(
+        styles.join(format!("{id}.md")),
+        "---\nname: x\n---\n\nProject voice.\n",
+    )
+    .expect("style file");
+    dir
+}
+
+#[test]
+fn a_project_style_file_resolves_by_id() {
+    let dir = project_with_style("fixture-voice");
+    let style = resolve_style_in_project(dir.path(), "fixture-voice").expect("resolves");
+    assert_eq!(style.id(), "fixture-voice");
+    assert!(style.content().contains("Project voice."));
+    assert!(matches!(style, ActiveStyle::Project { .. }));
+    // A bundled id keeps meaning the shipped style.
+    let bundled = resolve_style_in_project(dir.path(), "trusty-mpm").expect("bundled");
+    assert!(matches!(bundled, ActiveStyle::Bundled(_)));
+}
+
+#[test]
+fn unknown_id_lists_bundled_and_project_styles() {
+    let dir = project_with_style("fixture-voice");
+    let err = resolve_style_in_project(dir.path(), "nope").expect_err("unknown");
+    let message = err.to_string();
+    assert!(
+        message.contains("trusty-mpm-teacher") && message.contains("fixture-voice"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_path_like_id_is_refused() {
+    let dir = project_with_style("fixture-voice");
+    std::fs::write(dir.path().join("secret.md"), "outside").expect("write");
+    assert!(resolve_style_in_project(dir.path(), "../../secret").is_err());
+    assert!(resolve_style_in_project(dir.path(), ".hidden").is_err());
+}
+
+#[test]
+fn style_resolution_order_is_flag_then_project_then_host_then_manifest() {
+    // #8533 acceptance: one row per tier. Each row sets every tier from its
+    // own down and expects its own value to win.
+    let dir = project_with_style("fixture-voice");
+    let host = |active: Option<&str>| {
+        let mut config = MpmConfig::default();
+        config.style.active = active.map(str::to_string);
+        config
+    };
+    let with_project = |set: bool| {
+        let file = dir.path().join(".trusty-mpm.toml");
+        if set {
+            std::fs::write(&file, "[style]\nactive = \"fixture-voice\"\n").expect("project config");
+        } else if file.exists() {
+            std::fs::remove_file(&file).expect("remove project config");
+        }
+    };
+    let manifest = Some("trusty-mpm-research");
+
+    with_project(true);
+    assert_eq!(
+        effective_style_id(
+            dir.path(),
+            Some("trusty-mpm"),
+            &host(Some("trusty-mpm-teacher")),
+            manifest
+        )
+        .as_deref(),
+        Some("trusty-mpm"),
+        "tier 1: --style"
+    );
+    assert_eq!(
+        effective_style_id(
+            dir.path(),
+            None,
+            &host(Some("trusty-mpm-teacher")),
+            manifest
+        )
+        .as_deref(),
+        Some("fixture-voice"),
+        "tier 2: .trusty-mpm.toml [style] active"
+    );
+    with_project(false);
+    assert_eq!(
+        effective_style_id(
+            dir.path(),
+            None,
+            &host(Some("trusty-mpm-teacher")),
+            manifest
+        )
+        .as_deref(),
+        Some("trusty-mpm-teacher"),
+        "tier 3: host config"
+    );
+    assert_eq!(
+        effective_style_id(dir.path(), None, &host(None), manifest).as_deref(),
+        Some("trusty-mpm-research"),
+        "tier 4: manifest"
+    );
+    assert_eq!(
+        effective_style_id(dir.path(), None, &host(None), None),
+        None
+    );
+}
+
+#[test]
+fn an_unreadable_style_file_warns_and_keeps_the_prompt() {
+    // Fail-open: the selected style file exists but cannot be read (a
+    // directory, which fails even as root). The launch warns naming the file
+    // as unreadable, injects the default style, and keeps the prompt whole.
+    let dir = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(PROJECT_STYLES_DIR).join("broken-voice.md"))
+        .expect("style path as a directory");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"broken-voice\"\n",
+    )
+    .expect("project config");
+
+    let (style, warning) = resolve_or_default(dir.path(), Some("broken-voice"));
+    assert_eq!(style.id(), crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID);
+    let warning = warning.expect("an unreadable style is never a silent fallback");
+    assert!(
+        warning.contains("unreadable") && warning.contains("broken-voice"),
+        "{warning}"
+    );
+
+    let prompt = "BASE PROMPT\n\n## Memory & Instruction Sources".to_string();
+    let injected = super::super::apply_output_style_to_prompt_with_native(
+        dir.path(),
+        None,
+        prompt.clone(),
+        false,
+    );
+    assert!(
+        injected.ends_with(&prompt),
+        "the base prompt must survive whole"
+    );
+    let fw_root = dir.path().join("fw-root");
+    assert!(describe_effective_style(&fw_root, dir.path()).contains("unreadable"));
+}
+
+#[test]
+fn project_config_style_outranks_host_config() {
+    let dir = project_with_style("fixture-voice");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let mut config = MpmConfig::default();
+    config.style.active = Some("trusty-mpm-teacher".to_string());
+    assert_eq!(
+        effective_style_id(dir.path(), None, &config, Some("trusty-mpm-research")).as_deref(),
+        Some("fixture-voice")
+    );
+    assert_eq!(
+        effective_style_id(dir.path(), Some("trusty-mpm"), &config, None).as_deref(),
+        Some("trusty-mpm"),
+        "the --style flag stays on top"
+    );
+}
+
+#[test]
+fn an_unknown_style_warns_and_uses_the_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let (style, warning) = resolve_or_default(dir.path(), Some("typo-style"));
+    assert_eq!(style.id(), crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID);
+    let warning = warning.expect("an unknown id is never a silent fallback");
+    assert!(warning.contains("typo-style"), "{warning}");
+    let (_, none) = resolve_or_default(dir.path(), None);
+    assert!(none.is_none());
+}
+
+#[test]
+fn a_project_style_keeps_the_floor_with_and_without_native_support() {
+    // #8533 owner ruling 2026-09-25: a project style is delivered with the
+    // trusty-mpm floor appended, exactly once, on both launch paths.
+    let dir = project_with_style("fixture-voice");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let floor = super::super::style_floor();
+    let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
+    let apply = |native| {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            None,
+            "PROMPT".to_string(),
+            native,
+        )
+    };
+    // Injected: the project prose, then the floor, then the prompt.
+    let injected = apply(false);
+    assert!(
+        injected.contains(&format!("Project voice.{sep}{floor}{sep}PROMPT")),
+        "{injected}"
+    );
+    assert_eq!(injected.matches(&floor).count(), 1);
+    // Native, no composite in place: the floor heads the prompt.
+    assert_eq!(apply(true), format!("{floor}{sep}PROMPT"));
+    // Native, the settings naming the current composite: Claude Code delivers
+    // the prose and the floor, so the prompt carries no second floor.
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    std::fs::write(
+        dir.path().join(".claude").join("settings.json"),
+        serde_json::json!({ "outputStyle": id }).to_string(),
+    )
+    .expect("settings");
+    assert_eq!(apply(true), "PROMPT");
+    // A stale composite is not trusted.
+    std::fs::write(
+        dir.path().join(PROJECT_STYLES_DIR).join(format!("{id}.md")),
+        "stale",
+    )
+    .expect("stale composite");
+    assert_eq!(apply(true), format!("{floor}{sep}PROMPT"));
+}
+
+#[test]
+fn a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt() {
+    // #8533 critic round 3 HIGH: Claude Code applies settings.local.json ahead
+    // of settings.json. A local outputStyle naming the raw project id loads the
+    // prose with no floor, so the appended prompt must carry it.
+    let dir = project_with_style("fixture-voice");
+    std::fs::write(
+        dir.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let composite = super::super::native_style_id(dir.path(), &style).expect("composite");
+    let floor = super::super::style_floor();
+    let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
+    let claude = dir.path().join(".claude");
+    let write = |file: &str, value: serde_json::Value| {
+        std::fs::write(claude.join(file), value.to_string()).expect("settings");
+    };
+    let apply = || {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            None,
+            "PROMPT".to_string(),
+            true,
+        )
+    };
+
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    write(
+        "settings.local.json",
+        serde_json::json!({ "outputStyle": "fixture-voice" }),
+    );
+    assert_eq!(apply(), format!("{floor}{sep}PROMPT"));
+
+    // The local file naming the composite wins over a raw plain setting.
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": "fixture-voice" }),
+    );
+    write(
+        "settings.local.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    assert_eq!(apply(), "PROMPT");
+
+    // A local file silent on the key falls through to settings.json.
+    write(
+        "settings.json",
+        serde_json::json!({ "outputStyle": composite }),
+    );
+    write("settings.local.json", serde_json::json!({ "model": "x" }));
+    assert_eq!(apply(), "PROMPT");
+
+    // A malformed local file is never taken for the composite.
+    std::fs::write(claude.join("settings.local.json"), "{not json").expect("malformed");
+    assert_eq!(apply(), format!("{floor}{sep}PROMPT"));
+}
+
+#[test]
+fn a_composite_id_is_neither_listed_nor_selectable() {
+    // #8533: selecting the generated composite would append a second floor.
+    let dir = project_with_style("fixture-voice");
+    let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
+    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    assert_eq!(id, "fixture-voice.tm-floor");
+    assert_eq!(project_style_ids(dir.path()), vec!["fixture-voice"]);
+    assert!(matches!(
+        resolve_style_in_project(dir.path(), &id),
+        Err(ProjectStyleError::Unknown(_))
+    ));
+}
+
+#[test]
+fn a_bundled_style_gets_no_second_floor_on_either_path() {
+    let dir = TempDir::new().expect("tempdir");
+    let apply = |native| {
+        super::super::apply_output_style_to_prompt_with_native(
+            dir.path(),
+            Some(crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID),
+            "PROMPT".to_string(),
+            native,
+        )
+    };
+    let injected = apply(false);
+    assert!(!injected.contains(super::super::STYLE_FLOOR_HEADING));
+    for heading in super::super::FLOOR_SECTIONS {
+        assert_eq!(injected.matches(heading).count(), 1, "{heading}");
+    }
+    assert_eq!(apply(true), "PROMPT");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_style_file_is_refused_and_the_default_used() {
+    // #8533 finding 4: `read_to_string` follows a symlink, so a style file
+    // linked to a file outside the project was injected into the PM prompt.
+    let dir = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside");
+    let target = outside.path().join("private-8533.txt");
+    std::fs::write(&target, "PRIVATE-TEXT-8533\n").expect("outside file");
+    let styles = dir.path().join(PROJECT_STYLES_DIR);
+    std::fs::create_dir_all(&styles).expect("styles dir");
+    std::os::unix::fs::symlink(&target, styles.join("linked-voice.md")).expect("symlink");
+
+    let err = resolve_style_in_project(dir.path(), "linked-voice").expect_err("refused");
+    assert!(matches!(err, ProjectStyleError::Escapes { .. }), "{err}");
+
+    let (style, warning) = resolve_or_default(dir.path(), Some("linked-voice"));
+    assert_eq!(style.id(), crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID);
+    assert!(!style.content().contains("PRIVATE-TEXT-8533"));
+    let warning = warning.expect("a refused style is never a silent fallback");
+    assert!(warning.contains("symlink"), "{warning}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_style_in_a_symlinked_styles_dir_is_refused() {
+    // #8533: the file is regular, but `.claude/output-styles` itself links out
+    // of the project, so the file's text is not the project's own.
+    let dir = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside");
+    std::fs::write(outside.path().join("tm-demo-01.md"), "PRIVATE-TEXT-8533\n")
+        .expect("outside file");
+    std::fs::create_dir_all(dir.path().join(".claude")).expect(".claude");
+    std::os::unix::fs::symlink(outside.path(), dir.path().join(PROJECT_STYLES_DIR))
+        .expect("symlinked styles dir");
+
+    let err = resolve_style_in_project(dir.path(), "tm-demo-01").expect_err("refused");
+    assert!(matches!(err, ProjectStyleError::Escapes { .. }), "{err}");
+}

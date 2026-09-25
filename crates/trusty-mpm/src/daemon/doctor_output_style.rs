@@ -76,6 +76,10 @@ use std::path::{Path, PathBuf};
 use crate::core::bundle::OUTPUT_STYLES;
 use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::output_style::{
+    ActiveStyle, COMPOSITE_STYLE_SUFFIX, ProjectStyleError, composite_path,
+    resolve_style_in_project,
+};
 use crate::core::output_style_tiers::output_style_tiers;
 use crate::core::paths::FrameworkPaths;
 
@@ -196,7 +200,9 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 
     for (path, scope) in &layers {
         match read_style_key(path) {
-            Ok(StyleKey::Present(style_id)) => return evaluate_style(&style_id, home, path, scope),
+            Ok(StyleKey::Present(style_id)) => {
+                return evaluate_style(&style_id, project_dir, home, path, scope);
+            }
             Ok(StyleKey::Silent) => { /* fall through to the next layer */ }
             Err(check) => return check,
         }
@@ -228,11 +234,25 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 /// deployed file under `<home>/.claude/output-styles/` is missing/empty;
 /// `Ok` otherwise. `source` and `source_path` are folded into the message so
 /// the operator knows which file the effective value came from.
+/// #8533: an id that is not bundled is checked as a project style by
+/// [`evaluate_project_style`] before it is reported unknown.
 /// Test: `output_style_ok_when_style_resolves`, `output_style_fail_when_id_unknown`,
-/// `output_style_fail_when_file_missing`.
-fn evaluate_style(style_id: &str, home: &Path, source_path: &Path, source: &str) -> DoctorCheck {
+/// `output_style_fail_when_file_missing`,
+/// `output_style_ok_for_a_project_style_and_its_composite`.
+fn evaluate_style(
+    style_id: &str,
+    project_dir: Option<&Path>,
+    home: &Path,
+    source_path: &Path,
+    source: &str,
+) -> DoctorCheck {
     let known_ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
     let Some(style) = OUTPUT_STYLES.iter().find(|s| s.id == style_id) else {
+        if let Some(check) =
+            project_dir.and_then(|p| evaluate_project_style(style_id, p, source_path, source))
+        {
+            return check;
+        }
         return DoctorCheck::new(
             "output_style",
             CheckStatus::Fail,
@@ -272,6 +292,73 @@ fn evaluate_style(style_id: &str, home: &Path, source_path: &Path, source: &str)
             ),
         ),
     }
+}
+
+/// Check a non-bundled `outputStyle` id as a project style (#8533).
+///
+/// Why: a tm launch names a project style's composite (`<id>.tm-floor`) in
+/// `outputStyle`, and an operator may name the raw `<id>`. Both are valid
+/// project styles, and reporting them as unknown sent operators to fix a
+/// working setup.
+/// What: strips [`COMPOSITE_STYLE_SUFFIX`] and resolves the rest with
+/// [`resolve_style_in_project`]. A project style whose composite file is
+/// present and non-empty → `Ok`, naming the style file. Composite missing →
+/// `Fail` for a composite id (Claude Code finds no file) and `Warn` for a raw
+/// id (a bare `claude` launch loads it without the floor). A symlinked or
+/// unreadable style file → `Fail` with that error. `None` when the id names no
+/// project style, so the caller reports it unknown.
+/// Test: `output_style_ok_for_a_project_style_and_its_composite`,
+/// `output_style_project_style_without_composite_is_reported`.
+fn evaluate_project_style(
+    style_id: &str,
+    project_dir: &Path,
+    source_path: &Path,
+    source: &str,
+) -> Option<DoctorCheck> {
+    let base = style_id
+        .strip_suffix(COMPOSITE_STYLE_SUFFIX)
+        .unwrap_or(style_id);
+    let check = |status, detail: String| {
+        let origin = format!(
+            "{source} outputStyle {style_id:?} ({})",
+            source_path.display()
+        );
+        Some(DoctorCheck::new(
+            "output_style",
+            status,
+            format!("{origin} {detail}"),
+        ))
+    };
+    let path = match resolve_style_in_project(project_dir, base) {
+        Ok(ActiveStyle::Project { path, .. }) => path,
+        Ok(ActiveStyle::Bundled(_)) | Err(ProjectStyleError::Unknown(_)) => return None,
+        Err(err) => return check(CheckStatus::Fail, format!("names a project style: {err}")),
+    };
+    let composite = composite_path(project_dir, base);
+    if std::fs::metadata(&composite).is_ok_and(|meta| meta.len() > 0) {
+        return check(
+            CheckStatus::Ok,
+            format!(
+                "resolves to project style {} (with the trusty-mpm floor in {})",
+                path.display(),
+                composite.display()
+            ),
+        );
+    }
+    let status = if base == style_id {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Fail
+    };
+    check(
+        status,
+        format!(
+            "names project style {}, but its composite with the trusty-mpm floor ({}) is \
+             missing or empty — run `tm run`/`tm load` to write it",
+            path.display(),
+            composite.display()
+        ),
+    )
 }
 
 /// Best-effort resolution of the effective `outputStyle` id, ignoring any
