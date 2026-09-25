@@ -867,7 +867,10 @@ The nine accepted section tokens, quoted exactly as
 
 > Superseded on the tiering and the count: #4286 left `core` as the only
 > `fixed` section, and #8361 added a tenth token, `AUTONOMOUS-EXECUTION`, for
-> the autonomy rule it carved out of `core`. `section_token` is authoritative.
+> the autonomy rule it carved out of `core`. #8533 split nine more sections
+> out of `core`, for nineteen tokens in all; `CORE` is still the one token
+> that is always declined. `section_token` is authoritative; §11.5 lists the
+> current tokens and the safety core.
 
 ```rust
 SectionId::Identity => "IDENTITY",
@@ -1234,7 +1237,7 @@ paths (daemon resume, in-place relaunch) route through
 `instruction_pipeline::refresh_compiled_prompt`, which composes, writes, and
 formats the failure message. `prepare_session` deliberately does NOT: it must
 compose with the `effective_style` it has just resolved (flag > config >
-manifest), and `refresh_compiled_prompt` hardcodes the style to `None`, so
+manifest; §11.5 has the current order), and `refresh_compiled_prompt` hardcodes the style to `None`, so
 routing preparation through it would silently drop the operator's chosen output
 style from the compiled copy. All three still share the actual write —
 `write_compiled_prompt_to` — and the same fatal policy; only the composed text
@@ -1477,6 +1480,64 @@ auditable delta so policy cannot drift inside presentation variants.
   contain no unresolved links or undeclared duplicates.
 - `CLAUDE.md` remains outside the audit/edit set and passes the compatibility
   check.
+
+### 11.5 Project overrides and the safety core (#8533)
+
+**Owner ruling (2026-09-24):** a project may override every PM prompt section
+except a small, named, documented safety core. Agent selection, the memory
+protocol and the search protocol stay in that core.
+
+**Tokens.** A project's root `CLAUDE.md` overrides a section with the §9.2
+marker grammar. The nineteen tokens, in prompt order, are `IDENTITY`, `CORE`,
+`PM-ALLOWLIST`, `DELEGATION-MECHANICS`, `AGENT-ROUTING`,
+`SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`, `GIT-FILE-TRACKING`,
+`TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`, `AUTONOMOUS-EXECUTION`,
+`MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
+`NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS`. The nine after
+`CORE` held headings that were inside `core` until #8533. `CORE` is the only
+tier-`fixed` section, and a marker naming it is always declined. Every other
+token is tier `project`. The `CLAUDE.md` that tm seeds into a new project lists
+the eighteen overridable tokens; a test checks that list against `SectionId`.
+
+**The safety core.** `core/instruction_safety_core.rs::SAFETY_CORE` is the one
+enumeration. The manifest's `fixed` tier and `pinned` flags, the per-section
+report, and this table are tested against it.
+
+<!-- safety-core:start -->
+| Member | Section token | Kind |
+|---|---|---|
+| Memory & Instruction Sources | `CORE` | fixed section |
+| Customization Surface | `CORE` | fixed section |
+| Detected project stack | `CORE` | generated block |
+| Memory protocol | `MEMORY` | pinned block |
+| Code search protocol | `SEARCH` | pinned block |
+| Agent selection | `AGENT-DELEGATION` | pinned block |
+| Agent roster | `AGENT-DELEGATION` | generated block |
+<!-- safety-core:end -->
+
+- A **fixed section** declines a marker naming it. The decline is logged and
+  reported, and the bundled text stays.
+- A **pinned block** survives an override of its section. The project's text
+  replaces the rest of that section.
+- A **generated block** is computed at launch. No override can author or
+  remove it.
+
+A malformed marker block costs only that block. An unreadable `CLAUDE.md`
+means no overrides. In both cases the prompt keeps the bundled sections and
+the whole safety core.
+
+**Output style.** A project may select a style from
+`<project>/.claude/output-styles/<id>.md`. The launch, the prompt-injection
+seam and `tm sessions instructions` select the style through one function,
+`core::output_style::select_style`, in this order:
+
+1. the `--style` flag;
+2. `.trusty-mpm.toml` `[style] active`;
+3. the host config `[style] active`;
+4. the harness manifest `[style] active`.
+
+A bundled id resolves to the bundled style first. An unknown or unreadable id
+prints a warning and falls back to the default style.
 
 ## 12. Workflow, Ticketing, and Version-Control Ownership {#SPEC-PMINSTR-12~draft}
 

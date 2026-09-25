@@ -10,7 +10,8 @@
 //! a pinned block and a generated block stay in force while the rest of their
 //! section is replaced. `InstructionPackage::validate` derives the `fixed` tier
 //! from this list; the manifest's `pinned` flags, the section report, and the
-//! docs tables in `tm-workflow.md` and `sections/README.md` are tested against it.
+//! docs tables in `tm-workflow.md`, `sections/README.md` and SPEC-PMINSTR-01
+//! §11.5 are tested against it.
 //! Test: `instruction_safety_core_tests.rs`.
 
 use crate::core::instruction_package::{Generator, SectionId};

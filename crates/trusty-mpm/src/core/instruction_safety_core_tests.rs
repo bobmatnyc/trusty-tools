@@ -160,7 +160,15 @@ fn the_docs_name_every_safety_core_member() {
             )
         })
         .collect();
-    for (name, doc) in DOCS {
+    // The spec of record lives outside the crate, so `include_str!` would break
+    // `cargo package`; read it from the workspace at test time instead.
+    let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md");
+    let spec = std::fs::read_to_string(&spec_path).expect("the workspace spec of record");
+    let docs = DOCS
+        .into_iter()
+        .chain([("SPEC-PMINSTR-01 §11.5", spec.as_str())]);
+    for (name, doc) in docs {
         assert_eq!(
             doc_rows(doc),
             expected,
