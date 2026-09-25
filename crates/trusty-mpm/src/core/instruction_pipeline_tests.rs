@@ -1643,3 +1643,61 @@ fn no_seed_test_reads_the_ambient_home_directory() {
         "pass a fixture home under the test's temp dir, not the ambient one"
     );
 }
+
+/// The backtick-quoted words in `stub` between `from` and the next `until`.
+fn quoted_tokens_between<'a>(stub: &'a str, from: &str, until: &str) -> Vec<&'a str> {
+    let start = stub.find(from).expect("stub carries the opening phrase") + from.len();
+    let len = stub[start..].find(until).expect("stub carries the closing phrase");
+    stub[start..start + len]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .collect()
+}
+
+/// #8533: the seeded `CLAUDE.md` named the pre-split token set, so a new
+/// project was told `CORE` held the allowlist, phases and QA gate it no longer
+/// does. Both lists are checked against the one source of truth — every
+/// overridable `SectionId`, and every overridable section owning a safety-core
+/// member — so a new section or a new core member fails here until the stub
+/// names it.
+#[test]
+fn the_stub_lists_exactly_the_overridable_section_tokens() {
+    use crate::core::claude_md_sections::section_token;
+    use crate::core::instruction_package::SectionId;
+    use crate::core::instruction_safety_core::{SAFETY_CORE, is_fixed_core_section};
+
+    let listed = quoted_tokens_between(CLAUDE_MD_STUB, "Tokens:", " is the one\ntoken");
+    let (fixed, overridable): (Vec<&str>, Vec<&str>) = (
+        listed[listed.len() - 1..].to_vec(),
+        listed[..listed.len() - 1].to_vec(),
+    );
+    let expected: Vec<&str> = SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| !is_fixed_core_section(*id))
+        .map(section_token)
+        .collect();
+    assert_eq!(overridable, expected, "the stub's Tokens: list");
+    let expected_fixed: Vec<&str> = SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| is_fixed_core_section(*id))
+        .map(section_token)
+        .collect();
+    assert_eq!(fixed, expected_fixed, "the one token the stub says is declined");
+
+    let keeps_core = quoted_tokens_between(CLAUDE_MD_STUB, "An override of", "replaces");
+    let mut expected_core: Vec<&str> = SAFETY_CORE
+        .iter()
+        .filter(|m| !is_fixed_core_section(m.section))
+        .map(|m| section_token(m.section))
+        .collect();
+    expected_core.dedup();
+    assert_eq!(keeps_core, expected_core, "sections that keep a core block");
+    for member in SAFETY_CORE.iter().filter(|m| !is_fixed_core_section(m.section)) {
+        assert!(
+            CLAUDE_MD_STUB.contains(&member.name.to_lowercase()),
+            "the stub names safety-core member `{}`",
+            member.name
+        );
+    }
+}

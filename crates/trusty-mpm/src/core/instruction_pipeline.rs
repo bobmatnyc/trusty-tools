@@ -519,6 +519,12 @@ pub fn remove_stale_bundled_instructions(dest: &std::path::Path) -> std::io::Res
 /// creates it exactly once and then never touches it again, so the operator
 /// can edit freely (issue #2170 — trusty-mpm must never modify a target
 /// project's `CLAUDE.md`).
+/// What: #8533: the `Tokens:` list names every overridable [`SectionId`] and
+/// the safety-core sentence names every overridable section with a core block;
+/// both are checked against `SectionId::CANONICAL` and `SAFETY_CORE`.
+/// Test: `the_stub_lists_exactly_the_overridable_section_tokens`.
+///
+/// [`SectionId`]: crate::core::instruction_package::SectionId
 pub(crate) const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 <!-- trusty-mpm: created by `trusty-mpm session start` — customize for your project -->
@@ -539,11 +545,16 @@ a section of the framework prompt, put the replacement between a marker pair —
 mechanism, so a worked example here would take effect as a real override — see
 `seeded_claude_md_declares_no_overrides`.)
 
-Tokens: `IDENTITY`, `AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`,
-`AGENT-DELEGATION`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`,
-`FRAMEWORK-GUARANTEED-CONVENTIONS`. `CORE` is the one token that is always
-declined. `AUTONOMOUS-EXECUTION` is where a project sets how freely the PM runs
-— e.g. \"ask before dispatching after a resume\" (#8361). Prose outside the markers is
+Tokens: `IDENTITY`, `PM-ALLOWLIST`, `DELEGATION-MECHANICS`, `AGENT-ROUTING`,
+`SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`, `GIT-FILE-TRACKING`,
+`TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`, `AUTONOMOUS-EXECUTION`,
+`MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
+`NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. `CORE` is the one
+token that is always declined. An override of `MEMORY`, `SEARCH` or
+`AGENT-DELEGATION` replaces that section but keeps its safety-core block: the
+memory protocol, the code search protocol, agent selection and the agent roster.
+`AUTONOMOUS-EXECUTION` is where a project sets how freely the PM runs — e.g.
+\"ask before dispatching after a resume\" (#8361). Prose outside the markers is
 project context — Claude Code loads it natively, so it is never copied into the
 composed prompt.
 
