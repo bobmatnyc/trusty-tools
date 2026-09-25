@@ -238,6 +238,44 @@ raced when two sessions paused at once (#7782), and left the fast-forward watch
 blocked on a dirty sessions log. `**/.trusty-mpm/*` in `.gitignore` covers the
 store; do not re-add a `!.trusty-mpm/sessions/` negation.
 
+## Resuming parked work
+
+Claude Code mints a fresh isolation worktree for every isolated dispatch. The
+`isolation` field says whether to isolate, never where, and the harness refuses
+an isolated agent's git commands aimed at any other tree. A dispatch therefore
+cannot resume a worktree that is already parked
+([#8161](https://github.com/bobmatnyc/trusty-tools/issues/8161)), and cannot
+check out a PR branch that a parked worktree holds
+([#8494](https://github.com/bobmatnyc/trusty-tools/issues/8494)). The agent
+works in its own tree, and a caller that is not pinned to a tree moves the
+result across.
+
+1. **Dispatch.** Brief the agent with the parked tree's tip SHA and branch
+   name, never with the parked path: "base on `<parked-tip>`, branch
+   `<pr-branch>`". Read the tip first with
+   `git -C <parked> rev-parse HEAD`.
+2. **Agent, in its own tree.** `git reset --keep <parked-tip>`, then commit
+   there. Worktrees share refs, so the tip SHA resolves. `reset --keep`
+   refuses to discard uncommitted work, and an agent moving its own tree's
+   HEAD is never gated.
+3. **Consolidate, as the PM or `version-control`:**
+
+   ```bash
+   git -C <parked> fetch <agent-worktree> <agent-branch> && git -C <parked> reset --keep FETCH_HEAD
+   ```
+
+   The parked worktree now holds the agent's commits on its own branch. To
+   amend an open PR, push from the parked tree (`git -C <parked> push`).
+
+`tm hook --pm-guard` governs step 3. A `reset --keep`/`--hard`/`--merge`,
+`merge` (including `--ff-only`) or `rebase` whose target is a linked worktree
+is denied while the daemon reports a live agent standing in that tree. The
+answer counts your own session's agents too. It is allowed when the tree is
+idle. If the daemon cannot answer, the command is denied, not allowed. A
+target the guard cannot resolve (`$WT`, `$(…)`) is also denied, so spell the
+path out. A stale record is listed by `tm repair delegation --list <parked>`
+and ended with `tm repair delegation <agent-id>`.
+
 ## Harness Refusals Inside an Isolation Worktree
 
 An agent pinned to a worktree meets a second command classifier that is not

@@ -56,6 +56,8 @@ mod disk_usage;
 // #8572: an agent's branch switch in a dirty main checkout.
 mod head_switch;
 mod heredoc;
+// #8161: HEAD moves into a linked worktree a live agent stands in.
+mod linked_worktree_head_move;
 mod main_checkout;
 mod path_tokens;
 mod persistence;
@@ -73,6 +75,7 @@ mod worktree_remove_rechecks;
 
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
+pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,

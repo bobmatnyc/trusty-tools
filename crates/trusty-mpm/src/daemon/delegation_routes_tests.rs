@@ -987,6 +987,28 @@ async fn head_write_excludes_the_calling_sessions_own_delegation() {
     assert!(!commit.claimed, "a Bash query never claims the tree");
 }
 
+/// #8161: the tree-holders marker lifts #6797's own-session exclusion, because a
+/// consolidating `reset --keep` would clobber the asking PM's own live agent.
+#[tokio::test]
+async fn shared_tree_route_tree_holders_counts_the_callers_own_agent() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo/.claude/worktrees/agent-parked",
+        None,
+        Some("toolu_own"),
+        DelegationStatus::Running,
+    );
+    let mut query = commit_query("/repo/.claude/worktrees/agent-parked");
+    query.payload[crate::daemon::delegation_routes::TREE_HOLDERS_MARKER] = Value::Bool(true);
+
+    let answer = call(&state, session, query).await;
+    assert_eq!(answer.total, 1, "{:?}", answer.agents);
+    assert!(!answer.claimed, "a Bash query never claims the tree");
+}
+
 /// The fail-closed half, and the reason the exclusion is scoped to the caller
 /// rather than applied to every record. ADR-0048 decision 10's hazard is ANOTHER
 /// session's uncommitted work, so another session's record must still deny.

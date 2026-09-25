@@ -216,12 +216,12 @@ use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
-    docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
-    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_main_checkout_head_switch, evaluate_read_only_dispatch_command,
-    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
-    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
-    print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
+    deny_linked_worktree_head_move, docs_commit_deny_reason, evaluate_bash_command,
+    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
+    evaluate_main_checkout_destructive_command, evaluate_main_checkout_head_switch,
+    evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
+    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -573,6 +573,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
+        }
+        // #8161: the same move aimed at a LINKED worktree — see that module.
+        if deny_linked_worktree_head_move(url, session_id, &payload, command, &hook_cwd).await {
+            return Ok(());
         }
     }
 

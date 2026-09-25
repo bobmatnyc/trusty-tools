@@ -72,6 +72,16 @@ use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::daemon::state::sessions::SharedTreeQuestion;
 
+/// Payload key that asks the shared-tree route who holds a tree, counting the
+/// asking session's own agents (#8161).
+///
+/// Why: #6797 scopes a HEAD-write answer to OTHER sessions, which is right for a
+/// shared main checkout and wrong for a parked linked worktree, where the live
+/// agent a consolidating `reset --keep` would clobber is usually the asking
+/// PM's own. A `true` value answers with `HeadWrite { caller: None }`.
+/// Test: `shared_tree_route_tree_holders_counts_the_callers_own_agent`.
+pub const TREE_HOLDERS_MARKER: &str = "tree_holders";
+
 /// Request body of [`shared_tree_dispatch_route`].
 ///
 /// Why: the route both answers and records, and the recording is done by the
@@ -527,11 +537,15 @@ pub fn shared_tree_dispatch_op(
     // route already parsed and which `tm hook --pm-guard` fills from the
     // payload's `session_id` — the same id space a delegation's `session` field
     // holds, so the comparison is exact rather than heuristic.
+    // #8161: a HEAD move into a LINKED worktree asks who holds that tree, and
+    // the asking session's own agent is exactly who a `reset --keep` would
+    // clobber — so that query marks itself and hears every session.
+    let tree_holders = payload.get(TREE_HOLDERS_MARKER).and_then(Value::as_bool) == Some(true);
     let question = if is_dispatch {
         SharedTreeQuestion::Dispatch
     } else {
         SharedTreeQuestion::HeadWrite {
-            caller: Some(session),
+            caller: (!tree_holders).then_some(session),
         }
     };
 

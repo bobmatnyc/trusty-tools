@@ -126,6 +126,8 @@ use trusty_mpm::core::dispatch_isolation::{
     blocked_by_shared_tree, dispatch_agent, dispatch_isolation,
 };
 
+use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
+
 use crate::commands::hook_payload::build_hook_payload;
 // #8257: the writer-deny text lives beside this module, which is over cap.
 use crate::commands::pm_guard_dispatch_deny::{
@@ -795,6 +797,10 @@ pub(crate) async fn post_shared_tree(
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
+    // #8161: the builder forwards known keys only, so the tree-holders marker is copied.
+    if let Some(marker) = payload.get(TREE_HOLDERS_MARKER) {
+        forwarded[TREE_HOLDERS_MARKER] = marker.clone();
+    }
     let body = serde_json::json!({ "payload": forwarded });
     let response = match client.post(&endpoint).json(&body).send().await {
         Ok(response) => response,

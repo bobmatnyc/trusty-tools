@@ -643,7 +643,7 @@ const IN_PROGRESS_CONTROL_FLAGS: &[&str] = &[
 /// `starts_a_head_move_allows_in_progress_control`,
 /// `starts_a_head_move_matches_in_progress_control_positionally`,
 /// `starts_a_head_move_ignores_everything_else`.
-fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
+pub(super) fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
     // ADR-0053: `pull` was in this table until 2026-08-17.
     matches!(subcommand, "merge" | "rebase")
         && !tail

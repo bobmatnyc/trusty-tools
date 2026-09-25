@@ -5246,3 +5246,41 @@ fn pm_guard_allows_enter_worktree_from_the_pm() {
     let payload = r#"{"hook_event_name":"PreToolUse","cwd":"/repo/.claude/worktrees/agent-a","tool_name":"EnterWorktree","tool_input":{"path":"/repo/.claude/worktrees/agent-b"}}"#;
     assert_eq!(run_pm_guard(payload, &[]).trim(), "");
 }
+
+#[test]
+fn pm_guard_denies_a_reset_keep_into_a_live_agents_worktree() {
+    // #8161: the consolidation step into a parked worktree a live agent still
+    // stands in. Before the fix nothing classified it — the main-checkout rules
+    // stop at `main_checkout_root` — so it was allowed with no daemon query.
+    let (_dir, repo) = main_checkout_fixture();
+    let parked = repo.join(".claude/worktrees/agent-parked");
+    std::fs::create_dir_all(&parked).expect("parked tree");
+    let command = format!(
+        "git -C {p} fetch {r} fix/x && git -C {p} reset --keep FETCH_HEAD",
+        p = parked.display(),
+        r = repo.display()
+    );
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_denied(&stdout);
+    assert!(stdout.contains("#8161"), "{stdout}");
+    let posted = captured
+        .posted()
+        .expect("the guard must ask who holds the tree");
+    assert_eq!(posted["cwd"], parked.display().to_string());
+    assert_eq!(
+        posted["tree_holders"], true,
+        "the query must count the caller's own agents"
+    );
+
+    // The idle half: an empty answer lets the consolidation through.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "an idle parked worktree must be consolidatable"
+    );
+}
