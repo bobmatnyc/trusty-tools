@@ -242,14 +242,6 @@ pub async fn handle_start(
         env!("CARGO_PKG_VERSION"),
     );
 
-    // #8270: under launchd fd 2 is `StandardErrorPath`, opened once. Reopen it
-    // on the SIGHUP newsyslog sends after a rotation. No-op for a tty or
-    // `/dev/null` stderr (the detached child above).
-    #[cfg(unix)]
-    if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
-        tracing::debug!("SIGHUP reopens stderr log {}", log.display());
-    }
-
     // Translate the `--device` CLI flag into the `TRUSTY_DEVICE` env var.
     //
     // SAFETY: invoked on the main thread before tokio spawns any workers.
@@ -319,6 +311,15 @@ pub async fn handle_start(
     // say which number is in force and where it came from.
     crate::service::lazy_loader::log_resident_index_cap(policy.tier);
     let _ = foreground;
+
+    // #8270: under launchd fd 2 is `StandardErrorPath`, opened once; reopen it
+    // after newsyslog renames it. This spawns a task, so it sits below every
+    // `set_var` above. No-op for a tty, pipe or `/dev/null` stderr (the
+    // detached child above).
+    #[cfg(unix)]
+    if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
+        tracing::debug!("stderr log {} is reopened after a rotation", log.display());
+    }
 
     // Fast-path: bail before loading the 86 MB embedding model when
     // another daemon is already running.

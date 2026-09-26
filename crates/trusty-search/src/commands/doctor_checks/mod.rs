@@ -367,23 +367,40 @@ pub async fn check_port_reachable(port: u16) -> CheckResult {
 /// file grows unbounded. `doctor --fix` can install a newsyslog config + a
 /// daily LaunchAgent that caps it at 1 MB × 7 archives; this check tells the
 /// operator whether that is already in place.
-/// What: on macOS, returns Ok when a rotation config exists, Warn otherwise.
+/// What: on macOS, returns Ok when a rotation config in the current form
+/// exists, and Warn otherwise: a stale `/etc/newsyslog.d` conf gets the line to
+/// write (sudo), anything else gets the "no rotation policy" wording
+/// `doctor --fix` acts on (`log_rotation::rotation_status`, #8270).
 /// On other platforms returns Ok with a "not applicable" note — Linux service
 /// managers (systemd/journald) handle log rotation themselves.
 /// Test: `cargo test --workspace` — exercised by the doctor integration tests.
 pub fn check_log_rotation() -> CheckResult {
     #[cfg(target_os = "macos")]
     {
-        if super::log_rotation::rotation_configured() {
-            CheckResult::Ok("Log rotation configured for stderr.log (1 MB × 7 archives)".into())
-        } else {
-            CheckResult::Warn(
+        use super::log_rotation::RotationStatus;
+        use super::log_rotation::{newsyslog_data_line, rotation_status, stderr_log_path};
+        match rotation_status() {
+            RotationStatus::Configured => {
+                CheckResult::Ok("Log rotation configured for stderr.log (1 MB × 7 archives)".into())
+            }
+            // #8270: deliberately NOT the "no rotation policy" wording, so
+            // `--fix` does not install a second, user-level rotation of the
+            // same file. Editing `/etc` needs sudo; say what to write.
+            RotationStatus::SystemConfStale(path) => CheckResult::Warn(format!(
+                "{} does not match the current rotation policy (it may name a pidfile \
+                 or send a signal, #8270); replace its entry with: {} (needs sudo)",
+                path.display(),
+                stderr_log_path()
+                    .map(|log| newsyslog_data_line(&log))
+                    .unwrap_or_else(|_| "<could not resolve $HOME>".into()),
+            )),
+            RotationStatus::NotConfigured => CheckResult::Warn(
                 // `doctor --fix` keys on the "no rotation policy" substring.
                 "stderr.log has no rotation policy (none installed, or one from \
-                 before #8270 that fails every run) — it will grow unbounded; \
-                 run `trusty-search doctor --fix` to install one"
+                 before #8270 that fails every run or signals a pidfile) — it will \
+                 grow unbounded; run `trusty-search doctor --fix` to install one"
                     .into(),
-            )
+            ),
         }
     }
     #[cfg(not(target_os = "macos"))]

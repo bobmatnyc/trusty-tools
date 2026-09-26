@@ -1,3 +1,0 @@
-Fixed
-
-- macOS `stderr.log` rotation works as a non-root user. The rotation LaunchAgent now runs `newsyslog -r`, which previously exited 1 with "must have root privs" on every run. The daemon now writes `trusty-search.pid` beside its log, and the newsyslog conf sends SIGHUP to it. On SIGHUP the daemon reopens the log path onto stderr. Before this, a rotated daemon kept writing to the renamed and deleted file, so every later log line was lost and no disk space was freed. A reopen that fails keeps the old stderr and logs an error. `doctor` reports an install from before this fix as unconfigured, so `doctor --fix` rewrites it ([#8270](https://github.com/bobmatnyc/trusty-tools/issues/8270))

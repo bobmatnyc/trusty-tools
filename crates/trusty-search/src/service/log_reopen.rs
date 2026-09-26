@@ -1,46 +1,54 @@
-//! SIGHUP reopens the daemon's stderr log file after a rotation (#8270).
+//! The daemon reopens its stderr log after a rotation renames it (#8270).
 //!
 //! Why: launchd opens a plist's `StandardErrorPath` once, at spawn, and hands
 //! the daemon the open descriptor as fd 2. It never reopens that path. When
 //! `newsyslog` rotates `stderr.log` it renames the file (and, with `J`,
 //! compresses and deletes the renamed copy), so the daemon kept writing to the
 //! renamed, later deleted, inode: every later log line was lost and no disk was
-//! freed. The fix is the standard daemon contract: the rotator sends SIGHUP to
-//! the pid in a pidfile, and the daemon reopens its log path.
+//! freed. The rotator sends no signal (the conf's `N` flag): a pidfile can go
+//! stale on a SIGKILL or an early startup error, and a stale pid would let
+//! newsyslog SIGHUP an unrelated process once the pid wraps. The daemon detects
+//! the rotation itself instead.
 //! What: [`arm_for_current_stderr`] records fd 2's path when fd 2 is a regular
-//! file and spawns a task that, on every SIGHUP, opens that path for append and
-//! `dup2`s it onto fd 2. Every writer of fd 2 (tracing, the panic hook,
-//! `eprintln!`) then follows the rotation, and launchd's path is kept.
-//! [`publish_pidfile`] writes [`PIDFILE_NAME`] beside the log once the daemon
-//! holds its lock; the newsyslog conf in `commands::log_rotation` names that
-//! file. [`retract_pidfile`] removes it on a clean shutdown. A reopen that
-//! fails leaves fd 2 untouched and logs an error to it: stderr is never closed.
-//! Test: `sighup_after_a_rename_moves_writes_to_the_new_file`,
-//! `failed_reopen_keeps_the_old_fd_and_logs_an_error`.
+//! file and spawns a task that, every [`DEFAULT_CHECK_INTERVAL`], compares
+//! fd 2's `(st_dev, st_ino)` with `stat(path)`. When they differ, or the path
+//! is gone, it opens the path for append and `dup2`s it onto fd 2 (see
+//! [`reopen_stderr`]). Every writer of fd 2 (tracing, the panic hook,
+//! `eprintln!`) then follows the rotation. A reopen that fails leaves fd 2
+//! untouched and logs an error to it: stderr is never closed. Lines written
+//! between the rename and the next check go to the renamed file.
+//!
+//! No SIGHUP handler is installed. Nothing sends one any more, and a handler
+//! would change what a hangup means for a foreground daemon in a terminal,
+//! where the default action (terminate) is the expected one.
+//! Test: `a_rename_moves_writes_to_a_new_file_at_the_original_path`,
+//! `failed_reopen_keeps_the_old_fd_and_logs_an_error`,
+//! `a_pipe_or_dev_null_stderr_arms_nothing`.
 
 use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::time::Duration;
 
-/// File name of the pidfile written beside the stderr log.
+/// How often the daemon checks whether its log was rotated away.
 ///
-/// Why: newsyslog's conf is whitespace-delimited with no quoting, so the
-/// pidfile cannot live under `Application Support` (the daemon lockfile's
-/// home). The log directory has no space in it.
-pub const PIDFILE_NAME: &str = "trusty-search.pid";
+/// Why: the rotation job runs at most once a day; a minute bounds how many
+/// lines land in the renamed file without measurable cost (two `stat` calls).
+pub const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 const STDERR_FD: i32 = 2;
 
-/// Pidfile path recorded by [`arm_for_current_stderr`]; unset when nothing was
-/// armed (tests, a daemon whose stderr is a tty or `/dev/null`).
-static ARMED_PIDFILE: OnceLock<PathBuf> = OnceLock::new();
-
-/// The pidfile that pairs with `log`: [`PIDFILE_NAME`] in the log's directory.
-///
-/// Test: `newsyslog_conf_signals_the_daemon_through_its_pidfile`.
-pub fn pidfile_for_log(log: &Path) -> PathBuf {
-    log.with_file_name(PIDFILE_NAME)
+/// `fstat(fd)`, or `None` when the call fails.
+fn fstat(fd: i32) -> Option<libc::stat> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fstat` writes a whole `stat` into `st` on success and reads
+    // nothing through the pointer.
+    let rc = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: `rc == 0` means `fstat` initialised `st`.
+    Some(unsafe { st.assume_init() })
 }
 
 /// The path fd 2 was opened from, when fd 2 is a regular file.
@@ -50,25 +58,14 @@ pub fn pidfile_for_log(log: &Path) -> PathBuf {
 /// startup, because after a rename the descriptor reports the new name.
 /// What: `None` for a tty, pipe, `/dev/null`, or a platform with no fd-to-path
 /// query (only macOS and Linux have one).
-/// Test: `sighup_after_a_rename_moves_writes_to_the_new_file`.
+/// Test: `a_pipe_or_dev_null_stderr_arms_nothing`,
+/// `a_rename_moves_writes_to_a_new_file_at_the_original_path`.
 pub fn stderr_file_path() -> Option<PathBuf> {
-    if !fd_is_regular_file(STDERR_FD) {
+    let st = fstat(STDERR_FD)?;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
         return None;
     }
     fd_path(STDERR_FD)
-}
-
-fn fd_is_regular_file(fd: i32) -> bool {
-    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: `fstat` writes a whole `stat` into `st` on success and reads
-    // nothing through the pointer.
-    let rc = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
-    if rc != 0 {
-        return false;
-    }
-    // SAFETY: `rc == 0` means `fstat` initialised `st`.
-    let st = unsafe { st.assume_init() };
-    (st.st_mode & libc::S_IFMT) == libc::S_IFREG
 }
 
 #[cfg(target_os = "macos")]
@@ -95,6 +92,26 @@ fn fd_path(_fd: i32) -> Option<PathBuf> {
     None
 }
 
+/// True when `path` no longer names the file fd 2 writes to.
+///
+/// What: compares fd 2's `(st_dev, st_ino)` with `stat(path)`. A missing path
+/// counts as rotated. Any other `stat` error, or an unreadable fd 2, counts as
+/// not rotated, so a transient failure never triggers a reopen.
+/// Test: `a_rename_moves_writes_to_a_new_file_at_the_original_path`.
+fn rotated_away(path: &Path) -> bool {
+    let Some(open) = fstat(STDERR_FD) else {
+        return false;
+    };
+    // `st_dev`/`st_ino` widths differ by platform; `MetadataExt` widens its
+    // side with the same `as u64`, so the two compare like for like.
+    #[allow(clippy::unnecessary_cast)]
+    let open_id = (open.st_dev as u64, open.st_ino as u64);
+    match std::fs::metadata(path) {
+        Ok(m) => (m.dev(), m.ino()) != open_id,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Open `path` for append and make fd 2 refer to it.
 ///
 /// What: the open happens first, so an open failure returns `Err` with fd 2
@@ -115,83 +132,51 @@ pub fn reopen_stderr(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Install the SIGHUP handler that reopens `log` onto fd 2.
+/// Spawn the task that reopens `log` onto fd 2 once it is rotated away.
 ///
-/// What: registers for SIGHUP (replacing the default terminate action) before
-/// returning, then spawns a task that calls [`reopen_stderr`] per signal. A
-/// failed reopen logs an error through the unchanged fd 2 and keeps serving.
-/// Must run inside a tokio runtime.
-/// Test: `sighup_after_a_rename_moves_writes_to_the_new_file`,
+/// What: every `interval`, checks [`rotated_away`] and, when true, calls
+/// [`reopen_stderr`]. A failed reopen logs an error through the unchanged
+/// fd 2 and is retried on the next tick. Must run inside a tokio runtime.
+/// Test: `a_rename_moves_writes_to_a_new_file_at_the_original_path`,
 /// `failed_reopen_keeps_the_old_fd_and_logs_an_error`.
-pub fn arm_sighup_reopen(log: PathBuf) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut hup = signal(SignalKind::hangup())?;
-    Ok(tokio::spawn(async move {
-        while hup.recv().await.is_some() {
+pub fn arm_rotation_watch(log: PathBuf, interval: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick completes immediately; the log was just opened.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if !rotated_away(&log) {
+                continue;
+            }
             match reopen_stderr(&log) {
-                Ok(()) => tracing::info!("SIGHUP: reopened log {} (#8270)", log.display()),
+                Ok(()) => tracing::info!("reopened rotated log {} (#8270)", log.display()),
                 Err(e) => tracing::error!(
-                    "SIGHUP: could not reopen log {}: {e}; still writing to the previous file (#8270)",
+                    "could not reopen log {}: {e}; still writing to the previous file (#8270)",
                     log.display()
                 ),
             }
         }
-    }))
+    })
 }
 
-/// Arm the SIGHUP reopen for the daemon's own stderr, when it is a log file.
+/// Arm the rotation watch for the daemon's own stderr at the default interval.
 ///
 /// Why: under launchd fd 2 is `StandardErrorPath`; see the module doc.
-/// What: returns the recorded log path, or `None` when fd 2 is not a regular
-/// file or the handler could not be installed (logged). Records the paired
-/// pidfile for [`publish_pidfile`]; writes nothing itself, because a duplicate
-/// daemon that loses the lock race must not overwrite the live daemon's pid.
-/// Test: `sighup_after_a_rename_moves_writes_to_the_new_file`.
+/// What: returns the recorded log path, or `None` (nothing armed) when fd 2 is
+/// not a regular file: a tty, a pipe, or `/dev/null`.
+/// Test: `a_pipe_or_dev_null_stderr_arms_nothing`.
 pub fn arm_for_current_stderr() -> Option<PathBuf> {
+    arm_for_current_stderr_every(DEFAULT_CHECK_INTERVAL)
+}
+
+/// [`arm_for_current_stderr`] with an explicit check interval, for tests.
+///
+/// Test: `a_rename_moves_writes_to_a_new_file_at_the_original_path`,
+/// `a_pipe_or_dev_null_stderr_arms_nothing`.
+pub fn arm_for_current_stderr_every(interval: Duration) -> Option<PathBuf> {
     let log = stderr_file_path()?;
-    match arm_sighup_reopen(log.clone()) {
-        Ok(_task) => {
-            let _ = ARMED_PIDFILE.set(pidfile_for_log(&log));
-            Some(log)
-        }
-        Err(e) => {
-            tracing::warn!("could not install the SIGHUP log-reopen handler: {e} (#8270)");
-            None
-        }
-    }
-}
-
-/// Write this process's pid to the armed pidfile. No-op when nothing is armed.
-///
-/// Why: called once the daemon holds its lock, so the pid newsyslog signals is
-/// always the live daemon's.
-/// Test: `sighup_after_a_rename_moves_writes_to_the_new_file`.
-pub fn publish_pidfile() {
-    let Some(path) = ARMED_PIDFILE.get() else {
-        return;
-    };
-    if let Err(e) = std::fs::write(path, format!("{}\n", std::process::id())) {
-        tracing::warn!(
-            "could not write pidfile {}: {e}; log rotation cannot signal this daemon (#8270)",
-            path.display()
-        );
-    }
-}
-
-/// Remove the armed pidfile if it still names this process.
-///
-/// Why: a stale pidfile would let newsyslog SIGHUP whatever process later
-/// reuses the pid.
-/// Test: `sighup_after_a_rename_moves_writes_to_the_new_file`.
-pub fn retract_pidfile() {
-    let Some(path) = ARMED_PIDFILE.get() else {
-        return;
-    };
-    let ours = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        == Some(std::process::id());
-    if ours {
-        let _ = std::fs::remove_file(path);
-    }
+    arm_rotation_watch(log.clone(), interval);
+    Some(log)
 }

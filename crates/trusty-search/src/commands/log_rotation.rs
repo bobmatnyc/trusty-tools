@@ -6,14 +6,14 @@
 //! `newsyslog(8)` for rotation, but its system config dirs
 //! (`/etc/newsyslog.d/`) require root, so we install a *user-level* newsyslog
 //! config and a daily `LaunchAgent` that runs `newsyslog -r -F -f <config>`.
-//! `-r` lifts newsyslog's "must have root privs" refusal (#8270). After the
-//! rename, newsyslog sends SIGHUP to the pid in the daemon's pidfile, and the
-//! daemon reopens its log path onto fd 2 (`service::log_reopen`). Without that
-//! signal the daemon kept writing to the renamed, later deleted, file.
+//! `-r` lifts newsyslog's "must have root privs" refusal (#8270). newsyslog
+//! signals nobody (`N`): the daemon notices within a minute that its log path
+//! names a new file and reopens it onto fd 2 (`service::log_reopen`). Without
+//! that the daemon kept writing to the renamed, later deleted, file.
 //! What: renders the newsyslog config + rotation LaunchAgent plist, resolves
 //! their on-disk paths, and provides install + presence-check helpers used by
 //! `trusty-search doctor` / `doctor --fix`.
-//! Test: `newsyslog_conf_signals_the_daemon_through_its_pidfile`,
+//! Test: `newsyslog_conf_sends_no_signal_and_names_no_pidfile`,
 //! `rotation_plist_body_invokes_newsyslog`.
 
 #[cfg(target_os = "macos")]
@@ -82,32 +82,45 @@ pub fn rotation_plist_path() -> Result<std::path::PathBuf> {
         .join(format!("{ROTATION_LAUNCHD_LABEL}.plist")))
 }
 
+/// The one newsyslog data line for the given `stderr.log` path.
+///
+/// What: `<logfile> <mode> <count> <size> <when> <flags>` — rotates at
+/// `ROTATION_SIZE_KB`, keeps `ROTATION_KEEP` archives, also rotates daily
+/// (`when = $D0`, midnight) so an idle daemon's log still ages out, compresses
+/// archives (`J`), and signals no process (`N`), so there is no pidfile
+/// column. The daemon detects the rename itself (#8270). newsyslog columns
+/// cannot be quoted, so the path may not contain a space.
+/// Test: `newsyslog_conf_sends_no_signal_and_names_no_pidfile`.
+#[cfg(target_os = "macos")]
+pub fn newsyslog_data_line(stderr_log: &std::path::Path) -> String {
+    format!(
+        "{path}    644  {keep}  {size}  $D0  JN",
+        path = stderr_log.display(),
+        size = ROTATION_SIZE_KB,
+        keep = ROTATION_KEEP,
+    )
+}
+
 /// Render the newsyslog config body for the given `stderr.log` path.
 ///
 /// Why: newsyslog's config is whitespace-delimited columns; building it via a
 /// pure function keeps the format testable and documented in one place.
-/// What: emits a single entry —
-/// `<logfile> <mode> <count> <size> <when> <flags> <pid_file> <sig_num>` —
-/// that rotates at `ROTATION_SIZE_KB`, keeps `ROTATION_KEEP` archives, also
-/// rotates daily (`when = $D0`, midnight) so an idle daemon's log still ages
-/// out, and compresses archives (`J`). The pidfile column names the file the
-/// daemon writes beside its log (`service::log_reopen::pidfile_for_log`), and
-/// `sig_num` `1` is SIGHUP, which makes the daemon reopen its log (#8270).
-/// newsyslog columns cannot be quoted, so neither path may contain a space.
-/// Test: `newsyslog_conf_signals_the_daemon_through_its_pidfile`.
+/// What: a header naming #8270, then [`newsyslog_data_line`]. The header is
+/// part of what `doctor` compares, so a conf written before #8270 (same data
+/// columns, older header) reads as stale and `doctor --fix` rewrites it.
+/// Test: `newsyslog_conf_sends_no_signal_and_names_no_pidfile`,
+/// `installed_matches_rejects_a_stale_install`.
 #[cfg(target_os = "macos")]
 pub fn newsyslog_conf_body(stderr_log: &std::path::Path) -> String {
     format!(
         "# trusty-search log rotation (issues #127, #8270) — managed by `trusty-search doctor --fix`.\n\
-         # Columns: logfile_name  mode  count  size  when  flags  pid_file  sig_num\n\
-         # Rotates at {size} KB or daily (whichever comes first); keeps {keep} archives;\n\
-         # sends SIGHUP ({sig}) so the daemon reopens its log.\n\
-         {path}    644  {keep}  {size}  $D0  J  {pidfile}  {sig}\n",
-        path = stderr_log.display(),
+         # Columns: logfile_name  mode  count  size  when  flags\n\
+         # Rotates at {size} KB or daily (whichever comes first); keeps {keep} archives.\n\
+         # Signals nothing (N): the daemon reopens its log once the path names a new file.\n\
+         {line}\n",
         size = ROTATION_SIZE_KB,
         keep = ROTATION_KEEP,
-        pidfile = crate::service::log_reopen::pidfile_for_log(stderr_log).display(),
-        sig = libc::SIGHUP,
+        line = newsyslog_data_line(stderr_log),
     )
 }
 
@@ -165,32 +178,73 @@ pub fn rotation_plist_body(newsyslog_conf: &std::path::Path) -> String {
     )
 }
 
-/// True when log rotation is already configured for `stderr.log`.
+/// Where `stderr.log` rotation stands, as `doctor` reports it.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RotationStatus {
+    /// The system conf, or both user-level files, match the current form.
+    Configured,
+    /// `/etc/newsyslog.d/trusty-search.conf` exists but has no line in the
+    /// current form (for example, one naming a pidfile). Fixing it needs sudo.
+    SystemConfStale(std::path::PathBuf),
+    /// Nothing installed, or a user-level install from before #8270.
+    NotConfigured,
+}
+
+/// The operator-installed system conf `doctor` also accepts.
+#[cfg(target_os = "macos")]
+pub const SYSTEM_NEWSYSLOG_CONF: &str = "/etc/newsyslog.d/trusty-search.conf";
+
+/// Report whether log rotation is configured for `stderr.log`.
 ///
 /// Why: the doctor check and `--fix` both need a single source of truth for
-/// "is rotation set up?". We treat rotation as configured when *either* a
-/// system `/etc/newsyslog.d/trusty-search.conf` exists (operator installed it
-/// with sudo) *or* our user-level config and plist match what this build
-/// renders. An install from before #8270 (no `-r`, no pidfile) fails every run,
-/// so it counts as unconfigured and `doctor --fix` rewrites it.
-/// What: true if the system config exists, or both user-level files hold
-/// exactly the current rendered bodies.
-/// Test: `installed_matches_rejects_a_stale_install`.
+/// "is rotation set up?". An operator may install a system conf with sudo;
+/// otherwise this tool installs a user-level conf and plist. A user-level
+/// install from before #8270 (no `-r`, or a pidfile and signal) fails or
+/// signals a possibly stale pid, so it counts as unconfigured and
+/// `doctor --fix` rewrites it.
+/// What: a system conf is `Configured` only when one of its data lines has
+/// the columns of [`newsyslog_data_line`], else `SystemConfStale`. Without a
+/// system conf, `Configured` needs both user-level files to hold exactly the
+/// current rendered bodies.
+/// Test: `system_conf_must_match_the_current_form`,
+/// `installed_matches_rejects_a_stale_install`.
 #[cfg(target_os = "macos")]
-pub fn rotation_configured() -> bool {
-    let system = std::path::Path::new("/etc/newsyslog.d/trusty-search.conf");
-    if system.exists() {
-        return true;
-    }
-    let (Ok(log), Ok(conf), Ok(plist)) = (
-        stderr_log_path(),
-        newsyslog_conf_path(),
-        rotation_plist_path(),
-    ) else {
-        return false;
+pub fn rotation_status() -> RotationStatus {
+    let Ok(log) = stderr_log_path() else {
+        return RotationStatus::NotConfigured;
     };
-    installed_matches(&conf, &newsyslog_conf_body(&log))
+    let system = std::path::Path::new(SYSTEM_NEWSYSLOG_CONF);
+    if system.exists() {
+        let text = std::fs::read_to_string(system).unwrap_or_default();
+        return if conf_has_current_line(&text, &log) {
+            RotationStatus::Configured
+        } else {
+            RotationStatus::SystemConfStale(system.to_path_buf())
+        };
+    }
+    let (Ok(conf), Ok(plist)) = (newsyslog_conf_path(), rotation_plist_path()) else {
+        return RotationStatus::NotConfigured;
+    };
+    if installed_matches(&conf, &newsyslog_conf_body(&log))
         && installed_matches(&plist, &rotation_plist_body(&conf))
+    {
+        RotationStatus::Configured
+    } else {
+        RotationStatus::NotConfigured
+    }
+}
+
+/// True when some data line of `conf` has exactly the columns of
+/// [`newsyslog_data_line`] for `log`. Comments, blank lines and spacing are
+/// ignored.
+#[cfg(target_os = "macos")]
+fn conf_has_current_line(conf: &str, log: &std::path::Path) -> bool {
+    let want = newsyslog_data_line(log);
+    let want: Vec<&str> = want.split_whitespace().collect();
+    conf.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| l.split_whitespace().collect::<Vec<_>>() == want)
 }
 
 /// True when `path` exists and holds exactly `expected`.
@@ -293,14 +347,15 @@ mod tests {
         assert!(s.ends_with(".plist"), "{s}");
     }
 
-    /// #8270: the data line must signal the daemon. Columns, in order: log,
-    /// mode, count, size, when, flags, pid_file, sig_num.
+    /// #8270: the data line signals no process and names no pidfile.
+    /// Columns, in order: log, mode, count, size, when, flags.
     ///
-    /// Why: with the old `JN` flags and no pidfile, newsyslog renamed the log
-    /// and signalled nobody, so the daemon kept writing to the renamed file.
+    /// Why: a pidfile can go stale (SIGKILL, an early startup error), and a
+    /// stale pid lets newsyslog SIGHUP an unrelated process once the pid wraps.
+    /// The daemon detects the rename itself, so the conf must send nothing.
     /// Test: this test.
     #[test]
-    fn newsyslog_conf_signals_the_daemon_through_its_pidfile() {
+    fn newsyslog_conf_sends_no_signal_and_names_no_pidfile() {
         let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
         let body = newsyslog_conf_body(log);
         let data: Vec<&str> = body
@@ -317,34 +372,57 @@ mod tests {
                 &ROTATION_KEEP.to_string(),
                 &ROTATION_SIZE_KB.to_string(),
                 "$D0",
-                "J",
-                "/Users/test/Library/Logs/trusty-search/trusty-search.pid",
-                "1",
+                "JN",
             ],
             "{body}"
         );
-        // `N` would suppress the signal; newsyslog needs the pidfile to be an
-        // absolute path in the same directory the daemon writes it to.
-        assert!(!cols[5].contains('N'), "flags must not suppress the signal");
-        assert_eq!(
-            std::path::Path::new(cols[6]),
-            crate::service::log_reopen::pidfile_for_log(log)
-        );
+        assert!(!body.contains(".pid"), "no pidfile: {body}");
     }
 
     /// #8270: a pre-fix install must read as unconfigured so `doctor --fix`
-    /// rewrites it, and a current one as configured.
+    /// rewrites it, and a current one as configured. Both earlier forms count
+    /// as stale: the original #127 conf and the b45c3b74e conf that named a
+    /// pidfile and sent SIGHUP.
     /// Test: this test.
     #[test]
     fn installed_matches_rejects_a_stale_install() {
         let dir = tempfile::tempdir().expect("tempdir");
         let conf = dir.path().join("newsyslog.conf");
         let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
-        assert!(!installed_matches(&conf, &newsyslog_conf_body(log)));
-        std::fs::write(&conf, "/Users/test/stderr.log  644  7  1024  $D0  JN\n").expect("write");
-        assert!(!installed_matches(&conf, &newsyslog_conf_body(log)));
-        std::fs::write(&conf, newsyslog_conf_body(log)).expect("write");
-        assert!(installed_matches(&conf, &newsyslog_conf_body(log)));
+        let current = newsyslog_conf_body(log);
+        assert!(!installed_matches(&conf, &current), "nothing installed");
+        let original_127 = "# trusty-search log rotation (issue #127) — managed by `trusty-search doctor --fix`.\n\
+             # Columns: logfile_name  mode  count  size  when  flags\n\
+             # Rotates at 1024 KB or daily (whichever comes first); keeps 7 archives.\n\
+             /Users/test/Library/Logs/trusty-search/stderr.log    644  7  1024  $D0  JN\n";
+        let signalling =
+            "/Users/test/Library/Logs/trusty-search/stderr.log    644  7  1024  $D0  J  \
+             /Users/test/Library/Logs/trusty-search/trusty-search.pid  1\n";
+        for stale in [original_127, signalling] {
+            std::fs::write(&conf, stale).expect("write");
+            assert!(!installed_matches(&conf, &current), "{stale}");
+        }
+        std::fs::write(&conf, &current).expect("write");
+        assert!(installed_matches(&conf, &current));
+    }
+
+    /// #8270 review finding 4: a system conf counts only in the current form.
+    ///
+    /// Why: any `/etc/newsyslog.d/trusty-search.conf` used to short-circuit
+    /// the check to OK, including one that names the retired pidfile.
+    /// Test: this test.
+    #[test]
+    fn system_conf_must_match_the_current_form() {
+        let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
+        let current =
+            format!("# operator comment\n\n{}\n", newsyslog_data_line(log)).replace("    ", "\t");
+        assert!(conf_has_current_line(&current, log), "{current}");
+        let signalling = "/Users/test/Library/Logs/trusty-search/stderr.log 644 7 1024 $D0 J \
+             /Users/test/Library/Logs/trusty-search/trusty-search.pid 1\n";
+        assert!(!conf_has_current_line(signalling, log));
+        let other_user = newsyslog_data_line(std::path::Path::new("/Users/else/stderr.log"));
+        assert!(!conf_has_current_line(&other_user, log));
+        assert!(!conf_has_current_line("", log));
     }
 
     #[test]
