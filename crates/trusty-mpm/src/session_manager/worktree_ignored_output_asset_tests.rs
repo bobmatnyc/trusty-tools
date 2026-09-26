@@ -98,6 +98,44 @@ async fn a_user_skill_keeps_the_tree() {
     assert!(wt.join(".claude/skills/deploy-check/SKILL.md").exists());
 }
 
+/// 🔴 #8534 final round: a user skill named like build output is still the
+/// ledger's call. `/.claude/skills/*` makes git report `.claude/skills/build/`
+/// itself. Fails at 3165ad29b, which excused it by name before the ledger.
+#[test]
+fn a_user_skill_with_a_disposable_name_keeps_the_tree() {
+    let fx = GitWorktreeFixture::new();
+    ignore_deploy_dirs(&fx);
+    let wt = fx.add_worktree("skill-named-build-8534");
+    put(&wt, ".claude/skills/build/SKILL.md", SKILL_BODY);
+
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect("an unrecorded skill is kept output");
+    assert_eq!(
+        (kept.files, kept.first.as_str()),
+        (1, ".claude/skills/build/")
+    );
+}
+
+/// 🔴 #8534 final round: the same under `.claude/agents/`, where a user's
+/// `dist/` ignore rule makes git report `.claude/agents/dist/`. Fails at
+/// 3165ad29b, which excused it by name before the ledger.
+#[test]
+fn a_user_agent_with_a_disposable_name_keeps_the_tree() {
+    let fx = GitWorktreeFixture::new();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "dist/\n").expect("write info/exclude");
+    let wt = fx.add_worktree("agent-named-dist-8534");
+    put(&wt, ".claude/agents/dist/x.md", AGENT_BODY);
+
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect("an unrecorded agent is kept output");
+    assert_eq!(
+        (kept.files, kept.first.as_str()),
+        (1, ".claude/agents/dist/")
+    );
+}
+
 /// A skill tm's ledger records, unchanged since, does not block removal.
 #[tokio::test]
 async fn a_manifest_named_skill_does_not_block_removal() {

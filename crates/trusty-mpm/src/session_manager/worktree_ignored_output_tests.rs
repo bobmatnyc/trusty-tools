@@ -58,18 +58,19 @@ fn rule_excuses_build_output_and_keeps_run_output() {
     }
 }
 
-/// Critic round 3: framework, deploy and test caches, by last component only.
-/// Fails at 26b7c15ca, which kept each of the `true` rows.
+/// Critic round 3: framework and test caches, by last component only.
+/// Fails at 26b7c15ca, which kept each of the `true` rows. The final round
+/// dropped `.vercel`, `.output` and `.wrangler`: they hold kept files.
 #[test]
 fn tool_caches_added_in_round_3_are_regenerable() {
     for (entry, regenerable) in [
-        (".vercel/", true),
+        (".vercel/", false),
         ("site/.astro/", true),
-        (".output/", true),
+        (".output/", false),
         ("app/.angular/", true),
         (".expo/", true),
         ("docs/.docusaurus/", true),
-        (".wrangler/", true),
+        (".wrangler/", false),
         ("pkg/.dart_tool/", true),
         (".direnv/", true),
         (".hypothesis/", true),
@@ -148,6 +149,22 @@ fn kept_output_is_none_for_build_output_only() {
     std::fs::create_dir_all(wt.join("results")).expect("an empty ignored dir");
 
     assert_eq!(kept_ignored_output(&wt), Ok(None));
+}
+
+/// 🔴 #8534 final round: `.vercel/` holds the pulled environment file, so the
+/// gate keeps it. Fails at 3165ad29b, which excused `.vercel` by name.
+#[test]
+fn a_vercel_dir_holding_an_env_file_keeps_the_tree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("vercel-env");
+    exclude(&fx, ".vercel\n");
+    put(&wt, ".vercel/project.json", "{}");
+    put(&wt, ".vercel/.env.production.local", "API_KEY=x\n");
+
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect(".vercel/ is kept output");
+    assert_eq!((kept.files, kept.first.as_str()), (2, ".vercel/"));
 }
 
 /// 🔴 critic round 2: `build/out.json` under a TRACKED `build/` is run output.

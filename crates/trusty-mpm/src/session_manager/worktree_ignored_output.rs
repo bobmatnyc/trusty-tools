@@ -21,6 +21,9 @@
 //! - it is, or sits inside, a directory a cache tool tagged as its own
 //!   ([`under_cache_dir`]: a `CACHEDIR.TAG` carrying the spec's signature).
 //!
+//! The last two excuses never apply under `.claude/agents/` or
+//! `.claude/skills/`, where only the ledger decides.
+//!
 //! Every other gitignored entry is kept output and blocks removal. Only the
 //! entry's LAST component is matched by name, so `build/out.json` under a
 //! tracked `build/` and a user's `target-analysis/` are kept.
@@ -195,14 +198,21 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// Test: `kept_output_counts_files_in_an_ignored_results_dir`,
 /// `kept_output_is_none_for_build_output_only`,
 /// `kept_output_errors_when_git_cannot_answer`,
-/// `non_ascii_names_are_classified_not_refused`.
+/// `non_ascii_names_are_classified_not_refused`,
+/// `a_user_skill_with_a_disposable_name_keeps_the_tree`,
+/// `a_user_agent_with_a_disposable_name_keeps_the_tree`,
+/// `a_vercel_dir_holding_an_env_file_keeps_the_tree`.
 pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, String> {
     let status = git_stdout(path, IGNORED_STATUS_ARGS)?;
     let mut assets = DeployedAssets::new(path);
     let mut kept: Option<IgnoredOutput> = None;
     for entry in ignored_entries(&status) {
         let bare = entry.trim_end_matches('/');
-        if is_harness_path(bare) || is_regenerable(bare) || under_cache_dir(path, bare) {
+        // #8534 final round: under the deploy directories only a ledger
+        // decides; a user skill named `build/` or `dist/` is not excused.
+        if is_harness_path(bare)
+            || (!is_asset_path(bare) && (is_regenerable(bare) || under_cache_dir(path, bare)))
+        {
             continue;
         }
         let files = count_files(path, bare, &mut assets)?;

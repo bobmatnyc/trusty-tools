@@ -86,14 +86,13 @@ pub(super) const DISPOSABLE_DIR_NAMES: &[&str] = &[
     "coverage",
     ".nyc_output",
     ".terraform",
-    // #8534 critic round 3: framework, deploy and test caches.
-    ".vercel",
+    // #8534 critic round 3: framework and test caches. #8534 final round: not
+    // `.vercel`, `.wrangler` or `.output` — they hold environment files and
+    // deploy output a user keeps.
     ".astro",
-    ".output",
     ".angular",
     ".expo",
     ".docusaurus",
-    ".wrangler",
     ".dart_tool",
     ".direnv",
     ".hypothesis",
