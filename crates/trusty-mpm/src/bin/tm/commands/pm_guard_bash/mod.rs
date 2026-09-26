@@ -63,6 +63,8 @@ mod path_tokens;
 mod persistence;
 // #8439: a read-only dispatch runs only allowlisted command shapes.
 mod read_only_allow;
+// #8567: the `gh` read verbs a read-only dispatch may run.
+mod read_only_gh;
 mod read_only_git;
 mod read_only_lex;
 mod read_only_programs;

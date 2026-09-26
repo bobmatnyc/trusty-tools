@@ -9,9 +9,12 @@
 //! What: [`lex`] turns a command into [`Tok`]s or an `Err` naming what it
 //! refused. Accepted bytes are printable ASCII plus space, tab and newline.
 //! Words are unquoted runs of [`BARE`] bytes, `'…'` spans, and `"…"` spans
-//! with no `$`, backtick, `\` or `!`. Two expansions are recognised so the
-//! caller can confine them: `"$NAME"`/`"${NAME}"` ([`WordKind::Var`]) and a
-//! bare path word led by `/` or `~/` carrying `*`/`?` ([`WordKind::Expanding`]).
+//! with no backtick or `!`. Inside `"…"`, a `\` escape and a `$` the shell
+//! leaves literal are decoded as pattern text and mark the word
+//! [`Word::pattern`] (#8586); any other `$` is an `Err`. Two expansions are
+//! recognised so the caller can confine them: `"$NAME"`/`"${NAME}"`
+//! ([`WordKind::Var`]) and a bare path word led by `/` or `~/` carrying
+//! `*`/`?` ([`WordKind::Expanding`]).
 //! Operators are `|`, `;`/newline, `&&`, and the exact tokens `2>&1` and
 //! `2>/dev/null`; the parser admits `&&` only after a leading `cd <dir>`
 //! (#8578). Everything else — `$`, backtick, `\`, `<`, `>`, a lone `&`, parens,
@@ -19,7 +22,8 @@
 //! start or mid-word — is an `Err`. Every loop iteration consumes at least one
 //! byte, so lexing is linear in the input and always terminates.
 //! Test: `read_only_allow_tests::lexer_refuses_every_byte_outside_its_alphabet`,
-//! `read_only_allow_tests::lexing_terminates_on_arbitrary_bytes`.
+//! `read_only_allow_tests::lexing_terminates_on_arbitrary_bytes`,
+//! `read_only_allow_tests::quoted_rg_grep_patterns_are_pattern_text`.
 
 /// Longest command the rule will read; longer is refused (#8439).
 const MAX_COMMAND_BYTES: usize = 16 * 1024;
@@ -65,6 +69,9 @@ pub(super) struct Word {
     pub(super) bare: bool,
     /// See [`WordKind`].
     pub(super) kind: WordKind,
+    /// #8586: a `"…"` span decoded a `\` escape or a literal `$`; the parser
+    /// admits such a word only as an `rg`/`grep` argument.
+    pub(super) pattern: bool,
 }
 
 impl Word {
@@ -157,6 +164,7 @@ fn word_at(bytes: &[u8], start: usize) -> Result<(Word, usize), String> {
     let mut text = String::new();
     let mut bare = true;
     let mut expands = false;
+    let mut pattern = false;
     let mut j = start;
     while let Some(&b) = bytes.get(j) {
         if delimits(b) {
@@ -164,8 +172,9 @@ fn word_at(bytes: &[u8], start: usize) -> Result<(Word, usize), String> {
         }
         match b {
             b'\'' | b'"' => {
-                let close = quoted_span_end(bytes, j)?;
-                text.push_str(&String::from_utf8_lossy(&bytes[j + 1..close]));
+                let (decoded, close, escaped) = quoted_span(bytes, j)?;
+                text.push_str(&decoded);
+                pattern |= escaped;
                 bare = false;
                 j = close + 1;
             }
@@ -199,6 +208,7 @@ fn word_at(bytes: &[u8], start: usize) -> Result<(Word, usize), String> {
                 text,
                 bare,
                 kind: WordKind::Lit,
+                pattern,
             },
             j,
         ));
@@ -214,28 +224,64 @@ fn word_at(bytes: &[u8], start: usize) -> Result<(Word, usize), String> {
             text,
             bare,
             kind: WordKind::Expanding,
+            pattern: false,
         },
         j,
     ))
 }
 
-/// The index of the quote closing the span opened at `open`.
+/// The decoded text of the quoted span opened at `open`, the index of its
+/// closing quote, and whether it decoded a `\` escape or a literal `$`.
 ///
-/// What: a `'…'` span may hold any accepted byte but a newline; a `"…"` span
-/// also refuses `$`, backtick, `\` and `!`, each of which is live inside double
-/// quotes in bash or zsh. An unclosed span is an `Err`.
-fn quoted_span_end(bytes: &[u8], open: usize) -> Result<usize, String> {
+/// Why (#8586): a read-only agent's `rg "fn \w+\("` or `grep "^\[x\]$"` was
+/// refused because the span refused every `\` and `$`, though bash and zsh
+/// pass both to the program as text there.
+/// What: a `'…'` span may hold any accepted byte but a newline, verbatim. A
+/// `"…"` span refuses backtick and `!`, which are live there. It decodes `\X`
+/// as the shell does — `X` alone for `X` in `` $`"\ ``, `\X` otherwise — so
+/// `\"` never closes the span; `\!` and `\` before a newline are refused. A
+/// `$` is kept only before the closing quote, `|` or `)`, where bash, zsh
+/// and sh all leave it literal; any other `$` (`$(`, `${`, `$NAME`) is an
+/// `Err`. An unclosed span is an `Err`.
+/// Test: `read_only_allow_tests::quoted_rg_grep_patterns_are_pattern_text`,
+/// `read_only_allow_tests::shell_syntax_around_quoted_patterns_is_refused`.
+fn quoted_span(bytes: &[u8], open: usize) -> Result<(String, usize, bool), String> {
     let quote = bytes[open];
-    for (k, &b) in bytes.iter().enumerate().skip(open + 1) {
+    let mut text = String::new();
+    let mut pattern = false;
+    let mut k = open + 1;
+    while let Some(&b) = bytes.get(k) {
         if b == quote {
-            return Ok(k);
+            return Ok((text, k, pattern));
         }
         if b == b'\n' {
             return Err("a newline inside quotes".into());
         }
-        if quote == b'"' && matches!(b, b'$' | b'`' | b'\\' | b'!') {
-            return Err(format!("`{}` inside double quotes", char::from(b)));
+        if quote == b'"' {
+            match b {
+                b'`' | b'!' => return Err(format!("`{}` inside double quotes", char::from(b))),
+                // #8586: `\X` is two bytes of pattern text; `\"` never closes.
+                b'\\' => {
+                    let next = *bytes.get(k + 1).ok_or("an unclosed quote")?;
+                    if matches!(next, b'\n' | b'!') {
+                        return Err("a `\\` before a newline or `!` inside double quotes".into());
+                    }
+                    if !matches!(next, b'$' | b'`' | b'"' | b'\\') {
+                        text.push('\\');
+                    }
+                    text.push(char::from(next));
+                    pattern = true;
+                    k += 2;
+                    continue;
+                }
+                // #8586: a regex anchor `$` the shell leaves literal.
+                b'$' if matches!(bytes.get(k + 1), Some(b'"' | b'|' | b')')) => pattern = true,
+                b'$' => return Err("a `$` expansion inside double quotes".into()),
+                _ => {}
+            }
         }
+        text.push(char::from(b));
+        k += 1;
     }
     Err("an unclosed quote".into())
 }
@@ -264,6 +310,7 @@ fn var_word_at(bytes: &[u8], start: usize) -> Option<(Word, usize)> {
             text,
             bare: false,
             kind: WordKind::Var(name),
+            pattern: false,
         },
         end,
     ))
