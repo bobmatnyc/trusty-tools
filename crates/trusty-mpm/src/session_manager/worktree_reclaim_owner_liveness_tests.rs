@@ -313,6 +313,7 @@ fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,
@@ -347,6 +348,7 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,
@@ -394,6 +396,7 @@ async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,

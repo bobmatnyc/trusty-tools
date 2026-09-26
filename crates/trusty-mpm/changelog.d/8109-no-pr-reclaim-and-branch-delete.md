@@ -9,6 +9,8 @@ Fixed
 - A worktree the merged-PR sweep reclaims now has its local branch deleted
   too, only when its content is proven landed, its tip is still the exact
   commit that proof judged, and no other worktree (the main checkout
-  included) has it checked out. A commit made after the proof keeps the
-  branch. Each deletion or kept branch is logged. The landed-content proof
+  included) has it checked out. The deletion is one compare-and-delete
+  (`git update-ref -d` at the proven commit), so a commit made after the
+  proof keeps the branch. A failed branch lookup keeps the branch rather
+  than reporting it gone. Each deletion or kept branch is logged. The landed-content proof
   (up to 40 s) now runs once per candidate before deletion, not twice.

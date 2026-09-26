@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 // admission gate 5 asks when no pull request carries the branch's name.
 use super::worktree_landing_refresh::refresh_landing_refs;
 use super::worktree_reclaim_landed::{
-    landing_recheck, reclaim_landed_content, reclaim_landed_proof,
+    ReclaimProof, landing_recheck, reclaim_landed_content, reclaim_landed_proof,
 };
 
 use super::worktree_reclaim::{
@@ -500,6 +500,12 @@ pub(crate) struct FreshProbes<'a> {
     /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
     /// An empty slice is the pre-#7504 behaviour — a no-op gate.
     pub launched_from: &'a [PathBuf],
+    /// Take a candidate's landed proof before its deletion (#8109).
+    ///
+    /// Production passes [`reclaim_landed_proof`]. A probe so a test can change
+    /// the tree after the proof returns and show the branch deletion still
+    /// judges the SHA the proof judged.
+    pub prove: &'a dyn Fn(&Path) -> ReclaimProof,
 }
 
 /// Gates 2, 4b and 4c re-asked against a claim set read immediately before the
@@ -722,7 +728,7 @@ pub(crate) fn reclaim_with_probes(
         // #8109: the `merge-tree` proof, taken once per candidate. The re-check
         // asks it for a no-PR candidate; the own-PR rule and the branch
         // deletion read that same answer, and the SHA it judged.
-        let once = OnceProof::new(&path, &reclaim_landed_proof);
+        let once = OnceProof::new(&path, probes.prove);
         let ask = |p: &Path| once.admission(p);
         // #7889: the survey offered gate 5's landed-content admission, so the
         // re-check re-asks it for a candidate no pull request carries.
@@ -876,6 +882,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             agent_state,
             keep_list,
             launched_from,
+            prove: &reclaim_landed_proof,
         },
         mode,
         adopted,

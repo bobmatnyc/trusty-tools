@@ -27,7 +27,7 @@ use crate::core::worktree_landed_content::{LandedContent, LandingAdmission};
 use super::worktree_reclaim::BranchPrState;
 use super::worktree_reclaim_landed::{LandedContentProbe, PUBLISHED_BASE, ReclaimProof};
 use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
-use super::worktree_safety::git_stdout;
+use super::worktree_safety::{git_command, git_stdout};
 
 /// Re-judge a reclaimable survey verdict for a branch with no merged pull
 /// request of its own (#8109).
@@ -119,7 +119,7 @@ fn describe(state: &BranchPrState) -> String {
 /// What [`delete_reclaimed_branch`] did with a reclaimed tree's branch (#8109).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BranchCleanup {
-    /// `git branch -D` removed it.
+    /// The compare-and-delete at the proven `HEAD` removed it.
     Deleted,
     /// Left in place, and why.
     Kept(String),
@@ -131,19 +131,21 @@ pub(crate) enum BranchCleanup {
 /// Delete a reclaimed worktree's branch, only after its tree is gone and only
 /// on the landed proof (#8109).
 ///
-/// Why: the 2026-09-16 reclaim removed the tree and left `…-wt` behind. `-D`
-/// is needed because a squash merge leaves the branch looking unmerged to git,
-/// so `-d` proves nothing; it is safe only on the `merge-tree` proof, which the
+/// Why: the 2026-09-16 reclaim removed the tree and left `…-wt` behind. A
+/// squash merge leaves the branch looking unmerged to git, so `branch -d`
+/// proves nothing; deletion is safe only on the `merge-tree` proof, which the
 /// caller took before the removal and whose judged `HEAD` it hands in as
 /// `proven_head` ([`ReclaimProof::head`]).
 /// What: keeps the branch when the worktree listing cannot be read or names no
-/// tree, when any tree — the main checkout included — has it checked out
-/// ([`holder_of`]), or when its tip is no longer `proven_head`. Otherwise
-/// `git branch -D <branch>` in `repo_root`, which git itself also refuses for
-/// a checked-out branch.
+/// tree, or when any tree — the main checkout included — has it checked out
+/// ([`holder_of`]). A quiet miss on the ref is [`BranchCleanup::Absent`]; any
+/// other lookup failure keeps it. Then one compare-and-delete,
+/// `git update-ref -d refs/heads/<branch> <proven_head>`, which git refuses
+/// unless the tip is still `proven_head` — a moved tip keeps the branch.
 /// Test: `worktree_8109_a_reclaimed_landed_worktree_loses_its_branch`,
 /// `worktree_8109_a_branch_checked_out_elsewhere_is_kept`,
-/// `worktree_8109_a_branch_that_moved_after_the_proof_is_kept`.
+/// `worktree_8109_a_branch_that_moved_after_the_proof_is_kept`,
+/// `worktree_8109_a_failed_compare_and_delete_keeps_the_branch`.
 pub(crate) fn delete_reclaimed_branch(
     repo_root: &Path,
     branch: &str,
@@ -161,19 +163,39 @@ pub(crate) fn delete_reclaimed_branch(
         return BranchCleanup::Kept(kept_branch(branch, holder));
     }
     let tip_ref = format!("refs/heads/{branch}");
-    let Ok(tip) = git_stdout(repo_root, &["rev-parse", "--verify", "--quiet", &tip_ref]) else {
-        return BranchCleanup::Absent;
-    };
-    if !tip.trim().eq_ignore_ascii_case(proven_head.trim()) {
-        return BranchCleanup::Kept(format!(
-            "its tip moved from the proven `{}` to `{}`",
-            proven_head.trim(),
-            tip.trim()
-        ));
+    // #8109 critic: only a quiet miss is `Absent`; every other failure keeps.
+    let lookup = git_command(repo_root, &["rev-parse", "--verify", "--quiet", &tip_ref]).output();
+    match lookup {
+        Err(e) => return BranchCleanup::Kept(format!("the tip lookup could not run: {e}")),
+        Ok(out) if !out.status.success() => {
+            if out.status.code() == Some(1) && out.stdout.is_empty() && out.stderr.is_empty() {
+                return BranchCleanup::Absent;
+            }
+            return BranchCleanup::Kept(format!(
+                "the tip lookup failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(_) => {}
     }
-    match git_stdout(repo_root, &["branch", "-D", branch]) {
-        Ok(_) => BranchCleanup::Deleted,
-        Err(e) => BranchCleanup::Kept(e),
+    // #8109 critic: compare-and-delete in one step, so the tip cannot move
+    // between the comparison and the deletion.
+    let proven = proven_head.trim();
+    match git_stdout(repo_root, &["update-ref", "-d", &tip_ref, proven]) {
+        Ok(_) => {
+            // `branch -D` also drops the branch's config section; best-effort,
+            // since most reclaimed branches have none.
+            let section = format!("branch.{branch}");
+            if let Err(e) = git_stdout(repo_root, &["config", "--remove-section", &section]) {
+                tracing::debug!(branch, "worktree-reclaim: no branch config removed — {e}");
+            }
+            BranchCleanup::Deleted
+        }
+        Err(e) => BranchCleanup::Kept(format!(
+            "the compare-and-delete at the proven `{proven}` was refused — its tip moved, or \
+             the ref could not be locked: {e}"
+        )),
     }
 }
 

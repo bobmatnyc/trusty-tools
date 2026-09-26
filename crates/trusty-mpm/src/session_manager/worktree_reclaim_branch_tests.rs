@@ -17,7 +17,7 @@ use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWork
 use crate::session_manager::worktree_reclaim::{
     KeepList, LiveClaims, PrIndex, ReclaimMode, ReclaimOutcome,
 };
-use crate::session_manager::worktree_reclaim_landed::reclaim_landed_content_with;
+use crate::session_manager::worktree_reclaim_landed::{ReclaimProof, reclaim_landed_proof};
 use crate::session_manager::worktree_reclaim_pr_match::worktree_reclaim_pr_match_tests::FakeProbe;
 use crate::session_manager::worktree_reclaim_pr_match::{MergedPrHead, resolve_with_index};
 use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_with_probes};
@@ -43,9 +43,19 @@ fn failed_index(_: &Path) -> PrIndex {
 
 /// One destructive `--merged-prs --force` pass over the fixture.
 fn reclaim(fx: &GitWorktreeFixture, index_for: &dyn Fn(&Path) -> PrIndex) -> ReclaimOutcome {
+    reclaim_proving(fx, index_for, &reclaim_landed_proof)
+}
+
+/// [`reclaim`], with the pre-delete landed proof injected.
+fn reclaim_proving(
+    fx: &GitWorktreeFixture,
+    index_for: &dyn Fn(&Path) -> PrIndex,
+    prove: &dyn Fn(&Path) -> ReclaimProof,
+) -> ReclaimOutcome {
     reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -201,10 +211,51 @@ fn worktree_8109_a_branch_that_moved_after_the_proof_is_kept() {
         BranchCleanup::Kept(why) if why.contains("moved")
     ));
     assert!(branch_exists(&fx.repo, "wt/moved-8109"));
+    // A real move: proven at one commit, advanced to another. The
+    // compare-and-delete refuses it and the tip stays where it moved to.
+    let proven = git(&fx.repo, &["rev-parse", "wt/moved-8109"]);
+    let tree = git(&fx.repo, &["rev-parse", "wt/moved-8109^{tree}"]);
+    let moved = git(
+        &fx.repo,
+        &["commit-tree", &tree, "-p", &proven, "-m", "moved"],
+    );
+    git(
+        &fx.repo,
+        &["update-ref", "refs/heads/wt/moved-8109", &moved],
+    );
+    assert!(matches!(
+        delete_reclaimed_branch(&fx.repo, "wt/moved-8109", &proven),
+        BranchCleanup::Kept(why) if why.contains("moved")
+    ));
+    assert_eq!(git(&fx.repo, &["rev-parse", "wt/moved-8109"]), moved);
     assert_eq!(
         delete_reclaimed_branch(&fx.repo, "wt/never-8109", stale),
         BranchCleanup::Absent
     );
+}
+
+/// #8109 critic: a compare-and-delete git refuses for any reason but a moved
+/// tip keeps the branch, and is never reported `Absent` or `Deleted`.
+#[test]
+fn worktree_8109_a_failed_compare_and_delete_keeps_the_branch() {
+    let fx = GitWorktreeFixture::new();
+    git(&fx.repo, &["branch", "wt/locked-8109"]);
+    let proven = git(&fx.repo, &["rev-parse", "wt/locked-8109"]);
+    // Another writer holds the ref's lock.
+    let refs = PathBuf::from(git(&fx.repo, &["rev-parse", "--git-common-dir"]));
+    let refs = if refs.is_absolute() {
+        refs
+    } else {
+        fx.repo.join(refs)
+    };
+    let lock = refs.join("refs/heads/wt/locked-8109.lock");
+    std::fs::write(&lock, "").expect("lock");
+    match delete_reclaimed_branch(&fx.repo, "wt/locked-8109", &proven) {
+        BranchCleanup::Kept(why) => assert!(why.contains("compare-and-delete"), "{why}"),
+        other => panic!("a locked ref was not kept: {other:?}"),
+    }
+    std::fs::remove_file(&lock).expect("unlock");
+    assert!(branch_exists(&fx.repo, "wt/locked-8109"));
 }
 
 /// 🔴 #8109: the incident's own shape. The branch-name lookup finds nothing,
@@ -287,46 +338,31 @@ fn merged_own_pr(branch: &'static str) -> impl Fn(&Path) -> PrIndex {
 /// the landed proof judged. A commit made after the proof returned is not
 /// proven, so the branch holding it is kept.
 ///
-/// Fails when the deletion's SHA is re-read from `HEAD` after the proof, as at
-/// b5e2e1c77: the tip then equals the unproven commit and `-D` deletes it.
+/// Drives the real sweep. Fails when the sweep re-reads `HEAD` after the proof,
+/// as at b5e2e1c77 (the tip then equals the unproven commit and the branch is
+/// deleted), or when it takes a second proof.
 #[test]
 fn worktree_8109_a_commit_after_the_proof_keeps_the_branch() {
     let fx = GitWorktreeFixture::new();
     let wt = landed(&fx, "late-8109");
     let judged = git(&wt, &["rev-parse", "HEAD"]);
-    let on_base = |_: &Path| -> LandingAdmission {
-        LandedContent::Landed {
-            base: "origin/main".to_string(),
-            base_sha: "d".repeat(40),
-            landed_at: None,
-        }
-        .into()
-    };
-    // The proof returns, THEN a commit lands in the tree.
+    // The real proof returns, THEN a commit lands in the tree.
     let taken = std::cell::Cell::new(0);
     let prove = |p: &Path| {
         taken.set(taken.get() + 1);
-        let proof = reclaim_landed_content_with(p, &on_base);
+        let proof = reclaim_landed_proof(p);
         GitWorktreeFixture::commit_unpushed(p);
         proof
     };
-    let once = OnceProof::new(&wt, &prove);
-    // The re-check's ask and the deletion's read share one proof.
-    assert!(once.admission(&wt).admits());
-    let proof = deletion_proof(&BranchPrState::NoPr, &once).expect("a landed proof admits");
-    assert_eq!(taken.get(), 1, "the proof was taken more than once");
-    let late = git(&wt, &["rev-parse", "HEAD"]);
-    assert_ne!(late, judged, "premise: a commit landed after the proof");
-    assert_eq!(proof.head.as_deref(), Some(judged.as_str()));
-    // The sweep removes the tree before it deletes the branch.
-    let wt_arg = wt.to_str().expect("utf8");
-    git(&fx.repo, &["worktree", "remove", "--force", wt_arg]);
-    cleanup_reclaimed_branch(&fx.repo, &wt, Some("wt/late-8109"), &proof);
+    let out = reclaim_proving(&fx, &no_pr_index, &prove);
+    assert_eq!(taken.get(), 1, "the sweep took more than one proof");
+    assert_eq!(out.removed, vec![wt.clone()], "{out:?}");
     assert!(
         branch_exists(&fx.repo, "wt/late-8109"),
         "a branch holding a commit the proof never judged was deleted"
     );
-    assert_eq!(git(&fx.repo, &["rev-parse", "wt/late-8109"]), late);
+    let tip = git(&fx.repo, &["rev-parse", "wt/late-8109"]);
+    assert_ne!(tip, judged, "premise: the late commit is the branch tip");
 }
 
 /// #8109: a tree whose OWN-name pull request merged is reclaimed without the
