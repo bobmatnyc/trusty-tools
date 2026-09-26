@@ -88,6 +88,7 @@ impl UsearchStore {
     /// Test: see the module docs.
     pub async fn requantize(&self, target: VectorQuant, dry_run: bool) -> Result<RequantizeReport> {
         let mutation_guard = self.save_lock.lock().await;
+        self.refuse_if_closed("requantize")?;
         let snapshot_path = self.hnsw_path.read().await.clone();
         let bytes_before = snapshot_path
             .as_deref()

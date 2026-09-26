@@ -26,6 +26,7 @@ use super::usearch_store::{
 impl VectorStore for UsearchStore {
     async fn upsert(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
+        self.refuse_if_closed("upsert")?;
         if embedding.len() != self.dim {
             return Err(anyhow!(
                 "embedding dim mismatch: got {}, expected {}",
@@ -85,6 +86,8 @@ impl VectorStore for UsearchStore {
 
         let matches = {
             let index = self.index.read().await;
+            // #8232: checked under the read lock the close's reset waits on.
+            self.refuse_if_closed("search")?;
             index
                 .search(query, top_k)
                 .map_err(|e| anyhow!("usearch search failed: {e}"))?
@@ -149,6 +152,7 @@ impl VectorStore for UsearchStore {
         }
 
         let index = self.index.read().await;
+        self.refuse_if_closed("search")?;
         let key_to_id = self.key_to_id.read().await;
         // `key_to_id` resolves to chunk ids, not bare file paths — use
         // `matches_chunk_id` (see `path_match` module docs for why the
@@ -178,6 +182,7 @@ impl VectorStore for UsearchStore {
 
     async fn remove(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
+        self.refuse_if_closed("remove")?;
         // Promote view → mutable on first write. No-op when already mutable.
         self.ensure_mutable().await?;
         let key = {
@@ -215,7 +220,9 @@ impl VectorStore for UsearchStore {
     }
 
     async fn len(&self) -> Result<usize> {
-        Ok(self.index.read().await.size())
+        let index = self.index.read().await;
+        self.refuse_if_closed("len")?;
+        Ok(index.size())
     }
 
     /// Issue #2984 Phase 1 HIGH finding 3: single-id membership check backed
@@ -354,6 +361,7 @@ impl VectorStore for UsearchStore {
     /// per-item isolation path.
     async fn upsert_batch(&self, items: &[(String, Vec<f32>)]) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
+        self.refuse_if_closed("upsert")?;
         if items.is_empty() {
             return Ok(());
         }
@@ -540,6 +548,12 @@ impl VectorStore for UsearchStore {
             failed.len()
         );
         Ok(())
+    }
+
+    /// See [`VectorStore::close`]; delegates to
+    /// [`UsearchStore::close_and_unmap`] (#8167, #8232).
+    async fn close(&self) -> Result<()> {
+        self.close_and_unmap().await
     }
 
     /// See [`VectorStore::demote_to_view`]; delegates to

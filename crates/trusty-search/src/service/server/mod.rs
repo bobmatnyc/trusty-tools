@@ -14,6 +14,8 @@
 mod admin;
 mod components;
 mod contrib_graph;
+// #8167/#8232: a delete closes the index's redb and HNSW files first.
+mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
@@ -110,6 +112,9 @@ mod tests_8148;
 // #8134: vectors restored over an empty corpus never register as ready.
 #[cfg(test)]
 mod tests_8134;
+// #8167: a delete releases the index's files while a handle clone survives.
+#[cfg(test)]
+mod tests_8167;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
