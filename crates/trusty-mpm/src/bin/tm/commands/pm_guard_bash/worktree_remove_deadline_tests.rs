@@ -53,6 +53,7 @@ impl WorktreeRemovalProbe for SlowProbe {
             trusty_mpm::core::worktree_landed_history::ContentOnBase::Residual {
                 paths: vec!["x".into()],
                 searched: 0,
+                candidates: 0,
             },
         )
     }

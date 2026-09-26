@@ -159,7 +159,9 @@ fn a_branch_only_partly_landed_is_not_landed() {
     commit_files(&wt, &[("unlanded.txt", "never pushed\n")], "unlanded part");
 
     match content_on_base(&wt, "origin/main") {
-        Ok(ContentOnBase::Conflicted { paths, searched }) => {
+        Ok(ContentOnBase::Conflicted {
+            paths, searched, ..
+        }) => {
             assert!(paths.contains(&"README.md".to_string()), "{paths:?}");
             assert!(searched >= 1, "the squash commit must have been tried");
         }
@@ -195,6 +197,7 @@ fn the_description_names_the_probe_result() {
     let conflicted = ContentOnBase::Conflicted {
         paths: (1..=7).map(|i| format!("f{i}.rs")).collect(),
         searched: 3,
+        candidates: 3,
     };
     let text = conflicted.describe("origin/main");
     assert!(text.contains("conflicts in 7 file(s)"), "{text}");
@@ -202,9 +205,115 @@ fn the_description_names_the_probe_result() {
         text.contains("`f1.rs`") && text.contains("and 2 more"),
         "{text}"
     );
-    assert!(text.contains("3 commit(s)"), "{text}");
+    assert!(text.contains("none of the 3 commit(s)"), "{text}");
+    // #8633 critic round: a capped walk must not read as exhaustive.
+    let capped = ContentOnBase::Residual {
+        paths: vec!["f.rs".into()],
+        searched: 24,
+        candidates: 30,
+    };
+    let text = capped.describe("origin/main");
+    assert!(text.contains("the oldest 24 of 30 commit(s)"), "{text}");
+    assert!(text.contains("the newer 6 were not searched"), "{text}");
     let landed = ContentOnBase::Landed {
         at: Some("abc123".into()),
     };
     assert!(landed.describe("origin/main").contains("`abc123`"));
+}
+
+/// A ten-line file whose first and last lines are `first` and `last`; the
+/// eight lines between never change, so edits to the two ends merge apart.
+fn ten_lines(first: &str, last: &str) -> String {
+    format!("{first}\n2\n3\n4\n5\n6\n7\n8\n9\n{last}\n")
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 critic round): after the squash, an UNPUSHED
+/// branch commit reverts part of what the squash carried, and `main` then
+/// edits another line so the tip merge conflicts. Merging `HEAD` into the
+/// squash comes out empty — relative to the fork the revert changes nothing —
+/// but the revert is on no remote. Not landed.
+///
+/// Fails against a history walk that trusts the forward merge alone.
+#[test]
+fn a_post_squash_partial_revert_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("revert");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "d"))], "S");
+    squash_onto_main(&fx, "session/revert");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "T: revert line 10");
+    commit_files(
+        &fx.repo,
+        &[("f.txt", &ten_lines("e", "d"))],
+        "main edits line 1",
+    );
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+
+    match content_on_base(&wt, "origin/main") {
+        Ok(ContentOnBase::Conflicted {
+            paths, searched, ..
+        }) => {
+            assert_eq!(paths, vec!["f.txt".to_string()]);
+            assert_eq!(searched, 2, "the squash and the later edit were tried");
+        }
+        other => panic!("a reverted squash change must not read as landed: {other:?}"),
+    }
+    assert!(!landed_content_verdict(&wt, BOUND).is_landed());
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 critic round): after the squash, an UNPUSHED
+/// branch commit deletes a file the squash added — the same blind spot as the
+/// partial revert, since relative to the fork the deletion is a no-op.
+#[test]
+fn a_post_squash_deletion_of_a_squashed_file_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("delete");
+    commit_files(
+        &wt,
+        &[("README.md", "branch\n"), ("added.txt", "new\n")],
+        "S",
+    );
+    squash_onto_main(&fx, "session/delete");
+    git(&wt, &["rm", "-q", "added.txt"]);
+    git(&wt, &["commit", "-m", "T: delete added.txt"]);
+    edit_over_on_main_and_push(&fx, &["README.md"]);
+    git(&wt, &["fetch", "origin"]);
+
+    match content_on_base(&wt, "origin/main") {
+        Ok(ContentOnBase::Conflicted { paths, .. }) => {
+            assert_eq!(paths, vec!["README.md".to_string()]);
+        }
+        other => panic!("a deleted squash file must not read as landed: {other:?}"),
+    }
+    assert!(!landed_content_verdict(&wt, BOUND).is_landed());
+}
+
+/// #8633 critic round: the reverse check reads the landing commit's patch
+/// against its FIRST parent, so content landed by a MERGE commit — of a
+/// rebased copy of this branch, after other work on `main`, and edited over
+/// afterwards — is still landed at that merge commit.
+#[test]
+fn content_landed_by_a_merge_commit_edited_over_on_main_is_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("merged");
+    commit_files(&wt, &[("f.txt", &ten_lines("a", "d"))], "branch work");
+    git(&fx.repo, &["switch", "-q", "-c", "pr"]);
+    git(&fx.repo, &["cherry-pick", "session/merged"]);
+    git(&fx.repo, &["commit", "--amend", "-m", "rebased copy"]);
+    git(&fx.repo, &["switch", "-q", "main"]);
+    commit_files(&fx.repo, &[("other.txt", "main work\n")], "main work");
+    git(&fx.repo, &["merge", "--no-ff", "-m", "merge (#2)", "pr"]);
+    let merge = git(&fx.repo, &["rev-parse", "HEAD"]);
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "z"))], "later edit");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed { at: Some(merge) })
+    );
 }

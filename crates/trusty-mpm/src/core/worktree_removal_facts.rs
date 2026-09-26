@@ -951,6 +951,7 @@ mod tests {
             Ok(ContentOnBase::Residual {
                 paths: vec!["x".into()],
                 searched: 0,
+                candidates: 0,
             })
         }
     }

@@ -285,16 +285,22 @@ the guard will establish every precondition itself.
      ask `core::worktree_landed_history::content_on_base`: when the tip merge
      conflicts or leaves residue, it merges HEAD into each first-parent base
      commit since the fork point that touches a file HEAD changed (oldest
-     first, capped), and an empty merge into any of them admits and names
-     that commit. This is still content, never ancestry: the same empty-merge
-     test decides, only against commits that are already on the remote. A
-     branch holding any change no single base commit contains — a different
-     version of the change, or a later commit the squash never carried — is
-     not admitted. A conflict is told apart from a git error by the tree id
-     `merge-tree` prints first; a git error (it also exits 1 for a ref it
-     cannot merge) stays undeterminable and quotes git's stderr. Every
-     refusal names the conflicted or residual files and how many base
-     commits were searched.
+     first, capped). A candidate `M` admits only when BOTH directions are
+     empty: merging HEAD into `M` changes no file, and applying `M`'s own
+     patch (against its first parent) onto HEAD changes no file. The first
+     proves HEAD's changes since the fork are all in `M`; it cannot see a
+     later branch commit that takes part of `M` back — a revert to the fork's
+     version, or the deletion of a file `M` added — because relative to the
+     fork that commit changes nothing. The second catches exactly that. This
+     is still content, never ancestry, judged only against commits already on
+     the remote. A branch holding a different version of the change, a later
+     commit the squash never carried, or a later commit that undid part of
+     the squash is not admitted. A conflict is told apart from a git error by
+     the tree id `merge-tree` prints first; a git error (it also exits 1 for a
+     ref it cannot merge) stays undeterminable and quotes git's stderr, and
+     any error in either direction refuses. Every refusal names the
+     conflicted or residual files and how many base commits were searched —
+     "the oldest N of M" when the cap cut the search short.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from
