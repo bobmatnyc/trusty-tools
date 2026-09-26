@@ -14,7 +14,12 @@
 //!   2. a hold label (`do-not-merge*`, `hold`)
 //!   3. `reviewDecision: CHANGES_REQUESTED`
 //!   4. an unresolved `code-critic` BLOCK in the PR comments
-//!   5. a required status context missing, pending, or not `SUCCESS` on the
+//!   5. `mergeable: CONFLICTING` or `mergeStateStatus: DIRTY` — a real
+//!      conflict GitHub already detected; `UNKNOWN` on either field, or
+//!      either field missing from the payload, is pending (GitHub has not
+//!      finished computing it, or the response shape changed) and NEVER
+//!      reads as mergeable (#8670)
+//!   6. a required status context missing, pending, or not `SUCCESS` on the
 //!      head SHA — pending while any run has no result, else judged on its
 //!      latest run (#8638)
 //!
@@ -93,6 +98,19 @@ struct PrView {
     #[serde(default)]
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    /// `MergeableState`: `MERGEABLE`, `CONFLICTING`, `UNKNOWN`, or absent.
+    ///
+    /// Why (#8670): never requesting this field is how queue-check reported
+    /// MERGEABLE for a PR GitHub itself already marked CONFLICTING.
+    /// `CONFLICTING` lives HERE, never in `mergeStateStatus` — the two enums
+    /// are disjoint, mirroring `tm pr merge`'s `conflict_field` (#6808).
+    #[serde(default)]
+    mergeable: Option<String>,
+    /// `MergeStateStatus`: `DIRTY`, `UNKNOWN`, `BLOCKED`, `BEHIND`,
+    /// `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, or absent. `DIRTY` is the conflict.
+    #[serde(default)]
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
     #[serde(default)]
     #[serde(rename = "statusCheckRollup")]
     rollup: Vec<RollupEntry>,
@@ -114,7 +132,12 @@ struct PrView {
 /// `queue_duplicate_success_then_failure_is_blocked`,
 /// `queue_duplicate_success_then_running_is_pending`,
 /// `queue_duplicate_success_then_queued_is_pending`,
-/// `queue_check_and_status_same_name_both_required`.
+/// `queue_check_and_status_same_name_both_required`,
+/// `queue_mergeable_conflicting_is_blocked`, `queue_merge_state_dirty_is_blocked`,
+/// `queue_mergeable_unknown_is_pending`, `queue_merge_state_unknown_is_pending`,
+/// `queue_mergeable_field_missing_is_pending`,
+/// `queue_merge_state_field_missing_is_pending`,
+/// `queue_mergeable_clean_happy_path_is_admitted`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -131,6 +154,9 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     }
     if latest_critic_verdict(&view.comments) == Some(CriticVerdict::Block) {
         return Some("unresolved code-critic BLOCK in the PR comments".to_string());
+    }
+    if let Some(reason) = mergeability_reason(view) {
+        return Some(reason);
     }
     for context in required {
         // #8638: the latest run decides, never the first listed, and a
@@ -160,6 +186,61 @@ fn is_hold_label(name: &str) -> bool {
     HOLD_LABELS.iter().any(|h| {
         lower == *h || lower.starts_with(&format!("{h}/")) || lower.starts_with(&format!("{h}:"))
     })
+}
+
+/// Whether GitHub's own `mergeable`/`mergeStateStatus` fields stop this PR.
+///
+/// Why (#8670): queue-check never requested either field, so a PR GitHub
+/// already marked CONFLICTING or DIRTY still reported MERGEABLE — a caller
+/// trusting queue-check alone could attempt, and waste, a doomed merge. `tm
+/// pr merge`'s own `conflict_field` (#6808) is the model for reading the
+/// conflict: `CONFLICTING` lives in `mergeable`, `DIRTY` in
+/// `mergeStateStatus`, and the two enums are disjoint.
+/// What: a real conflict returns a reason naming the field. `UNKNOWN` on
+/// either field, or either field absent from the payload (an unparseable
+/// shape or a truncated response), also returns a reason — GitHub has not
+/// finished computing mergeability, or the field never arrived — so both
+/// fail CLOSED rather than defaulting to mergeable. Only `mergeable:
+/// MERGEABLE` together with `mergeStateStatus` outside `{DIRTY, UNKNOWN}`
+/// (e.g. `CLEAN`) returns `None`.
+/// Test: `queue_mergeable_conflicting_is_blocked`,
+/// `queue_merge_state_dirty_is_blocked`, `queue_mergeable_unknown_is_pending`,
+/// `queue_merge_state_unknown_is_pending`,
+/// `queue_mergeable_field_missing_is_pending`,
+/// `queue_merge_state_field_missing_is_pending`,
+/// `queue_mergeable_clean_happy_path_is_admitted`.
+fn mergeability_reason(view: &PrView) -> Option<String> {
+    let mergeable = view.mergeable.as_deref();
+    let merge_state = view.merge_state_status.as_deref();
+
+    if mergeable.is_some_and(|m| m.eq_ignore_ascii_case("CONFLICTING")) {
+        return Some("mergeable CONFLICTING — resolve with `gh pr update-branch`".to_string());
+    }
+    if merge_state.is_some_and(|s| s.eq_ignore_ascii_case("DIRTY")) {
+        return Some("mergeStateStatus DIRTY — resolve with `gh pr update-branch`".to_string());
+    }
+
+    match mergeable {
+        None => {
+            return Some("mergeable field is missing on the head SHA".to_string());
+        }
+        Some(m) if m.eq_ignore_ascii_case("UNKNOWN") => {
+            return Some("mergeable is UNKNOWN — GitHub is still computing it; retry".to_string());
+        }
+        _ => {}
+    }
+    match merge_state {
+        None => {
+            return Some("mergeStateStatus field is missing on the head SHA".to_string());
+        }
+        Some(s) if s.eq_ignore_ascii_case("UNKNOWN") => {
+            return Some(
+                "mergeStateStatus is UNKNOWN — GitHub is still computing it; retry".to_string(),
+            );
+        }
+        _ => {}
+    }
+    None
 }
 
 /// A `code-critic` verdict.
@@ -324,6 +405,10 @@ fn list_open_prs<R: GhRunner>(gh: &R, slug: &str, base: &str) -> anyhow::Result<
 }
 
 /// One PR's stop-condition inputs, in a single `gh pr view` call.
+///
+/// #8670: `mergeable,mergeStateStatus` join the requested fields so
+/// [`mergeability_reason`] has something to read; a prior version of this
+/// call omitted them entirely.
 fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
     let n = pr.to_string();
     let a = argv(&[
@@ -333,7 +418,7 @@ fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
         "--repo",
         slug,
         "--json",
-        "isDraft,labels,reviewDecision,statusCheckRollup,comments",
+        "isDraft,labels,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,comments",
     ]);
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
     serde_json::from_str(&stdout)

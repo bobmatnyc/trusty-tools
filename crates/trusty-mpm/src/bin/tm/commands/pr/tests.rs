@@ -2281,9 +2281,15 @@ fn open_rejects_an_empty_body_file() {
 const REQUIRED: &str = "Clippy\nRust tests\n";
 
 /// A `gh pr view --json` payload with the given overrides folded in.
+///
+/// #8670: `mergeable`/`mergeStateStatus` default to the GitHub-clean happy
+/// path so every pre-existing caller of this helper stays admitted; tests of
+/// [`queue_check::stop_reason`]'s new mergeability gate override them via
+/// `extra`.
 fn view_json(extra: &str) -> String {
     format!(
         r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
               {{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}}],
@@ -2388,6 +2394,7 @@ fn queue_stop_order_prefers_critic_block() {
 #[test]
 fn queue_critic_block_then_approve_is_clear() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
           {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
@@ -2398,6 +2405,7 @@ fn queue_critic_block_then_approve_is_clear() {
 #[test]
 fn queue_critic_ignores_unrelated_comments() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
           {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
@@ -2408,6 +2416,7 @@ fn queue_critic_ignores_unrelated_comments() {
 #[test]
 fn queue_required_context_missing() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}],"comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
     assert!(reason.contains("`Rust tests` is missing"), "{reason}");
@@ -2416,6 +2425,7 @@ fn queue_required_context_missing() {
 #[test]
 fn queue_required_context_not_success() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
           {"name":"Rust tests","status":"COMPLETED","conclusion":"SKIPPED"}],
@@ -2428,6 +2438,7 @@ fn queue_required_context_not_success() {
 fn queue_accepts_status_context() {
     // A StatusContext entry carries `context`/`state`, not `name`/`conclusion`.
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"context":"Clippy","state":"SUCCESS"},
           {"context":"Rust tests","state":"SUCCESS"}],
@@ -2436,9 +2447,14 @@ fn queue_accepts_status_context() {
 }
 
 /// A PR view whose `Clippy` is green and whose `Rust tests` ran as `runs`.
+///
+/// #8670: `mergeable`/`mergeStateStatus` default to GitHub-clean so the
+/// duplicate-run regressions this feeds keep exercising the required-context
+/// gate, not the new mergeability one.
 fn duplicate_run_view(runs: &str) -> String {
     format!(
         r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS",
                 "startedAt":"2026-09-25T22:40:00Z","completedAt":"2026-09-25T22:45:00Z"}},
@@ -2536,6 +2552,95 @@ fn queue_single_run_is_unchanged() {
     );
     let reason = first_reason(&red).expect("red blocks");
     assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
+/// A `gh pr view --json` payload past every earlier gate (not draft, no hold
+/// label, approved, no critic BLOCK), so only [`queue_check`]'s mergeability
+/// gate and the required-context loop remain live.
+fn mergeability_view(mergeable: &str, merge_state: &str) -> String {
+    format!(
+        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":{mergeable},"mergeStateStatus":{merge_state},
+            "statusCheckRollup":[
+              {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
+              {{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}}],
+            "comments":[]}}"#
+    )
+}
+
+/// REGRESSION (#8670): PRs #8667 and #8669 both had `mergeable: CONFLICTING`
+/// and still reported MERGEABLE, because queue-check never requested the
+/// field at all.
+#[test]
+fn queue_mergeable_conflicting_is_blocked() {
+    let json = mergeability_view(r#""CONFLICTING""#, r#""CLEAN""#);
+    let reason = first_reason(&json).expect("a real conflict blocks");
+    assert!(reason.contains("mergeable CONFLICTING"), "{reason}");
+}
+
+/// REGRESSION (#8670): `DIRTY` lives in `mergeStateStatus`, a separate enum
+/// from `mergeable` (mirrors `tm pr merge`'s `conflict_field`, #6808).
+#[test]
+fn queue_merge_state_dirty_is_blocked() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""DIRTY""#);
+    let reason = first_reason(&json).expect("dirty blocks");
+    assert!(reason.contains("mergeStateStatus DIRTY"), "{reason}");
+}
+
+/// `UNKNOWN` means GitHub has not finished computing mergeability — pending,
+/// never mergeable (#8670 acceptance criterion).
+#[test]
+fn queue_mergeable_unknown_is_pending() {
+    let json = mergeability_view(r#""UNKNOWN""#, r#""CLEAN""#);
+    let reason = first_reason(&json).expect("unknown is never mergeable");
+    assert!(reason.contains("mergeable is UNKNOWN"), "{reason}");
+}
+
+/// Same as [`queue_mergeable_unknown_is_pending`], for `mergeStateStatus`.
+#[test]
+fn queue_merge_state_unknown_is_pending() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""UNKNOWN""#);
+    let reason = first_reason(&json).expect("unknown is never mergeable");
+    assert!(reason.contains("mergeStateStatus is UNKNOWN"), "{reason}");
+}
+
+/// A `mergeable` field genuinely omitted from the payload fails CLOSED —
+/// never read as mergeable (#8670 acceptance criterion).
+#[test]
+fn queue_mergeable_field_missing_is_pending() {
+    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeStateStatus":"CLEAN",
+        "statusCheckRollup":[
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
+        "comments":[]}"#;
+    let reason = first_reason(json).expect("a missing field is never mergeable");
+    assert!(reason.contains("mergeable field is missing"), "{reason}");
+}
+
+/// Same as [`queue_mergeable_field_missing_is_pending`], for a genuinely
+/// omitted `mergeStateStatus`.
+#[test]
+fn queue_merge_state_field_missing_is_pending() {
+    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE",
+        "statusCheckRollup":[
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
+        "comments":[]}"#;
+    let reason = first_reason(json).expect("a missing field is never mergeable");
+    assert!(
+        reason.contains("mergeStateStatus field is missing"),
+        "{reason}"
+    );
+}
+
+/// The MERGEABLE/CLEAN happy path is still admitted (#8670 acceptance
+/// criterion) — this is the one shape that reaches `None`.
+#[test]
+fn queue_mergeable_clean_happy_path_is_admitted() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""CLEAN""#);
+    assert_eq!(first_reason(&json), None);
 }
 
 #[test]
