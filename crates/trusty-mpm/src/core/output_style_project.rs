@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use super::{StyleError, resolve_style};
 use crate::core::bundle::{BundledStyle, DEFAULT_OUTPUT_STYLE_ID, OUTPUT_STYLES};
 use crate::core::config::MpmConfig;
+use crate::core::session_profile::SessionProfile;
 
 /// Project-relative directory holding project output styles.
 pub const PROJECT_STYLES_DIR: &str = ".claude/output-styles";
@@ -259,9 +260,14 @@ pub fn effective_style_id(
     config: &MpmConfig,
     manifest: Option<&str>,
 ) -> Option<String> {
-    style_chain(project_dir, explicit, config, || {
-        manifest.map(str::to_string)
-    })
+    let profile = crate::core::session_profile::resolve(project_dir, config);
+    style_chain(
+        project_dir,
+        explicit,
+        config,
+        || manifest.map(str::to_string),
+        profile,
+    )
 }
 
 /// The precedence chain, reading the manifest tier only when it can win.
@@ -270,9 +276,10 @@ fn style_chain(
     explicit: Option<&str>,
     config: &MpmConfig,
     manifest: impl FnOnce() -> Option<String>,
+    profile: SessionProfile,
 ) -> Option<String> {
     // #8453: a supervisor session's style is its profile's, above every tier.
-    if crate::core::session_profile::resolve(project_dir).is_supervisor() {
+    if profile.is_supervisor() {
         return Some(crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID.to_string());
     }
     explicit
@@ -332,9 +339,9 @@ pub struct SelectedStyle {
 /// What: the [`effective_style_id`] chain (flag > `.trusty-mpm.toml` > host
 /// config > manifest; `manifest` is called only when no higher tier sets a
 /// style), then [`resolve_or_default`] (unknown or unreadable → the default
-/// plus a warning). #8453: a supervisor project always selects the supervisor
-/// style; any other project that names it gets the default plus a warning,
-/// because the supervisor style carries no delegation floor.
+/// plus a warning). #8453: a supervisor `profile` always selects the
+/// supervisor style; any other session that names it gets the default plus a
+/// warning, because the supervisor style carries no delegation floor.
 /// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`,
 /// `a_pm_project_cannot_select_the_supervisor_style`.
 pub fn select_style(
@@ -342,15 +349,16 @@ pub fn select_style(
     explicit: Option<&str>,
     config: &MpmConfig,
     manifest: impl FnOnce() -> Option<String>,
+    profile: SessionProfile,
 ) -> SelectedStyle {
-    let id = style_chain(project_dir, explicit, config, manifest);
+    let id = style_chain(project_dir, explicit, config, manifest, profile);
     let supervisor_id = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
-    if id.as_deref() == Some(supervisor_id)
-        && !crate::core::session_profile::resolve(project_dir).is_supervisor()
-    {
+    if id.as_deref() == Some(supervisor_id) && !profile.is_supervisor() {
         let warning = format!(
             "output style '{supervisor_id}' is for the supervisor profile only (set \
-             `profile = \"supervisor\"` in .trusty-mpm.toml); using `{DEFAULT_OUTPUT_STYLE_ID}` instead"
+             `profile = \"supervisor\"` in .trusty-mpm.toml and allow-list the project under \
+             `[supervisor] projects` in ~/.trusty-mpm/config.toml); using \
+             `{DEFAULT_OUTPUT_STYLE_ID}` instead"
         );
         tracing::warn!("{warning}");
         let (style, _) = resolve_or_default(project_dir, None);
@@ -384,17 +392,44 @@ pub fn manifest_style_id(framework_root: &Path, project_dir: &Path) -> Option<St
 /// Why: the report and the prompt-injection seam have no preloaded config or
 /// plan; this reads both from the same root the launch reads them from.
 /// What: `MpmConfig::load(framework_root)` and [`manifest_style_id`], passed to
-/// [`select_style`].
+/// [`select_style`] with the profile [`crate::core::session_profile::resolve`]
+/// derives from that config.
 /// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
 pub fn select_style_under(
     framework_root: &Path,
     project_dir: &Path,
     explicit: Option<&str>,
 ) -> SelectedStyle {
+    select_style_under_as(framework_root, project_dir, explicit, None)
+}
+
+/// [`select_style_under`] for a profile the caller already resolved (#8453).
+pub fn select_style_under_for(
+    framework_root: &Path,
+    project_dir: &Path,
+    explicit: Option<&str>,
+    profile: SessionProfile,
+) -> SelectedStyle {
+    select_style_under_as(framework_root, project_dir, explicit, Some(profile))
+}
+
+/// The body of [`select_style_under`]; `None` resolves the profile here.
+fn select_style_under_as(
+    framework_root: &Path,
+    project_dir: &Path,
+    explicit: Option<&str>,
+    profile: Option<SessionProfile>,
+) -> SelectedStyle {
     let config = MpmConfig::load(framework_root);
-    select_style(project_dir, explicit, &config, || {
-        manifest_style_id(framework_root, project_dir)
-    })
+    let profile =
+        profile.unwrap_or_else(|| crate::core::session_profile::resolve(project_dir, &config));
+    select_style(
+        project_dir,
+        explicit,
+        &config,
+        || manifest_style_id(framework_root, project_dir),
+        profile,
+    )
 }
 
 /// One line naming the style a launch in `project_dir` uses, or the warning.

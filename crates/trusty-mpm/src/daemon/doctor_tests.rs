@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_sixty_one_checks() {
+async fn run_doctor_produces_sixty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -473,7 +473,8 @@ async fn run_doctor_produces_sixty_one_checks() {
     // fifty-five); issue #8236 adds `launchd_secrets` and `credential_reach`
     // (fifty-six → fifty-eight); issue #8415 adds `launchd_process_type`
     // (fifty-eight → fifty-nine), then `tmux_priority` (fifty-nine → sixty);
-    // issue #8482 adds `bundled_asset_lag` (sixty → sixty-one).
+    // issue #8482 adds `bundled_asset_lag` (sixty → sixty-one); issue #8453
+    // adds `session_profile` (sixty-one → sixty-two).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -504,6 +505,8 @@ async fn run_doctor_produces_sixty_one_checks() {
         "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
+        // #8453: the resolved session profile, or why it fell back to PM.
+        "session_profile",
         // #7616: whether the instruction fold saved this project anything, or
         // is inactive — the state a daemon-log line used to be the only
         // evidence of. Named `instruction_fold` since #7867.
