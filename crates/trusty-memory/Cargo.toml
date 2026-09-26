@@ -40,7 +40,7 @@ name = "trusty-memory"
 # 0.27.1 (#8589): patch — picks up trusty-common 0.52.3, whose secret filter
 # stops refusing identifier paths, Google doc URLs and common identifier
 # shapes as secrets during kuzu-import. No public item was removed or changed.
-version = "0.27.3"
+version = "0.28.0"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

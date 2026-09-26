@@ -1,2 +1,0 @@
-Fixed
-- A write parked in redb no longer keeps `trusty-memory` alive after a graceful shutdown (#8314). The binary tears its runtime down within what the termination grace window (launchd's `ExitTimeOut`) has left since the shutdown signal, less 1 s, instead of waiting for every blocking task. A slow but finite KG commit that fits in that window finishes and closes the store cleanly; a stuck one is abandoned and logged, and the process exits so the palace's file locks are released. redb commits are atomic, so the next start opens the last committed state.
