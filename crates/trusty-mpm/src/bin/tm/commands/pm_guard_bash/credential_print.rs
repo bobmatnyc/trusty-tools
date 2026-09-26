@@ -320,7 +320,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     // A wrapper with flags (`sudo -u x bash -c …`) hides its program, so the
     // first evaluator word after it stands in.
     let evaluator_at = if resolved.is_some() {
-        Some(start).filter(|_| is_evaluator(&program))
+        is_evaluator(&program).then_some(start)
     } else {
         argv.iter()
             .skip(start)
