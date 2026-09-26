@@ -30,6 +30,8 @@
 //! `sync_is_a_no_op_when_the_block_already_matches`,
 //! `sync_propagates_a_failed_body_write`.
 
+use crate::commands::issue::config::StateModel;
+
 use super::backend::EpicBackend;
 use super::render::{self, PHASES_END, PHASES_START};
 
@@ -52,14 +54,15 @@ pub(crate) struct SyncReport {
 /// transition hook and the standalone verb cannot disagree about what it
 /// should contain.
 /// What: reads the body and the children, renders the table (its State cell
-/// reads the children's `<status_prefix>*` label, #8448), replaces the marker
-/// region, and writes the result only when it differs. Every refusal is
-/// propagated with the tracker named, and no write happens on any of them.
+/// resolves each child's labels through `model`'s states, #8448/#8696),
+/// replaces the marker region, and writes the result only when it differs.
+/// Every refusal is propagated with the tracker named, and no write happens
+/// on any of them.
 /// Test: see the module doc.
 pub(crate) fn sync<B: EpicBackend>(
     backend: &B,
     tracker: u64,
-    status_prefix: &str,
+    model: &StateModel,
 ) -> anyhow::Result<SyncReport> {
     let body = backend.body(tracker)?;
     let children = backend.children(tracker)?;
@@ -67,7 +70,8 @@ pub(crate) fn sync<B: EpicBackend>(
         .iter()
         .filter(|c| render::phase_number_of(&c.title).is_some())
         .count();
-    let table = render::phases_table(&children, status_prefix);
+    // #8696: the whole model, not its prefix — see `render::state_cell`.
+    let table = render::phases_table(&children, model);
     let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
         .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
     if next == body {

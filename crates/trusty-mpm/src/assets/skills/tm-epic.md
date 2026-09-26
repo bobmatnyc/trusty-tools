@@ -132,10 +132,13 @@ A session touches the tracker body on exactly five triggers:
 | An item is deferred, or a deferred item lands | `deferred` block amended (`tm issue epic defer`) |
 | A phase's `status:*` label changes | `phases` block regenerated (State column) — `tm issue transition` on a phase does this itself |
 
-The State cell reads `closed` for a closed phase; for an open one, its
-`status:*` label without the prefix (`in-progress`, `coded`, `merged`,
-`tested`), or `open` when it carries none. The prefix is the issue state
-model's `label_config.status_prefix` (`status:` in trusty-tools).
+The State cell reads `closed` for a closed phase; for an open one, the name
+of the issue state model's state whose `label.name` the phase carries, with
+the model's `label_config.status_prefix` (`status:` in trusty-tools)
+stripped (`in-progress`, `coded`, `merged`, `tested`), or `open` when no
+model state's label is on it. The label is matched against the model, never
+by prefix: a state `status:in-progress` whose label is `in-progress` still
+renders `in-progress`, and a `status:*` label no state issues renders `open`.
 
 **Not on PR open, merge, commit or review.** Those are phase-issue events and
 belong on the phase issue or its PR. A finding discovered mid-execution is a

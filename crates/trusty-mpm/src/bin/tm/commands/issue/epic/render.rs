@@ -21,9 +21,13 @@
 //! `state_cell_reads_the_status_label_of_an_open_child`,
 //! `state_cell_reads_open_for_an_unlabelled_open_child`,
 //! `phases_table_uses_the_configured_status_prefix`,
+//! `state_cell_resolves_a_label_whose_name_lacks_the_prefix`,
 //! `outcomes_of_folds_wrapped_continuation_lines`.
 
 use std::fmt::Write as _;
+
+use crate::commands::issue::config::StateModel;
+use crate::commands::issue::state::StateMachine;
 
 use super::backend::ChildIssue;
 use super::plan::{EpicPlan, PhasePlan};
@@ -302,13 +306,13 @@ pub(crate) fn plan_permalink(repo: &str, sha: &str, path: &str) -> String {
 /// block — a row hand-edited inside the old block is discarded by construction
 /// rather than merged.
 /// What: the two header rows plus one row per child, ordered by phase number,
-/// each carrying the child's number, its [`state_cell`] under `status_prefix`,
-/// and the `## Gate` section of its body collapsed to one line. A `|` in any
-/// cell is escaped so it cannot split the row.
+/// each carrying the child's number, its [`state_cell`] under `model`, and
+/// the `## Gate` section of its body collapsed to one line. A `|` in any cell
+/// is escaped so it cannot split the row.
 /// Test: `render_replaces_the_whole_phases_block`,
 /// `render_escapes_a_pipe_in_a_phase_title`,
 /// `phases_table_uses_the_configured_status_prefix`.
-pub(crate) fn phases_table(children: &[ChildIssue], status_prefix: &str) -> String {
+pub(crate) fn phases_table(children: &[ChildIssue], model: &StateModel) -> String {
     let mut rows: Vec<(u64, &ChildIssue)> = children
         .iter()
         .filter_map(|c| phase_number_of(&c.title).map(|n| (n, c)))
@@ -322,7 +326,7 @@ pub(crate) fn phases_table(children: &[ChildIssue], status_prefix: &str) -> Stri
             "\n| {number} | {} | #{} | {} | {} |",
             cell(&phase_what(&child.title)),
             child.number,
-            cell(&state_cell(child, status_prefix)),
+            cell(&state_cell(child, model)),
             cell(&gate_of(&child.body))
         );
     }
@@ -333,28 +337,41 @@ pub(crate) fn phases_table(children: &[ChildIssue], status_prefix: &str) -> Stri
 ///
 /// Why: GitHub's `OPEN`/`CLOSED` is two states, and the lifecycle between them
 /// lives in the status label — a table that showed only `open` for a phase
-/// already `coded` restated the sub-issue list GitHub renders anyway. The
-/// prefix is the model's `label_config.status_prefix` (`status:` in this repo,
-/// `unicorn:` in the crate default), never a constant: a hardcoded `status:`
-/// read `open` for every phase of a project on the default model.
+/// already `coded` restated the sub-issue list GitHub renders anyway. Which
+/// label is a lifecycle label is the model's to say, the same way `tm issue
+/// current` decides it: `tm issue transition` applies `StateDef.label.name`,
+/// and that name need not start with `label_config.status_prefix` (#8696). A
+/// renderer that matched labels by prefix instead read `open` for a phase the
+/// transition had just moved, and `sync` then reported the stale block as
+/// current.
 /// What: `closed` for a closed child, whatever labels it still wears. For an
-/// open child, the value of its `<status_prefix>*` label without the prefix;
-/// several such labels (a `tm issue repair` case) are joined with `/` in sorted
-/// order so the cell is deterministic; none at all reads `open`.
+/// open child, the model states whose `label.name` the child carries
+/// ([`StateMachine::labelled_states`]), each state's `name` with
+/// `status_prefix` stripped when it starts with it; several (a `tm issue
+/// repair` case) are joined with `/` in sorted order so the cell is
+/// deterministic; none — no lifecycle label, or one no model state issues —
+/// reads `open`. No raw-prefix fallback.
 /// Test: `state_cell_reads_closed_for_a_closed_child`,
 /// `state_cell_reads_the_status_label_of_an_open_child`,
 /// `state_cell_reads_open_for_an_unlabelled_open_child`,
-/// `phases_table_uses_the_configured_status_prefix`.
-pub(crate) fn state_cell(child: &ChildIssue, status_prefix: &str) -> String {
+/// `phases_table_uses_the_configured_status_prefix`,
+/// `state_cell_resolves_a_label_whose_name_lacks_the_prefix`,
+/// `state_cell_resolves_a_label_name_unrelated_to_the_state_name`,
+/// `state_cell_reads_open_for_a_prefixed_label_the_model_lacks`,
+/// `state_cell_under_an_empty_prefix_reads_only_model_labels`,
+/// `state_cell_joins_several_model_states_sorted`.
+pub(crate) fn state_cell(child: &ChildIssue, model: &StateModel) -> String {
     if child.state.eq_ignore_ascii_case("CLOSED") {
         return "closed".to_string();
     }
-    // #8448: the prefix comes from the state model in force, not a constant.
-    let mut states: Vec<&str> = child
-        .labels
-        .iter()
-        .filter_map(|l| l.strip_prefix(status_prefix))
-        .filter(|s| !s.is_empty())
+    // #8696: resolve through the model, never by label prefix — the label
+    // the transition wrote is `StateDef.label.name`, which the prefix may
+    // not match.
+    let prefix = model.label_config.status_prefix.as_str();
+    let mut states: Vec<&str> = StateMachine::new(model)
+        .labelled_states(&child.labels)
+        .into_iter()
+        .map(|name| name.strip_prefix(prefix).unwrap_or(name))
         .collect();
     states.sort_unstable();
     states.dedup();
