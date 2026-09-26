@@ -8,10 +8,13 @@
 //! survivors as if it had been refuted, and the review posted APPROVE with a
 //! live, unverified High blocker.
 //! What: the reviewer self-reports BLOCK / F; [`InfraVerifier`] errors on
-//! [`ERROR_MARKER`], returns unparseable text on [`TRUNCATE_MARKER`], refutes
-//! [`REFUTE_MARKER`], and confirms every other finding.
+//! [`ERROR_MARKER`] (alarm class) and [`TRANSPORT_MARKER`] (retryable), returns
+//! unparseable text on [`TRUNCATE_MARKER`], refutes [`REFUTE_MARKER`], answers
+//! UNVERIFIABLE on `UNSURE_MARKER`, and confirms every other finding.
 //! Test: `run_review_truncated_blocker_beside_refuted_nit_keeps_block`,
 //! `run_review_errored_blocker_beside_refuted_nit_keeps_block`,
+//! `run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block`,
+//! `run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes`,
 //! `run_review_truncated_blocker_beside_confirmed_conformance_keeps_block`,
 //! `run_review_refuted_blocker_beside_refuted_nit_still_relaxes`.
 
@@ -25,7 +28,12 @@ const ERROR_MARKER: &str = "ERROR-ME";
 /// unparseable text (`TruncationRefuted`).
 const TRUNCATE_MARKER: &str = "TRUNCATE-ME";
 
-/// Verifier that fails, truncates, refutes or confirms by the finding's text.
+/// Text a finding's body carries when the fake verifier call should fail with
+/// a retryable transport error (`Unverifiable` once the retry budget is spent).
+const TRANSPORT_MARKER: &str = "TRANSPORT-ME";
+
+/// Verifier that fails, truncates, refutes, answers UNVERIFIABLE or confirms
+/// by the finding's text.
 struct InfraVerifier;
 
 #[async_trait]
@@ -38,11 +46,16 @@ impl LlmProvider for InfraVerifier {
         if carries(ERROR_MARKER) {
             return Err(LlmError::ModelNotFound("stale-verifier".to_string()));
         }
+        if carries(TRANSPORT_MARKER) {
+            return Err(LlmError::Transport("connection reset by peer".to_string()));
+        }
         let text = if carries(TRUNCATE_MARKER) {
             "the answer was cut off befo".to_string()
         } else {
             let judgment = if carries(REFUTE_MARKER) {
                 "REFUTED"
+            } else if carries(UNSURE_MARKER) {
+                "UNVERIFIABLE"
             } else {
                 "CONFIRMED"
             };
@@ -62,6 +75,11 @@ impl LlmProvider for InfraVerifier {
 
 /// Run the whole review path with [`InfraVerifier`] as the verifier.
 async fn review_with_infra(findings_json: &str) -> ReviewResult {
+    review_with_infra_config(&default_config(), findings_json).await
+}
+
+/// [`review_with_infra`] under an explicit config.
+async fn review_with_infra_config(config: &ReviewConfig, findings_json: &str) -> ReviewResult {
     let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
     let input = ReviewInput {
         diff_source: source,
@@ -78,7 +96,7 @@ async fn review_with_infra(findings_json: &str) -> ReviewResult {
         Arc::new(blocks_on(findings_json)),
         Some(Arc::new(InfraVerifier)),
     );
-    run_review(&default_config(), input, deps).await
+    run_review(config, input, deps).await
 }
 
 /// The High correctness finding that alone floors the verdict to BLOCK; its
@@ -153,6 +171,57 @@ async fn run_review_errored_blocker_beside_refuted_nit_keeps_block() {
         result.findings[0].verified
     );
     assert_unverified_blocker_keeps_block(&result);
+}
+
+/// #8653: as (a), but every verifier call for the blocker failed with a
+/// retryable transport error until the retry budget ran out. The finding is
+/// recorded `Unverifiable`, and it is still a failed verification, not a
+/// judgment. One attempt keeps the test free of backoff sleeps.
+///
+/// Pre-fix this returned APPROVE: only the ErrorRefuted / TruncationRefuted
+/// arms fed the unverified floor.
+#[tokio::test]
+async fn run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block() {
+    let mut config = default_config();
+    config.verification.max_attempts = 1;
+    let result = review_with_infra_config(
+        &config,
+        &format!("{},{}", blocker(TRANSPORT_MARKER), refuted_nit()),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            result.findings[0].verified,
+            Some(VerifyOutcome::Unverifiable { .. })
+        ),
+        "fixture must exhaust the blocker's retry budget, got {:?}",
+        result.findings[0].verified
+    );
+    assert_unverified_blocker_keeps_block(&result);
+}
+
+/// Control for the test above: a blocker the verifier itself judged
+/// UNVERIFIABLE (#5309) is a judgment, not a failure, and #5309 keeps it from
+/// blocking. Beside a refuted nit the review still relaxes to APPROVE.
+#[tokio::test]
+async fn run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes() {
+    let result = review_with_infra(&format!("{},{}", blocker(UNSURE_MARKER), refuted_nit())).await;
+
+    assert!(
+        matches!(
+            result.findings[0].verified,
+            Some(VerifyOutcome::Unverifiable { .. })
+        ),
+        "fixture must have the verifier judge the blocker UNVERIFIABLE, got {:?}",
+        result.findings[0].verified
+    );
+    assert!(matches!(
+        result.findings[1].verified,
+        Some(VerifyOutcome::Refuted)
+    ));
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.grade.as_deref(), Some("B-"));
 }
 
 /// #8653 (c), the #4044 critic's example: a truncated blocker beside a

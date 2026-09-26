@@ -793,9 +793,7 @@ fn is_substantive(f: &Finding, thresholds: &Thresholds) -> bool {
             | Some(VerifyOutcome::ErrorRefuted { .. })
             | Some(VerifyOutcome::TruncationRefuted)
     );
-    // #8653: ErrorRefuted / TruncationRefuted mean UNVERIFIED, not refuted. They
-    // are excluded here only because `verify::apply_outcome` clamped their
-    // confidence; `verify::unverified_floor` restores their pre-verification floor.
+    // #8653: excluded by variant; ErrorRefuted / TruncationRefuted are unverified — verify::unverified_floor carries their pre-verification floor.
     // A refuted finding is disproven evidence — always excluded, even high-severity.
     // Otherwise retain it if it clears the confidence floor OR is a high-severity
     // (critical or high) finding: a genuine critical or high-severity concern must

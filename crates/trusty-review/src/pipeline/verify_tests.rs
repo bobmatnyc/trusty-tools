@@ -429,6 +429,25 @@ fn rederive_truncation_refuted_preserves_primary_verdict() {
     );
 }
 
+#[test]
+fn rederive_refuted_blocker_beside_truncated_low_nit_still_relaxes() {
+    // #8653 over-correction guard: the unverified floor carries only what the
+    // failed-verification finding drove, and a Low nit drove nothing.
+    let mut blocker = finding(Effort::High, 0.95);
+    apply_outcome(&mut blocker, VerifyOutcome::Refuted);
+    let nit_pre_demotion = finding(Effort::Low, 0.9);
+    let mut nit = nit_pre_demotion.clone();
+    apply_outcome(&mut nit, VerifyOutcome::TruncationRefuted);
+    let verdict = rederive_verdict(
+        Verdict::Block,
+        false,
+        true,
+        &[blocker, nit],
+        &[nit_pre_demotion],
+    );
+    assert_eq!(verdict, Verdict::Approve);
+}
+
 // ── End-to-end verification round ─────────────────────────────────────────────
 
 #[tokio::test]
