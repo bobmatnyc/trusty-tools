@@ -603,3 +603,245 @@ fn a_leading_cd_never_admits_a_write() {
         ],
     );
 }
+
+/// 🔴 REGRESSION (#8567): the GitHub reads a research or critic brief opens
+/// with. Refused on origin/main, where `gh` is off the allowlist.
+#[test]
+fn gh_read_verbs_are_allowed() {
+    for agent in READ_ONLY_DISPATCH_AGENTS {
+        let got = run(Some(agent), "gh issue view 8567 --comments");
+        assert_eq!(got, None, "{agent}");
+    }
+    check(
+        true,
+        &[
+            "gh issue view 8567 --comments",
+            "gh issue view 8567 --repo bobmatnyc/trusty-tools --json title,body",
+            "gh issue list --state open --label bug --limit 20",
+            "gh pr view 8604 --json state,mergeable,statusCheckRollup",
+            "gh pr list --search 'read-only allowlist' --state all",
+            "gh pr diff 8604 --name-only",
+            "gh pr checks 8604",
+            "gh run view 123456 --log-failed | tail -50",
+            "gh run list --branch main --limit 5",
+            "gh issue view 8567 --json comments --jq '.comments[].body' | head -40",
+            "cd /repo && gh pr view 8604",
+            "for n in 8567 8586; do gh issue view \"$n\"; done",
+        ],
+    );
+}
+
+/// #8567: every mutating verb, every verb not named, and every read verb in a
+/// form that opens a browser, blocks on CI or writes stays refused.
+#[test]
+fn gh_mutating_and_unknown_verbs_are_refused() {
+    check(
+        false,
+        &[
+            "gh pr create --title x --body y",
+            "gh pr merge 1 --squash",
+            "gh pr review 1 --comment -b ok",
+            "gh pr review 1 --approve",
+            "gh pr comment 1 --body x",
+            "gh pr edit 1 --add-label x",
+            "gh pr checkout 1",
+            "gh pr close 1",
+            "gh issue create --title x",
+            "gh issue comment 1 --body x",
+            "gh issue edit 1 --add-label x",
+            "gh issue close 1",
+            "gh issue delete 1",
+            "gh run rerun 1",
+            "gh run cancel 1",
+            "gh run download 1",
+            "gh run watch 1",
+            "gh repo delete o/r --yes",
+            "gh release create v1",
+            "gh auth token",
+            "gh secret list",
+            "gh alias set x 'pr merge'",
+            "gh extension install o/r",
+            "gh issue",
+            "gh",
+            "gh -R o/r pr view 1",
+            "gh pr ls",
+            "gh pr view 1 --web",
+            "gh issue list -w",
+            "gh pr checks 1 --watch",
+            "gh pr view 1 > /tmp/pr.txt",
+            "gh pr view 1 | tee /tmp/pr.txt",
+            "GH_CONFIG_DIR=/tmp/gh gh pr view 1",
+            "gh pr view 1 && gh pr merge 1",
+            "ls | gh issue create --body-file -",
+            "for v in create; do gh pr \"$v\"; done",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8567): `gh api` reads that send GET. Refused on origin/main.
+#[test]
+fn gh_api_get_forms_are_allowed() {
+    check(
+        true,
+        &[
+            "gh api repos/bobmatnyc/trusty-tools/issues/8567",
+            "gh api /repos/o/r/pulls/1/comments --paginate --jq '.[].body'",
+            "gh api -X GET search/issues",
+            "gh api --method GET repos/o/r",
+            "gh api --method=GET repos/o/r",
+            "gh api -XGET repos/o/r",
+            "gh api repos/o/r/commits/abc/check-runs -q '.check_runs[].conclusion'",
+            "gh api -H 'Accept: application/vnd.github+json' \
+             -H 'X-GitHub-Api-Version: 2022-11-28' repos/o/r",
+            "gh api -i --silent repos/o/r",
+            "gh api 'repos/{owner}/{repo}/pulls?state=open' --paginate --slurp",
+            "gh api --hostname github.com user",
+            "gh api repos/o/r/actions/runs -t '{{range .workflow_runs}}{{.id}}{{end}}'",
+        ],
+    );
+}
+
+/// #8567: a `gh api` call that could write — another method, a request body,
+/// GraphQL, a method-override header, or an option not named — is refused.
+#[test]
+fn gh_api_writes_are_refused() {
+    check(
+        false,
+        &[
+            "gh api -X POST repos/o/r/issues -f title=x",
+            "gh api -X PATCH repos/o/r/issues/1 -f state=closed",
+            "gh api -X PUT repos/o/r/pulls/1/merge",
+            "gh api -X DELETE repos/o/r/git/refs/heads/x",
+            "gh api -XPOST repos/o/r/issues",
+            "gh api --method POST repos/o/r/issues",
+            "gh api --method=DELETE repos/o/r",
+            "gh api repos/o/r/issues -f title=x",
+            "gh api repos/o/r/issues -F title=x",
+            "gh api repos/o/r/issues -ftitle=x",
+            "gh api repos/o/r/issues --field title=x",
+            "gh api repos/o/r/issues --raw-field title=x",
+            "gh api repos/o/r/issues --input body.json",
+            "gh api repos/o/r/issues --input=body.json",
+            "gh api -X GET repos/o/r/issues -f title=x",
+            "gh api graphql -f query='mutation { x }'",
+            "gh api graphql",
+            "gh api /graphql",
+            "gh api -H 'X-HTTP-Method-Override: DELETE' repos/o/r",
+            "gh api --cache 1h repos/o/r",
+            "gh api -iX POST repos/o/r",
+            "gh api -X",
+            "gh api",
+            "gh api repos/o/r repos/o/s",
+            "for e in repos/o/r; do gh api \"$e\"; done",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8567): `date`, which BASE-AGENT asks every dispatch to run
+/// first. Refused on origin/main.
+#[test]
+fn date_is_allowed() {
+    for agent in READ_ONLY_DISPATCH_AGENTS {
+        assert_eq!(run(Some(agent), "date"), None, "{agent}");
+    }
+    check(
+        true,
+        &[
+            "date",
+            "date +%s",
+            "date -u +%Y-%m-%dT%H:%M:%SZ",
+            "date '+%Y-%m-%d %H:%M:%S'",
+            "date -r 0",
+        ],
+    );
+}
+
+/// #8567: `date` never writes through a redirect or a chained command.
+#[test]
+fn date_with_a_redirect_is_refused() {
+    check(
+        false,
+        &[
+            "date > /tmp/start",
+            "date >> start.txt",
+            "date | tee start.txt",
+            "date 2>/tmp/err",
+            "date; rm -f x",
+            "date && touch x",
+            "echo $(date)",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8586): a quoted rg/grep pattern keeps its `\` escapes, an
+/// end-of-line `$` and glob characters as text. The double-quoted rows are
+/// refused on origin/main; the single-quoted rows pin the issue's own forms.
+#[test]
+fn quoted_rg_grep_patterns_are_pattern_text() {
+    check(
+        true,
+        &[
+            r#"rg -n "fn \w+\(" crates"#,
+            r#"grep -e "\(foo\|bar\)" f.txt"#,
+            r#"grep -n "^\[workspace\.dependencies\]" Cargo.toml"#,
+            r#"grep -n -A2 -B1 -E "^version = \"[0-9.]+\"$" Cargo.toml"#,
+            r#"rg "foo$|bar$" src"#,
+            r#"rg "(fn|struct) \w+$" src"#,
+            r#"rg -n "\$HOME" docs"#,
+            r#"rg "\`tm \w+\`" docs"#,
+            r#"grep -rn "a\s+b" --include="*.rs" crates"#,
+            r#"git log --oneline | grep "fix(\w+)""#,
+            r#"rg -F "a\"b" src"#,
+            r#"rg "a\" 'b" src"#,
+            r#"cd /repo && rg -n "unwrap\(\)" crates"#,
+            "rg -g '!*.test.ts' foo",
+            r"grep -e '\(foo\)' f.txt",
+            r"rg 'a\.b$' src",
+        ],
+    );
+}
+
+/// #8586: shell syntax stays refused — an expansion the shell performs inside
+/// double quotes (`$(…)`, `${…}`, `$NAME`, backtick), any unquoted
+/// metacharacter, an escape that would let a `"` close early, and pattern
+/// text given to any program but rg/grep.
+#[test]
+fn shell_syntax_around_quoted_patterns_is_refused() {
+    check(
+        false,
+        &[
+            r#"rg "$(cat /tmp/x)" src"#,
+            r#"grep "a$(id)b" f"#,
+            r#"rg "a\\$(id)" f"#,
+            r#"rg "a$|$(id)" f"#,
+            r#"rg "${HOME}x" f"#,
+            r#"rg "a$HOME" f"#,
+            r#"rg "$[1+1]" f"#,
+            r#"rg "a$'b'" f"#,
+            r#"rg "`id`" f"#,
+            r#"rg "a!b" f"#,
+            r#"rg "a\!b" f"#,
+            r#"rg "a$" $(id)"#,
+            r#"rg "a\" 'b" f; rm -rf x #'"#,
+            "rg \"a\\\nb\" f",
+            r#"rg "a\"#,
+            r"rg \( f",
+            "rg a$ f",
+            "rg foo; rm -rf x",
+            "rg foo | tee out",
+            r#"rg "foo\(" > out"#,
+            r#"rg "foo\(" && rm f"#,
+            r#"rg "foo\(" &"#,
+            r#"ls | rg "\(" | tee out"#,
+            "grep -r foo --include=*.rs .",
+            r#"rg --pre "c\at" foo"#,
+            r#"echo "a\(b""#,
+            r#"cat "a\$b""#,
+            r#"sed -n "/a$/p" f"#,
+            r#"git log --grep="fix\(x\)""#,
+            r#"git grep "a\(b""#,
+            r#"for f in "a\$b"; do rg x "$f"; done"#,
+            r#"cd "/tmp/a\$b" && rg x"#,
+        ],
+    );
+}

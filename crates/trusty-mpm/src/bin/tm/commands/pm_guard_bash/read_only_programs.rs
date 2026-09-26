@@ -19,6 +19,8 @@
 //! - `tmux capture-pane` with `-p`, no `-b`, and plain `-t`/`-S`/`-E` values.
 //! - `cargo metadata` / `cargo tree` without `--config` or `-Z`.
 //! - `git`: see [`super::read_only_git`].
+//! - `gh`: see [`super::read_only_gh`] (#8567).
+//! - `date` with any arguments (#8567); the lexer already refuses a redirect.
 //! - `echo`, `pwd`.
 //!
 //! A pipe stage after the first must be `cat`, `head`, `tail`, `wc`, `grep`,
@@ -26,6 +28,7 @@
 //! Test: `read_only_allow_tests::legitimate_reads_stay_allowed`,
 //! `read_only_allow_tests::critic_round_three_probes_are_refused`.
 
+use super::read_only_gh::check_gh;
 use super::read_only_git::check_git;
 
 /// One argument of a judged command.
@@ -153,6 +156,9 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
         "tmux" => tmux(rest),
         "cargo" => cargo(rest),
         "git" => check_git(rest),
+        // #8567: GitHub reads, and `date` for a dispatch's start time.
+        "gh" => check_gh(rest),
+        "date" => Ok(()),
         "echo" => Ok(()),
         "pwd" if rest.is_empty() => Ok(()),
         _ => Err(format!(

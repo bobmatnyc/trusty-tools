@@ -1,0 +1,3 @@
+Fixed
+- A read-only dispatch (`research`, `code-critic`, `code-analyzer`, `security`, `Explore`, `Plan`) may now run GitHub reads — `gh issue view|list`, `gh pr view|list|diff|checks`, `gh run view|list`, and `gh api` sending GET only — plus `date`. Mutating `gh` verbs, `--web`/`--watch`, `gh api` with a non-GET method, a request field or `--input`, and the `graphql` endpoint stay refused, as does any `gh` verb not named (#8567).
+- A double-quoted `rg`/`grep` pattern may carry `\` escapes (`\(`, `\.`, `\s`) and an end-of-line `$`, which the shell passes through as text. `$(…)`, `${…}`, `$NAME` and backticks inside double quotes, every unquoted shell metacharacter, and the same escapes given to any other program stay refused (#8586).
