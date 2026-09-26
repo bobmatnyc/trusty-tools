@@ -16,9 +16,12 @@
 //! copy of `kg.db` and of `kg.redb`, and reports the legacy rows, the ones
 //! already in `kg.redb`, the ones missing, unreadable rows, legacy triples,
 //! content duplicated under other ids, and any `.v2-incompatible` quarantine
-//! files. [`apply_report`] imports the missing drawers verbatim (same id,
-//! room, timestamps) into `kg.redb` in one transaction and embeds them so
-//! recall can reach them; content duplicates are skipped unless
+//! files. Both screen the missing drawers with the `memory_remember` write
+//! gates and report the refused ids by reason ([`guard`]). [`apply_report`]
+//! first backs up and verifies every store file it can modify, then imports
+//! the drawers that passed verbatim (same id, room, timestamps) into
+//! `kg.redb` in one transaction and embeds them so recall can reach them;
+//! content duplicates are skipped unless
 //! `--include-content-duplicates` is passed. Nothing is ever deleted, renamed
 //! or rewritten in `kg.db`; a re-run imports nothing because every imported id
 //! is then in `kg.redb` and a skipped duplicate is skipped again. [`unaccounted_legacy_data`] is the check `palace_delete` makes
@@ -26,10 +29,11 @@
 //!
 //! Test: `dry_run_counts_legacy_drawers_and_writes_nothing`,
 //! `apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop`,
-//! `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`.
+//! `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`,
+//! `credential_row_is_rejected_in_dry_run_and_apply`,
+//! `apply_with_a_failing_backup_writes_nothing`.
 
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -37,12 +41,15 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use trusty_common::memory_core::palace::{Drawer, Palace};
 use trusty_common::memory_core::retrieval::{PalaceHandle, VectorBackfillOptions};
-use trusty_common::memory_core::store::concurrent_open::try_open_or_snapshot;
 use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
 use trusty_common::memory_core::{memory_content_hash, ContentHash};
 use uuid::Uuid;
 
 use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
+
+#[path = "legacy_kg_guard.rs"]
+pub mod guard;
+use guard::{backup_stores, probe_stores, screen_drawers, Backup, CopyFn, Rejected};
 
 /// Filename of the pre-redb SQLite knowledge graph inside a palace directory.
 pub(crate) const LEGACY_KG_FILE: &str = "kg.db";
@@ -336,6 +343,12 @@ pub struct LegacyReport {
     /// under another id; `None` without a `kg.db`. An apply skips them unless
     /// `include_content_duplicates` is set.
     pub content_duplicates: Option<usize>,
+    /// Missing drawers the `memory_remember` write gates refuse; never imported.
+    pub rejected: Vec<Rejected>,
+    /// Apply only: the verified pre-write backup (#8434).
+    pub backup: Option<Backup>,
+    /// `--allow-short`: the 8-token minimum was skipped (#8434).
+    pub allow_short: bool,
     /// Apply only: `--include-content-duplicates` imported the duplicates.
     pub include_content_duplicates: bool,
     /// Drawers this run wrote to `kg.redb`. Always 0 on a dry run.
@@ -381,6 +394,12 @@ impl LegacyReport {
                      already holds under another id; {fate})\n"
                 ));
             }
+            out.push_str(&guard::render_guards(
+                self.dry_run,
+                self.allow_short,
+                &self.rejected,
+                self.backup.as_ref(),
+            ));
         } else {
             out.push_str("  legacy kg.db: none\n");
         }
@@ -414,13 +433,17 @@ impl LegacyReport {
 /// What: reads a copy of `kg.db` and the drawers of a private copy of
 /// `kg.redb`. Only `kg.redb` counts as live: a drawer present only in the L1
 /// snapshot is lost at the next L1 flush, so it is reported missing (#8434).
-/// Also counts missing drawers whose content a live drawer already holds.
+/// Also counts missing drawers whose content a live drawer already holds, and
+/// lists the ones the write gates refuse, as the apply with the same
+/// `allow_short` will (#8434).
 /// Safe while the daemon holds the palace.
 /// Test: `dry_run_counts_legacy_drawers_and_writes_nothing`,
+/// `noise_row_is_rejected_in_dry_run_and_apply`,
+/// `short_row_is_rejected_by_default_and_imported_with_allow_short`,
 /// `l1_only_legacy_drawer_is_imported_to_redb`.
-pub fn scan_report(palace: &Palace) -> Result<LegacyReport> {
+pub fn scan_report(palace: &Palace, allow_short: bool) -> Result<LegacyReport> {
     let data_dir = &palace.data_dir;
-    let mut report = base_report(palace, true)?;
+    let mut report = base_report(palace, true, allow_short)?;
     let Some(legacy) = read_legacy_kg(data_dir)? else {
         return Ok(report);
     };
@@ -434,22 +457,27 @@ pub fn scan_report(palace: &Palace) -> Result<LegacyReport> {
     })?
     .unwrap_or_default();
     fill_legacy_counts(&mut report, &legacy, &live);
-    let (_, duplicates) = split_missing(legacy.drawers, &live, &live_hashes);
+    let (_, duplicates, rejected) = split_missing(legacy.drawers, &live, &live_hashes, allow_short);
     report.content_duplicates = Some(duplicates.len());
+    report.rejected = rejected;
     Ok(report)
 }
 
-/// Split the legacy drawers `live` lacks into `(distinct, duplicates)`, where
-/// a duplicate repeats the content of a `kg.redb` drawer under another id.
+/// Split the legacy drawers `live` lacks into `(distinct, duplicates,
+/// rejected)`: `rejected` fail the write gates (#8434), and of the rest a
+/// duplicate repeats the content of a `kg.redb` drawer under another id.
 fn split_missing(
     drawers: Vec<Drawer>,
     live: &HashSet<Uuid>,
     live_hashes: &HashSet<ContentHash>,
-) -> (Vec<Drawer>, Vec<Drawer>) {
-    drawers
+    allow_short: bool,
+) -> (Vec<Drawer>, Vec<Drawer>, Vec<Rejected>) {
+    let missing = drawers.into_iter().filter(|d| !live.contains(&d.id));
+    let (passed, rejected) = screen_drawers(missing, allow_short);
+    let (distinct, duplicates) = passed
         .into_iter()
-        .filter(|d| !live.contains(&d.id))
-        .partition(|d| !live_hashes.contains(&memory_content_hash(d.content())))
+        .partition(|d| !live_hashes.contains(&memory_content_hash(d.content())));
+    (distinct, duplicates, rejected)
 }
 
 /// Put the drawers just written to `kg.redb` into the in-memory table.
@@ -476,12 +504,17 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// makes the `Writer` open fail loud rather than write to a snapshot.
 /// What: first probes private copies of `kg.redb` and the vector index and
 /// bails if either fails to open — a `Writer` open would rename such a store
-/// aside and recreate it empty (#702). Then opens the palace `Writer`; refuses
+/// aside and recreate it empty (#702). Then backs up every store file into
+/// `<palace>/legacy-kg-backup-<timestamp>/` and bails, writing nothing, when a
+/// copy fails verification ([`guard::backup_stores`]). Then opens the palace
+/// `Writer` (whose open may already sweep expired rows); refuses
 /// a handle whose drawer table loaded degraded (a partial live set would
 /// re-import rows it merely failed to read, overwriting them with their legacy
 /// text). Dedupes against the ids in `kg.redb` only, never the L1 snapshot,
-/// and skips missing drawers whose content a `kg.redb` drawer already holds
-/// under another id unless `include_content_duplicates` is set; the skipped
+/// drops the drawers the write gates refuse (listed in
+/// [`LegacyReport::rejected`]), and skips missing drawers whose content a
+/// `kg.redb` drawer already holds under another id unless
+/// `include_content_duplicates` is set; the skipped
 /// count lands in [`LegacyReport::content_duplicates`]. Upserts the rest in
 /// one redb transaction, puts them in the in-memory table (replacing an
 /// L1-only entry for the same id), and — unless `embed` is false — runs the
@@ -490,17 +523,53 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// Test: `apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop`,
 /// `l1_only_legacy_drawer_is_imported_to_redb`,
 /// `apply_skips_content_duplicates_unless_included`,
-/// `apply_refuses_a_store_the_writer_open_would_rename_aside`.
+/// `apply_refuses_a_store_the_writer_open_would_rename_aside`,
+/// `apply_with_a_failing_backup_writes_nothing`,
+/// `credential_row_is_rejected_in_dry_run_and_apply`,
+/// `short_secret_row_is_rejected_even_with_allow_short`,
+/// `apply_error_after_backup_names_the_kept_backup`.
 pub async fn apply_report(
     palace: &Palace,
     embed: bool,
     include_content_duplicates: bool,
+    allow_short: bool,
 ) -> Result<LegacyReport> {
-    let mut report = base_report(palace, false)?;
+    let copy: CopyFn = |from, to| std::fs::copy(from, to);
+    let flags = (embed, include_content_duplicates, allow_short);
+    apply_report_with(palace, flags, &palace.data_dir, copy).await
+}
+
+/// [`apply_report`] with the backup parent dir and per-file copy injected;
+/// `flags` is `(embed, include_content_duplicates, allow_short)`.
+pub(crate) async fn apply_report_with(
+    palace: &Palace,
+    (embed, include_content_duplicates, allow_short): (bool, bool, bool),
+    backup_parent: &Path,
+    copy: CopyFn,
+) -> Result<LegacyReport> {
+    let mut report = base_report(palace, false, allow_short)?;
     let Some(legacy) = read_legacy_kg(&palace.data_dir)? else {
         return Ok(report);
     };
     probe_stores(&palace.data_dir)?;
+    // #8434: fail closed — no verified backup, no write.
+    let backup = backup_stores(&palace.data_dir, backup_parent, copy)?;
+    // #8434: a failure from here on must still name the backup it left.
+    let kept = format!("backup kept at {}", backup.dir.display());
+    report.backup = Some(backup);
+    report.include_content_duplicates = include_content_duplicates;
+    import_legacy(palace, legacy, report, embed)
+        .await
+        .context(kept)
+}
+
+/// The writes of [`apply_report_with`], run only after a verified backup.
+async fn import_legacy(
+    palace: &Palace,
+    legacy: LegacyDrawers,
+    mut report: LegacyReport,
+    embed: bool,
+) -> Result<LegacyReport> {
     let handle = PalaceHandle::open_with_intent(palace, OpenIntent::Writer)
         .with_context(|| format!("open palace {} for writing", palace.id))?;
     if handle.drawer_load_degraded {
@@ -523,11 +592,12 @@ pub async fn apply_report(
         .map(|d| memory_content_hash(d.content()))
         .collect();
     fill_legacy_counts(&mut report, &legacy, &live);
-    let (mut to_import, duplicates) = split_missing(legacy.drawers, &live, &live_hashes);
+    let (mut to_import, duplicates, rejected) =
+        split_missing(legacy.drawers, &live, &live_hashes, report.allow_short);
     report.content_duplicates = Some(duplicates.len());
-    report.include_content_duplicates = include_content_duplicates;
+    report.rejected = rejected;
     // #8434: a content duplicate is already present under another id.
-    if include_content_duplicates {
+    if report.include_content_duplicates {
         to_import.extend(duplicates);
     }
     if !to_import.is_empty() {
@@ -554,47 +624,12 @@ pub async fn apply_report(
     Ok(report)
 }
 
-/// Refuse to import when a `Writer` open would recreate a store (#8434).
-///
-/// Why: `OpenIntent::Writer` renames an incompatible-format `kg.redb` or
-/// vector index aside and creates it empty (`concurrent_open.rs`, #702). An
-/// import must not be the step that does that.
-/// What: opens private copies of both files the way the dry run does and
-/// returns the first failure; an absent file passes.
-/// Test: `apply_refuses_a_store_the_writer_open_would_rename_aside`.
-fn probe_stores(data_dir: &Path) -> Result<()> {
-    with_store_copy(data_dir, &std::env::temp_dir(), |s| s.load_drawer_ids())
-        .context("kg.redb failed a read-only probe; refusing to open it for writing")?;
-    let live = data_dir.join(INDEX_FILE);
-    if !live
-        .try_exists()
-        .with_context(|| format!("cannot stat {}", live.display()))?
-    {
-        return Ok(());
-    }
-    let scratch = tempfile::TempDir::with_prefix_in(SCRATCH_PREFIX, std::env::temp_dir())
-        .context("create scratch dir for the vector index probe")?;
-    let copy = scratch.path().join(INDEX_FILE);
-    std::fs::copy(&live, &copy).with_context(|| format!("copy {}", live.display()))?;
-    // redb can panic on a torn file; see `with_store_copy`.
-    match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        try_open_or_snapshot(&copy, OpenIntent::ReadOnlyClient).map(drop)
-    })) {
-        Ok(opened) => opened.with_context(|| {
-            format!(
-                "{} failed a read-only probe; refusing to open it for writing",
-                live.display()
-            )
-        }),
-        Err(_) => bail!("panic while probing a copy of {}", live.display()),
-    }
-}
-
 /// The fields every report carries whether or not `kg.db` exists.
-fn base_report(palace: &Palace, dry_run: bool) -> Result<LegacyReport> {
+fn base_report(palace: &Palace, dry_run: bool, allow_short: bool) -> Result<LegacyReport> {
     Ok(LegacyReport {
         palace: palace.id.as_str().to_string(),
         dry_run,
+        allow_short,
         incompatible: list_incompatible_files(&palace.data_dir)?,
         ..LegacyReport::default()
     })
