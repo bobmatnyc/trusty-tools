@@ -19,7 +19,11 @@ mod snapshot_publish;
 mod snapshot_tests;
 #[cfg(test)]
 mod tests_2936;
+#[cfg(test)]
+mod tests_close_8232;
 mod types;
+// #8167/#8232: releasing the snapshot mapping when its index is deleted.
+mod usearch_close;
 // #6826: the whole view↔heap demotion state machine (the #2164 clean-store
 // demote and the write-cooldown demote), in its own file so
 // `usearch_store.rs` stays under the 500-SLOC production cap.

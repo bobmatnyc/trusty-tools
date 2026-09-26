@@ -334,7 +334,12 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// refusal behaviour by `service::server::tests_3049`; the registry-only,
 /// unknown-id and failed-cleanup arms by `service::server::tests_6363`; the
 /// under-lock expectation re-check by
-/// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`.
+/// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`; the
+/// file close by `delete_releases_the_corpus_and_vector_files_while_a_clone_survives`
+/// and `a_corpus_still_referenced_elsewhere_abandons_the_delete`.
+///
+/// #8167/#8232: a quiesced delete closes the index's redb corpus and HNSW
+/// mapping before deregistering — see [`super::delete_close::close_index_files`].
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -441,6 +446,37 @@ pub(super) async fn unregister_index(
             };
         }
     }
+    // #8167/#8232: close the index's files BEFORE deregistering, so a close
+    // that cannot finish abandons a delete that changed nothing. Skipped when
+    // not quiesced: a live writer still holds them, and `quiesced: false` on
+    // the wire already says the delete ran without draining.
+    let mut errors: Vec<String> = Vec::new();
+    if quiesced {
+        let hot = state.registry.get(&index_id);
+        match super::delete_close::close_index_files(
+            hot.as_ref(),
+            super::delete_close::CLOSE_BUDGET,
+        )
+        .await
+        {
+            Ok(vector_close_error) => errors.extend(vector_close_error),
+            Err(reason) => {
+                tracing::error!(
+                    "delete[{id}]: ABANDONED — {reason}; nothing was changed, re-issue the \
+                     delete (issue #8167)"
+                );
+                crate::service::reindex::clear_index_cancel(&index_id);
+                return UnregisterOutcome {
+                    removed: false,
+                    data_deleted: false,
+                    quiesced,
+                    registered: true,
+                    error: Some(format!("index files not closed: {reason}")),
+                    refusal: None,
+                };
+            }
+        }
+    }
     let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.as_ref().map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
@@ -460,7 +496,6 @@ pub(super) async fn unregister_index(
     // produces exactly this shape. Consulting it here is what turns those rows
     // from undeletable (200 `removed:false`, row and data dir intact) into an
     // ordinary delete, and what lets a genuinely unknown id 404 instead.
-    let mut errors: Vec<String> = Vec::new();
     let registry_entry = if in_memory_removed {
         // Already proven to exist; skip the file read on the hot path.
         None

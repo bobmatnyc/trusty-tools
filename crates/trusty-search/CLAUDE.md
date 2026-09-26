@@ -266,9 +266,13 @@ version does not.
 `delete_data`) followed by `POST /indexes` with the same `id`/`root_path` is
 the supported way to swap a registration's data while the daemon keeps
 running. `DELETE` (via `unregister_index`) always stops that index's
-filesystem watcher and drops its in-memory handle — and with it the redb
-file lock — before returning, so the following `POST` reopens the corpus
-cleanly. Skipping the `DELETE` and dropping a handle out-of-process (or
+filesystem watcher and drops its in-memory handle before returning. A
+delete that answers `quiesced: true` also closes the redb corpus and unmaps
+`hnsw.usearch` first, even while another handle clone survives it (#8167,
+#8232), so the files can then be replaced and the root unmounted. A delete
+that answers `quiesced: false` skips that close, because a live writer
+still holds the files: do not replace them or unmount until a later delete
+answers `quiesced: true`. Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.

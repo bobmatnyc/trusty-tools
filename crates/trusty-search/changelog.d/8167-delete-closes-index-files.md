@@ -1,0 +1,2 @@
+Fixed
+- `DELETE /indexes/{id}` now closes the index's `index.redb` before it returns, even while another handle to the index is still alive (a queued deferred-embed job, an in-flight request). A colocated root can be unmounted after the delete instead of failing with `EBUSY` (#8167). If a transient reference does not drop within 5 s, the delete changes nothing and answers `500` with `error: "index files not closed: …"`; re-issue it. A delete that answers `quiesced: false` still skips the close, because a live writer holds the files.
