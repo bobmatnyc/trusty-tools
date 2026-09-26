@@ -381,3 +381,67 @@ async fn vector_remove_rejected_on_snapshot() {
         "remove on snapshot must be rejected"
     );
 }
+
+/// #8314: a palace reopen must not wait on a stuck vector write.
+///
+/// Why: the daemon reopens a palace on a READ (`open_palace` after an LRU or
+/// idle eviction), and the reopen shares the cached `Database` with the live
+/// handle. Before the fix `HnswStore::open_with_mode` ran two write
+/// transactions on every open, so a write transaction that never finished
+/// parked the reopen — and the read behind it — forever.
+/// What: holds an uncommitted vector write on the live handle's database, then
+/// reopens the same store on another thread and searches it. The reopen must
+/// finish inside a bound and return the last COMMITTED vector; the held
+/// write's row must stay invisible, and aborting it must leave nothing behind.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reopen_behind_a_stuck_vector_write_still_reads() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.usearch");
+    let committed = Uuid::new_v4();
+    let v = unit_vec(384, 21);
+    let live = UsearchStore::new_with_intent(path.clone(), 384, OpenIntent::Writer).unwrap();
+    live.upsert(committed, v.clone()).await.unwrap();
+
+    // The stuck writer: an open write transaction holding an uncommitted row.
+    let db = live.db_state.db.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = std::thread::spawn(move || {
+        let wtx = db.begin_write().unwrap();
+        {
+            let mut keys = wtx.open_table(VECTOR_KEYS_FOR_TEST).unwrap();
+            keys.insert("uncommitted-drawer", 9_999_u64).unwrap();
+        }
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        drop(wtx); // abort: never committed
+    });
+    held_rx.recv().unwrap();
+
+    let reopen_path = path.clone();
+    let query = v.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = UsearchStore::new_with_intent(reopen_path, 384, OpenIntent::Writer)
+            .and_then(|s| Ok(s.inner.search(&query, 5)?));
+        let _ = done_tx.send(outcome);
+    });
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    release_tx.send(()).unwrap();
+    stuck.join().unwrap();
+
+    let hits = outcome
+        .expect("reopen blocked behind the stuck vector write (#8314)")
+        .expect("reopen and search succeed");
+    let want = committed.to_string();
+    assert_eq!(hits.first().map(|h| h.0.as_str()), Some(want.as_str()));
+    assert!(hits.iter().all(|h| h.0 != "uncommitted-drawer"));
+    let keys = live.inner.all_keys().unwrap();
+    assert!(
+        !keys.iter().any(|k| k == "uncommitted-drawer"),
+        "an aborted write left a row behind"
+    );
+}
+
+use crate::memory_core::store::kg_store::VECTOR_KEYS as VECTOR_KEYS_FOR_TEST;

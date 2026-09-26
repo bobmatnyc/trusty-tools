@@ -1,0 +1,3 @@
+Fixed
+- A palace reopen no longer waits on a write transaction that never finishes (#8314). The vector store's open is write-free once the file is initialised, and the open-time expired-drawer sweep waits at most 2 s for its deletes before the open proceeds, logging an error that names the palace and the operation. A read that has to reopen an evicted palace now answers with the last committed data instead of hanging.
+- A write that exceeds its pipeline budget now logs an ERROR naming the palace and the `remember` operation, not only an error returned to a client that may already have given up (#8314).

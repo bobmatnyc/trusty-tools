@@ -26,9 +26,7 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
-use crate::memory_core::store::kg_store::{
-    DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
-};
+use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
 
 mod exhaustive;
 use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
@@ -152,6 +150,7 @@ impl From<redb::CommitError> for HnswStoreError {
 }
 
 mod alloc;
+mod open_init;
 use alloc::allocate_vector_id;
 
 /// Public result alias to keep call-site signatures concise.
@@ -294,15 +293,10 @@ impl HnswStore {
         // least once. In read-only mode we skip this — the snapshot copy
         // we hold was made from a fully-initialised live file, so the
         // tables already exist.
+        // #8314: write-free once initialised, so a reopen never waits on a
+        // live (possibly stuck) vector write. See `open_init`.
         if !read_only {
-            let wtx = db.begin_write()?;
-            {
-                let _ = wtx.open_table(VECTORS)?;
-                let _ = wtx.open_table(VECTOR_KEYS)?;
-                let _ = wtx.open_table(DELETED_VECTORS)?;
-                let _ = wtx.open_table(VECTOR_ID_SEQ)?;
-            }
-            wtx.commit()?;
+            open_init::ensure_schema(&db)?;
         }
 
         let index = Hnsw::<f32, DistCosine>::new(
@@ -377,17 +371,9 @@ impl HnswStore {
         // and the next open of a fixed binary pulls it back up before any id is
         // issued. Skipped in read-only/snapshot mode, where every write path
         // returns `ReadOnly` before it could allocate anything.
+        // #8314: reads first; writes only when the counter is below the floor.
         if !read_only {
-            let wtx = db.begin_write()?;
-            {
-                let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
-                let current = seq.get(NEXT_VECTOR_ID)?.map(|g| g.value()).unwrap_or(0);
-                let floor = max_seen.saturating_add(1);
-                if current < floor {
-                    seq.insert(NEXT_VECTOR_ID, floor)?;
-                }
-            }
-            wtx.commit()?;
+            open_init::raise_id_floor(&db, max_seen.saturating_add(1))?;
         }
 
         Ok(Self {

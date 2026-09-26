@@ -465,6 +465,71 @@ async fn expired_tier_c_drawer_survives_the_open_time_sweep() {
     );
 }
 
+/// #8314: a reopen that shares a live handle's KG must not wait on its write.
+///
+/// Why: the daemon reopens a palace on a READ after an LRU or idle eviction,
+/// and that reopen shares the cached kg.redb `Database` with any handle still
+/// alive — including one whose write transaction never ends. The open-time
+/// sweep deleted each expired drawer with a synchronous write, which waited on
+/// that transaction forever, so the read behind the reopen never answered.
+/// What: seeds one live and one expired drawer through a live handle, holds a
+/// raw kg.redb write transaction on another thread, then opens the same palace
+/// again on a third thread. The reopen must finish inside a bound, show the
+/// live drawer, and keep the expired one out of the in-memory table.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reopen_behind_a_stuck_kg_write_still_reads() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("stuck-palace");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let palace = Palace {
+        id: PalaceId::new("stuck-palace"),
+        name: "Stuck".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir,
+    };
+    let live = PalaceHandle::open(&palace).expect("open live handle");
+    let room_id = Uuid::new_v4();
+    let kept = Drawer::new(room_id, "a drawer committed before the stall");
+    let mut expired = Drawer::new(room_id, "an expired ordinary drawer");
+    expired.expires_at = Some(Utc::now() - Duration::days(1));
+    let (kept_id, expired_id) = (kept.id, expired.id);
+    live.kg.upsert_drawer_sync(&kept).unwrap();
+    live.kg.upsert_drawer_sync(&expired).unwrap();
+
+    let db = live.kg.store().db_for_test();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = std::thread::spawn(move || {
+        let wtx = db.begin_write().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        drop(wtx); // abort: never committed
+    });
+    held_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reopen_palace = palace.clone();
+    std::thread::spawn(move || {
+        let ids = PalaceHandle::open(&reopen_palace)
+            .map(|h| h.drawers.read().iter().map(|d| d.id).collect::<Vec<_>>());
+        let _ = done_tx.send(ids.map_err(|e| format!("{e:#}")));
+    });
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    release_tx.send(()).unwrap();
+    stuck.join().unwrap();
+
+    let ids = outcome
+        .expect("reopen blocked behind the stuck kg write (#8314)")
+        .expect("reopen succeeds");
+    assert!(ids.contains(&kept_id), "the committed drawer is readable");
+    assert!(
+        !ids.contains(&expired_id),
+        "the expired drawer is still hidden"
+    );
+}
+
 // ── The incumbent-absent fallback (#6438) ───────────────────────────────────
 
 /// Every drawer row in `rows` whose own `fact_key` still claims [`SLOT`].
