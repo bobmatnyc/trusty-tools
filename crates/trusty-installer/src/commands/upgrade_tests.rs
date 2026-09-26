@@ -514,3 +514,23 @@ fn member_line_shows_versions_and_size() {
     };
     assert_eq!(member_line(&m), "tga: 8.0.0 → 10.0.0 (2.00 MiB)");
 }
+
+/// Why (#8642 review): the binary is replaced before verification, so a
+/// failed check must say what is on disk now, not imply nothing changed.
+/// What: a tag mismatch (tag 10.0.0, binary reports 8.0.0) wrapped by
+/// `placed_state_error` names the verification failure, the replaced path,
+/// and the version it now holds.
+/// Test: This is the test.
+#[test]
+fn placed_state_error_names_the_replaced_path_and_version() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    let path = std::path::Path::new("/x/.cargo/bin/tga");
+    let err = verify_applied(&c, Some("10.0.0"), "tga 8.0.0").unwrap_err();
+    let msg = placed_state_error(err, path, "tga 8.0.0").to_string();
+    assert!(msg.contains("release tag is 10.0.0"), "{msg}");
+    assert!(
+        msg.contains("/x/.cargo/bin/tga was already replaced and now holds 8.0.0"),
+        "{msg}"
+    );
+    assert!(msg.contains("previous binary was not kept"), "{msg}");
+}

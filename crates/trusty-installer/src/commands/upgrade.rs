@@ -544,7 +544,8 @@ async fn upgrade_one(
                 trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
             // #8642: the placed binary must report the tag's version and advance.
             // #4964: no `cargo install` on this branch — only activation.
-            let applied = verify_applied(c, Some(&version), &reported)?;
+            let applied = verify_applied(c, Some(&version), &reported)
+                .map_err(|e| placed_state_error(e, &bin_path, &reported))?;
             finish_member(c, applied, bin_path, path_env).await
         }
         // #5518: verification failed — abort this candidate instead of
@@ -572,7 +573,8 @@ async fn upgrade_one(
             let reported =
                 trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
             // #8642: cargo could not advance it either → an error, not "ok".
-            let applied = verify_applied(c, None, &reported)?;
+            let applied = verify_applied(c, None, &reported)
+                .map_err(|e| placed_state_error(e, &bin_path, &reported))?;
             finish_member(c, applied, bin_path, path_env).await
         }
     }
@@ -669,6 +671,29 @@ fn verify_applied(
         );
     }
     Ok(reported)
+}
+
+/// Name the on-disk state a failed post-placement check leaves behind.
+///
+/// Why (#8642 review): both install branches replace the binary BEFORE
+/// [`verify_applied`] runs, and neither keeps the previous copy. An error that
+/// said only "did not advance" or "tag mismatch" implied nothing changed on
+/// disk, when the old binary is already gone.
+/// What: appends the replaced path and the version that binary now reports
+/// (or its raw `--version` line when none parses) to the verification error.
+/// Test: `tests::placed_state_error_names_the_replaced_path_and_version`.
+fn placed_state_error(
+    err: anyhow::Error,
+    bin_path: &std::path::Path,
+    reported_line: &str,
+) -> anyhow::Error {
+    let now = super::update_engine::extract_version_from_line(reported_line)
+        .unwrap_or_else(|| format!("{reported_line:?}"));
+    anyhow::anyhow!(
+        "{err}. {} was already replaced and now holds {now}; the previous \
+         binary was not kept",
+        bin_path.display()
+    )
 }
 
 /// Activate a just-placed daemon binary by restarting the member (#4964).
