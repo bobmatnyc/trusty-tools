@@ -400,6 +400,12 @@ mod tests {
         asked_fresh: std::cell::Cell<Option<bool>>,
         /// #7889 critic round 2: the nested-repository scan's answer.
         nested: Result<Option<String>, String>,
+        /// #8665: commits on HEAD after the merged pull request's head and on
+        /// no `origin` ref. Empty by default, so every pre-#8665 own-PR grant
+        /// stands and a test that wants post-merge work has to say so.
+        after_merge: Result<Vec<String>, String>,
+        /// #8665: whether the guard asked for that list at all.
+        asked_after_merge: std::cell::Cell<bool>,
     }
 
     /// A merged-PR answer for the fixture repository (#7057), landing on `main`.
@@ -484,6 +490,8 @@ mod tests {
                 carried: None,
                 asked_fresh: std::cell::Cell::new(None),
                 nested: Ok(None),
+                after_merge: Ok(Vec::new()),
+                asked_after_merge: std::cell::Cell::new(false),
             }
         }
 
@@ -522,6 +530,14 @@ mod tests {
         }
         fn local_only_commits(&self, _dir: &Path) -> Result<usize, String> {
             self.local_only.clone()
+        }
+        fn commits_after_merged_head(
+            &self,
+            _dir: &Path,
+            _pr_head: &str,
+        ) -> Result<Vec<String>, String> {
+            self.asked_after_merge.set(true);
+            self.after_merge.clone()
         }
         fn head_sha(&self, _dir: &Path) -> Result<String, String> {
             self.head_sha.clone()
@@ -1428,6 +1444,49 @@ mod tests {
             "a clean tree whose branch has a MERGED pull request must be removable even \
              though the merge deleted its upstream"
         );
+        assert!(
+            probe_asked_after_merge(&FakeProbe::upstream_deleted()),
+            "#8665: the own-PR grant now asks what HEAD holds past the merged head"
+        );
+    }
+
+    /// Run the re-checks against `probe` and report whether the #8665
+    /// post-merge list was asked for.
+    fn probe_asked_after_merge(probe: &FakeProbe) -> bool {
+        let _ = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), probe);
+        probe.asked_after_merge.get()
+    }
+
+    /// 🔴 FAIL-OPEN CHECK (#8665): a post-merge commit list git could not
+    /// produce never admits on the own-PR route; the content probe decides, and
+    /// the refusal quotes git. Fails at c7f433765, where `!ahead` granted.
+    #[test]
+    fn worktree_8665_an_unanswerable_post_merge_list_never_admits() {
+        let probe = FakeProbe {
+            after_merge: Err("`git rev-list` failed: bad revision".to_string()),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unanswerable post-merge list must not grant");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("bad revision"), "{reason}");
+        assert!(reason.contains("could not be established"), "{reason}");
+    }
+
+    /// 🔴 FAIL-OPEN CHECK (#8665): with `origin` not refreshed in this
+    /// evaluation, the post-merge list is never asked — a stale ref could vouch
+    /// for a commit the remote no longer has — so the content probe decides.
+    /// Fails at c7f433765, where `!ahead` granted.
+    #[test]
+    fn worktree_8665_stale_origin_refs_are_never_asked() {
+        let probe = FakeProbe {
+            local_only: Err("`origin` could not be refreshed: timed out".to_string()),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("stale refs must not vouch for post-merge commits");
+        assert!(!probe.asked_after_merge.get(), "{reason}");
+        assert!(reason.contains("was not refreshed"), "{reason}");
     }
 
     /// The grant is the merged pull request, not the missing upstream. With no
