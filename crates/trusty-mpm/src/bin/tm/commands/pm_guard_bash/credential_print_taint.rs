@@ -12,11 +12,14 @@
 //! Test: `credential_print_tests::denies_a_credential_carried_by_a_variable`,
 //! `credential_print_tests::allows_a_carried_variable_that_is_never_printed`,
 //! `credential_print_tests::denies_zsh_expansion_forms`,
+//! `credential_print_tests::denies_brace_expanded_declarer_names`,
+//! `credential_print_tests::denies_nameref_loops_and_subscripted_namerefs`,
 //! `credential_print_tests::deep_brace_nesting_denies_without_overflow`.
 
 use std::collections::BTreeSet;
 
 use super::credential_print_programs::basename;
+use super::credential_print_taint_forms::reads_tainted;
 use super::{Lifted, MARK, carries};
 use crate::commands::hook_rewrite::is_env_assignment;
 
@@ -27,21 +30,26 @@ pub(super) const POSITIONAL: &str = "@";
 /// expansion then counts as carrying.
 pub(super) const ANY: &str = "$any";
 
+/// #8676 round 3: recorded while tainted when some name has the integer
+/// attribute, so any assignment of a bare tainted name is arithmetic.
+pub(super) const INTEGER: &str = "$integer";
+
 /// Builtins that bind (`declare T=…`) or list (`declare -p`) variables.
-const DECLARERS: &[&str] = &["declare", "typeset", "export", "readonly", "local"];
+pub(super) const DECLARERS: &[&str] = &["declare", "typeset", "export", "readonly", "local"];
 
 /// The names bash (`BASH_REMATCH`) and zsh (`match`, `MATCH`) fill from `=~`.
 const REMATCH: &[&str] = &["BASH_REMATCH", "match", "MATCH"];
 
 /// The names a stage binds from a credential-carrying word.
 ///
-/// What: every `NAME=`/`NAME+=`/`NAME[i]=` word whose value carries, wherever
-/// it stands — a prefix assignment, an `export`/`local`/`declare`/`readonly`
-/// operand, a word inside a `{ …; }` body; a run-time name binds [`ANY`]; a
-/// `declare -n R=T` nameref to a tainted `T`; `for`/`select NAME in WORDS`
-/// when a listed word carries, or with no `in` list when the positional
-/// parameters do; `set …` with a carrying operand binds [`POSITIONAL`]; and
-/// `=~` against a carrying word binds the [`REMATCH`] names.
+/// What: every `NAME=`/`NAME+=`/`NAME[i]=` word whose value carries or names
+/// a tainted name bare, wherever it stands — a prefix assignment, an
+/// `export`/`local`/`declare`/`readonly` operand, a word inside a `{ …; }`
+/// body; a run-time, brace-expanded or globbed name binds [`ANY`];
+/// `for`/`select NAME in WORDS` when a listed word carries or names one, or
+/// with no `in` list when the positional parameters do; `set …` with a
+/// carrying operand binds [`POSITIONAL`]; `=~` against a carrying word binds
+/// the [`REMATCH`] names; and an integer declaration binds [`INTEGER`].
 pub(super) fn bound_names(
     argv: &[String],
     kw: usize,
@@ -50,17 +58,20 @@ pub(super) fn bound_names(
     lifted: &Lifted,
 ) -> Vec<String> {
     let mut bound = Vec::new();
-    let nameref = DECLARERS.contains(&program)
-        && args
-            .iter()
-            .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('n'));
+    // #8676 round 3: `declare -i` makes every later `X=T` arithmetic.
+    if declares_integer(program, args) && !lifted.names.is_empty() {
+        bound.push(INTEGER.to_string());
+    }
     for word in argv {
         let Some((lhs, value)) = word.split_once('=') else {
             continue;
         };
         let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
         let name = lhs.split('[').next().unwrap_or(lhs);
-        let carried = carries(value, lifted) || (nameref && is_tainted(value, &lifted.names));
+        // #8676 round 3: a value naming a tainted name bare copies it — a
+        // nameref (`R=T`, `R='A[0]'`) or a name arithmetic evaluates
+        // recursively (`U=T; $((U))`).
+        let carried = carries(value, lifted) || reads_tainted(value, &lifted.names);
         if !carried {
             continue;
         }
@@ -68,14 +79,21 @@ pub(super) fn bound_names(
             bound.push(name.to_string());
         } else if name.contains('$') || name.contains('`') || name.contains(MARK) {
             bound.push(ANY.to_string());
+        } else if expands_to_names(name) {
+            // #8676 round 3: brace expansion or a glob (`{T,U}=`, `T{,}=`)
+            // builds the name at run time, as `$N=` does.
+            bound.push(ANY.to_string());
         }
     }
     let rest = argv.get(kw..).unwrap_or_default();
     if let [head, name, list @ ..] = rest
         && matches!(head.as_str(), "for" | "select")
     {
+        // #8676 round 3: a bare name in the list binds a nameref loop variable.
         let carried = match list.split_first() {
-            Some((first, words)) if first == "in" => words.iter().any(|w| carries(w, lifted)),
+            Some((first, words)) if first == "in" => words
+                .iter()
+                .any(|w| carries(w, lifted) || reads_tainted(w, &lifted.names)),
             _ => is_tainted(POSITIONAL, &lifted.names),
         };
         if carried {
@@ -100,6 +118,26 @@ pub(super) fn is_tainted(name: &str, names: &BTreeSet<String>) -> bool {
     names.contains(name)
         || (positional && names.contains(POSITIONAL))
         || (names.contains(ANY) && (positional || is_identifier(name)))
+}
+
+/// Whether a declaration gives its names the integer attribute (#8676 round
+/// 3): a [`DECLARERS`] cluster holding `i` (`declare -i`, `local -ri`), or
+/// zsh's `integer`.
+pub(super) fn declares_integer(program: &str, args: &[String]) -> bool {
+    program == "integer"
+        || (DECLARERS.contains(&program)
+            && args
+                .iter()
+                .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('i')))
+}
+
+/// Whether an assignment's left side is a brace expansion or a glob built
+/// from name characters (`{T,U}`, `T{,}`, `T*`), so the shell picks the name.
+fn expands_to_names(name: &str) -> bool {
+    name.contains(['{', '*', '?'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_{},*?".contains(&b))
 }
 
 /// `${…}` nesting followed before a word counts as carrying (#8676): the

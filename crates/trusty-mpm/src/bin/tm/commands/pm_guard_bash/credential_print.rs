@@ -29,8 +29,13 @@
 //!
 //! Known residual (unscored default): a program the rule has no fact for is
 //! treated as non-printing when a credential is its argument. `awk -v t=… '…'`,
-//! `jq --arg t …`, and a shell function or alias can each print the value and
-//! are allowed; only [`ARG_PRINTERS`] are known to print their arguments.
+//! `jq --arg t …`, a shell function or alias, `[ x "$T" y ]`, and an external
+//! program that repeats a bad operand in its error (`ls "$T"`, `timeout 5
+//! sleep "$T"`) can each print the value and are allowed; only
+//! [`ARG_PRINTERS`] and the echoing builtins (#8676, `credential_print_taint_sinks`)
+//! are known to print their arguments. A script file an evaluator runs by
+//! name (`bash deploy.sh`) is not read. Why a denylist and not an allowlist:
+//! see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
 
 #[path = "credential_print_heredoc.rs"]
@@ -45,6 +50,8 @@ mod credential_print_split;
 mod credential_print_taint;
 #[path = "credential_print_taint_forms.rs"]
 mod credential_print_taint_forms;
+#[path = "credential_print_taint_sinks.rs"]
+mod credential_print_taint_sinks;
 
 use super::bash_tokens::tokenize;
 use super::shell_lex::{WrappedCommand, wrapped_command};
@@ -52,12 +59,13 @@ use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
     KEYWORDS, basename, code_operands, consumes_stdin, credential_fds, enables_xtrace,
-    first_credential_program, is_evaluator,
+    evaluator_name, first_credential_program, is_evaluator,
 };
 use credential_print_redirect::{apply_redirections, terminal_name_sink};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
+use credential_print_taint_sinks::{judge_builtin_sinks, reads_script_by_path};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -163,6 +171,7 @@ struct Lifted {
 /// `credential_print_tests::denies_a_credential_carried_by_a_variable`,
 /// `credential_print_tests::denies_inline_code_reading_a_tainted_name`,
 /// `credential_print_tests::scan_work_is_bounded`,
+/// `credential_print_tests::deny_reason_never_echoes_the_command`,
 /// `credential_print_tests::no_prefix_of_a_command_panics`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
@@ -379,6 +388,9 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if dumps_variables(argv, &program, args, &lifted.names) {
         route(routed.out, &mut emitted)?;
     }
+    // #8676 round 3: `cd "$T"`, `export "$T"`, `trap 'echo $T' EXIT`.
+    let sinks = (routed.out, routed.err);
+    judge_builtin_sinks(&program, args, sinks, lifted, ctx.depth, &mut emitted)?;
     if program_word.is_empty() {
         // Assignments only (`T=$(…)`): nothing is printed.
         return Ok(emitted);
@@ -412,18 +424,22 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
             .map(|p| p + start)
     };
     if let Some(at) = evaluator_at.filter(|&at| at != start || wrapped == WrappedCommand::None) {
-        let evaluator = basename(&argv[at]);
+        let word = basename(&argv[at]);
+        // #8676 round 3: `python3.12` runs as `python`.
+        let evaluator = evaluator_name(&word).unwrap_or(&word);
         let operands = argv.get(at + 1..).unwrap_or_default();
-        let code = code_operands(&evaluator, operands);
+        let code = code_operands(evaluator, operands);
         // #8676: with a credential in a variable, any inline code can read it
         // with no `$` (`os.environ`, `ENV`, `process.env`), so all refuse.
         let tainted = !lifted.names.is_empty();
         let reads_stdin = operands.iter().all(|a| a.starts_with('-'));
         // #8596 round 3: only code operands; `python3 up.py --token "$T"` is data.
-        let fed = matches!(evaluator.as_str(), "eval" | "source" | ".")
+        let fed = matches!(evaluator, "eval" | "source" | ".")
             || code.iter().any(|c| input_is_program_text(c))
             || (tainted && (!code.is_empty() || routed.here_any))
             || (tainted && reads_stdin && ctx.stdin_piped)
+            // #8676 round 3: `bash /dev/stdin`, `bash <(…)`, `bash < <(…)`.
+            || (tainted && reads_script_by_path(operands, lifted))
             || routed.here_program_text
             || ctx.stdin_text;
         if fed {

@@ -10,13 +10,16 @@
 //! [`function_header_words`] counts the words of a leading function header.
 //! Test: `credential_print_tests::denies_array_assignment_copies`,
 //! `credential_print_tests::denies_arithmetic_reads`,
+//! `credential_print_tests::denies_arithmetic_reads_in_offsets_and_integer_declarations`,
 //! `credential_print_tests::denies_after_a_function_header`.
 
 use std::collections::BTreeSet;
 
 use super::super::bash_tokens::tokenize;
 use super::super::shell_lex::QuoteScan;
-use super::credential_print_taint::{ANY, expands_tainted, is_identifier, is_tainted};
+use super::credential_print_taint::{
+    ANY, INTEGER, declares_integer, expands_tainted, is_identifier, is_tainted, leading_name,
+};
 use super::{Lifted, carries};
 
 /// `test`/`[[` operators that evaluate both operands as arithmetic.
@@ -99,8 +102,10 @@ fn matching_close(bytes: &[u8], from: usize, level: usize) -> Option<usize> {
 ///
 /// What: the text of every `(( … ))` and `$(( … ))`, every `let` operand, a
 /// `[`/`[[`/`test` stage using an [`ARITH_TESTS`] operator, and every array
-/// subscript (`A[…]`). A name there is read bare or as `$NAME`; `${#NAME}` is
-/// its length and does not count. An unclosed `((` reads to the stage's end.
+/// subscript (`A[…]`); `$[…]`, a `${NAME:offset:length}` operand, and an
+/// assignment value while a name is integer (`declare -i`). A name there is
+/// read bare or as `$NAME`; `${#NAME}` is its length and does not count. An
+/// unclosed `((` reads to the stage's end.
 pub(super) fn reads_in_arithmetic(
     stage: &str,
     argv: &[String],
@@ -123,6 +128,30 @@ pub(super) fn reads_in_arithmetic(
     if program == "let" && argv.iter().any(|w| reads_tainted(w, names)) {
         return true;
     }
+    // #8676 round 3: a subscript, `$[…]`, a `${X:offset:length}`, and an
+    // assignment to an integer name (`declare -i X=T`, or `X=T` after one)
+    // are arithmetic. One linear pass each: a per-opener scan was quadratic.
+    let after = |at: usize, want: fn(u8) -> bool| at > 0 && want(bytes[at - 1]);
+    let subscript = |at| after(at, |b| ident_byte(b) || b == b'$');
+    if any_body(stage, (b'[', b']'), subscript, |s| reads_tainted(s, names))
+        || any_body(
+            stage,
+            (b'{', b'}'),
+            |at| after(at, |b| b == b'$'),
+            |s| offset_operand(s).is_some_and(|o| reads_tainted(o, names)),
+        )
+    {
+        return true;
+    }
+    let integer = declares_integer(program, argv) || names.contains(INTEGER);
+    if integer
+        && argv
+            .iter()
+            .filter_map(|w| w.split_once('=').map(|(_, v)| v))
+            .any(|v| reads_tainted(v, names))
+    {
+        return true;
+    }
     let test = argv
         .iter()
         .any(|w| matches!(w.as_str(), "[" | "[[" | "test"));
@@ -132,21 +161,54 @@ pub(super) fn reads_in_arithmetic(
     {
         return true;
     }
-    subscripts(stage).any(|s| reads_tainted(s, names))
+    false
 }
 
-/// The text of each `[…]` that directly follows a name character.
-fn subscripts(stage: &str) -> impl Iterator<Item = &str> {
-    let bytes = stage.as_bytes();
-    stage.match_indices('[').filter_map(move |(at, _)| {
-        let after_name = at > 0 && ident_byte(bytes[at - 1]);
-        let close = stage[at..].find(']').map_or(stage.len(), |c| at + c);
-        after_name.then(|| &stage[at + 1..close])
-    })
+/// Bracket nesting [`any_body`] follows before it counts as reading (#8676
+/// round 3); it also bounds how many bodies hold any one byte.
+const MAX_NEST: usize = 32;
+
+/// Whether `reads` holds for the body of any `open`…`close` run whose opener
+/// `starts(at)` accepts, in one pass; an unclosed body runs to the end.
+/// Fail-closed: nesting deeper than [`MAX_NEST`] counts as reading.
+fn any_body(
+    text: &str,
+    (open, close): (u8, u8),
+    starts: impl Fn(usize) -> bool,
+    reads: impl Fn(&str) -> bool,
+) -> bool {
+    let mut stack: Vec<Option<usize>> = Vec::new();
+    for (at, b) in text.bytes().enumerate() {
+        if b == open {
+            stack.push(starts(at).then_some(at + 1));
+            if stack.len() > MAX_NEST {
+                return true;
+            }
+        } else if b == close
+            && let Some(Some(from)) = stack.pop()
+            && reads(&text[from..at])
+        {
+            return true;
+        }
+    }
+    stack.into_iter().flatten().any(|from| reads(&text[from..]))
+}
+
+/// The offset and length text of a `${NAME:offset[:length]}` or
+/// `${NAME[i]:…}` body, which bash evaluates as arithmetic; `None` for the
+/// `:-`, `:=`, `:?` and `:+` defaults and for every other form.
+fn offset_operand(body: &str) -> Option<&str> {
+    let name = leading_name(body);
+    let mut after = body.get(name.len()..).filter(|_| !name.is_empty())?;
+    if after.starts_with('[') {
+        after = after.find(']').map_or("", |end| &after[end + 1..]);
+    }
+    let rest = after.strip_prefix(':')?;
+    (!rest.starts_with(['-', '=', '?', '+'])).then_some(rest)
 }
 
 /// Whether arithmetic `text` reads a tainted name, bare or expanded.
-fn reads_tainted(text: &str, names: &BTreeSet<String>) -> bool {
+pub(super) fn reads_tainted(text: &str, names: &BTreeSet<String>) -> bool {
     if expands_tainted(text, names) {
         return true;
     }
