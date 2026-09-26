@@ -26,7 +26,7 @@ use super::build_router;
 use super::delete_close::{close_index_files, CLOSE_BUDGET};
 use super::tests_components::IsolatedDataDir;
 use crate::core::indexer::TEST_REHYDRATE_DELAY_MS;
-use crate::core::indexer::{IndexDeleted, SearchQuery};
+use crate::core::indexer::{CodeIndexer, IndexDeleted, SearchQuery};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::Embedder;
 use crate::service::persistence::{
@@ -44,7 +44,7 @@ struct Fixture {
     registry: IndexRegistry,
     handle: Arc<IndexHandle>,
     redb: std::path::PathBuf,
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
 }
 
 /// Seed a colocated index on disk, then reload it so the HNSW snapshot is
@@ -78,18 +78,23 @@ async fn fixture() -> Fixture {
         registry,
         handle,
         redb: corpus_redb_path_for_entry(&entry).expect("redb path"),
-        _root: root,
+        root,
     }
 }
 
 /// Send `DELETE /indexes/{INDEX_ID}` and return status plus decoded body.
 async fn send_delete(router: &axum::Router) -> (StatusCode, serde_json::Value) {
+    send_delete_query(router, "").await
+}
+
+/// [`send_delete`] with a query string, e.g. `?delete_data=true`.
+async fn send_delete_query(router: &axum::Router, query: &str) -> (StatusCode, serde_json::Value) {
     let resp = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/indexes/{INDEX_ID}"))
+                .uri(format!("/indexes/{INDEX_ID}{query}"))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -363,6 +368,10 @@ async fn a_deleted_index_skips_snapshot_writes_without_the_swap_error() {
     let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
     let indexer = surviving.indexer.read().await;
     indexer.force_incremental_persist();
+    assert!(
+        indexer.refuse_durable_write("test", "x"),
+        "a deleted index must refuse the snapshot write"
+    );
 
     let captured = store.recent_errors(16);
     assert!(
@@ -370,4 +379,55 @@ async fn a_deleted_index_skips_snapshot_writes_without_the_swap_error() {
         "a deletion must not be logged as a staged reindex swap: {captured:?}"
     );
     assert_eq!(indexer.refused_incremental_writes(), 0);
+}
+
+/// #8167: an indexer that never wired a corpus (`corpus_ever_wired == false`)
+/// is neither quarantined nor detached, so only the `deleted` check refuses
+/// its snapshot writes once the delete has detached it.
+#[test]
+fn a_deleted_indexer_that_never_wired_a_corpus_refuses_snapshot_writes() {
+    let root = tempfile::tempdir().expect("root");
+    let mut indexer = CodeIndexer::new(INDEX_ID, root.path());
+    assert!(
+        !indexer.refuse_durable_write("test", "x"),
+        "precondition: a live corpus-less indexer writes its snapshots"
+    );
+    let detached = indexer.detach_for_delete();
+    assert!(
+        detached.corpus.is_none(),
+        "precondition: no corpus was wired"
+    );
+    assert!(
+        indexer.refuse_durable_write("test", "x"),
+        "a deleted indexer must refuse the snapshot write"
+    );
+    assert_eq!(indexer.refused_incremental_writes(), 0);
+}
+
+/// #8167: after `DELETE ?delete_data=true` removes the colocated data dir, a
+/// snapshot persist on a surviving clone does not create it again.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_persist_after_delete_data_does_not_recreate_the_colocated_dir() {
+    let _isolated = IsolatedDataDir::new();
+    let fx = fixture().await;
+    let surviving = Arc::clone(&fx.handle);
+    let data_dir = fx.root.path().join(".trusty-search");
+    assert!(data_dir.exists(), "precondition: the colocated dir exists");
+
+    let (status, body) = send_delete_query(&fx.router, "?delete_data=true").await;
+    assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
+    assert!(
+        !data_dir.exists(),
+        "precondition: delete_data removed the dir"
+    );
+
+    surviving.indexer.read().await.force_incremental_persist();
+    // The persist, if it were spawned, runs on a detached task.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !data_dir.exists(),
+        "a persist on a deleted index must not recreate {}",
+        data_dir.display()
+    );
 }

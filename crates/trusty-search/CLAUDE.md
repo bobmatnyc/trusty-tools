@@ -279,7 +279,10 @@ delete answers `404` and cannot help. Instead the daemon closes the files in
 the background once that writer finishes, and the response says nothing
 about it: do not replace the files or unmount until the daemon log shows
 `delete[<id>]: deferred close done`. An ERROR line starting
-`delete[<id>]: deferred close` means they stayed open. Skipping the `DELETE` and dropping a handle out-of-process (or
+`delete[<id>]: deferred close` means they stayed open. Re-registering or
+writing to the same index id waits until `delete[<id>]: deferred close done`
+is logged, because the queued deferred close holds the teardown lock queue.
+Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
