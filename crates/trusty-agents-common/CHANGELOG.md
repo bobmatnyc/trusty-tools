@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.3] — 2026-09-26
+
+### Fixed
+
+- `BASE-AGENT.md`'s worktree-isolation bullet cuts the #8473 heredoc-commit-message clause to a short pointer at the `worktree-discipline.md` substitution table, and two other bullets drop redundant words, bringing composed `rust-engineer` and `ticketing` back under their resident-body budgets ([#8377](https://github.com/bobmatnyc/trusty-tools/issues/8377)).
+- `BASE-AGENT.md`'s worktree-isolation bullet names the substitute for a heredoc-embedded `git commit -m "$(cat <<'EOF' … EOF)"`, which a worktree agent's harness refuses: repeated `-m` flags, or `git commit -F <file>` with the file written by the Write tool ([#8473](https://github.com/bobmatnyc/trusty-tools/issues/8473)).
+- The `python-engineer` agent's Development Workflow section spells the test gate `.venv/bin/python -m pytest` instead of `source .venv/bin/activate`, which a worktree agent's harness refuses ([#8514](https://github.com/bobmatnyc/trusty-tools/issues/8514)).
+
+### Changed
+
+- The `version-control` agent points at the `git-workflow` skill's "GitHub Actions Spend" checks before a workflow edit or a PR on a billed repo ([#8630](https://github.com/bobmatnyc/trusty-tools/issues/8630)).
+
+### Security
+
+- The `local-ops` agent checks that a Keychain item exists by exit status alone, never adds `-w`/`-g` to a check, and consumes a needed value inside the command that uses it (a pipe to `--password-stdin`) rather than in a shell variable, matching the `tm-secrets` skill; the `gcp-ops` agent never runs `print-access-token` as its own command and consumes a token inside the command that needs it ([#8596](https://github.com/bobmatnyc/trusty-tools/issues/8596), [#8248](https://github.com/bobmatnyc/trusty-tools/issues/8248)).
+
+### Documentation
+
+- `version-control.md` no longer tells the agent to pass `--delete-branch` —
+  the flag fails post-merge whenever a worktree holds the base branch (#7104)
+  or the head branch (#8391), which every `isolation: "worktree"` delivery
+  does. Guidance now points to `tm pr merge <n>` + `tm pr cleanup <n>`, with a
+  fallback sequence and the correct merge-tree safety check for
+  `git branch -D` (closes [#8391](https://github.com/bobmatnyc/trusty-tools/issues/8391))
+
 ## [0.8.2] — 2026-09-25
 
 ### Added
