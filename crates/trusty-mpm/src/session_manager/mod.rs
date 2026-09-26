@@ -124,6 +124,9 @@ mod worktree_protection;
 pub(crate) mod worktree_reclaim_sweep;
 // #7889: gate 5's landed-content admission and its pre-delete re-check.
 pub(crate) mod worktree_reclaim_landed;
+// #8109: a branch with no pull request of its own needs the landed proof, and a
+// reclaimed tree's branch is deleted on that proof.
+pub(crate) mod worktree_reclaim_branch;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;

@@ -54,9 +54,11 @@ use super::worktree_reclaim::{
 use super::worktree_reclaim_launch::launch_refusal;
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
-use super::worktree_reclaim_pr_match::{GhLandingProbe, resolve_with_index};
+use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
+// #8109: the own-pull-request proof rule and the reclaimed branch's deletion.
+use super::worktree_reclaim_branch::{cleanup_reclaimed_branch, own_pr_gate, own_pr_refusal};
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
-use super::worktree_safety::inspect_dirt;
+use super::worktree_safety::{git_stdout, inspect_dirt};
 
 /// How long a survey may spend measuring bytes, and classifying (#2919).
 ///
@@ -221,7 +223,11 @@ pub(crate) fn survey_with_landed_content(
         // #6561 (the per-branch retry) and #7267 (the round-stem and head-commit
         // widening) both live in `resolve_with_index`, so this call site and the
         // pre-delete re-check below cannot drift apart.
-        let pr = resolve_with_index(
+        // #8109: the by-name answer rides beside the final one.
+        let PrResolution {
+            by_name,
+            landing: pr,
+        } = resolve_with_index(
             &scanned.path,
             &scanned.registry_root,
             scanned.branch.as_deref(),
@@ -248,6 +254,8 @@ pub(crate) fn survey_with_landed_content(
             keep_list,
             landed_content,
         );
+        // #8109: no pull request of its own admits only on the landed proof.
+        let verdict = own_pr_gate(&scanned.path, verdict, &by_name, landed_content);
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
             bytes: None,
@@ -691,7 +699,10 @@ pub(crate) fn reclaim_with_probes(
         // #6561, #7267: the same resolution the survey ran, re-run FRESH — the
         // survey's answer is minutes old, and a widening applied only there
         // would propose a candidate this re-check could not confirm.
-        let pr_now = resolve_with_index(
+        let PrResolution {
+            by_name,
+            landing: pr_now,
+        } = resolve_with_index(
             &path,
             &candidate.registry_root,
             candidate.branch.as_deref(),
@@ -722,6 +733,23 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
+        // #8109: the `merge-tree` proof, taken once. It admits a tree with no
+        // merged pull request of its own, and it is what the branch deletion
+        // after the removal rests on.
+        let proof = reclaim_landed_content(&path).content;
+        if let Some(reason) = own_pr_refusal(&by_name, &proof) {
+            tracing::warn!(
+                path = %path.display(),
+                "worktree-reclaim: re-check refused a surveyed candidate — {reason}"
+            );
+            out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
+        let proven_head = proof
+            .is_landed()
+            .then(|| git_stdout(&path, &["rev-parse", "HEAD"]).ok())
+            .flatten();
         // #7885: the route names itself in the audit line the remover emits
         // before it deletes — an operator reading the log after the fact could
         // not otherwise tell this pass from the orphan sweep.
@@ -775,6 +803,14 @@ pub(crate) fn reclaim_with_probes(
                 evidence = ?candidate.verdict,
                 bytes_freed = candidate.bytes,
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
+            );
+            // #8109: the tree is gone, so its branch goes too — on the proof.
+            cleanup_reclaimed_branch(
+                &candidate.registry_root,
+                &path,
+                candidate.branch.as_deref(),
+                proven_head.as_deref().map(str::trim),
+                &proof,
             );
             out.removed_bytes = out
                 .removed_bytes
