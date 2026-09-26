@@ -229,6 +229,7 @@ fn worktree_7889_dirt_that_appears_during_the_admission_refuses() {
         LandedContent::Landed {
             base: "origin/main".into(),
             base_sha: "0".repeat(40),
+            landed_at: None,
         }
         .into()
     };

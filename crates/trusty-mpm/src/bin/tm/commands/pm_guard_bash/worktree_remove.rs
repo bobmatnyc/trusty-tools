@@ -318,6 +318,7 @@ mod tests {
     use trusty_mpm::core::worktree_landed_content::{
         LANDED_CONTENT_CHECK as CHECK_LANDED_CONTENT, LandedContent, LandingAdmission,
     };
+    use trusty_mpm::core::worktree_landed_history::ContentOnBase;
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
     };
@@ -374,8 +375,8 @@ mod tests {
         /// guard asks for only when the branch itself has no merged pull
         /// request. `None` means GitHub reported nothing for it either.
         merged_related: Option<Result<MergedPrLookup, String>>,
-        /// #7275: whether merging this tree into its base would change nothing.
-        noop_merge: Result<bool, String>,
+        /// #7275, #8633: what `content_on_base` answers for this tree's base.
+        on_base: Result<ContentOnBase, String>,
         /// #7914: commits reachable from HEAD that no `origin` ref has. One by
         /// default, so every pre-#7914 test still reaches the merged-PR route
         /// it was written for — the admission only ever fires on a zero.
@@ -437,6 +438,21 @@ mod tests {
     /// The repository the fake probe reports having searched (#7057).
     const FAKE_REPO: &str = "1m-consulting/adaptive-crm";
 
+    /// #8633: HEAD is an ancestor of the base.
+    fn tip_landed() -> ContentOnBase {
+        ContentOnBase::Landed { at: None }
+    }
+
+    /// #8633: a clean merge into the tip that still changes `src/lib.rs`,
+    /// after an exhaustive history walk found no landing commit.
+    fn residual() -> ContentOnBase {
+        ContentOnBase::Residual {
+            paths: vec!["src/lib.rs".into()],
+            searched: 0,
+            candidates: 0,
+        }
+    }
+
     impl FakeProbe {
         /// Clean, pushed, on a branch with one merged pull request.
         fn reclaimable() -> Self {
@@ -449,7 +465,7 @@ mod tests {
                 // #7275: a tree with its own merged PR and a live, level
                 // upstream is never asked this; a false default keeps the
                 // merged-PR arm the only thing granting here.
-                noop_merge: Ok(false),
+                on_base: Ok(residual()),
                 // #7914: not zero — a fixture that admitted here would stop
                 // exercising the merged-PR route these tests exist for.
                 local_only: Ok(1),
@@ -479,7 +495,7 @@ mod tests {
                 branch: Ok("feat/thing-r2".to_string()),
                 merged: Ok(lookup(0)),
                 merged_related: Some(Ok(lookup(1))),
-                noop_merge: Ok(true),
+                on_base: Ok(tip_landed()),
                 ..Self::upstream_deleted()
             }
         }
@@ -530,9 +546,11 @@ mod tests {
             }
             self.merged_related.clone().unwrap_or_else(|| Ok(lookup(0)))
         }
-        fn merge_into_base_is_a_noop(&self, _dir: &Path, base_ref: &str) -> Result<bool, String> {
+        fn content_on_base(&self, _dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
             *self.asked_base.borrow_mut() = Some(base_ref.to_string());
-            self.noop_merge.clone()
+            // #8633 critic round: the verdict verbatim, so every variant —
+            // `Landed { at: Some }` and `Conflicted` included — reaches the guard.
+            self.on_base.clone()
         }
         fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
             self.asked_fresh.set(Some(false));
@@ -646,6 +664,7 @@ mod tests {
             landed: LandedContent::Landed {
                 base: "origin/main".to_string(),
                 base_sha: "7df1c383f0a1b2c3d4e5f60718293a4b5c6d7e8f".to_string(),
+                landed_at: None,
             },
             ..FakeProbe::upstream_deleted()
         }
@@ -823,7 +842,7 @@ mod tests {
     /// 🔴 REGRESSION (#7275, round 2): the critic's CRITICAL. An empty merge
     /// tree with NO merged pull request anywhere must DENY.
     ///
-    /// Why: round 1 asked `merge_into_base_is_a_noop` the moment the lookup
+    /// Why: round 1 asked `content_on_base` the moment the lookup
     /// returned zero and granted on `Ok(true)`. A branch that was never pushed,
     /// holding one empty or self-reverting commit, answers that exactly the way
     /// a landed branch does — and it clears every other re-check by
@@ -843,7 +862,7 @@ mod tests {
             branch: Ok("feat/never-pushed".to_string()),
             merged: Ok(lookup(0)),
             merged_related: None,
-            noop_merge: Ok(true),
+            on_base: Ok(tip_landed()),
             ..FakeProbe::upstream_deleted()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
@@ -865,7 +884,7 @@ mod tests {
     #[test]
     fn a_related_merged_pr_with_a_non_empty_merge_tree_denies_with_the_residue() {
         let probe = FakeProbe {
-            noop_merge: Ok(false),
+            on_base: Ok(residual()),
             ..FakeProbe::round_sibling()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
@@ -873,6 +892,9 @@ mod tests {
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("would still change files"), "{reason}");
         assert!(reason.contains("diff --name-only"), "{reason}");
+        // #8633: the refusal quotes the probe's own result.
+        assert!(reason.contains("Probe result:"), "{reason}");
+        assert!(reason.contains("`src/lib.rs`"), "{reason}");
     }
 
     /// 🔴 REGRESSION (#7275, round 2): the base is the merged pull request's
@@ -927,7 +949,7 @@ mod tests {
     fn a_stale_upstream_no_longer_refuses_a_merged_tree() {
         let probe = FakeProbe {
             unpushed: Ok(UpstreamComparison::Ahead(1)),
-            noop_merge: Ok(true),
+            on_base: Ok(tip_landed()),
             ..FakeProbe::reclaimable()
         };
         assert!(
@@ -941,7 +963,7 @@ mod tests {
     fn a_stale_upstream_still_denies_when_work_is_not_on_the_base() {
         let probe = FakeProbe {
             unpushed: Ok(UpstreamComparison::Ahead(1)),
-            noop_merge: Ok(false),
+            on_base: Ok(residual()),
             ..FakeProbe::reclaimable()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
@@ -956,12 +978,97 @@ mod tests {
     #[test]
     fn a_sibling_whose_content_cannot_be_checked_denies() {
         let probe = FakeProbe {
-            noop_merge: Err("git could not be run".to_string()),
+            on_base: Err("git could not be run".to_string()),
             ..FakeProbe::round_sibling()
         };
         assert!(
             evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe).is_some(),
             "undeterminable is not absent"
+        );
+    }
+
+    /// #8633 critic round: content that landed at an EARLIER base commit —
+    /// the squash, edited over on `main` since — admits through the guard.
+    #[test]
+    fn content_landed_at_an_earlier_base_commit_allows() {
+        let probe = FakeProbe {
+            on_base: Ok(ContentOnBase::Landed {
+                at: Some(MERGED_PR_HEAD.to_string()),
+            }),
+            ..FakeProbe::round_sibling()
+        };
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe),
+            None,
+            "a history hit is landing evidence"
+        );
+        assert!(probe.asked_base.borrow().is_some(), "the probe was asked");
+    }
+
+    /// 🔴 #8633 critic round: a tip merge that conflicts with no landing
+    /// commit in history denies, and the refusal names the conflicted file.
+    #[test]
+    fn a_conflicted_merge_with_no_landing_commit_denies() {
+        let probe = FakeProbe {
+            on_base: Ok(ContentOnBase::Conflicted {
+                paths: vec!["src/main.rs".into()],
+                searched: 3,
+                candidates: 3,
+            }),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a conflict with no landing commit must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("conflicts in 1 file(s)"), "{reason}");
+        assert!(reason.contains("`src/main.rs`"), "{reason}");
+        assert!(reason.contains("none of the 3 commit(s)"), "{reason}");
+    }
+
+    /// 🔴 #8633 round 3: an empty tip merge whose branch undid part of what
+    /// landed denies, and says so instead of claiming the merge still changes
+    /// files.
+    #[test]
+    fn an_undone_landing_denies_and_names_what_was_taken_back() {
+        let probe = FakeProbe {
+            on_base: Ok(ContentOnBase::Undone {
+                at: MERGED_PR_HEAD.to_string(),
+                paths: vec!["added.txt".into()],
+                searched: 1,
+                candidates: 1,
+            }),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an undone landing must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(
+            reason.contains("no longer holds all of what landed"),
+            "{reason}"
+        );
+        assert!(reason.contains("`added.txt`"), "{reason}");
+        assert!(!reason.contains("would still change files"), "{reason}");
+    }
+
+    /// 🔴 #8633 critic round: a history walk cut short by `MAX_CANDIDATES`
+    /// (24) denies, and says the search was not exhaustive.
+    #[test]
+    fn an_exhausted_candidate_cap_denies_and_says_it_was_truncated() {
+        let probe = FakeProbe {
+            on_base: Ok(ContentOnBase::Conflicted {
+                paths: vec!["src/main.rs".into()],
+                searched: 24,
+                candidates: 40,
+            }),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a truncated search must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("the oldest 24 of 40 commit(s)"), "{reason}");
+        assert!(
+            reason.contains("the newer 16 were not searched"),
+            "{reason}"
         );
     }
 
@@ -1389,7 +1496,7 @@ mod tests {
             merged_related: None,
             // Not a route to a grant: content-equivalence alone stays denied
             // (#7275 round 2), so only the local-only count can admit here.
-            noop_merge: Ok(false),
+            on_base: Ok(residual()),
             local_only: Ok(0),
             ..FakeProbe::upstream_deleted()
         }
@@ -1439,7 +1546,7 @@ mod tests {
         let probe = FakeProbe {
             local_only: Ok(1),
             // The round-2 input verbatim: an empty merge, no pull request.
-            noop_merge: Ok(true),
+            on_base: Ok(tip_landed()),
             ..no_pr_fully_landed()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
@@ -1513,7 +1620,7 @@ mod tests {
     ///
     /// Why: `gh pr merge` leaves `@{upstream}` STALE, not level, so `Ahead(4)`
     /// is what a landed worktree reports. The `is_own && !ahead` short-circuit
-    /// therefore never fired, and `merge_into_base_is_a_noop` — asked next —
+    /// therefore never fired, and `content_on_base` — asked next —
     /// reported residue for a tree holding none. PR #7946's worktree, at head
     /// `9c8699fe0`, was refused that way on 2026-09-14. Fails on `983b7a2ae`,
     /// where this denies with `unpushed-commits`.

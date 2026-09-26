@@ -22,6 +22,13 @@
 //! to reclaim. `git cherry`'s patch ids miss it for the mirror-image reason: a
 //! squash of two or more commits matches none of them. Neither is used here.
 //!
+//! #8633: the comparison is [`content_on_base`], which also accepts an
+//! earlier commit on the base's own history when later commits there edited
+//! the same files — the squash-merged shape a tip-only merge misread. Ancestry
+//! is sufficient there, never necessary: a `HEAD` that is not an ancestor of
+//! the base needs a base commit, the tip included, that holds its content in
+//! both directions, so a revert made after the squash is never admitted.
+//!
 //! **Every failure arm refuses**, per
 //! [ADR-0045](../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
 //! — a failed or expired refresh, a base that will not resolve, a `merge-tree`
@@ -34,6 +41,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::core::worktree_carried_by_pr::{CarriedByPr, carried_by_merged_pr};
+use crate::core::worktree_landed_history::{ContentOnBase, content_on_base};
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_pr_match::LandingProbe;
 use crate::session_manager::worktree_safety::git_stdout;
@@ -75,6 +83,9 @@ pub enum LandedContent {
         base: String,
         /// That ref's own commit, so a refusal or a grant is reproducible.
         base_sha: String,
+        /// #8633: the commit on `base`, possibly its tip, that holds the
+        /// content in both directions; `None` when `HEAD` is an ancestor.
+        landed_at: Option<String>,
     },
     /// Merging `HEAD` into `base` would still change files.
     Residual {
@@ -82,6 +93,15 @@ pub enum LandedContent {
         base: String,
         /// The first path the merge would change, in git's own ordering.
         first_path: String,
+    },
+    /// Merging `HEAD` into `base` conflicts, and no earlier commit on `base`
+    /// holds the content either (#8633); or the merge is empty but `HEAD`
+    /// undid part of what landed (`ContentOnBase::Undone`, #8633 round 3).
+    Conflicted {
+        /// The ref the comparison was made against.
+        base: String,
+        /// The probe's own account: conflicted paths and commits searched.
+        detail: String,
     },
     /// The question could not be answered, which never admits.
     Unavailable {
@@ -116,10 +136,30 @@ impl LandedContent {
     /// `worktree_7889_a_residual_path_denies_and_names_it`.
     pub fn note(&self) -> String {
         match self {
-            Self::Landed { base, base_sha } => format!(
-                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission applies: merging HEAD into \
-                 {base} (`{base_sha}`) would change no file, so this tree holds nothing the \
-                 remote does not already have"
+            Self::Landed {
+                base,
+                base_sha,
+                landed_at: None,
+            } => format!(
+                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission applies: HEAD is an ancestor of \
+                 {base} (`{base_sha}`), so this tree holds nothing the remote does not already \
+                 have"
+            ),
+            Self::Landed {
+                base,
+                landed_at: Some(at),
+                ..
+            } => format!(
+                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission applies: {}, so this tree holds \
+                 nothing the remote does not already have",
+                ContentOnBase::Landed {
+                    at: Some(at.clone())
+                }
+                .describe(base)
+            ),
+            Self::Conflicted { detail, .. } => format!(
+                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission does not apply either: {detail}, \
+                 so this tree may hold work that is on no remote"
             ),
             Self::Residual { base, first_path } => format!(
                 "ADR-0057's `{LANDED_CONTENT_CHECK}` admission does not apply either: merging \
@@ -245,9 +285,10 @@ fn with_carried_fallback(
 /// What: in order — refresh `origin` within `refresh_timeout` (a failure or an
 /// expiry is [`LandedContent::Unavailable`], never a comparison against the
 /// stale refs it left); resolve the landing base from [`BASE_CANDIDATES`];
-/// then [`merge_residue`]. An empty residue is
-/// [`Landed`](LandedContent::Landed), a non-empty one is
-/// [`Residual`](LandedContent::Residual) naming its first path.
+/// then [`content_on_base`]. Content on the base's tip or on an earlier commit
+/// of its history is [`Landed`](LandedContent::Landed); a clean merge that
+/// still changes files is [`Residual`](LandedContent::Residual) naming its
+/// first path; a conflict is [`Conflicted`](LandedContent::Conflicted).
 ///
 /// This decides nothing on its own: both callers reach it only after their own
 /// clean-tree and ownership gates have passed, and neither treats anything but
@@ -275,7 +316,7 @@ pub fn landed_content_verdict(dir: &Path, refresh_timeout: Duration) -> LandedCo
 ///
 /// Why: split from [`landed_content_verdict`] so a caller that has just
 /// refreshed `origin` itself does not pay for a second fetch.
-/// What: resolve the landing base, then [`merge_residue`].
+/// What: resolve the landing base, then [`content_on_base`].
 /// Test: `a_divergence_landed_by_another_route_reports_landed`,
 /// `an_unlanded_commit_reports_its_residual_path`.
 fn landed_content_on_fetched_refs(dir: &Path) -> LandedContent {
@@ -285,14 +326,26 @@ fn landed_content_on_fetched_refs(dir: &Path) -> LandedContent {
             BASE_CANDIDATES.join(", ")
         ));
     };
-    match merge_residue(dir, &base) {
+    // #8633: a conflict is a verdict, not a failure; only a git error is
+    // `Unavailable`.
+    match content_on_base(dir, &base) {
         Err(e) => LandedContent::unavailable(e),
-        Ok(residue) => match residue.first() {
-            None => LandedContent::Landed { base, base_sha },
-            Some(first_path) => LandedContent::Residual {
+        Ok(ContentOnBase::Landed { at }) => LandedContent::Landed {
+            base,
+            base_sha,
+            landed_at: at,
+        },
+        // #8633 round 3: `Undone` carries no merge residue to name, so it
+        // reports through the probe's own description, as a conflict does.
+        Ok(c @ (ContentOnBase::Conflicted { .. } | ContentOnBase::Undone { .. })) => {
+            LandedContent::Conflicted {
+                detail: c.describe(&base),
                 base,
-                first_path: first_path.clone(),
-            },
+            }
+        }
+        Ok(ContentOnBase::Residual { paths, .. }) => LandedContent::Residual {
+            base,
+            first_path: paths.into_iter().next().unwrap_or_default(),
         },
     }
 }
@@ -331,55 +384,6 @@ fn landing_base(dir: &Path) -> Option<(String, String)> {
         return Some((name, sha));
     }
     None
-}
-
-/// The paths merging `HEAD` into `base` would still change (#7275, #7889).
-///
-/// Why: the one question that answers "would deleting this directory destroy
-/// anything". `git cherry`'s per-commit patch ids report `+` for content that
-/// IS on the base, because every merge here is a squash — observed on #7258 —
-/// and ancestry is wrong for the same reason. #7889 moved the implementation
-/// here from `worktree_removal_facts` so the guard's merged-PR residue check
-/// and both ladders' landed-content admission run the same two commands.
-/// What: `git merge-tree --write-tree <base> HEAD` writes the merged tree;
-/// `git diff --name-only <base> <tree>` names what it changed. `Err` when
-/// either command failed — which includes a merge CONFLICT, since `merge-tree`
-/// exits non-zero on one — or when no tree was named.
-/// Test: `a_divergence_landed_by_another_route_reports_landed`,
-/// `an_unlanded_commit_reports_its_residual_path`,
-/// `merge_residue_against_an_unresolvable_base_is_an_error`.
-pub fn merge_residue(dir: &Path, base: &str) -> Result<Vec<String>, String> {
-    let base = base.trim();
-    if base.is_empty() {
-        return Err("no base ref was supplied to judge this worktree's content against".into());
-    }
-    let tree = git_stdout(dir, &["merge-tree", "--write-tree", base, "HEAD"])
-        .map_err(|e| format!("`git merge-tree --write-tree {base} HEAD` failed: {e}"))?;
-    let Some(tree) = tree.lines().next().map(str::trim).filter(|t| !t.is_empty()) else {
-        return Err(format!(
-            "`git merge-tree --write-tree {base} HEAD` named no tree"
-        ));
-    };
-    // `--name-only` rather than `--quiet`: an empty answer is the no-op, and a
-    // non-empty one names the residue the refusal has to quote.
-    // #7889 critic: `--ignore-submodules=none` overrides `diff.ignoreSubmodules`
-    // and `submodule.<name>.ignore`, either of which would hide a gitlink bump
-    // and read a donor holding one as landed.
-    let args = [
-        "diff",
-        "--name-only",
-        "--ignore-submodules=none",
-        base,
-        tree,
-    ];
-    let residue = git_stdout(dir, &args)
-        .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
-    Ok(residue
-        .lines()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 #[cfg(test)]

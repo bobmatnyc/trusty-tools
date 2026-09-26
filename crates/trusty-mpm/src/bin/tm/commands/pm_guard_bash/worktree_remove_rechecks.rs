@@ -83,7 +83,7 @@
 //! `gh pr merge` leaves `@{upstream}` stale rather than level, so `Ahead(n)` is
 //! what a landed worktree reports and the `landed.is_own && !ahead`
 //! short-circuit never fired for one. Evaluation fell through to
-//! [`residue_deny`], whose `merge_into_base_is_a_noop` reported residue for a
+//! [`residue_deny`], whose `content_on_base` reported residue for a
 //! tree holding none — PR #7946's worktree, sitting on head `9c8699fe0`, was
 //! refused that way. [`head_is_the_merged_pr_head`] answers first: a worktree
 //! whose HEAD IS the commit the pull request merged holds nothing that merge did
@@ -151,6 +151,7 @@
 
 use std::path::Path;
 
+use trusty_mpm::core::worktree_landed_history::ContentOnBase;
 use trusty_mpm::core::worktree_removal_facts::{
     MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
 };
@@ -408,7 +409,7 @@ fn landing_rechecks(
     // did not carry can remain. The upstream comparison cannot weaken that:
     // `gh pr merge` leaves the tracking ref stale rather than level, so `Ahead`
     // is what a landed worktree reports, and reading it as unfinished work sent
-    // every such tree to `merge_into_base_is_a_noop` — which answered "residue"
+    // every such tree to `content_on_base` — which answered "residue"
     // for a tree holding none.
     if landed.is_own && head_is_the_merged_pr_head(target, &landed, probe) {
         return None;
@@ -767,7 +768,8 @@ fn base_of(
 /// and only the merge state was ever going to answer.
 /// Test: `a_related_merged_pr_with_a_non_empty_merge_tree_denies_with_the_residue`,
 /// `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
-/// `a_stale_upstream_still_denies_when_work_is_not_on_the_base`.
+/// `a_stale_upstream_still_denies_when_work_is_not_on_the_base`,
+/// `an_undone_landing_denies_and_names_what_was_taken_back`.
 fn residue_deny(
     target: &Path,
     branch: &str,
@@ -793,27 +795,40 @@ fn residue_deny(
         CHECK_MERGED_PULL_REQUEST
     };
     let base = &landed.base_ref;
-    match probe.merge_into_base_is_a_noop(target, base) {
-        Ok(true) => None,
-        Ok(false) => Some(recheck_deny(
-            check,
-            target,
-            &match ahead {
-                Some(n) => format!(
-                    "{n} commit(s) on HEAD are not on the upstream branch, and merging \
-                     `{branch}` into {base} would still change files — that work is on no \
-                     remote, even though {via} landed there. Inspect it with `git -C {dir} \
-                     diff --name-only {base}...HEAD`.",
-                    dir = target.display()
-                ),
-                None => format!(
-                    "{via} landed on {base}, but merging `{branch}` into {base} would still \
-                     change files — this tree holds work that merge did not carry. Inspect \
-                     the residue with `git -C {dir} diff --name-only {base}...HEAD`.",
-                    dir = target.display()
-                ),
-            },
-        )),
+    match probe.content_on_base(target, base) {
+        Ok(c) if c.is_landed() => None,
+        // #8633: the refusal quotes the probe's own result — conflicted or
+        // residual paths, and how many base commits were searched.
+        Ok(c) => {
+            // #8633 round 3: an empty merge whose branch undid part of what
+            // landed changes no file, so "would still change files" is wrong.
+            let fault = if matches!(c, ContentOnBase::Undone { .. }) {
+                format!("`{branch}` no longer holds all of what landed on {base}")
+            } else {
+                format!("merging `{branch}` into {base} would still change files")
+            };
+            Some(recheck_deny(
+                check,
+                target,
+                &match ahead {
+                    Some(n) => format!(
+                        "{n} commit(s) on HEAD are not on the upstream branch, and {fault} — \
+                         that work is on no remote, even though {via} landed there. Probe \
+                         result: {found}. Inspect it with `git -C {dir} diff --name-only \
+                         {base}...HEAD`.",
+                        found = c.describe(base),
+                        dir = target.display()
+                    ),
+                    None => format!(
+                        "{via} landed on {base}, but {fault} — this tree holds work that merge \
+                         did not carry. Probe result: {found}. Inspect the residue with `git -C \
+                         {dir} diff --name-only {base}...HEAD`.",
+                        found = c.describe(base),
+                        dir = target.display()
+                    ),
+                },
+            ))
+        }
         Err(e) => Some(recheck_deny(
             check,
             target,
