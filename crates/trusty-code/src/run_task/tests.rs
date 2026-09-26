@@ -1586,6 +1586,110 @@ async fn gratuitous_redelegation_after_finish_is_refused_and_run_succeeds() {
     );
 }
 
+/// #8157: a `finish_task` call the verify-before-finish gate REJECTS must
+/// never latch `EngineerCompletionSignal` — a later PM `delegate_to_agent`
+/// must not be refused, and the run must still end `Success`.
+///
+/// Why: #8157 reported the opposite — a gate-rejected finish somehow latching
+/// completion and stranding the run as `NoChanges`. Live scripted repro
+/// against the real wiring showed the defect does NOT reproduce: `dispatch_all`
+/// (agent_loop/mod.rs:872-896) only sets `finish_args` on the gate's `Accept`/
+/// `AcceptWithNote` arms, so `build_finish_output` (mod.rs:1318-1330) — the
+/// sole setter of `finish_status` — never runs on a `Reject`, and
+/// `DelegateToAgentTool::mark_completion_if_finished` (tools/delegate.rs:
+/// 406-412) latches only on `Some(FinishStatus::Completed)`. This pins that
+/// correct behaviour permanently so a future regression is caught here rather
+/// than live.
+/// What: A project with a `pytest.ini` (so the engineer's `default_finish_gate`
+/// can detect a runnable suite). Script [PM delegates naming `pytest tests/
+/// -v`, engineer calls `finish_task` prematurely (no test run — REJECTED),
+/// engineer stops without finishing again, PM re-delegates (must NOT be
+/// refused by the #2683 completion latch), engineer writes `parser.py`, runs
+/// the named test, then finishes for real (gate now satisfied), PM finishes
+/// (its own `pm_finish_gate` sees the engineer's recorded test run)]. Asserts
+/// `exit == Success`, all eight scripted turns are consumed (proving the
+/// second delegation actually reached the engineer rather than being refused
+/// outright), and the engineer was invoked across both delegations (five
+/// `python-engineer` transcript turns, not two).
+///
+/// Hermeticity (#8157, PR #8691 CI): the scripted `bash` call really executes.
+/// A bare `pytest tests/ -v` ran the host's pytest wherever one was on `PATH`,
+/// and its `.pytest_cache/` was the run's only diff — `Success` locally,
+/// `NoChanges` on a runner without pytest. The command now points `PATH` at a
+/// dead directory so no host pytest ever runs, the gate still matches it
+/// (`is_test_command`), and the scripted `parser.py` write is the deliverable
+/// on every host.
+/// Test: this test.
+#[tokio::test]
+async fn gate_refused_finish_task_never_latches_completion() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(project.path().join("pytest.ini"), "[pytest]\n").expect("write pytest.ini");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        // 1. PM delegates, naming the runnable suite.
+        delegate_response("implement the parser; then run `pytest tests/ -v`"),
+        // 2. Engineer finishes prematurely — no matching `bash` call has run
+        //    yet, so the engineer's own `default_finish_gate` REJECTS this.
+        finish_task_response("completed", "premature — no tests run"),
+        // 3. Engineer stops WITHOUT finishing again — this delegation ends
+        //    with no successful finish_task, so `finish_status` stays `None`.
+        stop_response("engineer: giving up without finishing"),
+        // 4. PM re-delegates. This MUST NOT be refused: the completion signal
+        //    never latched, because step 2's finish was rejected, not accepted.
+        delegate_response("re-verify: run `pytest tests/ -v` and finish"),
+        // 5. Engineer writes the deliverable — the run's only diff.
+        write_file_response("parser.py", "def parse(s):\n    return s\n"),
+        // 6. Engineer runs the named test. A dead `PATH` keeps any host
+        //    pytest from running (its `.pytest_cache/` would enter the diff);
+        //    the gate matches on the command text alone.
+        bash_response("PATH=/nonexistent pytest tests/ -v"),
+        // 7. Engineer finishes — the gate is now satisfied, so this ACCEPTS.
+        finish_task_response("completed", "ran pytest, all good"),
+        // 8. PM finishes — its own `pm_finish_gate` sees the shared
+        //    transcript's recorded test run and accepts on the first attempt.
+        finish_task_response("completed", "confirmed complete"),
+    ]));
+
+    let mut task_params = params(&agents, &project, None);
+    task_params.task = "implement the parser; run `pytest tests/ -v` before finishing".into();
+
+    let report = execute_run_task(task_params, llm.clone()).await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Success,
+        "a gate-rejected finish that never latched completion must still let \
+         the run complete Success, not strand as NoChanges; task: {}",
+        report.task
+    );
+    assert!(
+        report.diff.contains("parser.py") && !report.diff.contains(".pytest_cache"),
+        "the diff must be exactly the scripted deliverable, never a host \
+         pytest's cache; got: {}",
+        report.diff
+    );
+    assert_eq!(
+        llm.models_seen().len(),
+        8,
+        "every scripted turn must be consumed — a wrongly-latched completion \
+         signal would refuse the second delegate_to_agent and strand the run \
+         well short of all eight turns"
+    );
+
+    let engineer_turns = report
+        .transcript
+        .iter()
+        .filter(|t| t.role == "python-engineer")
+        .count();
+    assert_eq!(
+        engineer_turns, 5,
+        "the second delegation must actually reach the engineer (3 more turns \
+         on top of the first delegation's 2), proving it was not refused by a \
+         stray completion latch; got {engineer_turns} engineer turns"
+    );
+}
+
 // ── #2265 fix #5 / #2852: PM stops re-delegating once the run-wide ceiling ─────
 // ── latches (a single delegation's retry exhaustion must NOT stop it) ──────────
 
