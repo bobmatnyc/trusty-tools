@@ -1833,7 +1833,7 @@ fn spawn_capturing_writers_mock(body: &'static str) -> (String, CapturedRequest)
     spawn_routed_mock(MockAnswer::Http("200 OK", body))
 }
 
-/// How a routed mock answers a request that is NOT the builder-slot claim.
+/// How a routed mock answers a request.
 #[derive(Clone, Copy)]
 enum MockAnswer {
     /// Answer with this status line and body.
@@ -1842,42 +1842,15 @@ enum MockAnswer {
     Silent,
 }
 
-/// The builder-slot answer every mock in this file serves (#6892).
+/// One HTTP mock that serves connections in a loop.
 ///
-/// Why: until #8261 increment two, `tm hook --pm-guard` claimed a builder slot
-/// at dispatch and denied when that claim went unanswered. The guard no longer
-/// asks this route; the mocks still answer it so a regression that re-adds the
-/// dispatch-time claim meets a neutral answer here, and a refusing one in
-/// `pm_guard_does_not_consult_the_builder_cap_at_dispatch`.
-/// What: `claimed: true` on a machine with room.
-const BUILDER_SLOT_ADMITS: &str = r#"{"claimed":true,"cap":4,"holders":[]}"#;
-
-/// One HTTP mock that answers the builder-slot claim and one other route.
-///
-/// Why: the guard makes TWO daemon calls per engineer dispatch since #6892, so
-/// a one-shot listener can no longer stand in for the daemon — the first call
-/// consumed it and the second found a closed socket. This serves connections in
-/// a loop and routes by path, which is what a daemon does.
-/// What: binds an ephemeral port; answers any request whose path names the
-/// builder-slot route with [`BUILDER_SLOT_ADMITS`]; answers everything else per
-/// `answer`, after publishing its body on the capture channel. The accept loop
-/// runs on a detached thread and ends with the test binary.
+/// Why: a one-shot listener is consumed by the first call; this serves every
+/// connection, which is what a daemon does.
+/// What: binds an ephemeral port; answers every request per `answer`, after
+/// publishing its body on the capture channel. The accept loop runs on a
+/// detached thread and ends with the test binary.
+// #8261: round 4 — the builder-slot branch is gone; the guard never asks it.
 fn spawn_routed_mock(answer: MockAnswer) -> (String, CapturedRequest) {
-    spawn_routed_mock_with_builder(answer, BUILDER_SLOT_ADMITS)
-}
-
-/// [`spawn_routed_mock`] with the builder-slot answer supplied (#6892).
-///
-/// Why: one case below is ABOUT the builder cap end to end, and it needs the
-/// daemon to say the machine is full. Every other case wants the neutral
-/// [`BUILDER_SLOT_ADMITS`], so the parameter lives here rather than at every
-/// call site.
-/// What: as [`spawn_routed_mock`], with `builder` served for the builder-slot
-/// route.
-fn spawn_routed_mock_with_builder(
-    answer: MockAnswer,
-    builder: &'static str,
-) -> (String, CapturedRequest) {
     use std::io::Read;
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -1912,19 +1885,9 @@ fn spawn_routed_mock_with_builder(
                     break Some((head.to_string(), rest.to_string()));
                 }
             };
-            let Some((head, posted)) = request else {
+            let Some((_head, posted)) = request else {
                 continue;
             };
-            // #6892: every mock answers the builder-slot claim, so the rule each
-            // test is about is the one that decides its verdict.
-            if head
-                .lines()
-                .next()
-                .is_some_and(|l| l.contains("/builder-slot"))
-            {
-                let _ = socket.write_all(http_response("200 OK", builder).as_bytes());
-                continue;
-            }
             let _ = tx.send(posted);
             match answer {
                 MockAnswer::Http(status_line, body) => {
@@ -2029,8 +1992,7 @@ fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
 /// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
 /// it cannot drive the guard's malformed-response branch.
 /// What: as [`spawn_writers_mock`], but the caller supplies the status line
-/// (e.g. `"500 Internal Server Error"`) and the raw body bytes. The
-/// builder-slot claim is still answered normally — see [`BUILDER_SLOT_ADMITS`].
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
 fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
     spawn_routed_mock(MockAnswer::Http(status_line, body)).0
 }
@@ -2043,8 +2005,7 @@ fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> Str
 /// connection and went quiet. Only a real accepted-then-silent listener
 /// exercises the arm.
 /// What: reads the shared-tree request and holds the socket open past the
-/// guard's 2 s total budget. The builder-slot claim is answered normally, so the
-/// silence is the shared-tree route's alone (#6892).
+/// guard's 2 s total budget.
 fn spawn_silent_mock() -> String {
     spawn_routed_mock(MockAnswer::Silent).0
 }
@@ -2185,7 +2146,7 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
     use std::sync::Arc;
 
     use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::daemon::{builder_slot_routes, delegation_routes, state::DaemonState};
+    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
@@ -2205,13 +2166,6 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
                 }
             },
         ))
-        // #6892: the builder-slot claim precedes the shared-tree claim on every
-        // engineer dispatch, so the daemon under test has to serve it or the
-        // guard denies before the race this harness exists to drive. Merged
-        // AFTER the barrier layer, deliberately: `route_layer` applies only to
-        // the routes already on the router, so the builder claims pass straight
-        // through and the barrier still holds exactly the shared-tree calls.
-        .merge(builder_slot_routes::router())
         .with_state(state);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -5135,27 +5089,6 @@ fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
             "{agent} must not be denied by the builder cap"
         );
     }
-}
-
-/// #8261 increment two, through the real binary: a daemon that would report
-/// the machine FULL is never asked at dispatch — the engineer dispatch is
-/// allowed and carries no slot notice. The machine-wide cap now lives in
-/// `tm build-lease` (`tests/tm_build_lease.rs`).
-#[test]
-fn pm_guard_does_not_consult_the_builder_cap_at_dispatch() {
-    let (url, _captured) = spawn_routed_mock_with_builder(
-        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
-        r#"{"claimed":false,"cap":2,"holders":[
-            {"agent":"rust-engineer","session":"11111111-1111-1111-1111-111111111111","elapsed_secs":754}]}"#,
-    );
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
-    assert!(!verdict.contains("\"deny\""), "{verdict}");
-    assert!(!verdict.contains("Machine-wide builder cap"), "{verdict}");
-    assert!(
-        !verdict.contains("CARGO_TARGET_DIR"),
-        "no dispatch-time slot notice: {verdict}"
-    );
 }
 
 // ---------------------------------------------------------------------------

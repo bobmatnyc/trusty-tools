@@ -116,8 +116,9 @@ fn low_memory_refuses_even_when_nothing_is_held() {
     assert!(!d(&dflt(), 4, 0, &r).admit, "pressure over its threshold");
 }
 
-/// Owner ruling "Load only" (#8261 round 3): the census has no floor — at or
-/// over the ceiling it leaves zero slots, so even the first build waits.
+/// The census has no floor — at or over the ceiling it leaves zero slots, so
+/// even the first build waits.
+// #8261: owner ruling (a) roll out together.
 #[test]
 fn foreign_builds_can_reduce_the_slots_to_zero() {
     let mut r = quiet();

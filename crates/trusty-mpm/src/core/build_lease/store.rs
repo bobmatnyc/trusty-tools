@@ -64,10 +64,9 @@ pub fn canonical_path(home: &Path) -> PathBuf {
     home.join(".trusty-mpm").join(SLOT_DIR_NAME)
 }
 
-/// The fixed per-uid fallback: `/tmp/trusty-mpm-build-slots-<uid>`.
+/// The fallback [`SlotDir::resolve`] uses: [`fixed_fallback_path`], or in a
+/// debug build the test override named in the module doc.
 ///
-/// What: never derived from `$TMPDIR`. Debug builds honour the test override
-/// named in the module doc.
 /// Test: `the_fallback_path_ignores_tmpdir`.
 #[must_use]
 pub fn fallback_path() -> PathBuf {
@@ -75,6 +74,16 @@ pub fn fallback_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK") {
         return PathBuf::from(dir);
     }
+    fixed_fallback_path()
+}
+
+/// The fixed per-uid fallback: `/tmp/trusty-mpm-build-slots-<uid>`, never
+/// derived from `$TMPDIR` and never overridden.
+///
+/// Test: `the_fallback_path_ignores_tmpdir`.
+// #8261: round 4 — split out so the test asserts it with no override in play.
+#[must_use]
+pub fn fixed_fallback_path() -> PathBuf {
     PathBuf::from("/tmp").join(format!("trusty-mpm-{SLOT_DIR_NAME}-{}", current_uid()))
 }
 
@@ -215,16 +224,23 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 
+    /// #8261 round 4: through `resolve_in`, with no early return — a broken
+    /// home resolves to exactly `/tmp/trusty-mpm-build-slots-<uid>`, whatever
+    /// `$TMPDIR` says. This opens the machine's real fallback store (creating
+    /// it `0700` if missing), as `tm build-lease` itself would.
     #[test]
     fn the_fallback_path_ignores_tmpdir() {
-        if std::env::var_os("TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK").is_some() {
-            return;
+        let fixed = fixed_fallback_path();
+        let expected = PathBuf::from(format!("/tmp/trusty-mpm-build-slots-{}", current_uid()));
+        assert_eq!(fixed, expected);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".trusty-mpm"), "x").expect("a file, not a dir");
+        let slots = SlotDir::resolve_in(Some(tmp.path()), &fixed).expect("the fixed fallback");
+        assert_eq!(slots.path(), expected);
+        assert!(slots.fallback_reason().is_some(), "marked as the fallback");
+        let tmpdir = std::env::temp_dir();
+        if tmpdir != Path::new("/tmp") && tmpdir != Path::new("/tmp/") {
+            assert!(!slots.path().starts_with(&tmpdir), "{tmpdir:?}");
         }
-        let path = fallback_path();
-        assert!(path.starts_with("/tmp"), "{path:?}");
-        assert!(
-            path.ends_with(format!("trusty-mpm-build-slots-{}", current_uid())),
-            "{path:?}"
-        );
     }
 }

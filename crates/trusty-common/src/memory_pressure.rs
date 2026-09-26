@@ -9,8 +9,8 @@
 //! killing processes — so admission reads that verdict instead of re-deriving
 //! it from a byte count.
 //!
-//! What: [`read_memory_pressure`] returns a [`MemoryPressure`]: a
-//! [`PressureLevel`] (normal / warn / critical), the available-memory
+//! What: [`read_memory_pressure`](crate::memory_pressure::read_memory_pressure) returns a [`MemoryPressure`](crate::memory_pressure::MemoryPressure): a
+//! [`PressureLevel`](crate::memory_pressure::PressureLevel) (normal / warn / critical), the available-memory
 //! percentage where the platform has one, the source it came from, and every
 //! raw signal as a `name=value` pair so a refusal can quote exactly what was
 //! read. Sources, in order:
@@ -24,7 +24,7 @@
 //! - Linux without PSI: `MemAvailable / MemTotal` from `/proc/meminfo`.
 //!
 //! Nothing here substitutes a guessed level for a reading it could not take:
-//! every failure is a [`MemoryPressureError`], and deciding what an unreadable
+//! every failure is a [`MemoryPressureError`](crate::memory_pressure::MemoryPressureError), and deciding what an unreadable
 //! signal means is the caller's policy, not this reader's.
 //! Test: the `#[cfg(test)]` suite below; the live read is
 //! `live_pressure_reads_on_this_host`.

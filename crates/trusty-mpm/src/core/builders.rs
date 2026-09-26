@@ -176,9 +176,10 @@ pub struct BuildersConfig {
     ///
     /// DEPRECATED since #8261 increment two: `tm build-lease` reads memory
     /// PRESSURE (`builders.memory_pressure_max`, `builders.min_available_pct`,
-    /// see [`crate::core::build_lease::config`]) and ignores this key; only the
-    /// retired dispatch-time formula in [`crate::core::builder_capacity`] reads
-    /// it. Still parsed so an operator config carrying it loads unchanged.
+    /// see [`crate::core::build_lease::config`]) and ignores this key; nothing
+    /// reads it since the dispatch-time formula (`core::builder_capacity`) was
+    /// removed. Still parsed so an operator config carrying it loads unchanged.
+    // #8261: round 4 — the removed module is no longer an intra-doc link.
     pub free_memory_floor_mb: Option<u64>,
 
     /// Where the per-slot build directories live.

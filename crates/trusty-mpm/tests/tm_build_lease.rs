@@ -536,6 +536,44 @@ fn a_waiter_never_sees_a_holders_argument_values() {
     assert_eq!(mode & 0o777, 0o600, "slot file mode {mode:o}");
 }
 
+/// #8261 round 4: `--census` runs nothing, lists each holder by program and
+/// subcommand only, and prints the census header with the ceiling.
+#[test]
+fn the_census_view_lists_holders_without_argument_values() {
+    let home = home_with_ceiling(3, "");
+    let holder = build_lease(home.path())
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "sleep 30",
+            "sh",
+            "--token",
+            "s3cr3t-census",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("holder");
+    wait_for_holders(home.path(), 1);
+    let out = build_lease(home.path())
+        .arg("--census")
+        .output()
+        .expect("census");
+    stop(holder);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(text.starts_with("tm build-lease census on "), "{text}");
+    assert!(text.contains("1 lease(s) held, ceiling 3"), "{text}");
+    assert!(text.contains("  lease slot 0: sh (pid "), "{text}");
+    assert!(!text.contains("s3cr3t-census"), "{text}");
+    let both = build_lease(home.path())
+        .args(["--census", "--", "true"])
+        .output()
+        .expect("both");
+    assert_ne!(both.status.code(), Some(0), "--census runs no command");
+}
+
 /// A repo `acme/widget` under the scratch home, with the pool root configured
 /// under it, and the repo's shared target directory.
 fn widget_repo(home: &Path) -> (PathBuf, PathBuf, PathBuf) {

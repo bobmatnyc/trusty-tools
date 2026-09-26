@@ -24,6 +24,13 @@
 //!   rewrite with `permissionDecision: "allow"`, as the original was allowed;
 //! - otherwise: the rewrite with no decision, so the normal flow applies.
 //!
+//! `allow` is never emitted for a command that can run something its segments
+//! do not show (#8261 round 4): a `$(…)`, backtick, `<(…)`, `>(…)` or `${…}`
+//! expansion, a newline (a here-document or a line the splitter may cut
+//! differently from the shell), an `eval`/`source`/`.` segment, or a `KEY=value`
+//! prefix outside [`INERT_ENV_KEYS`] (`RUSTC_WRAPPER=/tmp/x`, `BASH_ENV=…`,
+//! `PATH=…` all run a program the rule never named).
+//!
 //! `tm build-lease` itself refuses any command the heavy-build classifier does
 //! not match, so the lease program never needs an allow rule of its own.
 //!
@@ -260,25 +267,87 @@ fn matches_any(command: &str, patterns: &[String]) -> bool {
         && (matches_one(command.trim(), patterns)
             || split_shell_segments(command)
                 .iter()
-                .any(|seg| segment_matches(seg, patterns)))
+                .any(|seg| segment_matches(seg, patterns, is_any_env)))
 }
 
 /// Whether EVERY segment of `command` matches an allow pattern — Claude Code
 /// auto-approves a compound command only when each part is allowed.
-/// Test: `an_ask_rule_keeps_the_lease_and_asks`.
+///
+/// What: false whenever [`hides_a_command`] holds for the command, and only
+/// [`INERT_ENV_KEYS`] assignments are stripped before a segment is matched.
+/// Test: `an_ask_rule_keeps_the_lease_and_asks`,
+/// `a_hidden_command_never_gets_an_allow`, `only_inert_env_prefixes_keep_an_allow`.
 fn matches_every_segment(command: &str, patterns: &[String]) -> bool {
+    // #8261 round 4: `cargo test $(rm -rf ~)` matched `Bash(cargo test:*)`.
+    if hides_a_command(command) {
+        return false;
+    }
     let segments = split_shell_segments(command);
     !patterns.is_empty()
         && !segments.is_empty()
-        && segments.iter().all(|seg| segment_matches(seg, patterns))
+        && segments
+            .iter()
+            .all(|seg| !hides_a_command(seg) && segment_matches(seg, patterns, is_inert_env))
 }
 
-/// One segment, as written or with its `KEY=value` prefix removed.
-fn segment_matches(seg: &str, patterns: &[String]) -> bool {
+/// Text that makes the shell run a command no segment shows as its program.
+const HIDDEN_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${", "\n", "\r"];
+
+/// Leading builtins that run a string or a file as commands.
+const EVAL_BUILTINS: &[&str] = &["eval", "source", "."];
+
+/// `KEY=value` prefixes that set a build knob and never name a program.
+///
+/// Why: `RUSTC_WRAPPER`, `RUSTFLAGS` (`-C linker=`), `BASH_ENV`, `PATH`,
+/// `LD_PRELOAD` and `DYLD_*` each make an allowed `cargo test` run a program
+/// the rule never named; only these keys are stripped before an allow match.
+const INERT_ENV_KEYS: &[&str] = &[
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_JOBS",
+    "CARGO_INCREMENTAL",
+    "CARGO_TERM_COLOR",
+    "SKIP_UI_BUILD",
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+    "RUST_TEST_THREADS",
+    "NO_COLOR",
+];
+
+/// Whether `text` can run a command its own words do not show.
+///
+/// What: any [`HIDDEN_COMMAND_MARKERS`] text, quoted or not (a quoted one only
+/// costs an allow), or a first word (past `KEY=value` prefixes) in
+/// [`EVAL_BUILTINS`].
+/// Test: `a_hidden_command_never_gets_an_allow`.
+fn hides_a_command(text: &str) -> bool {
+    HIDDEN_COMMAND_MARKERS.iter().any(|m| text.contains(m))
+        || text
+            .split_whitespace()
+            .find(|w| !super::hook_rewrite::is_env_assignment(w))
+            .is_some_and(|w| EVAL_BUILTINS.contains(&w))
+}
+
+/// Whether `word` is an assignment [`INERT_ENV_KEYS`] names, or the one wrapper
+/// value `tm doctor` itself prints (`RUSTC_WRAPPER=sccache`).
+fn is_inert_env(word: &str) -> bool {
+    word == "RUSTC_WRAPPER=sccache"
+        || word
+            .split_once('=')
+            .is_some_and(|(key, _)| INERT_ENV_KEYS.contains(&key))
+}
+
+/// Every `KEY=value` word, for the deny/ask match: stripping more there only
+/// matches more, which is the conservative direction.
+fn is_any_env(word: &str) -> bool {
+    super::hook_rewrite::is_env_assignment(word)
+}
+
+/// One segment, as written or with its leading `strip` assignments removed.
+fn segment_matches(seg: &str, patterns: &[String], strip: fn(&str) -> bool) -> bool {
     let seg = seg.trim();
     let bare = seg
         .split_whitespace()
-        .skip_while(|w| super::hook_rewrite::is_env_assignment(w))
+        .skip_while(|w| strip(w))
         .collect::<Vec<_>>()
         .join(" ");
     matches_one(seg, patterns) || matches_one(&bare, patterns)
@@ -458,5 +527,99 @@ mod tests {
         let rendered = rewrite_response(None, &out, Some(RewriteDecision::Ask));
         let parsed: Value = serde_json::from_str(&rendered).expect("json");
         assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "ask");
+    }
+
+    /// A project whose settings allow `cargo test` (and `eval`/`source`).
+    fn allowing() -> tempfile::TempDir {
+        let dir = cwd();
+        std::fs::create_dir_all(dir.path().join(".claude")).expect("mkdir");
+        std::fs::write(
+            dir.path().join(".claude/settings.json"),
+            r#"{"permissions":{"allow":["Bash(cargo test:*)","Bash(eval:*)","Bash(source:*)"]}}"#,
+        )
+        .expect("settings");
+        dir
+    }
+
+    /// #8261 round 4: each command is still leased, and gets NO decision.
+    fn assert_no_allow(commands: &[&str]) {
+        let dir = allowing();
+        assert_eq!(
+            decide_rewrite("cargo test -p x", bg(), dir.path()).1,
+            Some(RewriteDecision::Allow),
+            "control: the plain build is allowed"
+        );
+        for command in commands {
+            let (rewrite, permission) = decide_rewrite(command, bg(), dir.path());
+            assert!(
+                matches!(rewrite, LeaseRewrite::Rewrite(_)),
+                "{command:?} keeps its lease: {rewrite:?}"
+            );
+            assert_eq!(permission, None, "{command:?} must not be allowed");
+        }
+    }
+
+    #[test]
+    fn a_command_substitution_never_gets_an_allow() {
+        assert_no_allow(&["cargo test $(rm -rf ~)", "cargo test \"$(rm -rf ~)\""]);
+    }
+
+    #[test]
+    fn a_backtick_substitution_never_gets_an_allow() {
+        assert_no_allow(&["cargo test `rm -rf ~`"]);
+    }
+
+    #[test]
+    fn an_input_process_substitution_never_gets_an_allow() {
+        assert_no_allow(&["cargo test <(rm -rf ~)"]);
+    }
+
+    #[test]
+    fn an_output_process_substitution_never_gets_an_allow() {
+        assert_no_allow(&["cargo test >(rm -rf ~)"]);
+    }
+
+    /// Parameter expansion, a newline, `eval`/`source`, and the four forms
+    /// behind an inert env prefix.
+    #[test]
+    fn a_hidden_command_never_gets_an_allow() {
+        assert_no_allow(&[
+            "cargo test ${X:-$(rm -rf ~)}",
+            "cargo test ${X@P}",
+            "cargo test <<'EOF'\nrm -rf ~\nEOF",
+            "cargo test\rrm -rf ~",
+            "cargo test && eval \"rm -rf ~\"",
+            "cargo test; source ./x.sh",
+            "cargo test && . ./x.sh",
+        ]);
+        // Not leased at all (the classifier skips it), and still no allow.
+        let dir = allowing();
+        let prefixed = decide_rewrite("CARGO_TARGET_DIR=$(rm -rf ~) cargo test", bg(), dir.path());
+        assert_eq!(prefixed.1, None);
+        assert!(hides_a_command("FOO=1 eval x"));
+        assert!(!hides_a_command("cargo test -p x -- --exact"));
+    }
+
+    /// #8261 round 4: only an inert `KEY=value` prefix is stripped for allow.
+    #[test]
+    fn only_inert_env_prefixes_keep_an_allow() {
+        let dir = allowing();
+        for allowed in [
+            "CARGO_TARGET_DIR=/t CARGO_BUILD_JOBS=8 SKIP_UI_BUILD=1 cargo test -p x",
+            "RUSTC_WRAPPER=sccache cargo test",
+        ] {
+            assert_eq!(
+                decide_rewrite(allowed, bg(), dir.path()).1,
+                Some(RewriteDecision::Allow),
+                "{allowed}"
+            );
+        }
+        assert_no_allow(&[
+            "RUSTC_WRAPPER=/tmp/x cargo test",
+            "RUSTFLAGS=-Clinker=/tmp/x cargo test",
+            "BASH_ENV=/tmp/x cargo test",
+            "PATH=/tmp/x cargo test",
+            "DYLD_INSERT_LIBRARIES=/tmp/x.dylib cargo test",
+        ]);
     }
 }

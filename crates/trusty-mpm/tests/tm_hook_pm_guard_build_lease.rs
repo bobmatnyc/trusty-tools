@@ -268,6 +268,26 @@ fn a_read_only_local_ops_dispatch_is_admitted_on_a_loaded_host() {
     assert!(!stdout.contains("71.9"), "{stdout}");
 }
 
+/// A daemon that would report the machine FULL is never asked at dispatch: an
+/// unisolated `rust-engineer` dispatch is allowed and carries no slot notice.
+// #8261: round 4 — moved from `tm_hook_pm_guard.rs`, whose mocks no longer
+// serve the builder-slot route.
+#[test]
+fn a_rust_engineer_dispatch_never_consults_the_builder_cap() {
+    let home = scratch_home();
+    let url = spawn_refusing_daemon(
+        r#"{"claimed":false,"cap":2,"holders":[{"agent":"rust-engineer","elapsed_secs":754}]}"#,
+    );
+    let payload = dispatch_payload(home.path(), "rust-engineer", "fix a bug");
+    let stdout = run_hook_against(home.path(), &["--pm-guard"], &payload, &url);
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(!stdout.contains("Machine-wide builder cap"), "{stdout}");
+    assert!(
+        !stdout.contains("CARGO_TARGET_DIR"),
+        "no dispatch-time slot notice: {stdout}"
+    );
+}
+
 /// 2026-09-24 trigger (mac-duetto): a light `typescript-engineer` dispatch was
 /// refused as "builder 2 of 1" on free memory 5059 MB. It is admitted now.
 #[test]

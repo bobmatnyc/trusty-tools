@@ -32,9 +32,9 @@
 //! record says so through [`SeedKind::ColdDirectory`], because an operator
 //! debugging a slow first build needs to know the clone did not happen.
 //!
-//! Nothing here decides ADMISSION. The count comes from
-//! [`builder_capacity`](crate::core::builder_capacity); this module only turns
-//! a granted slot index into a directory.
+//! Nothing here decides ADMISSION. The count comes from the build lease
+//! ([`crate::core::build_lease::admission`], #8261); this module only turns a
+//! granted slot index into a directory.
 //!
 //! Test: the `#[cfg(test)]` suite below, which uses a temp root throughout —
 //! #8311 is the 42,000-directory leak from tests that wrote under the real home.

@@ -19,6 +19,10 @@
 //! store, the OS error and the repair; an unreadable census refuses. On
 //! timeout, exit [`EXIT_LEASE_TIMEOUT`] naming the holders and every reading. Every decision is POSTed to the daemon log with the
 //! command summarized, never its full argv.
+//!
+//! `tm build-lease --census` runs nothing: it prints the lease holders and
+//! every build group the census counts against the ceiling, attributed by
+//! pgid, leader, driver and parent chain (#8261 round 4).
 //! Test: `tests/tm_build_lease.rs` (real processes and flocks).
 
 use std::path::{Path, PathBuf};
@@ -30,6 +34,7 @@ use trusty_mpm::core::build_lease::acquire::{
 };
 use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
+use trusty_mpm::core::build_lease::census_detail::{header, live_breakdown};
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
@@ -42,6 +47,38 @@ use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
 
+/// `tm build-lease --census`: print the holders and the attributed census.
+///
+/// What: read-only. Exit 0 on a census read; exit 1 naming the error when the
+/// process table cannot be read. A store that cannot be opened lists no
+/// holders and says so. Argument values never print (see `census_detail`).
+/// Test: `the_census_view_lists_holders_without_argument_values`.
+fn print_census() -> ! {
+    let slots = SlotDir::resolve(dirs::home_dir().as_deref());
+    let holders = slots.as_ref().map(SlotDir::holders).unwrap_or_default();
+    let details = match live_breakdown(&holders) {
+        Ok(details) => details,
+        Err(err) => {
+            eprintln!("tm build-lease: the process census cannot be read: {err}");
+            std::process::exit(1)
+        }
+    };
+    println!(
+        "{}",
+        header(details.len(), holders.len(), resolve_max_concurrent())
+    );
+    if let Err(err) = &slots {
+        println!("  lease store unusable: {err}");
+    }
+    for holder in &holders {
+        println!("  lease {}", holder.render());
+    }
+    for (i, detail) in details.iter().enumerate() {
+        println!("  group {}: {}", i + 1, detail.render());
+    }
+    std::process::exit(0)
+}
+
 /// The exit code for a command that is not a heavy build (`EX_USAGE`).
 const EXIT_NOT_A_HEAVY_BUILD: i32 = 64;
 
@@ -53,8 +90,16 @@ pub(crate) struct BuildLeaseArgs {
     /// Seconds to wait for a slot; defaults to `builders.lease_wait_secs`.
     #[arg(long)]
     wait_secs: Option<u64>,
+    /// Print the lease holders and the census, per build group, and exit.
+    // #8261: round 4 — the live check logs this while builds run.
+    #[arg(long, conflicts_with_all = ["command", "wait_secs"])]
+    census: bool,
     /// The heavy build to run, after `--`; anything else is refused.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        required_unless_present = "census"
+    )]
     command: Vec<String>,
 }
 
@@ -64,6 +109,9 @@ pub(crate) struct BuildLeaseArgs {
 /// success, [`EXIT_LEASE_TIMEOUT`] when no slot freed — so it never returns.
 /// Test: `tests/tm_build_lease.rs`.
 pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
+    if args.census {
+        print_census()
+    }
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
     let command_line = summarize_command(&args.command);

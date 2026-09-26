@@ -207,15 +207,46 @@ impl ProcessSampler for SysinfoSampler {
 /// `tsc` is deliberately absent. The 2026-09-21 ruling names typescript among
 /// the stacks the cap must never hold, and a type-check is single-core work
 /// that never approached the 2026-08-08 overcommit.
+///
+/// `clippy-driver` is rustc under another name: `cargo clippy` compiles the
+/// workspace crates through it. `rust-analyzer` and its `proc-macro-srv` are
+/// deliberately absent — an editor's analysis is not a build.
 /// What: matched case-insensitively against [`ProcessSnapshot::name`] by
 /// [`is_compiler_process`], with a `.exe` suffix tolerated for Windows.
 /// Test: `compiler_processes_are_recognised`,
 /// `ordinary_processes_are_not_compilers`.
 // #8297: the cap counts these existing, not agents that might start one.
+// #8261: round 4 adds `clippy-driver`, which `cargo clippy` runs instead.
 const COMPILER_PROCESS_NAMES: &[&str] = &[
-    "rustc", "cc", "c++", "cc1", "cc1plus", "clang", "clang++", "gcc", "g++", "ld", "ld64", "lld",
-    "ld.lld", "javac", "swiftc", "csc", "msbuild",
+    "rustc",
+    "clippy-driver",
+    "cc",
+    "c++",
+    "cc1",
+    "cc1plus",
+    "clang",
+    "clang++",
+    "gcc",
+    "g++",
+    "ld",
+    "ld64",
+    "lld",
+    "ld.lld",
+    "javac",
+    "swiftc",
+    "csc",
+    "msbuild",
 ];
+
+/// The basename prefix of a cargo build script (`build-script-build`).
+///
+/// Why: a build script runs inside the build it belongs to — often a C
+/// compile or a codegen step at full CPU — and cargo names its executable
+/// `build-script-<stem>`. A prefix, so a name the OS truncated
+/// (`build-script-bui`, macOS's 16-byte `comm`) still matches.
+/// Test: `cargo_build_scripts_are_recognised`.
+// #8261: round 4 census gap.
+const BUILD_SCRIPT_PREFIX: &str = "build-script-";
 
 /// Go toolchain binaries, which are matched by PATH and never by name alone.
 ///
@@ -273,14 +304,18 @@ const MAX_ANCESTRY_HOPS: usize = 64;
 /// Why: one predicate, so the name table and the Go path rule cannot be applied
 /// differently in two places.
 /// What: case-insensitive match of `name` (with any `.exe` suffix stripped)
-/// against [`COMPILER_PROCESS_NAMES`], or against [`GO_TOOL_NAMES`] when `exe`
-/// contains [`GO_TOOL_PATH_SEGMENT`].
+/// against [`COMPILER_PROCESS_NAMES`], a [`BUILD_SCRIPT_PREFIX`] prefix, or
+/// [`GO_TOOL_NAMES`] when `exe` contains [`GO_TOOL_PATH_SEGMENT`].
 /// Test: `compiler_processes_are_recognised`,
-/// `ordinary_processes_are_not_compilers`, `go_toolchain_binaries_need_their_path`.
+/// `ordinary_processes_are_not_compilers`, `go_toolchain_binaries_need_their_path`,
+/// `cargo_build_scripts_are_recognised`.
 #[must_use]
 pub fn is_compiler_process(snap: &ProcessSnapshot) -> bool {
     let name = base_name(&snap.name);
-    if COMPILER_PROCESS_NAMES.iter().any(|c| *c == name) {
+    // #8261: a build script is matched by prefix, never by exact name.
+    if COMPILER_PROCESS_NAMES.iter().any(|c| *c == name)
+        || (name.len() > BUILD_SCRIPT_PREFIX.len() && name.starts_with(BUILD_SCRIPT_PREFIX))
+    {
         return true;
     }
     GO_TOOL_NAMES.iter().any(|c| *c == name)
@@ -289,6 +324,14 @@ pub fn is_compiler_process(snap: &ProcessSnapshot) -> bool {
                 .replace('\\', "/")
                 .contains(GO_TOOL_PATH_SEGMENT)
         })
+}
+
+/// Is `name` a build driver ([`BUILD_DRIVER_NAMES`]), case-insensitively?
+///
+/// Test: `nested_drivers_collapse_to_the_topmost`.
+#[must_use]
+pub fn is_build_driver(name: &str) -> bool {
+    BUILD_DRIVER_NAMES.contains(&base_name(name).as_str())
 }
 
 /// An executable name, lowercased and stripped of a Windows `.exe` suffix.
@@ -382,11 +425,7 @@ pub fn build_groups(snapshot: &[ProcessSnapshot]) -> Vec<BuildGroup> {
         let root = chain
             .iter()
             .rev()
-            .find(|pid| {
-                by_pid
-                    .get(*pid)
-                    .is_some_and(|p| BUILD_DRIVER_NAMES.contains(&base_name(&p.name).as_str()))
-            })
+            .find(|pid| by_pid.get(*pid).is_some_and(|p| is_build_driver(&p.name)))
             .copied()
             .unwrap_or(snap.pid);
         let root_name = by_pid
@@ -460,7 +499,16 @@ mod tests {
     /// The compiler table is matched by name, case-insensitively.
     #[test]
     fn compiler_processes_are_recognised() {
-        for name in ["rustc", "RUSTC", "clang", "cc1plus", "javac", "rustc.exe"] {
+        for name in [
+            "rustc",
+            "RUSTC",
+            "clang",
+            "cc1plus",
+            "javac",
+            "rustc.exe",
+            "clippy-driver",
+            "clippy-driver.exe",
+        ] {
             assert!(
                 is_compiler_process(&proc_row(1, None, name, 0.0)),
                 "{name} is a compilation while it runs"
@@ -479,12 +527,38 @@ mod tests {
             "claude",
             "tm",
             "terraform",
+            "rust-analyzer",
+            "rust-analyzer-proc-macro-srv",
+            "proc-macro-srv",
+            "build-script-",
+            "clippy",
         ] {
             assert!(
                 !is_compiler_process(&proc_row(1, None, name, 90.0)),
                 "{name} compiles nothing, whatever its CPU"
             );
         }
+    }
+
+    /// #8261 round 4: a cargo build script counts, and groups under its cargo.
+    #[test]
+    fn cargo_build_scripts_are_recognised() {
+        for name in [
+            "build-script-build",
+            "build-script-main",
+            "build-script-bui",
+        ] {
+            assert!(is_compiler_process(&proc_row(1, None, name, 0.0)), "{name}");
+        }
+        let table = vec![
+            proc_row(200, None, "cargo", 1.0),
+            proc_row(300, Some(200), "build-script-build", 90.0),
+            proc_row(301, Some(200), "clippy-driver", 80.0),
+        ];
+        let groups = build_groups(&table);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].root_name, "cargo");
+        assert_eq!(groups[0].compilers.len(), 2, "{groups:?}");
     }
 
     /// `compile`/`link`/`asm` count only from a Go toolchain path.

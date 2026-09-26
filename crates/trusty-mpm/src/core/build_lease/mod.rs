@@ -23,6 +23,8 @@
 //!   foreign builds. The anti-starvation floor is load-only (see that module).
 //! - [`census`] — foreign compiler groups (the #8297 process census) and the
 //!   live readings.
+//! - [`census_detail`] — the census attributed per group (pgid, leader,
+//!   driver, parent chain) for `tm build-lease --census`.
 //! - [`acquire`] — the bounded wait.
 //! - [`target_dir`] — the slot's private `CARGO_TARGET_DIR`.
 //! - [`stale_guard`] — clears a slot's workspace fingerprints when its next
@@ -48,6 +50,7 @@
 //! | shared `CARGO_TARGET_DIR` and no slot directory (no pool, seed failed, fingerprints not clearable) | REFUSED, exit 75 | `an_unusable_slot_directory_refuses_instead_of_sharing`, `a_shared_target_without_a_repo_identity_refuses` |
 //! | pressure sysctl / PSI unreadable | pressure gate skipped; ceiling, leases and load still apply; warning | `unreadable_pressure_uses_the_ceiling_and_warns` |
 //! | load average unreadable | load gate skipped; the rest applies | `an_unreadable_load_skips_only_the_load_gate` |
+//! | census at or over the ceiling | no floor: every leased build waits, then exits 75 (`// #8261: owner ruling (a) roll out together`) | `foreign_builds_can_reduce_the_slots_to_zero` |
 //! | process census fails | foreign builds not subtracted; ceiling and leases apply | `an_unreadable_census_counts_leases_only` |
 //! | invalid `[builders]` value | that key's default, pressure gate included | `an_invalid_config_still_gates_on_pressure` |
 //! | slot's workspace package list unreadable on a checkout change | every fingerprint in the slot is cleared — a cold build, never a stale one | `an_unreadable_package_list_clears_every_fingerprint` |
@@ -69,6 +72,7 @@
 pub mod acquire;
 pub mod admission;
 pub mod census;
+pub mod census_detail;
 pub mod config;
 pub mod slots;
 pub mod stale_guard;

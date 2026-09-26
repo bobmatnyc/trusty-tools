@@ -20,9 +20,14 @@
 //!
 //! **The floor is load-only** (owner ruling "Load only", #8261 round 3). A
 //! loaded machine still admits [`MIN_SLOTS`] leased build, so a load spike
-//! cannot starve every build. Memory pressure, low available memory and a
-//! census at the ceiling refuse even with nothing held: round 2's `max(1, …)`
-//! on the census count is gone (the line marked `#8261 floor`).
+//! cannot starve every build. Memory pressure and low available memory refuse
+//! even with nothing held.
+//!
+//! **The census has no floor** (owner ruling (a) "roll out together", #8261
+//! round 4). Every compiler group running without a lease counts against the
+//! ceiling: with `foreign >= ceiling`, `n_effective` is 0 and EVERY leased
+//! build waits, then exits 75, until those builds finish. This is the accepted
+//! rollout risk; `tm build-lease --census` names each counted group.
 //! Test: `admission_tests.rs`.
 
 use trusty_common::memory_pressure::MemoryPressure;
@@ -136,7 +141,7 @@ pub fn decide(
             0
         }
     };
-    // #8261 floor: round 2 applied `.max(1)` here (a ceiling of 0 excepted).
+    // #8261: owner ruling (a) roll out together — no `.max(1)` floor here.
     let n_effective = ceiling.saturating_sub(foreign_count);
 
     pressure_gate(&lease, &readings.pressure, &mut withheld, &mut degraded);
