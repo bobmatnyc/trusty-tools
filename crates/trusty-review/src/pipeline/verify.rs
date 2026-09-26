@@ -74,10 +74,7 @@ use crate::{
     config::verification::{DEFAULT_VERIFY_CONCURRENCY, DEFAULT_VERIFY_MAX_ATTEMPTS},
     llm::{LlmError, LlmProvider},
     models::{Finding, Verdict, VerifyOutcome},
-    pipeline::{
-        grade::{derive_verdict, drives_block_floor},
-        verify_prompt::build_verify_request,
-    },
+    pipeline::{grade::derive_verdict, verify_prompt::build_verify_request},
 };
 
 /// Base backoff before the second attempt at one finding (#4459).
@@ -365,9 +362,9 @@ pub async fn run_verification_round_with_policy(
 /// BLOCK would pin the result even when every blocking finding was refuted.
 ///
 /// Four-way baseline selection:
-///   a)  confirmed + at least one confirmed High-effort finding
+///   a)  the confirmed findings alone floor to BLOCK under `derive_verdict` (#4044)
 ///       → keep `primary_verdict` (grounded critical evidence, e.g. BLOCK stays BLOCK)
-///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015 + #1343)
+///   a2) confirmed, but the confirmed findings do not floor to BLOCK (#1015 + #1343)
 ///       → CAP (ceiling) the baseline at APPROVE*: `min(primary_verdict, APPROVE*)`.
 ///         BUT this is a ceiling on the *baseline input*, not on the final result:
 ///         `derive_verdict(baseline, survivors)` below independently re-derives the
@@ -404,7 +401,8 @@ pub async fn run_verification_round_with_policy(
 /// `rederive_confirmed_praise_keeps_clean_approve` (a2 — #1343 runtime residual),
 /// `rederive_refuted_finding_does_not_clear_standing_medium_finding` (a2 — #1876),
 /// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
-/// `rederive_truncation_refuted_preserves_primary_verdict` (c).
+/// `rederive_truncation_refuted_preserves_primary_verdict` (c),
+/// `run_review_refuted_sole_blocker_does_not_clamp_to_block` (a vs a2 — #4044).
 fn rederive_verdict(
     primary_verdict: Verdict,
     any_confirmed: bool,
@@ -424,27 +422,26 @@ fn rederive_verdict(
         .cloned()
         .collect();
 
-    // Does any confirmed (surviving) finding drive the BLOCK floor — i.e. is it
-    // High-effort AND escalation-eligible (cited or diff-provable)?
+    // Do the confirmed findings, on their own, floor to BLOCK?
     //
-    // #PR84 adversarial-review follow-up: this previously used a bare
-    // `f.effort == Effort::High` check, so a CONFIRMED-but-disqualified (uncited,
-    // non-diff-provable) High finding — exactly PR #84's shape post-verification
-    // (`verified: Confirmed`, no citation) — routed to path (a) below and pinned
-    // `primary_verdict` (e.g. a self-reported BLOCK) as a HARD floor.
-    // `derive_verdict`'s own #PR84 gate (in `grade.rs`) already prevents that
-    // baseline from surviving as an outright ungated BLOCK, but path (a) vs (a2)
-    // selection should agree with the unified path's citability rule on its own
-    // merits — using `drives_block_floor` here keeps this call site consistent
-    // with `correctness_floor` / the map-reduce synthesis floor rather than
-    // relying solely on the downstream `derive_verdict` safety net.
-    let any_confirmed_high = survivors
+    // #4044: path (a) re-uses `primary_verdict` as a lower bound, and that
+    // verdict was floored BEFORE verification — over findings this round may
+    // have just refuted. A per-finding predicate (`drives_block_floor`, before
+    // this) drifted from the grader: a confirmed High-effort test-coverage or
+    // style finding (informational since #3474/#7036) or conformance divergence
+    // (capped at REQUEST_CHANGES, #1359) opened path (a) and pinned a BLOCK
+    // resting only on the refuted blocker. Asking the grader itself keeps the
+    // two in agreement for every category, now and later.
+    let confirmed: Vec<Finding> = survivors
         .iter()
         .filter(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed)))
-        .any(drives_block_floor);
+        .cloned()
+        .collect();
+    let any_confirmed_high =
+        !confirmed.is_empty() && derive_verdict(Verdict::Approve, &confirmed) == Verdict::Block;
 
     // Four-way baseline selection (see Why above):
-    //  a)  confirmed + at least one High-effort confirmed
+    //  a)  the confirmed findings alone floor to BLOCK
     //      → keep primary_verdict as lower bound (grounded critical evidence)
     //  a2) confirmed, but only Medium/Low confirmed
     //      → CAP the baseline at APPROVE* via severity-min(primary, APPROVE*); don't
@@ -467,7 +464,7 @@ fn rederive_verdict(
     let no_judgment_rendered = !any_confirmed && !any_clean_refuted;
 
     let baseline = if any_confirmed && any_confirmed_high {
-        // Path (a): confirmed High-effort evidence supports the escalation fully.
+        // Path (a): confirmed BLOCK-grade evidence supports the escalation fully.
         primary_verdict.clone()
     } else if any_confirmed {
         // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
