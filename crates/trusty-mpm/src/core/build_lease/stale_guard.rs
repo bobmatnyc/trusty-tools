@@ -70,12 +70,14 @@ pub fn checkout_root(cwd: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// A description when the marker could not be written; the fingerprints have
-/// already been cleared by then.
+/// A description when a matching fingerprint entry could not be removed (the
+/// marker is then left unchanged, and the caller must not build in the slot,
+/// #8261 round 3), or when the marker could not be written.
 ///
 /// Test: `a_different_checkout_clears_only_workspace_fingerprints`,
 /// `the_same_checkout_touches_nothing`, `a_missing_marker_clears`,
-/// `an_unreadable_package_list_clears_every_fingerprint`.
+/// `an_unreadable_package_list_clears_every_fingerprint`,
+/// `a_failed_removal_is_an_error_and_keeps_the_marker`.
 pub fn invalidate_if_checkout_changed(
     slot_dir: &Path,
     checkout: &Path,
@@ -99,11 +101,18 @@ pub fn invalidate_if_checkout_changed(
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if (all || names.iter().any(|pkg| is_unit_of(&name, pkg)))
-                && std::fs::remove_dir_all(entry.path()).is_ok()
-            {
-                removed += 1;
+            if !(all || names.iter().any(|pkg| is_unit_of(&name, pkg))) {
+                continue;
             }
+            // #8261 round 3: a fingerprint left behind can serve a stale
+            // build, so a failed removal fails the whole invalidation.
+            std::fs::remove_dir_all(entry.path()).map_err(|err| {
+                format!(
+                    "could not clear stale fingerprint {}: {err}; the slot is not used",
+                    entry.path().display()
+                )
+            })?;
+            removed += 1;
         }
     }
     std::fs::write(&marker, &current)
@@ -113,6 +122,52 @@ pub fn invalidate_if_checkout_changed(
         removed,
         all,
     })
+}
+
+/// Whether a cargo build is running in `slot_dir` right now.
+///
+/// Why (#8261 round 3): a SIGKILLed `tm build-lease` frees its slot's flock at
+/// once while the build it spawned keeps running in the slot's directory. Cargo
+/// holds `flock(LOCK_EX)` on `<profile>/.cargo-lock` for a build's life, so that
+/// lock — not the slot file — says whether the directory is still in use.
+/// What: `true` when any `.cargo-lock` within the fingerprint search depth is
+/// locked by another open file description. An unopenable lock file counts as
+/// busy: the directory's state is unknown, so it is not reused.
+/// Test: `a_held_cargo_lock_marks_the_directory_busy`.
+#[must_use]
+pub fn cargo_lock_held(slot_dir: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut frontier = vec![slot_dir.to_path_buf()];
+    for _ in 0..FINGERPRINT_DEPTH {
+        let mut next = Vec::new();
+        for dir in frontier {
+            let lock = dir.join(".cargo-lock");
+            if lock.is_file() {
+                let Ok(file) = std::fs::File::open(&lock) else {
+                    return true;
+                };
+                // SAFETY: `file` owns a valid descriptor for both calls.
+                let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if rc != 0 {
+                    return true;
+                }
+                // SAFETY: as above; releases the probe lock at once.
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            next.extend(
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .filter(|e| e.file_name() != ".fingerprint")
+                    .map(|e| e.path()),
+            );
+        }
+        frontier = next;
+    }
+    false
 }
 
 /// Whether a fingerprint entry `<pkg>-<16 hex>` belongs to package `pkg`.
@@ -304,6 +359,42 @@ mod tests {
             slot.path(),
             "debug/.fingerprint/serde-0123456789abcdef"
         ));
+    }
+
+    /// #8261 round 3: a fingerprint that cannot be removed fails the whole
+    /// invalidation, and the marker still names the previous checkout.
+    #[test]
+    fn a_failed_removal_is_an_error_and_keeps_the_marker() {
+        use std::os::unix::fs::PermissionsExt;
+        let slot = slot();
+        std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
+        let parent = slot.path().join("debug/.fingerprint");
+        std::fs::create_dir(parent.join("trusty-mpm-0123456789abcdef/inner")).expect("mkdir");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/b"), || {
+            Ok(vec!["trusty-mpm".into()])
+        });
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        let err = got.expect_err("a fingerprint that survives must fail the call");
+        assert!(err.contains("could not clear stale fingerprint"), "{err}");
+        let marker = std::fs::read_to_string(slot.path().join(LAST_CHECKOUT_MARKER)).expect("m");
+        assert_eq!(marker, "/wt/a", "the marker is unchanged");
+    }
+
+    #[test]
+    fn a_held_cargo_lock_marks_the_directory_busy() {
+        use std::os::fd::AsRawFd;
+        let slot = slot();
+        assert!(!cargo_lock_held(slot.path()), "no lock file");
+        let lock = slot.path().join("debug/.cargo-lock");
+        std::fs::write(&lock, "").expect("lock file");
+        assert!(!cargo_lock_held(slot.path()), "an unheld lock");
+        let held = std::fs::File::open(&lock).expect("open");
+        // SAFETY: `held` owns a valid descriptor.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        assert!(cargo_lock_held(slot.path()), "a held lock");
+        drop(held);
+        assert!(!cargo_lock_held(slot.path()), "released");
     }
 
     #[test]

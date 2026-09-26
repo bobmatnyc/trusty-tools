@@ -36,6 +36,7 @@ fn run_hook_against(home: &Path, args: &[&str], payload: &Value, url: &str) -> S
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -317,4 +318,28 @@ fn the_reported_agents_commands_take_no_build_lease() {
             "{agent}: {command}"
         );
     }
+}
+
+/// #8261 round 3 (critic finding 3): a command matching an `ask` rule keeps
+/// its lease and asks, instead of silently dropping the lease.
+#[test]
+fn an_ask_rule_keeps_the_lease_and_asks() {
+    let home = scratch_home();
+    std::fs::create_dir_all(home.path().join(".claude")).expect("mkdir");
+    std::fs::write(
+        home.path().join(".claude/settings.json"),
+        r#"{"permissions":{"ask":["Bash(git push:*)"]}}"#,
+    )
+    .expect("settings");
+    let stdout = run_hook(
+        home.path(),
+        &["--pm-guard"],
+        &bash_payload(home.path(), "cargo test && git push", true),
+    );
+    assert!(stdout.contains("build-lease -- cargo test"), "{stdout}");
+    let parsed: Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "ask",
+        "{stdout}"
+    );
 }

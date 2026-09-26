@@ -14,14 +14,18 @@
 //! command, [`LeaseRewrite::Refuse`] for the one shape it cannot rewrite (a
 //! heavy build inside an UNTERMINATED `$(…)`), or [`LeaseRewrite::None`]. A
 //! heavy build inside `$(…)` or backticks is leased inside the substitution; one
-//! inside `sh -c '…'`, `bash -c`, `env -S` or `xargs` leases the whole wrapper.
+//! inside `sh -c '…'`, `bash -c`, `env -S`, `xargs` or `find -exec` leases the
+//! whole wrapper. Which word is a heavy program is `build_lease_program`'s call.
 //! Quoted DATA is never matched: `git commit -m "fix cargo test"` is not a build.
 //! Test: the `#[cfg(test)]` suite below.
 
+use super::build_lease_program::{
+    LEADING_KEYWORDS, find_exec_commands, heavy_program_offset, words,
+};
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
 use super::{paren_substitution_live_at, split_shell_segments, split_shell_segments_raw};
-use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment};
+use crate::commands::hook_rewrite::is_env_assignment;
 
 /// What the hook does with one Bash command.
 ///
@@ -35,14 +39,6 @@ pub(crate) enum LeaseRewrite {
     /// A heavy build the rewrite cannot reach; deny with this reason.
     Refuse(String),
 }
-
-/// Shell words that may precede a command without being it.
-const LEADING_KEYWORDS: &[&str] = &[
-    "!", "{", "(", "if", "then", "else", "elif", "do", "while", "until",
-];
-
-/// Cargo global options that take a value before the subcommand.
-const CARGO_VALUE_FLAGS: &[&str] = &["-C", "-Z", "--config", "--color"];
 
 /// Decide the lease rewrite for `command`.
 ///
@@ -123,14 +119,35 @@ fn segment_inserts(text: &str, base: usize, heavy: &[(String, Option<String>)]) 
             if let Some(off) = heavy_program_offset(seg, heavy) {
                 return Some(seg_start + off);
             }
-            match wrapped_command(seg.trim()) {
-                WrappedCommand::Inner(inner) if hides_a_heavy_build(&inner, heavy) => {
-                    command_start_offset(seg).map(|off| seg_start + off)
-                }
-                _ => None,
-            }
+            let hidden = match wrapped_command(seg.trim()) {
+                WrappedCommand::Inner(inner) => hides_a_heavy_build(&inner, heavy),
+                _ => false,
+            } || find_exec_commands(seg)
+                .iter()
+                .any(|inner| hides_a_heavy_build(inner, heavy));
+            hidden
+                .then(|| command_start_offset(seg).map(|off| seg_start + off))
+                .flatten()
         })
         .collect()
+}
+
+/// Whether `argv`, run as one command, is a heavy build (#8261 round 3).
+///
+/// Why: `tm build-lease` must refuse to run anything the classifier would not
+/// have leased, so the lease program is never a way to run an arbitrary
+/// command (critic finding 4).
+/// What: shell-joins `argv` into ONE simple command and asks
+/// [`rewrite_for_lease`] whether it would lease it.
+/// Test: `a_lease_argv_is_heavy_only_when_the_classifier_says_so`.
+pub(crate) fn is_heavy_build(argv: &[String], heavy: &[(String, Option<String>)]) -> bool {
+    let Ok(joined) = shlex::try_join(argv.iter().map(String::as_str)) else {
+        return false;
+    };
+    matches!(
+        rewrite_for_lease(&joined, heavy, "tm build-lease --"),
+        LeaseRewrite::Rewrite(_)
+    )
 }
 
 /// Whether a wrapper's inner command runs a heavy build at any depth.
@@ -194,157 +211,6 @@ fn command_start_offset(seg: &str) -> Option<usize> {
             || is_env_assignment(bare)))
         .then_some(word.start + lead)
     })
-}
-
-/// One word of a segment: its byte span and its unquoted text.
-struct Word {
-    start: usize,
-    text: String,
-}
-
-/// Split a segment into words, honouring quotes and backslashes.
-fn words(seg: &str) -> Vec<Word> {
-    let bytes = seg.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        let start = i;
-        let mut quote: Option<u8> = None;
-        while i < bytes.len() {
-            let b = bytes[i];
-            match quote {
-                Some(q) if b == q => quote = None,
-                Some(b'"') if b == b'\\' => i += 1,
-                Some(_) => {}
-                None if b.is_ascii_whitespace() => break,
-                None if b == b'\'' || b == b'"' => quote = Some(b),
-                None if b == b'\\' => i += 1,
-                None => {}
-            }
-            i += 1;
-        }
-        let raw = &seg[start..i.min(bytes.len())];
-        let text = shlex::split(raw)
-            .map(|parts| parts.concat())
-            .unwrap_or_else(|| raw.to_string());
-        out.push(Word { start, text });
-    }
-    out
-}
-
-/// The byte offset of the heavy program word in `seg`, if `seg` is a heavy build.
-///
-/// What: skips leading keywords and `(`, env assignments, and command wrappers
-/// with their flags and numeric arguments (`timeout 600`, `nice -n 10`); then
-/// matches the program's basename and, past `+toolchain` and cargo's global
-/// options, its subcommand.
-fn heavy_program_offset(seg: &str, heavy: &[(String, Option<String>)]) -> Option<usize> {
-    let words = words(seg);
-    let mut idx = 0;
-    let mut after_wrapper = false;
-    // #8261 critic round 1 (LOW): the lease goes OUTSIDE `sudo`/`doas`, so it
-    // runs as the caller and locks the caller's slot directory.
-    let mut outside: Option<usize> = None;
-    while let Some(word) = words.get(idx) {
-        let text = word.text.as_str();
-        let bare = text.trim_start_matches('(');
-        let lead = text.len() - bare.len();
-        if text == "case" {
-            // `case WORD in` — the pattern label that follows is skipped below.
-            idx = words
-                .iter()
-                .skip(idx)
-                .position(|w| w.text == "in")
-                .map_or(words.len(), |p| idx + p + 1);
-            continue;
-        }
-        if LEADING_KEYWORDS.contains(&text) || bare.is_empty() || is_case_label(bare) {
-            idx += 1;
-            continue;
-        }
-        if is_env_assignment(bare) || COMMAND_WRAPPERS.contains(&bare) {
-            if (bare == "sudo" || bare == "doas") && outside.is_none() {
-                outside = Some(word.start + lead);
-            }
-            after_wrapper |= COMMAND_WRAPPERS.contains(&bare);
-            idx += 1;
-            continue;
-        }
-        if after_wrapper
-            && (bare.starts_with('-') || bare.parse::<f64>().is_ok() || is_duration(bare))
-        {
-            idx += 1;
-            continue;
-        }
-        break;
-    }
-    let word = words.get(idx)?;
-    let lead = word.text.len() - word.text.trim_start_matches('(').len();
-    let program = word.text.trim_start_matches('(');
-    let program = program.rsplit('/').next().unwrap_or(program);
-    let sub = subcommand(&words[idx + 1..]);
-    let is_heavy = heavy
-        .iter()
-        .any(|(p, s)| p == program && s.as_deref().is_none_or(|s| Some(s) == sub.as_deref()));
-    (is_heavy && !invokes_no_compiler(sub.as_deref(), &words[idx + 1..]))
-        .then_some(outside.unwrap_or(word.start + lead))
-}
-
-/// Flags that make any heavy verb print and exit without compiling.
-const NO_COMPILE_FLAGS: &[&str] = &["--help", "-h", "--version", "-V"];
-
-/// Whether a heavy verb's own arguments make it run no compiler (#8261).
-///
-/// Why: admission follows whether the command compiles, never the agent's
-/// role (2026-09-25 report: a read-only `local-ops` dispatch refused by the
-/// builder cap). `cargo build --help` or `cargo install --list` compiles
-/// nothing, so it must not wait for — or be refused — a build slot.
-/// What: `true` when a [`NO_COMPILE_FLAGS`] word, or `--list` after
-/// `install`, appears before any `--` (past `--`, words belong to the built
-/// program: `cargo run -- --help` still compiles).
-/// Test: `non_compiling_invocations_of_heavy_verbs_are_left_alone`.
-fn invokes_no_compiler(sub: Option<&str>, rest: &[Word]) -> bool {
-    rest.iter()
-        .map(|w| w.text.as_str())
-        .take_while(|w| *w != "--")
-        .any(|w| NO_COMPILE_FLAGS.contains(&w) || (sub == Some("install") && w == "--list"))
-}
-
-/// A `case` arm's pattern label: `a)`, `(a)`, `*)`, `x|y)`.
-fn is_case_label(word: &str) -> bool {
-    word.ends_with(')') && !word.starts_with('$')
-}
-
-/// The subcommand after a program word, skipping `+toolchain` and global options.
-fn subcommand(rest: &[Word]) -> Option<String> {
-    let mut iter = rest.iter();
-    while let Some(word) = iter.next() {
-        let text = word.text.as_str();
-        if text.starts_with('+') {
-            continue;
-        }
-        if CARGO_VALUE_FLAGS.contains(&text) {
-            iter.next();
-            continue;
-        }
-        if text.starts_with('-') {
-            continue;
-        }
-        return Some(text.trim_end_matches([')', ';', '}']).to_string());
-    }
-    None
-}
-
-/// `30s`, `5m`, `1h` — a `timeout` duration.
-fn is_duration(word: &str) -> bool {
-    word.strip_suffix(['s', 'm', 'h', 'd'])
-        .is_some_and(|n| n.parse::<f64>().is_ok())
 }
 
 #[cfg(test)]
@@ -495,11 +361,6 @@ mod tests {
         }
         let make_all = vec![("make".to_string(), None)];
         assert_eq!(
-            rewrite_for_lease("make --help", &make_all, "tm build-lease --"),
-            LeaseRewrite::None,
-            "a help flag compiles nothing, whatever the program"
-        );
-        assert_eq!(
             rewrite_for_lease("make -j8", &make_all, "tm build-lease --"),
             LeaseRewrite::Rewrite("tm build-lease -- make -j8".into()),
             "a program-only entry leases every invocation"
@@ -603,6 +464,98 @@ mod tests {
                 LeaseRewrite::Rewrite(format!("tm build-lease -- {input}")),
                 "{input}"
             );
+        }
+    }
+
+    /// #8261 round 3 (critic finding 7): wrapper options that take a value,
+    /// `find -exec`, `rustup run` and `cargo watch` — one table.
+    #[test]
+    fn wrappers_with_option_values_are_seen_through() {
+        for (input, want) in [
+            (
+                "env -u NAME cargo test",
+                "env -u NAME tm build-lease -- cargo test",
+            ),
+            (
+                "sudo -u builder cargo build",
+                "tm build-lease -- sudo -u builder cargo build",
+            ),
+            (
+                "timeout -s KILL 600 cargo test",
+                "timeout -s KILL 600 tm build-lease -- cargo test",
+            ),
+            (
+                "timeout --signal=KILL 10m cargo check",
+                "timeout --signal=KILL 10m tm build-lease -- cargo check",
+            ),
+            (
+                "nice -n 5 env -C crates/x cargo clippy",
+                "nice -n 5 env -C crates/x tm build-lease -- cargo clippy",
+            ),
+            (
+                "find . -name Cargo.toml -execdir cargo test \\;",
+                "tm build-lease -- find . -name Cargo.toml -execdir cargo test \\;",
+            ),
+            (
+                "find crates -maxdepth 1 -exec cargo build --manifest-path {}/Cargo.toml +",
+                "tm build-lease -- find crates -maxdepth 1 -exec cargo build --manifest-path {}/Cargo.toml +",
+            ),
+            (
+                "rustup run stable cargo build",
+                "tm build-lease -- rustup run stable cargo build",
+            ),
+            (
+                "rustup run --install nightly cargo test -p x",
+                "tm build-lease -- rustup run --install nightly cargo test -p x",
+            ),
+            (
+                "cargo watch -x test",
+                "tm build-lease -- cargo watch -x test",
+            ),
+        ] {
+            assert_eq!(rewritten(input), want, "{input}");
+        }
+        for input in [
+            "find . -name '*.rs' -exec grep -l cargo {} +",
+            "env -u CARGO cargo fmt",
+            "rustup run stable cargo --version",
+        ] {
+            assert_eq!(rw(input), LeaseRewrite::None, "{input}");
+        }
+    }
+
+    /// #8261 round 3 (critic finding 10): `-V`/`--help` mean "no compile" for
+    /// cargo only; `mvn -V package` prints its version AND builds.
+    #[test]
+    fn no_compile_flags_apply_to_cargo_only() {
+        let mvn = vec![("mvn".to_string(), None)];
+        assert_eq!(
+            rewrite_for_lease("mvn -V package", &mvn, "tm build-lease --"),
+            LeaseRewrite::Rewrite("tm build-lease -- mvn -V package".into())
+        );
+        assert_eq!(rw("cargo -V"), LeaseRewrite::None);
+    }
+
+    /// #8261 round 3 (critic finding 4): the lease runs only what the hook
+    /// would have leased.
+    #[test]
+    fn a_lease_argv_is_heavy_only_when_the_classifier_says_so() {
+        let argv = |s: &str| shlex::split(s).expect("argv");
+        for heavy_argv in [
+            "cargo test -p x",
+            "sh -c 'cd x && cargo build'",
+            "sudo cargo install --path x",
+        ] {
+            assert!(is_heavy_build(&argv(heavy_argv), &heavy()), "{heavy_argv}");
+        }
+        for light in [
+            "rm -f /tmp/x",
+            "sh -c 'rm -rf ~'",
+            "cargo fmt",
+            "cargo --version",
+            "echo cargo test",
+        ] {
+            assert!(!is_heavy_build(&argv(light), &heavy()), "{light}");
         }
     }
 

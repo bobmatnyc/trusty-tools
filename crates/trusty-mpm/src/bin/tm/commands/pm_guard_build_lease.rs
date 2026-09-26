@@ -14,14 +14,18 @@
 //!
 //! **Permission rules.** Claude Code matches its `permissions` rules against
 //! the tool input it will run, which after a rewrite starts with the lease
-//! program, so a rule written for the original — a deny such as
-//! `Bash(cargo install:*)` — would no longer match. The rewrite is therefore
-//! SKIPPED whenever the original command matches a `deny` or `ask` Bash rule in
-//! the managed, user or project settings: Claude Code then applies that rule to
-//! the original command exactly as before, and the build, if it runs, is still
-//! counted by every lease as a foreign compiler group. An `allow` rule written
-//! for the original no longer pre-approves the rewritten command; outside
-//! bypass-permissions mode that build asks once. See the changelog.
+//! program, so a rule written for the original would no longer match. The
+//! hook therefore decides against the ORIGINAL command, from the managed, user
+//! and project settings (#8261 round 3):
+//! - a `deny` match: no rewrite — Claude Code denies the original as before;
+//! - an `ask` match: the rewrite, with `permissionDecision: "ask"`, so the user
+//!   is still asked and the build, once approved, is leased;
+//! - every segment matching an `allow` rule and none a `deny`/`ask`: the
+//!   rewrite with `permissionDecision: "allow"`, as the original was allowed;
+//! - otherwise: the rewrite with no decision, so the normal flow applies.
+//!
+//! `tm build-lease` itself refuses any command the heavy-build classifier does
+//! not match, so the lease program never needs an allow rule of its own.
 //!
 //! What: [`evaluate`] returns a rendered rewrite response, a refusal, or
 //! nothing; [`emit_allow`] prints the rewrite at an ALLOW exit, merging any
@@ -37,6 +41,7 @@ use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
 use super::hook_rewrite::rewrite_bash_command_unless_isolated;
 use super::pm_guard_bash::build_lease_rewrite::{LeaseRewrite, rewrite_for_lease};
 use super::pm_guard_bash::split_shell_segments;
+use super::pm_guard_response::{RewriteDecision, build_rewrite_response};
 
 /// What the lease rule decided for one tool call.
 ///
@@ -49,10 +54,6 @@ pub(crate) enum LeaseVerdict {
     /// Deny with this reason.
     Deny(String),
 }
-
-/// Seconds of a Bash call's own timeout left to the build itself (#8261 critic
-/// round 1): the lease wait is shortened so the refusal lands inside it.
-const TIMEOUT_MARGIN_SECS: u64 = 15;
 
 /// The Bash tool's timeout when a call names none, in milliseconds.
 const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -71,8 +72,9 @@ fn tm_program_word() -> String {
 
 /// The lease wait for this call, when it must be shorter than the config's.
 ///
-/// What: a foreground call's own `timeout` (default 120 s) minus
-/// [`TIMEOUT_MARGIN_SECS`]; `None` when that is not shorter than
+/// What: half a foreground call's own `timeout` (default 120 s), so a build
+/// admitted at the end of the wait still has at least half the call to run —
+/// round 2 left it 15 s (#8261 round 3). `None` when that is not shorter than
 /// `config_wait`, or the call runs in the background (no timeout applies).
 /// Test: `the_wait_fits_inside_the_calls_timeout`.
 fn wait_for_call(tool_input: Option<&Value>, config_wait: u64) -> Option<u64> {
@@ -87,32 +89,41 @@ fn wait_for_call(tool_input: Option<&Value>, config_wait: u64) -> Option<u64> {
         .and_then(|v| v.get("timeout"))
         .and_then(Value::as_u64)
         .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
-    let fit = (timeout_ms / 1000)
-        .saturating_sub(TIMEOUT_MARGIN_SECS)
-        .max(1);
+    let fit = (timeout_ms / 1000 / 2).max(1);
     (fit < config_wait).then_some(fit)
 }
 
 /// The command both `PreToolUse` hooks emit for a Bash call, if it is leased.
 ///
 /// Why: see the module doc — the two hooks must agree byte for byte.
-/// What: [`LeaseRewrite::None`] when the original matches a `deny`/`ask` Bash
+/// What: [`LeaseRewrite::None`] when the original matches a `deny` Bash
 /// permission rule; otherwise [`rewrite_bash_command_unless_isolated`] when it
 /// applies (never inside an isolation worktree, #7477), then
-/// [`rewrite_for_lease`] over the result.
+/// [`rewrite_for_lease`] over the result, paired with the permission decision
+/// the module doc describes.
 /// Test: `a_compressible_heavy_build_is_compressed_and_leased`,
 /// `an_isolation_worktree_build_is_leased_uncompressed`,
-/// `a_deny_rule_on_the_original_skips_the_rewrite`.
+/// `a_deny_rule_on_the_original_skips_the_rewrite`,
+/// `an_ask_rule_keeps_the_lease_and_asks`.
 pub(crate) fn decide_rewrite(
     command: &str,
     tool_input: Option<&Value>,
     cwd: &Path,
-) -> LeaseRewrite {
+) -> (LeaseRewrite, Option<RewriteDecision>) {
     let lease = BuildLeaseConfig::load_default();
     let heavy = lease.effective_heavy_build_commands();
-    if matches_a_restricting_rule(command, &permission_rules(cwd)) {
-        return LeaseRewrite::None;
+    let rules = permission_rules(cwd);
+    if matches_any(command, &rules.deny) {
+        return (LeaseRewrite::None, None);
     }
+    // #8261 round 3 (critic finding 3): an ask rule keeps the lease and asks.
+    let permission = if matches_any(command, &rules.ask) {
+        Some(RewriteDecision::Ask)
+    } else if matches_every_segment(command, &rules.allow) {
+        Some(RewriteDecision::Allow)
+    } else {
+        None
+    };
     let mut prefix = format!("{} build-lease", tm_program_word());
     if let Some(wait) = wait_for_call(tool_input, lease.effective_lease_wait().as_secs()) {
         prefix.push_str(&format!(" --wait-secs {wait}"));
@@ -120,27 +131,30 @@ pub(crate) fn decide_rewrite(
     prefix.push_str(" --");
     // #7477: no compression wrap inside an isolation worktree; the lease stays.
     let compressed = rewrite_bash_command_unless_isolated(command, Some(cwd));
-    rewrite_for_lease(compressed.as_deref().unwrap_or(command), &heavy, &prefix)
+    (
+        rewrite_for_lease(compressed.as_deref().unwrap_or(command), &heavy, &prefix),
+        permission,
+    )
 }
 
 /// The `updatedInput` response carrying `tool_input` with `command` replaced.
 ///
 /// Why: `updatedInput` replaces the tool's arguments, so every other field —
 /// `run_in_background`, `timeout`, `description` — is carried over.
-/// Test: `a_background_build_keeps_run_in_background`.
-pub(crate) fn rewrite_response(tool_input: Option<&Value>, command: &str) -> String {
+/// What: `permission` becomes the response's permission decision.
+/// Test: `a_background_build_keeps_run_in_background`,
+/// `an_ask_rule_keeps_the_lease_and_asks`.
+pub(crate) fn rewrite_response(
+    tool_input: Option<&Value>,
+    command: &str,
+    permission: Option<RewriteDecision>,
+) -> String {
     let mut input = tool_input
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
     input.insert("command".to_string(), Value::String(command.to_string()));
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "updatedInput": Value::Object(input),
-        }
-    })
-    .to_string()
+    build_rewrite_response(Value::Object(input), permission).to_string()
 }
 
 /// Decide the lease rule for one `PreToolUse` call.
@@ -157,9 +171,11 @@ pub(crate) fn evaluate(tool_name: &str, tool_input: Option<&Value>, cwd: &Path) 
         return LeaseVerdict::None;
     };
     match decide_rewrite(command, tool_input, cwd) {
-        LeaseRewrite::Rewrite(new) => LeaseVerdict::Rewrite(rewrite_response(tool_input, &new)),
-        LeaseRewrite::Refuse(reason) => LeaseVerdict::Deny(reason),
-        LeaseRewrite::None => LeaseVerdict::None,
+        (LeaseRewrite::Rewrite(new), permission) => {
+            LeaseVerdict::Rewrite(rewrite_response(tool_input, &new, permission))
+        }
+        (LeaseRewrite::Refuse(reason), _) => LeaseVerdict::Deny(reason),
+        (LeaseRewrite::None, _) => LeaseVerdict::None,
     }
 }
 
@@ -180,12 +196,20 @@ pub(crate) fn emit_allow(payload: &Value, cost_notice: Option<String>, rewrite: 
     );
 }
 
-/// Every `deny` and `ask` Bash pattern in the settings that govern `cwd`.
+/// The Bash permission patterns, by kind.
+#[derive(Default)]
+struct Rules {
+    deny: Vec<String>,
+    ask: Vec<String>,
+    allow: Vec<String>,
+}
+
+/// Every `deny`, `ask` and `allow` Bash pattern in the settings for `cwd`.
 ///
 /// What: managed policy settings, the user settings (`$CLAUDE_CONFIG_DIR` or
 /// `~/.claude`), and every ancestor's `.claude/settings.json` and
 /// `.claude/settings.local.json`. Unreadable files contribute nothing.
-fn permission_rules(cwd: &Path) -> Vec<String> {
+fn permission_rules(cwd: &Path) -> Rules {
     let mut files: Vec<PathBuf> = vec![
         PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
         PathBuf::from("/etc/claude-code/managed-settings.json"),
@@ -200,54 +224,71 @@ fn permission_rules(cwd: &Path) -> Vec<String> {
         files.push(dir.join(".claude/settings.json"));
         files.push(dir.join(".claude/settings.local.json"));
     }
-    files
+    let docs: Vec<Value> = files
         .iter()
         .filter_map(|f| std::fs::read_to_string(f).ok())
         .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .flat_map(|doc| {
-            ["deny", "ask"]
-                .iter()
-                .filter_map(|k| doc["permissions"][k].as_array().cloned())
-                .flatten()
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|rule| {
-            rule.as_str()
-                .and_then(|r| r.strip_prefix("Bash("))
-                .and_then(|r| r.strip_suffix(')'))
-                .map(str::to_string)
-        })
-        .collect()
+        .collect();
+    let of_kind = |kind: &str| -> Vec<String> {
+        docs.iter()
+            .filter_map(|doc| doc["permissions"][kind].as_array())
+            .flatten()
+            .filter_map(|rule| {
+                rule.as_str()
+                    .and_then(|r| r.strip_prefix("Bash("))
+                    .and_then(|r| r.strip_suffix(')'))
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+    Rules {
+        deny: of_kind("deny"),
+        ask: of_kind("ask"),
+        allow: of_kind("allow"),
+    }
 }
 
-/// Whether any segment of `command` matches one of the Bash `patterns`.
+/// Whether the whole command, or any one segment of it, matches a pattern.
 ///
 /// What: `prefix:*` matches a segment equal to `prefix` or starting with
 /// `prefix ` (Claude Code's prefix rule); a pattern with `*` matches as a
 /// glob; anything else matches exactly. Each segment is also tried with its
 /// leading `KEY=value` assignments removed.
 /// Test: `a_deny_rule_on_the_original_skips_the_rewrite`.
-fn matches_a_restricting_rule(command: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return false;
-    }
-    let mut candidates = vec![command.trim().to_string()];
-    for seg in split_shell_segments(command) {
-        let seg = seg.trim().to_string();
-        let bare = seg
-            .split_whitespace()
-            .skip_while(|w| super::hook_rewrite::is_env_assignment(w))
-            .collect::<Vec<_>>()
-            .join(" ");
-        candidates.push(seg);
-        candidates.push(bare);
-    }
-    patterns.iter().any(|p| {
-        candidates.iter().any(|c| match p.strip_suffix(":*") {
-            Some(prefix) => c == prefix || c.starts_with(&format!("{prefix} ")),
-            None if p.contains('*') => glob_match(p, c),
-            None => c == p,
-        })
+fn matches_any(command: &str, patterns: &[String]) -> bool {
+    !patterns.is_empty()
+        && (matches_one(command.trim(), patterns)
+            || split_shell_segments(command)
+                .iter()
+                .any(|seg| segment_matches(seg, patterns)))
+}
+
+/// Whether EVERY segment of `command` matches an allow pattern — Claude Code
+/// auto-approves a compound command only when each part is allowed.
+/// Test: `an_ask_rule_keeps_the_lease_and_asks`.
+fn matches_every_segment(command: &str, patterns: &[String]) -> bool {
+    let segments = split_shell_segments(command);
+    !patterns.is_empty()
+        && !segments.is_empty()
+        && segments.iter().all(|seg| segment_matches(seg, patterns))
+}
+
+/// One segment, as written or with its `KEY=value` prefix removed.
+fn segment_matches(seg: &str, patterns: &[String]) -> bool {
+    let seg = seg.trim();
+    let bare = seg
+        .split_whitespace()
+        .skip_while(|w| super::hook_rewrite::is_env_assignment(w))
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches_one(seg, patterns) || matches_one(&bare, patterns)
+}
+
+fn matches_one(candidate: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| match p.strip_suffix(":*") {
+        Some(prefix) => candidate == prefix || candidate.starts_with(&format!("{prefix} ")),
+        None if p.contains('*') => glob_match(p, candidate),
+        None => candidate == p,
     })
 }
 
@@ -280,10 +321,17 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
+    /// A background call: no Bash timeout, so no `--wait-secs` is inserted.
+    fn bg() -> Option<&'static Value> {
+        static INPUT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        Some(INPUT.get_or_init(|| serde_json::json!({ "run_in_background": true })))
+    }
+
     #[test]
     fn a_compressible_heavy_build_is_compressed_and_leased() {
         let dir = cwd();
-        let LeaseRewrite::Rewrite(out) = decide_rewrite("cargo test -p x", None, dir.path()) else {
+        let (LeaseRewrite::Rewrite(out), _) = decide_rewrite("cargo test -p x", bg(), dir.path())
+        else {
             panic!("a heavy build is rewritten");
         };
         assert!(out.starts_with("{ "), "compression wraps first: {out}");
@@ -299,7 +347,7 @@ mod tests {
     #[test]
     fn an_isolation_worktree_build_is_leased_uncompressed() {
         let cwd = Path::new("/repo/.claude/worktrees/agent-a/crates/x");
-        let LeaseRewrite::Rewrite(out) = decide_rewrite("cargo test -p x", None, cwd) else {
+        let (LeaseRewrite::Rewrite(out), _) = decide_rewrite("cargo test -p x", bg(), cwd) else {
             panic!("a heavy build is leased in an isolation worktree too");
         };
         assert!(out.ends_with(" build-lease -- cargo test -p x"), "{out}");
@@ -314,7 +362,7 @@ mod tests {
             "run_in_background": true,
             "description": "run tests",
         });
-        let rendered = rewrite_response(Some(&input), "tm build-lease -- cargo test");
+        let rendered = rewrite_response(Some(&input), "tm build-lease -- cargo test", None);
         let parsed: Value = serde_json::from_str(&rendered).expect("json");
         let updated = &parsed["hookSpecificOutput"]["updatedInput"];
         assert_eq!(updated["command"], "tm build-lease -- cargo test");
@@ -326,53 +374,89 @@ mod tests {
     #[test]
     fn the_wait_fits_inside_the_calls_timeout() {
         let short = serde_json::json!({ "command": "cargo test", "timeout": 60_000 });
-        assert_eq!(wait_for_call(Some(&short), 90), Some(45));
+        assert_eq!(wait_for_call(Some(&short), 90), Some(30));
         assert_eq!(
             wait_for_call(None, 90),
-            None,
-            "the default 120 s leaves 105 > 90"
+            Some(60),
+            "the default 120 s: the wait takes half, the build keeps half"
         );
-        let tiny = serde_json::json!({ "command": "cargo test", "timeout": 5_000 });
+        let long = serde_json::json!({ "command": "cargo test", "timeout": 600_000 });
+        assert_eq!(wait_for_call(Some(&long), 90), None, "300 s > 90");
+        let tiny = serde_json::json!({ "command": "cargo test", "timeout": 1_000 });
         assert_eq!(wait_for_call(Some(&tiny), 90), Some(1));
         let bg = serde_json::json!({ "command": "cargo test", "timeout": 5_000, "run_in_background": true });
         assert_eq!(wait_for_call(Some(&bg), 90), None);
         let dir = cwd();
-        let LeaseRewrite::Rewrite(out) = decide_rewrite("cargo check", Some(&short), dir.path())
+        let (LeaseRewrite::Rewrite(out), _) =
+            decide_rewrite("cargo check", Some(&short), dir.path())
         else {
             panic!("rewritten");
         };
         assert!(
-            out.contains(" build-lease --wait-secs 45 -- cargo check"),
+            out.contains(" build-lease --wait-secs 30 -- cargo check"),
             "{out}"
         );
     }
 
-    /// Critic round 1: a deny or ask rule written for the original command
-    /// keeps applying — the rewrite that would dodge it is skipped.
+    /// Critic round 1: a deny rule written for the original command keeps
+    /// applying — the rewrite that would dodge it is skipped.
     #[test]
     fn a_deny_rule_on_the_original_skips_the_rewrite() {
         let dir = cwd();
         std::fs::create_dir_all(dir.path().join(".claude")).expect("mkdir");
         std::fs::write(
             dir.path().join(".claude/settings.json"),
-            r#"{"permissions":{"deny":["Bash(cargo install:*)"],"ask":["Bash(cargo publish*)"]}}"#,
+            r#"{"permissions":{"deny":["Bash(cargo install:*)"]}}"#,
         )
         .expect("settings");
         for denied in [
             "cargo install --path x",
             "cd y && CARGO_BUILD_JOBS=2 cargo install tm",
-            "cargo publish -p x",
         ] {
             assert!(
-                matches!(decide_rewrite(denied, None, dir.path()), LeaseRewrite::None),
+                matches!(
+                    decide_rewrite(denied, None, dir.path()),
+                    (LeaseRewrite::None, _)
+                ),
                 "{denied}"
             );
         }
         assert!(matches!(
             decide_rewrite("cargo check", None, dir.path()),
-            LeaseRewrite::Rewrite(_)
+            (LeaseRewrite::Rewrite(_), None)
         ));
         assert!(glob_match("cargo * --release", "cargo build --release"));
         assert!(!glob_match("cargo * --release", "cargo build"));
+    }
+
+    /// #8261 round 3 (critic finding 3): an ask rule keeps the lease and asks;
+    /// allow is emitted only when every segment of the original is allowed.
+    #[test]
+    fn an_ask_rule_keeps_the_lease_and_asks() {
+        let dir = cwd();
+        std::fs::create_dir_all(dir.path().join(".claude")).expect("mkdir");
+        std::fs::write(
+            dir.path().join(".claude/settings.json"),
+            r#"{"permissions":{"ask":["Bash(git push:*)"],"allow":["Bash(cargo test:*)","Bash(cargo check:*)"]}}"#,
+        )
+        .expect("settings");
+        let (rewrite, permission) = decide_rewrite("cargo test && git push", bg(), dir.path());
+        let LeaseRewrite::Rewrite(out) = rewrite else {
+            panic!("an ask rule must not drop the lease: {rewrite:?}");
+        };
+        assert!(out.contains("build-lease -- cargo test"), "{out}");
+        assert_eq!(permission, Some(RewriteDecision::Ask));
+        assert_eq!(
+            decide_rewrite("cargo test -p x", None, dir.path()).1,
+            Some(RewriteDecision::Allow)
+        );
+        assert_eq!(
+            decide_rewrite("cargo test && rm -rf x", None, dir.path()).1,
+            None,
+            "one unallowed segment: no allow"
+        );
+        let rendered = rewrite_response(None, &out, Some(RewriteDecision::Ask));
+        let parsed: Value = serde_json::from_str(&rendered).expect("json");
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "ask");
     }
 }

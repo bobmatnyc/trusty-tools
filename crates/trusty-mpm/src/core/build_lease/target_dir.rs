@@ -4,16 +4,16 @@
 //! directory no concurrent build shares, so cargo's own build-directory lock
 //! never serialises two leased builds and one build's artifacts never replace
 //! another's. Holding flock `K` for the build's whole life is what makes pool
-//! directory `slot-K` exclusive — the 45-minute daemon TTL that let a second
-//! builder be handed a live build's directory is gone.
+//! directory `slot-K` exclusive.
 //!
-//! What: [`choose`] is the pure rule. Only the machine's SHARED target
-//! directory — the one `tm doctor`'s `rust_build_env` row exports, and which a
-//! project `.envrc` commonly exports for every shell — is replaced by the held
-//! slot's directory: it is the one directory concurrent worktrees share. An
-//! unset `CARGO_TARGET_DIR` (cargo's `./target`, or a repo's
-//! `build.target-dir`) and any other pinned directory are left alone. [`resolve_pool`] finds the pool for a checkout exactly as
-//! the retired dispatch-time grant did.
+//! What: [`SharedDirs`] names every directory concurrent worktrees share: the
+//! configured `build.cargo_target_dir`, anything under the default shared root
+//! `~/.trusty-tools/cargo-target/`, and anything under `builders.slot_pool_root`
+//! (a slot directory some other lease may hold). None of it needs a repo
+//! identity (#8261 round 3). [`plan`] is the pure rule: an unset
+//! `CARGO_TARGET_DIR` (cargo's `./target`, a repo's `build.target-dir`) and any
+//! other pinned directory are left alone; a shared one is replaced by the held
+//! slot's directory, and when no pool is available the build is refused.
 //! Test: the `#[cfg(test)]` suite below.
 
 use std::path::{Path, PathBuf};
@@ -21,55 +21,112 @@ use std::path::{Path, PathBuf};
 use crate::core::builder_slot_pool::SlotPool;
 use crate::core::builders::BuildersConfig;
 
-/// What [`choose`] decided.
+/// The directories a build must not run in unleased-by-slot.
+///
+/// Test: `shared_dirs_need_no_repo_identity`.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SharedDirs {
+    /// Any path at or under one of these is shared.
+    pub roots: Vec<PathBuf>,
+}
+
+impl SharedDirs {
+    /// The shared directories for this machine's config.
+    ///
+    /// What: `builders.slot_pool_root`, `~/.trusty-tools/cargo-target`, and the
+    /// configured `build.cargo_target_dir` when one is set.
+    #[must_use]
+    pub fn resolve(config: &BuildersConfig, home: &Path) -> Self {
+        let mut roots = vec![
+            config.effective_slot_pool_root(home),
+            home.join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+                .join(crate::core::build_env::CARGO_TARGET_SUBDIR),
+        ];
+        let configured = load_build_config(home)
+            .and_then(|b| b.cargo_target_dir)
+            .map(|t| trusty_common::workspace_layout::expand_tilde(&t, home));
+        roots.extend(configured);
+        Self { roots }
+    }
+
+    /// Whether `dir` is, or lies under, a shared directory.
+    ///
+    /// What: compared component-wise, and again after canonicalizing both
+    /// sides when both exist (`/tmp` vs `/private/tmp`).
+    #[must_use]
+    pub fn contains(&self, dir: &Path) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).ok();
+        self.roots.iter().any(|root| {
+            dir.starts_with(root)
+                || matches!((canon(dir), canon(root)), (Some(d), Some(r)) if d.starts_with(&r))
+        })
+    }
+}
+
+/// What a leased build does with `CARGO_TARGET_DIR`.
 ///
 /// Test: every test below.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum TargetDirChoice {
-    /// The caller pinned this directory; leave it.
+pub enum TargetPlan {
+    /// The caller pinned this private directory; leave it.
     Keep(String),
-    /// Use this slot directory.
-    Slot(PathBuf),
-    /// No pool is available; the environment is left as it is, for this reason.
-    Unchanged(String),
+    /// Unset: cargo's own target directory stands.
+    Unset,
+    /// Replace the shared directory with the held slot's, from this pool,
+    /// seeding a new slot from `clone_from`.
+    Slot {
+        /// The repo's slot pool.
+        pool: SlotPool,
+        /// The repo's warm shared directory, if any.
+        clone_from: Option<PathBuf>,
+    },
+    /// The build would run in a shared directory and no slot can replace it.
+    Refuse(String),
 }
 
-/// Decide the target directory for a leased build.
+/// Decide the target directory before a slot is taken.
 ///
 /// What: `ambient` is `CARGO_TARGET_DIR` as the build would inherit it;
-/// `shared` is the machine's shared target directory; `slot` is the pool
-/// directory for the held slot, or why there is none.
+/// `pool` is the repo's slot pool and warm directory, or why there is none.
 /// Test: `an_explicit_target_dir_is_kept`, `the_shared_dir_is_replaced_by_the_slot`,
-/// `no_pool_leaves_the_environment_alone`, `an_unset_target_dir_is_left_to_cargo`,
-/// `a_repo_pinned_target_dir_is_left_alone`.
+/// `an_unset_target_dir_is_left_to_cargo`, `a_shared_dir_without_a_pool_is_refused`,
+/// `an_ambient_pool_slot_counts_as_shared`.
 #[must_use]
-pub fn choose(
+pub fn plan(
     ambient: Option<&str>,
-    shared: Option<&Path>,
-    slot: Result<PathBuf, String>,
-) -> TargetDirChoice {
-    // #8261 critic round 1 (PM decision): redirect ONLY the machine's shared
-    // directory — the one case that shares state across worktrees. Unset
-    // means cargo's own `./target` or a repo's `build.target-dir`, and a
-    // binary a user runs from there must not go stale; that is left alone.
+    shared: &SharedDirs,
+    pool: Result<(SlotPool, Option<PathBuf>), String>,
+) -> TargetPlan {
     let Some(dir) = ambient.filter(|d| !d.trim().is_empty()) else {
-        return TargetDirChoice::Unchanged(
-            "CARGO_TARGET_DIR is unset, so cargo's own target directory is kept".to_string(),
-        );
+        return TargetPlan::Unset;
     };
-    if !shared.is_some_and(|s| same_path(Path::new(dir), s)) {
-        return TargetDirChoice::Keep(dir.to_string());
+    if !shared.contains(Path::new(dir)) {
+        return TargetPlan::Keep(dir.to_string());
     }
-    match slot {
-        Ok(path) => TargetDirChoice::Slot(path),
-        Err(why) => TargetDirChoice::Unchanged(why),
+    match pool {
+        Ok((pool, clone_from)) => TargetPlan::Slot { pool, clone_from },
+        // #8261 round 3: a shared directory with no pool never builds there.
+        Err(why) => TargetPlan::Refuse(format!(
+            "CARGO_TARGET_DIR={dir} is a shared target directory that concurrent builds \
+             overwrite, and no private slot directory can replace it ({why}). Set a private \
+             CARGO_TARGET_DIR for this build, or add a git `origin` to the checkout"
+        )),
     }
 }
 
-/// Paths equal after dropping trailing separators and `.` components.
-fn same_path(a: &Path, b: &Path) -> bool {
-    a.components().eq(b.components())
+/// The `build:` section of `~/.trusty-tools/trusty-mpm` config, if readable.
+fn load_build_config(home: &Path) -> Option<crate::core::build_env::BuildConfig> {
+    trusty_common::crate_config::load_at::<crate::core::trusty_tools_config::TrustyToolsConfig>(
+        &trusty_common::crate_config::crate_config_path_at(
+            home,
+            crate::core::trusty_tools_config::CRATE_NAME,
+        ),
+    )
+    .ok()
+    .flatten()
+    .and_then(|c| c.build)
 }
 
 /// The slot pool for `checkout`, and the shared directory to seed it from.
@@ -90,16 +147,8 @@ pub fn resolve_pool(
             checkout.display()
         )
     })?;
-    let build = trusty_common::crate_config::load_at::<
-        crate::core::trusty_tools_config::TrustyToolsConfig,
-    >(&trusty_common::crate_config::crate_config_path_at(
-        home,
-        crate::core::trusty_tools_config::CRATE_NAME,
-    ))
-    .ok()
-    .flatten();
     let shared = crate::core::build_env::resolve_build_env(
-        build.as_ref().and_then(|c| c.build.as_ref()),
+        load_build_config(home).as_ref(),
         home,
         Some(&identity),
         crate::core::build_env::host_cores(),
@@ -116,63 +165,75 @@ pub fn resolve_pool(
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_explicit_target_dir_is_kept() {
-        let got = choose(
-            Some("/work/target-mine"),
-            Some(Path::new("/shared/target")),
-            Ok(PathBuf::from("/pool/slot-1")),
-        );
-        assert_eq!(got, TargetDirChoice::Keep("/work/target-mine".into()));
-    }
-
-    /// The index-recycling fix: the shared directory (as a project `.envrc`
-    /// exports it) is replaced by the held slot's own directory.
-    /// The index-recycling fix: the shared directory (as a project `.envrc`
-    /// exports it) is replaced by the held slot's own directory.
-    #[test]
-    fn the_shared_dir_is_replaced_by_the_slot() {
-        let slot = PathBuf::from("/pool/o/r/slot-1");
-        for ambient in ["/shared/target", "/shared/target/"] {
-            let got = choose(
-                Some(ambient),
-                Some(Path::new("/shared/target")),
-                Ok(slot.clone()),
-            );
-            assert_eq!(got, TargetDirChoice::Slot(slot.clone()), "{ambient:?}");
+    fn shared() -> SharedDirs {
+        SharedDirs {
+            roots: vec![PathBuf::from("/shared/target"), PathBuf::from("/pool")],
         }
     }
 
-    /// Critic round 1 (HIGH 3): unset means cargo's own `./target` (or the
-    /// repo's `build.target-dir`); it is never redirected.
+    fn pool() -> Result<(SlotPool, Option<PathBuf>), String> {
+        let id = trusty_common::github_path::GithubPath {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        Ok((SlotPool::new(PathBuf::from("/pool"), id), None))
+    }
+
+    #[test]
+    fn an_explicit_target_dir_is_kept() {
+        let got = plan(Some("/work/target-mine"), &shared(), pool());
+        assert!(matches!(got, TargetPlan::Keep(d) if d == "/work/target-mine"));
+    }
+
+    #[test]
+    fn the_shared_dir_is_replaced_by_the_slot() {
+        for ambient in ["/shared/target", "/shared/target/", "/shared/target/o/r"] {
+            let got = plan(Some(ambient), &shared(), pool());
+            assert!(
+                matches!(got, TargetPlan::Slot { .. }),
+                "{ambient:?}: {got:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_unset_target_dir_is_left_to_cargo() {
-        let got = choose(
-            None,
-            Some(Path::new("/shared/target")),
-            Ok("/pool/slot-0".into()),
+        assert!(matches!(plan(None, &shared(), pool()), TargetPlan::Unset));
+        assert!(matches!(
+            plan(Some(" "), &shared(), pool()),
+            TargetPlan::Unset
+        ));
+    }
+
+    /// #8261 round 3: no repo identity, shared directory ambient — refused.
+    #[test]
+    fn a_shared_dir_without_a_pool_is_refused() {
+        let got = plan(Some("/shared/target"), &shared(), Err("no origin".into()));
+        assert!(
+            matches!(&got, TargetPlan::Refuse(why) if why.contains("no origin")),
+            "{got:?}"
         );
-        assert!(matches!(got, TargetDirChoice::Unchanged(_)), "{got:?}");
+    }
+
+    /// #8261 round 3: another lease's slot directory is shared, not pinned.
+    #[test]
+    fn an_ambient_pool_slot_counts_as_shared() {
+        let got = plan(Some("/pool/o/r/slot-0"), &shared(), pool());
+        assert!(matches!(got, TargetPlan::Slot { .. }), "{got:?}");
     }
 
     #[test]
-    fn a_repo_pinned_target_dir_is_left_alone() {
-        let got = choose(
-            Some("/repo/custom-target"),
-            Some(Path::new("/shared/target")),
-            Ok("/pool/slot-0".into()),
+    fn shared_dirs_need_no_repo_identity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dirs = SharedDirs::resolve(&BuildersConfig::default(), tmp.path());
+        assert!(dirs.contains(&tmp.path().join(".trusty-tools/cargo-target/any/repo")));
+        assert!(
+            dirs.contains(
+                &tmp.path()
+                    .join(".trusty-tools/cargo-target-pool/o/r/slot-3")
+            )
         );
-        assert_eq!(got, TargetDirChoice::Keep("/repo/custom-target".into()));
-    }
-
-    #[test]
-    fn no_pool_leaves_the_environment_alone() {
-        let got = choose(
-            Some("/shared/target"),
-            Some(Path::new("/shared/target")),
-            Err("no origin".into()),
-        );
-        assert_eq!(got, TargetDirChoice::Unchanged("no origin".into()));
+        assert!(!dirs.contains(&tmp.path().join("private-target")));
     }
 
     #[test]

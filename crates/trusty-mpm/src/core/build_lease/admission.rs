@@ -8,25 +8,30 @@
 //! What: [`decide`] folds the ceiling, the live lease count, the memory
 //! pressure, the load average and the foreign-build census into a
 //! [`Decision`]. [`decide_unleased`] is the bound for a build that could not
-//! take a lease at all.
+//! take a lease at all: "allow up to the cap" (owner ruling, #8261 round 3).
 //!
 //! **Order of the gates.** Pressure first: a reading above
 //! `builders.memory_pressure_max`, or available memory under
 //! `builders.min_available_pct`, admits no NEW build whatever the count —
 //! running builds are never touched. Then load: above `logical cores x
-//! builders.load_factor` a build is admitted only when no lease is held. Then
-//! the count: `held < n_effective`, `n_effective = max(1, ceiling - foreign)`.
+//! builders.load_factor` a build is admitted only while fewer than
+//! [`MIN_SLOTS`] leases are held. Then the count: `held < n_effective`,
+//! `n_effective = ceiling - foreign`.
 //!
-//! **Why the leased reduction floors at one.** The census matches process
-//! names; a false positive (an IDE's background `cargo check`) must not starve
-//! every leased build. The UNLEASED bound has no such floor: a build that holds
-//! no lease is itself only visible to the census, so the census is the whole
-//! bound there.
-//! Test: the `#[cfg(test)]` suite below.
+//! **The floor is load-only** (owner ruling "Load only", #8261 round 3). A
+//! loaded machine still admits [`MIN_SLOTS`] leased build, so a load spike
+//! cannot starve every build. Memory pressure, low available memory and a
+//! census at the ceiling refuse even with nothing held: round 2's `max(1, …)`
+//! on the census count is gone (the line marked `#8261 floor`).
+//! Test: `admission_tests.rs`.
 
 use trusty_common::memory_pressure::MemoryPressure;
 
 use super::config::BuildLeaseConfig;
+
+/// Leased builds a LOADED machine still admits (owner ruling "Load only",
+/// #8261 round 3). Applies to the load gate only.
+pub const MIN_SLOTS: u32 = 1;
 use crate::core::build_probe::BuildGroup;
 use crate::core::builders::BuildersConfig;
 
@@ -90,9 +95,6 @@ pub struct Decision {
     pub readings: String,
 }
 
-/// The floor on the foreign-reduced LEASED slot count. See the module doc.
-pub const MIN_SLOTS: u32 = 1;
-
 /// Decide whether one more leased build may start.
 ///
 /// What: see the module doc. Unreadable inputs degrade as the fail-open table
@@ -103,8 +105,9 @@ pub const MIN_SLOTS: u32 = 1;
 /// Test: `a_quiet_machine_admits_up_to_the_ceiling`,
 /// `warn_pressure_refuses_a_new_build_but_counts_the_holders`,
 /// `low_available_memory_refuses_even_at_normal_pressure`,
-/// `a_loaded_machine_admits_only_when_nothing_is_held`,
-/// `foreign_builds_reduce_the_slots_but_never_below_one`,
+/// `a_loaded_machine_admits_exactly_one_when_nothing_is_held`,
+/// `low_memory_refuses_even_when_nothing_is_held`,
+/// `foreign_builds_can_reduce_the_slots_to_zero`,
 /// `unreadable_pressure_uses_the_ceiling_and_warns`,
 /// `an_unreadable_load_skips_only_the_load_gate`,
 /// `an_unreadable_census_counts_leases_only`,
@@ -133,18 +136,16 @@ pub fn decide(
             0
         }
     };
-    let n_effective = if ceiling == 0 {
-        0
-    } else {
-        ceiling.saturating_sub(foreign_count).max(MIN_SLOTS)
-    };
+    // #8261 floor: round 2 applied `.max(1)` here (a ceiling of 0 excepted).
+    let n_effective = ceiling.saturating_sub(foreign_count);
 
     pressure_gate(&lease, &readings.pressure, &mut withheld, &mut degraded);
     let cores = readings.logical_cores.max(1);
     #[allow(clippy::cast_precision_loss)]
     let threshold = cores as f64 * builders.effective_load_factor();
     match &readings.load_avg_1min {
-        Ok(load) if *load > threshold && held > 0 => withheld.push(format!(
+        // #8261 round 3: the load gate keeps its floor of MIN_SLOTS.
+        Ok(load) if *load > threshold && held >= MIN_SLOTS => withheld.push(format!(
             "1-minute load {load:.2} is above {threshold:.2} (logical cores x \
              builders.load_factor) and {held} build(s) already hold a lease"
         )),
@@ -177,7 +178,8 @@ pub fn decide(
 /// to the census, so the census bounds it: foreign compiler groups — every
 /// unleased build already running, and every orphan a SIGKILLed holder left
 /// behind — must be below the ceiling, with NO floor.
-/// What: admits when the census reads fewer groups than `ceiling` and the
+/// What: "allow up to the cap" (owner ruling, #8261 round 3). Admits when
+/// the census reads fewer groups than `ceiling` and the
 /// pressure gate passes. A census that cannot be read either — lease AND
 /// census both failed — WITHHOLDS: nothing would bound the build, and the
 /// 2026-09-21 owner ruling on #8261 forbids unlimited admission. The build

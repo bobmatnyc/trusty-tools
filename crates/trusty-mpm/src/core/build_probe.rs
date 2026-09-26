@@ -94,14 +94,25 @@ pub enum BuildProbeError {
 ///
 /// [`BuildProbeError`] when the process table cannot be read. Never an empty
 /// `Ok`: see the module doc.
+/// Sealed (#8261 round 3): a required method can be added later without
+/// breaking a caller. The implementations are [`SysinfoSampler`] and a `Vec` of
+/// [`ProcessSnapshot`].
 /// Test: `a_cargo_build_collapses_to_one_group`.
-pub trait ProcessSampler: Send + Sync {
+pub trait ProcessSampler: Send + Sync + sealed::Sealed {
     /// Sample every live process on this host.
     ///
     /// # Errors
     ///
     /// [`BuildProbeError`] when the table cannot be read.
     fn sample(&self) -> Result<Vec<ProcessSnapshot>, BuildProbeError>;
+}
+
+/// Keeps [`ProcessSampler`] implementable only inside this crate.
+mod sealed {
+    /// The supertrait no other crate can name.
+    pub trait Sealed {}
+    impl Sealed for Vec<super::ProcessSnapshot> {}
+    impl Sealed for super::SysinfoSampler {}
 }
 
 impl ProcessSampler for Vec<ProcessSnapshot> {

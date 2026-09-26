@@ -17,6 +17,44 @@
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
+/// The decision a `PreToolUse` REWRITE may carry (#8261 round 3).
+///
+/// Why: a rewrite of a command the user's settings `ask` about must still
+/// ask, and one they `allow` may still be allowed — but never `deny`, which
+/// goes through [`build_pm_guard_deny_response`] so it carries the prefix.
+/// Test: `a_rewrite_carries_only_ask_or_allow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RewriteDecision {
+    /// Ask the user, as the original command's `ask` rule would.
+    Ask,
+    /// Allow, as the original command's `allow` rules would.
+    Allow,
+}
+
+/// A `PreToolUse` response replacing the tool input with `input`.
+///
+/// What: `hookSpecificOutput.updatedInput = input`, plus `permissionDecision`
+/// when `decision` is set; with none, the normal permission flow applies.
+/// Test: `a_rewrite_carries_only_ask_or_allow`.
+pub(crate) fn build_rewrite_response(
+    input: serde_json::Value,
+    decision: Option<RewriteDecision>,
+) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": input,
+        }
+    });
+    if let Some(decision) = decision {
+        out["hookSpecificOutput"]["permissionDecision"] = serde_json::Value::from(match decision {
+            RewriteDecision::Ask => "ask",
+            RewriteDecision::Allow => "allow",
+        });
+    }
+    out
+}
+
 /// Build the `hookSpecificOutput.permissionDecision = "deny"` JSON body.
 ///
 /// Why: this is the exact shape Claude Code parses on a `PreToolUse` hook's
@@ -194,6 +232,22 @@ mod tests {
             })
             .unwrap_or(lines.len());
         lines[..end].to_vec()
+    }
+
+    #[test]
+    fn a_rewrite_carries_only_ask_or_allow() {
+        let input = serde_json::json!({ "command": "x" });
+        let none = build_rewrite_response(input.clone(), None);
+        assert!(
+            none["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
+        assert_eq!(none["hookSpecificOutput"]["updatedInput"]["command"], "x");
+        let ask = build_rewrite_response(input.clone(), Some(RewriteDecision::Ask));
+        assert_eq!(ask["hookSpecificOutput"]["permissionDecision"], "ask");
+        let allow = build_rewrite_response(input, Some(RewriteDecision::Allow));
+        assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]

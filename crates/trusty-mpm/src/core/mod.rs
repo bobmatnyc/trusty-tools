@@ -115,11 +115,6 @@ pub mod claude_mpm_session;
 // the memory-tier default table, and the one host-root resolution site.
 pub mod builders;
 
-// #8261: the capacity formula that replaces the cap's fixed number — measured
-// 1-minute load average and free memory against the operator's ceiling, with
-// the fail-closed and never-revoke invariants.
-pub mod builder_capacity;
-
 // #8261: the pool of persistent per-slot `CARGO_TARGET_DIR` directories a
 // leased builder compiles into, so concurrent builds stop serialising on one
 // shared cargo build-directory lock.

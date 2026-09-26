@@ -1590,12 +1590,6 @@ async fn an_admitted_grant_revives_the_record_its_own_deny_tombstoned_7487() {
         "a revived record carries no end time"
     );
     assert_eq!(record.isolation.as_deref(), Some("worktree"));
-    let holders = state.builder_slot_holders(None);
-    assert_eq!(
-        holders.len(),
-        1,
-        "the revived builder holds its slot again: {holders:?}"
-    );
 }
 
 // ── operator repair of a stuck record (#7602) ────────────────────────────
