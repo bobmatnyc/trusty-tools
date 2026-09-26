@@ -92,8 +92,13 @@ async fn decommission_keeps_gitignored_run_output() {
     ignore_seeds(&fx);
     let wt = seeded_tree(&fx, "decom-8534", Seed::RunOutput);
 
-    let verdict =
-        remove_in_project_worktree(&ManagedSessionId::new(), &wt, ProvisioningDirt::Refuse).await;
+    let verdict = remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        None,
+        &wt,
+        ProvisioningDirt::Refuse,
+    )
+    .await;
 
     assert!(!verdict.removed, "{verdict:?}");
     assert!(
@@ -114,8 +119,13 @@ async fn force_decommission_keeps_gitignored_run_output() {
     ignore_seeds(&fx);
     let wt = seeded_tree(&fx, "decom-force-8534", Seed::RunOutput);
 
-    let verdict =
-        remove_in_project_worktree(&ManagedSessionId::new(), &wt, ProvisioningDirt::Discard).await;
+    let verdict = remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        None,
+        &wt,
+        ProvisioningDirt::Discard,
+    )
+    .await;
 
     assert!(!verdict.removed && wt.join("results/out.json").exists());
 }
@@ -129,9 +139,13 @@ async fn decommission_removes_build_and_harness_output() {
         ignore_seeds(&fx);
         let wt = seeded_tree(&fx, &format!("decom-regen-8534-{i}"), s);
 
-        let verdict =
-            remove_in_project_worktree(&ManagedSessionId::new(), &wt, ProvisioningDirt::Refuse)
-                .await;
+        let verdict = remove_in_project_worktree(
+            &ManagedSessionId::new(),
+            None,
+            &wt,
+            ProvisioningDirt::Refuse,
+        )
+        .await;
 
         assert!(verdict.removed, "{s:?}: {:?}", verdict.kept_reason);
         assert!(!wt.exists(), "{s:?}: the tree is gone");

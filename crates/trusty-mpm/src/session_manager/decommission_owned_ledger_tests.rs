@@ -95,7 +95,7 @@ async fn plain_decommission(managed_root: &Path, ws: &Path) -> bool {
 
 /// The reason a plain decommission keeps `ws`.
 fn kept(ws: &Path) -> String {
-    owned_workspace_keep_reason(ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+    owned_workspace_keep_reason(ws, &ManagedSessionId::new(), None, ProvisioningDirt::Refuse)
         .expect("the workspace is kept")
 }
 
@@ -110,7 +110,12 @@ async fn ledger_excuses_only_provisioning_dirt_on_a_clone() {
     assert!(ws.join(".git").join(LEDGER_NAME).is_file(), "admin dir");
 
     assert_eq!(
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse),
+        owned_workspace_keep_reason(
+            &ws,
+            &ManagedSessionId::new(),
+            None,
+            ProvisioningDirt::Refuse
+        ),
         None
     );
     assert!(plain_decommission(&fx.repos_root, &ws).await);
@@ -128,6 +133,26 @@ async fn ledger_keeps_a_clone_with_an_edited_claude_md() {
     assert!(kept(&ws).contains("CLAUDE.md"), "{}", kept(&ws));
     assert!(!plain_decommission(&fx.repos_root, &ws).await);
     assert!(ws.join("CLAUDE.md").exists());
+}
+
+/// #8688: the refusal names only the entries the ledger did not excuse, so
+/// its count matches its list. Fails before the fix, which counted 2 and
+/// listed all 5 entries, the ledger-excused ones included.
+#[test]
+fn ledger_refusal_lists_only_the_entries_it_counts() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "ledger-count");
+    provision(&ws);
+    std::fs::write(ws.join("TASK.md"), "Fix the bug\n").expect("TASK.md");
+    std::fs::write(ws.join("notes.rs"), "// unsaved\n").expect("user work");
+
+    let reason = kept(&ws);
+    assert!(
+        reason.contains(
+            "(2 uncommitted/untracked file(s), 0 unpushed commit(s): ?? TASK.md, ?? notes.rs)"
+        ),
+        "{reason}"
+    );
 }
 
 /// #8663: a `.gitignore` line tm did not append keeps the clone.
@@ -180,7 +205,7 @@ fn locked_owned_worktree_is_kept_even_with_force() {
     fx.lock_worktree(&wt);
 
     for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
-        let reason = owned_workspace_keep_reason(&wt, &me, policy)
+        let reason = owned_workspace_keep_reason(&wt, &me, None, policy)
             .unwrap_or_else(|| panic!("a locked worktree is kept under {policy:?}"));
         assert!(reason.contains("locked"), "{reason}");
     }
@@ -219,7 +244,7 @@ fn owned_worktree_whose_probe_fails_is_kept() {
     let probe = worktree_kind(&wt).expect_err("precondition: the probe fails");
 
     for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
-        let reason = owned_workspace_keep_reason(&wt, &me, policy)
+        let reason = owned_workspace_keep_reason(&wt, &me, None, policy)
             .unwrap_or_else(|| panic!("a tree the probe cannot read is kept under {policy:?}"));
         assert!(reason.contains(&probe), "{reason}");
         assert!(reason.contains("nothing was removed"), "{reason}");
@@ -247,7 +272,7 @@ fn force_on_owned_worktree_of_another_session_is_kept() {
 
     for (wt, names) in [(&other, "names session"), (&agent, "agent-synthetic-8663")] {
         std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("provisioning dirt");
-        let reason = owned_workspace_keep_reason(wt, &me, ProvisioningDirt::Discard)
+        let reason = owned_workspace_keep_reason(wt, &me, None, ProvisioningDirt::Discard)
             .expect("--force is declined");
         assert!(reason.contains("--force declined"), "{reason}");
         assert!(reason.contains(names), "{reason}");
@@ -311,7 +336,12 @@ fn ledger_adopts_a_relaunch_rewrite_of_tm_or_head_bytes() {
         assert!(ledger.files.contains_key(rel), "{rel}: {ledger:?}");
     }
     assert_eq!(
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse),
+        owned_workspace_keep_reason(
+            &ws,
+            &ManagedSessionId::new(),
+            None,
+            ProvisioningDirt::Refuse
+        ),
         None
     );
 }

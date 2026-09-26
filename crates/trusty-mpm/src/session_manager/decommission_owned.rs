@@ -27,9 +27,7 @@ use super::record::ManagedSessionId;
 use super::worktree_ignored_output::{
     ignored_output_refusal, kept_unversioned_content, unversioned_content_refusal,
 };
-use super::worktree_safety::{
-    DirtyWorktreePolicy, inspect_dirt, inspect_dirt_excusing, is_worktree_root,
-};
+use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_worktree_root};
 
 /// Why an SM-owned workspace must be kept, or `None` when it may be deleted
 /// (#8663).
@@ -39,16 +37,18 @@ use super::worktree_safety::{
 /// What: a directory that is its own git worktree root gets the worktree
 /// guard. [`worktree_kind`] must prove it a linked worktree or a main
 /// checkout; a probe error keeps it under either policy. A linked worktree
-/// that `git worktree lock` protects is kept under
-/// either policy ([`lock_blocker`]). Then [`inspect_dirt`] (dirty files,
-/// unpushed commits, nested repositories), excusing only entries that match
-/// the [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
+/// that `git worktree lock` protects is kept under either policy
+/// ([`lock_blocker`]). Then [`inspect_dirt_excusing`] (dirty files, unpushed
+/// commits, nested repositories), excusing only entries that match the
+/// [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
 /// [`ProvisioningDirt::Discard`] (`--force`), when that check still finds
 /// dirt, a linked worktree must pass [`force_blocker`] for `id`, and the dirt
 /// check then also excuses tm's provisioning files as the in-project route
-/// does. Last, [`ignored_output_refusal`]. A `.git` entry git cannot resolve
-/// keeps it. Any other directory must hold only harness files and regenerable
-/// output ([`unversioned_content_refusal`]). Every reason names the path.
+/// does: `TASK.md` only while it holds what tm wrote from `task`, the
+/// record's task (#8688). Last, [`ignored_output_refusal`]. A `.git` entry
+/// git cannot resolve keeps it. Any other directory must hold only harness
+/// files and regenerable output ([`unversioned_content_refusal`]). Every
+/// reason names the path.
 /// Test: `owned_worktree_with_an_unpushed_commit_is_kept`,
 /// `owned_worktree_with_untracked_results_is_kept`,
 /// `owned_non_git_workspace_with_user_files_is_kept`,
@@ -60,6 +60,7 @@ use super::worktree_safety::{
 pub(super) fn owned_workspace_keep_reason(
     ws: &Path,
     id: &ManagedSessionId,
+    task: Option<&str>,
     policy: ProvisioningDirt,
 ) -> Option<String> {
     if is_worktree_root(ws).unwrap_or(false) {
@@ -77,26 +78,23 @@ pub(super) fn owned_workspace_keep_reason(
         }
         // #8663 critic round 1: tm's provisioning writes, proven by the ledger.
         let ledger = provisioning_ledger::load(ws);
-        let dirt = match &ledger {
-            Some(ledger) => inspect_dirt_excusing(ws, &|line| ledger.excuses(ws, line)),
-            None => inspect_dirt(ws),
-        };
-        let Some(dirt) = dirt else {
+        // #8688: one excuse for the count and the list; no ledger excuses nothing.
+        let ledgered = |line: &str| ledger.as_ref().is_some_and(|l| l.excuses(ws, line));
+        let Some(dirt) = inspect_dirt_excusing(ws, &ledgered) else {
             return ignored_output_refusal(ws);
         };
         if policy == ProvisioningDirt::Refuse {
-            return named(kept_for_dirt(ws, &dirt.reason, policy));
+            return named(kept_for_dirt(ws, &dirt.reason, policy, &ledgered));
         }
         if linked.is_some()
             && let Some(blocker) = force_blocker(ws, id)
         {
             return named(format!("--force declined: {blocker}; nothing was removed"));
         }
-        let excuse = |line: &str| {
-            is_provisioning_entry(ws, line) || ledger.as_ref().is_some_and(|l| l.excuses(ws, line))
-        };
+        // #8688: `task` decides whether `TASK.md` is tm's write.
+        let excuse = |line: &str| is_provisioning_entry(ws, task, line) || ledgered(line);
         if let Some(dirt) = inspect_dirt_excusing(ws, &excuse) {
-            return named(kept_for_dirt(ws, &dirt.reason, policy));
+            return named(kept_for_dirt(ws, &dirt.reason, policy, &excuse));
         }
         return ignored_output_refusal(ws);
     }
@@ -128,11 +126,14 @@ pub(super) fn owned_workspace_keep_reason(
 /// `decommission_prunes_the_base_repo_worktree_registry`.
 pub(super) async fn remove_owned_workspace(
     id: &ManagedSessionId,
+    task: Option<&str>,
     ws: &Path,
     policy: ProvisioningDirt,
 ) -> Result<WorkspaceVerdict, ManagedError> {
     let path = ws.to_path_buf();
     let owner = *id;
+    // #8688: `TASK.md` is excused only while it equals the record's task.
+    let task = task.map(str::to_owned);
     let join = tokio::task::spawn_blocking(move || {
         let mut failure: Option<std::io::Error> = None;
         // #7885 critic round: audited like every other removal route.
@@ -140,7 +141,8 @@ pub(super) async fn remove_owned_workspace(
             &path,
             "session decommission: owned workspace, containment guard passed",
             || {
-                if let Some(reason) = owned_workspace_keep_reason(&path, &owner, policy) {
+                let task = task.as_deref();
+                if let Some(reason) = owned_workspace_keep_reason(&path, &owner, task, policy) {
                     return WorktreeRemoval::Kept(reason);
                 }
                 if policy == ProvisioningDirt::Discard {

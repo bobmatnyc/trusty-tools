@@ -111,9 +111,13 @@ async fn owned_worktree_with_an_unpushed_commit_is_kept() {
     git(&wt, &["add", "work.rs"]);
     git(&wt, &["commit", "-q", "-m", "agent work"]);
 
-    let reason =
-        owned_workspace_keep_reason(&wt, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
-            .expect("an unpushed commit keeps the workspace");
+    let reason = owned_workspace_keep_reason(
+        &wt,
+        &ManagedSessionId::new(),
+        None,
+        ProvisioningDirt::Refuse,
+    )
+    .expect("an unpushed commit keeps the workspace");
     assert!(reason.contains(&wt.display().to_string()), "{reason}");
     assert!(reason.contains("1 unpushed commit"), "{reason}");
     assert_decommission_keeps(&fx.repos_root, &wt).await;
@@ -127,9 +131,14 @@ async fn owned_worktree_with_untracked_results_is_kept() {
     let wt = fx.add_worktree("owned-8663-results");
     write(&wt, "results/out.json");
 
-    let verdict = remove_owned_workspace(&ManagedSessionId::new(), &wt, ProvisioningDirt::Refuse)
-        .await
-        .expect("a refusal is not an error");
+    let verdict = remove_owned_workspace(
+        &ManagedSessionId::new(),
+        None,
+        &wt,
+        ProvisioningDirt::Refuse,
+    )
+    .await
+    .expect("a refusal is not an error");
     assert!(!verdict.removed);
     let reason = verdict.kept_reason.expect("the kept reason is reported");
     assert!(reason.contains("results/"), "{reason}");
@@ -146,9 +155,13 @@ async fn owned_worktree_with_gitignored_results_is_kept() {
     std::fs::write(fx.repo.join(".git/info/exclude"), "results/\n").expect("exclude");
     write(&wt, "results/out.json");
 
-    let reason =
-        owned_workspace_keep_reason(&wt, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
-            .expect("ignored output keeps the workspace");
+    let reason = owned_workspace_keep_reason(
+        &wt,
+        &ManagedSessionId::new(),
+        None,
+        ProvisioningDirt::Refuse,
+    )
+    .expect("ignored output keeps the workspace");
     assert!(reason.contains("gitignored"), "{reason}");
     assert_decommission_keeps(&fx.repos_root, &wt).await;
 }
@@ -162,15 +175,35 @@ fn owned_worktree_force_excuses_only_provisioning_files() {
     let me = ManagedSessionId::new();
     write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
     write(&wt, "CLAUDE.md");
-    assert!(owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Refuse).is_some());
+    assert!(owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Refuse).is_some());
     assert_eq!(
-        owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Discard),
+        owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard),
         None
     );
     write(&wt, "notes.md");
-    let reason = owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Discard)
+    let reason = owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard)
         .expect("--force never excuses user files");
     assert!(reason.contains("notes.md"), "{reason}");
+}
+
+/// #8688: on the owned route `--force` excuses `TASK.md` only while it
+/// equals the record's task. Fails before the content check, which excused
+/// it by path with or without a task.
+#[test]
+fn owned_worktree_force_excuses_task_md_only_when_it_equals_the_task() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("owned-8688-task");
+    let me = ManagedSessionId::new();
+    write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
+    let task = "Fix the bug\n";
+    std::fs::write(wt.join("TASK.md"), task).expect("write TASK.md");
+    let forced = |task| owned_workspace_keep_reason(&wt, &me, task, ProvisioningDirt::Discard);
+    assert_eq!(forced(Some(task)), None);
+    let reason = forced(None).expect("no task vouches for TASK.md");
+    assert!(reason.contains("?? TASK.md"), "{reason}");
+    std::fs::write(wt.join("TASK.md"), format!("{task}- a note\n")).expect("edit TASK.md");
+    let reason = forced(Some(task)).expect("an edited TASK.md keeps the worktree");
+    assert!(reason.contains("?? TASK.md"), "{reason}");
 }
 
 /// #8663: a non-git owned workspace holding a user file is kept.
@@ -181,9 +214,13 @@ async fn owned_non_git_workspace_with_user_files_is_kept() {
     write(&ws, WORKTREE_SENTINEL_FILE);
     write(&ws, "notes.md");
 
-    let reason =
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
-            .expect("a user file keeps the workspace");
+    let reason = owned_workspace_keep_reason(
+        &ws,
+        &ManagedSessionId::new(),
+        None,
+        ProvisioningDirt::Refuse,
+    )
+    .expect("a user file keeps the workspace");
     assert!(reason.contains(&ws.display().to_string()), "{reason}");
     assert!(reason.contains("notes.md"), "{reason}");
     assert_decommission_keeps(root.path(), &ws).await;
@@ -235,9 +272,13 @@ async fn owned_workspace_is_kept_when_the_content_check_fails() {
     write(&ws, "data/run.json");
     let _restore = deny_all(&ws.join("data"));
 
-    let reason =
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
-            .expect("an unreadable directory keeps the workspace");
+    let reason = owned_workspace_keep_reason(
+        &ws,
+        &ManagedSessionId::new(),
+        None,
+        ProvisioningDirt::Refuse,
+    )
+    .expect("an unreadable directory keeps the workspace");
     assert!(reason.contains("content check failed"), "{reason}");
     assert_decommission_keeps(root.path(), &ws).await;
 }

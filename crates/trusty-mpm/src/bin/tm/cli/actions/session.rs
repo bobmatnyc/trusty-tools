@@ -344,7 +344,9 @@ pub(crate) enum SessionAction {
         id: String,
         /// Remove the workspace even when it is dirty from tm's own
         /// provisioning files (.gitignore, .claude/settings.json[.bak],
-        /// CLAUDE.md). Other changes and unpushed commits still block it.
+        /// timestamped .claude/settings.json snapshots, CLAUDE.md, and TASK.md
+        /// while it still holds the session's task). Other changes, an edited
+        /// TASK.md, and unpushed commits still block it.
         #[arg(long)]
         force: bool,
     },

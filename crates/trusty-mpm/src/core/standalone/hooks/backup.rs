@@ -207,12 +207,12 @@ fn prune_snapshots(path: &Path, keep: usize) {
 /// would never have touched — `.claude/` also holds the atomic writer's own
 /// `settings.json.bak`. Three test modules across two module trees assert on
 /// snapshot counts, so the alternative is three copies of the shape drifting
-/// apart from the one the prune actually applies. Production reads the ordering
-/// key directly and never calls this, hence `#[cfg(test)]`.
+/// apart from the one the prune actually applies. #8688: decommission's
+/// `--force` excuse reads it too, so it excuses exactly the names this module
+/// writes.
 /// What: [`snapshot_order_key`] reduced to a yes/no.
 /// Test: `snapshot_order_key_rejects_foreign_names`,
 /// `write_project_hooks_snapshots_the_file_it_replaces`.
-#[cfg(test)]
 pub(crate) fn is_snapshot_of(settings_name: &str, entry_name: &str) -> bool {
     snapshot_order_key(settings_name, entry_name).is_some()
 }

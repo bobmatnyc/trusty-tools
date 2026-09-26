@@ -92,8 +92,13 @@ async fn a_user_skill_keeps_the_tree() {
         (2, ".claude/skills/deploy-check/")
     );
 
-    let verdict =
-        remove_in_project_worktree(&ManagedSessionId::new(), &wt, ProvisioningDirt::Refuse).await;
+    let verdict = remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        None,
+        &wt,
+        ProvisioningDirt::Refuse,
+    )
+    .await;
     assert!(!verdict.removed, "{verdict:?}");
     assert!(wt.join(".claude/skills/deploy-check/SKILL.md").exists());
 }
@@ -150,8 +155,13 @@ async fn a_manifest_named_skill_does_not_block_removal() {
     put(&wt, ".claude/skills/.trusty-mpm-project-tier-stamp", "abc");
 
     assert_eq!(kept_ignored_output(&wt), Ok(None));
-    let verdict =
-        remove_in_project_worktree(&ManagedSessionId::new(), &wt, ProvisioningDirt::Refuse).await;
+    let verdict = remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        None,
+        &wt,
+        ProvisioningDirt::Refuse,
+    )
+    .await;
     assert!(verdict.removed, "{:?}", verdict.kept_reason);
 }
 

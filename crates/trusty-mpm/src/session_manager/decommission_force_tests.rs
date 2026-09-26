@@ -50,20 +50,57 @@ fn provisioned_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     wt
 }
 
+/// A `.claude/settings.json` snapshot named the way `snapshot_then_prune`
+/// names one (#8688).
+const SETTINGS_SNAPSHOT: &str = ".claude/settings.json.20260926T140608Z.bak";
+
+/// The session task every fixture record carries; `write_task_md` writes it
+/// to `TASK.md` verbatim (#8688).
+const TASK: &str = "Fix the bug\n";
+
+/// [`provisioned_tree`] plus the two files a task-bearing spawn adds (#8688):
+/// `TASK.md` holding [`TASK`] and a timestamped `.claude/settings.json`
+/// snapshot.
+fn task_bearing_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
+    let wt = provisioned_tree(fx, name);
+    std::fs::write(wt.join("TASK.md"), TASK).expect("write TASK.md");
+    std::fs::write(wt.join(SETTINGS_SNAPSHOT), "{}\n").expect("write the snapshot");
+    wt
+}
+
+/// The file count a kept reason states and the entries it lists (#8688).
+fn count_and_list(reason: &str) -> (usize, Vec<String>) {
+    let (head, _) = reason
+        .split_once(" uncommitted/untracked file(s)")
+        .expect("the reason states a file count");
+    let count = head
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a numeric count");
+    let listed = reason
+        .split_once("unpushed commit(s): ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(list, _)| list.split(", ").map(str::to_string).collect())
+        .unwrap_or_default();
+    (count, listed)
+}
+
 async fn remove(wt: &Path, policy: ProvisioningDirt) -> WorkspaceVerdict {
     remove_as(&ManagedSessionId::new(), wt, policy).await
 }
 
 /// [`remove`] as the session `id`, for the tests whose marker names an owner.
+/// The session's record carries [`TASK`].
 async fn remove_as(id: &ManagedSessionId, wt: &Path, policy: ProvisioningDirt) -> WorkspaceVerdict {
-    remove_in_project_worktree(id, wt, policy).await
+    remove_in_project_worktree(id, Some(TASK), wt, policy).await
 }
 
 #[test]
 fn provisioning_entry_matches_only_the_four_paths_in_provisioning_states() {
     let fx = GitWorktreeFixture::new();
     let wt = provisioned_tree(&fx, "decom-entry-7660");
-    let is = |line: &str| is_provisioning_entry(&wt, line);
+    let is = |line: &str| is_provisioning_entry(&wt, None, line);
     assert!(is(" M .gitignore"));
     assert!(is("?? .claude/settings.json"));
     assert!(is("?? .claude/settings.json.bak"));
@@ -219,6 +256,272 @@ async fn force_decommission_removes_a_provisioning_only_worktree() {
 
     assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
     assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688: `TASK.md` and a timestamped settings snapshot are excused only
+/// untracked, at their exact paths, in the snapshot's exact name shape.
+#[test]
+fn provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-entry-8688");
+    let is = |line: &str| is_provisioning_entry(&wt, Some(TASK), line);
+    assert!(is("?? TASK.md"));
+    assert!(is(&format!("?? {SETTINGS_SNAPSHOT}")));
+    assert!(is("?? .claude/settings.json.20260926T140608Z-1.bak"));
+    assert!(!is(" M TASK.md"), "an edit to a tracked TASK.md is work");
+    assert!(!is("?? docs/TASK.md"));
+    assert!(!is("?? .claude/settings.json.mine.bak"));
+    assert!(!is("?? .claude/settings.local.json.20260926T140608Z.bak"));
+    assert!(!is("?? settings.json.20260926T140608Z.bak"));
+    assert!(!is("?? .claude/sub/settings.json.20260926T140608Z.bak"));
+    assert!(!is(&format!(" M {SETTINGS_SNAPSHOT}")));
+}
+
+/// #8688: `?? TASK.md` is excused only when its bytes equal the session's
+/// task — never with no record, an empty task, a different task, an edit, an
+/// unreadable file, or a symlink in the file's place. Fails before the
+/// content check, which excused `?? TASK.md` by path alone.
+#[test]
+fn provisioning_entry_excuses_task_md_only_when_it_equals_the_session_task() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-entry-task-8688");
+    let task_md = wt.join("TASK.md");
+    let is = |task: Option<&str>| is_provisioning_entry(&wt, task, "?? TASK.md");
+    assert!(is(Some(TASK)));
+    assert!(!is(None), "no record vouches for it");
+    assert!(!is(Some("")), "a task-less record wrote no TASK.md");
+    assert!(!is(Some("Fix the bug")), "one byte short is not tm's write");
+    assert!(!is(Some("Another task\n")));
+    {
+        let _restore = deny_all(&task_md);
+        assert!(!is(Some(TASK)), "an unreadable TASK.md is not excused");
+    }
+    std::fs::remove_file(&task_md).expect("drop TASK.md");
+    std::fs::write(wt.join("brief.txt"), TASK).expect("write the link target");
+    std::os::unix::fs::symlink("brief.txt", &task_md).expect("symlink TASK.md");
+    assert!(!is(Some(TASK)), "a symlink is not the file tm wrote");
+}
+
+/// #8688 (c): the live report — a task-bearing managed worktree holding only
+/// tm-written files, `TASK.md` still equal to the record's task, is removed
+/// by `--force`. Fails before #8688, which kept it for `?? TASK.md` and
+/// `?? .claude/settings.json.<ts>.bak`.
+#[tokio::test]
+async fn force_decommission_removes_a_worktree_holding_task_md_and_a_settings_snapshot() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-task-8688");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688 (a): notes an agent appended to `TASK.md` after spawn keep the
+/// worktree under `--force`, and the refusal names the file. Fails before
+/// the content check, which excused `?? TASK.md` by path and deleted them.
+#[tokio::test]
+async fn force_decommission_keeps_a_task_md_edited_after_spawn() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-task-edit-8688");
+    let edited = format!("{TASK}\n## Notes\n- the cause is the stale cache\n");
+    std::fs::write(wt.join("TASK.md"), &edited).expect("edit TASK.md");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(!verdict.removed, "an edited TASK.md must keep the worktree");
+    let body = std::fs::read_to_string(wt.join("TASK.md")).expect("TASK.md survives");
+    assert_eq!(body, edited, "the notes survive untouched");
+    let reason = verdict.kept_reason.expect("reason");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? TASK.md".to_string()]),
+        "reason: {reason}"
+    );
+}
+
+/// #8688 (b): with no record to compare against, or a record with no task,
+/// `TASK.md` keeps the worktree under `--force` and is named. Fails before
+/// the content check, which excused `?? TASK.md` whatever the record held.
+#[tokio::test]
+async fn force_decommission_keeps_a_task_md_without_a_session_task() {
+    let fx = GitWorktreeFixture::new();
+    for (name, task) in [("none", None), ("empty", Some(""))] {
+        let wt = task_bearing_tree(&fx, &format!("decom-force-task-{name}-8688"));
+
+        let verdict = remove_in_project_worktree(
+            &ManagedSessionId::new(),
+            task,
+            &wt,
+            ProvisioningDirt::Discard,
+        )
+        .await;
+
+        assert!(!verdict.removed && wt.join("TASK.md").exists(), "{name}");
+        let reason = verdict.kept_reason.expect("reason");
+        assert_eq!(
+            count_and_list(&reason),
+            (1, vec!["?? TASK.md".to_string()]),
+            "{name}: {reason}"
+        );
+    }
+}
+
+/// `task` as `mark_errored` leaves the record's task after failing with `msg`
+/// (#8688). The manager-level wire test drives the real `mark_errored`.
+fn errored(task: &str, msg: &str) -> String {
+    format!("{task} [error: {msg}]")
+}
+
+/// `--force` on `wt` as a session whose record's task is `task`.
+async fn force_with_task(wt: &Path, task: &str) -> WorkspaceVerdict {
+    remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        Some(task),
+        wt,
+        ProvisioningDirt::Discard,
+    )
+    .await
+}
+
+/// #8688 round 3: `mark_errored` appends its note to the record's task after
+/// `TASK.md` was written, so an errored session's unedited `TASK.md` never
+/// equalled the task and kept the tree. Fails at 9465af6d2.
+#[tokio::test]
+async fn force_decommission_removes_a_once_errored_session_s_unedited_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-errored-8688");
+
+    // A message holding `]` is still one note.
+    let verdict = force_with_task(&wt, &errored(TASK, "launch spec [tm-x] unreadable")).await;
+
+    assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688 round 3: an errored session's `TASK.md` edited after spawn keeps the
+/// tree. Passes at 9465af6d2, which kept every errored tree; it pins that the
+/// errored candidate excuses only the bytes tm wrote.
+#[tokio::test]
+async fn force_decommission_keeps_a_once_errored_session_s_edited_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-errored-edit-8688");
+    let edited = format!("{TASK}\n## Notes\n- the spawn failed on a stale spec\n");
+    std::fs::write(wt.join("TASK.md"), &edited).expect("edit TASK.md");
+
+    let verdict = force_with_task(&wt, &errored(TASK, "boom")).await;
+
+    assert!(!verdict.removed, "an edited TASK.md must keep the worktree");
+    let body = std::fs::read_to_string(wt.join("TASK.md")).expect("TASK.md survives");
+    assert_eq!(body, edited, "the notes survive untouched");
+    let reason = verdict.kept_reason.expect("reason");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? TASK.md".to_string()]),
+        "reason: {reason}"
+    );
+}
+
+/// #8688 round 3: without exactly one error marker, no prefix of the task is
+/// known to be what tm wrote, so `TASK.md` keeps the tree. The rows pass at
+/// 9465af6d2, which kept every errored tree. A `strip_error_notes` candidate
+/// loses `strip-twice`, `strip-own-marker` and `straddle`; a cut at the first
+/// marker loses `strip-twice`, `first-marker` and `straddle`; counting
+/// markers without overlaps loses `straddle`.
+#[tokio::test]
+async fn force_decommission_keeps_a_repeatedly_errored_session_s_task_md() {
+    use crate::session_manager::setters::strip_error_notes;
+    let fx = GitWorktreeFixture::new();
+    let noted = "Fix the parser [error: x]\n";
+    let straddle = "Fix the bug [error:";
+    let rows: [(&str, String, String); 5] = [
+        // Two `mark_errored` calls; `TASK.md` unedited.
+        (
+            "strip-twice",
+            errored(&errored(TASK, "a"), "b"),
+            TASK.into(),
+        ),
+        // The task's own text holds a marker, errored once; unedited.
+        ("own-marker", errored(noted, "boom"), noted.into()),
+        // Edited to what `strip_error_notes` yields, which tm never wrote.
+        (
+            "strip-own-marker",
+            errored(noted, "boom"),
+            strip_error_notes(&errored(noted, "boom")),
+        ),
+        // Edited to the text before the first of two markers.
+        (
+            "first-marker",
+            errored(noted, "boom"),
+            "Fix the parser".into(),
+        ),
+        // The task ends in ` [error:`, whose space the note shares.
+        ("straddle", errored(straddle, "boom"), "Fix the bug".into()),
+    ];
+    // Every row runs, so a failure names each row that lost its `TASK.md`.
+    let mut removed = Vec::new();
+    for (name, task, task_md) in rows {
+        let wt = provisioned_tree(&fx, &format!("decom-force-errored-{name}-8688"));
+        std::fs::write(wt.join("TASK.md"), &task_md).expect("write TASK.md");
+
+        let verdict = force_with_task(&wt, &task).await;
+
+        let Some(reason) = verdict.kept_reason.filter(|_| !verdict.removed) else {
+            removed.push(name);
+            continue;
+        };
+        assert_eq!(
+            std::fs::read_to_string(wt.join("TASK.md")).expect("TASK.md survives"),
+            task_md,
+            "{name}"
+        );
+        assert_eq!(
+            count_and_list(&reason),
+            (1, vec!["?? TASK.md".to_string()]),
+            "{name}: {reason}"
+        );
+    }
+    assert!(
+        removed.is_empty(),
+        "TASK.md must keep the tree: {removed:?}"
+    );
+}
+
+/// #8688: user work beside the tm-written files still blocks `--force`, and
+/// the reason counts and names only that work.
+#[tokio::test]
+async fn force_decommission_keeps_user_work_beside_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-task-work-8688");
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("write user work");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(!verdict.removed && wt.join("notes.rs").exists());
+    assert!(wt.join("TASK.md").exists(), "nothing is removed");
+    let reason = verdict.kept_reason.expect("reason");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? notes.rs".to_string()]),
+        "reason: {reason}"
+    );
+}
+
+/// #8688: the plain refusal's count and its list agree. Fails before the
+/// fix, which counted the untracked `.claude/` as one entry and listed each
+/// of its three files.
+#[tokio::test]
+async fn decommission_refusal_count_matches_the_entries_it_lists() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-refuse-count-8688");
+
+    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
+
+    assert!(!verdict.removed && wt.exists());
+    let reason = verdict.kept_reason.expect("a kept workspace must say why");
+    let (count, listed) = count_and_list(&reason);
+    assert_eq!(count, listed.len(), "reason: {reason}");
+    assert_eq!(count, 6, "reason: {reason}");
 }
 
 /// `--force` never discards a file provisioning did not write.
@@ -415,7 +718,7 @@ async fn force_decommission_keeps_the_tree_when_the_gitignore_diff_cannot_be_rea
     std::fs::write(&index, b"not an index").expect("corrupt the index");
 
     assert!(
-        !is_provisioning_entry(&wt, " M .gitignore"),
+        !is_provisioning_entry(&wt, None, " M .gitignore"),
         "an unreadable diff must never excuse .gitignore"
     );
     let verdict = remove(&wt, ProvisioningDirt::Discard).await;
@@ -433,14 +736,14 @@ fn gitignore_body_line_shaped_like_a_header_is_not_excused() {
     let fx = GitWorktreeFixture::new();
     let wt = provisioned_tree(&fx, "decom-header-shaped-7660");
     assert!(
-        is_provisioning_entry(&wt, " M .gitignore"),
+        is_provisioning_entry(&wt, None, " M .gitignore"),
         "premise: the scaffold block alone is excused"
     );
     let mut body = std::fs::read_to_string(wt.join(".gitignore")).expect("read .gitignore");
     body.push_str("++ secrets.env\n");
     std::fs::write(wt.join(".gitignore"), &body).expect("append a header-shaped line");
 
-    assert!(!is_provisioning_entry(&wt, " M .gitignore"));
+    assert!(!is_provisioning_entry(&wt, None, " M .gitignore"));
 }
 
 /// The kept reason, asserting the tree stayed on disk.
