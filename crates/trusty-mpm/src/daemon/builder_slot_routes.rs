@@ -176,6 +176,9 @@ pub fn router() -> Router<Arc<DaemonState>> {
             post(builder_slot_route),
         )
         .route("/api/v1/builder-slots", get(builder_slot_census_route))
+        // #8261: the build-lease decision log rides this router; `api.rs` is at
+        // its frozen line-cap budget.
+        .merge(super::build_lease_routes::router())
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/builder-slot` (#6892).

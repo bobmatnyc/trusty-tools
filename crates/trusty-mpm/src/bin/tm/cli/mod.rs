@@ -685,6 +685,16 @@ pub(crate) enum Command {
     /// Test: `commands::wait::tests`; `cli_parses_wait_*` in
     /// `tests_behavior_a.rs`.
     Wait(WaitArgs),
+    /// Run a heavy build under a machine-wide build slot (#8261).
+    ///
+    /// Why: the machine-wide builder cap is enforced at the build command,
+    /// not the dispatch; the `PreToolUse` hook rewrites heavy builds to this.
+    /// What: waits (bounded by `builders.lease_wait_secs`) for a `flock` slot
+    /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
+    /// slot's pool directory unless one is pinned, runs the command and exits
+    /// with its status; exits 75 naming the holders when no slot frees.
+    /// Test: `tests/tm_build_lease.rs`.
+    BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.

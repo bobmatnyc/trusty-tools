@@ -719,6 +719,17 @@ pub mod host_metrics;
 #[cfg(feature = "load-average")]
 pub mod load_average;
 
+/// The host's memory pressure as the kernel reports it (#8261).
+///
+/// Why: builder admission read a free-megabytes floor over `sysinfo`'s
+/// estimate; both kernels publish the pressure verdict they act on, and that
+/// is the signal an admission decision should follow.
+/// What: [`memory_pressure::read_memory_pressure`] returns a level
+/// (normal/warn/critical), the available percentage and every raw signal read.
+/// Test: `cargo test -p trusty-common --features memory-pressure -- memory_pressure`.
+#[cfg(feature = "memory-pressure")]
+pub mod memory_pressure;
+
 /// Machine-tier detection + the proportional memory budget (#6820).
 ///
 /// Why: the suite's supported-hardware bar — 24 GB supported, 16 GB minimum,

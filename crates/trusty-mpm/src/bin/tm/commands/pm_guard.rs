@@ -224,7 +224,7 @@ use crate::commands::pm_guard_bash::{
     main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
-use crate::commands::pm_guard_builder_cap;
+use crate::commands::pm_guard_build_lease;
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_dispatch;
@@ -737,23 +737,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
                         println!("{}", build_pm_guard_deny_response(&reason));
                     }
-                    // #6892: a granted worktree answers WHERE this agent writes,
-                    // not whether the machine has room for another build. The
-                    // cap is asked here, at the grant's ALLOW exit, because the
-                    // grant prints and returns — a check after this block would
-                    // never see a granted dispatch at all.
-                    None => {
-                        pm_guard_builder_cap::emit_builder_cap_or(
-                            url,
-                            &payload,
-                            tool_name,
-                            tool_input,
-                            session_id,
-                            &hook_cwd,
-                            &pm_guard_worktree_grant::build_worktree_grant_response(&updated_input),
-                        )
-                        .await;
-                    }
+                    // #8261: dispatch takes no builder slot; the build command does.
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
                 }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
@@ -776,21 +764,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         audit_denied_tool(url, session_id, tool_name, &reason).await;
                         println!("{}", build_pm_guard_deny_response(&reason));
                     }
-                    // #6892: as the Rewrite arm above — the machine cap is a
-                    // separate question from where the agent writes, and this is
-                    // the only place a rewritten dispatch can still be stopped.
-                    None => {
-                        pm_guard_builder_cap::emit_builder_cap_or(
-                            url,
-                            &payload,
-                            tool_name,
-                            tool_input,
-                            session_id,
-                            &hook_cwd,
-                            &pm_guard_worktree_grant::build_worktree_grant_response(&updated_input),
-                        )
-                        .await;
-                    }
+                    // #8261: dispatch takes no builder slot; the build command does.
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
                 }
             }
         }
@@ -818,42 +796,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         return Ok(());
     }
 
-    // #6892: the machine-wide builder cap, the third of the three exits it is
-    // asked at — this one for a dispatch that reached neither the grant nor a
-    // #4480 deny. It runs AFTER the tree rules above, not before, because its
-    // claim WRITES the delegation record: asking it first put both of two
-    // simultaneous dispatches' records in the map before either shared-tree
-    // claim ran, so each saw the other and #5324's "exactly one admitted"
-    // became "both denied".
-    //
-    // It fails CLOSED, deliberately unlike every daemon call around it: an
-    // unreachable or silent daemon DENIES a builder dispatch rather than
-    // allowing it, because a false allow overcommits the host and a machine that
-    // goes down takes every session with it. The blast radius of that inversion
-    // is bounded by ordering inside the guard — `pm_guard_builder_cap`
-    // classifies locally and returns before any network call for a non-builder
-    // dispatch, so a daemon outage costs builder dispatches only. See its module
-    // doc.
-    // #8261: this exit has no worktree rewrite to merge a slot notice into, so
-    // the notice `emit_builder_cap_or` merges into the grant object has nowhere
-    // to ride here. It is held instead and emitted at the plain ALLOW exit
-    // below, because a `PreToolUse` hook's stdout may carry exactly one object
-    // and the gates between here and there each print their own.
-    let mut slot_notice: Option<String> = None;
-    if !caller_is_subagent {
-        match pm_guard_builder_cap::evaluate(
-            url, &payload, tool_name, tool_input, session_id, &hook_cwd,
-        )
-        .await
-        {
-            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
-                audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
-                return Ok(());
-            }
-            pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
-        }
-    }
+    // #8261 increment two (option D): a dispatch no longer takes a builder
+    // slot. The machine-wide cap is enforced at the BUILD COMMAND — see the
+    // build-lease rule below — so a light dispatch is never refused or queued
+    // by it, whatever its agent type.
 
     // Text of a pending agent-cost notice, emitted at whichever subagent ALLOW
     // exit this call reaches (Guard 1 or Guard 4). Deferred rather than printed
@@ -906,6 +852,22 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         }
     }
 
+    // ABSOLUTE rule (#8261) — heavy builds run under `tm build-lease`. Decided
+    // HERE, before Guards 1 and 4, for the #3977 reason: dispatched agents run
+    // the builds, and both exemptions return before any later rule. A heavy
+    // build the rewrite cannot reach denies for every caller; a rewrite is
+    // held and printed at whichever ALLOW exit this call reaches, because
+    // stdout carries exactly one object and a deny below must still win.
+    let lease_rewrite = match pm_guard_build_lease::evaluate(tool_name, tool_input, &hook_cwd) {
+        pm_guard_build_lease::LeaseVerdict::Deny(reason) => {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
+            return Ok(());
+        }
+        pm_guard_build_lease::LeaseVerdict::Rewrite(response) => Some(response),
+        pm_guard_build_lease::LeaseVerdict::None => None,
+    };
+
     // Guard 1: never block a nested MPM sub-agent for anything else — it is
     // doing the delegated work the PM is being steered toward. Moved here
     // (originally the first line of this function, short-circuiting before
@@ -915,7 +877,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // rationale; see Guards 2/3 above for why THOSE stayed in their original
     // position instead.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
-        emit_cost_notice(&payload, cost_notice);
+        pm_guard_build_lease::emit_allow(&payload, cost_notice, lease_rewrite);
         return Ok(());
     }
 
@@ -944,18 +906,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             tool_name,
             "pm_guard: allow — native sub-agent dispatch (agent_id present in PreToolUse payload)"
         );
-        emit_cost_notice(&payload, cost_notice);
+        pm_guard_build_lease::emit_allow(&payload, cost_notice, lease_rewrite);
         return Ok(());
     }
 
     let Some(reason) = evaluate_tool(tool_name, tool_input) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies —
-        // unless #8261 admitted this dispatch to a builder slot, which is the
-        // one thing an allowed dispatch still has to be TOLD. This is the exit
-        // a PM's own `Agent` dispatch reaches: the two subagent exits above are
-        // unreachable with a slot notice in hand, because the claim runs only
-        // when `caller_is_subagent` is false and both of them require it true.
-        emit_slot_notice(slot_notice);
+        // unless #8261's lease rule rewrote a heavy build the PM may run.
+        if let Some(rewrite) = lease_rewrite {
+            println!("{rewrite}");
+        }
         return Ok(());
     };
 
@@ -1190,36 +1150,11 @@ pub(crate) fn is_source_code_path(path: &str) -> bool {
 /// Test: the claim is pinned by
 /// `pm_guard_cost::warn_notice_is_claimed_once_per_agent`; the JSON shape by
 /// `build_pretooluse_context_response_carries_no_decision`.
-fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
+pub(crate) fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
     let Some(text) = notice else {
         return;
     };
     if pm_guard_cost::claim_warn_notice(payload) {
-        println!("{}", build_pretooluse_context_response(&text));
-    }
-}
-
-/// Emit an admitted builder's slot-directory notice at the plain ALLOW exit.
-///
-/// Why (#8261): the grant arms hand their notice to
-/// [`pm_guard_builder_cap::emit_builder_cap_or`], which merges it into the
-/// rewrite object they were already printing. The plain-dispatch exit prints no
-/// object at all, so without this the daemon recorded a slot the engineer was
-/// never told about and it built in the shared directory anyway — the exact
-/// contention #8261 exists to end.
-///
-/// It does NOT go through [`emit_cost_notice`]'s once-per-agent claim. That
-/// claim keys on `agent_id`, which a PM's own dispatch payload does not carry,
-/// so every slot notice in a session would fall back to the same `session_id`
-/// key and only the first builder would ever be told its directory.
-/// What: no-op on `None`; otherwise prints the single
-/// [`build_pretooluse_context_response`] object, carrying no
-/// `permissionDecision` so the normal permission flow still applies.
-/// Test: `pm_guard_tells_an_admitted_builder_its_slot_directory` in
-/// `tests/tm_hook_pm_guard.rs`; the JSON shape by
-/// `build_pretooluse_context_response_carries_no_decision`.
-fn emit_slot_notice(notice: Option<String>) {
-    if let Some(text) = notice {
         println!("{}", build_pretooluse_context_response(&text));
     }
 }

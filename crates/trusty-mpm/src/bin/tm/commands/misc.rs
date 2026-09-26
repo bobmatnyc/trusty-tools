@@ -420,6 +420,37 @@ async fn detect_idle_parking_from_payload_in(
     trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript(&jsonl)
 }
 
+/// The `PreToolUse` Bash rewrite `tm hook` prints, if any.
+///
+/// Why (#8261): `tm hook --pm-guard` wraps heavy builds in `tm build-lease`,
+/// and both hooks run on the same call in parallel. For a heavy build this hook
+/// therefore emits the SAME response the guard does — compression inside the
+/// lease — so whichever one Claude Code applies, the build is leased. A heavy
+/// build the guard refuses gets no rewrite here; the guard's deny decides it.
+/// What: the lease response for a heavy build, the compression-only response
+/// (#1956) otherwise, `None` when neither applies. Inside an isolation
+/// worktree, or with an unreadable cwd, neither response compresses (#7477) —
+/// the lease itself still applies there.
+/// Test: `hook_emits_the_guards_lease_rewrite_for_a_heavy_build` in
+/// `tests/tm_hook_pm_guard_build_lease.rs`.
+fn pretooluse_bash_rewrite(
+    cmd: &str,
+    tool_input: Option<&serde_json::Value>,
+    cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
+    let cwd = cwd.unwrap_or(std::path::Path::new(""));
+    match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
+        LeaseRewrite::Rewrite(new) => Some(super::pm_guard_build_lease::rewrite_response(
+            tool_input, &new,
+        )),
+        LeaseRewrite::Refuse(_) => None,
+        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
+        LeaseRewrite::None => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
+            .map(|rewritten| build_pretooluse_rewrite_response(&rewritten).to_string()),
+    }
+}
+
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
 ///
 /// Why: Claude Code invokes the configured hook command on every PreToolUse /
@@ -551,11 +582,9 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == "PreToolUse"
         && tool_name == Some("Bash")
         && let Some(cmd) = bash_command
-        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
-        && let Some(rewritten) =
-            rewrite_bash_command_unless_isolated(cmd, hook_cwd(stdin_payload.as_ref()).as_deref())
+        && let Some(response) =
+            pretooluse_bash_rewrite(cmd, tool_input, hook_cwd(stdin_payload.as_ref()).as_deref())
     {
-        let response = build_pretooluse_rewrite_response(&rewritten);
         println!("{response}");
         return Ok(());
     }

@@ -746,14 +746,12 @@ impl SharedTreeReply {
 /// callers share one wire contract — the endpoint, the payload projection, and
 /// the timeout bounds are the parts a second copy would drift on.
 ///
-/// #6892: the builder-slot guard POSTs through this too, on its own `route`.
 /// The endpoint SHAPE is `/api/v1/sessions/{id}/delegations/{route}` for every
 /// delegation-time guard, and the projection and timeout bounds are the parts a
 /// second copy would drift on — so it takes the route rather than owning one.
-/// What it does NOT decide is what a failure MEANS: `commands::pm_guard_builder_cap`
-/// denies on both [`SharedTreeReply::Unavailable`] and
-/// [`SharedTreeReply::Unanswered`], where this module's claim path allows on the
-/// first. That policy stays with each caller.
+/// What it does NOT decide is what a failure MEANS: that policy stays with each
+/// caller. (#8261: the #6892 builder-slot guard that also POSTed here is gone;
+/// the build cap is taken at the build command by `tm build-lease`.)
 /// What: an answered body, or which KIND of failure stopped it (see
 /// [`SharedTreeReply`]). Sent under the same tight connect/total bounds
 /// `pm_guard`'s audit POSTs use (500 ms / 2 s), because this call sits inside a

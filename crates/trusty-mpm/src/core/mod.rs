@@ -54,6 +54,12 @@ pub mod budget;
 // row reports and its `--fix` arm seeds.
 pub mod build_env;
 pub mod build_env_repair;
+// #8261 increment two: the build-command lease — a machine-wide flock slot per
+// heavy build, admitted against memory pressure, load and the process census.
+pub mod build_lease;
+// #8297 (absorbed into #8261): what is actually compiling on this host — the
+// process-table census that counts builds holding no lease.
+pub mod build_probe;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is
 // still stale, and semver alone cannot say so.

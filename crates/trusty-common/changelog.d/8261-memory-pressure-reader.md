@@ -1,0 +1,2 @@
+Added
+- `memory_pressure::read_memory_pressure` (feature `memory-pressure`) reads the kernel's own memory-pressure verdict — macOS `kern.memorystatus_vm_pressure_level` and `kern.memorystatus_level` via `sysctlbyname`, Linux cgroup v2 `memory.pressure` inside a container, host PSI `/proc/pressure/memory`, or `MemAvailable / MemTotal` without PSI — as a normal/warn/critical level with every raw signal attached (#8261). Nothing is guessed: an unreadable source is an error the caller decides on.

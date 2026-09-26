@@ -1,356 +1,230 @@
-//! The `builder_cap` row of `tm doctor` (#6892).
+//! The `builder_cap` row of `tm doctor` (#6892, rebuilt for #8261 increment two).
 //!
-//! Why: the builder cap denies dispatches from a count no operator can see. A
-//! deny names the holders at the moment it fires, and an operator asking "what
-//! is holding my machine" has no dispatch to hang that on — so the census gets
-//! its own row. It also surfaces the one lease state that means something went
-//! wrong: a lease past `BUILDER_LEASE_TTL_SECS` that no other signal ended.
+//! Why: a refused or waiting build names its holders at the moment it waits;
+//! an operator asking "what is holding my machine" has no build to hang that
+//! on, so the machine's lease state gets its own row. Since option D the state
+//! is LOCAL — flocks under `~/.trusty-mpm/build-slots/`, the process table, the
+//! kernel's memory pressure — so the row reads it directly and needs no daemon.
 //!
-//! Why it lives in the `tm` binary rather than in the daemon's own
-//! `run_doctor`: the same reason `doctor_stale` and `doctor_orphan` do — it
-//! reasons about a daemon's ANSWER, so it belongs on the client side of the one
-//! `/health` probe `doctor_local` already takes, and it is skipped entirely when
-//! no daemon answered.
+//! What: the lease holders (from the slot files), the census's foreign builds,
+//! the memory-pressure level with its raw signals, the load, and the ceiling —
+//! everything `tm build-lease` decides on, from the same `decide` call. FAIL
+//! when the lease machinery itself is broken (a slot file that cannot be
+//! locked, an unopenable `admission.lock`, an uncreatable slot directory), so a
+//! degraded lease is never silent; WARN when a new build would wait or a
+//! reading is degraded.
 //! Test: the `#[cfg(test)]` suite below.
 
+use trusty_mpm::core::build_lease::admission::{Decision, decide};
+use trusty_mpm::core::build_lease::census::{LiveSampler, Sampler};
+use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
+use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir};
+use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
+use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
-/// The row's stable name.
+/// This check's name.
 const CHECK: &str = "builder_cap";
 
-/// One row of the census as the daemon reports it.
+/// The row for one slot directory, from its holders and one decision.
 ///
-/// Why: the daemon's own types live behind the library, and the row only needs
-/// three fields of them. Reading the JSON here rather than importing the struct
-/// keeps a daemon one version ahead or behind from breaking the row.
-/// What: agent, session, and elapsed seconds. A row missing an agent name is
-/// skipped by [`holders_in`].
-/// Test: `census_rows_are_read_out_of_the_daemons_answer`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CensusRow {
-    /// The holding agent's name.
-    pub(crate) agent: String,
-    /// How long it has been running, in seconds.
-    pub(crate) elapsed_secs: i64,
-}
-
-/// The `builder_cap` row for one census answer.
-///
-/// Why: kept pure — it takes the daemon's answer rather than fetching it — so
-/// every verdict is assertable with no daemon and no machine of a particular
-/// size.
-/// What: `Ok` reporting `N/cap` held with the holders named; `Warn` when any
-/// lease is past the TTL and has not been reaped, because reaching that state
-/// means neither a terminal status nor a PID check could end the lease and the
-/// slot was held on a backstop; `Unknown` when the census could not be read at
-/// all, which is never `Ok` (#4005) — a cap whose count is unavailable has not
-/// passed anything.
-/// Test: `an_idle_machine_is_ok`, `holders_are_named_in_the_ok_row`,
-/// `an_expired_lease_warns`, `an_unreadable_census_is_unknown`,
-/// `a_full_machine_is_still_ok`.
-pub(crate) fn builder_cap_check(census: Option<(&[CensusRow], &[CensusRow], u32)>) -> DoctorCheck {
-    let Some((holders, expired, cap)) = census else {
+/// Why: separated from the live read so a test can drive it with a real slot
+/// directory and scripted readings.
+/// What: FAIL naming each broken slot file or an unopenable `admission.lock`;
+/// otherwise [`render_check`].
+/// Test: `doctor_fails_on_a_broken_slot_file`,
+/// `an_idle_machine_reports_ok_with_its_readings`.
+pub(crate) fn slot_dir_check(
+    slots: &SlotDir,
+    config: (&BuildersConfig, &BuildLeaseConfig),
+    ceiling: u32,
+    sampler: &mut dyn Sampler,
+) -> DoctorCheck {
+    let mut broken: Vec<String> = slots
+        .broken()
+        .into_iter()
+        .map(|(slot, err)| format!("slot-{slot}.lock ({err})"))
+        .collect();
+    if let Err(err) = slots.check_admission_lock() {
+        broken.push(format!("admission.lock ({err})"));
+    }
+    if !broken.is_empty() {
         return DoctorCheck::new(
             CHECK,
-            CheckStatus::Unknown,
-            "could not read the machine's builder-slot census from the daemon — the cap is \
-             still enforced (a dispatch that cannot be counted is denied, #6892), but this \
-             report cannot say how many builders are running. `tm restart` clears an unhealthy \
-             daemon.",
-        );
-    };
-    let held = format!("{}/{} builder slots held", holders.len(), cap);
-    if !expired.is_empty() {
-        return DoctorCheck::new(
-            CHECK,
-            CheckStatus::Warn,
+            CheckStatus::Fail,
             format!(
-                "{held}; {} lease(s) past the 45-minute TTL and not yet reaped: {}. Reaching \
-                 the TTL means neither a terminal status nor a dispatching-process check could \
-                 end the lease, so the slot was held on the backstop alone. The slot is already \
-                 free — this reports that the agent never came back, not that anything is \
-                 blocked. {}",
-                expired.len(),
-                render(expired),
-                configured(cap),
+                "the build-lease files in {} are broken: {}. A broken slot is skipped and an \
+                 unopenable admission lock falls back to the census-bounded unleased path, so \
+                 builds still run, but the cap is degraded until these are removed (#8261).",
+                slots.path().display(),
+                broken.join("; ")
             ),
         );
     }
-    if holders.is_empty() {
-        return DoctorCheck::new(
-            CHECK,
-            CheckStatus::Ok,
-            format!("{held}; no builders running. {}", configured(cap)),
-        );
-    }
-    DoctorCheck::new(
-        CHECK,
-        CheckStatus::Ok,
-        format!("{held}: {}. {}", render(holders), configured(cap)),
+    let holders = slots.holders();
+    let readings = sampler.sample(&holders);
+    let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
+    let decision = decide(config.0, config.1, ceiling, held, &readings);
+    render_check(
+        &decision,
+        &holders,
+        &slots.path().display().to_string(),
+        &config.0.deprecation_warnings(),
     )
 }
 
-/// Where the cap came from, appended to every row.
+/// Render the row from one decision and the holders it counted.
 ///
-/// Why: the number is the first thing an operator asks about, and the file that
-/// sets it is the second. `.trusty-mpm.toml` is named as a non-answer because
-/// putting the key there is the obvious wrong guess.
-fn configured(cap: u32) -> String {
-    format!(
-        "The cap is `builders.max_concurrent` in `~/.trusty-mpm/config.toml` (currently {cap}, \
-         defaulting to this host's memory tier); a project's `.trusty-mpm.toml` cannot set it."
-    )
-}
-
-/// `agent (running 12m)`, comma-separated.
-fn render(rows: &[CensusRow]) -> String {
-    render_with(rows, crate::formatters::agent_color::color_enabled())
-}
-
-/// [`render`] with the color decision passed in.
-///
-/// Why (#4068): this is the closest thing `tm` prints to a dispatch line — the
-/// agents currently holding a builder slot — so each name carries its identity
-/// color. Taking `use_color` explicitly rather than probing `colored`'s
-/// process-global override keeps both paths testable without the shared
-/// mutable state that made the #1858 color tests flaky.
-/// What: paints each agent name via
-/// [`crate::formatters::agent_color::agent_label_with`]; the elapsed-minutes
-/// suffix and the separators stay uncolored, so with `use_color` false the
-/// line is byte-identical to what this rendered before #4068.
-/// Test: `the_census_line_names_each_agent_in_its_identity_color`,
-/// `the_census_line_is_byte_identical_when_color_is_disabled`.
-fn render_with(rows: &[CensusRow], use_color: bool) -> String {
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{} (running {}m)",
-                crate::formatters::agent_color::agent_label_with(&r.agent, use_color),
-                r.elapsed_secs / 60
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Read one census list out of the daemon's answer.
-///
-/// Why: shared by the `holders` and `expired` lists, which have identical shape.
-/// What: rows carrying an `agent`; `elapsed_secs` defaults to `0`.
-/// Test: `census_rows_are_read_out_of_the_daemons_answer`.
-fn holders_in(body: &serde_json::Value, key: &str) -> Vec<CensusRow> {
-    body.get(key)
-        .and_then(serde_json::Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    Some(CensusRow {
-                        agent: row
-                            .get("agent")
-                            .and_then(serde_json::Value::as_str)?
-                            .to_string(),
-                        elapsed_secs: row
-                            .get("elapsed_secs")
-                            .and_then(serde_json::Value::as_i64)
-                            .unwrap_or_default(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Fetch the census and render the row.
-///
-/// Why: the network half, split from the pure verdict above for the same reason
-/// `doctor_stale` splits — the comparison is what is worth pinning, and the
-/// fetch is not testable without a live daemon.
-/// What: `GET <url>/api/v1/builder-slots` under the same tight bounds every
-/// other `tm doctor` probe uses; any failure renders the `Unknown` row. Its
-/// only caller is `doctor_local::daemon_rows`, which reaches this line only when
-/// a daemon has already answered `/health`.
-/// Test: `an_unreadable_census_is_unknown` covers the failure verdict; the
-/// live fetch is exercised by the executor's live-daemon doctor test.
-pub(crate) async fn builder_cap_row(url: &str) -> DoctorCheck {
-    let Some(body) = fetch_census(url).await else {
-        return builder_cap_check(None);
+/// Test: `an_idle_machine_reports_ok_with_its_readings`.
+fn render_check(
+    decision: &Decision,
+    holders: &[HolderRecord],
+    slot_dir: &str,
+    warnings: &[String],
+) -> DoctorCheck {
+    let held = if holders.is_empty() {
+        "no build leases held".to_string()
+    } else {
+        format!(
+            "{} build lease(s) held: {}",
+            holders.len(),
+            holders
+                .iter()
+                .map(HolderRecord::render)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     };
-    let holders = holders_in(&body, "holders");
-    let expired = holders_in(&body, "expired");
-    let cap = body
-        .get("cap")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|c| u32::try_from(c).ok())
-        .unwrap_or_default();
-    builder_cap_check(Some((&holders, &expired, cap)))
+    let body = format!(
+        "{held}. {} effective slot(s) of ceiling {} (`builders.max_concurrent` in \
+         ~/.trusty-mpm/config.toml). Readings: {}. Slot files: {slot_dir}.",
+        decision.n_effective, decision.ceiling, decision.readings
+    );
+    let mut concerns: Vec<String> = decision.withheld.clone();
+    concerns.extend(decision.degraded.iter().cloned());
+    concerns.extend(warnings.iter().cloned());
+    if concerns.is_empty() {
+        DoctorCheck::new(CHECK, CheckStatus::Ok, body)
+    } else {
+        DoctorCheck::new(
+            CHECK,
+            CheckStatus::Warn,
+            format!(
+                "{body} A new heavy build would wait or run degraded: {}",
+                concerns.join("; ")
+            ),
+        )
+    }
 }
 
-/// One bounded GET of the census, or `None` for any failure.
-async fn fetch_census(url: &str) -> Option<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    client
-        .get(format!("{url}/api/v1/builder-slots"))
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<serde_json::Value>()
-        .await
-        .ok()
+/// The live row.
+///
+/// What: an uncreatable slot directory FAILS; otherwise [`slot_dir_check`]
+/// with this machine's readings.
+pub(crate) fn builder_cap_row() -> DoctorCheck {
+    let builders: BuildersConfig = MpmConfig::load_default().builders;
+    let lease = BuildLeaseConfig::load_default();
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    match SlotDir::resolve(&home) {
+        Ok(slots) => slot_dir_check(
+            &slots,
+            (&builders, &lease),
+            resolve_max_concurrent(),
+            &mut LiveSampler::new(&lease),
+        ),
+        Err((first, second)) => DoctorCheck::new(
+            CHECK,
+            CheckStatus::Fail,
+            format!(
+                "no build-slot directory could be created ({first}; fallback: {second}) — \
+                 every `tm build-lease` runs census-bounded without a lease until this is \
+                 fixed (#8261)."
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_common::memory_pressure::{
+        MemoryPressure, PressureLevel, PressureSignal, PressureSource,
+    };
+    use trusty_mpm::core::build_lease::admission::Readings;
+    use trusty_mpm::core::build_lease::census::Sampler;
+    use trusty_mpm::core::build_probe::BuildGroup;
 
-    fn row(agent: &str, elapsed_secs: i64) -> CensusRow {
-        CensusRow {
-            agent: agent.to_string(),
-            elapsed_secs,
+    struct Quiet;
+
+    impl Sampler for Quiet {
+        fn sample(&mut self, _holders: &[HolderRecord]) -> Readings {
+            Readings::new(
+                Ok(MemoryPressure::new(
+                    PressureLevel::Normal,
+                    Some(80.0),
+                    PressureSource::MacosSysctl,
+                    vec![PressureSignal::new(
+                        "kern.memorystatus_vm_pressure_level",
+                        "1 (normal)",
+                    )],
+                )),
+                Ok(2.0),
+                16,
+                Ok(Vec::<BuildGroup>::new()),
+                "test-host",
+            )
         }
     }
 
-    /// #4068: each agent holding a builder slot is named in ITS OWN color, so
-    /// two concurrent agents are tellable apart on this line. Before #4068 the
-    /// line carried no escape at all, so this fails on the pre-change render.
+    fn slots() -> (tempfile::TempDir, SlotDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let slots = SlotDir::at(tmp.path().join("slots")).expect("slot dir");
+        (tmp, slots)
+    }
+
     #[test]
-    fn the_census_line_names_each_agent_in_its_identity_color() {
-        let rows = [row("rust-engineer", 720), row("code-critic", 60)];
-        let rendered = render_with(&rows, true);
-        // `rust-engineer` hashes to palette slot 3, periwinkle.
-        assert!(
-            rendered.contains("\u{1b}[38;2;130;170;255mrust-engineer\u{1b}[0m (running 12m)"),
-            "{rendered:?}"
-        );
-        // …and `code-critic` to a DIFFERENT slot, which is the whole point.
-        assert!(
-            rendered.contains("\u{1b}[38;2;176;176;208mcode-critic\u{1b}[0m (running 1m)"),
-            "{rendered:?}"
-        );
-        // Status colors stay the exclusive property of `formatters::services`:
-        // nothing here emits a plain green/red/yellow/cyan foreground.
-        for reserved in ["\u{1b}[32m", "\u{1b}[31m", "\u{1b}[33m", "\u{1b}[36m"] {
+    fn an_idle_machine_reports_ok_with_its_readings() {
+        let (_tmp, slots) = slots();
+        let mut guard = slots.try_acquire(0).expect("io").expect("free");
+        guard
+            .write_record(&HolderRecord::new(0, "cargo test -p x", "/repo"))
+            .expect("record");
+        let cfg = (BuildersConfig::default(), BuildLeaseConfig::default());
+        let check = slot_dir_check(&slots, (&cfg.0, &cfg.1), 4, &mut Quiet);
+        assert_eq!(check.name, "builder_cap");
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+        for needle in [
+            "1 build lease(s) held: slot 0: cargo test -p x",
+            "kern.memorystatus_vm_pressure_level=1 (normal)",
+            "ceiling 4",
+        ] {
             assert!(
-                !rendered.contains(reserved),
-                "census line must not emit the reserved sequence {reserved:?}"
+                check.message.contains(needle),
+                "{needle}: {}",
+                check.message
             );
         }
+        drop(guard);
     }
 
-    /// #4068: with color disabled — `NO_COLOR`, a pipe, any non-TTY — the line
-    /// must stay byte-identical to what `format!("{} (running {}m)", …)`
-    /// produced before that change, so scripts and the doctor's own
-    /// assertions see no drift.
+    /// Critic round 1 (HIGH 1c): a broken slot file or admission lock FAILS.
     #[test]
-    fn the_census_line_is_byte_identical_when_color_is_disabled() {
-        let rows = [row("rust-engineer", 720), row("code-critic", 60)];
-        let rendered = render_with(&rows, false);
-        assert_eq!(
-            rendered,
-            "rust-engineer (running 12m), code-critic (running 1m)"
-        );
-        assert!(
-            !rendered.contains('\u{1b}'),
-            "no-color census line must carry no ANSI escape: {rendered:?}"
-        );
-    }
+    fn doctor_fails_on_a_broken_slot_file() {
+        let cfg = (BuildersConfig::default(), BuildLeaseConfig::default());
+        let (_tmp, broken_slot) = slots();
+        std::fs::create_dir(broken_slot.path().join("slot-0.lock")).expect("mkdir");
+        let check = slot_dir_check(&broken_slot, (&cfg.0, &cfg.1), 4, &mut Quiet);
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+        assert!(check.message.contains("slot-0.lock"), "{}", check.message);
 
-    #[test]
-    fn an_idle_machine_is_ok() {
-        let check = builder_cap_check(Some((&[], &[], 3)));
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert_eq!(check.name, "builder_cap");
-        assert!(check.message.contains("0/3"), "{}", check.message);
+        let (_tmp2, broken_admission) = slots();
+        std::fs::create_dir(broken_admission.path().join("admission.lock")).expect("mkdir");
+        let check = slot_dir_check(&broken_admission, (&cfg.0, &cfg.1), 4, &mut Quiet);
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
         assert!(
-            check.message.contains("builders.max_concurrent"),
+            check.message.contains("admission.lock"),
             "{}",
             check.message
         );
-    }
-
-    #[test]
-    fn holders_are_named_in_the_ok_row() {
-        let holders = [row("rust-engineer", 754), row("local-ops", 61)];
-        let check = builder_cap_check(Some((&holders, &[], 3)));
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert!(check.message.contains("2/3"), "{}", check.message);
-        assert!(
-            check.message.contains("rust-engineer (running 12m)"),
-            "{}",
-            check.message
-        );
-        assert!(
-            check.message.contains("local-ops (running 1m)"),
-            "{}",
-            check.message
-        );
-    }
-
-    /// A machine AT its cap is healthy, not a warning — that is the cap doing
-    /// its job. Only an un-reaped lease is a signal about the harness.
-    #[test]
-    fn a_full_machine_is_still_ok() {
-        let holders = [row("rust-engineer", 60), row("python-engineer", 60)];
-        let check = builder_cap_check(Some((&holders, &[], 2)));
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert!(check.message.contains("2/2"), "{}", check.message);
-    }
-
-    #[test]
-    fn an_expired_lease_warns() {
-        let expired = [row("rust-engineer", 3600)];
-        let check = builder_cap_check(Some((&[], &expired, 2)));
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.message.contains("past the 45-minute TTL"),
-            "{}",
-            check.message
-        );
-        assert!(
-            check.message.contains("rust-engineer (running 60m)"),
-            "{}",
-            check.message
-        );
-    }
-
-    /// Never `Ok` (#4005): a count that could not be read has not passed.
-    #[test]
-    fn an_unreadable_census_is_unknown() {
-        let check = builder_cap_check(None);
-        assert_eq!(check.status, CheckStatus::Unknown);
-        // And it must say the cap is still being enforced, or the reader
-        // concludes builds are unguarded.
-        assert!(
-            check.message.contains("still enforced"),
-            "{}",
-            check.message
-        );
-    }
-
-    #[test]
-    fn census_rows_are_read_out_of_the_daemons_answer() {
-        let body = serde_json::json!({
-            "cap": 2,
-            "holders": [
-                {"agent": "rust-engineer", "session": "s", "elapsed_secs": 90},
-                {"session": "s", "elapsed_secs": 10},
-            ],
-            "expired": [],
-        });
-        let rows = holders_in(&body, "holders");
-        assert_eq!(rows, vec![row("rust-engineer", 90)]);
-        assert!(holders_in(&body, "expired").is_empty());
-        assert!(holders_in(&body, "absent").is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_row_is_unknown_when_no_daemon_answers() {
-        let check = builder_cap_row("http://127.0.0.1:1").await;
-        assert_eq!(check.status, CheckStatus::Unknown);
     }
 }

@@ -313,6 +313,9 @@ trusty-common = { workspace = true, features = [
     # builder capacity formula reads. `host-metrics` above cannot answer it;
     # its CPU figure is an instantaneous sample, not a sustained one.
     "load-average",
+    # #8261: `memory_pressure::read_memory_pressure` — the kernel pressure
+    # verdict `tm build-lease` admits new builds against.
+    "memory-pressure",
     "intent-source",
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
