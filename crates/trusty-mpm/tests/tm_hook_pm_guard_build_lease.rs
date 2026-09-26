@@ -363,3 +363,111 @@ fn an_ask_rule_keeps_the_lease_and_asks() {
         "{stdout}"
     );
 }
+
+/// A scratch home whose `[builders]` config leaves only the lease mechanics
+/// live (the pressure, load and census gates are unit-tested elsewhere) and
+/// whose slot pool is `<home>/pool`; plus an isolation worktree of
+/// `acme/widget` at `<home>/widget/.claude/worktrees/agent-8261`.
+fn leasing_home_and_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = scratch_home();
+    let config = home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "[builders]\nmax_concurrent = 2\ncount_foreign_builds = false\n\
+             memory_pressure_max = \"critical\"\nmin_available_pct = 0\nload_factor = 64\n\
+             slot_pool_root = \"{}\"\n",
+            home.path().join("pool").display()
+        ),
+    )
+    .expect("config");
+    let worktree = home.path().join("widget/.claude/worktrees/agent-8261");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(&args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    (home, worktree)
+}
+
+/// #8261 round 5 (supervisor's slot-relay requirement): a dispatched agent's
+/// own `cargo test`, run with the SHARED `CARGO_TARGET_DIR` its `.envrc`
+/// exports, builds in its leased slot. The chain is the real one: `tm hook
+/// --pm-guard` rewrites the subagent's Bash call, the rewritten command runs
+/// in a shell, and a stand-in `cargo` records the `CARGO_TARGET_DIR` it got.
+/// The same slot path is printed to the agent on stderr.
+#[test]
+fn a_subagents_leased_build_runs_in_its_slot_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, worktree) = leasing_home_and_worktree();
+    let shared = home.path().join(".trusty-tools/cargo-target/acme/widget");
+    let record = home.path().join("cargo-saw");
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    // `cargo metadata` (the stale-build guard) fails; `cargo test` records.
+    std::fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\n[ \"$1\" = test ] || exit 1\nprintf %s \"$CARGO_TARGET_DIR\" > '{}'\n",
+            record.display()
+        ),
+    )
+    .expect("stand-in cargo");
+    std::fs::set_permissions(bin.join("cargo"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+
+    let payload = bash_payload(&worktree, "cargo test -p widget", true);
+    let (command, _) = updated_command(&run_hook(home.path(), &["--pm-guard"], &payload));
+    assert!(
+        command.ends_with(" build-lease -- cargo test -p widget"),
+        "the subagent's build is leased: {command}"
+    );
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut shell = std::process::Command::new("/bin/sh");
+    common::isolate_spawned_tm(&mut shell, home.path());
+    let out = shell
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&worktree)
+        .env("PATH", path)
+        .env("CARGO_TARGET_DIR", &shared)
+        .env("TRUSTY_MPM_URL", UNREACHABLE_DAEMON)
+        .env(
+            "TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK",
+            home.path().join("fallback-store"),
+        )
+        .output()
+        .expect("run the rewritten command");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let slot = home.path().join("pool/acme/widget/slot-0");
+    let saw = std::fs::read_to_string(&record).expect("the build recorded its target");
+    assert_eq!(
+        Path::new(&saw),
+        slot,
+        "cargo builds in the leased slot: {err}"
+    );
+    assert!(
+        err.contains(&format!("slot 0 — CARGO_TARGET_DIR={}", slot.display())),
+        "the agent is told the slot path: {err}"
+    );
+}

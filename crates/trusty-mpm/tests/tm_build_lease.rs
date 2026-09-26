@@ -536,7 +536,7 @@ fn a_waiter_never_sees_a_holders_argument_values() {
     assert_eq!(mode & 0o777, 0o600, "slot file mode {mode:o}");
 }
 
-/// #8261 round 4: `--census` runs nothing, lists each holder by program and
+/// #8261 round 4: `--census` runs no build, lists each holder by program and
 /// subcommand only, and prints the census header with the ceiling.
 #[test]
 fn the_census_view_lists_holders_without_argument_values() {
@@ -567,11 +567,19 @@ fn the_census_view_lists_holders_without_argument_values() {
     assert!(text.contains("1 lease(s) held, ceiling 3"), "{text}");
     assert!(text.contains("  lease slot 0: sh (pid "), "{text}");
     assert!(!text.contains("s3cr3t-census"), "{text}");
+    // #8261 round 5: a `touch` marker proves the refused command never ran.
+    let ran = home.path().join("census-ran-the-command");
     let both = build_lease(home.path())
-        .args(["--census", "--", "true"])
+        .args(["--census", "--", "touch"])
+        .arg(&ran)
         .output()
         .expect("both");
-    assert_ne!(both.status.code(), Some(0), "--census runs no command");
+    assert_ne!(
+        both.status.code(),
+        Some(0),
+        "--census with a command is refused"
+    );
+    assert!(!ran.exists(), "--census runs no command: {}", stderr(&both));
 }
 
 /// A repo `acme/widget` under the scratch home, with the pool root configured

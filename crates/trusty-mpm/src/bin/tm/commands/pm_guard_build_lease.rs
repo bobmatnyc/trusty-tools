@@ -25,8 +25,9 @@
 //! - otherwise: the rewrite with no decision, so the normal flow applies.
 //!
 //! `allow` is never emitted for a command that can run something its segments
-//! do not show (#8261 round 4): a `$(…)`, backtick, `<(…)`, `>(…)` or `${…}`
-//! expansion, a newline (a here-document or a line the splitter may cut
+//! do not show (#8261 round 4): a `$(…)`, backtick or `${…}` expansion, any
+//! `(` (process substitution in bash or zsh, a zsh glob qualifier, round 5),
+//! a newline (a here-document or a line the splitter may cut
 //! differently from the shell), an `eval`/`source`/`.` segment, or a `KEY=value`
 //! prefix outside [`INERT_ENV_KEYS`] (`RUSTC_WRAPPER=/tmp/x`, `BASH_ENV=…`,
 //! `PATH=…` all run a program the rule never named).
@@ -291,7 +292,12 @@ fn matches_every_segment(command: &str, patterns: &[String]) -> bool {
 }
 
 /// Text that makes the shell run a command no segment shows as its program.
-const HIDDEN_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${", "\n", "\r"];
+///
+/// Why: the Bash tool runs zsh on macOS. Any `(` is a marker (#8261 round 5):
+/// it covers bash and zsh `$(…)`, `<(…)`, `>(…)` and zsh `=(…)`, and every zsh
+/// glob qualifier — `*(e:'…':)`, `*(+cmd)`, `(#q…)` — whose delimiters vary
+/// too much to match safely. A subshell `( … )` loses its allow as the price.
+const HIDDEN_COMMAND_MARKERS: &[&str] = &["(", "`", "${", "\n", "\r"];
 
 /// Leading builtins that run a string or a file as commands.
 const EVAL_BUILTINS: &[&str] = &["eval", "source", "."];
@@ -577,6 +583,29 @@ mod tests {
     #[test]
     fn an_output_process_substitution_never_gets_an_allow() {
         assert_no_allow(&["cargo test >(rm -rf ~)"]);
+    }
+
+    /// #8261 round 5: zsh `=(…)` runs its body into a temp file.
+    #[test]
+    fn a_zsh_equals_process_substitution_never_gets_an_allow() {
+        assert_no_allow(&["cargo test =(rm -rf ~)"]);
+    }
+
+    /// #8261 round 5: the zsh glob qualifier `e` runs its string as shell code,
+    /// whatever its delimiter.
+    #[test]
+    fn a_zsh_e_glob_qualifier_never_gets_an_allow() {
+        assert_no_allow(&[
+            "cargo test *(e:'rm -rf ~':)",
+            "cargo test *(Ne['rm -rf ~'])",
+            "cargo test *(#qe:'rm -rf ~':)",
+        ]);
+    }
+
+    /// #8261 round 5: the zsh glob qualifier `+cmd` calls a shell function.
+    #[test]
+    fn a_zsh_plus_glob_qualifier_never_gets_an_allow() {
+        assert_no_allow(&["cargo test *(+evil)"]);
     }
 
     /// Parameter expansion, a newline, `eval`/`source`, and the four forms

@@ -224,23 +224,13 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 
-    /// #8261 round 4: through `resolve_in`, with no early return — a broken
-    /// home resolves to exactly `/tmp/trusty-mpm-build-slots-<uid>`, whatever
-    /// `$TMPDIR` says. This opens the machine's real fallback store (creating
-    /// it `0700` if missing), as `tm build-lease` itself would.
+    /// The fallback store is exactly `/tmp/trusty-mpm-build-slots-<uid>`,
+    /// whatever `$TMPDIR` says.
+    // #8261 round 5: path only — never creates or chmods the machine's real
+    // store (#8545: no writes outside a tempdir).
     #[test]
     fn the_fallback_path_ignores_tmpdir() {
-        let fixed = fixed_fallback_path();
         let expected = PathBuf::from(format!("/tmp/trusty-mpm-build-slots-{}", current_uid()));
-        assert_eq!(fixed, expected);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(".trusty-mpm"), "x").expect("a file, not a dir");
-        let slots = SlotDir::resolve_in(Some(tmp.path()), &fixed).expect("the fixed fallback");
-        assert_eq!(slots.path(), expected);
-        assert!(slots.fallback_reason().is_some(), "marked as the fallback");
-        let tmpdir = std::env::temp_dir();
-        if tmpdir != Path::new("/tmp") && tmpdir != Path::new("/tmp/") {
-            assert!(!slots.path().starts_with(&tmpdir), "{tmpdir:?}");
-        }
+        assert_eq!(fixed_fallback_path(), expected);
     }
 }

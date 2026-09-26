@@ -294,9 +294,10 @@ pub(crate) fn build_worktree_grant_response(updated_input: &Value) -> String {
 /// Add `additionalContext` to an already-rendered allow response (#8261).
 ///
 /// Why: a `PreToolUse` hook's stdout may carry exactly ONE object, so the
-/// builder slot's `CARGO_TARGET_DIR` notice cannot be a second `println!`
-/// beside the grant's own — it has to be merged into the same
-/// `hookSpecificOutput` that already carries `updatedInput`. It lives here
+/// agent-cost notice cannot be a second `println!` beside a build-lease
+/// rewrite — it has to be merged into the same `hookSpecificOutput` that
+/// already carries `updatedInput`. (#8261 round 5: no dispatch-time slot
+/// notice exists; a build learns its slot from `tm build-lease`.) It lives here
 /// rather than in `pm_guard.rs` because that file sits at its 500-SLOC cap.
 /// What: parses `response`, inserts `additionalContext` into its
 /// `hookSpecificOutput`, and re-renders. `None` — or a response this does not

@@ -10,8 +10,9 @@
 //! classifier would not have leased. Otherwise wait (bounded by `--wait-secs`,
 //! else `builders.lease_wait_secs`, both clamped to 1..=600 s) for a slot. On
 //! admission, replace `CARGO_TARGET_DIR` with the slot's pool directory when it
-//! names a SHARED target directory; run the command with inherited stdio,
-//! forward SIGINT/SIGTERM/SIGHUP to it, and exit with its status. The slot's
+//! names a SHARED target directory, and name that directory on stderr; run the
+//! command with inherited stdio, forward SIGINT/SIGTERM/SIGHUP to it, and exit
+//! with its status. The slot's
 //! `flock` is held by this process until the command exits; if this process
 //! dies the kernel releases it. When no lease can be taken, the build runs
 //! UNLEASED only while the census counts fewer than the ceiling (owner ruling
@@ -20,9 +21,10 @@
 //! timeout, exit [`EXIT_LEASE_TIMEOUT`] naming the holders and every reading. Every decision is POSTed to the daemon log with the
 //! command summarized, never its full argv.
 //!
-//! `tm build-lease --census` runs nothing: it prints the lease holders and
-//! every build group the census counts against the ceiling, attributed by
-//! pgid, leader, driver and parent chain (#8261 round 4).
+//! `tm build-lease --census` runs no build; it probes slot locks like `tm
+//! doctor` (#8261 round 5). It prints the lease holders and every build group
+//! the census counts against the ceiling, attributed by pgid, leader, driver
+//! and parent chain (#8261 round 4).
 //! Test: `tests/tm_build_lease.rs` (real processes and flocks).
 
 use std::path::{Path, PathBuf};
@@ -49,8 +51,9 @@ use trusty_mpm::core::config::MpmConfig;
 
 /// `tm build-lease --census`: print the holders and the attributed census.
 ///
-/// What: read-only. Exit 0 on a census read; exit 1 naming the error when the
-/// process table cannot be read. A store that cannot be opened lists no
+/// What: runs no build; probes slot locks like `tm doctor`, which creates the
+/// store if it is missing (#8261 round 5). Exit 0 on a census read; exit 1
+/// naming the error when the process table cannot be read. A store that cannot be opened lists no
 /// holders and says so. Argument values never print (see `census_detail`).
 /// Test: `the_census_view_lists_holders_without_argument_values`.
 fn print_census() -> ! {
@@ -212,6 +215,7 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
                     refuse(&format!("not running the build (#8261) — {why}"))
                 }
             };
+            announce_slot(&target_plan, guard.slot(), target.as_deref());
             let mut record =
                 HolderRecord::new(guard.slot(), command_line.clone(), checkout.clone());
             record.target_dir.clone_from(&target);
@@ -262,6 +266,24 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
         other => refuse(&format!(
             "unrecognised lease outcome {other:?}; not running the build"
         )),
+    }
+}
+
+/// Name the slot directory that replaced a shared `CARGO_TARGET_DIR`.
+///
+/// Why: the build gets the slot through its own environment, but the agent
+/// that ran it still holds the shared `CARGO_TARGET_DIR` from `.envrc`, or a
+/// slot path a brief named. Its next `$CARGO_TARGET_DIR/debug/<bin>` would run
+/// another worktree's binary (#8261 round 5).
+/// What: one stderr line, `slot N — CARGO_TARGET_DIR=<dir>`, only when the
+/// plan replaced the directory; a kept or unset one prints nothing.
+/// Test: `a_subagents_leased_build_runs_in_its_slot_directory`.
+fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
+    if let (TargetPlan::Slot { .. }, Some(dir)) = (plan, target) {
+        eprintln!(
+            "tm build-lease: slot {slot} — CARGO_TARGET_DIR={dir} for this build; its \
+             binaries are under that directory, not the inherited one (#8261)."
+        );
     }
 }
 

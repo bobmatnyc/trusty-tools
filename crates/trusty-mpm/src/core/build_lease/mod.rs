@@ -12,6 +12,14 @@
 //! `builders.heavy_build_commands`) to `tm build-lease -- <cmd>`, and the
 //! lease holds a kernel `flock` for the build's whole life.
 //!
+//! **Slot relay** (#8261 round 5). The slot reaches the agent that runs the
+//! build through that agent's own Bash call, never through the PM: the hook's
+//! `updatedInput` rewrites the subagent's command, and `tm build-lease` sets
+//! the slot's `CARGO_TARGET_DIR` in the build's environment and names it on
+//! stderr. A dispatch-time channel cannot work: the slot is taken per build,
+//! after the dispatch, and a dispatch hook's `additionalContext` reaches only
+//! the PM. Test: `a_subagents_leased_build_runs_in_its_slot_directory`.
+//!
 //! What:
 //! - [`slots`] — the slot files, the flock, the holder records, the admission
 //!   lock.
