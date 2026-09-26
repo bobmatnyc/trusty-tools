@@ -15,6 +15,9 @@
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm
 //! --test session_control_api`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;

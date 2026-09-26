@@ -14,6 +14,9 @@
 //! measurement seam — it derives its threshold from what it measured.
 //! Test: this file IS the test.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use serial_test::serial;
 use tempfile::TempDir;
 

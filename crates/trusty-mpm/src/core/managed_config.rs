@@ -233,6 +233,8 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     project_dir: &Path,
     exe_override: Option<&Path>,
 ) -> anyhow::Result<()> {
+    // #8545: a test binary fences its home; see `core::home_write_fence`.
+    crate::core::home_write_fence::check(config_dir);
     // Phase 1: canonical scaffolding shared with the standalone driver.
     ensure_global_config_dir_with_exe(&fw.root, config_dir, exe_override)?;
 
@@ -414,7 +416,22 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `interactive_config_dir_survives_a_malformed_managed_claude_json`,
 /// `interactive_config_dir_withholds_builtins_when_a_pin_failed`.
 pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::PathBuf> {
-    let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
+    // #8545: the pre-#8545 signature, resolving the real home.
+    prepare_interactive_config_dir_under(workspace, dirs::home_dir().as_deref())
+}
+
+/// [`prepare_interactive_config_dir`] with the user home named (#8545).
+///
+/// Why: the `guided_fallback_*` tests drive the real launch path; a named home
+/// keeps the managed config dir and its framework source under a temp dir.
+/// What: the same steps, with `<home>/.trusty-tools/trusty-mpm/claude-config`
+/// as the config dir; `None` for `home` takes the unresolved-home arm.
+/// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+pub fn prepare_interactive_config_dir_under(
+    workspace: &Path,
+    home: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    let Some(home) = home else {
         // #4181: home unresolved — nothing to relocate to. Keep the legacy
         // home-trust seed so the startup dialogs are still dismissed.
         if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(workspace) {
@@ -425,7 +442,8 @@ pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::Pat
         }
         return None;
     };
-    prepare_interactive_config_dir_in(&FrameworkPaths::default(), &config_dir, workspace);
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
+    prepare_interactive_config_dir_in(&FrameworkPaths::under(home), &config_dir, workspace);
     Some(config_dir)
 }
 

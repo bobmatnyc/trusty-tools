@@ -22,14 +22,7 @@ pub(super) use super::session_prep::prepare_inproject_session;
 
 use tracing::{info, warn};
 
-use super::deployment_check::ensure_deployment_complete;
-// `carrier_reachable`/`warn_if_no_persona_carrier` are only called from
-// within `deployment_check` itself in non-test code; `lifecycle_tests.rs`
-// (a child module, `use super::*`) still exercises them directly, so they
-// are imported here ONLY under `#[cfg(test)]` to avoid an unused-import
-// warning on the production build.
-#[cfg(test)]
-use super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
+use super::deployment_check::{RepairHost, ensure_deployment_complete};
 use super::inproject::try_inproject_spawn;
 use super::managed_checkout::deny_worktree_fallback;
 use super::resume_error::ResumeManagedError;
@@ -863,8 +856,9 @@ async fn spawn_managed_inproject(
     // already resolved above for `prepare_inproject_session`.
     // #7763: `reachable` is what `prepare_inproject_session` already resolved —
     // the gate's repair reuses it instead of re-probing trusty-memory.
+    let host = RepairHost::new(reachable, state.user_home());
     let url = record.repo_url.as_deref();
-    if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, reachable) {
+    if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, host) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
@@ -1210,7 +1204,8 @@ pub async fn resume_managed(
     crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string()).await;
 
     // Defensive self-heal (#1913): best-effort, never blocks the resume.
-    if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {
+    // #8545: the user tier under the daemon's home, which an isolated test pins.
+    if let Err(e) = state.ensure_status_line(&workspace) {
         warn!(
             id = %record.id,
             "resume_managed: statusline self-heal failed (non-fatal): {e}"
@@ -1230,8 +1225,9 @@ pub async fn resume_managed(
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
     // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
     // `None` keeps the single probe the repair pipeline makes for itself.
+    let host = RepairHost::new(None, state.user_home());
     let url = record.repo_url.as_deref();
-    if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, None) {
+    if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, host) {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 

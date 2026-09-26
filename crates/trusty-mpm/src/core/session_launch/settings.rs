@@ -989,6 +989,7 @@ pub(super) fn preseed_workspace_trust(
     // Claude Code itself — could read the file while it was half-written and
     // see malformed JSON, which every reader in this crate treats as "skip,
     // leave it alone" (silently losing the seed) rather than as an error.
+    crate::core::home_write_fence::check(claude_json); // #8545
     trusty_common::claude_config::write_json_atomic(claude_json, &config)
         .map_err(|err| PrepError::Deploy(format!("write {}: {err}", claude_json.display())))?;
     Ok(())
@@ -1020,6 +1021,8 @@ pub(super) fn preseed_workspace_trust_home(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude.json"));
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
@@ -1074,6 +1077,8 @@ pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude"));
     clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
 }
 

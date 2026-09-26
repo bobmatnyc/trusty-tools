@@ -1800,6 +1800,9 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     let _tmux = fallback_tmux_guard(repos_root.path());
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -1807,6 +1810,7 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 
@@ -1890,6 +1894,9 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
     let _tmux = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -1897,6 +1904,7 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 
@@ -1931,6 +1939,18 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
         "the session must be prepared in the worktree the fallback provisioned: {} \
          has no .claude",
         worktree.display()
+    );
+    // #8545: the session-scoped MCP config is composed under the injected home,
+    // not the process home's `~/.trusty-tools/trusty-mpm/session-mcp/`.
+    let session_mcp = trusty_mpm::core::paths::FrameworkPaths::under(fw_home.path())
+        .crate_config_root()
+        .join(trusty_mpm::core::session_mcp_scope::SESSION_MCP_DIR);
+    let composed = std::fs::read_dir(&session_mcp).map_or(0, |d| d.count());
+    assert_eq!(
+        composed,
+        1,
+        "the launch must compose exactly one session MCP config under {}",
+        session_mcp.display()
     );
 }
 
@@ -2002,6 +2022,9 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     let guard = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -2009,6 +2032,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 
@@ -2199,8 +2223,10 @@ fn launch_paths_prepare_through_the_isolated_seam() {
             trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG,
             trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG_RELOCATED
         );
+        // #8545: `_under` is the same seam with the home named.
         assert_eq!(
-            src.matches("prepare_isolated_session(").count(),
+            src.matches("prepare_isolated_session(").count()
+                + src.matches("prepare_isolated_session_under(").count(),
             expected_calls,
             "{name} must deploy through `prepare_isolated_session` exactly \
              {expected_calls}x (issue #4203); if a call site was added or removed, \

@@ -245,6 +245,8 @@ pub fn ensure_skill_source_fresh(paths: &FrameworkPaths) -> Result<bool> {
     if paths.skill_source_dir() != paths.skills {
         return Ok(false);
     }
+    // #8545: the refresh below writes the framework source; fenced in tests.
+    crate::core::home_write_fence::check(&paths.skills);
 
     let stamp_path = paths.skills.join(STAMP_FILE_NAME);
     let current = skill_bundle_stamp();

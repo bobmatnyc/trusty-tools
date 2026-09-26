@@ -16,6 +16,9 @@
 //! Test: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test pid_registry_sweep`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 

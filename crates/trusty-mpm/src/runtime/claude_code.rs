@@ -43,7 +43,9 @@ mod claude_code_agents;
 // #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
 // relaunch below is a real run in the operator's own home and keeps the ambient
 // form.
-use super::prompt_file::{build_prompt_file, build_prompt_file_in};
+#[cfg(test)]
+use super::prompt_file::build_prompt_file;
+use super::prompt_file::build_prompt_file_in;
 
 /// #8233: every home-derived launch path reads this layout instead of
 /// `dirs::home_dir()`.
@@ -504,14 +506,32 @@ pub fn build_inplace_resume_command(
     // #8233: this path IS the `tm` process running inside the managed pane, so
     // the ambient home is its own correct layout — unlike the daemon adapter,
     // which holds the root it was built with.
-    let fw = FrameworkPaths::default();
-    let config_dir = prepare_managed_config(&fw, "in-place-relaunch", cwd);
+    build_inplace_resume_command_under(&FrameworkPaths::default(), cwd, claude_session_id)
+}
+
+/// [`build_inplace_resume_command`] against a caller-named framework layout.
+///
+/// Why (#8545): the ambient-home form provisioned the operator's own
+/// `~/.trusty-tools/trusty-mpm/claude-config` from every test that drove it.
+/// What: the same steps, with the managed config dir and the session-mcp root
+/// both derived from `fw`.
+/// Test: `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
+pub fn build_inplace_resume_command_under(
+    fw: &FrameworkPaths,
+    cwd: &Path,
+    claude_session_id: Option<&str>,
+) -> Result<InPlaceResumeCommand, RuntimeError> {
+    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd);
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
     // failure here abandons the relaunch rather than dropping the flag, which
     // would hand the pane the unscoped shared server map.
-    crate::core::session_mcp_scope::provision_for_spawn(cwd, Some(&config_dir))
-        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+    crate::core::session_mcp_scope::provision_for_spawn_at(
+        &fw.crate_config_root(),
+        cwd,
+        Some(&config_dir),
+    )
+    .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     let claude_bin = ClaudeCodeAdapter::resolve_claude().ok_or_else(|| {
         RuntimeError::BinaryNotFound(
             "claude binary not found on PATH or in well-known dirs \
@@ -521,7 +541,8 @@ pub fn build_inplace_resume_command(
     })?;
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
-    let prompt_file = build_prompt_file(cwd, None);
+    // #8545: the savings row lands under `fw`, not the process home.
+    let prompt_file = build_prompt_file_in(&fw.root, cwd, None);
     let args = compose_inplace_args(
         cwd,
         Some(&config_dir),

@@ -21,6 +21,9 @@
 //!
 //! Test: this file.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::PathBuf;
 
 /// The one fixed, cross-process path this test contends on.

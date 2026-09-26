@@ -23,8 +23,17 @@ use crate::core::session::{Session, SessionId};
 /// `pause.json`.
 /// Test: `pause_path_in_layout`.
 pub fn pause_path_in(base: &Path, id: &SessionId) -> PathBuf {
-    base.join(".trusty-mpm")
-        .join("sessions")
+    pause_path_under(&base.join(".trusty-mpm"), id)
+}
+
+/// Returns `<framework_root>/sessions/<id>/pause.json` (#8545).
+///
+/// Why: the daemon holds its framework root, not the home it came from; the
+/// pause writer must land where [`sessions_root_under`] points its reaper.
+/// What: [`sessions_root_under`]`(framework_root)/<id>/pause.json`.
+/// Test: `pause_path_in_layout`, `save_pause_under_writes_below_the_framework_root`.
+pub fn pause_path_under(framework_root: &Path, id: &SessionId) -> PathBuf {
+    sessions_root_under(framework_root)
         .join(id.0.to_string())
         .join("pause.json")
 }
@@ -46,7 +55,18 @@ pub fn pause_path(id: &SessionId) -> PathBuf {
 /// What: writes the pause record to [`pause_path_in`], creating parent dirs.
 /// Test: `save_then_load_round_trips`.
 pub fn save_pause_in(base: &Path, session: &Session) -> std::io::Result<()> {
-    let path = pause_path_in(base, &session.id);
+    save_pause_under(&base.join(".trusty-mpm"), session)
+}
+
+/// [`save_pause_in`] under an already-resolved framework root (#8545).
+///
+/// Why: the daemon's pause route resolved `$HOME`, so a daemon test on a temp
+/// root still wrote `~/.trusty-mpm/sessions/<id>/pause.json`.
+/// What: writes the record to [`pause_path_under`], creating parent dirs.
+/// Test: `save_pause_under_writes_below_the_framework_root`.
+pub fn save_pause_under(framework_root: &Path, session: &Session) -> std::io::Result<()> {
+    let path = pause_path_under(framework_root, &session.id);
+    crate::core::home_write_fence::check(&path); // #8545
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -111,7 +131,15 @@ pub fn load_pause(id: &SessionId) -> Option<serde_json::Value> {
 /// `clear_removes_the_emptied_session_dir`,
 /// `clear_leaves_a_session_dir_holding_other_files`.
 pub fn clear_pause_in(base: &Path, id: &SessionId) -> std::io::Result<()> {
-    let path = pause_path_in(base, id);
+    clear_pause_under(&base.join(".trusty-mpm"), id)
+}
+
+/// [`clear_pause_in`] under an already-resolved framework root (#8545).
+///
+/// What: the same delete-then-reclaim against [`pause_path_under`].
+/// Test: `save_pause_under_writes_below_the_framework_root`.
+pub fn clear_pause_under(framework_root: &Path, id: &SessionId) -> std::io::Result<()> {
+    let path = pause_path_under(framework_root, id);
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -308,6 +336,23 @@ mod tests {
         assert!(path.ends_with("pause.json"));
         assert!(path.to_string_lossy().contains(".trusty-mpm"));
         assert!(path.to_string_lossy().contains(&id.0.to_string()));
+    }
+
+    /// #8545: the framework-root form writes and clears below that root only.
+    #[test]
+    fn save_pause_under_writes_below_the_framework_root() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+        save_pause_under(root.path(), &session).expect("save");
+        let path = pause_path_under(root.path(), &session.id);
+        assert!(
+            path.starts_with(root.path().join("sessions")),
+            "{}",
+            path.display()
+        );
+        assert!(path.is_file());
+        clear_pause_under(root.path(), &session.id).expect("clear");
+        assert!(!path.exists());
     }
 
     #[test]

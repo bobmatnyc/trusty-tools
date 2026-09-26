@@ -10,6 +10,9 @@
 //! Test: run with:
 //!   cargo test -p trusty-mpm --test services_integration -- --include-ignored --nocapture
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};
 
 /// Verify `tm services list` finds trusty-search when it is running on :7878.

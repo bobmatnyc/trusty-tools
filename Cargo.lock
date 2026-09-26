@@ -11960,6 +11960,7 @@ dependencies = [
  "clap",
  "colored 2.2.0",
  "crossterm",
+ "ctor",
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",

@@ -23,8 +23,9 @@ mod entry;
 // `isolated_framework_paths` has no caller outside `entry` itself; the tests
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
-    prepare_isolated_session, prepare_session, prepare_session_for_managed,
-    prepare_session_for_repair, prepare_session_with_home, prepare_session_with_memory_reachable,
+    prepare_isolated_session, prepare_isolated_session_under, prepare_session,
+    prepare_session_for_managed, prepare_session_for_repair, prepare_session_for_repair_under,
+    prepare_session_with_home, prepare_session_with_memory_reachable,
     prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
     prepare_session_with_style, prepare_session_with_style_and_native,
 };
@@ -952,7 +953,9 @@ pub(super) fn prepare_session_inner(
     // absent (never clobbers the user's existing statusLine). Non-fatal.
     // #7617: and into the user tier on the same call — provisioning owns both,
     // so the `💸` segment is core setup rather than a project's to arrange.
-    if let Err(err) = ensure_status_line(project_dir) {
+    // #8545: the injected home, not the ambient `$HOME` `ensure_status_line` reads.
+    let user_settings = home.map(|h| h.join(".claude").join("settings.json"));
+    if let Err(err) = ensure_status_line_in(project_dir, user_settings.as_deref()) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
 
@@ -1122,7 +1125,9 @@ pub(super) fn prepare_session_inner(
             full: false,
         };
         // Auto-inject advances the watermark so subsequent sessions are incremental.
-        let ctx = crate::core::catchup::run_catchup_blocking(opts, true);
+        // #8545: the watermark follows the injected home, not the process one.
+        let state_root = home.map(|h| FrameworkPaths::under(h).root);
+        let ctx = crate::core::catchup::run_catchup_blocking_in(opts, true, state_root);
         if ctx.is_empty() { None } else { Some(ctx) }
     } else {
         None

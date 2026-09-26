@@ -157,7 +157,9 @@ impl<'s> SessionService<'s> {
         });
 
         if let Some(updated) = self.state.session(session.id)
-            && let Err(e) = crate::core::session_store::save_pause(&updated)
+            // #8545: under the daemon's own root, where its reaper looks.
+            && let Err(e) =
+                crate::core::session_store::save_pause_under(self.state.framework_root(), &updated)
         {
             tracing::warn!(
                 "failed to persist pause state for {}: {e}",
@@ -192,7 +194,9 @@ impl<'s> SessionService<'s> {
             s.paused_at = None;
             s.pause_summary = None;
         });
-        if let Err(e) = crate::core::session_store::clear_pause(&session.id) {
+        if let Err(e) =
+            crate::core::session_store::clear_pause_under(self.state.framework_root(), &session.id)
+        {
             tracing::warn!("failed to clear pause state for {}: {e}", session.tmux_name);
         }
         Ok(())
@@ -292,7 +296,9 @@ mod tests {
 
     #[test]
     fn pause_then_resume_transitions_status() {
-        let state = DaemonState::new();
+        // #8545: a temp root, so `pause.json` never lands in `~/.trusty-mpm`.
+        let root = crate::test_support::hermetic_temp_dir();
+        let state = DaemonState::with_root(root.path().to_path_buf());
         let id = active_session(&state);
         let svc = SessionService::new(&state);
 

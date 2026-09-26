@@ -17,6 +17,8 @@
 //! Test: this file IS the test module.
 
 use super::*;
+// #8545: moved here from `lifecycle.rs`, which imported them only for these tests.
+use super::super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
 
 /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
 /// identical pattern in `core::session_launch::tests::EnvVarGuard`,
@@ -506,11 +508,17 @@ fn ensure_deployment_complete_noops_for_unknown_workspace() {
     // a fixed placeholder base (no I/O, no tempdir) is sufficient.
     let id = ManagedSessionId::new();
     let fw = crate::core::paths::FrameworkPaths::under("/nonexistent-fw-base-for-test");
-    let result = ensure_deployment_complete(&fw, std::path::Path::new("/unknown"), None, &id, None);
+    let result = ensure_deployment_complete(
+        &fw,
+        std::path::Path::new("/unknown"),
+        None,
+        &id,
+        RepairHost::default(),
+    );
     assert!(result.is_ok());
 
     let missing = std::path::Path::new("/this/path/does/not/exist/anywhere");
-    let result = ensure_deployment_complete(&fw, missing, None, &id, None);
+    let result = ensure_deployment_complete(&fw, missing, None, &id, RepairHost::default());
     assert!(result.is_ok());
 }
 
@@ -566,7 +574,7 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     .unwrap();
 
     let id = ManagedSessionId::new();
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, RepairHost::default());
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
@@ -700,7 +708,7 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
     fw.trusty_mpm_root = None;
     let id = ManagedSessionId::new();
 
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, RepairHost::default());
 
     // Restore write permission so the TempDir can clean itself up.
     let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755));
@@ -997,7 +1005,7 @@ fn both_launch_gates_reuse_the_resolved_reachability() {
     assert!(
         on_main.contains(
             "ensure_deployment_complete( &fw, local_path, record.repo_url.as_deref(), \
-             session_id, memory_reachable, )"
+             session_id, RepairHost::new(memory_reachable, state.user_home()), )"
         ),
         "launch-on-main must hand the gate the reachability preparation resolved"
     );
@@ -1005,8 +1013,9 @@ fn both_launch_gates_reuse_the_resolved_reachability() {
     let inproject = flat(include_str!("lifecycle.rs"));
     assert!(
         inproject.contains(
-            "let url = record.repo_url.as_deref(); if let Err(reason) = \
-             ensure_deployment_complete(&fw, &worktree, url, session_id, reachable)"
+            "let host = RepairHost::new(reachable, state.user_home()); \
+             let url = record.repo_url.as_deref(); if let Err(reason) = \
+             ensure_deployment_complete(&fw, &worktree, url, session_id, host)"
         ),
         "the in-project spawn must hand the gate the reachability preparation resolved"
     );

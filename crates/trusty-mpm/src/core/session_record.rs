@@ -287,6 +287,7 @@ pub fn record_session_value(root: &Path, kind: &str, session_id: &str, value: &s
     let Some(path) = session_record_path_in(root, kind, session_id) else {
         return;
     };
+    crate::core::home_write_fence::check(&path); // #8545
     if read_session_record(root, kind, session_id).as_deref() == Some(value) {
         return;
     }

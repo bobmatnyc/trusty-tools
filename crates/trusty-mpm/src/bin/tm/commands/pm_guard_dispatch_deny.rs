@@ -253,7 +253,8 @@ mod tests {
         use trusty_mpm::core::session::{ControlModel, Session, SessionId};
         use trusty_mpm::daemon::state::DaemonState;
 
-        let state = DaemonState::new();
+        // #8545: a temp root, never the real `~/.trusty-mpm`.
+        let state = DaemonState::with_root(crate::test_support::hermetic_temp_dir().keep());
         let named = SessionId::new();
         let unknown = SessionId::new();
         state.register_session(Session::new(

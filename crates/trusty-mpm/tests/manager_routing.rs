@@ -22,6 +22,9 @@
 //! What: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test manager_routing`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::sync::Mutex;

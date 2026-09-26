@@ -75,6 +75,8 @@ pub(crate) mod install;
 pub(crate) mod install_skills;
 pub(crate) mod issue;
 pub(crate) mod launch;
+// #8545: launch/connect user-home writes, under a caller-named home.
+pub(crate) mod launch_home;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.

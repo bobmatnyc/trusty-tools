@@ -371,6 +371,9 @@ pub fn autodeploy_agents_for(
     target_dir: &Path,
     skills_root: &Path,
 ) -> AgentAutodeploy {
+    // #8545: both the agent source and `target_dir` are written; fenced in tests.
+    crate::core::home_write_fence::check(&paths.agents);
+    crate::core::home_write_fence::check(target_dir);
     let source_dir = paths.agent_source_dir();
     if source_dir != paths.agents && has_agent_markdown(&source_dir) {
         let mut out = AgentAutodeploy::default();

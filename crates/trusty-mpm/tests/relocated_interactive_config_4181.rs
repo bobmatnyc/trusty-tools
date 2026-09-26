@@ -14,6 +14,9 @@
 //! (#1269), a malformed managed file quarantined rather than fatal, and #3950's
 //! pin contract carried across the move.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::Path;
 
 use tempfile::TempDir;

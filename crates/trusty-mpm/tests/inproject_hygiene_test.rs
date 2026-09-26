@@ -16,6 +16,9 @@
 //! Test: this file IS the test suite; run with `cargo test -p trusty-mpm
 //! --test inproject_hygiene_test`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

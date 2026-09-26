@@ -21,6 +21,9 @@
 //! `PATH`, which would otherwise break any concurrently-running test that
 //! spawns git.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use trusty_mpm::daemon::managed_routes::inproject::try_inproject_spawn;
 
 /// Build a real git repo in `dir` so `.git` genuinely exists.

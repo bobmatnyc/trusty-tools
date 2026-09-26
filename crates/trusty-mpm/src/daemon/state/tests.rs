@@ -745,6 +745,37 @@ fn audit_logger_is_accessible() {
     );
 }
 
+/// #8545: a lib test's `DaemonState::new()` roots outside every fenced home,
+/// and its audit write lands there. The root is checked before the write, so a
+/// regression fails here without touching the operator's `~/.trusty-mpm`.
+#[test]
+fn new_never_writes_under_the_real_home() {
+    use crate::core::home_write_fence::{armed_roots, fenced_root};
+    use crate::daemon::audit::AuditEntry;
+    assert!(!armed_roots().is_empty(), "the lib binary arms the fence");
+    let state = DaemonState::new();
+    let audit = state.audit();
+    for path in [state.framework_root(), audit.path()] {
+        assert!(
+            fenced_root(path, armed_roots()).is_none(),
+            "{} sits under a fenced home root {:?}",
+            path.display(),
+            armed_roots()
+        );
+    }
+    audit.log(AuditEntry {
+        ts: "2026-09-26T00:00:00Z".into(),
+        session: "tmpm-8545".into(),
+        event: "PreToolUse".into(),
+        tool: None,
+        decision: "allow".into(),
+        reason: "#8545 regression".into(),
+        handler: "deterministic".into(),
+    });
+    let written = std::fs::read_to_string(audit.path()).expect("the audit line landed");
+    assert!(written.contains("#8545 regression"), "{written}");
+}
+
 #[test]
 fn hook_history_is_bounded() {
     let state = DaemonState::new();

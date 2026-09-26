@@ -521,6 +521,8 @@ pub(crate) async fn run_inplace_relaunch(
     record: trusty_mpm::client::ManagedSessionSummary,
     caller_pane_id: Option<&str>,
     pane_confirmed_dead: bool,
+    // #8545: the layout the resume command provisions; production passes the default.
+    fw: &trusty_mpm::core::paths::FrameworkPaths,
 ) -> InPlaceOutcome {
     eprintln!("tm: this pane belongs to managed session {id} — relaunching in place…");
 
@@ -594,14 +596,17 @@ pub(crate) async fn run_inplace_relaunch(
     //
     // #4832: scoped to THIS session's id, so the refreshed file is the one
     // `build_inplace_resume_command` is about to hand the runtime.
-    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt(
+    // #8545: the savings row lands under `fw`, not the process home.
+    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt_in(
+        &fw.root,
         &cwd,
         &record.id.to_string(),
     ) {
         return InPlaceOutcome::Result(Err(anyhow::anyhow!("{msg}")));
     }
 
-    let resume = match trusty_mpm::runtime::build_inplace_resume_command(
+    let resume = match trusty_mpm::runtime::build_inplace_resume_command_under(
+        fw,
         &cwd,
         record.claude_session_id.as_deref(),
     ) {
@@ -837,6 +842,7 @@ pub(crate) async fn try_inplace_relaunch(
                 record,
                 current_pane_id.as_deref(),
                 false,
+                &trusty_mpm::core::paths::FrameworkPaths::default(),
             )
             .await
             {

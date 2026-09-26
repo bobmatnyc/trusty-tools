@@ -72,6 +72,24 @@ pub(crate) fn lock_path_env() -> std::sync::MutexGuard<'static, ()> {
     PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Arm `core::home_write_fence` for this whole test binary, before `main`.
+///
+/// Why (#8545): `cargo test -p trusty-mpm --bin tm` deployed the full skill and
+/// agent roster into the operator's `~/.trusty-tools/trusty-mpm/claude-config`
+/// and `~/.trusty-mpm/framework`. A process-wide `$HOME` redirect would stop
+/// it, but this target bans `HOME` writes (`env_isolation_tests`, #5544) and a
+/// redirected `$HOME` makes the #5784 host-state gate refuse tmux to every
+/// tmux fixture here. The fence writes no environment at all.
+/// What: a pre-`main` constructor, so the fence is armed before libtest starts
+/// any test thread and parallel tests only ever read it. It fences the `$HOME`
+/// and password-database home config paths; a test that reaches a home-config
+/// writer panics there, by name, before the write.
+/// Test: `tests::the_home_write_fence_is_armed_for_this_binary`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
@@ -166,6 +184,29 @@ pub(crate) fn renderer_operand(alternate_screen: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8545: the constructor ran, and it fences this process's home config
+    /// paths. Fails if the constructor is removed or stripped by the linker.
+    #[test]
+    fn the_home_write_fence_is_armed_for_this_binary() {
+        use trusty_mpm::core::home_write_fence::{armed_roots, fenced_root};
+        let home = dirs::home_dir().expect("a test process has a home");
+        let managed = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at(&home);
+        let framework = trusty_mpm::core::paths::FrameworkPaths::under(&home).framework;
+        for dest in [managed.join("skills"), framework.join("agents")] {
+            assert!(
+                fenced_root(&dest, armed_roots()).is_some(),
+                "{} is not fenced; armed roots: {:?}",
+                dest.display(),
+                armed_roots()
+            );
+        }
+        let scratch = hermetic_temp_dir();
+        assert!(
+            fenced_root(&scratch.path().join(".trusty-mpm"), armed_roots()).is_none(),
+            "a test temp root must stay writable"
+        );
+    }
 
     /// The whole point, asserted rather than assumed: the directory lands under
     /// the hardcoded root, not wherever `$TMPDIR` currently points.

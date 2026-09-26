@@ -11,6 +11,10 @@
 //! every test spawns its own isolated daemon and temp directory.
 //! Test: `cargo test -p trusty-mpm-daemon --test e2e`.
 
+// #8545: `common` arms the home-write fence before `main`.
+#[path = "../common/mod.rs"]
+mod common;
+
 mod harness;
 
 mod test_agent_deploy;
