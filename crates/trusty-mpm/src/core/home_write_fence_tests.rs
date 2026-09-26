@@ -72,6 +72,20 @@ fn a_claude_config_dir_outside_home_is_fenced() {
     check_against(Path::new("/elsewhere/project/.claude"), &roots);
 }
 
+/// #8545: when this process has a `$CLAUDE_CONFIG_DIR`, the pre-`main` arming
+/// fenced it. Reads the environment only; vacuous where the variable is unset.
+#[test]
+fn a_set_claude_config_dir_is_an_armed_root_of_this_process() {
+    if let Some(dir) = claude_config_dir_root(std::env::var_os("CLAUDE_CONFIG_DIR")) {
+        assert!(
+            armed_roots().contains(&dir),
+            "{} is not fenced; armed roots: {:?}",
+            dir.display(),
+            armed_roots()
+        );
+    }
+}
+
 /// An unset or empty `$CLAUDE_CONFIG_DIR` adds no root.
 #[test]
 fn an_empty_claude_config_dir_fences_nothing() {
