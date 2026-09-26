@@ -18,8 +18,8 @@ use tracing::{info, warn};
 
 use super::decommission::WorktreeRemoval;
 use super::decommission_force::{
-    ProvisioningDirt, WorkspaceVerdict, dirty_entries, force_blocker, is_provisioning_entry,
-    kept_for_dirt, linked_worktree_git_dir, lock_blocker,
+    ProvisioningDirt, WorkspaceVerdict, WorktreeKind, dirty_entries, force_blocker,
+    is_provisioning_entry, kept_for_dirt, lock_blocker, worktree_kind,
 };
 use super::manager::ManagedError;
 use super::provisioning_ledger;
@@ -37,7 +37,9 @@ use super::worktree_safety::{
 /// Why: `workspace_owned` says tm created the directory, not that nothing in
 /// it is worth keeping.
 /// What: a directory that is its own git worktree root gets the worktree
-/// guard. A linked worktree that `git worktree lock` protects is kept under
+/// guard. [`worktree_kind`] must prove it a linked worktree or a main
+/// checkout; a probe error keeps it under either policy. A linked worktree
+/// that `git worktree lock` protects is kept under
 /// either policy ([`lock_blocker`]). Then [`inspect_dirt`] (dirty files,
 /// unpushed commits, nested repositories), excusing only entries that match
 /// the [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
@@ -52,7 +54,9 @@ use super::worktree_safety::{
 /// `owned_non_git_workspace_with_user_files_is_kept`,
 /// `owned_workspace_is_kept_when_the_content_check_fails`,
 /// `ledger_excuses_only_provisioning_dirt_on_a_clone`,
-/// `locked_owned_worktree_is_kept_even_with_force`.
+/// `locked_owned_worktree_is_kept_even_with_force`,
+/// `owned_worktree_whose_probe_fails_is_kept`,
+/// `force_on_owned_worktree_of_another_session_is_kept`.
 pub(super) fn owned_workspace_keep_reason(
     ws: &Path,
     id: &ManagedSessionId,
@@ -60,9 +64,15 @@ pub(super) fn owned_workspace_keep_reason(
 ) -> Option<String> {
     if is_worktree_root(ws).unwrap_or(false) {
         let named = |reason: String| Some(format!("{}: {reason}", ws.display()));
-        let linked = linked_worktree_git_dir(ws);
+        // #8663 critic round 2: only a proven main checkout skips the lock and
+        // `--force` gates; a probe that cannot answer keeps the tree.
+        let linked = match worktree_kind(ws) {
+            Ok(WorktreeKind::Linked(git_dir)) => Some(git_dir),
+            Ok(WorktreeKind::MainCheckout) => None,
+            Err(e) => return named(format!("{e}; nothing was removed")),
+        };
         // #8663 critic round 1: a lock keeps it under both policies.
-        if let Some(blocker) = linked.as_deref().ok().and_then(lock_blocker) {
+        if let Some(blocker) = linked.as_deref().and_then(lock_blocker) {
             return named(format!("{blocker}; nothing was removed"));
         }
         // #8663 critic round 1: tm's provisioning writes, proven by the ledger.
@@ -77,7 +87,7 @@ pub(super) fn owned_workspace_keep_reason(
         if policy == ProvisioningDirt::Refuse {
             return named(kept_for_dirt(ws, &dirt.reason, policy));
         }
-        if linked.is_ok()
+        if linked.is_some()
             && let Some(blocker) = force_blocker(ws, id)
         {
             return named(format!("--force declined: {blocker}; nothing was removed"));

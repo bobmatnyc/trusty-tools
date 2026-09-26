@@ -143,8 +143,9 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 /// [`crate::session_manager::SessionManager::decommission`].
 /// What: parses the id, calls `decommission_reporting` (the same teardown
 /// as `decommission`, without `--force`), returns the tombstone record plus
-/// `workspace_removed` (bool) and `workspace_kept_reason` (string or null) —
-/// a workspace kept for the work it holds is reported, not hidden (#8663).
+/// `workspace_removed` (bool), `workspace_kept_reason` and
+/// `workspace_kept_by_design` (string or null each, as the HTTP route) — a
+/// workspace kept for the work it holds is reported, not hidden (#8663).
 ///
 /// `caller` (#3649, Option B): the trait-level MCP `Backend::session_decommission`
 /// method currently carries no per-connection caller identity — the wire
@@ -155,7 +156,8 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 /// full pre-#3649 authority — i.e. an MCP-driven decommission behaves
 /// exactly as it did before this issue, never gated by the new owner check.
 /// Test: `session_decommission_unknown_id_errors`,
-/// `session_decommission_prunes_stale_worktree_bookkeeping` in the `tests`
+/// `session_decommission_prunes_stale_worktree_bookkeeping`,
+/// `session_decommission_reports_a_workspace_kept_by_design` in the `tests`
 /// module.
 pub async fn session_decommission(
     state: &Arc<DaemonState>,
@@ -183,6 +185,13 @@ pub async fn session_decommission(
             "workspace_kept_reason".to_string(),
             report
                 .workspace_kept_reason
+                .map_or(Value::Null, Value::String),
+        );
+        // #8663 critic round 2: the same verdict fields the HTTP route returns.
+        obj.insert(
+            "workspace_kept_by_design".to_string(),
+            report
+                .workspace_kept_by_design
                 .map_or(Value::Null, Value::String),
         );
     }
@@ -897,5 +906,46 @@ mod tests {
             .unwrap_or_else(|| panic!("the kept reason is a string: {json}"));
         assert!(reason.contains("notes.md"), "{reason}");
         assert!(ws.join("notes.md").exists(), "the work must survive");
+        assert_eq!(
+            json.get("workspace_kept_by_design"),
+            Some(&Value::Null),
+            "{json}"
+        );
+    }
+
+    /// #8663 critic round 2: a workspace tm never removes comes back as
+    /// `workspace_kept_by_design`, as the HTTP route reports it.
+    #[tokio::test]
+    async fn session_decommission_reports_a_workspace_kept_by_design() {
+        let ws = tempfile::tempdir().expect("user directory");
+        let (_root, s) = state().await;
+        let id = crate::session_manager::ManagedSessionId::new();
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8663 MCP kept by design".to_string(),
+                Some(ws.path().to_path_buf()),
+                None,
+                Some(ws.path().to_path_buf()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                // Unowned: a local-path directory decommission never deletes.
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_decommission(&s, &id.to_string())
+            .await
+            .expect("decommission");
+        let by_design = json["workspace_kept_by_design"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the by-design reason is a string: {json}"));
+        assert!(by_design.contains("kept by design"), "{by_design}");
+        assert_eq!(json["workspace_removed"], Value::Bool(false), "{json}");
+        assert!(ws.path().exists(), "the user's directory must survive");
     }
 }

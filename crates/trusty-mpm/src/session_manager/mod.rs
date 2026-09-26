@@ -15,11 +15,11 @@ pub mod decommission;
 pub mod decommission_force;
 // #8663: the content gates on decommission's two `remove_dir_all` routes.
 mod decommission_owned;
-// #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
 pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
 pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
