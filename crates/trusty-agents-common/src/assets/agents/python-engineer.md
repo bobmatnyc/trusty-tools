@@ -97,7 +97,9 @@ reading input and writing output — no service layer, no DI container.
 ## Development Workflow
 `black . && isort .` to format, `mypy --strict src/` and
 `flake8 src/ --max-line-length=100` to lint, `pytest --cov=src
---cov-fail-under=90` to verify.
+--cov-fail-under=90` to verify. Run the venv's interpreter directly —
+`.venv/bin/python -m pytest` — never `source .venv/bin/activate`, which a
+worktree agent's harness refuses (#8514).
 
 ## Integration Points
 QA on coverage requirements, Data Engineer on pandas/NumPy pipelines,

@@ -321,6 +321,7 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | an `awk` program over a log file | `grep` |
 | `grep -n <pattern> <file>` | multi-file/line-number `grep` results are unreliable here — read the file with the Read tool and search visually, or narrow to the one line with `sed -n '<N>p' <file>` on a literal address |
 | a helper script written with the Write tool to the scratchpad directory, then run from there (`python3 <scratchpad>/name.py`) — refused even quoted, because the scratchpad sits outside the worktree | write the script INSIDE the worktree with the Write tool and invoke it as `./name.py`, not from the scratchpad path |
+| `source .venv/bin/activate && pytest`, `. <venv>/bin/activate` — runs a string through `source`, which can't be verified to stay inside the worktree | `.venv/bin/python -m pytest …` (#8514) |
 
 This repo's docs spell every gate `bash scripts/<name>.sh`, so the first row
 above applies to the whole test ladder, not only to the line-cap check.
