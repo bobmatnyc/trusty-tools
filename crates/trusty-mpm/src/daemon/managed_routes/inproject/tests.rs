@@ -947,6 +947,9 @@ fn create_session_worktree_rejects_existing_worktree_dir() {
 fn ensure_worktrees_gitignored_idempotent() {
     // ensure_worktrees_gitignored must write .worktrees/ to .git/info/exclude
     // exactly ONCE even when called multiple times (idempotent) (#1803).
+    // #7638: the entry comes from `TRUSTY_MPM_WORKTREES_DIRNAME`, which sibling
+    // tests set to `.sessions` under the env lock; hold it so this reads `.worktrees`.
+    let _env = crate::core::trusty_tools_config::env_test_lock();
     let tmp = crate::test_support::hermetic_temp_dir();
     let base = tmp.path();
     // Create a minimal .git dir (not a real git repo, but enough for the function).
@@ -1666,6 +1669,10 @@ fn session_worktree_without_a_remote_still_branches_from_head() {
 /// Test: this function IS the test.
 #[test]
 fn worktrees_exclude_entry_protects_against_double_force_clean() {
+    // #7638: `ensure_base_clone`, the worktree path and `want` each resolve the
+    // process-global `TRUSTY_MPM_WORKTREES_DIRNAME`, which sibling tests set
+    // under the env lock; hold it so all three resolutions see one value.
+    let _env = crate::core::trusty_tools_config::env_test_lock();
     let scratch = crate::test_support::hermetic_temp_dir();
     let origin = scratch.path().join("origin");
     std::fs::create_dir_all(&origin).expect("origin dir");
