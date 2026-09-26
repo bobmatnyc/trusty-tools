@@ -10,9 +10,10 @@
 //! ignored it, and the request struct had no field to ignore.
 //! What: drives the real `create_index_handler` with `colocated: Some(false)`
 //! and asserts NOTHING was created under the root while the data-dir corpus
-//! was, plus the guard that refuses the flag when the root already carries
-//! colocated storage, the read-only-root refusal and retry, and the omitted
-//! field's unchanged default.
+//! was, plus the read-only-root and read-only-`.trusty-search/` refusal and
+//! retry, the fatal registry write for a data-dir index, and the omitted
+//! field's unchanged default. Unix-only (permission bits); the read-only cases
+//! skip under euid 0, where permission bits do not refuse.
 //! Test: this module. Run with `cargo test -p trusty-search tests_8147`.
 
 use super::*;
@@ -113,46 +114,15 @@ async fn create_index_honours_colocated_false() {
         "#8147: the corpus must have been opened in the data-dir store at {}",
         data_dir_corpus.display(),
     );
+    assert!(
+        crate::service::roots_registry::load_roots()
+            .expect("roots.toml readable")
+            .is_empty(),
+        "#8147: roots.toml lists colocated roots for the scanner; a data-dir index \
+         must add none"
+    );
 
     state.watcher_manager.stop_for_index(&id).await;
-}
-
-/// #8147 guard: `colocated: false` over a root that ALREADY has
-/// `.trusty-search/` is refused, not split across two layouts.
-///
-/// Why: the write paths (`reindex::runner`, `corpus_swap`, `hnsw_swap`,
-/// `shutdown_flush`) route on `has_colocated_storage(root)`, not on the
-/// persisted flag. Honouring the flag there would have the writer commit to
-/// the colocated corpus while the loader reads the data-dir one — the #483 /
-/// #485 zero-chunk failure with the layouts swapped.
-/// What: creates `<root>/.trusty-search/` first, then asserts the request is
-/// refused with `400` and nothing is registered.
-/// Test: this test.
-#[tokio::test]
-#[serial_test::serial]
-async fn create_index_refuses_colocated_false_over_existing_colocated_storage() {
-    let _data_dir = super::tests_components::IsolatedDataDir::new();
-    let state = mock_state().await;
-    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-split-");
-    let id = IndexId::new("ts-8147-split");
-    std::fs::create_dir_all(root.join(".trusty-search")).expect("pre-create colocated dir");
-
-    let created = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req_with_colocated(&id.0, root.clone(), Some(false))),
-    )
-    .await;
-
-    assert_eq!(
-        created.status(),
-        StatusCode::BAD_REQUEST,
-        "#8147: a root that already carries colocated storage must refuse \
-         colocated=false rather than register a split-layout index"
-    );
-    assert!(
-        state.registry.get(&id).is_none(),
-        "a refused registration must leave nothing registered"
-    );
 }
 
 /// Restores a read-only directory's write bit on drop, so a failed assertion
@@ -175,6 +145,16 @@ impl Drop for ReadOnlyDir {
     }
 }
 
+/// Permission bits do not refuse euid 0, so the read-only cases cannot fail
+/// there; they skip rather than report a false red.
+fn running_as_root() -> bool {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping: permission bits do not refuse euid 0");
+        return true;
+    }
+    false
+}
+
 /// #8147: a colocated request on a read-only root is refused with an error
 /// that names the permission problem, leaves nothing behind, and a retry with
 /// `colocated: false` then registers the index in the data-dir store.
@@ -190,6 +170,9 @@ impl Drop for ReadOnlyDir {
 #[tokio::test]
 #[serial_test::serial]
 async fn create_index_colocated_on_read_only_root_names_the_permission_problem() {
+    if running_as_root() {
+        return;
+    }
     let _data_dir = super::tests_components::IsolatedDataDir::new();
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-ro-");
@@ -297,6 +280,145 @@ async fn create_index_omitted_colocated_keeps_the_colocated_default() {
         root.join(".trusty-search").join("index.redb").exists(),
         "the corpus must be colocated under the root"
     );
+    assert_eq!(
+        crate::service::roots_registry::load_roots()
+            .expect("roots.toml readable")
+            .len(),
+        1,
+        "a colocated root is listed in roots.toml for the startup scanner"
+    );
+
+    state.watcher_manager.stop_for_index(&id).await;
+}
+
+/// #8147 round 2, finding 1: a root whose `.trusty-search/` the daemon cannot
+/// write is registrable with `colocated: false`.
+///
+/// Why: the `403` for such a root says to retry with `colocated=false`, and a
+/// `400` guard then refused that retry because the directory exists: a
+/// root-owned `.trusty-search/` could never be registered.
+/// What: pre-creates `<root>/.trusty-search/` at `0o555`; the omitted-field
+/// request is a `403`, the `colocated: false` retry is a `200` whose corpus is
+/// in the data dir, and the repo directory stays empty.
+/// Test: this test. With the `400` guard restored the retry answers `400`.
+#[tokio::test]
+#[serial_test::serial]
+async fn create_index_colocated_false_over_a_read_only_colocated_dir_registers() {
+    if running_as_root() {
+        return;
+    }
+    let _data_dir = super::tests_components::IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-rodir-");
+    let repo_dir = root.join(".trusty-search");
+    std::fs::create_dir_all(&repo_dir).expect("pre-create colocated dir");
+    let _read_only = ReadOnlyDir::new(&repo_dir);
+    let id = IndexId::new("ts-8147-rodir");
+
+    let refused = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req_with_colocated(&id.0, root.clone(), None)),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN, "precondition: 403");
+
+    let retried = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req_with_colocated(&id.0, root.clone(), Some(false))),
+    )
+    .await;
+    assert_eq!(
+        retried.status(),
+        StatusCode::OK,
+        "#8147: the retry the 403 names must register"
+    );
+    assert!(state.registry.get(&id).is_some(), "the retry is registered");
+    let entry = crate::service::persistence::find_index_registry_entry(&id.0)
+        .expect("registry readable")
+        .expect("the retry must be persisted");
+    assert!(!entry.colocated, "indexes.toml must record colocated=false");
+    let data_dir_corpus =
+        crate::service::persistence::corpus_redb_path(&id.0).expect("data-dir corpus path");
+    assert!(
+        data_dir_corpus.exists(),
+        "the corpus must live in the data dir at {}",
+        data_dir_corpus.display()
+    );
+    let written: Vec<_> = std::fs::read_dir(&repo_dir)
+        .expect("repo dir readable")
+        .collect();
+    assert!(written.is_empty(), "nothing written to the repo dir");
+
+    state.watcher_manager.stop_for_index(&id).await;
+}
+
+/// #8147 round 2, finding 2: a data-dir registration whose `indexes.toml` row
+/// cannot be written is a `500`, and nothing is registered.
+///
+/// Why: warm boot rediscovers a colocated index from `roots.toml`, but a
+/// data-dir index lives only in `indexes.toml`. A warn-only write failure
+/// answered `200` for an index that vanished on restart.
+/// What: an unparseable `indexes.toml` makes the upsert fail. The request is a
+/// `500` naming `indexes.toml`; no handle is registered, the file is
+/// byte-identical, and `roots.toml` gains nothing. With the file removed, the
+/// same request registers.
+/// Test: this test. Before the fix the first request answers `200`.
+#[tokio::test]
+#[serial_test::serial]
+async fn create_index_colocated_false_with_an_unwritable_registry_is_a_500() {
+    let _data_dir = super::tests_components::IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-noreg-");
+    let id = IndexId::new("ts-8147-noreg");
+    let registry = crate::service::persistence::indexes_toml_path().expect("registry path");
+    let garbage = b"this is [[not toml".to_vec();
+    std::fs::write(&registry, &garbage).expect("plant an unparseable registry");
+
+    let refused = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req_with_colocated(&id.0, root.clone(), Some(false))),
+    )
+    .await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "#8147: a data-dir index that cannot be recorded must not answer 200"
+    );
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("indexes.toml"),
+        "the error must name the registry. Body: {body}"
+    );
+    assert!(
+        state.registry.get(&id).is_none(),
+        "no half-registered handle"
+    );
+    assert_eq!(
+        std::fs::read(&registry).expect("registry still there"),
+        garbage,
+        "the refused write left the registry untouched"
+    );
+    assert!(
+        crate::service::roots_registry::load_roots()
+            .expect("roots.toml readable")
+            .is_empty(),
+        "no roots.toml row either"
+    );
+
+    std::fs::remove_file(&registry).expect("clear the fault");
+    let retried = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req_with_colocated(&id.0, root.clone(), Some(false))),
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::OK, "a clean retry registers");
+    assert!(state.registry.get(&id).is_some());
 
     state.watcher_manager.stop_for_index(&id).await;
 }

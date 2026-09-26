@@ -96,3 +96,23 @@ async fn corpus_abort_reopens_the_data_dir_not_the_repo() {
     );
     fx.assert_repo_dir_empty();
 }
+
+/// Why (#8147): the hash-cache root-move decision probed the repo dir, so a
+/// data-dir index whose root holds `.trusty-search/` kept its cache on a move.
+/// What: both layouts over the same root, which carries the repo dir.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn hash_keys_follow_the_registry_layout_not_the_repo_dir() {
+    let fx = Fixture::new(true);
+    let data_dir = fx.handle("ts-8147-hkeys-d", StorageLayout::DataDir).await;
+    assert!(
+        !super::hash_cache::keys_survive_root_move(&data_dir).await,
+        "#8147: a colocated=false index clears its hash cache on a root move"
+    );
+    let colocated = fx.handle("ts-8147-hkeys-c", StorageLayout::Colocated).await;
+    assert!(
+        super::hash_cache::keys_survive_root_move(&colocated).await,
+        "#1073: colocated keys are root-relative and survive a move"
+    );
+}

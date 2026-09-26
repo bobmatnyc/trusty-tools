@@ -234,13 +234,14 @@ pub struct CreateIndexRequest {
     /// has always routed on `PersistedIndex::colocated`; only this door
     /// hardcoded `true`.
     /// What: `Option<bool>`; persisted to `indexes.toml` so warm boot restores
-    /// the same layout. `false` against a root that ALREADY has
-    /// `.trusty-search/` is refused with `400`; a colocated request whose
-    /// `.trusty-search/` the daemon cannot write is refused with `403`. Both
-    /// live in `create_layout`.
+    /// the same layout, and for `false` that write is fatal (`500`), since no
+    /// `roots.toml` scan rediscovers a data-dir index. A colocated request
+    /// whose `.trusty-search/` the daemon cannot write is refused with `403`.
+    /// Both live in `create_layout`.
     /// Test: `create_index_honours_colocated_false`,
-    /// `create_index_refuses_colocated_false_over_existing_colocated_storage`,
-    /// `create_index_colocated_on_read_only_root_names_the_permission_problem`.
+    /// `create_index_colocated_false_over_a_read_only_colocated_dir_registers`,
+    /// `create_index_colocated_on_read_only_root_names_the_permission_problem`,
+    /// `create_index_colocated_false_with_an_unwritable_registry_is_a_500`.
     #[serde(default)]
     pub colocated: Option<bool>,
 

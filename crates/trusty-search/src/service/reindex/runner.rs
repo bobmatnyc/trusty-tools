@@ -323,7 +323,8 @@ pub(super) async fn run_reindex(
     // ROOT-RELATIVE (#402), so they are valid at any root location — a pure
     // move changes the root prefix only. Do NOT clear the hash cache on a
     // root move for colocated indexes.
-    let is_colocated = crate::service::colocated_storage::has_colocated_storage(&canonical_root);
+    // #8147: read the registry layout, not the disk (see `keys_survive_root_move`).
+    let is_colocated = hash_cache::keys_survive_root_move(&handle).await;
     // #5024: the hash-cache load is a full redb table scan on a warm index —
     // measure it rather than leaving it in the residual.
     let mut stage_timings = StageTimings::default();

@@ -532,7 +532,7 @@ pub(crate) async fn create_index_report(
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
     // #8147: the layout is the caller's to choose; a colocated root the daemon
     // cannot write is refused here, before anything is built or registered.
-    let colocated = super::create_layout::resolve_layout(&req)?;
+    let colocated = super::create_layout::resolve_layout(&req);
     if colocated {
         super::create_layout::preflight_colocated_root(&req.id, &req.root_path)?;
     }
@@ -682,11 +682,12 @@ pub(crate) async fn create_index_report(
     // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
     // #8147: `colocated` is resolved above from the request; a non-colocated
     // index writes nothing under `root_path`, so it has no `.gitignore` entry
-    // to owe.
-    if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
-        tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
-    }
+    // to owe, and no `roots.toml` row: that file lists colocated roots for the
+    // startup scanner.
     if colocated {
+        if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
+            tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
+        }
         if let Err(e) = crate::service::colocated_storage::ensure_gitignored(&req.root_path) {
             tracing::warn!(
                 "could not add .trusty-search/ to .gitignore for {}: {e}",
@@ -736,6 +737,11 @@ pub(crate) async fn create_index_report(
             deferred_embed_pending: false,
         },
     ) {
+        // #8147: fatal for a data-dir index — `indexes.toml` is its only record.
+        if let Some(refusal) = super::create_layout::registry_write_refusal(&req.id, colocated, &e)
+        {
+            return Err(refusal);
+        }
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
     }
 

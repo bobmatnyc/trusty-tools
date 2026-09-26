@@ -5,7 +5,9 @@
 //! registered. The caller now chooses the layout, and a colocated request the
 //! daemon cannot write is refused before anything is built or recorded.
 //! What: [`resolve_layout`] reads `CreateIndexRequest::colocated`;
-//! [`preflight_colocated_root`] proves `<root>/.trusty-search/` is writable.
+//! [`preflight_colocated_root`] proves `<root>/.trusty-search/` is writable;
+//! [`registry_write_refusal`] makes a failed `indexes.toml` write fatal for a
+//! data-dir index, which no `roots.toml` scan can rediscover.
 //! Test: `service::server::tests_8147`.
 
 use std::io::ErrorKind;
@@ -14,44 +16,23 @@ use std::path::Path;
 use axum::http::StatusCode;
 
 use super::router::CreateIndexRequest;
-use crate::service::colocated_storage::{has_colocated_storage, COLOCATED_DIR_NAME};
+use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 
 /// The handler's error shape: a status and a JSON body.
 pub(super) type Refusal = (StatusCode, serde_json::Value);
 
 /// Resolve the storage layout a registration asked for: `true` is colocated.
 ///
-/// Why: `None` must keep the #403 default byte-identical, and `false` over a
-/// root that already carries `.trusty-search/` stays ambiguous — the reindex
-/// runner still probes that directory (`reindex/runner.rs`, the hash-cache
-/// root-move decision), so the two layouts would disagree.
-/// What: `None`/`true` → `Ok(true)`; `false` → `Ok(false)` unless the root has
-/// colocated storage, which is a `400`.
-/// Test: `create_index_refuses_colocated_false_over_existing_colocated_storage`,
-/// `create_index_omitted_colocated_keeps_the_colocated_default`.
-pub(super) fn resolve_layout(req: &CreateIndexRequest) -> Result<bool, Refusal> {
-    let colocated = req.colocated.unwrap_or(true);
-    if colocated || !has_colocated_storage(&req.root_path) {
-        return Ok(colocated);
-    }
-    tracing::warn!(
-        "create_index: refusing '{}' with colocated=false — {} already carries \
-         .trusty-search/ (issue #8147)",
-        req.id,
-        req.root_path.display(),
-    );
-    Err((
-        StatusCode::BAD_REQUEST,
-        serde_json::json!({
-            "error": format!(
-                "colocated=false was requested but {:?} already contains .trusty-search/; \
-                 the two storage layouts would disagree. Remove or move it aside, or \
-                 register with colocated=true.",
-                req.root_path.display()
-            ),
-            "id": req.id,
-        }),
-    ))
+/// Why: `None` must keep the #403 default byte-identical. An existing
+/// `<root>/.trusty-search/` is no reason to refuse `false`: since #8438 every
+/// write path, and the reindex hash-cache decision, follows the registry
+/// layout, and a `400` there left a root-owned directory with no way in (the
+/// `403` below says to retry with `colocated=false`).
+/// What: `None`/`true` → colocated; `false` → the data-dir store.
+/// Test: `create_index_omitted_colocated_keeps_the_colocated_default`,
+/// `create_index_colocated_false_over_a_read_only_colocated_dir_registers`.
+pub(super) fn resolve_layout(req: &CreateIndexRequest) -> bool {
+    req.colocated.unwrap_or(true)
 }
 
 /// Refuse a colocated registration whose `.trusty-search/` the daemon cannot
@@ -97,9 +78,42 @@ pub(super) fn preflight_colocated_root(id: &str, root: &Path) -> Result<(), Refu
         serde_json::json!({
             "error": format!(
                 "permission denied: the daemon cannot write {:?} ({e}). Register with \
-                 colocated=false to keep this index in the daemon's data directory \
-                 instead.",
+                 colocated=false (POST /indexes or search.index.create only) to keep \
+                 this index in the daemon's data directory instead.",
                 dir.display()
+            ),
+            "id": id,
+        }),
+    ))
+}
+
+/// Refuse a data-dir registration whose `indexes.toml` row was not written.
+///
+/// Why: warm boot rediscovers a colocated index from `roots.toml`, but a
+/// data-dir index exists only in `indexes.toml`. A warn-only failed write
+/// answered `200` for an index that vanished on the next restart.
+/// What: `None` for a colocated index, whose write stays best-effort. For a
+/// data-dir index, a `500` naming the failure, returned before the handle is
+/// registered, so nothing is left half-registered.
+/// Test: `create_index_colocated_false_with_an_unwritable_registry_is_a_500`.
+pub(super) fn registry_write_refusal(
+    id: &str,
+    colocated: bool,
+    e: &anyhow::Error,
+) -> Option<Refusal> {
+    if colocated {
+        return None;
+    }
+    tracing::error!(
+        "create_index: refusing '{id}' — colocated=false and indexes.toml could not be \
+         written ({e:#}); nothing else would restore it at boot (issue #8147)"
+    );
+    Some((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({
+            "error": format!(
+                "could not record colocated=false index '{id}' in indexes.toml ({e:#}); \
+                 nothing was registered, since the index would not survive a restart"
             ),
             "id": id,
         }),
