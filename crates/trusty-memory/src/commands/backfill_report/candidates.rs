@@ -21,7 +21,8 @@
 //!    being run — the one outcome ADR-0028's human-gated migration forbids. It
 //!    would also delete the rows a human most wants to see.
 //! 2. **No open against the live file.** Going one level lower to
-//!    [`KgStoreRedb`] is not enough on its own: `OpenIntent::ReadOnlyClient`
+//!    [`trusty_common::memory_core::store::kg_redb::KgStoreRedb`] is not enough
+//!    on its own: `OpenIntent::ReadOnlyClient`
 //!    only snapshots when the file is *already locked*. On an unlocked palace it
 //!    reaches `Database::create`, which opens read-write and runs a table-init
 //!    write transaction — and on a file in an incompatible redb format it
