@@ -493,7 +493,7 @@ fn compose_inplace_args(
 /// missing), provisions/trust-seeds the managed `CLAUDE_CONFIG_DIR` via
 /// [`prepare_managed_config`] (logged under the synthetic session name
 /// `"in-place-relaunch"` — there is no tmux session name in this context),
-/// builds the PM system-prompt file via [`build_prompt_file`] (#4336 — the
+/// builds the PM system-prompt file via `build_prompt_file` (#4336 — the
 /// SAME carrier `spawn`/`spawn_resume` use, previously missing from this path
 /// alone; non-fatal, a write failure omits the flag), then delegates argv
 /// composition to [`compose_inplace_args`].
@@ -707,7 +707,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// if it cannot be found on `PATH` or in the well-known daemon dirs),
     /// provisions + trust-seeds the tm-owned `CLAUDE_CONFIG_DIR` via
     /// [`prepare_managed_config`], builds the PM system-prompt file via
-    /// [`build_prompt_file`] (issue #2125 item 3), resolves an optional
+    /// `build_prompt_file` (issue #2125 item 3), resolves an optional
     /// `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (issue #2246), then
     /// sends a FIXED-SHAPE launch line naming a [`super::launch_spec::LaunchSpec`] the shim reads
@@ -856,7 +856,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
     /// `claude_session_id` against the resolved config dir, falls back to a
     /// fresh launch when it is missing,
-    /// builds the PM system-prompt file via [`build_prompt_file`] (#2230 —
+    /// builds the PM system-prompt file via `build_prompt_file` (#2230 —
     /// same carrier `spawn` uses, previously missing from every resume path),
     /// resolves an optional `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (#2246 — same carrier

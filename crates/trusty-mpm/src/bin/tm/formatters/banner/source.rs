@@ -57,7 +57,7 @@ impl BannerEnv {
     ///
     /// #8545: the test binary resolves no home, so the ten banner-rendering
     /// tests neither read the operator's `banner.txt` nor seed one; every
-    /// `banner_source_*` test builds its env with [`BannerEnv::new`] instead.
+    /// `banner_source_*` test builds its env with `BannerEnv::new` instead.
     /// Test: `banner_rendering_never_resolves_the_process_home`.
     pub(crate) fn from_process() -> Self {
         Self {
