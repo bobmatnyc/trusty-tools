@@ -1800,6 +1800,9 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     let _tmux = fallback_tmux_guard(repos_root.path());
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -1807,6 +1810,7 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 
@@ -1890,6 +1894,9 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
     let _tmux = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -1897,6 +1904,7 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 
@@ -2002,6 +2010,9 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     let guard = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
+    // #8545: the launch writes its user-home state under a temp home, never
+    // the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
     let _result = crate::commands::guided::fallback_protected_gated(
@@ -2009,6 +2020,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
         "http://127.0.0.1:1",
         live_dir.path(),
         &empty_disk(),
+        Some(fw_home.path()),
     )
     .await;
 

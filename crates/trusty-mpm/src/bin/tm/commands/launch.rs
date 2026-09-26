@@ -116,6 +116,7 @@ pub(crate) async fn launch(
     style: Option<String>,
     worktree: bool,
     launch_dir: super::managed_workspace::LaunchDir,
+    home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
 ) -> anyhow::Result<()> {
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
@@ -149,7 +150,7 @@ pub(crate) async fn launch(
     let origin_url = match super::origin_plan::plan_for_origin(raw_origin.as_deref()) {
         super::origin_plan::OriginPlan::LiveCheckout => {
             eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
-            return connect(client, url, Some(live_workdir)).await;
+            return connect(client, url, Some(live_workdir), home).await;
         }
         // Any origin remote keeps the pre-#6276 path exactly: parse it as
         // owner/repo, or stop with the hint below.
@@ -236,6 +237,7 @@ pub(crate) async fn launch(
         match trusty_mpm::core::session_launch::prepare_isolated_session(
             &managed_path,
             Some(&origin_url),
+            home,
         ) {
             Ok(report) => {
                 // Issue #2149: a roster-deploy failure no longer aborts
@@ -266,7 +268,7 @@ pub(crate) async fn launch(
         };
         // #4181: relocate CLAUDE_CONFIG_DIR and seed trust into the file the
         // relocated session actually reads.
-        relocate_config_dir(&managed_path)
+        super::launch_home::relocate_config_dir(&managed_path, home)
     };
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
@@ -274,9 +276,7 @@ pub(crate) async fn launch(
     //    Both steps are best-effort — a failure is logged but never fatal.
     // #5875: this strips the two `~/.claude/settings*.json` files only. It used
     // to walk the whole `$HOME` tree here, which blocked a launch indefinitely.
-    if let Err(e) = crate::commands::install::remove_global_trusty_mpm_hooks() {
-        eprintln!("warning: could not remove global MPM hooks: {e:#}");
-    }
+    super::launch_home::strip_global_hooks(home);
     if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&managed_path, None) {
         eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
     }
@@ -490,6 +490,7 @@ pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
+    home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
 ) -> anyhow::Result<()> {
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
@@ -525,7 +526,7 @@ pub(crate) async fn connect(
     //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
     //     the `claude` spawned at step 5 carries `--setting-sources
     //     project,local` and would never read a `$HOME/.claude` deploy.
-    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
+    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None, home) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
@@ -549,7 +550,7 @@ pub(crate) async fn connect(
     }
     // #4181: same relocation `tm launch` performs — `tm connect` reads the same
     // user-tier MCP declaration and needs the same #1269 isolation posture.
-    let config_dir = relocate_config_dir(&path);
+    let config_dir = super::launch_home::relocate_config_dir(&path, home);
 
     // 1d. Build the PM system-prompt text for the live checkout (where 1c just
     //     deployed the framework) and write it to a temp file for
@@ -741,34 +742,6 @@ pub(crate) fn launch_claude_cmd(
         scoped_mcp,
         trusty_mpm::core::alt_screen::configured_alternate_screen_in(config_root),
     )
-}
-
-/// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
-/// trust-seeding it.
-///
-/// Why (issue #4181): thin binary-side wrapper so `tm launch` and `tm connect`
-/// share one call rather than two copies of the same sequence. Why relocation
-/// preserves #1269 lives on the library function.
-/// What: delegates to
-/// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir`], then
-/// warns once when the spawn will relocate with no resolvable
-/// `CLAUDE_CODE_OAUTH_TOKEN` — the #2246 shape where a Keychain credential
-/// stored under the operator's default config dir is unreadable under the
-/// relocated one.
-/// Test: `core::managed_config`'s `interactive_config_dir_*` tests.
-fn relocate_config_dir(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
-    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(workspace);
-    // #2246: relocating moves which Keychain entry `claude` reads. Say so once
-    // rather than let the session present as "logged in, then not logged in".
-    if dir.is_some() && trusty_mpm::core::oauth_token::resolve_oauth_token().is_none() {
-        eprintln!(
-            "warning: no CLAUDE_CODE_OAUTH_TOKEN resolved; this session reads the \
-             keychain entry keyed to the tm-managed config dir. If it starts \
-             unauthenticated, run `claude setup-token | tm auth set-token` \
-             (see issue #2246)."
-        );
-    }
-    dir
 }
 
 /// Find the first LIVE session whose `workdir` matches `workdir` (exact) or lies

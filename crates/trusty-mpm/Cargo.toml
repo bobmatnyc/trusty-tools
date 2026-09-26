@@ -509,6 +509,9 @@ http-body-util.workspace = true
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel Rust test threads (used by bug-report token resolution tests).
 serial_test.workspace = true
+# #8545: the `tm` bin target arms `core::home_write_fence` before `main`, so no
+# test can write the operator's home config paths (see its `test_support`).
+ctor.workspace = true
 # test-util enables tokio's paused-clock (`tokio::time::pause` / `start_paused = true`)
 # used by the deterministic auth-timeout tests in actor_tests.rs (#1649) and by
 # `telegram::supervisor_tests::healthy_run_resets_transient_backoff` (#4306).

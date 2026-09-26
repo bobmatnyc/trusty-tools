@@ -706,6 +706,8 @@ pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
 /// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `remove_global_hooks_at_ignores_project_settings_below_home`.
 pub fn remove_global_trusty_mpm_hooks_at(home: &Path) -> anyhow::Result<usize> {
+    // #8545: the operator's `~/.claude` settings; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude"));
     let files = global_settings_files(home);
 
     let mut changed = 0usize;

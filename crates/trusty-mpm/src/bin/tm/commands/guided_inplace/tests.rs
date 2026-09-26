@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
+use trusty_mpm::core::paths::FrameworkPaths;
 
 const TEST_ID: &str = "11111111-2222-3333-4444-555555555555";
 
@@ -600,6 +601,7 @@ async fn run_inplace_relaunch_falls_through_on_gutted_worktree() {
     let (url, hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
     let client = reqwest::Client::new();
 
+    let fw_home = crate::test_support::hermetic_temp_dir();
     let outcome = run_inplace_relaunch(
         &client,
         &url,
@@ -607,6 +609,7 @@ async fn run_inplace_relaunch_falls_through_on_gutted_worktree() {
         stopped_record_at(&gutted),
         None,
         false,
+        &FrameworkPaths::under(fw_home.path()),
     )
     .await;
 
@@ -651,6 +654,8 @@ async fn run_inplace_relaunch_serves_live_linked_worktree() {
     let (url, hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
     let client = reqwest::Client::new();
 
+    // #8545: provision under a temp home, never the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
     let outcome = run_inplace_relaunch(
         &client,
         &url,
@@ -658,6 +663,7 @@ async fn run_inplace_relaunch_serves_live_linked_worktree() {
         stopped_record_at(&live),
         None,
         false,
+        &FrameworkPaths::under(fw_home.path()),
     )
     .await;
 
@@ -684,7 +690,10 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     // present, mirroring the inverse of the "skip when claude absent"
     // convention used throughout runtime::claude_code's own test suite.
     let tmp = tempfile::tempdir().expect("tempdir");
-    if trusty_mpm::runtime::build_inplace_resume_command(tmp.path(), None).is_ok() {
+    // #8545: provision under a temp home, never the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_home.path());
+    if trusty_mpm::runtime::build_inplace_resume_command_under(&fw, tmp.path(), None).is_ok() {
         return;
     }
 
@@ -692,7 +701,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     let record = stopped_record_at(tmp.path());
     let client = reqwest::Client::new();
 
-    let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None, false).await;
+    let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None, false, &fw).await;
 
     assert!(
         matches!(outcome, InPlaceOutcome::Result(Err(_))),
@@ -1045,7 +1054,11 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
     // into vanilla Claude Code. Requires a real `claude` install; skip
     // otherwise, matching this file's established convention.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let Ok(resume) = trusty_mpm::runtime::build_inplace_resume_command(tmp.path(), None) else {
+    // #8545: provision under a temp home, never the operator's.
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_home.path());
+    let Ok(resume) = trusty_mpm::runtime::build_inplace_resume_command_under(&fw, tmp.path(), None)
+    else {
         return;
     };
     let cmd = build_inplace_exec_command(&resume, tmp.path(), &no_gh(), false);

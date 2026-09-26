@@ -952,7 +952,9 @@ pub(super) fn prepare_session_inner(
     // absent (never clobbers the user's existing statusLine). Non-fatal.
     // #7617: and into the user tier on the same call — provisioning owns both,
     // so the `💸` segment is core setup rather than a project's to arrange.
-    if let Err(err) = ensure_status_line(project_dir) {
+    // #8545: the injected home, not the ambient `$HOME` `ensure_status_line` reads.
+    let user_settings = home.map(|h| h.join(".claude").join("settings.json"));
+    if let Err(err) = ensure_status_line_in(project_dir, user_settings.as_deref()) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
 

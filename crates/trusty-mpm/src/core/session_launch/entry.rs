@@ -233,17 +233,34 @@ pub(crate) fn isolated_framework_paths(project_dir: &Path) -> FrameworkPaths {
 /// spawns a bare `claude` (`commands/session/start.rs`) and so genuinely does
 /// read the user tier; pointing it here would be a regression, not a fix.
 /// What: resolves [`isolated_framework_paths`] for `project_dir` (the cwd the
-/// harness is spawned in) and delegates to [`prepare_session_with_repo_url`],
-/// which is exactly [`prepare_session`] when `repo_url` is `None`.
+/// harness is spawned in) — under `home` when one is given — and runs the
+/// same pipeline [`prepare_session_with_repo_url`] does.
+/// #8545: `home` is the user home the framework source and the user-global
+/// writes resolve under — production passes `dirs::home_dir()`, a test a temp
+/// dir, so driving the real launch path never touches the operator's home.
 /// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`;
 /// `launch_paths_prepare_through_the_isolated_seam` (tm binary) binds the call
-/// sites to it.
+/// sites to it; `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
+/// drives it under a temp home.
 pub fn prepare_isolated_session(
     project_dir: &Path,
     repo_url: Option<&str>,
+    home: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
-    let fw = isolated_framework_paths(project_dir);
-    prepare_session_with_repo_url(&fw, project_dir, repo_url)
+    let fw = match home {
+        Some(home) => FrameworkPaths::for_managed_workspace_under(home, project_dir),
+        None => isolated_framework_paths(project_dir),
+    };
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    prepare_session_inner(
+        &fw,
+        project_dir,
+        None,
+        native,
+        repo_url,
+        None,
+        HostInputs::with_home(home),
+    )
 }
 
 /// Prepare a session, selecting an explicit output style (HR-4).

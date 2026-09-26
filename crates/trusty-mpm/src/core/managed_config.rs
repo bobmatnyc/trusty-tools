@@ -233,6 +233,8 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     project_dir: &Path,
     exe_override: Option<&Path>,
 ) -> anyhow::Result<()> {
+    // #8545: a test binary fences its home; see `core::home_write_fence`.
+    crate::core::home_write_fence::check(config_dir);
     // Phase 1: canonical scaffolding shared with the standalone driver.
     ensure_global_config_dir_with_exe(&fw.root, config_dir, exe_override)?;
 
@@ -413,8 +415,12 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `interactive_config_dir_never_writes_the_home_claude_json`,
 /// `interactive_config_dir_survives_a_malformed_managed_claude_json`,
 /// `interactive_config_dir_withholds_builtins_when_a_pin_failed`.
-pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::PathBuf> {
-    let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
+pub fn prepare_interactive_config_dir(
+    workspace: &Path,
+    home: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    // #8545: resolved under the caller's `home` (production: `dirs::home_dir()`).
+    let Some(home) = home else {
         // #4181: home unresolved — nothing to relocate to. Keep the legacy
         // home-trust seed so the startup dialogs are still dismissed.
         if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(workspace) {
@@ -425,7 +431,8 @@ pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::Pat
         }
         return None;
     };
-    prepare_interactive_config_dir_in(&FrameworkPaths::default(), &config_dir, workspace);
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
+    prepare_interactive_config_dir_in(&FrameworkPaths::under(home), &config_dir, workspace);
     Some(config_dir)
 }
 

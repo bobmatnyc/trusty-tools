@@ -1,0 +1,3 @@
+Fixed
+
+- `cargo test -p trusty-mpm --bin tm` no longer deploys skills, agents and settings into the operator's `~/.trusty-tools/trusty-mpm/claude-config`, `~/.trusty-mpm/framework` or `~/.claude/settings.json`. `tm launch`, `tm connect`, the guided fallback and the in-place relaunch now take the user home as an argument, and the session prep writes the user-tier `statusLine` under that home instead of `$HOME`. The `tm` test binary arms a home-write fence before `main`: a test that reaches a home-config writer panics there, naming the path, before anything is written ([#8545](https://github.com/bobmatnyc/trusty-tools/issues/8545))

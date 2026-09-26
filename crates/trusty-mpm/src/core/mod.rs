@@ -166,6 +166,8 @@ pub mod git_identity;
 pub(crate) mod harness_exclude;
 pub mod harness_root;
 pub mod home_trust_seed;
+// #8545: a test binary's fence around the operator's home config paths.
+pub mod home_write_fence;
 pub mod hook;
 pub mod host_state_gate;
 pub mod idle_nudge;

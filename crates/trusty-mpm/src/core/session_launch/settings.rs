@@ -1020,6 +1020,8 @@ pub(super) fn preseed_workspace_trust_home(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude.json"));
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
@@ -1074,6 +1076,8 @@ pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude"));
     clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
 }
 

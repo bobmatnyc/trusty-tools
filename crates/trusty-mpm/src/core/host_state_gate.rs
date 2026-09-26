@@ -341,6 +341,19 @@ fn passwd_home() -> Option<PathBuf> {
     }
 }
 
+/// The password-database home for the current uid; `None` off unix or on a
+/// failed lookup. #8545: the home-write fence fences it alongside `$HOME`.
+pub(crate) fn passwd_home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        passwd_home()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// Non-unix hosts have no password database and no tmux, so there is nothing
 /// for this gate to isolate — it always allows.
 ///

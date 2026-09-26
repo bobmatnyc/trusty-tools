@@ -467,6 +467,7 @@ async fn run_managed(
         None,
         false,
         super::managed_workspace::LaunchDir::CallerResolved,
+        dirs::home_dir().as_deref(),
     )
     .await
 }

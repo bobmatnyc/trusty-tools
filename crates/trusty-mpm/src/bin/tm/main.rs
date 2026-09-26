@@ -537,8 +537,22 @@ async fn main() -> anyhow::Result<()> {
             worktree,
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
-        }) => launch(&client, &url, dir, style, worktree, LaunchDir::OperatorCwd).await,
-        Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
+        }) => {
+            let home = dirs::home_dir();
+            launch(
+                &client,
+                &url,
+                dir,
+                style,
+                worktree,
+                LaunchDir::OperatorCwd,
+                home.as_deref(),
+            )
+            .await
+        }
+        Some(Command::Connect { dir }) => {
+            connect(&client, &url, dir, dirs::home_dir().as_deref()).await
+        }
         Some(Command::Attach {
             target,
             json,

@@ -521,6 +521,8 @@ pub(crate) async fn run_inplace_relaunch(
     record: trusty_mpm::client::ManagedSessionSummary,
     caller_pane_id: Option<&str>,
     pane_confirmed_dead: bool,
+    // #8545: the layout the resume command provisions; production passes the default.
+    fw: &trusty_mpm::core::paths::FrameworkPaths,
 ) -> InPlaceOutcome {
     eprintln!("tm: this pane belongs to managed session {id} — relaunching in place…");
 
@@ -601,7 +603,8 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::Result(Err(anyhow::anyhow!("{msg}")));
     }
 
-    let resume = match trusty_mpm::runtime::build_inplace_resume_command(
+    let resume = match trusty_mpm::runtime::build_inplace_resume_command_under(
+        fw,
         &cwd,
         record.claude_session_id.as_deref(),
     ) {
@@ -837,6 +840,7 @@ pub(crate) async fn try_inplace_relaunch(
                 record,
                 current_pane_id.as_deref(),
                 false,
+                &trusty_mpm::core::paths::FrameworkPaths::default(),
             )
             .await
             {
