@@ -2,7 +2,7 @@
 name: tm-secrets
 description: Where a trusty credential lives today — the 0600 file store and Keychain behind trusty-common, the two tm doctor rows that check them, and the rules for handling a secret value. The tm secrets CLI does not ship yet.
 user-invocable: true
-version: "1.1.0"
+version: "1.2.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -97,6 +97,11 @@ value in argv is visible in `ps` to every process on the host.
   refuses this for every agent.
 - Never paste a secret value into an issue, a PR body, a commit message, or a
   code comment.
+- Never let a credential CLI print into tool output. Check a Keychain item by
+  exit status (`security find-generic-password -s <svc> >/dev/null 2>&1`, no
+  `-w`/`-g`), and consume a token inside the command that needs it
+  (`$(gcloud auth print-access-token)`), never as a bare run. The pm-guard
+  refuses the printing forms for every agent (#8596, #8248).
 - Never put a value in a command's argv (`some-cli --token abc123`).
 - Never put a credential in a LaunchAgent plist, a committed `.env`, or any
   other file a `plutil -p` or a backup will print. That is #8236.
