@@ -351,12 +351,14 @@ impl MemoryService {
     /// What: 1) confirms the palace exists on disk (else `NotFound`),
     /// 2) when `!force`, lists drawers via the live handle and returns
     /// `BadRequest("Palace has drawers; pass force=true to delete")` if
-    /// the palace is non-empty, 3) drops the in-memory registry entry so
+    /// the palace is non-empty, and `Conflict` while a legacy `kg.db` holds
+    /// drawers or a `.v2-incompatible` file remains (#8434), 3) drops the in-memory registry entry so
     /// future opens hit the (now-missing) disk state, 4) removes
     /// `<data_root>/<palace_id>/` recursively via `tokio::fs::remove_dir_all`,
     /// and 5) emits an aggregate `StatusChanged` so dashboards refresh.
     /// Test: `delete_palace_removes_dir_when_empty`,
     /// `delete_palace_refuses_when_drawers_present`,
+    /// `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`,
     /// `delete_palace_force_removes_populated_palace`,
     /// `delete_palace_returns_not_found_for_missing_id` in `web::tests`.
     pub async fn delete_palace(&self, palace_id: &str, force: bool) -> ServiceResult<()> {
@@ -381,6 +383,24 @@ impl MemoryService {
                         "Palace has drawers; pass force=true to delete",
                     ));
                 }
+            }
+            // #8434: "0 live drawers" is not "empty" while a legacy kg.db or a
+            // quarantined redb 2.x store holds data the live store never saw.
+            // The live set is empty here — a non-empty palace returned above.
+            let dir = self.state.data_root.join(palace_id);
+            let unaccounted = tokio::task::spawn_blocking(move || {
+                crate::commands::legacy_kg::unaccounted_legacy_data(
+                    &dir,
+                    &std::collections::HashSet::new(),
+                )
+            })
+            .await
+            .map_err(|e| ServiceError::internal(format!("legacy data check: {e}")))?;
+            if let Some(reason) = unaccounted {
+                return Err(ServiceError::conflict(format!(
+                    "Palace holds legacy data ({reason}); run `trusty-memory palace legacy-kg \
+                     {palace_id}` to review it, or pass force=true to delete"
+                )));
             }
         }
         // Drop the cached `Arc<PalaceHandle>` and gap cache before unlinking

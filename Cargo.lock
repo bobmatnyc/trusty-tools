@@ -11929,6 +11929,7 @@ dependencies = [
  "postcard",
  "redb 4.1.0",
  "reqwest 0.12.28",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -232,6 +232,51 @@ async fn delete_palace_refuses_when_drawers_present() {
         .expect("a refused delete must leave the palace resolvable");
 }
 
+/// Why (#8434): a palace whose live store is empty can still hold the only
+/// copy of drawers in a legacy SQLite `kg.db`, or a quarantined redb 2.x
+/// store. A non-force delete must refuse both and leave the files in place;
+/// `force` still deletes.
+/// Test: itself.
+#[tokio::test]
+async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
+    use crate::commands::legacy_kg::tests::write_legacy_kg;
+    let (svc, state) = service();
+    for (name, quarantine_only) in [("stranded-kg", false), ("stranded-v2", true)] {
+        svc.create_palace(palace_body(name), ActivitySource::Http)
+            .await
+            .expect("create");
+        let dir = state.data_root.join(name);
+        let marker = if quarantine_only {
+            std::fs::write(dir.join("kg.redb.v2-incompatible"), b"redb2").expect("write");
+            dir.join("kg.redb.v2-incompatible")
+        } else {
+            write_legacy_kg(
+                &dir,
+                &[(
+                    "0b0f5d7e-1d7b-4c35-9a52-4f3f7f2f0a09",
+                    "a fact only kg.db holds",
+                    "2026-04-01T09:00:00Z",
+                )],
+            );
+            dir.join("kg.db")
+        };
+
+        match svc.delete_palace(name, false).await {
+            Err(ServiceError::Conflict(msg)) => assert!(msg.contains("legacy"), "{msg}"),
+            other => panic!("{name}: expected a legacy-data conflict, got {other:?}"),
+        }
+        assert!(
+            marker.exists(),
+            "{name}: a refused delete removed legacy data"
+        );
+
+        svc.delete_palace(name, true)
+            .await
+            .expect("force still deletes");
+        assert!(!dir.exists());
+    }
+}
+
 /// Why (#180): `force` is the explicit destructive opt-in — the conflict guard
 /// must yield to it and the palace must vanish with its drawers.
 /// Test: itself.
