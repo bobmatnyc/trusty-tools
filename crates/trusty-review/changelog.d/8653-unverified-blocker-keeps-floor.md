@@ -1,0 +1,2 @@
+Fixed
+- A blocker whose verification failed no longer posts APPROVE. When the verifier errored or its answer was cut off on the finding that floored the review, and a different finding in the same round was cleanly refuted, the round treated the failed check as a refutation and dropped the verdict to APPROVE. A failed check now counts as unverified: the finding keeps the floor it drove before verification, so a BLOCK it caused stays BLOCK, and the grade follows the verdict (#8653).

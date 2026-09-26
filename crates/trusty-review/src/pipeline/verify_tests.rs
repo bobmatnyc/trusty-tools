@@ -234,7 +234,7 @@ fn rederive_excludes_refuted_relaxes() {
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Refuted);
     // any_clean_refuted=true triggers path (b): drop to APPROVE baseline.
-    let verdict = rederive_verdict(Verdict::Block, false, true, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, true, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Approve,
@@ -247,7 +247,7 @@ fn rederive_keeps_confirmed_block() {
     // Path (a): one High finding, confirmed → survives → BLOCK floor.
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -276,7 +276,7 @@ fn rederive_confirmed_but_disqualified_high_does_not_pin_block() {
     let mut f = finding(Effort::High, 0.95);
     f.code_provable = false; // disqualify: no citation, not diff-provable
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
     assert_ne!(
         verdict,
         Verdict::Block,
@@ -296,7 +296,7 @@ fn rederive_confirmed_medium_still_escalates_to_request_changes() {
     // REQUEST_CHANGES even though the baseline itself was capped.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med]);
+    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med], &[]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -317,7 +317,7 @@ fn rederive_confirmed_praise_keeps_clean_approve() {
     // APPROVE*) = APPROVE, so the verdict stays APPROVE and the grade stays A-.
     let mut praise = finding(Effort::Low, 1.0);
     apply_outcome(&mut praise, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise]);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise], &[]);
     assert_eq!(
         verdict,
         Verdict::Approve,
@@ -343,7 +343,7 @@ fn rederive_confirmed_high_effort_still_escalates_from_approve() {
     // keeps primary_verdict, and derive_verdict's BLOCK floor then escalates.
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high]);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -360,7 +360,13 @@ fn rederive_mixed_keeps_only_surviving_floor() {
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::ApproveWithReservations, true, true, &[high, med]);
+    let verdict = rederive_verdict(
+        Verdict::ApproveWithReservations,
+        true,
+        true,
+        &[high, med],
+        &[],
+    );
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -383,7 +389,7 @@ fn rederive_refuted_finding_does_not_clear_standing_medium_finding() {
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med]);
+    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med], &[]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -402,7 +408,7 @@ fn rederive_error_refuted_preserves_primary_verdict() {
             error_class: "ModelNotFound".to_string(),
         },
     );
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -415,7 +421,7 @@ fn rederive_truncation_refuted_preserves_primary_verdict() {
     // Path (c): all demotions are TruncationRefuted → preserve primary (#726).
     let mut f = finding(Effort::High, 0.85);
     apply_outcome(&mut f, VerifyOutcome::TruncationRefuted);
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,

@@ -325,10 +325,15 @@ pub async fn run_verification_round_with_policy(
     let mut any_confirmed = false;
     let mut any_clean_refuted = false;
     let mut unverified = 0usize;
+    // #8653: pre-demotion copies of the findings whose verification failed.
+    let mut infra_failed: Vec<Finding> = Vec::new();
     for (idx, outcome) in outcomes {
         match &outcome {
             VerifyOutcome::Confirmed => any_confirmed = true,
             VerifyOutcome::Refuted => any_clean_refuted = true,
+            VerifyOutcome::ErrorRefuted { .. } | VerifyOutcome::TruncationRefuted => {
+                infra_failed.push(findings[idx].clone());
+            }
             _ => {}
         }
         if outcome.is_unverified() {
@@ -343,6 +348,7 @@ pub async fn run_verification_round_with_policy(
         any_confirmed,
         any_clean_refuted,
         findings,
+        &infra_failed,
     );
     info!(
         primary = %primary_verdict,
@@ -391,10 +397,14 @@ pub async fn run_verification_round_with_policy(
 ///       set trips `grade`'s low-confidence collapse, which dissolved the
 ///       model's own BLOCK. Surviving findings may still escalate.
 ///
+/// On every path, a finding whose verification failed (`infra_failed`, its
+/// pre-demotion copy) keeps the floor it drove before verification (#8653).
+///
 /// `UNKNOWN` is handled by the caller and never reaches here.
 /// What: filters survivors (non-refuted), selects baseline (path a2 takes the
 /// severity-min of `primary_verdict` and APPROVE*), calls
-/// `derive_verdict(baseline, survivors)`.
+/// `derive_verdict(baseline, survivors)`, then raises the result to
+/// [`unverified_floor`].
 /// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
 /// `rederive_confirmed_medium_still_escalates_to_request_changes` (a2 — #1876,
 /// supersedes the pre-#1876 `..._caps_at_approve_star` expectation),
@@ -402,12 +412,14 @@ pub async fn run_verification_round_with_policy(
 /// `rederive_refuted_finding_does_not_clear_standing_medium_finding` (a2 — #1876),
 /// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
 /// `rederive_truncation_refuted_preserves_primary_verdict` (c),
-/// `run_review_refuted_sole_blocker_does_not_clamp_to_block` (a vs a2 — #4044).
+/// `run_review_refuted_sole_blocker_does_not_clamp_to_block` (a vs a2 — #4044),
+/// `run_review_truncated_blocker_beside_refuted_nit_keeps_block` (#8653).
 fn rederive_verdict(
     primary_verdict: Verdict,
     any_confirmed: bool,
     any_clean_refuted: bool,
     findings: &[Finding],
+    infra_failed: &[Finding],
 ) -> Verdict {
     let survivors: Vec<Finding> = findings
         .iter()
@@ -492,7 +504,35 @@ fn rederive_verdict(
         // what the model itself said.
         return verdict_max(rederived, primary_verdict);
     }
-    rederived
+    // #8653: ErrorRefuted / TruncationRefuted mean UNVERIFIED, not refuted — the
+    // same reading path (c) gives an all-infra round. A clean refutation or
+    // confirmation elsewhere in the round is no evidence against them.
+    verdict_max(rederived, unverified_floor(&primary_verdict, infra_failed))
+}
+
+/// The verdict floor that findings whose verification failed still carry.
+///
+/// Why (#8653): a verifier error or truncation is not a refutation, so the
+/// finding keeps the weight it had before the round. Only path (c) honoured
+/// that; a mixed round let one unrelated clean refutation drop an unverified
+/// blocker to APPROVE.
+/// What: the grader's own verdict over the pre-demotion `infra_failed` findings
+/// (`derive_verdict` from an APPROVE baseline, so category caps and the #1897
+/// cap apply as at grade time), capped at `primary` so an unverified finding
+/// never raises the verdict above what it was before verification. A blocker
+/// that floored `primary` to BLOCK therefore keeps BLOCK. APPROVE when empty.
+/// Test: `run_review_truncated_blocker_beside_refuted_nit_keeps_block`,
+/// `run_review_errored_blocker_beside_refuted_nit_keeps_block`,
+/// `run_review_truncated_blocker_beside_confirmed_conformance_keeps_block`,
+/// `run_review_refuted_blocker_beside_refuted_nit_still_relaxes`.
+fn unverified_floor(primary: &Verdict, infra_failed: &[Finding]) -> Verdict {
+    if infra_failed.is_empty() {
+        return Verdict::Approve;
+    }
+    verdict_min(
+        primary.clone(),
+        derive_verdict(Verdict::Approve, infra_failed),
+    )
 }
 
 /// Return the *more severe* (severity-max) of two verdicts.
