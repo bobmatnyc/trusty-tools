@@ -38,6 +38,8 @@ pub(crate) mod metadata_apply;
 pub(crate) mod missing_label;
 pub(crate) mod open;
 pub(crate) mod queue_check;
+// #8638: one latest-run rule for every rollup reader (queue-check, wait).
+pub(crate) mod rollup;
 
 #[cfg(test)]
 #[path = "tests.rs"]

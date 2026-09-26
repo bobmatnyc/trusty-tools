@@ -22,8 +22,9 @@
 //! A body is one or more pipelines separated by `;` or newlines. Every command
 //! must be on the allowlist in [`super::read_only_programs`]. Everything else
 //! is refused, including any other `&&`, `||`, `&`, any redirect other than `2>&1` and
-//! `2>/dev/null`, an assignment or wrapper before the program, and any
-//! expansion outside the `for` shape. No filesystem or daemon is consulted, so
+//! `2>/dev/null`, an assignment or wrapper before the program, any
+//! expansion outside the `for` shape, and a double-quoted `\` escape or `$`
+//! outside an `rg`/`grep` argument (#8586). No filesystem or daemon is consulted, so
 //! the rule has no I/O arm to fail open through.
 //! Out of scope: the `Write`, `Edit` and `NotebookEdit` tools; what a user's
 //! own shell aliases and functions do; `cargo metadata`/`cargo tree` updating
@@ -152,7 +153,8 @@ impl Parser<'_> {
             return Ok(());
         }
         let dir = match self.toks.get(self.at + 1..self.at + 4) {
-            Some([Tok::Word(d), Tok::AndIf, Tok::Word(_)]) => d.lit(),
+            // #8586: pattern text is an rg/grep argument, never a directory.
+            Some([Tok::Word(d), Tok::AndIf, Tok::Word(_)]) if !d.pattern => d.lit(),
             _ => None,
         };
         let plain = dir.filter(|d| {
@@ -201,7 +203,8 @@ impl Parser<'_> {
         let mut words = 0;
         while let Some(Tok::Word(w)) = self.toks.get(self.at) {
             let flag_like = w.lit().is_none_or(|t| t.starts_with('-'));
-            if w.kind != WordKind::Expanding && flag_like {
+            // #8586: pattern text never reaches a loop variable.
+            if w.pattern || (w.kind != WordKind::Expanding && flag_like) {
                 return Err("a `for` list word that is not a literal operand".into());
             }
             words += 1;
@@ -246,12 +249,18 @@ impl Parser<'_> {
     }
 
     /// One simple command's words, then any `2>&1`/`2>/dev/null`.
+    ///
+    /// What: a word carrying [`Word::pattern`] text is accepted only when the
+    /// program is `rg` or `grep` (#8586).
+    /// Test: `read_only_allow_tests::shell_syntax_around_quoted_patterns_is_refused`.
     fn command(&mut self, var: Option<&str>) -> Result<Vec<Arg>, String> {
         let mut args = Vec::new();
+        let mut pattern = false;
         while let Some(Tok::Word(w)) = self.toks.get(self.at) {
             if args.is_empty() && is_reserved(w) {
                 return Err(format!("the shell keyword `{}` here", w.text));
             }
+            pattern |= w.pattern;
             args.push(to_arg(w, var)?);
             self.at += 1;
         }
@@ -260,6 +269,13 @@ impl Parser<'_> {
         }
         if args.is_empty() {
             return Err("an empty command".into());
+        }
+        // #8586: a double-quoted `\` escape or literal `$` is regex text for
+        // rg/grep; every other program keeps the strict quoting rule.
+        if pattern && !matches!(args[0].text(), Some("rg" | "grep")) {
+            return Err(
+                "a `\\` escape or `$` inside double quotes outside an `rg`/`grep` argument".into(),
+            );
         }
         Ok(args)
     }
@@ -299,16 +315,19 @@ const LOOP_NAMES: &[&str] = &[
 
 /// The deny text for a read-only dispatch's refused command (#8439).
 fn deny_reason(agent: &str, what: &str) -> String {
+    // #8567: names the gh read verbs and `date`. #8586: the quoted-pattern hint.
     format!(
         "Read-only dispatch refused a command (#8439): `{agent}` is a read-only agent, and this \
          command has {what}. A read-only agent runs only allowlisted reads, one per call, with \
          literal arguments: git [-C <dir>] status/log/diff/show/grep/rev-parse/ls-files/\
          merge-base/ls-remote/branch --list/worktree list; cat/head/tail/wc/ls/grep/rg; find without \
          -exec/-delete/-fprint; sed -n with a print script; plutil -p/-lint; defaults read; \
-         launchctl print/list; tmux capture-pane -p; cargo metadata/tree; echo; pwd. A pipe \
-         into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` and one \
-         leading `cd <dir> &&` with a literal path. If \
-         the task needs a write, report back so the PM dispatches a writing agent."
+         launchctl print/list; tmux capture-pane -p; cargo metadata/tree; gh issue view/list, \
+         gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd. A \
+         pipe into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` \
+         and one leading `cd <dir> &&` with a literal path. An rg/grep pattern may carry `\\` \
+         escapes and an end-of-line `$` inside quotes; single quotes are the safest. If the \
+         task needs a write, report back so the PM dispatches a writing agent."
     )
 }
 

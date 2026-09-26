@@ -2262,6 +2262,40 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
     }
 }
 
+/// #8630: adaptive-crm spent its org's Actions cap and every job failed after.
+/// The deployed `git-workflow` entry must carry the four-check heading, each
+/// check, the run-spend rule and the billing-blocker phrase, and the composed
+/// `version-control` body must point at that section.
+#[test]
+fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
+    let deployed = ALL
+        .iter()
+        .find(|a| a.rel_path == "skills/git-workflow.md")
+        .expect("git-workflow must be in the ALL bundle table")
+        .contents;
+    for needle in [
+        "### Four Checks Before a Workflow Edit or a PR on a Billed Repo",
+        "branches: [main]",
+        "cancel-in-progress: ${{ github.ref != format(",
+        "timeout-minutes: 20",
+        "if: needs.changes.outputs.db == 'true'",
+        "Never re-run a green run.",
+        "recent account payments have failed or your spending limit",
+        "19,667 Linux minutes",
+    ] {
+        assert!(
+            deployed.contains(needle),
+            "deployed git-workflow skill is missing the #8630 Actions-spend text: {needle:?}"
+        );
+    }
+    let composed = crate::core::agent_builder::compose_agent("version-control", agent_assets_dir())
+        .expect("compose_agent(version-control) must succeed");
+    assert!(
+        composed.contains("git-workflow/SKILL.md`, \"GitHub Actions Spend\""),
+        "composed version-control must point at the #8630 section"
+    );
+}
+
 /// 🔴 #7558 REGRESSION, second home: `tm-workflow` owns the main-checkout
 /// `pull --ff-only` refresh and already names ONE cause of its failure
 /// (another session's uncommitted work). The untracked-path collision is a

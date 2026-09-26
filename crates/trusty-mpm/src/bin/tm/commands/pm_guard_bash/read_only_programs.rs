@@ -19,6 +19,8 @@
 //! - `tmux capture-pane` with `-p`, no `-b`, and plain `-t`/`-S`/`-E` values.
 //! - `cargo metadata` / `cargo tree` without `--config` or `-Z`.
 //! - `git`: see [`super::read_only_git`].
+//! - `gh`: see [`super::read_only_gh`] (#8567).
+//! - `date` that only prints ([`date`], #8567).
 //! - `echo`, `pwd`.
 //!
 //! A pipe stage after the first must be `cat`, `head`, `tail`, `wc`, `grep`,
@@ -26,6 +28,7 @@
 //! Test: `read_only_allow_tests::legitimate_reads_stay_allowed`,
 //! `read_only_allow_tests::critic_round_three_probes_are_refused`.
 
+use super::read_only_gh::check_gh;
 use super::read_only_git::check_git;
 
 /// One argument of a judged command.
@@ -153,6 +156,9 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
         "tmux" => tmux(rest),
         "cargo" => cargo(rest),
         "git" => check_git(rest),
+        // #8567: GitHub reads, and `date` for a dispatch's start time.
+        "gh" => check_gh(rest),
+        "date" => date(rest),
         "echo" => Ok(()),
         "pwd" if rest.is_empty() => Ok(()),
         _ => Err(format!(
@@ -172,6 +178,43 @@ fn tail(rest: &[Arg]) -> Verdict {
         .any(|t| t.starts_with("--") || (t.starts_with('-') && t.contains(['f', 'F'])));
     if follows {
         return Err("`tail` with a long option or `-f`/`-F`".into());
+    }
+    Ok(())
+}
+
+/// `date` that prints and never sets the clock (#8567).
+///
+/// Why: GNU `date -s`/`--set`, a BSD bare `[[cc]yy]mmddHHMM` operand, and BSD
+/// `date -f fmt value` without `-j` each set the system clock when run as
+/// root or with `CAP_SYS_TIME`.
+/// What: options `-u`, `-R`, `-j`, `--utc`, `--rfc-email`, `-I*`,
+/// `--iso-8601*`, `--rfc-3339=*` and `-r <literal>`; every operand starts
+/// with `+`. Anything else is refused.
+/// Test: `read_only_allow_tests::date_is_allowed`,
+/// `read_only_allow_tests::date_that_writes_or_sets_the_clock_is_refused`.
+fn date(rest: &[Arg]) -> Verdict {
+    let mut i = 0;
+    while let Some(arg) = rest.get(i) {
+        let t = arg
+            .text()
+            .ok_or("a `date` argument that is not a literal")?;
+        i += 1;
+        let prints = matches!(t, "-u" | "-R" | "-j" | "--utc" | "--rfc-email")
+            || t.starts_with("-I")
+            || t.starts_with("--iso-8601")
+            || t.starts_with("--rfc-3339=")
+            || t.starts_with('+');
+        if prints {
+            continue;
+        }
+        if t == "-r" && rest.get(i).and_then(Arg::text).is_some() {
+            i += 1;
+            continue;
+        }
+        return Err(format!(
+            "`date {t}`, which is not a print-only form (`date -s`, a bare time operand and \
+             `-f` can set the clock)"
+        ));
     }
     Ok(())
 }
