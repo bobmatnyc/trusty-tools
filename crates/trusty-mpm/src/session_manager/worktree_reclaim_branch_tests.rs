@@ -258,6 +258,56 @@ fn worktree_8109_a_failed_compare_and_delete_keeps_the_branch() {
     assert!(branch_exists(&fx.repo, "wt/locked-8109"));
 }
 
+/// 🔴 #8109 critic: a branch that is a symref to another branch at the same
+/// tip deletes only itself, never the branch it names.
+///
+/// Fails without `--no-deref`: `update-ref -d` follows the symref and deletes
+/// the target.
+#[test]
+fn worktree_8109_a_symref_branch_never_deletes_its_target() {
+    let fx = GitWorktreeFixture::new();
+    git(&fx.repo, &["branch", "target-8109"]);
+    let tip = git(&fx.repo, &["rev-parse", "target-8109"]);
+    git(
+        &fx.repo,
+        &[
+            "symbolic-ref",
+            "refs/heads/wt/sym-8109",
+            "refs/heads/target-8109",
+        ],
+    );
+    let outcome = delete_reclaimed_branch(&fx.repo, "wt/sym-8109", &tip);
+    assert_eq!(outcome, BranchCleanup::Deleted, "{outcome:?}");
+    assert!(
+        branch_exists(&fx.repo, "target-8109"),
+        "deleting a symref branch deleted the branch it names"
+    );
+    assert_eq!(git(&fx.repo, &["rev-parse", "target-8109"]), tip);
+}
+
+/// #8109 critic: an empty or malformed proven SHA never reaches
+/// `update-ref -d`, where an empty old value deletes unconditionally.
+#[test]
+fn worktree_8109_an_unproven_sha_keeps_the_branch() {
+    let fx = GitWorktreeFixture::new();
+    git(&fx.repo, &["branch", "wt/unproven-8109"]);
+    let tip = git(&fx.repo, &["rev-parse", "wt/unproven-8109"]);
+    let malformed = [
+        String::new(),
+        "   ".to_string(),
+        tip[..12].to_string(),
+        format!("{}z", &tip[..39]),
+        format!("{tip}0"),
+    ];
+    for proven in &malformed {
+        match delete_reclaimed_branch(&fx.repo, "wt/unproven-8109", proven) {
+            BranchCleanup::Kept(why) => assert!(why.contains("full object name"), "{why}"),
+            other => panic!("`{proven}` was not kept: {other:?}"),
+        }
+    }
+    assert_eq!(git(&fx.repo, &["rev-parse", "wt/unproven-8109"]), tip);
+}
+
 /// 🔴 #8109: the incident's own shape. The branch-name lookup finds nothing,
 /// and the head-commit search finds another branch's merged pull request whose
 /// head descends from this HEAD. That match is not the branch's own, so the

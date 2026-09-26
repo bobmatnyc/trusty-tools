@@ -10,7 +10,8 @@ Fixed
   too, only when its content is proven landed, its tip is still the exact
   commit that proof judged, and no other worktree (the main checkout
   included) has it checked out. The deletion is one compare-and-delete
-  (`git update-ref -d` at the proven commit), so a commit made after the
+  (`git update-ref --no-deref -d` at the proven commit, never through a
+  symref and never without a full commit SHA), so a commit made after the
   proof keeps the branch. A failed branch lookup keeps the branch rather
   than reporting it gone. Each deletion or kept branch is logged. The landed-content proof
   (up to 40 s) now runs once per candidate before deletion, not twice.

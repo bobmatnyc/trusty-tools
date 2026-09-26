@@ -136,21 +136,34 @@ pub(crate) enum BranchCleanup {
 /// proves nothing; deletion is safe only on the `merge-tree` proof, which the
 /// caller took before the removal and whose judged `HEAD` it hands in as
 /// `proven_head` ([`ReclaimProof::head`]).
-/// What: keeps the branch when the worktree listing cannot be read or names no
-/// tree, or when any tree — the main checkout included — has it checked out
+/// What: keeps the branch when `proven_head` is not a full 40- or 64-hex
+/// object name, when the worktree listing cannot be read or names no tree, or
+/// when any tree — the main checkout included — has it checked out
 /// ([`holder_of`]). A quiet miss on the ref is [`BranchCleanup::Absent`]; any
 /// other lookup failure keeps it. Then one compare-and-delete,
-/// `git update-ref -d refs/heads/<branch> <proven_head>`, which git refuses
-/// unless the tip is still `proven_head` — a moved tip keeps the branch.
+/// `git update-ref --no-deref -d refs/heads/<branch> <proven_head>`, which git
+/// refuses unless the tip is still `proven_head` — a moved tip keeps the
+/// branch, and a symref branch never deletes the branch it names.
 /// Test: `worktree_8109_a_reclaimed_landed_worktree_loses_its_branch`,
 /// `worktree_8109_a_branch_checked_out_elsewhere_is_kept`,
 /// `worktree_8109_a_branch_that_moved_after_the_proof_is_kept`,
-/// `worktree_8109_a_failed_compare_and_delete_keeps_the_branch`.
+/// `worktree_8109_a_failed_compare_and_delete_keeps_the_branch`,
+/// `worktree_8109_a_symref_branch_never_deletes_its_target`,
+/// `worktree_8109_an_unproven_sha_keeps_the_branch`.
 pub(crate) fn delete_reclaimed_branch(
     repo_root: &Path,
     branch: &str,
     proven_head: &str,
 ) -> BranchCleanup {
+    // #8109 critic: an empty old value makes `update-ref -d` unconditional, so
+    // only a full SHA-1 or SHA-256 object name may reach it.
+    let proven = proven_head.trim();
+    if !is_full_object_name(proven) {
+        return BranchCleanup::Kept(format!(
+            "the proven HEAD `{proven}` is not a full object name, so no compare-and-delete \
+             can rest on it"
+        ));
+    }
     let listing = match git_stdout(repo_root, &["worktree", "list", "--porcelain"]) {
         Ok(listing) => listing,
         Err(e) => return BranchCleanup::Kept(format!("the worktree listing failed: {e}")),
@@ -180,9 +193,12 @@ pub(crate) fn delete_reclaimed_branch(
         Ok(_) => {}
     }
     // #8109 critic: compare-and-delete in one step, so the tip cannot move
-    // between the comparison and the deletion.
-    let proven = proven_head.trim();
-    match git_stdout(repo_root, &["update-ref", "-d", &tip_ref, proven]) {
+    // between the comparison and the deletion. `--no-deref` deletes the branch
+    // ref itself, never the branch a symref names.
+    match git_stdout(
+        repo_root,
+        &["update-ref", "--no-deref", "-d", &tip_ref, proven],
+    ) {
         Ok(_) => {
             // `branch -D` also drops the branch's config section; best-effort,
             // since most reclaimed branches have none.
@@ -197,6 +213,11 @@ pub(crate) fn delete_reclaimed_branch(
              the ref could not be locked: {e}"
         )),
     }
+}
+
+/// Exactly 40 (SHA-1) or 64 (SHA-256) hex characters (#8109 critic).
+fn is_full_object_name(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// One candidate's landed proof, taken at most once in its pre-delete pass
