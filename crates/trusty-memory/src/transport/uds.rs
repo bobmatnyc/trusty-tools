@@ -434,7 +434,12 @@ pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
     // part of serving.
     remove_retired_discovery_files();
 
-    serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
+    // #8314: teardown's bound counts the grace window from the signal.
+    let shutdown = async {
+        trusty_common::shutdown_signal().await;
+        crate::exit_runtime::note_shutdown_requested();
+    };
+    serve_with_shutdown(state, socket, shutdown).await
 }
 
 /// [`serve`]'s body, with the shutdown future supplied by the caller.
