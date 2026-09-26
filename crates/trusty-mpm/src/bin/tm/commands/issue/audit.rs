@@ -54,7 +54,7 @@ use anyhow::Context as _;
 
 use crate::commands::issue::epic::audit_rows::epic_rows;
 use crate::commands::issue::epic::backend::GhEpicBackend;
-use crate::commands::issue::epic::status_prefix;
+use crate::commands::issue::epic::state_model;
 use crate::commands::ticket::labels::gh_list_repo_labels;
 use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
 
@@ -104,9 +104,9 @@ pub(crate) fn run(
     // the dispatcher, so a windowed run stays #7097's model-free read.
     let epic_backend = GhEpicBackend::new(RealCommandRunner::with_gh_env(gh_env));
     let epic_rows_for = |number: u64| {
-        let prefix = status_prefix(lifecycle)?;
-        epic_rows(&epic_backend, number, &prefix)
-            .with_context(|| format!("epic rows for #{number}"))
+        // #8696: the rows resolve child labels through the model's states.
+        let model = state_model(lifecycle)?;
+        epic_rows(&epic_backend, number, &model).with_context(|| format!("epic rows for #{number}"))
     };
     let reads = AuditReads {
         view: &view,

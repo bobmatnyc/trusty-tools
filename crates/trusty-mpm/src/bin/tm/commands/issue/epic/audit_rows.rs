@@ -36,6 +36,8 @@ use std::collections::BTreeSet;
 
 use trusty_mpm::core::issue_audit::{AuditRow, Verdict};
 
+use crate::commands::issue::config::StateModel;
+
 use super::backend::EpicBackend;
 use super::render::{self, PHASES_END, PHASES_START};
 
@@ -50,8 +52,8 @@ pub(crate) const REQ_PHASE_LINKAGE: &str = "phase linkage";
 /// tracker's children and the repository's phase-titled issues, so they are
 /// computed only for an issue that declares a `phases` block.
 /// What: reads the body; no `phases:start` line → empty. Otherwise renders the
-/// block from the children exactly as `sync` would — under the same
-/// `status_prefix` — and compares byte for byte (a body `replace_block`
+/// block from the children exactly as `sync` would — under the same state
+/// `model` (#8696) — and compares byte for byte (a body `replace_block`
 /// refuses is a FAIL naming the refusal); then lists every issue titled
 /// `[EPIC_<tracker> PHASE_…]`, FAILs when the search omitted a linked phase
 /// (the index has not caught up), and FAILs on each candidate that is not in
@@ -60,18 +62,21 @@ pub(crate) const REQ_PHASE_LINKAGE: &str = "phase linkage";
 /// phase is linked and the result therefore cannot be cross-checked. Any
 /// backend failure is propagated — an audit that could not enumerate must not
 /// print PASS.
-/// Test: see the module doc.
+/// Test: see the module doc, plus
+/// `audit_rows_fail_a_stale_block_hidden_behind_a_prefix_less_label`.
 pub(crate) fn epic_rows<B: EpicBackend>(
     backend: &B,
     tracker: u64,
-    status_prefix: &str,
+    model: &StateModel,
 ) -> anyhow::Result<Vec<AuditRow>> {
     let body = backend.body(tracker)?;
     if !body.lines().any(|l| l.trim() == PHASES_START) {
         return Ok(Vec::new());
     }
     let children = backend.children(tracker)?;
-    let table = render::phases_table(&children, status_prefix);
+    // #8696: same model-driven renderer `sync` writes with, so the audit
+    // cannot pass a block the sync would have rewritten.
+    let table = render::phases_table(&children, model);
     let rows = children
         .iter()
         .filter(|c| render::phase_number_of(&c.title).is_some())

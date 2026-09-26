@@ -72,9 +72,9 @@ pub(crate) struct NewIssue {
 ///
 /// Why: the `phases` block is rendered from live child state, so the row's
 /// number, state and gate all come from the child itself.
-/// What: the number, title, `OPEN`/`CLOSED` state, label names (whose
-/// `status:*` member fills the State column, #8448) and body (whose `## Gate`
-/// section fills the Gate column).
+/// What: the number, title, `OPEN`/`CLOSED` state, label names (the one the
+/// state model issues for a lifecycle state fills the State column, #8448,
+/// #8696) and body (whose `## Gate` section fills the Gate column).
 /// Test: `gh_backend_parses_the_sub_issue_connection`,
 /// `gh_backend_reads_a_childs_labels_with_its_body`.
 #[derive(Debug, Clone)]
@@ -85,7 +85,8 @@ pub(crate) struct ChildIssue {
     pub(crate) title: String,
     /// `OPEN` or `CLOSED`, as gh reports it.
     pub(crate) state: String,
-    /// The child's label names; the `status:*` one is its lifecycle state.
+    /// The child's label names; the one matching a model state's
+    /// `label.name` is its lifecycle state (#8696).
     pub(crate) labels: Vec<String>,
     /// The child's body, read for its `## Gate` section.
     pub(crate) body: String,

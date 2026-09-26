@@ -38,7 +38,7 @@ mod tests;
 use std::path::Path;
 
 use crate::cli::EpicCmd;
-use crate::commands::issue::config::load_model_with_source;
+use crate::commands::issue::config::{StateModel, load_model_with_source};
 use crate::commands::ticket::runner::RealCommandRunner;
 
 use backend::GhEpicBackend;
@@ -54,7 +54,7 @@ use create::{CreateOptions, CreateReport};
 /// What: builds a [`GhEpicBackend`] over a runner bound to the resolved
 /// per-project GitHub identity (#1265), then dispatches. The two verbs that
 /// render the `phases` block (`create`, `sync`) load the state model the way
-/// `tm issue transition` does, for its status-label prefix (#8448);
+/// `tm issue transition` does, and render through it (#8448, #8696);
 /// `lifecycle` is the configured `agents.ticketing.lifecycle_model`.
 /// Test: `epic_create_requires_a_milestone`, `epic_create_requires_a_component`,
 /// `epic_create_requires_a_session_name`.
@@ -84,13 +84,13 @@ pub(crate) fn run(
                 session: require_session(session)?,
                 tracker,
                 dry_run,
-                status_prefix: status_prefix(lifecycle)?,
+                model: state_model(lifecycle)?,
             };
             let report = create::create(&backend, &opts)?;
             print_create(&report);
         }
         EpicCmd::Sync { epic } => {
-            let report = sync::sync(&backend, epic, &status_prefix(lifecycle)?)?;
+            let report = sync::sync(&backend, epic, &state_model(lifecycle)?)?;
             if report.unchanged {
                 println!(
                     "#{}: phases block already matches its {} child issue(s) — nothing written",
@@ -145,19 +145,21 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// The status-label prefix of the state model in force (#8448).
+/// The state model in force, for rendering the `phases` block (#8448).
 ///
-/// Why: the State cell strips this prefix from a child's lifecycle label, and
-/// it differs per project (`status:` here, `unicorn:` in the crate default) —
-/// so it is read from the same model `tm issue transition` resolves, never
-/// hardcoded. The epic verbs carry no `--config` flag, so the flag slot is
-/// `None` and discovery runs from the working directory upward. `tm issue
-/// audit` shares it for the epic rows, loading only on that path (#8448).
+/// Why: the State cell resolves a child's labels through the model's states
+/// and strips its `status_prefix` — both differ per project (`status:` here,
+/// `unicorn:` in the crate default) — so the model is the same one `tm issue
+/// transition` resolves, never a hardcoded prefix (#8696: the prefix alone
+/// missed a label whose name lacks it). The epic verbs carry no `--config`
+/// flag, so the flag slot is `None` and discovery runs from the working
+/// directory upward. `tm issue audit` shares it for the epic rows, loading
+/// only on that path (#8448).
 /// Test: `phases_table_uses_the_configured_status_prefix` covers the renderer;
 /// the load itself is `load_model_in`'s.
-pub(crate) fn status_prefix(lifecycle: Option<&Path>) -> anyhow::Result<String> {
+pub(crate) fn state_model(lifecycle: Option<&Path>) -> anyhow::Result<StateModel> {
     let (model, _source) = load_model_with_source(None, lifecycle)?;
-    Ok(model.label_config.status_prefix)
+    Ok(model)
 }
 
 /// The milestone every issue in the run carries, or the refusal.

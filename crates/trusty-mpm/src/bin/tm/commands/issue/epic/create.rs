@@ -52,6 +52,7 @@ use std::path::PathBuf;
 use super::backend::{ChildIssue, EpicBackend, NewIssue, PUBLISH_REF};
 use super::plan::{self, EpicPlan};
 use super::render;
+use crate::commands::issue::config::StateModel;
 use crate::commands::issue::standard_live::one_line;
 
 /// The comment prefix recording on the issue why it carries no project.
@@ -108,9 +109,9 @@ pub(crate) struct CreateOptions {
     pub(crate) tracker: Option<u64>,
     /// Plan and report without mutating anything.
     pub(crate) dry_run: bool,
-    /// The state model's status-label prefix the final sync renders the State
-    /// cell with (#8448).
-    pub(crate) status_prefix: String,
+    /// The state model the final sync renders the State cell through
+    /// (#8448, #8696).
+    pub(crate) model: StateModel,
 }
 
 /// What one `create` run did.
@@ -223,7 +224,7 @@ pub(crate) fn create<B: EpicBackend>(
         report.filed.push((number, filed));
     }
 
-    super::sync::sync(backend, tracker, &opts.status_prefix)?;
+    super::sync::sync(backend, tracker, &opts.model)?;
     Ok(report)
 }
 

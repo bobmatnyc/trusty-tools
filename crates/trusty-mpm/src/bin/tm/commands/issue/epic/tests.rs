@@ -34,7 +34,50 @@ use trusty_mpm::core::issue_audit::Verdict;
 const REL_PATH: &str = "docs/research/tm-epic-cli/epic-plan.md";
 /// This repository's status-label prefix (`issue-state.yaml`); the crate
 /// default model's is `unicorn:`, which the hook tests run under (#8448).
-const STATUS: &str = "status:";
+/// The lifecycle model of this repo's `TICKETING.md`, inline: label-less
+/// `open`/`closed` around four `status:*` states whose label names equal the
+/// state names. The renderer resolves labels through it (#8696).
+fn status_model() -> StateModel {
+    let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "status:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "status:in-progress", label: { name: "status:in-progress", color: "AABBCC" }, order: 1 }
+  - { name: "status:coded", label: { name: "status:coded", color: "AABBCC" }, order: 2 }
+  - { name: "status:merged", label: { name: "status:merged", color: "AABBCC" }, order: 3 }
+  - { name: "status:tested", label: { name: "status:tested", color: "AABBCC" }, order: 4 }
+  - { name: closed, gh_state: closed, order: 5 }
+transitions:
+  - { from: open, to: "status:in-progress", trigger: executor_start }
+  - { from: "status:in-progress", to: "status:coded", trigger: executor_start }
+  - { from: "status:coded", to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+    serde_yaml::from_str(yaml).expect("the status model parses")
+}
+
+/// #8696: the model of the reporting repo — `status_prefix` is `status:`, yet
+/// the `status:in-progress` state's label is the repo's pre-existing
+/// `in-progress`, and `status:coded`'s is `status:coded`. Legal: the schema
+/// relates neither field to the prefix.
+fn prefixless_model() -> StateModel {
+    let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "status:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "status:in-progress", label: { name: "in-progress", color: "FBCA04" }, order: 1 }
+  - { name: "status:coded", label: { name: "status:coded", color: "AABBCC" }, order: 2 }
+  - { name: closed, gh_state: closed, order: 3 }
+transitions:
+  - { from: open, to: "status:in-progress", trigger: executor_start }
+  - { from: "status:in-progress", to: "status:coded", trigger: executor_start }
+  - { from: "status:coded", to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+    serde_yaml::from_str(yaml).expect("the prefix-less model parses")
+}
 /// A plausible 40-hex commit for the permalink assertions.
 const PUBLISHED_SHA: &str = "581cfb4da254f7448c5c042c8d9bea50ebe84828";
 /// gh's handled wording when the token lacks the `project` scope — the ONE
@@ -506,7 +549,7 @@ fn opts_for(dir: &tempfile::TempDir, project: Option<u64>) -> CreateOptions {
         session: "tm-trusty-tools-15".to_string(),
         tracker: None,
         dry_run: false,
-        status_prefix: STATUS.to_string(),
+        model: status_model(),
     }
 }
 
@@ -793,7 +836,7 @@ fn child(phase: u64, number: u64) -> ChildIssue {
 #[test]
 fn render_replaces_the_whole_phases_block() {
     let body = format!("prose\n\n{PHASES_START}\n| stale |\n{PHASES_END}\n\ntail\n");
-    let table = render::phases_table(&[child(1, 101), child(2, 102)], STATUS);
+    let table = render::phases_table(&[child(1, 101), child(2, 102)], &status_model());
     let out = render::replace_block(&body, PHASES_START, PHASES_END, &table).expect("replaces");
     assert!(!out.contains("| stale |"), "{out}");
     assert!(
@@ -820,7 +863,7 @@ fn gate_of_reads_only_the_first_paragraph() {
             labels: Vec::new(),
             body: body.to_string(),
         }],
-        STATUS,
+        &status_model(),
     );
     assert!(rendered.contains("| the gate line. |"), "{rendered}");
     assert!(!rendered.contains("phase summary"), "{rendered}");
@@ -838,7 +881,7 @@ fn render_escapes_a_pipe_in_a_phase_title() {
             labels: Vec::new(),
             body: "## Gate\n\nnone | really\n".to_string(),
         }],
-        STATUS,
+        &status_model(),
     );
     assert!(rendered.contains(r"create\|sync"), "{rendered}");
     assert!(rendered.contains(r"none \| really"), "{rendered}");
@@ -1422,7 +1465,7 @@ fn sync_replaces_the_whole_block_and_discards_a_hand_edited_row() {
         "## Gate\n\ngate 1\n",
     );
 
-    let report = sync::sync(&backend, 100, STATUS).expect("syncs");
+    let report = sync::sync(&backend, 100, &status_model()).expect("syncs");
     assert!(!report.unchanged);
     assert_eq!(report.rows, 1);
 
@@ -1451,7 +1494,7 @@ fn sync_leaves_every_byte_outside_the_markers_identical() {
         "## Gate\n\ngate 1\n",
     );
 
-    sync::sync(&backend, 100, STATUS).expect("syncs");
+    sync::sync(&backend, 100, &status_model()).expect("syncs");
     let after = backend.issue(100).body;
     assert_ne!(after, before, "the block itself must change");
 
@@ -1491,7 +1534,7 @@ fn sync_refuses_a_body_with_no_markers_and_writes_nothing() {
         "## Gate\n\ng\n",
     );
 
-    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
+    let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
     assert!(err.to_string().contains(PHASES_START), "{err}");
     assert_eq!(
         backend.issue(100).body,
@@ -1516,7 +1559,7 @@ fn sync_refuses_a_body_with_two_start_markers_and_writes_nothing() {
         "## Gate\n\ng\n",
     );
 
-    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
+    let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
     assert!(err.to_string().contains("exactly one is required"), "{err}");
     assert_eq!(
         backend.issue(100).body,
@@ -1539,9 +1582,9 @@ fn sync_is_a_no_op_when_the_block_already_matches() {
     );
     backend.seed_child(100, 101, &child_title, "OPEN", "## Gate\n\ngate 1\n");
 
-    sync::sync(&backend, 100, STATUS).expect("first sync writes");
+    sync::sync(&backend, 100, &status_model()).expect("first sync writes");
     assert_eq!(backend.calls("set_body"), 1);
-    let report = sync::sync(&backend, 100, STATUS).expect("second sync is a no-op");
+    let report = sync::sync(&backend, 100, &status_model()).expect("second sync is a no-op");
     assert!(report.unchanged, "a matching block must not be rewritten");
     assert_eq!(backend.calls("set_body"), 1, "no second write");
 }
@@ -1565,7 +1608,7 @@ fn sync_propagates_a_failed_body_write() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
+    let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
     assert!(
         err.to_string().contains("scripted failure: set_body"),
         "{err}"
@@ -1584,7 +1627,7 @@ fn sync_propagates_a_failed_child_read() {
             "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
         ),
     );
-    let err = sync::sync(&backend, 100, STATUS).unwrap_err();
+    let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
     assert!(
         err.to_string().contains("scripted failure: children"),
         "{err}"
@@ -1919,7 +1962,10 @@ fn labelled_child(state: &str, labels: &[&str]) -> ChildIssue {
 #[test]
 fn state_cell_reads_closed_for_a_closed_child() {
     assert_eq!(
-        render::state_cell(&labelled_child("CLOSED", &["status:tested"]), STATUS),
+        render::state_cell(
+            &labelled_child("CLOSED", &["status:tested"]),
+            &status_model()
+        ),
         "closed"
     );
 }
@@ -1930,8 +1976,8 @@ fn state_cell_reads_the_status_label_of_an_open_child() {
     for state in ["in-progress", "coded", "merged", "tested"] {
         let label = format!("status:{state}");
         let child = labelled_child("OPEN", &["trusty-mpm", &label]);
-        assert_eq!(render::state_cell(&child, STATUS), state);
-        let table = render::phases_table(std::slice::from_ref(&child), STATUS);
+        assert_eq!(render::state_cell(&child, &status_model()), state);
+        let table = render::phases_table(std::slice::from_ref(&child), &status_model());
         assert!(table.contains(&format!("| #5 | {state} |")), "{table}");
     }
 }
@@ -1942,26 +1988,98 @@ fn state_cell_reads_open_for_an_unlabelled_open_child() {
     assert_eq!(
         render::state_cell(
             &labelled_child("OPEN", &["trusty-mpm", "enhancement"]),
-            STATUS
+            &status_model()
         ),
         "open"
     );
 }
 
 /// #8448 (review MEDIUM 4): the prefix is the model's `status_prefix`, not a
-/// constant. Under the crate default's `unicorn:` a `unicorn:coded` child reads
-/// `coded`; a hardcoded `status:` read it as `open`, and read a `status:coded`
-/// child as `coded` under a model that never issues that label.
+/// constant. Under the crate default's `unicorn:` a `unicorn:approved` child
+/// reads `approved`; a hardcoded `status:` read it as `open`. #8696 corrected
+/// the fixture: the default model has no `coded` state, so `unicorn:coded` is
+/// a label no state issues and reads `open` under every model.
 #[test]
 fn phases_table_uses_the_configured_status_prefix() {
+    let child = labelled_child("OPEN", &["unicorn", "unicorn:approved"]);
+    assert_eq!(render::state_cell(&child, &model()), "approved");
+    assert_eq!(render::state_cell(&child, &status_model()), "open");
+    let table = render::phases_table(std::slice::from_ref(&child), &model());
+    assert!(table.contains("| #5 | approved |"), "{table}");
+    assert_eq!(model().label_config.status_prefix, "unicorn:");
+}
+
+/// #8696 regression 1: the reporting repo's model — state `status:in-progress`
+/// whose label is the pre-existing `in-progress`. The transition writes that
+/// label; the cell must read the state, not `open`. A renderer matching by
+/// prefix never sees the label at all.
+#[test]
+fn state_cell_resolves_a_label_whose_name_lacks_the_prefix() {
+    let child = labelled_child("OPEN", &["enhancement", "in-progress"]);
+    assert_eq!(
+        render::state_cell(&child, &prefixless_model()),
+        "in-progress"
+    );
+    let table = render::phases_table(std::slice::from_ref(&child), &prefixless_model());
+    assert!(table.contains("| #5 | in-progress |"), "{table}");
+}
+
+/// #8696 regression 2: the label name need not resemble the state name at
+/// all. The cell is the state's `name` minus the prefix, never the label.
+#[test]
+fn state_cell_resolves_a_label_name_unrelated_to_the_state_name() {
+    let mut model = prefixless_model();
+    let in_progress = model
+        .states
+        .iter_mut()
+        .find(|s| s.name == "status:in-progress")
+        .and_then(|s| s.label.as_mut())
+        .expect("the fixture labels status:in-progress");
+    in_progress.name = "wip".to_string();
+    let child = labelled_child("OPEN", &["wip"]);
+    assert_eq!(render::state_cell(&child, &model), "in-progress");
+}
+
+/// #8696 regression 3 (owner ruling): a prefixed label no model state issues
+/// is not a lifecycle label. The default model has no `coded` state, so a
+/// `unicorn:coded` child reads `open` — the answer `tm issue current` gives —
+/// not `coded` by prefix; a raw-prefix fallback would read `coded`. The
+/// foreign-prefix `status:coded` reads `open` the same way.
+#[test]
+fn state_cell_reads_open_for_a_prefixed_label_the_model_lacks() {
     let child = labelled_child("OPEN", &["unicorn", "unicorn:coded"]);
-    assert_eq!(render::state_cell(&child, "unicorn:"), "coded");
-    assert_eq!(render::state_cell(&child, STATUS), "open");
-    let table = render::phases_table(std::slice::from_ref(&child), "unicorn:");
-    assert!(table.contains("| #5 | coded |"), "{table}");
-    let default_model: StateModel =
-        serde_yaml::from_str(DEFAULT_MODEL_YAML).expect("the default model parses");
-    assert_eq!(default_model.label_config.status_prefix, "unicorn:");
+    assert_eq!(render::state_cell(&child, &model()), "open");
+    let table = render::phases_table(std::slice::from_ref(&child), &model());
+    assert!(table.contains("| #5 | open |"), "{table}");
+    let foreign = labelled_child("OPEN", &["unicorn", "status:coded"]);
+    assert_eq!(render::state_cell(&foreign, &model()), "open");
+}
+
+/// #8696 regression 4: with an empty `status_prefix` every label strips to
+/// itself, so a prefix-matching renderer read `bug/in-progress`. Only the
+/// model's labels count; the state name is used as-is.
+#[test]
+fn state_cell_under_an_empty_prefix_reads_only_model_labels() {
+    let mut model = prefixless_model();
+    model.label_config.status_prefix = String::new();
+    let child = labelled_child("OPEN", &["bug", "in-progress"]);
+    assert_eq!(render::state_cell(&child, &model), "status:in-progress");
+    let renamed = model
+        .states
+        .iter_mut()
+        .find(|s| s.name == "status:in-progress")
+        .expect("the fixture has the state");
+    renamed.name = "in-progress".to_string();
+    assert_eq!(render::state_cell(&child, &model), "in-progress");
+}
+
+/// #8696 regression 7: several lifecycle labels (a `tm issue repair` case)
+/// each resolve through the model and join in sorted order, not model order
+/// and not the first match only.
+#[test]
+fn state_cell_joins_several_model_states_sorted() {
+    let child = labelled_child("OPEN", &["status:merged", "status:coded"]);
+    assert_eq!(render::state_cell(&child, &status_model()), "coded/merged");
 }
 
 /// #8448 (review MEDIUM 3): the live #8445 body wraps every outcome across
@@ -2291,9 +2409,10 @@ fn seed_hookable(backend: &FakeBackend, parent: Option<u64>) -> FakeTickets {
             state: "OPEN".to_string(),
             parent,
             // The lifecycle label the LIVE child wears after the swap, which
-            // is what the regenerated State cell must show (AC6) — under the
-            // default model's `unicorn:` prefix, not this repo's `status:`.
-            labels: vec!["unicorn:coded".to_string()],
+            // is what the regenerated State cell must show (AC6) — the label
+            // the default model issues for `approved` (#8696: the old
+            // `unicorn:coded` named a state the model does not have).
+            labels: vec!["unicorn:approved".to_string()],
             ..FakeIssue::default()
         },
     );
@@ -2317,7 +2436,7 @@ fn transition_hook_regenerates_the_parent_trackers_block() {
         backend
             .issue(100)
             .body
-            .contains("| 1 | phase 1 | #101 | coded | g |"),
+            .contains("| 1 | phase 1 | #101 | approved | g |"),
         "{}",
         backend.issue(100).body
     );
@@ -2395,7 +2514,7 @@ fn transition_hook_regenerates_a_stale_tracker_on_a_no_op_transition() {
         backend
             .issue(100)
             .body
-            .contains("| 1 | phase 1 | #101 | coded | g |"),
+            .contains("| 1 | phase 1 | #101 | approved | g |"),
         "{}",
         backend.issue(100).body
     );
@@ -2438,6 +2557,66 @@ fn transition_hook_names_the_tracker_when_the_parent_read_fails() {
     assert_eq!(render::epic_number_of("[EPIC 8445] x"), None);
 }
 
+/// #8696: the reported state — tracker 100's block already reads `open` for
+/// phase #101, and the live child wears the prefix-less `in-progress` label
+/// [`prefixless_model`] issues for `status:in-progress`.
+fn seed_prefixless_phase(backend: &FakeBackend) -> FakeTickets {
+    let title = render::phase_title(100, 1, "phase 1");
+    backend.seed_tracker(
+        100,
+        "[EPIC 100] An outcome",
+        &tracker_fixture(
+            "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|\n\
+             | 1 | phase 1 | #101 | open | g |",
+        ),
+    );
+    backend.issues.borrow_mut().insert(
+        101,
+        FakeIssue {
+            title: title.clone(),
+            body: "## Gate\n\ng\n".to_string(),
+            state: "OPEN".to_string(),
+            parent: Some(100),
+            labels: vec!["enhancement".to_string(), "in-progress".to_string()],
+            ..FakeIssue::default()
+        },
+    );
+    FakeTickets::new(101, &title, &["enhancement"])
+}
+
+/// #8696 regression 5: the reported bug end to end. The transition applies
+/// the model's `in-progress` label; the hook must regenerate the row to
+/// `in-progress` rather than render `open`, find it equal to the stored
+/// block, and report "already current".
+#[test]
+fn transition_hook_regenerates_a_row_for_a_prefix_less_label() {
+    let backend = FakeBackend::new();
+    let tickets = seed_prefixless_phase(&backend);
+    let hooked = hook::transition_with_tracker_sync(
+        &tickets,
+        &backend,
+        &prefixless_model(),
+        101,
+        "status:in-progress",
+        None,
+    )
+    .expect("transitions and syncs");
+    assert!(!hooked.report.no_op);
+    let synced = hooked.synced.expect("the tracker was synced");
+    assert!(
+        !synced.unchanged,
+        "the `open` row was stale, so it was written"
+    );
+    assert!(
+        backend
+            .issue(100)
+            .body
+            .contains("| 1 | phase 1 | #101 | in-progress | g |"),
+        "{}",
+        backend.issue(100).body
+    );
+}
+
 // --------------------------------------------- phase 2: audit set-level rows
 
 fn row<'a>(
@@ -2460,8 +2639,8 @@ fn audit_rows_pass_a_tracker_whose_block_matches() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    sync::sync(&backend, 100, STATUS).expect("bring the block current");
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    sync::sync(&backend, 100, &status_model()).expect("bring the block current");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert_eq!(row(&rows, REQ_PHASES_BLOCK).verdict, Verdict::Pass);
     assert_eq!(row(&rows, REQ_PHASE_LINKAGE).verdict, Verdict::Pass);
@@ -2488,9 +2667,9 @@ fn audit_rows_fail_when_search_omits_a_linked_phase() {
             "## Gate\n\ng\n",
         );
     }
-    sync::sync(&backend, 100, STATUS).expect("current");
+    sync::sync(&backend, 100, &status_model()).expect("current");
     backend.hide_from_search(102);
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let linkage = row(&rows, REQ_PHASE_LINKAGE);
     assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
     assert_eq!(
@@ -2508,8 +2687,8 @@ fn audit_rows_fail_when_search_omits_a_linked_phase() {
 fn audit_rows_report_info_when_no_linked_phase_cross_checks_the_search() {
     let backend = FakeBackend::new();
     backend.seed_tracker(100, "[EPIC 100] An outcome", &tracker_fixture("| # |"));
-    sync::sync(&backend, 100, STATUS).expect("an empty block is current");
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    sync::sync(&backend, 100, &status_model()).expect("an empty block is current");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let linkage = row(&rows, REQ_PHASE_LINKAGE);
     assert_eq!(linkage.verdict, Verdict::Info, "{linkage:?}");
     assert!(
@@ -2521,7 +2700,7 @@ fn audit_rows_report_info_when_no_linked_phase_cross_checks_the_search() {
 
     // The same tracker once the search returns an unlinked phase: FAIL wins.
     backend.seed_tracker(102, &render::phase_title(100, 2, "orphan"), "body");
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let linkage = row(&rows, REQ_PHASE_LINKAGE);
     assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
     assert!(
@@ -2543,7 +2722,7 @@ fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let block = row(&rows, REQ_PHASES_BLOCK);
     assert_eq!(block.verdict, Verdict::Fail);
     assert_eq!(
@@ -2551,6 +2730,23 @@ fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {
         "phases block stale — run tm issue epic sync 100"
     );
     assert_eq!(backend.calls("set_body"), 0, "an audit never writes");
+}
+
+/// #8696 regression 6: the audit renders through the same model as `sync`,
+/// so a block reading `open` for a child wearing the prefix-less
+/// `in-progress` label is FAIL as stale — a prefix-matching renderer passed
+/// it.
+#[test]
+fn audit_rows_fail_a_stale_block_hidden_behind_a_prefix_less_label() {
+    let backend = FakeBackend::new();
+    let _tickets = seed_prefixless_phase(&backend);
+    let rows = audit_rows::epic_rows(&backend, 100, &prefixless_model()).expect("rows");
+    let block = row(&rows, REQ_PHASES_BLOCK);
+    assert_eq!(block.verdict, Verdict::Fail, "{block:?}");
+    assert_eq!(
+        block.detail,
+        "phases block stale — run tm issue epic sync 100"
+    );
 }
 
 /// AC4: a phase-titled issue that is not a native sub-issue is FAIL, not INFO.
@@ -2565,12 +2761,12 @@ fn audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue() {
         "OPEN",
         "## Gate\n\ng\n",
     );
-    sync::sync(&backend, 100, STATUS).expect("current");
+    sync::sync(&backend, 100, &status_model()).expect("current");
     // Phase-titled for #100, parent None — the unlinked case.
     backend.seed_tracker(102, &render::phase_title(100, 2, "orphan"), "body");
     // Phase-titled for ANOTHER epic: not this tracker's concern.
     backend.seed_tracker(103, &render::phase_title(999, 1, "elsewhere"), "body");
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let linkage = row(&rows, REQ_PHASE_LINKAGE);
     assert_eq!(linkage.verdict, Verdict::Fail, "{linkage:?}");
     assert!(linkage.detail.contains("#102"), "{}", linkage.detail);
@@ -2586,7 +2782,7 @@ fn audit_rows_fail_a_phase_titled_issue_that_is_not_a_sub_issue() {
 fn audit_rows_are_empty_for_a_non_tracker() {
     let backend = FakeBackend::new();
     backend.seed_tracker(7, "a plain issue", "prose with no markers\n");
-    let rows = audit_rows::epic_rows(&backend, 7, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 7, &status_model()).expect("rows");
     assert!(rows.is_empty(), "{rows:?}");
     assert_eq!(backend.calls("children"), 0);
     assert_eq!(backend.calls("phase_titled_issues"), 0);
@@ -2597,7 +2793,7 @@ fn audit_rows_fail_a_body_whose_markers_cannot_be_rewritten() {
     let backend = FakeBackend::new();
     let body = format!("{PHASES_START}\na\n{PHASES_START}\nb\n{PHASES_END}\n");
     backend.seed_tracker(100, "[EPIC 100] An outcome", &body);
-    let rows = audit_rows::epic_rows(&backend, 100, STATUS).expect("rows");
+    let rows = audit_rows::epic_rows(&backend, 100, &status_model()).expect("rows");
     let block = row(&rows, REQ_PHASES_BLOCK);
     assert_eq!(block.verdict, Verdict::Fail);
     assert!(
@@ -2622,7 +2818,7 @@ fn gh_backend_reads_a_childs_labels_with_its_body() {
     let backend = super::backend::GhEpicBackend::new(runner);
     let children = backend.children(8445).expect("parses");
     assert_eq!(children[0].labels, vec!["status:coded", "trusty-mpm"]);
-    assert_eq!(render::state_cell(&children[0], STATUS), "coded");
+    assert_eq!(render::state_cell(&children[0], &status_model()), "coded");
     let calls = backend_calls(&backend);
     assert!(calls[1].contains(&"body,labels".to_string()), "{calls:?}");
 }

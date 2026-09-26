@@ -74,13 +74,8 @@ pub(crate) fn transition_with_tracker_sync<S: TicketSystem, B: EpicBackend>(
     let report = ops::transition(sys, model, issue, to, note)?;
     // #8448: no early return on `report.no_op` — the no-op is exactly what a
     // re-run after a killed or failed sync looks like, and it must repair.
-    let synced = sync_tracker_of_phase(
-        epic,
-        issue,
-        &report.title,
-        to,
-        &model.label_config.status_prefix,
-    )?;
+    // #8696: the sync renders through the same model the transition applied.
+    let synced = sync_tracker_of_phase(epic, issue, &report.title, to, model)?;
     Ok(HookedTransition { report, synced })
 }
 
@@ -92,17 +87,19 @@ pub(crate) fn transition_with_tracker_sync<S: TicketSystem, B: EpicBackend>(
 /// already a no-op and never learn the tracker needs `sync`.
 /// What: `Ok(None)` for a title that is not a phase title (no call made) or a
 /// phase with no parent (one parent read). Otherwise syncs the parent under
-/// `status_prefix`. A parent read that fails names the tracker by the title's
-/// embedded number; a sync that fails names the parent. Both carry the
+/// `model`, whose states decide what each child's labels mean (#8696). A
+/// parent read that fails names the tracker by the title's embedded number;
+/// a sync that fails names the parent. Both carry the
 /// `tm issue epic sync <n>` repair.
 /// Test: `transition_hook_fails_the_command_when_the_sync_fails`,
-/// `transition_hook_names_the_tracker_when_the_parent_read_fails`.
+/// `transition_hook_names_the_tracker_when_the_parent_read_fails`,
+/// `transition_hook_regenerates_a_row_for_a_prefix_less_label`.
 pub(crate) fn sync_tracker_of_phase<B: EpicBackend>(
     epic: &B,
     issue: u64,
     title: &str,
     to: &str,
-    status_prefix: &str,
+    model: &StateModel,
 ) -> anyhow::Result<Option<SyncReport>> {
     // #8448 AC2: the title is the gate. Not a phase title → not a call.
     if render::phase_number_of(title).is_none() {
@@ -124,7 +121,7 @@ pub(crate) fn sync_tracker_of_phase<B: EpicBackend>(
     let Some(tracker) = parent else {
         return Ok(None);
     };
-    match sync::sync(epic, tracker, status_prefix) {
+    match sync::sync(epic, tracker, model) {
         Ok(report) => Ok(Some(report)),
         // #8448 AC1: the label has moved; the caller must not read success.
         Err(e) => anyhow::bail!(
