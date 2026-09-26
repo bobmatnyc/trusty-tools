@@ -6,7 +6,9 @@ name = "trusty-installer"
 # retry/half-close changes. No public API changes.
 # 0.13.8 (#8415): patch — launchd ProcessType fix. No public API changes.
 # 0.13.9 (#3782, #3451): patch — ETXTBSY test-writer fix. No public API changes.
-version = "0.13.9"
+# 0.14.0 (#8642, code-critic ruling): minor — `pub struct UpgradeOutcome` gained
+# three pub fields; breaking under 0.x semver rules.
+version = "0.14.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
