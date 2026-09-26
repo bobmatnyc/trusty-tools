@@ -15,6 +15,8 @@
 //!   default method to POST, are refused), a `-H` header only `Accept:` or
 //!   `X-GitHub-Api-Version:`, and never the `graphql` endpoint, whose query
 //!   can hold a mutation. A `for` variable is refused anywhere in `gh api`.
+//!   The endpoint is a path on the default host: `--hostname`, a `://` URL, a
+//!   `..` segment, and a `graphql` segment in any case are refused.
 //!
 //! Every other verb — `pr create|merge|review|comment|edit|checkout`,
 //! `issue create|comment|edit|close`, `repo`, `release`, `auth`, and any verb
@@ -59,7 +61,6 @@ const API_VALUED: &[&str] = &[
     "--template",
     "-p",
     "--preview",
-    "--hostname",
 ];
 
 /// Judge a `gh` argv (`rest` excludes `gh` itself).
@@ -141,10 +142,16 @@ fn api(rest: &[Arg]) -> Verdict {
         api_value(name, value)?;
     }
     let endpoint = endpoint.ok_or("`gh api` without an endpoint")?;
-    let path = endpoint.trim_start_matches('/');
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    if path.eq_ignore_ascii_case("graphql") {
-        return Err("`gh api graphql`, whose query can carry a mutation".into());
+    // #8567 critic: a full URL can name another host.
+    if endpoint.contains("://") {
+        return Err("a `gh api` endpoint that is a full URL".into());
+    }
+    // #8567 critic: judge each path segment, so `graphql/`, `./graphql` and
+    // `GraphQL` are refused; `..` could climb back to one.
+    let path = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
+    let mut segments = path.split('/').filter(|s| !s.is_empty() && *s != ".");
+    if segments.any(|s| s == ".." || s.eq_ignore_ascii_case("graphql")) {
+        return Err("a `gh api` graphql endpoint or `..` segment".into());
     }
     Ok(())
 }

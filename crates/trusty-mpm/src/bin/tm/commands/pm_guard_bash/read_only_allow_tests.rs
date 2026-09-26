@@ -695,7 +695,6 @@ fn gh_api_get_forms_are_allowed() {
              -H 'X-GitHub-Api-Version: 2022-11-28' repos/o/r",
             "gh api -i --silent repos/o/r",
             "gh api 'repos/{owner}/{repo}/pulls?state=open' --paginate --slurp",
-            "gh api --hostname github.com user",
             "gh api repos/o/r/actions/runs -t '{{range .workflow_runs}}{{.id}}{{end}}'",
         ],
     );
@@ -733,6 +732,16 @@ fn gh_api_writes_are_refused() {
             "gh api",
             "gh api repos/o/r repos/o/s",
             "for e in repos/o/r; do gh api \"$e\"; done",
+            // #8567 critic: another host, and graphql spelled another way.
+            "gh api https://evil.example/repos/o/r",
+            "gh api http://localhost:8080/x",
+            "gh api --hostname evil.example user",
+            "gh api --hostname=github.com user",
+            "gh api graphql/",
+            "gh api ./graphql",
+            "gh api GraphQL",
+            "gh api //GRAPHQL?x=1",
+            "gh api repos/../graphql",
         ],
     );
 }
@@ -748,20 +757,37 @@ fn date_is_allowed() {
         true,
         &[
             "date",
+            "date -u",
             "date +%s",
             "date -u +%Y-%m-%dT%H:%M:%SZ",
             "date '+%Y-%m-%d %H:%M:%S'",
             "date -r 0",
+            "date -j -u -R",
+            "date -Iseconds",
+            "date --iso-8601=seconds --utc",
+            "date --rfc-3339=ns",
         ],
     );
 }
 
-/// #8567: `date` never writes through a redirect or a chained command.
+/// #8567: `date` never sets the clock, and never writes through a redirect
+/// or a chained command.
 #[test]
-fn date_with_a_redirect_is_refused() {
+fn date_that_writes_or_sets_the_clock_is_refused() {
     check(
         false,
         &[
+            // #8567 critic: the clock-setting forms.
+            "date -s 12:00",
+            "date --set=12:00",
+            "date --set 12:00",
+            "date 0101000026",
+            "date -f %s 0",
+            "date -j -f %s 0",
+            "date -d yesterday",
+            "date -us 12:00",
+            "date -r",
+            "for x in 0101000026; do date \"$x\"; done",
             "date > /tmp/start",
             "date >> start.txt",
             "date | tee start.txt",

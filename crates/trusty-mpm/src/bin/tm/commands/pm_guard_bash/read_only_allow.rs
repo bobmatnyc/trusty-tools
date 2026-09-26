@@ -323,7 +323,7 @@ fn deny_reason(agent: &str, what: &str) -> String {
          merge-base/ls-remote/branch --list/worktree list; cat/head/tail/wc/ls/grep/rg; find without \
          -exec/-delete/-fprint; sed -n with a print script; plutil -p/-lint; defaults read; \
          launchctl print/list; tmux capture-pane -p; cargo metadata/tree; gh issue view/list, \
-         gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date; echo; pwd. A \
+         gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd. A \
          pipe into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` \
          and one leading `cd <dir> &&` with a literal path. An rg/grep pattern may carry `\\` \
          escapes and an end-of-line `$` inside quotes; single quotes are the safest. If the \
