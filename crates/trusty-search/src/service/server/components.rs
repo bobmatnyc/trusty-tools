@@ -18,6 +18,8 @@
 //!   side effects (stage flip + in-memory KG drop).
 //! - `spawn_component_catch_up` — the background catch-up task for a
 //!   turn-on, holding the caller's already-acquired semaphore permit.
+//! - `claim_semantic_rearm` / `spawn_semantic_rearm` — the #8148 embed-only
+//!   re-arm, queued behind the background permit like any C2 pass.
 //!
 //! Test: `service::server::tests_components`.
 
@@ -114,6 +116,50 @@ pub(super) fn should_rearm_vector_catch_up(
         && !transition.new_skip_vector
         && !transition.vector_turning_on
         && matches!(semantic, StageStatus::Pending | StageStatus::Failed)
+}
+
+/// Claim the semantic stage for an embed-only re-arm (#8148).
+///
+/// Why: the handler read the stage before taking any lock, so two concurrent
+/// `vector: true` PATCHes can both see `Pending`. The claim is the atomic
+/// check-and-set that lets exactly one of them queue a pass.
+/// What: under the `stages` write lock, flips `semantic` from
+/// `Pending`/`Failed` to `InProgress` and returns `true`; any other status is
+/// left alone and returns `false`.
+/// Test: `service::server::tests_8148::patch_vector_true_is_a_no_op_once_semantic_is_ready`,
+/// `rearm_patches_across_indexes_wait_for_the_background_permit`.
+pub(super) async fn claim_semantic_rearm(handle: &IndexHandle) -> bool {
+    let mut stages = handle.stages.write().await;
+    if !matches!(
+        stages.semantic.status,
+        StageStatus::Pending | StageStatus::Failed
+    ) {
+        return false;
+    }
+    stages.semantic = StageState {
+        status: StageStatus::InProgress,
+        started_at: Some(now_rfc3339()),
+        ..Default::default()
+    };
+    true
+}
+
+/// Queue the embed-only re-arm on the deferred-embed queue (#8148).
+///
+/// Why: the re-arm first ran through [`spawn_component_catch_up`], which never
+/// takes `background_reindex_semaphore`, so N PATCHes across N indexes ran N
+/// embed passes at once. The queue takes the background permit and then the
+/// per-index permit, in that order; this function takes neither, so it cannot
+/// invert that order and deadlock.
+/// What: sets the durable `deferred_embed_pending` marker (a restart re-arms a
+/// pass it interrupts, as for a reindex's C2 pass), then enqueues via
+/// `spawn_deferred_embed_pass`, keyed on the cheap `chunk_count()` upper bound.
+/// Test: `service::server::tests_8148::rearm_patches_across_indexes_wait_for_the_background_permit`.
+pub(super) async fn spawn_semantic_rearm(handle: Arc<IndexHandle>) {
+    let chunks = handle.indexer.read().await.chunk_count();
+    crate::service::boot_markers::persist_deferred_embed_pending(&handle.id.0, true);
+    let progress = Arc::new(crate::service::reindex::ReindexProgress::new());
+    crate::service::reindex::spawn_deferred_embed_pass(handle, progress, chunks);
 }
 
 /// Apply the immediate, synchronous half of a component transition.

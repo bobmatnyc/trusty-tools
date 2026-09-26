@@ -175,3 +175,104 @@ async fn patch_without_vector_true_or_against_in_progress_changes_nothing() {
         );
     }
 }
+
+/// Send `PATCH { vector: true }` for `id` and return the status and body.
+async fn patch_vector_true(
+    state: &Arc<crate::service::server::SearchAppState>,
+    id: &str,
+) -> (StatusCode, serde_json::Value) {
+    let resp = patch_index_config_handler(
+        State(Arc::clone(state)),
+        Path(id.to_string()),
+        Json(PatchIndexConfigRequest {
+            vector: Some(true),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// #8148 review finding 1: re-arm PATCHes across different indexes queue
+/// behind the one background permit instead of running concurrent embed passes.
+///
+/// Why: the first re-arm ran through the component catch-up, which never takes
+/// `background_reindex_semaphore`, so N PATCHes started N embed passes at once.
+/// What: holds the background permit (standing in for any other embed pass),
+/// re-arms three indexes, and asserts none of them reaches `Ready` while the
+/// permit is held. After the permit is released, all three do. Pre-fix the
+/// passes ignore the permit and reach `Ready` at once.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn rearm_patches_across_indexes_wait_for_the_background_permit() {
+    let _isolated = IsolatedDataDir::new();
+    let held = crate::service::reindex::background_reindex_semaphore()
+        .acquire()
+        .await
+        .expect("background semaphore is never closed");
+    let mut handles = Vec::new();
+    let mut states = Vec::new();
+    for id in ["comp-8148-q1", "comp-8148-q2", "comp-8148-q3"] {
+        let state = state_with_index(id);
+        let handle = state.registry.get(&IndexId::new(id)).expect("handle");
+        let (status, body) = patch_vector_true(&state, id).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {body}");
+        assert_eq!(
+            body["components"]["catch_up_started"].as_bool(),
+            Some(true),
+            "{id}: {body}"
+        );
+        handles.push(handle);
+        states.push(state);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for handle in &handles {
+        assert_eq!(
+            handle.stages.read().await.semantic.status,
+            StageStatus::InProgress,
+            "{}: no embed pass may run while another pass holds the background permit",
+            handle.id.0
+        );
+    }
+
+    drop(held);
+    for handle in &handles {
+        poll_stages(handle, |s| s.semantic.status == StageStatus::Ready).await;
+    }
+}
+
+/// #8148 review finding 2: a persist failure on a re-arm still runs the pass,
+/// so the stage is never left `InProgress` with nothing running, and a retry
+/// succeeds.
+///
+/// Why: the stage was flipped to `InProgress` before the persist; a 500 then
+/// returned without spawning, and the predicate refused every retry because
+/// the stage read `InProgress`.
+/// What: points `TRUSTY_DATA_DIR` under a regular file so the persist fails,
+/// PATCHes `vector: true` (500), restores a writable data dir, retries (200),
+/// and waits for `Ready`. Pre-fix the stage never leaves `InProgress`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_persist_failure_still_runs_the_rearm_and_a_retry_succeeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("write blocker");
+    // SAFETY: serial test; `IsolatedDataDir` below re-points and removes it.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", blocker.join("data")) };
+
+    let id = "comp-8148-persist-fail";
+    let state = state_with_index(id);
+    let handle = state.registry.get(&IndexId::new(id)).expect("handle");
+    let (status, body) = patch_vector_true(&state, id).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["persisted"].as_bool(), Some(false), "{body}");
+
+    let _isolated = IsolatedDataDir::new();
+    let (status, body) = patch_vector_true(&state, id).await;
+    assert_eq!(status, StatusCode::OK, "the retry must succeed: {body}");
+    poll_stages(&handle, |s| s.semantic.status == StageStatus::Ready).await;
+}
