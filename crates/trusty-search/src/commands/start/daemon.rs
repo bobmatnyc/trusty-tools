@@ -242,6 +242,14 @@ pub async fn handle_start(
         env!("CARGO_PKG_VERSION"),
     );
 
+    // #8270: under launchd fd 2 is `StandardErrorPath`, opened once. Reopen it
+    // on the SIGHUP newsyslog sends after a rotation. No-op for a tty or
+    // `/dev/null` stderr (the detached child above).
+    #[cfg(unix)]
+    if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
+        tracing::debug!("SIGHUP reopens stderr log {}", log.display());
+    }
+
     // Translate the `--device` CLI flag into the `TRUSTY_DEVICE` env var.
     //
     // SAFETY: invoked on the main thread before tokio spawns any workers.

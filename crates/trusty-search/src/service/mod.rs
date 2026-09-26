@@ -21,6 +21,9 @@ pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;
+// #8270: SIGHUP reopens the stderr log after a newsyslog rotation.
+#[cfg(unix)]
+pub mod log_reopen;
 pub mod mcp_descriptor;
 pub mod metrics;
 pub mod network_fs;

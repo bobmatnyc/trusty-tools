@@ -671,6 +671,9 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // Best-effort: write PID into the lockfile so `ps`/`lsof` can confirm.
     let _ = lock_file.set_len(0);
     let _ = lock_file.write_all(pid_string.as_bytes());
+    // #8270: only the lock holder publishes the pidfile newsyslog signals.
+    #[cfg(unix)]
+    crate::service::log_reopen::publish_pidfile();
 
     let listener = bind_with_auto_port(requested_port, 64).await?;
     let addr = listener.local_addr()?;
@@ -856,6 +859,8 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         let _ = std::fs::remove_file(&path);
     }
     deregister_shared_discovery();
+    #[cfg(unix)]
+    crate::service::log_reopen::retract_pidfile();
 
     serve_result.map_err(|e| DaemonError::Server(e.to_string()))?;
     drop(lock_file);

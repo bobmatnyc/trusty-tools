@@ -378,7 +378,9 @@ pub fn check_log_rotation() -> CheckResult {
             CheckResult::Ok("Log rotation configured for stderr.log (1 MB × 7 archives)".into())
         } else {
             CheckResult::Warn(
-                "stderr.log has no rotation policy — it will grow unbounded; \
+                // `doctor --fix` keys on the "no rotation policy" substring.
+                "stderr.log has no rotation policy (none installed, or one from \
+                 before #8270 that fails every run) — it will grow unbounded; \
                  run `trusty-search doctor --fix` to install one"
                     .into(),
             )
