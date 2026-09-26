@@ -85,6 +85,37 @@ pub(super) fn resolve_component_toggle(
     }
 }
 
+/// Upgrade a no-op `vector: true` into a catch-up when the lane is enabled but
+/// the semantic stage never got built (#8148).
+///
+/// Why: an index registered over an `index.redb` whose chunks carry no vectors
+/// has `skip_vector: false` already, so [`resolve_component_toggle`] reports
+/// `vector_turning_on: false` and `PATCH /indexes/:id/config {"vector": true}`
+/// answers `catch_up_started: false`. Nothing else ever queues the C2 pass for
+/// that corpus either — `boot_markers::rearm_deferred_embed_if_pending` fires
+/// only on the `deferred_embed_pending` marker a reindex leaves behind — so
+/// `deferred_embed_queue_depth` stays `0` and the semantic stage stays
+/// `Pending` forever. This makes the existing route the embed-only trigger,
+/// with no new endpoint and no full reindex.
+/// What: a pure predicate. `true` only when the caller EXPLICITLY asked for
+/// `vector: true`, the resolved state has the lane enabled, the transition is
+/// not already a turn-on, and the semantic stage is `Pending` or `Failed`.
+/// `Ready` and `InProgress` stay no-ops — the first has nothing to embed, the
+/// second already has a pass running and a second one would contend for the
+/// same per-index permit.
+/// Test: `rearm_vector_catch_up_fires_for_a_pending_semantic_stage`,
+/// `rearm_vector_catch_up_is_a_no_op_when_semantic_is_ready`.
+pub(super) fn should_rearm_vector_catch_up(
+    transition: &ComponentTransition,
+    vector_requested: Option<bool>,
+    semantic: StageStatus,
+) -> bool {
+    vector_requested == Some(true)
+        && !transition.new_skip_vector
+        && !transition.vector_turning_on
+        && matches!(semantic, StageStatus::Pending | StageStatus::Failed)
+}
+
 /// Apply the immediate, synchronous half of a component transition.
 ///
 /// Why: soft-disable is instantaneous — the caller must see the stage flip
@@ -319,6 +350,66 @@ mod tests_pure {
         assert!(!t.kg_turning_on && !t.kg_turning_off);
         assert!(!t.vector_turning_on && t.vector_turning_off);
         assert!(!t.needs_catch_up());
+    }
+
+    /// #8148: an explicit `vector: true` against an already-enabled lane earns
+    /// a catch-up exactly when the semantic stage never got built.
+    ///
+    /// Why: this predicate is the whole of the embed-only trigger's decision,
+    /// and both directions matter — `Pending`/`Failed` must fire (that is the
+    /// stranded corpus) while `Ready`/`InProgress` must not (nothing to do, or
+    /// a pass already holds the permit).
+    /// Test: this test.
+    #[test]
+    fn rearm_vector_catch_up_fires_for_a_pending_semantic_stage() {
+        // Lane already enabled, so this is NOT a turn-on.
+        let t = resolve_component_toggle(None, Some(true), false, false);
+        assert!(!t.vector_turning_on, "sanity: nothing is transitioning");
+        assert!(should_rearm_vector_catch_up(
+            &t,
+            Some(true),
+            StageStatus::Pending
+        ));
+        assert!(should_rearm_vector_catch_up(
+            &t,
+            Some(true),
+            StageStatus::Failed
+        ));
+    }
+
+    /// #8148, the other direction: every state that must stay a no-op.
+    ///
+    /// Why: guards against turning an idempotent config call into a re-embed.
+    /// Test: this test.
+    #[test]
+    fn rearm_vector_catch_up_is_a_no_op_when_semantic_is_ready() {
+        let t = resolve_component_toggle(None, Some(true), false, false);
+        for status in [StageStatus::Ready, StageStatus::InProgress] {
+            assert!(
+                !should_rearm_vector_catch_up(&t, Some(true), status),
+                "{status:?} must not start a catch-up"
+            );
+        }
+        // Absent field: a hygiene-only PATCH never embeds anything.
+        assert!(!should_rearm_vector_catch_up(
+            &t,
+            None,
+            StageStatus::Pending
+        ));
+        // A real off -> on transition is already handled by `needs_catch_up`.
+        let turning_on = resolve_component_toggle(None, Some(true), false, true);
+        assert!(!should_rearm_vector_catch_up(
+            &turning_on,
+            Some(true),
+            StageStatus::Pending
+        ));
+        // A lane being turned OFF in the same call never re-arms.
+        let off = resolve_component_toggle(None, Some(false), false, false);
+        assert!(!should_rearm_vector_catch_up(
+            &off,
+            Some(false),
+            StageStatus::Pending
+        ));
     }
 
     /// The design doc's headline scenario: enabling BOTH components from a

@@ -279,12 +279,27 @@ pub(crate) async fn patch_index_config_report(
     // `runner::run_reindex` and `defer_embed::spawn_deferred_embed_pass`
     // acquire for this index, so a genuinely concurrent reindex on the SAME
     // index also correctly conflicts here.
-    let transition = components::resolve_component_toggle(
+    let mut transition = components::resolve_component_toggle(
         req.kg,
         req.vector,
         existing.skip_kg,
         existing.skip_vector,
     );
+    // #8148: an explicit `vector: true` against an ALREADY-enabled lane whose
+    // semantic stage never got built is the embed-only trigger. Marking it a
+    // turn-on here routes it through the identical permit / apply / spawn path
+    // as an off→on toggle, so it inherits every #2984 and #3049 guard instead
+    // of growing a second catch-up entry point.
+    let semantic_status = existing.stages.read().await.semantic.status;
+    if components::should_rearm_vector_catch_up(&transition, req.vector, semantic_status) {
+        tracing::info!(
+            "patch_index_config[{}]: vector lane already enabled but semantic is {:?} — \
+             running the embed catch-up over the existing corpus (issue #8148)",
+            index_id.0,
+            semantic_status,
+        );
+        transition.vector_turning_on = true;
+    }
     let permit = if transition.needs_catch_up() {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
