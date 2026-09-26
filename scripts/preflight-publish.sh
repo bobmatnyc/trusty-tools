@@ -58,38 +58,42 @@
 #   CHECK 5 (public-API SemVer, #5149): runs `scripts/check_semver.sh --crate
 #     <pkg>`, which compares this crate's public API against its PREVIOUS
 #     crates.io release — the greatest non-yanked version below the one about to
-#     be published (#5296) — and fails when a breaking change is not carried by a
-#     breaking version bump (Cargo's 0.x rule: for 0.y.z the MINOR position is
-#     the breaking one). When the bump is already breaking there is no
-#     requirement left to violate, and the run becomes an advisory INVENTORY of
-#     what the release breaks (#5297); it reports, and cannot fail this check.
+#     be published (#5296). This workspace follows an internal numbering
+#     scheme, not Cargo SemVer's break-forces-major rule (owner ruling
+#     2026-09-26): a feature bumps the minor version, a fix bumps the patch, and
+#     a public-API break never forces a major bump on its own — see
+#     docs/reference/semver-gate.md. So CHECK 5 REPORTS ONLY: it still runs the
+#     comparison and prints every break it finds, and it still auto-records each
+#     one (`semver_record_break` below) into the crate's changelog and into
+#     `scripts/semver-accepted-breaks/`, but a computed break never fails this
+#     check and never chooses or changes a version.
 #
-#     WHY IT LIVES HERE, and not only in CI: this script is the LAST thing that
-#     runs before `cargo publish`, and its nonzero exit is the documented
-#     absolute stop — so a break caught here is caught while the upload can
-#     still be prevented. A crates.io publish is irreversible except by yank, so
-#     a gate that only reports AFTER the upload has no way to undo the damage:
-#     that is exactly #4088, where trusty-common 0.22.5 shipped a required new
-#     public field on a patch bump and cost trusty-analyze 0.7.3 a yank.
-#     `.github/workflows/semver-checks.yml` runs the same command on the tag
-#     push, but a CI job cannot stop a `cargo publish` a human runs locally —
-#     it reports, this blocks.
+#     WHY IT STILL LIVES HERE, and not only in CI: this script is the LAST thing
+#     that runs before `cargo publish`, so a break caught here is caught while a
+#     human still has eyes on the release — recorded to the same file the tag
+#     push's `.github/workflows/semver-checks.yml` run also writes to, before
+#     the upload is irreversible (crates.io permits only a yank, never a
+#     retraction). That is exactly #4088, where trusty-common 0.22.5 shipped a
+#     required new public field on a patch bump and cost trusty-analyze 0.7.3 a
+#     yank — CHECK 5 makes the break visible and durable, and the owner ruling
+#     is that visibility, not a red exit, is what a break earns.
 #
-#     A BREAK HAS ONE NARROW OVERRIDE (owner ruling 2026-09-22). The default
-#     remedy is still to bump the breaking position, which the gate then records
-#     as an already-breaking release and inventories. The exception is a
-#     committed scripts/semver-accepted-breaks/<package>-<version>.txt naming
-#     this exact crate and version, a reason, and an accept row covering every
-#     break the gate computed. It prints [WARN], never [PASS], and fails closed
-#     on anything else — see scripts/lib/semver_accepted_breaks.sh.
+#     THE RECORD IS AUTOMATIC, not a pre-committed declaration (superseding the
+#     2026-09-22 ruling's declare-first flow for THIS gate only — the
+#     pull-request-time `Public API / SemVer` check, `scripts/semver_ci_accept.sh`,
+#     still reads a hand-committed declaration, and is out of scope here).
+#     `semver_record_break` regenerates
+#     `scripts/semver-accepted-breaks/<package>-<version>.txt` and a
+#     `changelog.d/` fragment from what THIS run computed — same bytes every
+#     re-run for the same gate output, so nothing duplicates.
 #
 #     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
-#     it computed a verdict that says break, and 3 when it could not compute one
-#     at all (rustdoc build failure, a run that executed ZERO checks (#5440),
-#     unreachable registry, missing tool). Both
-#     stop the publish; only the first is reported as "your API changed". The
-#     remedy above applies to exit 1 — for exit 3 the remedy is to fix the gate
-#     and re-run, never to bump a version on evidence that does not exist.
+#     it computed a verdict that says break — REPORTED, never a stop — and 3
+#     when it could not compute one at all (rustdoc build failure, a run that
+#     executed ZERO checks (#5440), unreachable registry, missing tool). Exit 3
+#     is an INFRASTRUCTURE fault, not a break, and still stops the publish;
+#     the remedy there is to fix the gate and re-run, never to bump a version on
+#     evidence that does not exist.
 #
 #     NEITHER IS EXIT 0 (#5620). The gate exits 0 on an ADVISORY run it could
 #     not compute — an already-breaking release is permitted by its version
@@ -819,8 +823,9 @@ semver_types_decide() {
 #
 # THE INVARIANT: `0 compared` and `[PASS]` are unreachable together. A pass
 #   states how many crates it actually compared and refuses to print PASS when
-#   that number is zero. Four outcomes, four labels, so a reader can always tell
-#   "nothing was wrong" from "nothing was examined":
+#   that number is zero. Outcomes and labels, so a reader can always tell
+#   "nothing was wrong" from "nothing was examined" from "something broke, and
+#   it was recorded":
 #
 #     [PASS] >= 1 crate compared, and every lint that RAN passed. Narrower than
 #            it reads, and the line says so: cargo-semver-checks 0.50.0 checks
@@ -840,12 +845,16 @@ semver_types_decide() {
 #            recorded in a reviewable file, so it permits without an override.
 #            It is not a statement that the API is unchanged.
 #     [WARN] 0 compared because the gate was BLIND, and PREFLIGHT_SEMVER_UNVERIFIED
-#            named a reason to accept that. Permits; never prints PASS.
-#     [WARN] ACCEPTED BREAK: a computed break that a committed per-crate,
-#            per-version declaration lists in full, with a reason (owner ruling
-#            2026-09-22). Permits; never prints PASS.
-#     [FAIL] a computed break with no valid, complete declaration, a blind gate
-#            with no override, or a gate that malfunctioned.
+#            named a reason to accept that. Permits; never prints PASS. This is
+#            an INFRASTRUCTURE fault arm — the comparison itself could not run —
+#            and is the only 0-compared arm that still stops without the reason.
+#     [WARN] RECORDED BREAK (owner ruling 2026-09-26): a computed break. Always
+#            permits — see semver_record_break below, which writes the crate's
+#            changelog fragment and scripts/semver-accepted-breaks/ entry before
+#            this prints. Never prints PASS.
+#     [FAIL] a blind gate with no override, or a gate that malfunctioned. A
+#            computed break is NEVER in this list any more — see
+#            semver_record_break.
 #
 # THE OVERRIDE IS FOR SITUATIONAL BLINDNESS ONLY, and it takes a REASON, not a
 #   boolean:
@@ -867,11 +876,11 @@ semver_types_decide() {
 #   scrolls past every publish. An override that is always set is not an
 #   override.
 #
-# A COMPUTED BREAK IS NOT OVERRIDE-ABLE BY THIS VARIABLE. The override answers
-#   "the gate could not run"; exit 1 is the gate running and saying no. Its only
-#   exception is the committed declaration semver_accept_decide reads, which
-#   names the crate, the version, the reason and every accepted break, and which
-#   in turn never covers a blind gate.
+# A COMPUTED BREAK NEVER NEEDS THIS VARIABLE (owner ruling 2026-09-26). It
+#   answers "the gate could not run"; a computed break is the gate running and
+#   having an answer, which `semver_record_break` now records and permits
+#   unconditionally — setting the override alongside a break changes nothing,
+#   see the self-test's override-irrelevance case.
 #
 # Test: scripts/preflight-check5-selftest.sh.
 # ---------------------------------------------------------------------------
@@ -887,30 +896,121 @@ SEMVER_TYPES_ADVISORY=""
 # Starts at 0 so a semver_decide that never reached the count leaves it refusing.
 SEMVER_GATE_COMPARED=0
 
+# ---------------------------------------------------------------------------
+# semver_record_break <gate-log> <package> <version> — CHECK 5's owner-ruling
+# 2026-09-26 arm. semver_decide calls this, and only this, for a computed
+# BREAK (gate exit 1); it ALWAYS returns 0 and never fails the publish.
+#
+# Why: the internal numbering policy (owner ruling 2026-09-26; see
+#   docs/reference/semver-gate.md) makes a public-API break something this
+#   gate REPORTS, not something it enforces a version shape over. A break that
+#   is only printed to a terminal and never landed anywhere is invisible to the
+#   next person who reads the crate's history, so the report has to leave a
+#   durable, reviewable trace of its own — the same durability the 2026-09-22
+#   declare-first flow gave a break that a human had pre-approved, but written
+#   automatically now that nothing needs pre-approving.
+#
+# What: reuses semver_break_entries (scripts/lib/semver_accepted_breaks.sh) to
+#   pull `<lint>\t<entry>` rows out of the gate's own output; a list that does
+#   not parse (semver_break_entries's ERROR arm — ambiguous lint counts, no
+#   failure block, a stray NO VERDICT line) still gets ONE generic row rather
+#   than nothing on disk, because a break was still computed and still has to
+#   be recorded. Writes (or rewrites) two files, following
+#   scripts/semver-accepted-breaks/README.md's row format for the first:
+#     - scripts/semver-accepted-breaks/<package>-<version>.txt
+#     - crates/<crate-dir>/changelog.d/8699-semver-break-<version>.md
+#       (Breaking category; skipped, with a note in the [WARN] line, when
+#       MANIFEST does not resolve to a crates/<dir>/Cargo.toml — the version
+#       guard fixture in the self-test exercises exactly that shape).
+#
+#   DETERMINISTIC AND IDEMPOTENT: both files are fully REGENERATED from what
+#   THIS run computed, never appended to, and written only when the new bytes
+#   differ from what is already on disk. Two preflight runs over the same gate
+#   output produce byte-identical files, so nothing is ever duplicated.
+#
+# Test: scripts/preflight-check5-selftest.sh, the "record break" cases.
+# ---------------------------------------------------------------------------
+semver_record_break() {
+  local log="$1" pkg="$2" version="$3"
+  local rel path entries reason crate_dir frag_rel frag_path n tab
+  tab="$(printf '\t')"
+  rel="scripts/semver-accepted-breaks/${pkg}-${version}.txt"
+  path="${REPO_ROOT}/${rel}"
+
+  entries="$(semver_break_entries "$log" "$pkg" 2> /dev/null)"
+  if [ -z "$entries" ] || printf '%s\n' "$entries" | grep -q '^ERROR'; then
+    entries="unparsed_break_list${tab}gate output did not parse into individual lint/item rows -- see the CHECK 5 log above"
+  fi
+  entries="$(printf '%s\n' "$entries" | LC_ALL=C sort -u)"
+  n="$(printf '%s\n' "$entries" | grep -c .)"
+
+  reason="Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26):"
+  reason="${reason} trusty-tools' internal numbering policy — a public-API break"
+  reason="${reason} never forces a major version. See docs/reference/semver-gate.md."
+
+  mkdir -p "$(dirname "$path")"
+  {
+    printf 'crate   %s\n' "$pkg"
+    printf 'version %s\n' "$version"
+    printf 'reason  %s\n' "$reason"
+    printf '%s\n' "$entries" | while IFS="$tab" read -r lint item; do
+      printf 'accept  %s %s\n' "$lint" "$item"
+    done
+  } > "${path}.new"
+  if [ -f "$path" ] && cmp -s "$path" "${path}.new"; then
+    rm -f "${path}.new"
+  else
+    mv "${path}.new" "$path"
+  fi
+
+  # crates/<dir>/Cargo.toml -> <dir>, from either an absolute or relative
+  # MANIFEST — works in the real run (absolute) and the self-test (relative).
+  crate_dir="$(printf '%s' "${MANIFEST:-}" | sed -nE 's#.*/?crates/([^/]+)/Cargo\.toml$#\1#p')"
+  if [ -n "$crate_dir" ]; then
+    frag_rel="crates/${crate_dir}/changelog.d/8699-semver-break-${version}.md"
+    frag_path="${REPO_ROOT}/${frag_rel}"
+    mkdir -p "$(dirname "$frag_path")"
+    {
+      echo "Breaking"
+      echo
+      echo "- ${pkg} ${version} ships a public-API break under the internal numbering"
+      echo "  policy (owner ruling 2026-09-26); recorded automatically in"
+      echo "  \`${rel}\` (Refs #8699)."
+    } > "${frag_path}.new"
+    if [ -f "$frag_path" ] && cmp -s "$frag_path" "${frag_path}.new"; then
+      rm -f "${frag_path}.new"
+    else
+      mv "${frag_path}.new" "$frag_path"
+    fi
+  else
+    frag_rel="(not recorded — MANIFEST did not resolve to a crates/<dir>/Cargo.toml)"
+  fi
+
+  echo "[WARN] semver: RECORDED BREAK — ${pkg} ${version} ships a public-API break." >&2
+  echo "       Owner ruling 2026-09-26: a break is reported, never a reason to fail" >&2
+  echo "       this gate or to force a version bump. Never prints [PASS]." >&2
+  echo "       Recorded in ${rel} and ${frag_rel}." >&2
+  echo "       ${n} break entry(ies):" >&2
+  sed 's/^/         /' <<EOF_ENTRIES >&2
+${entries}
+EOF_ENTRIES
+  return 0
+}
+
 semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
   local summary checked skipped inventoried blind compared blind_why
 
-  # --- A COMPUTED VERDICT THAT SAYS BREAK. PREFLIGHT_SEMVER_UNVERIFIED does not
-  #     apply; only a declaration for this exact release can (ruling 2026-09-22).
+  # --- A COMPUTED VERDICT THAT SAYS BREAK. Owner ruling 2026-09-26: this
+  #     workspace's internal numbering policy means a public-API break never
+  #     forces a major version and never blocks a publish — it is recorded and
+  #     reported instead. PREFLIGHT_SEMVER_UNVERIFIED plays no role either way:
+  #     that variable covers a gate that could not run, and this is the gate
+  #     running and answering. See semver_record_break for what gets written.
   if [ "$rc" -eq 1 ]; then
-    # Present in any form, a symlink included, so a refused one says why.
-    if semver_accept_present "$(semver_accept_rel "$pkg" "$version")"; then
-      semver_accept_decide "$log" "$pkg" "$version"
-      return $?
-    fi
-    echo "[FAIL] semver: public-API check failed for ${pkg} ${version}:" >&2
-    sed 's/^/       /' "$log" >&2
-    echo "       Publishing this would ship a breaking change without a breaking" >&2
-    echo "       version bump — the #4088 shape that yanked trusty-analyze 0.7.3." >&2
-    echo "       Bump the breaking position in ${MANIFEST:-the crate manifest}," >&2
-    echo "       or make the change non-breaking (#[non_exhaustive] on public" >&2
-    echo "       structs and enums). PREFLIGHT_SEMVER_UNVERIFIED does not apply to" >&2
-    echo "       a verdict — it covers a gate that could not run, not one that ran." >&2
-    echo "       Only an owner-accepted break may ship unbumped, declared in a" >&2
-    echo "       committed $(semver_accept_rel "$pkg" "$version") — see" >&2
-    echo "       docs/reference/semver-gate.md, \"Accepted breaks\"." >&2
-    return 1
+    SEMVER_GATE_COMPARED=1
+    semver_record_break "$log" "$pkg" "$version"
+    return 0
   fi
 
   # --- THE GATE MALFUNCTIONED. 2 is a usage error and anything else is

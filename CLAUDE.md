@@ -138,7 +138,8 @@ category list: [changelog-fragments.md](docs/reference/changelog-fragments.md).
 🔴 **Version bumps, tags, and `cargo publish` are delegated to `local-ops`** —
 the PM never edits a version file, cuts a tag, or publishes directly. Call
 `Skill(skill="cargo-publish")` first: [release-workflow.md](docs/reference/release-workflow.md),
-semver gate (`preflight-publish.sh` CHECK 5, always the absolute stop):
+semver gate (`preflight-publish.sh` CHECK 5 reports a public-API break and
+never blocks — owner ruling 2026-09-26):
 [semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **CRITICAL macOS:** never `cp` a release binary — always `cargo install`,

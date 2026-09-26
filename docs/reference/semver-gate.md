@@ -1,5 +1,18 @@
 # Public-API / SemVer gate
 
+> **Versioning policy (owner ruling, 2026-09-26; stands until the owner
+> revokes it).** Every trusty-tools crate follows the project's internal
+> numbering scheme, not Cargo SemVer's break-forces-major rule. A release that
+> adds features bumps the minor version, and a release of bug fixes only bumps
+> the patch version, following the milestone the work belongs to. A
+> public-API break never forces a major version. The semver gate
+> (`preflight-publish.sh` CHECK 5) still runs on every publish. It detects
+> breaks and records them automatically in the crate's changelog and its
+> accepted-breaks record, so they stay visible to consumers. It reports and
+> never blocks: it does not fail the publish and it does not choose the
+> version. A major version is cut only when the owner says so. trusty-mpm
+> 2.0.0 is reserved for the supervisor milestone.
+
 `scripts/check_semver.sh` (issue
 [#5050](https://github.com/bobmatnyc/trusty-tools/issues/5050)). It runs at
 **release time**, not on pull requests —
@@ -9,26 +22,31 @@
 
 | Caller | When | Blocks a publish? |
 |---|---|---|
-| `scripts/preflight-publish.sh` CHECK 5 | immediately before `cargo publish` | **Yes** |
+| `scripts/preflight-publish.sh` CHECK 5 | immediately before `cargo publish` | Only on an infrastructure fault (comparison could not run) — never on a computed break (owner ruling 2026-09-26) |
 | `.github/workflows/semver-checks.yml` | on a `<crate>-v<version>` tag push | No — reports |
 | `bash scripts/check_semver.sh --crate <crate>` | on demand, any time | n/a |
 
 **Internal consistency is the bar — do not deliberate over external SemVer.**
 Keep the workspace self-consistent; what a third-party crates.io consumer
 would experience is not a question to weigh, hold work over, or write an
-analysis about. That governs deliberation, not the gate: CHECK 5's nonzero
-exit is still the absolute stop, and it is never advisory.
+analysis about. That governs deliberation, not the gate: CHECK 5 still runs on
+every publish and still stops it when the COMPARISON itself could not run
+(missing tool, unreachable registry, a run that examined zero crates) — that
+is an infrastructure fault, not a break. A computed break is never one of the
+things CHECK 5's nonzero exit means any more.
 
 `cargo publish` for this workspace is run locally by a human (`local-ops`), so
-no CI job can stop an upload. `preflight-publish.sh` is what can: the release
-sequence runs it as the last step before `cargo publish`, and a nonzero exit is
-the documented absolute stop (`Skill(skill="cargo-publish")`, step 5). CHECK 5
-sits there, so a break is caught while the upload can still be prevented — which
-matters because a crates.io publish is irreversible except by yank, and a gate
-that reported only after the upload would have caught #4088 with nothing left to
-do about it.
+no CI job can stop an upload. `preflight-publish.sh` still runs as the last
+step before `cargo publish`, and a nonzero exit is still the absolute stop for
+the checks that can still produce one (merged-main, identity, clean-tree,
+version-not-live, an infrastructure-fault CHECK 5, tag/publish-commit parity).
+A computed public-API break is no longer among them: CHECK 5 records it
+(`semver_record_break`, into the crate's changelog and
+`scripts/semver-accepted-breaks/`) and continues, before the upload happens —
+that recording is what makes the break visible and durable, in place of the
+red exit that used to be the only way to force a human to look at it.
 
-A zero exit from `check_semver.sh` is **not** the mirror of that stop, and
+A zero exit from `check_semver.sh` is **not** the mirror of a permit, and
 reading it as one is how a blind gate shipped a release
 ([#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620)). What CHECK 5
 concludes from a given run is in
@@ -572,37 +590,67 @@ coverage hole and has to earn its place. "It is slow" is not a reason.
 
 ## When it fires
 
-Bump the breaking position, or make the change non-breaking. `#[non_exhaustive]`
-on a struct or enum makes future field and variant additions non-breaking by
-construction — the fix #4088 asked for and deferred.
+At release time (CHECK 5) it no longer fires anything to fire AT — see the
+policy paragraph at the top of this document. A break is REPORTED: printed,
+and recorded automatically (below), never a reason to bump a version or rework
+an API on THIS gate's account. Bump the breaking position, or make the change
+non-breaking with `#[non_exhaustive]` (the fix #4088 asked for), only when the
+release's own plan calls for it — not because CHECK 5 demands it.
 
 ```bash
 cargo semver-checks --explain constructible_struct_adds_field
 ```
 
-Bumping the breaking position turns the run into an advisory inventory, so a
-false positive and a real break have the same safe remedy.
-`PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run, never one that
-ran and said no. A break has one narrow override, below.
+`PREFLIGHT_SEMVER_UNVERIFIED` still covers a gate that could not RUN (an
+infrastructure fault); it plays no role for a computed break, because a
+computed break no longer needs covering.
 
-### Accepted breaks (owner ruling 2026-09-22)
+### Breaks are recorded automatically (owner ruling 2026-09-26)
 
-The owner ruled on 2026-09-22: "accept the breaking API changes on main and keep
-the existing release plan. Override the semver gate (CHECK 5) so 1.x releases can
-publish with them", because "the user base is small, and it does not dictate the
-release model."
+CHECK 5 calls `semver_record_break`
+(`scripts/preflight-publish.sh`) for every computed break. It regenerates,
+deterministically and idempotently, two files from what THIS run computed —
+re-running over the same gate output writes byte-identical bytes, so nothing
+duplicates:
 
-A release that ships a break without a breaking bump carries a committed
-declaration, `scripts/semver-accepted-breaks/<package>-<version>.txt`. It names
-the crate, the exact version, a reason, and one `accept <lint> <item>...` row per
-accepted break. Format:
-[`scripts/semver-accepted-breaks/README.md`](../../scripts/semver-accepted-breaks/README.md).
-When it covers the gate's output, CHECK 5 prints `[WARN] semver: ACCEPTED BREAK`
-with the crate, the version, the reason, every accepted lint, the declaration's
-commit, and the full list of breaks the gate computed. It never prints `[PASS]`,
-and the run's final line says the release ships a break.
+- `scripts/semver-accepted-breaks/<package>-<version>.txt` — crate, version, a
+  reason, and one `accept <lint> <item>...` row per entry the gate computed.
+  Format:
+  [`scripts/semver-accepted-breaks/README.md`](../../scripts/semver-accepted-breaks/README.md).
+- a `Breaking`-category fragment in the crate's `changelog.d/`, so the break
+  reaches the crate's own changelog the same way any other user-visible change
+  does.
 
-It fails closed. CHECK 5 stays `[FAIL]` when:
+CHECK 5 then prints `[WARN] semver: RECORDED BREAK` with the crate, the
+version, the paths it wrote, and the full list of entries the gate computed.
+It never prints `[PASS]`, and it always permits — see
+[Reading the gate's result](#reading-the-gates-result). A break list the gate's
+own output does not parse into individual lint/item rows (an
+already-rare shape — no `--- failure <lint>:` block, or a fail count that
+disagrees with the failure blocks) still gets a file, with one generic
+`accept unparsed_break_list …` row rather than nothing on disk; the break was
+still computed, so it is still recorded.
+
+### The pull-request-time check is unchanged
+
+The **Public API / SemVer** PR check
+(`.github/workflows/semver-checks.yml` → `scripts/semver_ci_accept.sh`) still
+follows the 2026-09-22 declare-first ruling and is OUT OF SCOPE for the
+2026-09-26 policy above: a PR still cannot merge an unbumped break with no
+committed declaration on its base, `scripts/semver_ci_accept.sh` still reads
+that declaration through the same `semver_accept_present` /
+`semver_accept_decide` functions in
+`scripts/lib/semver_accepted_breaks.sh`, and every rule below still governs
+that check alone.
+
+A release that ships a break without a breaking bump, at PR time, still
+carries a committed declaration, `scripts/semver-accepted-breaks/<package>-<version>.txt`,
+naming the crate, the exact version, a reason, and one `accept <lint>
+<item>...` row per accepted break — the same file CHECK 5 now writes for
+itself at release time, so a PR that lands after CHECK 5 has already recorded
+a break finds the declaration already there. When it covers the gate's
+output, the PR check passes with the `ACCEPTED BREAK` warning; every rule
+below is this check's alone, not CHECK 5's:
 
 - the gate computed a break the declaration does not list — every `Failed in:`
   entry needs a row for its lint whose item tokens match as whole tokens;
@@ -610,39 +658,25 @@ It fails closed. CHECK 5 stays `[FAIL]` when:
   for another version;
 - the declared version is not the one the gate compared. `check_semver.sh`
   compares the manifest version, so a declaration for a hypothetical version
-  argument accepts nothing. A full (non-`--check-only`) run also refuses a
-  version argument that differs from the manifest (`[FAIL] version-arg`);
+  argument accepts nothing;
 - the `reason` row is missing or blank, a row is unknown, or no `accept` row
   exists;
 - the break list does not parse completely: the tool's failed-lint count and the
   failure blocks disagree, a block has no entries, or the gate also reported NO
   VERDICT.
 
-A declaration never covers a blind gate. That arm stays governed by
-`PREFLIGHT_SEMVER_UNVERIFIED` alone, and CHECK 5 says so when a declaration is
-present there. With no declaration, CHECK 5 behaves as before.
+A declaration never covers a blind gate there either. The file is the audit
+trail: it must be a plain tracked file (git mode 100644), read from the commit
+at HEAD (`git cat-file`), not through the filesystem. A symlink, any other
+mode, an untracked file, or a working copy that differs from HEAD fails that
+check. It names one release, so a later version needs a new file.
 
-The file is the audit trail. It must be a plain tracked file (git mode 100644),
-and CHECK 5 reads it from the commit at HEAD (`git cat-file`), not through the
-filesystem. A symlink, any other mode, an untracked file, or a working copy that
-differs from HEAD is `[FAIL]`. Only `--check-only` previews an uncommitted copy,
-marked `NOT COMMITTED`; a symlink fails there too. It names one release, so a
-later version needs a new file and a new review. It changes no exclusion TSV and
-no other check.
-
-The **Public API / SemVer** PR check honours the same declaration through
-`scripts/semver_ci_accept.sh`, which sources the same library: it passes with
-the `ACCEPTED BREAK` warning only when every crate's break is covered, and reads
-the declaration from the PR head commit, which the checked-out merge commit's
-copy must match.
-
-**Declare first.** A PR cannot accept its own break. Land the declaration on
-`main` in its own PR, then open or re-run the release PR that needs it. The PR
-check accepts a declaration only when the same file, byte-identical, is already
-on the PR's base — the first parent of the merge commit it checks out. A
-declaration that exists only on the PR branch, or that the PR changes, stays
-`[FAIL]`. A tag or `workflow_dispatch` run has no base, so it reads the file at
-the checked-out commit and accepts it only when that commit is on `main`.
+**Declare first, for the PR check.** It cannot accept its own break: the same
+file, byte-identical, must already be on the PR's base — the first parent of
+the merge commit it checks out. A declaration that exists only on the PR
+branch, or that the PR changes, stays `[FAIL]` there. A tag or
+`workflow_dispatch` run has no base, so it reads the file at the checked-out
+commit and accepts it only when that commit is on `main`.
 
 ## Reading the gate's result
 
@@ -672,13 +706,17 @@ together**, and each outcome gets its own label:
 |---|---|---|
 | `[PASS]` | ≥ 1 crate compared — a pass/fail run or an inventory that ran — and no unbumped break | proceeds |
 | `[SKIP]` | 0 compared because no comparison was *possible*: no baseline on crates.io, no library target, or a row in `semver-checks-crate-exclusions.tsv` | proceeds |
-| `[WARN]` | 0 compared because the gate was blind, and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
-| `[WARN] … ACCEPTED BREAK` | a computed break that a committed declaration for this crate and version lists in full ([Accepted breaks](#accepted-breaks-owner-ruling-2026-09-22)) | proceeds |
-| `[FAIL]` | a computed break with no valid, complete declaration, a blind gate with no override, or a gate that malfunctioned | stops |
+| `[WARN]` | 0 compared because the gate was blind (an infrastructure fault), and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
+| `[WARN] … RECORDED BREAK` | a computed break (owner ruling 2026-09-26) — recorded automatically, see [Breaks are recorded automatically](#breaks-are-recorded-automatically-owner-ruling-2026-09-26) | proceeds, unconditionally |
+| `[FAIL]` | a blind gate (infrastructure fault) with no override, or a gate that malfunctioned | stops |
 
 `[PASS]` states how many crates it compared. `[SKIP]` permits without an override
 because the reason is a fact about the crate that is already recorded in a
 reviewable file — but it says `NOT VERIFIED`, because nothing looked at the API.
+A computed break is never in the `[FAIL]` row any more: `[WARN] … RECORDED
+BREAK` is unconditional, needs no override, and `PREFLIGHT_SEMVER_UNVERIFIED`
+plays no role in it — that variable still means "the comparison could not
+run", not "a comparison ran and found a break".
 
 ### The same question, asked of the GitHub check ([#5688](https://github.com/bobmatnyc/trusty-tools/issues/5688))
 

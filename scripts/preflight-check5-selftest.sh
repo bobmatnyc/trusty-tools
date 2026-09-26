@@ -36,32 +36,37 @@
 #                             comparison, so [PASS] — the fix must not turn the
 #                             already-breaking arm into a blanket stop.
 #     3.  inventory blind     THE DEFECT, verbatim from the trusty-review
-#                             0.16.0 run. Gate exit 0, nothing compared.
-#                             Must [FAIL] and must NOT print PASS.
+#                             0.16.0 run. Gate exit 0, nothing compared. This
+#                             is an INFRASTRUCTURE fault (the comparison itself
+#                             never ran), not a break — must [FAIL] and must
+#                             NOT print PASS.
 #     4.  recorded skip       real trusty-mpm, excluded by
 #                             semver-checks-crate-exclusions.tsv. Nothing was
 #                             comparable, which is a fact about the crate and
 #                             already recorded in a reviewable file — so it
 #                             permits, and still must not print PASS.
-#     5.  no verdict (exit 3) real registry-unreachable run. Already stopped
-#                             before this change; pinned so the other arm's fix
-#                             does not quietly loosen it.
-#     6.  break (exit 1)      a computed verdict. Must [FAIL] with the
-#                             version-bump remedy.
+#     5.  no verdict (exit 3) real registry-unreachable run. An infrastructure
+#                             fault, same as case 3 — must [FAIL].
+#     6.  break (exit 1)      a computed verdict. Owner ruling 2026-09-26: this
+#                             is a REPORT, not a stop — must permit (status 0),
+#                             print [WARN] … RECORDED BREAK, and must NOT print
+#                             [PASS]. See the "record break" cases below for
+#                             what gets written to disk.
 #     7.  no summary          gate exit 0 with a summary line this script cannot
 #                             parse. Must [FAIL]: a reworded summary makes CHECK
 #                             5 red, never green.
 #     8.  gate malfunction    an undocumented exit status. Must [FAIL].
 #
-#   Override cases, all against case 3's blind fixture:
+#   Override cases, all against case 3's blind fixture unless noted:
 #     9.  reason given        [WARN], permits, and echoes the reason VERBATIM —
 #                             the reason is the entire disclosure, so a run that
 #                             swallowed it would record that a publish was
 #                             allowed without recording why.
 #     10. empty reason        set with nothing in it is REFUSED, not honoured.
-#     11. break + override    a computed break is NOT override-able. The
-#                             override covers a gate that could not run; exit 1
-#                             is the gate running and saying no.
+#     11. break + override    a computed break needs no override and the
+#                             override changes nothing about it — the run still
+#                             takes the RECORDED BREAK arm (owner ruling
+#                             2026-09-26), never the UNVERIFIED one.
 #     12. skip is unforced    the recorded-skip arm permits with NO override set,
 #                             so trusty-mpm does not need one on every publish.
 #                             An override that is always set is not an override.
@@ -83,34 +88,37 @@
 #                             is required for the clean arm, so a malfunctioning
 #                             differ lands in NO VERDICT rather than in [PASS].
 #
-#   Accepted-break cases (owner ruling 2026-09-22), over the real trusty-mpm
-#   1.6.3 -> 1.6.4 break and scripts/lib/semver_accepted_breaks.sh:
-#     (f) complete declaration  [WARN] naming crate, version, reason, every lint
-#                               and every computed entry; permits.
-#     (a) undeclared break      one item, then one whole lint, left out: [FAIL].
-#     (b) wrong release         crate or version inside the file differs, or the
-#                               only file is for another version: [FAIL].
-#     (c) no reason             blank or missing `reason` row: [FAIL].
-#     (d) blind gate            a complete declaration + no verdict: [FAIL].
-#     (e) no declaration        the break stops, as before.
-#     (g) unreadable list       fail counts and failure blocks disagree: [FAIL].
-#     (h) gate compared another declaration version = argument, but the gate
-#                               compared the manifest version: [FAIL].
-#     (i) full run, arg != manifest  full_mode_version_is_manifest refuses;
-#                               --check-only and an equal argument pass.
-#     (j) symlink / mode        committed as a symlink (target edited or not), a
-#                               symlink in the working tree, or mode 100755:
-#                               [FAIL] in both modes.
-#     (k) not the committed content  an edited working copy or an untracked
-#                               file: [FAIL] on a full run, a NOT COMMITTED
-#                               [WARN] preview under --check-only.
-#     (l) committed, unmodified [WARN] naming the HEAD blob it read.
-#     (m) two-path entry        an item only in the text after the first
-#                               ` in /<path>` is matched.
-#   The scratch root is a git repo, so every declaration is committed first.
-#   PREFLIGHT_SELFTEST_LIB points at another semver_accepted_breaks.sh.
+#   "record break" cases (owner ruling 2026-09-26), driving
+#   semver_record_break() over the real trusty-mpm 1.6.3 -> 1.6.4 break
+#   (break-lints.out, 25 distinct entries across 7 lints):
+#     (r1) structured break     writes scripts/semver-accepted-breaks/<pkg>-
+#                               <version>.txt (crate/version/reason/accept rows,
+#                               one per computed entry) and a changelog.d
+#                               fragment; [WARN] RECORDED BREAK; permits.
+#     (r2) idempotent re-run    running it twice over the same gate output
+#                               produces BYTE-IDENTICAL files — no duplicated
+#                               accept rows, no duplicated bullets.
+#     (r3) unparseable list     break.out carries no `--- failure <lint>:`
+#                               blocks (semver_break_entries's ERROR arm). Still
+#                               permits, still writes a file, with a single
+#                               generic accept row rather than nothing.
+#     (r4) unresolved crate dir MANIFEST that names no crates/<dir>/Cargo.toml
+#                               still permits and says so, rather than writing a
+#                               changelog fragment nobody can attribute to a
+#                               crate.
+#   The unrelated (i) full_mode_version_is_manifest cases below are unchanged
+#   by this ruling: a version argument that disagrees with the manifest is
+#   still refused on a full run, independent of what CHECK 5 decides.
 #
-# HOW IT DRIVES THE REAL DECISION: the two functions are lifted out of
+#   The pre-2026-09-26 declare-first accepted-breaks flow
+#   (scripts/lib/semver_accepted_breaks.sh's semver_accept_present /
+#   semver_accept_decide) is UNCHANGED and still governs the pull-request-time
+#   `Public API / SemVer` check (scripts/semver_ci_accept.sh) — its own
+#   coverage lives in scripts/check_semver_selftest.sh's `ci-accept/` cases,
+#   out of scope here. preflight-publish.sh's CHECK 5 no longer calls either
+#   function; semver_record_break replaces that call site.
+#
+# HOW IT DRIVES THE REAL DECISION: the functions are lifted out of
 #   preflight-publish.sh BY PATTERN (the same awk-extraction
 #   check_semver_selftest.sh uses for release_type), so this exercises the
 #   shipped definitions rather than a copy that can drift. check5_semver's own
@@ -193,19 +201,10 @@ exit "${SELFTEST_TYPES_RC:-0}"
 STUB
 chmod +x "${SCRATCH}/scripts/check_semver_types.sh"
 
-# The scratch root is a git repo: a declaration counts only as committed at HEAD,
-# so the accepted-break cases commit theirs. OUTSIDE is a directory outside it,
-# the target of case (j)'s symlink.
+# The scratch root doubles as REPO_ROOT for semver_record_break's own writes
+# (scripts/semver-accepted-breaks/, crates/<dir>/changelog.d/) — no git repo
+# needed for those, unlike the pre-2026-09-26 declare-first flow this replaced.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5-outside.XXXXXX")"
-trap 'rm -rf "$SCRATCH" "$OUTSIDE"' EXIT
-sgit() {
-  git -C "$SCRATCH" -c user.name=selftest -c user.email=selftest@example.invalid \
-    -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
-}
-sgit init -q
-sgit add -A -- scripts
-sgit commit -q --no-verify -m "selftest: stub gate"
 
 # ---------------------------------------------------------------------------
 # run_decision <fixture> <gate-rc> — run the shipped CHECK 5 end to end and
@@ -220,15 +219,17 @@ run_decision() {
   local fixture="$1" gate_rc="$2"
   (
     set +e
-    # Globals the extracted functions read. MANIFEST appears only in the
-    # break-remedy text; PKG_NAME/VERSION are the crate under test.
+    # Globals the extracted functions read. PKG_NAME/VERSION are the crate
+    # under test; MANIFEST feeds semver_record_break's crates/<dir>/Cargo.toml
+    # -> <dir> resolution, so it tracks PKG_NAME by default. Case (r4) overrides
+    # it to a path with no crates/<dir>/Cargo.toml shape.
     PKG_NAME="${SELFTEST_PKG:-stub-crate}"
     VERSION="${SELFTEST_VERSION:-9.9.9}"
     # Mirrors the shipped globals: semver_decide sets this, semver_types_advisory
     # reads it. Initialised to 0 here for the same reason it is there — a run
     # that never reached the count must refuse, not inherit a stale number.
     SEMVER_GATE_COMPARED=0
-    MANIFEST="crates/stub-crate/Cargo.toml"
+    MANIFEST="${SELFTEST_MANIFEST_OVERRIDE:-crates/${PKG_NAME}/Cargo.toml}"
     CHECK_ONLY="${SELFTEST_CHECK_ONLY:-0}"
     REPO_ROOT="$SCRATCH"
     TMP_SEMVER="$(mktemp "${SCRATCH}/log.XXXXXX")"
@@ -242,6 +243,7 @@ run_decision() {
 
     # The shipped definitions, lifted by pattern so a drifted copy cannot be
     # what passes. A missing function is a loud failure, not a silent skip.
+    eval "$(awk '/^semver_record_break\(\) \{/,/^\}/' "$UNDER_TEST")"
     eval "$(awk '/^semver_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
     eval "$(awk '/^semver_types_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
     eval "$(awk '/^semver_types_advisory\(\) \{/,/^\}/' "$UNDER_TEST")"
@@ -306,8 +308,8 @@ assert_case "recorded skip (excluded crate)" \
 assert_case "no verdict (gate exit 3)" \
   no-verdict.out 3 1 "[FAIL]" "0 crate(s) were compared" "[PASS] semver:"
 
-assert_case "computed break (gate exit 1)" \
-  break.out 1 1 "[FAIL]" "without a breaking" "[PASS] semver:"
+assert_case "computed break (gate exit 1) — owner ruling 2026-09-26: reports, never blocks" \
+  break.out 1 0 "[WARN] semver: RECORDED BREAK" "break entry" "[PASS] semver:"
 
 assert_case "summary line unparsable" \
   no-summary.out 0 1 "[FAIL]" "no summary line this script could read" "[PASS] semver:"
@@ -348,16 +350,21 @@ else
   pass_case "an override set with no reason is refused"
 fi
 
-# --- 11. A computed break is not override-able.
+# --- 11. A computed break needs no override, and the override changes
+#         nothing about it (owner ruling 2026-09-26): the run still takes the
+#         RECORDED BREAK arm, never the UNVERIFIED one — the override answers
+#         "the gate could not run", and this is the gate running and answering.
 raw="$(PREFLIGHT_SEMVER_UNVERIFIED="$REASON" run_decision break.out 1)"
 status="$(printf '%s\n' "$raw" | sed -n 1p)"
 body="$(printf '%s\n' "$raw" | sed '1d')"
-if [[ "$status" != "1" ]]; then
-  fail_case "override/break: the override cleared a COMPUTED break — it covers a gate that could not run, not one that ran and said no (got ${status})" "$body"
-elif [[ "$body" != *"[FAIL]"* ]]; then
-  fail_case "override/break: expected a [FAIL] line" "$body"
+if [[ "$status" != "0" ]]; then
+  fail_case "override/break: a computed break must permit regardless of the override (got ${status})" "$body"
+elif [[ "$body" != *"[WARN] semver: RECORDED BREAK"* ]]; then
+  fail_case "override/break: expected the RECORDED BREAK arm, not the override's own UNVERIFIED wording" "$body"
+elif [[ "$body" == *"UNVERIFIED"* ]]; then
+  fail_case "override/break: a computed break took the override's UNVERIFIED arm instead of its own" "$body"
 else
-  pass_case "a computed break is not override-able"
+  pass_case "a computed break needs no override, and the override changes nothing about it"
 fi
 
 # --- 12. The recorded-skip arm needs no override. The fixture is a trusty-mpm
@@ -481,55 +488,10 @@ else
 fi
 
 # ===========================================================================
-# (a)-(g). Accepted breaks (owner ruling 2026-09-22). break-lints.out is the
-#          real trusty-mpm 1.6.3 -> 1.6.4 break: 7 failed lints, 25 distinct entries.
-#          Every case must fail against a preflight-publish.sh with no
-#          declaration support: (f) because that script stops, the rest because
-#          they assert the reason the declaration was refused.
+# (r1)-(r4). "record break" — semver_record_break, owner ruling 2026-09-26.
+#            break-lints.out is the real trusty-mpm 1.6.3 -> 1.6.4 break: 7
+#            failed lints, 25 distinct entries.
 # ===========================================================================
-DECL_DIR="${SCRATCH}/scripts/semver-accepted-breaks"
-ACCEPT_REASON="owner ruling 2026-09-22: accept the breaking API changes on main"
-ACCEPT_ROWS="accept constructible_struct_adds_field BuildersConfig
-accept constructible_struct_adds_field BuilderSlotResponse
-accept derive_trait_impl_removed BuildersConfig Eq
-accept enum_no_repr_variant_discriminant_changed SectionId
-accept enum_variant_added ManagedError
-accept enum_variant_added ResumeManagedError
-accept enum_variant_added SectionId
-accept function_parameter_count_changed build_adapter
-accept method_parameter_count_changed ClaudeCodeAdapter::new
-accept struct_marked_non_exhaustive Delegation"
-
-# put_decl <file-pkg> <file-version> <body> — leave exactly one declaration in
-# the working tree, uncommitted.
-put_decl() {
-  rm -rf "$DECL_DIR"
-  mkdir -p "$DECL_DIR"
-  printf '%s\n' "$3" > "${DECL_DIR}/$1-$2.txt"
-}
-
-# commit_decl — commit the declaration directory as it now stands at HEAD.
-commit_decl() {
-  sgit add -A -- scripts
-  sgit commit -q --no-verify --allow-empty -m "selftest: declaration"
-}
-
-# write_decl <file-pkg> <file-version> <body> — put_decl, then commit it.
-write_decl() {
-  put_decl "$@"
-  commit_decl
-}
-
-# clear_decl — no declaration in the working tree or at HEAD.
-clear_decl() {
-  rm -rf "$DECL_DIR"
-  commit_decl
-}
-
-# decl_body <crate> <version> <reason-row> <accept-rows>
-decl_body() {
-  printf 'crate %s\nversion %s\n%s\n%s\n' "$1" "$2" "$3" "$4"
-}
 
 # check_raw <name> <want-status> <must-not, or -> <must-have>... — over $raw.
 check_raw() {
@@ -558,159 +520,71 @@ run_mpm() {
   SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 run_decision "$1" "$2"
 }
 
-# --- (f) A complete declaration downgrades BREAK to WARN, naming everything.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(f) complete declaration" 0 "[PASS] semver:" \
-  "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
-  "Reason: ${ACCEPT_REASON}" \
-  "Accepted lints: constructible_struct_adds_field, derive_trait_impl_removed, enum_no_repr_variant_discriminant_changed, enum_variant_added, function_parameter_count_changed, method_parameter_count_changed, struct_marked_non_exhaustive" \
-  "constructible_struct_adds_field: field BuilderSlotResponse.slot_refused" \
-  "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters"
-
-# --- (a) A break the declaration does not list still fails. Dropping the
-#         ResumeManagedError row also proves `ManagedError` does not cover it.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
-  "$(printf '%s\n' "$ACCEPT_ROWS" | grep -v ' ResumeManagedError$')")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(a) one item undeclared" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "NOT DECLARED  enum_variant_added: variant ResumeManagedError:AlreadyResuming"
-
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
-  "$(printf '%s\n' "$ACCEPT_ROWS" | grep -v struct_marked_non_exhaustive)")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(a) one lint undeclared" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "NOT DECLARED  struct_marked_non_exhaustive: struct Delegation"
-
-# --- (b) The declaration must name this crate and this version.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-common 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(b) wrong crate inside the file" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "names crate 'trusty-common', but this publish is 'trusty-mpm'"
-
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.3 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(b) wrong version inside the file" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "names version '1.6.3', but this publish is '1.6.4'"
-
-write_decl trusty-mpm 1.6.3 "$(decl_body trusty-mpm 1.6.3 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(b) declaration only for another version" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "committed scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
-
-# --- (c) The reason is mandatory and must say something.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason    " "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(c) empty reason" 1 "ACCEPTED BREAK" "[FAIL]" "the 'reason' row is empty"
-
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "# no reason" "$ACCEPT_ROWS")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(c) missing reason" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "needs exactly one 'reason' row, found 0"
-
-# --- (d) A complete declaration never covers a gate with no verdict.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(run_mpm inventory-blind.out 0)"
-check_raw "accepted/(d) blind inventory" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "does not cover a gate that produced no verdict"
-raw="$(run_mpm no-verdict.out 3)"
-check_raw "accepted/(d) no verdict (exit 3)" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "does not cover a gate that produced no verdict"
-
-# --- (e) No declaration: the break stops the publish, and the remedy names the
-#         one file that could change that.
-clear_decl
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(e) no declaration" 1 "ACCEPTED BREAK" "[FAIL] semver: public-API check failed" \
-  "committed scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
-
-# --- (g) A break list that does not parse is never matched. break.out counts 9
-#         failed lints and carries no failure block.
-write_decl stub-crate 1.3.5 "$(decl_body stub-crate 1.3.5 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(SELFTEST_VERSION=1.3.5 run_decision break.out 1)"
-check_raw "accepted/(g) unreadable break list" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "could not be read completely"
-
-# --- (h) The declaration, the version argument and the file name all say
-#         1.99.0, but the gate compared the manifest's 1.6.4. The breaks listed
-#         belong to 1.6.4, so nothing is accepted.
-write_decl trusty-mpm 1.99.0 "$(decl_body trusty-mpm 1.99.0 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-raw="$(SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.99.0 run_decision break-lints.out 1)"
-check_raw "accepted/(h) declaration names the argument, gate compared the manifest" 1 \
-  "ACCEPTED BREAK" "[FAIL]" \
-  "names version '1.99.0', but the gate compared trusty-mpm '1.6.4' (the manifest version)"
-
-# --- (j) A declaration is a plain committed file, never a symlink. The target
-#         sits outside the repo, so editing it leaves no git trace.
+# --- (r1) A structured break list writes both files and permits.
 DECL_REL="scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
-COMPLETE_DECL="$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" "$ACCEPT_ROWS")"
-rm -rf "$DECL_DIR"
-mkdir -p "$DECL_DIR"
-printf '%s\n' "$COMPLETE_DECL" > "${OUTSIDE}/target.txt"
-ln -s "${OUTSIDE}/target.txt" "${SCRATCH}/${DECL_REL}"
-commit_decl
-if [[ "$(sgit ls-tree HEAD -- "$DECL_REL")" != 120000* ]]; then
-  fail_case "accepted/(j) harness: the fixture was not committed as a symlink" "$(sgit ls-tree HEAD -- "$DECL_REL")"
+FRAG_REL="crates/trusty-mpm/changelog.d/8699-semver-break-1.6.4.md"
+rm -f "${SCRATCH}/${DECL_REL}" "${SCRATCH}/${FRAG_REL}"
+raw="$(run_mpm break-lints.out 1)"
+check_raw "record/(r1) structured break list" 0 "[PASS] semver:" \
+  "[WARN] semver: RECORDED BREAK — trusty-mpm 1.6.4" \
+  "Recorded in ${DECL_REL} and ${FRAG_REL}" \
+  "25 break entry(ies)"
+if [[ ! -f "${SCRATCH}/${DECL_REL}" ]]; then
+  fail_case "record/(r1) harness: ${DECL_REL} was not written" "$(ls -la "${SCRATCH}/scripts/semver-accepted-breaks" 2>&1)"
+elif ! grep -q '^crate   trusty-mpm$' "${SCRATCH}/${DECL_REL}" \
+    || ! grep -q '^version 1.6.4$' "${SCRATCH}/${DECL_REL}" \
+    || ! grep -q 'owner ruling 2026-09-26' "${SCRATCH}/${DECL_REL}" \
+    || ! grep -q '^accept  constructible_struct_adds_field field BuilderSlotResponse.slot_refused$' "${SCRATCH}/${DECL_REL}"; then
+  fail_case "record/(r1) ${DECL_REL} does not follow the README row format" "$(cat "${SCRATCH}/${DECL_REL}")"
+else
+  pass_case "record/(r1) ${DECL_REL} follows the crate/version/reason/accept row format"
 fi
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(j) committed symlink, full run" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "is committed at HEAD as a SYMLINK (git mode 120000)"
-printf '%s\n' "$(decl_body trusty-mpm 1.6.4 "reason edited outside git" "$ACCEPT_ROWS")" > "${OUTSIDE}/target.txt"
-raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
-check_raw "accepted/(j) committed symlink, target edited, --check-only" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "is committed at HEAD as a SYMLINK (git mode 120000)"
+if [[ ! -f "${SCRATCH}/${FRAG_REL}" ]]; then
+  fail_case "record/(r1) harness: ${FRAG_REL} was not written" "$(ls -la "${SCRATCH}/crates/trusty-mpm/changelog.d" 2>&1)"
+elif [[ "$(sed -n 1p "${SCRATCH}/${FRAG_REL}")" != "Breaking" ]] || ! grep -q '^- ' "${SCRATCH}/${FRAG_REL}"; then
+  fail_case "record/(r1) ${FRAG_REL} is not a valid changelog fragment (category line + '- ' bullets)" "$(cat "${SCRATCH}/${FRAG_REL}")"
+else
+  pass_case "record/(r1) ${FRAG_REL} is a Breaking-category fragment"
+fi
 
-write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
-rm -f "${SCRATCH}/${DECL_REL}"
-ln -s "${OUTSIDE}/target.txt" "${SCRATCH}/${DECL_REL}"
-raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
-check_raw "accepted/(j) plain at HEAD, symlink in the working tree, --check-only" 1 "ACCEPTED BREAK" \
-  "[FAIL]" "is a SYMLINK in the working tree"
-
-write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
-chmod +x "${SCRATCH}/${DECL_REL}"
-commit_decl
+# --- (r2) Idempotent: a second run over the same gate output writes the SAME
+#          bytes — no duplicated accept rows, no duplicated bullets.
+DECL_BEFORE="$(cat "${SCRATCH}/${DECL_REL}")"
+FRAG_BEFORE="$(cat "${SCRATCH}/${FRAG_REL}")"
 raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(j) committed with mode 100755" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "is committed at HEAD with git mode 100755 (blob), not as a plain file (100644)"
+check_raw "record/(r2) idempotent re-run" 0 "[PASS] semver:" "[WARN] semver: RECORDED BREAK"
+if [[ "$(cat "${SCRATCH}/${DECL_REL}")" != "$DECL_BEFORE" ]]; then
+  fail_case "record/(r2) ${DECL_REL} changed on a re-run over identical gate output" "diff:" \
+    "$(diff <(printf '%s' "$DECL_BEFORE") "${SCRATCH}/${DECL_REL}" 2>&1)"
+elif [[ "$(cat "${SCRATCH}/${FRAG_REL}")" != "$FRAG_BEFORE" ]]; then
+  fail_case "record/(r2) ${FRAG_REL} changed on a re-run over identical gate output" "diff:" \
+    "$(diff <(printf '%s' "$FRAG_BEFORE") "${SCRATCH}/${FRAG_REL}" 2>&1)"
+else
+  pass_case "record/(r2) a re-run over the same gate output writes byte-identical files"
+fi
 
-# --- (k) Only the committed content counts on a full run. --check-only may
-#         preview an edited or untracked working copy, marked NOT COMMITTED.
-write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
-printf '%s\n' "$(decl_body trusty-mpm 1.6.4 "reason edited after review" "$ACCEPT_ROWS")" \
-  > "${SCRATCH}/${DECL_REL}"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(k) committed, working copy edited, full run" 1 "ACCEPTED BREAK" "[FAIL]" \
-  "has a working-tree copy that differs from the content committed at HEAD"
-raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
-check_raw "accepted/(k) committed, working copy edited, --check-only preview" 0 "[PASS] semver:" \
-  "[WARN] semver: ACCEPTED BREAK" "Reason: edited after review" "Declaration: NOT COMMITTED"
+# --- (r3) A break list that does not parse (break.out: 9 failed lints, no
+#          "--- failure <lint>:" block) still permits and still writes a file,
+#          with one generic accept row rather than nothing.
+STUB_DECL_REL="scripts/semver-accepted-breaks/stub-crate-9.9.9.txt"
+rm -f "${SCRATCH}/${STUB_DECL_REL}"
+raw="$(run_decision break.out 1)"
+check_raw "record/(r3) unparseable break list still permits and records" 0 "[PASS] semver:" \
+  "[WARN] semver: RECORDED BREAK — stub-crate 9.9.9" "1 break entry(ies)"
+if [[ ! -f "${SCRATCH}/${STUB_DECL_REL}" ]]; then
+  fail_case "record/(r3) harness: ${STUB_DECL_REL} was not written" "-"
+elif ! grep -q '^accept  unparsed_break_list' "${SCRATCH}/${STUB_DECL_REL}"; then
+  fail_case "record/(r3) expected a generic unparsed_break_list accept row" "$(cat "${SCRATCH}/${STUB_DECL_REL}")"
+else
+  pass_case "record/(r3) an unparseable break list still writes a generic record"
+fi
 
-clear_decl
-put_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(k) untracked, full run" 1 "ACCEPTED BREAK" "[FAIL]" "is not tracked at HEAD"
-raw="$(SELFTEST_CHECK_ONLY=1 run_mpm break-lints.out 1)"
-check_raw "accepted/(k) untracked, --check-only preview" 0 "[PASS] semver:" \
-  "[WARN] semver: ACCEPTED BREAK" "Declaration: NOT COMMITTED"
-
-# --- (l) The positive control: a committed, unmodified 100644 file is accepted,
-#         and the output names the exact blob it read.
-write_decl trusty-mpm 1.6.4 "$COMPLETE_DECL"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(l) committed plain file, unmodified" 0 "[PASS] semver:" \
-  "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
-  "Declaration: read from the commit at HEAD (blob $(sgit rev-parse --short=12 "HEAD:${DECL_REL}")"
-
-# --- (m) An arity entry carries two ` in /<path>` suffixes. Its second clause,
-#         `now takes 3 parameters`, is part of the break and must be matchable.
-write_decl trusty-mpm 1.6.4 "$(decl_body trusty-mpm 1.6.4 "reason ${ACCEPT_REASON}" \
-  "$(printf '%s\n' "$ACCEPT_ROWS" | sed 's/ClaudeCodeAdapter::new$/ClaudeCodeAdapter::new now takes 3 parameters/')")"
-raw="$(run_mpm break-lints.out 1)"
-check_raw "accepted/(m) item only in an entry's second clause" 0 "NOT DECLARED" \
-  "[WARN] semver: ACCEPTED BREAK" \
-  "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
-clear_decl
+# --- (r4) A MANIFEST that resolves to no crates/<dir>/Cargo.toml still
+#          permits and records the declaration; it just cannot attribute a
+#          changelog fragment to a crate, and says so instead of guessing.
+raw="$(SELFTEST_VERSION=9.9.8 SELFTEST_MANIFEST_OVERRIDE=Cargo.toml run_decision break.out 1)"
+check_raw "record/(r4) unresolved crate dir still permits" 0 "[PASS] semver:" \
+  "[WARN] semver: RECORDED BREAK" "not recorded — MANIFEST did not resolve"
 
 # --- (i) A full run whose version argument is not the manifest version is
 #         refused; --check-only keeps the hypothetical-version preview.
