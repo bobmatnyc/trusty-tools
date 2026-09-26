@@ -106,15 +106,16 @@
 //!   2. **Map-reduce synthesis floor** (`mapreduce::synthesis::apply_synthesis_floor`)
 //!      — a hand-rolled floor for large diffs that does NOT call `derive_verdict`
 //!      at all; it tested bare `f.effort == Effort::High`.  **Fixed** — now uses
-//!      `drives_block_floor` (Tier 1) with a `correctness_floor`-equivalent
-//!      confidence-gated demotion (Tier 1.5) for a disqualified High.
+//!      `floors_verdict_to_block` (Tier 1; category-aware since #4044) with a
+//!      `correctness_floor`-equivalent confidence-gated demotion (Tier 1.5) for
+//!      a disqualified High.
 //!   3. **Verification re-derivation** (`verify::rederive_verdict`'s
-//!      `any_confirmed_high` baseline selector) — bare `f.effort == Effort::High`
-//!      picked path (a) (preserve `primary_verdict` as a hard floor) regardless
-//!      of citability.  **Fixed** — now requires `drives_block_floor`; a
-//!      confirmed-but-disqualified High falls through to path (a2) instead,
-//!      which still independently re-derives via `derive_verdict` (so it is NOT
-//!      silently dropped, just no longer treated as an unconditional floor).
+//!      `confirmed_floor_blocks` baseline selector) — bare `f.effort ==
+//!      Effort::High` picked path (a) (preserve `primary_verdict` as a hard
+//!      floor) regardless of citability.  **Fixed** — path (a) now opens only
+//!      when `derive_verdict` over the confirmed set reaches BLOCK (#4044), so
+//!      citability and category caps both hold; anything else falls through to
+//!      path (a2), which still re-derives via `derive_verdict`.
 //!
 //! ### Second-round adversarial-review fixes (grade consistency + downgrade scope)
 //!
@@ -865,9 +866,9 @@ pub(crate) fn is_escalation_eligible(f: &Finding) -> bool {
 /// unconditionally, a prompt-only change is not self-enforcing — this predicate is
 /// the deterministic backstop.  A high finding that is NOT escalation-eligible is
 /// demoted to the advisory (Medium) tier by `correctness_floor` rather than
-/// driving BLOCK.  Reused verbatim by the map-reduce synthesis floor
-/// (`mapreduce::synthesis::apply_synthesis_floor`) and the model-proposed-BLOCK
-/// sanitization below, so every BLOCK-emitting site in the pipeline applies the
+/// driving BLOCK.  Reused by the model-proposed-BLOCK sanitization below and,
+/// through the category-aware [`floors_verdict_to_block`], by `correctness_floor`
+/// and the map-reduce synthesis floor, so every BLOCK-emitting site applies the
 /// SAME gate (adversarial-review follow-up — see the module doc's "sites gated"
 /// list).
 /// What: returns `is_high_severity(f) && is_escalation_eligible(f)`.
@@ -875,6 +876,23 @@ pub(crate) fn is_escalation_eligible(f: &Finding) -> bool {
 /// controls.
 pub(crate) fn drives_block_floor(f: &Finding) -> bool {
     is_high_severity(f) && is_escalation_eligible(f)
+}
+
+/// Return `true` when a finding floors the verdict to BLOCK under the grader:
+/// it passes [`drives_block_floor`] AND sits in a category allowed to block.
+///
+/// Why: `drives_block_floor` ignores category, but the grader never lets an
+/// informational finding (#3474/#7036) drive BLOCK and caps method conformance
+/// at REQUEST_CHANGES (#1359). A floor outside `derive_verdict` that asked
+/// `drives_block_floor` alone blocked where the grader would not (#4044).
+/// What: `drives_block_floor(f)` for a correctness finding; `false` for an
+/// informational or `MethodConformance` one. Refutation is the caller's filter.
+/// Test: `synthesis_floor_blocks_only_on_categories_the_grader_blocks_on`,
+/// `high_finding_code_provable_still_blocks`.
+pub(crate) fn floors_verdict_to_block(f: &Finding) -> bool {
+    !f.category.is_informational()
+        && f.category != FindingCategory::MethodConformance
+        && drives_block_floor(f)
 }
 
 /// Return `true` when a finding is a "disqualified High" — high-severity but
@@ -1050,7 +1068,8 @@ fn correctness_floor(findings: &[&&Finding], thresholds: &Thresholds) -> FloorRe
     // `code_provable`).  A non-citable, non-diff-provable High finding is external
     // framework/platform speculation — it is demoted to the advisory (Medium) tier
     // below and can never force BLOCK.
-    let has_block_high = findings.iter().any(|f| drives_block_floor(f));
+    // #4044: the same predicate the synthesis floor asks, so the two cannot drift.
+    let has_block_high = findings.iter().any(|f| floors_verdict_to_block(f));
 
     // #1897: ANY High-effort finding (escalation-eligible or disqualified) rules
     // out the reconciliation cap — a disqualified High is still stronger evidence

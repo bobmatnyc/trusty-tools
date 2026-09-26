@@ -259,12 +259,12 @@ fn rederive_keeps_confirmed_block() {
 /// FAILS the citability gate (uncited, non-diff-provable — the exact PR #84
 /// shape post-verification: `verified: Confirmed`, no `source_citation`, not
 /// `code_provable`) must NOT pin `primary_verdict` as a hard BLOCK floor via
-/// path (a) — `any_confirmed_high` now requires `drives_block_floor`, so this
+/// path (a) — `confirmed_floor_blocks` asks `derive_verdict` (#4044), so this
 /// routes to path (a2) instead, which independently re-derives via
 /// `derive_verdict` rather than treating the disqualified confirmation as an
 /// unconditional floor.
 ///
-/// Why: previously `any_confirmed_high` used a bare `f.effort == Effort::High`
+/// Why: previously the path (a) selector used a bare `f.effort == Effort::High`
 /// check, so this exact scenario selected path (a) and pinned `primary_verdict`
 /// (here, a self-reported BLOCK) regardless of citability.  `derive_verdict`'s
 /// own #PR84 RULE 2 gate provides a downstream safety net that already prevents
