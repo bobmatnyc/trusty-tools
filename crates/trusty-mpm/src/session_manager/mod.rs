@@ -13,10 +13,14 @@ pub mod create;
 pub mod decommission;
 // #7660: the in-project removal step, `--force` policy and kept reason.
 pub mod decommission_force;
+// #8663: the content gates on decommission's two `remove_dir_all` routes.
+mod decommission_owned;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
+pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
@@ -66,6 +70,11 @@ pub mod workspace_guard;
 pub(crate) mod worktree_adopt;
 // #8318: frees an adopted tree's branch and a dead agent's harness lock.
 pub(crate) mod worktree_adopt_release;
+// #8534 critic round 3: which gitignored agent and skill files tm deployed.
+mod worktree_deployed_assets;
+// #8534: gitignored run output that `git worktree remove` would delete. `pub`
+// for the `tm pr cleanup` probe the binary wires in.
+pub mod worktree_ignored_output;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
@@ -156,6 +165,22 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8663: the owned-workspace and unclaimed-directory content gates.
+#[cfg(test)]
+mod decommission_owned_tests;
+
+// #8663 critic round 1: the provisioning ledger, lock and force gates.
+#[cfg(test)]
+mod decommission_owned_ledger_tests;
+
+// #8534 critic round 2: the gitignored-output gate, route by route.
+#[cfg(test)]
+mod worktree_ignored_output_route_tests;
+
+// #8534 critic round 3: user agents and skills versus tm's deployed ones.
+#[cfg(test)]
+mod worktree_ignored_output_asset_tests;
 
 // #8511: the marker-location behaviour, through the pre-existing ownership API.
 #[cfg(test)]

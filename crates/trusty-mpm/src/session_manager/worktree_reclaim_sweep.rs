@@ -742,6 +742,7 @@ pub(crate) fn reclaim_with_probes(
                 late_refusal.set(refusal.clone());
                 refusal
             },
+            super::DirtyWorktreePolicy::Skip,
         );
         if let Some(reason) = late_refusal.take() {
             tracing::warn!(

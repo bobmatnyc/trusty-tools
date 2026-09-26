@@ -20,7 +20,7 @@ use trusty_mpm::client::DaemonClient;
 use trusty_mpm::core::pr_cleanup::{
     ClaimEnder, CleanupRegistry, CleanupRequest, CleanupScope, RealGit, RealLanding,
 };
-use trusty_mpm::session_manager::worktree_safety::inspect_dirt;
+use trusty_mpm::session_manager::worktree_ignored_output::inspect_dirt_with_ignored_output;
 
 use super::{EXIT_BLOCKED, EXIT_OK, RealGhRunner, repo_slug};
 use crate::cli::PrCleanupArgs;
@@ -135,7 +135,9 @@ async fn run_engine(
 ) -> trusty_mpm::core::pr_cleanup::CleanupReport {
     // #7275: `RealLanding` is what decides a squash-merged branch is landed;
     // `inspect_dirt`'s ahead-of-upstream count no longer refuses on its own.
-    trusty_mpm::core::pr_cleanup::run(gh, &RealGit, claims, &RealLanding, &inspect_dirt, req).await
+    // #8534: `git worktree remove` deletes gitignored output; the probe counts it.
+    let probe = &inspect_dirt_with_ignored_output;
+    trusty_mpm::core::pr_cleanup::run(gh, &RealGit, claims, &RealLanding, probe, req).await
 }
 
 /// [`run`], with the #8301 scope choice: `head_only` limits removal to the PR's

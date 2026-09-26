@@ -70,7 +70,7 @@
 //! are safe, so the merged-PR re-check still has to supply that evidence.
 //!
 //! **Content-equivalence is never landing evidence on its own (#7275 round
-//! 2).** [`WorktreeRemovalProbe::merge_into_base_is_a_noop`] answers "would
+//! 2).** [`WorktreeRemovalProbe::content_on_base`] answers "would
 //! landing this branch change anything", and a branch that was never pushed —
 //! holding one empty or self-reverting commit — answers it exactly the way a
 //! merged branch does. The policy therefore asks it only once a MERGED pull
@@ -147,8 +147,8 @@ use std::path::Path;
 
 use crate::core::worktree_landed_content::{
     LandedContent, LandingAdmission, landing_admission, landing_admission_on_fetched_refs,
-    merge_residue,
 };
+use crate::core::worktree_landed_history::ContentOnBase;
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
@@ -432,6 +432,36 @@ pub trait WorktreeRemovalProbe {
     /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
     fn local_only_commits(&self, dir: &Path) -> Result<usize, String>;
 
+    /// Commits reachable from `HEAD` that neither the merged pull request's
+    /// head `pr_head` nor any `origin` remote-tracking ref has (#8665).
+    ///
+    /// Why: a branch whose own pull request merged had its remote branch
+    /// deleted by the merge, so a commit made in the worktree AFTER that merge
+    /// is on no remote at all — and "own PR merged, no upstream" granted the
+    /// removal without asking. This names those commits, so the guard can
+    /// require their content to be proven landed.
+    /// What: `git rev-list --abbrev-commit HEAD --not <pr_head> --remotes=origin`,
+    /// one abbreviated id per commit, newest first. `Ok(vec![])` means nothing
+    /// here post-dates the merged head or is off `origin`. `pr_head` must be a
+    /// hex object id; anything else, a head git does not have, or a failed
+    /// `rev-list` is `Err`. It does NOT refresh `origin`: the caller asks only
+    /// after [`local_only_commits`](Self::local_only_commits) answered, which
+    /// the production probe does only after its own fetch succeeded. Defaulted,
+    /// with the fail-closed default, for the reason [`head_sha`](Self::head_sha)
+    /// is.
+    /// Test: `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
+    /// `worktree_8665_the_merged_head_itself_is_still_reclaimable` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove_rechecks_tests`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`,
+    /// `commits_after_merged_head_refuses_a_head_that_is_not_hex`.
+    fn commits_after_merged_head(
+        &self,
+        _dir: &Path,
+        _pr_head: &str,
+    ) -> Result<Vec<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
+
     /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
     /// repository the question was asked (#7057).
     ///
@@ -456,10 +486,11 @@ pub trait WorktreeRemovalProbe {
     /// `worktree_remove_rechecks::landing_evidence`.
     /// What: `base_ref` is the full ref the pull request merged into
     /// (`origin/<baseRefName>`), supplied by the caller rather than guessed
-    /// here. `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
-    /// would change files or conflict, `Err` when git could not be asked —
-    /// which denies, like every other undeterminable answer here.
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
+    /// here. `Ok` carries the verdict — landed at the tip or at an earlier
+    /// base commit (#8633), residue, or a conflict — and its description;
+    /// `Err` when git could not be asked, which denies, like every other
+    /// undeterminable answer here.
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String>;
 
     /// Is this tree's content landed, or its HEAD inside a merged pull
     /// request's history (#7889)?
@@ -659,6 +690,33 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         })
     }
 
+    fn commits_after_merged_head(&self, dir: &Path, pr_head: &str) -> Result<Vec<String>, String> {
+        // #8665: the id comes from GitHub and lands in argv, so only a bare hex
+        // object id is passed — never something git could read as an option.
+        let pr_head = pr_head.trim();
+        if pr_head.is_empty() || !pr_head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "the merged pull request's head `{pr_head}` is not a commit id git can be asked \
+                 about"
+            ));
+        }
+        let args = [
+            "rev-list",
+            "--abbrev-commit",
+            "HEAD",
+            "--not",
+            pr_head,
+            "--remotes=origin",
+        ];
+        let out = git_stdout(dir, &args)?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
         // #7057: the repository — and its host, when that is not github.com —
         // comes from THIS worktree's own remote, not from whatever `gh` would
@@ -683,7 +741,7 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         )
     }
 
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
         // #7275, owner correction 2026-09-09: NOT `git cherry`. Every merge here
         // is a squash, so its per-commit patch-id comparison reports `+` for
         // content that IS on the base — observed on #7258. Merging into the base
@@ -693,7 +751,9 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // branch, which is wrong for anything that merged elsewhere.
         // #7889: the two commands now live in `core::worktree_landed_content`,
         // so this check and the landed-content admission cannot drift apart.
-        Ok(merge_residue(dir, base_ref)?.is_empty())
+        // #8633: a squash whose files `main` later edited is found in the
+        // base's history instead of being read as a failed merge.
+        crate::core::worktree_landed_history::content_on_base(dir, base_ref)
     }
 
     fn landing_admission(&self, dir: &Path) -> LandingAdmission {
@@ -944,8 +1004,12 @@ mod tests {
         fn merged_pull_requests(&self, _dir: &Path, _b: &str) -> Result<MergedPrLookup, String> {
             Ok(MergedPrLookup::new(0, "o/r", ""))
         }
-        fn merge_into_base_is_a_noop(&self, _dir: &Path, _base: &str) -> Result<bool, String> {
-            Ok(false)
+        fn content_on_base(&self, _dir: &Path, _base: &str) -> Result<ContentOnBase, String> {
+            Ok(ContentOnBase::Residual {
+                paths: vec!["x".into()],
+                searched: 0,
+                candidates: 0,
+            })
         }
     }
 
@@ -967,6 +1031,26 @@ mod tests {
         assert!(!UnoverriddenProbe.landing_admission(dir).admits());
         // #7889 critic round 2: an unoverridden nested scan is unanswerable.
         assert!(UnoverriddenProbe.nested_dirt(dir).is_err());
+        // #8665: so is the post-merge commit list, which then never admits.
+        assert!(
+            UnoverriddenProbe
+                .commits_after_merged_head(dir, "deadbeef")
+                .is_err()
+        );
+    }
+
+    /// 🔴 #8665: the merged head comes from GitHub and lands in argv, so a
+    /// value git would read as an option is refused before git runs. Unguarded,
+    /// `--all` turns the query into `HEAD --not --all`, which lists nothing and
+    /// would read as "no commit after the merge".
+    #[test]
+    fn commits_after_merged_head_refuses_a_head_that_is_not_hex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        let err = GitAndGhProbe
+            .commits_after_merged_head(&repo, "--all")
+            .expect_err("an option-shaped head must never reach git");
+        assert!(err.contains("--all"), "{err}");
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.

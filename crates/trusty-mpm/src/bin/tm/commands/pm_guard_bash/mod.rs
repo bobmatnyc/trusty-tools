@@ -49,6 +49,8 @@
 // sibling rules ask, replacing the per-guard lexing and redirect/program-text
 // splitting that disagreed with the shell four different ways.
 mod bash_tokens;
+// #8596, #8248: a credential CLI whose printed value would reach tool output.
+mod credential_print;
 mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
@@ -75,6 +77,7 @@ mod worktree_remove;
 mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 
+pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;

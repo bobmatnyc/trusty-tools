@@ -266,9 +266,23 @@ version does not.
 `delete_data`) followed by `POST /indexes` with the same `id`/`root_path` is
 the supported way to swap a registration's data while the daemon keeps
 running. `DELETE` (via `unregister_index`) always stops that index's
-filesystem watcher and drops its in-memory handle — and with it the redb
-file lock — before returning, so the following `POST` reopens the corpus
-cleanly. Skipping the `DELETE` and dropping a handle out-of-process (or
+filesystem watcher and drops its in-memory handle before returning. A
+delete that answers `quiesced: true` also closes the redb corpus and unmaps
+`hnsw.usearch` first, even while another handle clone survives it (#8167,
+#8232), so the files can then be replaced and the root unmounted. A delete
+that lands during a detached corpus rehydrate (#3683) first waits up to 30 s
+for the scan, without blocking searches; a scan still running then answers
+`500` with a `rehydrate` reason and nothing changed — re-issue the delete. A
+delete that answers `quiesced: false` could not close the files, because a
+live writer still holds them. The id is already deregistered, so a second
+delete answers `404` and cannot help. Instead the daemon closes the files in
+the background once that writer finishes, and the response says nothing
+about it: do not replace the files or unmount until the daemon log shows
+`delete[<id>]: deferred close done`. An ERROR line starting
+`delete[<id>]: deferred close` means they stayed open. Re-registering or
+writing to the same index id waits until `delete[<id>]: deferred close done`
+is logged, because the queued deferred close holds the teardown lock queue.
+Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
@@ -374,6 +388,7 @@ Per-index stats.
   {
     "index_id": "my-project",
     "root_path": "/Users/me/code/my-project",
+    "status": "ready",
     "chunk_count": 14823,
     "watcher": {
       "active": true,
@@ -382,6 +397,12 @@ Per-index stats.
     }
   }
   ```
+  - `status`: one of three values, checked in this order.
+    - `"indexing"` — a reindex task is running for this index.
+    - `"degraded"` (#8134) — a stage in `stages` has `failed`, or
+      `migration_error` is non-null. Both fields name the cause. An index
+      that restored vectors over an empty corpus reports this, not `ready`.
+    - `"ready"` — neither of the above.
   - `watcher` (issue #3408): `active` is whether a live OS-level watcher is
     currently running for this index. `network_mount_degraded` is `true` when
     the watcher was refused because `root_path` was detected as
@@ -546,6 +567,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
   the caller need not re-probe. An UNPINNED query is unaffected: it still
   returns `200` and degrades to whatever lanes are ready, reporting that via
   the `meta` flags above.
+
+  **Embed-only trigger (#8148).** `PATCH /indexes/{id}/config {"vector": true}`
+  is also how a corpus that was registered with unembedded chunks gets its
+  vectors, with no full reindex: when the lane is ALREADY enabled and the
+  semantic stage is `pending` or `failed`, the PATCH queues the same C2 embed
+  pass a reindex queues and answers `components.catch_up_started: true`. The
+  pass waits for the one background permit, so re-arming many indexes runs
+  their passes one at a time, and it sets the `deferred_embed_pending` marker,
+  so a restart re-arms an interrupted pass. It stays a no-op
+  (`catch_up_started: false`) once the stage is `ready` or a pass is already
+  `in_progress`. A `500` from a failed `indexes.toml` write still starts the
+  requested catch-up, because the in-memory config it serves is live.
 
   **Facet routing (#5069).** Before refusing, the daemon looks for a sibling
   index carrying the same `PersistedIndex::repo_identity` that was built with

@@ -250,13 +250,23 @@ impl<P: WorktreeRemovalProbe> WorktreeRemovalProbe for PendingProbe<P> {
         self.mark(CHECK_LOCAL_ONLY_COMMITS);
         self.inner.local_only_commits(dir)
     }
+    fn commits_after_merged_head(&self, dir: &Path, pr_head: &str) -> Result<Vec<String>, String> {
+        // #8665: forwarded, or the default `Err` would refuse every merged tree
+        // not parked on its pull request's exact head.
+        self.mark(CHECK_UNPUSHED_COMMITS);
+        self.inner.commits_after_merged_head(dir, pr_head)
+    }
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
         self.mark(CHECK_MERGED_PULL_REQUEST);
         self.inner.merged_pull_requests(dir, branch)
     }
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
+    fn content_on_base(
+        &self,
+        dir: &Path,
+        base_ref: &str,
+    ) -> Result<trusty_mpm::core::worktree_landed_history::ContentOnBase, String> {
         self.mark(CHECK_MERGED_PULL_REQUEST);
-        self.inner.merge_into_base_is_a_noop(dir, base_ref)
+        self.inner.content_on_base(dir, base_ref)
     }
     fn landing_admission(&self, dir: &Path) -> LandingAdmission {
         self.mark(LANDED_CONTENT_CHECK);

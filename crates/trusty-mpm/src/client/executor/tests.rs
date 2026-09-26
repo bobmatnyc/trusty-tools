@@ -770,6 +770,18 @@ async fn decommission_managed_id_prunes_stale_worktree_bookkeeping() {
     std::fs::write(base.join("README.md"), "seed\n").unwrap();
     git(&base, &["add", "README.md"]);
     git(&base, &["commit", "--quiet", "-m", "seed"]);
+    // #8663: pushed, so the owned workspace holds no unpushed commit.
+    git(
+        &workspace_root,
+        &["init", "--quiet", "--bare", "tm-5913-remote.git"],
+    );
+    let remote = workspace_root.join("tm-5913-remote.git");
+    git(
+        &base,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
+    git(&base, &["push", "--quiet", "origin", "HEAD"]);
+    git(&base, &["fetch", "--quiet", "origin"]);
 
     let id = ManagedSessionId::new();
     let leaf = format!("tm-5913-{id}");

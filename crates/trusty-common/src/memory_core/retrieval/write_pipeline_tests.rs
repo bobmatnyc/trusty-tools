@@ -645,4 +645,98 @@ mod tests {
             "the size guard should report an unknown size, not fail: {msg}"
         );
     }
+
+    /// Why (#8314): a write stuck behind a kg.redb write transaction that never
+    /// ends must be aborted with a server-side error naming the palace and the
+    /// operation — the client usually gives up first and never sees the
+    /// returned error. Reads of committed drawers must keep answering, and the
+    /// abandoned commit must land whole or not at all.
+    /// What: commits one drawer, holds a raw kg.redb write transaction on
+    /// another thread, runs a write with a small budget under log capture, and
+    /// reads the committed drawer while the transaction is still held. Then it
+    /// releases the transaction, waits for the abandoned commit to settle, and
+    /// asserts the in-memory table and the redb rows agree.
+    /// Test: itself.
+    #[test]
+    fn a_write_stuck_behind_a_kg_transaction_is_aborted_logged_and_never_partial() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let (outcome, lines) = crate::log_buffer::capture_logs(|| {
+            rt.block_on(async {
+                let (dir, handle) = palace().await;
+                let committed = handle
+                    .remember_with_options_within(
+                        "a drawer committed before the stall".to_string(),
+                        RoomType::General,
+                        vec![],
+                        0.5,
+                        opts(),
+                        AMPLE,
+                    )
+                    .await
+                    .expect("baseline write lands");
+
+                let db = handle.kg.store().db_for_test();
+                let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+                let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+                let stuck = std::thread::spawn(move || {
+                    let wtx = db.begin_write().expect("stuck kg write txn");
+                    held_tx.send(()).expect("signal held");
+                    let _ = release_rx.recv();
+                    drop(wtx); // abort: never committed
+                });
+                held_rx.recv().expect("stuck txn held");
+
+                let err = handle
+                    .remember_with_options_within(
+                        "a write that meets a stuck kg transaction".to_string(),
+                        RoomType::General,
+                        vec![],
+                        0.5,
+                        opts(),
+                        TINY,
+                    )
+                    .await
+                    .expect_err("#8314: a write behind a stuck txn must abort");
+                let read_started = Instant::now();
+                let seen = handle
+                    .list_drawers(None, None, 100)
+                    .iter()
+                    .any(|d| d.id == committed);
+                let read_took = read_started.elapsed();
+
+                release_tx.send(()).expect("release stuck txn");
+                stuck.join().expect("stuck thread");
+                // The abandoned commit holds the commit-order guard until it
+                // has landed in redb AND in `drawers`; taking it means settled.
+                drop(handle.commit_mutex.clone().lock_owned().await);
+                let in_memory = handle.list_drawers(None, None, 100).len();
+                let in_redb = handle.kg.store().raw_drawer_rows().expect("rows").len();
+                drop(dir);
+                (format!("{err:#}"), seen, read_took, in_memory, in_redb)
+            })
+        });
+        let (msg, seen, read_took, in_memory, in_redb) = outcome;
+        assert!(
+            msg.contains("write-budget-test"),
+            "error names the palace: {msg}"
+        );
+        assert!(seen, "the committed drawer stays readable during the stall");
+        assert!(
+            read_took < Duration::from_secs(1),
+            "read took {read_took:?}"
+        );
+        assert_eq!(
+            in_memory, in_redb,
+            "no partial commit: table and redb agree"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("ERROR")
+                && l.contains("write-budget-test")
+                && l.contains("remember")),
+            "#8314: the abort must be logged naming palace and operation: {lines:#?}"
+        );
+    }
 }

@@ -206,6 +206,8 @@ impl CodeIndexer {
     /// Test: `search_meta_reports_the_exact_match_floor`.
     pub async fn search_with_outcome(&self, query: &SearchQuery) -> Result<SearchOutcome> {
         self.touch_activity();
+        // #8232: a handle that outlived DELETE must not answer from closed files.
+        self.refuse_if_deleted()?;
         // #6581: M005 clears the corpus and re-chunks it in batches, so a query
         // landing in that window would read a cleanly-readable but empty corpus
         // and answer `results: []` — the same "outage rendered as nothing

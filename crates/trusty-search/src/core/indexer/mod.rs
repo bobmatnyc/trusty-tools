@@ -36,9 +36,13 @@ use crate::core::symbol_graph::SymbolGraph;
 
 pub(crate) mod archive;
 pub(crate) mod corpus_fault;
+// #8167/#8232: closing an index's files when it is deleted.
+mod delete_close;
 pub(crate) mod docs_penalty;
 // #6581: the migration-in-progress window and the error a query lands on there.
 mod files;
+// #8266: grep's file set, read without rehydrating an evicted corpus.
+mod file_set;
 pub(crate) mod helpers;
 mod idle_evict;
 mod ingest;
@@ -98,6 +102,10 @@ pub(crate) use helpers::{
 
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
+pub use delete_close::IndexDeleted;
+// #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
+#[cfg(test)]
+pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #7979: the failed-migration record `GET /indexes/:id/status` reports.
 pub use migration_state::{
@@ -454,6 +462,11 @@ pub struct CodeIndexer {
     /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`.
     pub(super) corpus_ever_wired: bool,
 
+    /// #8167/#8232: `true` once `DELETE /indexes/{id}` has closed this
+    /// indexer's files. Set and cleared only by `delete_close`; while set,
+    /// search and `index_file` refuse with [`IndexDeleted`].
+    pub(super) deleted: bool,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -702,6 +715,7 @@ impl CodeIndexer {
             corpus_open_failed: false,
             corpus_open_failure: None,
             corpus_ever_wired: false,
+            deleted: false,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,

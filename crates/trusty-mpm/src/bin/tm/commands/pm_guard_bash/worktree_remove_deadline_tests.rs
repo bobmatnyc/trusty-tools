@@ -44,8 +44,18 @@ impl WorktreeRemovalProbe for SlowProbe {
     fn merged_pull_requests(&self, _dir: &Path, _b: &str) -> Result<MergedPrLookup, String> {
         Ok(MergedPrLookup::new(0, "o/r", ""))
     }
-    fn merge_into_base_is_a_noop(&self, _dir: &Path, _base: &str) -> Result<bool, String> {
-        Ok(false)
+    fn content_on_base(
+        &self,
+        _dir: &Path,
+        _base: &str,
+    ) -> Result<trusty_mpm::core::worktree_landed_history::ContentOnBase, String> {
+        Ok(
+            trusty_mpm::core::worktree_landed_history::ContentOnBase::Residual {
+                paths: vec!["x".into()],
+                searched: 0,
+                candidates: 0,
+            },
+        )
     }
     fn nested_dirt(&self, _dir: &Path) -> Result<Option<String>, String> {
         Ok(None)

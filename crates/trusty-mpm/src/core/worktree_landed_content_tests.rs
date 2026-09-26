@@ -12,10 +12,9 @@
 
 use std::time::Duration;
 
-use super::{
-    LANDED_CONTENT_CHECK, LandedContent, LandingAdmission, landed_content_verdict, merge_residue,
-};
+use super::{LANDED_CONTENT_CHECK, LandedContent, LandingAdmission, landed_content_verdict};
 use crate::core::worktree_carried_by_pr::{CarriedByPr, MERGED_PR_ANCESTRY_CHECK};
+use crate::core::worktree_landed_history::{ContentOnBase, content_on_base};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 
 /// The bound every test here runs the refresh under.
@@ -40,7 +39,7 @@ fn a_divergence_landed_by_another_route_reports_landed() {
     fx.land_on_the_remote_only(&wt, "donor.txt");
 
     match landed_content_verdict(&wt, BOUND) {
-        LandedContent::Landed { base, base_sha } => {
+        LandedContent::Landed { base, base_sha, .. } => {
             assert!(base.contains("main"), "the base must be named: {base}");
             assert_eq!(base_sha.len(), 40, "a full object id: {base_sha}");
         }
@@ -168,12 +167,16 @@ fn a_gitlink_bump_is_residue_even_when_submodule_diffs_are_ignored() {
     git(&wt, &["config", "diff.ignoreSubmodules", "all"]);
     git(&wt, &["config", "submodule.sub.ignore", "all"]);
 
-    let residue = merge_residue(&wt, "origin/main").expect("the merge must be answerable");
-    assert_eq!(
-        residue,
-        vec!["sub".to_string()],
-        "the gitlink bump is residue"
-    );
+    match content_on_base(&wt, "origin/main") {
+        Ok(ContentOnBase::Residual { paths, .. }) => {
+            assert_eq!(
+                paths,
+                vec!["sub".to_string()],
+                "the gitlink bump is residue"
+            );
+        }
+        other => panic!("the merge must be answerable and leave residue: {other:?}"),
+    }
     match landed_content_verdict(&wt, BOUND) {
         LandedContent::Residual { first_path, .. } => assert_eq!(first_path, "sub"),
         other => panic!("a gitlink bump must not read as landed: {other:?}"),
@@ -187,11 +190,11 @@ fn merge_residue_against_an_unresolvable_base_is_an_error() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("no-base");
     assert!(
-        merge_residue(&wt, "origin/does-not-exist").is_err(),
+        content_on_base(&wt, "origin/does-not-exist").is_err(),
         "an unresolvable base must be an error"
     );
     assert!(
-        merge_residue(&wt, "   ").is_err(),
+        content_on_base(&wt, "   ").is_err(),
         "an empty base must be an error"
     );
 }
@@ -204,6 +207,16 @@ fn the_note_names_the_admission_in_every_arm() {
         LandedContent::Landed {
             base: "origin/main".into(),
             base_sha: "abc123".into(),
+            landed_at: None,
+        },
+        LandedContent::Landed {
+            base: "origin/main".into(),
+            base_sha: "abc123".into(),
+            landed_at: Some("def456".into()),
+        },
+        LandedContent::Conflicted {
+            base: "origin/main".into(),
+            detail: "merging HEAD into origin/main conflicts in 1 file(s)".into(),
         },
         LandedContent::Residual {
             base: "origin/main".into(),

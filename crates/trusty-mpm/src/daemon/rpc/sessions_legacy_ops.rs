@@ -313,11 +313,22 @@ async fn reconcile_managed_store_on_delete(state: &Arc<DaemonState>, tmux_name: 
         ) {
             continue;
         }
-        if let Err(e) = mgr.decommission(&record.id, None).await {
-            tracing::warn!(
+        let policy = crate::session_manager::decommission_force::ProvisioningDirt::Refuse;
+        match mgr.decommission_reporting(&record.id, None, policy).await {
+            // #8663: a workspace kept for its content is named, not dropped.
+            Ok(report) => {
+                if let Some(reason) = report.workspace_kept_reason {
+                    tracing::warn!(
+                        name = %tmux_name,
+                        "delete reconcile: decommissioned the managed record but kept its \
+                         workspace: {reason}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
                 name = %tmux_name,
                 "delete reconcile: decommission of managed record failed (may already be gone): {e}"
-            );
+            ),
         }
     }
 }

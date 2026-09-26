@@ -22,7 +22,10 @@ use trusty_common::migrations::{
 use crate::core::{
     corpus::{open_serialized, CorpusOpenFailure, CorpusStore},
     embed::Embedder,
-    indexer::{migrations::JsonCorpusToRedbMigration, CodeIndexer},
+    indexer::{
+        migrations::{legacy_snapshot_source, retire_snapshot, JsonCorpusToRedbMigration},
+        CodeIndexer,
+    },
     store::{UsearchStore, VectorStore},
 };
 
@@ -218,49 +221,85 @@ pub async fn build_indexer_from_entry(
 /// hasn't already recorded that the migration ran. The stamp is written
 /// after every successful migration step so subsequent boots skip the JSON
 /// probe entirely.
-/// What: tries `load_chunks_from_redb` first; on a populated redb corpus
-/// stamps the schema (so legacy `chunks.json` becomes inert) and returns.
-/// On an empty redb the [`MigrationRunner`] dispatches
-/// [`JsonCorpusToRedbMigration`], which reads the JSON snapshot and seeds
-/// redb. The runner writes the schema stamp after each successful step.
+/// What: loads redb, then hands the outcome to [`migrate_after_redb_load`].
 /// Test: covered by the corpus roundtrip + migration integration tests; the
 /// runner itself is unit-tested in `trusty-common::migrations`.
 async fn restore_corpus_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
+    let loaded = indexer.load_chunks_from_redb().await;
+    migrate_after_redb_load(indexer, entry, loaded);
+}
+
+/// Decide what migrates, given how the redb load went.
+///
+/// Why (#8134): only an empty corpus may be seeded from a legacy snapshot. A
+/// failed load says nothing about what the durable store holds, and importing
+/// over it overwrote the rows that share the snapshot's ids.
+/// What: a populated load stamps the schema and retires any own-layout
+/// snapshot beside it to `chunks.json.migrated`, since redb supersedes it; a
+/// failed rename records a `json_to_redb` fault and changes nothing else. `Ok(0)` runs the [`MigrationRunner`] with
+/// [`JsonCorpusToRedbMigration`], which seeds redb from the snapshot and
+/// writes the stamp after each successful step. `Err` runs no migration and
+/// writes nothing; when a snapshot is present it records a `json_to_redb`
+/// fault naming the snapshot and the load error, so status reads `degraded`.
+/// Test: `a_failed_redb_load_never_imports_and_records_a_fault`,
+/// `a_stale_snapshot_beside_a_populated_corpus_is_retired`,
+/// `a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing`.
+fn migrate_after_redb_load(
+    indexer: &mut CodeIndexer,
+    entry: &PersistedIndex,
+    loaded: Result<usize>,
+) {
     let index_id = &entry.id;
-    // Primary path: redb durable corpus.
-    match indexer.load_chunks_from_redb().await {
+    match loaded {
         Ok(n) if n > 0 => {
             tracing::info!("warm-boot: restored {n} chunks for index '{index_id}' from redb");
-            // Ensure the schema stamp is bumped past the JSON → redb step so
-            // a stray `chunks.json` left over from the legacy build is never
-            // re-read on the next boot.
             stamp_if_unversioned_for_entry(entry);
-            return;
+            // #8134: redb is authoritative here, so an own-layout snapshot
+            // left beside it is superseded. Retire it now; otherwise an index
+            // emptied later re-imports it through the v1-stamp recovery.
+            let retired = legacy_snapshot_source(indexer).map(|s| retire_snapshot(&s));
+            if let Some(Err(e)) = retired {
+                indexer.record_migration_failure(
+                    crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+                    format!("{e:#}"),
+                );
+            }
         }
-        Ok(_) => {} // empty redb — fall through to the migration runner.
-        Err(e) => tracing::warn!(
-            "warm-boot: redb corpus load failed for '{index_id}' ({e}) — \
-             trying registered migrations"
-        ),
+        // Migration runner path (issue #179).
+        Ok(_) => run_migrations_for_entry(indexer, entry),
+        Err(e) => {
+            tracing::warn!(
+                "warm-boot: redb corpus load failed for '{index_id}' ({e}) — \
+                 no migration runs over a corpus that could not be read (#8134)"
+            );
+            if let Some(snapshot) = legacy_snapshot_source(indexer) {
+                indexer.record_migration_failure(
+                    crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+                    format!(
+                        "the redb corpus could not be read ({e:#}) — refusing to import \
+                         legacy snapshot {} over it (#8134). Reindex to rebuild the \
+                         corpus, or remove or rename the snapshot to clear this fault.",
+                        snapshot.display()
+                    ),
+                );
+            }
+        }
     }
-
-    // Migration runner path (issue #179): dispatches the legacy JSON →
-    // redb migration when the on-disk schema stamp says it hasn't yet run.
-    run_migrations_for_entry(indexer, entry);
 }
 
 /// Dispatch the trusty-search migration runner for one index.
 ///
 /// Why: lifted into its own function so the redb-empty branch in
-/// [`restore_corpus_for_entry`] and any future "force re-migrate" admin command
+/// [`migrate_after_redb_load`] and any future "force re-migrate" admin command
 /// can share one entry point. Keeps the runner's stamp file path resolution
 /// and error logging in one place. Uses `schema_version_path_for_entry` so the
 /// stamp lands in the right location for both colocated and legacy indexes.
 /// What: reads the current stamp via `read_version_from_file`, instantiates
 /// the runner with [`JsonCorpusToRedbMigration`], and runs it against the
-/// indexer. Failures are logged but never propagated — a missing
+/// indexer, then [`reimport_over_stamped_empty_corpus`] (#8134). Failures are
+/// logged and recorded as a migration fault, never propagated — a missing
 /// `chunks.json` is the genuine first-boot case and yields an empty corpus.
-/// Test: covered by the existing migration integration tests.
+/// Test: `tests/migration_zero_row_8134.rs`.
 fn run_migrations_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
     let index_id = &entry.id;
     let stamp_path = match persistence::schema_version_path_for_entry(entry) {
@@ -282,7 +321,10 @@ fn run_migrations_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
         }
     };
     let runner = MigrationRunner::new(vec![Box::new(JsonCorpusToRedbMigration)]);
-    match runner.run(indexer, current, |v| write_version_to_file(&stamp_path, v)) {
+    let outcome = runner
+        .run(indexer, current, |v| write_version_to_file(&stamp_path, v))
+        .and_then(|_| reimport_over_stamped_empty_corpus(indexer, current));
+    match outcome {
         // #7979: a failed JSON → redb migration leaves the index serving 0
         // chunks; the WARN alone left `status` and `search_health` silent.
         Err(e) => {
@@ -299,6 +341,38 @@ fn run_migrations_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
             indexer.clear_migration_failure(crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB)
         }
     }
+}
+
+/// Re-run the JSON import for an index whose stamp already passed it but
+/// whose corpus came up empty (#8134).
+///
+/// Why: the runner skips a step once the stamp has passed it. An install that
+/// stamped v1 before the colocated-snapshot fix — a populated
+/// `<root>/.trusty-search/chunks.json` beside an empty `index.redb` — was
+/// therefore never read again, and with no HNSW vectors to trip the semantic
+/// stage it reported `ready` over 0 chunks forever.
+/// What: a no-op unless the stamp was already at or past
+/// `TRUSTY_SEARCH_SCHEMA_TARGET` when the runner started. Reached only after a
+/// redb load returned `Ok(0)`; then runs [`JsonCorpusToRedbMigration`] once
+/// more against the index's OWN snapshot (resolved per registry layout,
+/// #8438). That step refuses unless the DURABLE store holds no rows — a load
+/// of 0 does not prove that, since undecodable rows are skipped — and retires
+/// a snapshot it seeded from, so an index emptied later stays empty. No
+/// snapshot is `Ok`. Any failure is `Err`, which the caller records as a
+/// `json_to_redb` fault, so status reads `degraded`. The stamp is never
+/// touched, so this needs no new schema version.
+/// Test: `a_v1_stamp_over_an_empty_corpus_reimports_its_own_snapshot`,
+/// `a_v1_stamp_over_an_unreadable_snapshot_is_a_migration_fault`,
+/// `a_v1_stamp_never_imports_over_rows_the_load_could_not_decode`,
+/// `a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty`.
+fn reimport_over_stamped_empty_corpus(indexer: &CodeIndexer, current: SchemaVersion) -> Result<()> {
+    use crate::core::indexer::migrations::TRUSTY_SEARCH_SCHEMA_TARGET;
+    use trusty_common::migrations::Migration;
+
+    if current < TRUSTY_SEARCH_SCHEMA_TARGET {
+        return Ok(());
+    }
+    JsonCorpusToRedbMigration.apply(indexer)
 }
 
 /// Stamp the schema as fully migrated if the on-disk stamp is currently

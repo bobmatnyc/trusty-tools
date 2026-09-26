@@ -271,6 +271,23 @@ pub trait VectorStore: Send + Sync {
         Ok(0)
     }
 
+    /// Release every file handle and memory mapping this store holds, and
+    /// refuse all later use (#8167, #8232).
+    ///
+    /// Why: the store is shared by `Arc`, and a clone can outlive the index's
+    /// deletion (a queued deferred-embed job, an in-flight request). Dropping
+    /// the registry's reference therefore does not unmap `hnsw.usearch`: the
+    /// root stays busy for `umount`, and a file truncated under the mapping
+    /// turns the next search into a SIGBUS that kills the daemon.
+    /// What: irreversible. `UsearchStore` resets its graph (unmapping the
+    /// snapshot and closing its descriptor) and answers every later search,
+    /// write or save with an error rather than an empty result. Default =
+    /// no-op for in-memory / mock backends, which hold no file.
+    /// Test: `close_unmaps_the_view_and_refuses_every_later_use`.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Demote a promoted-but-idle store back to mmap-view mode, reclaiming
     /// its heap-resident copy. Default = no-op (in-memory / mock backends
     /// have no view-vs-mutable distinction to demote between).

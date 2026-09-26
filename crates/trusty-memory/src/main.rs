@@ -659,8 +659,12 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
             .expect("trusty-memory help.yaml is bundled and valid") // Why: include_str! guarantees presence at compile time; parse is validated in tests
     });
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// #8314: bounded teardown, so a parked redb write cannot hold the process open.
+fn main() -> Result<()> {
+    trusty_memory::exit_runtime::run_main(run())?
+}
+
+async fn run() -> Result<()> {
     // #4764: panic payloads reach the log stream via the hook that
     // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.
     // Why: parse via `try_parse` so we can attach the workspace-shared

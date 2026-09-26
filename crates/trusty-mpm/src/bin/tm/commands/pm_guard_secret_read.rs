@@ -335,9 +335,10 @@ use std::path::Path;
 
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    any_pattern_overlaps, expand_brace_alternatives, git_argv_at_subcommand, git_subcommand,
-    matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
-    split_shell_segments, strip_process_substitution,
+    any_pattern_overlaps, evaluate_credential_print_command, expand_brace_alternatives,
+    git_argv_at_subcommand, git_subcommand, matches_only_name_substring_family,
+    secret_pattern_overlaps, split_heredoc_bodies, split_shell_segments,
+    strip_process_substitution,
 };
 // #7839, #7738, #7744: the ONE tokenizer and token classifier every Bash
 // guard asks — which token is an interpreter's PROGRAM, which word is regex
@@ -527,8 +528,11 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
 /// Why: the one entry point `pm_guard` calls, so a Bash command and a `Read`
 /// tool call are decided by the same rule and reported with the same reason.
 /// What: routes `Bash` to [`evaluate_secret_file_read_command`] over its
-/// `command` string and every other tool to [`evaluate_secret_file_read_tool`].
-/// Test: `the_unified_entry_point_routes_both_surfaces`.
+/// `command` string, then to [`evaluate_credential_print_command`] (#8596,
+/// #8248: a credential CLI prints the same bytes with no file named), and
+/// every other tool to [`evaluate_secret_file_read_tool`].
+/// Test: `the_unified_entry_point_routes_both_surfaces`,
+/// `the_unified_entry_point_refuses_a_printed_credential`.
 pub(crate) fn evaluate_secret_file_read(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
@@ -538,7 +542,8 @@ pub(crate) fn evaluate_secret_file_read(
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        return evaluate_secret_file_read_command(command);
+        return evaluate_secret_file_read_command(command)
+            .or_else(|| evaluate_credential_print_command(command));
     }
     evaluate_secret_file_read_tool(tool_name, tool_input)
 }
@@ -2551,6 +2556,24 @@ mod tests {
         let allowed = serde_json::json!({"command": "cat Cargo.toml"});
         assert_eq!(evaluate_secret_file_read("Bash", Some(&allowed)), None);
         assert_eq!(evaluate_secret_file_read("Bash", None), None);
+    }
+
+    /// #8596, #8248: the entry `pm_guard` calls reaches the credential rule.
+    #[test]
+    fn the_unified_entry_point_refuses_a_printed_credential() {
+        for command in [
+            "security find-generic-password -s svc -w | head -c 50",
+            "gcloud auth application-default print-access-token",
+        ] {
+            let bash = serde_json::json!({ "command": command });
+            let reason = evaluate_secret_file_read("Bash", Some(&bash));
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains("#8596")),
+                "{command:?} -> {reason:?}"
+            );
+        }
+        let captured = serde_json::json!({"command": "T=$(gcloud auth print-access-token)"});
+        assert_eq!(evaluate_secret_file_read("Bash", Some(&captured)), None);
     }
 
     #[test]

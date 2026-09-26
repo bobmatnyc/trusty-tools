@@ -800,6 +800,13 @@ pub(crate) async fn create_index_report(
     if restore_chunk_count == 0 {
         stages.lexical = crate::core::registry::StageState::pending();
     }
+    // #8134: vectors restored over an empty corpus are not a ready lane.
+    let restore_vectors = indexer.vector_count().await.unwrap_or(0);
+    crate::service::warm_boot::fail_semantic_over_empty_corpus(
+        &mut stages,
+        restore_chunk_count,
+        restore_vectors,
+    );
     tracing::info!(
         "create_index: '{}' registered — restored chunks={} hnsw_snapshot={} graph_nodes={} \
          lexical_only={} skip_kg={} skip_vector={} → stages(lexical={:?}, semantic={:?}, \

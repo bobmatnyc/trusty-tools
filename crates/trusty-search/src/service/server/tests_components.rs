@@ -33,7 +33,7 @@ use tokio::sync::RwLock;
 
 /// Register a bare handle (both components enabled) under `id` and return
 /// the shared state.
-fn state_with_index(id: &str) -> Arc<SearchAppState> {
+pub(super) fn state_with_index(id: &str) -> Arc<SearchAppState> {
     let registry = IndexRegistry::new();
     let tmp = std::env::temp_dir();
     registry.register(IndexHandle::bare(
@@ -80,14 +80,14 @@ impl Drop for IsolatedDataDir {
     }
 }
 
-async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+pub(super) async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
     serde_json::from_slice(&bytes).expect("json")
 }
 
 /// Poll `handle.stages` up to 2s until `pred` is true. Mirrors the polling
 /// pattern in `service::reindex::defer_embed::tests`.
-async fn poll_stages<F: Fn(&crate::core::registry::IndexStages) -> bool>(
+pub(super) async fn poll_stages<F: Fn(&crate::core::registry::IndexStages) -> bool>(
     handle: &Arc<IndexHandle>,
     pred: F,
 ) {

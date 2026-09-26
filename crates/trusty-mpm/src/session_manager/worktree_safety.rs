@@ -60,12 +60,11 @@
 //!
 //! - **Gitignored loose files outside `.trusty-mpm/` whose names are not on the
 //!   #4166 list** — a scratch note in an ignored directory, a `.mcp.json.local`.
-//!   Deliberately not counted: on this repo's own 31 session worktrees,
-//!   treating every non-disposable ignored entry as dirt would flag `.claude/`
-//!   in 30 of 31 and disable reclamation outright, which is the failure mode of
-//!   a guard nobody can run. The named list buys back the unrecoverable cases
-//!   without that flag rate; widening it is a measurement, not a judgement
-//!   call.
+//!   Not counted HERE: on this repo's own 31 session worktrees, treating every
+//!   non-disposable ignored entry as dirt would flag `.claude/` in 30 of 31. Since
+//!   #8534 a separate gate counts them before removal, excusing harness and build
+//!   output: `super::worktree_ignored_output`, run by the shared remover, the
+//!   agent reap and the `tm pr cleanup` probe.
 //! - **Anything under a disposable build directory** (`target/`,
 //!   `node_modules/`, …), including a nested repository inside one — see
 //!   `super::worktree_nested::DISPOSABLE_DIR_NAMES`.

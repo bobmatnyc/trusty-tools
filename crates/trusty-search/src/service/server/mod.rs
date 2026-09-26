@@ -14,6 +14,8 @@
 mod admin;
 mod components;
 mod contrib_graph;
+// #8167/#8232: a delete closes the index's redb and HNSW files first.
+mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
@@ -104,6 +106,15 @@ mod tests_6380;
 // #8438: `delete_data` removes the directory the registry names, per source.
 #[cfg(test)]
 mod tests_8438;
+// #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
+#[cfg(test)]
+mod tests_8148;
+// #8134: vectors restored over an empty corpus never register as ready.
+#[cfg(test)]
+mod tests_8134;
+// #8167: a delete releases the index's files while a handle clone survives.
+#[cfg(test)]
+mod tests_8167;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
@@ -164,6 +175,9 @@ mod tests_exact_match_7675;
 // #5917: a search over an index whose corpus cannot be read must be refused.
 #[cfg(test)]
 mod tests_corpus_read_5917;
+// #8266: a cold, narrow grep must not rehydrate the whole corpus.
+#[cfg(test)]
+mod tests_grep_cold_8266;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;

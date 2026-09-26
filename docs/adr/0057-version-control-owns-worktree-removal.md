@@ -274,6 +274,73 @@ the guard will establish every precondition itself.
      request is in evidence. The `landed-content` comparison is separate. It
      can grant without any pull request, but only after a successful refresh of
      `origin` and after the clean-tree and ownership checks.
+
+     Amended by #8633 — a `merge-tree` CONFLICT is a verdict, not a failure,
+     and the comparison may be made against an earlier commit on the base.
+     A squash-merged branch whose files the base edited afterwards conflicts
+     with the base's tip, so every such tree was refused — with an empty
+     reason, because `merge-tree` reports a conflict on stdout with exit 1.
+     PR #8655's worktree was refused that way on 2026-09-26. Both the
+     `landed-content` admission and the merged-pull-request residue check now
+     ask `core::worktree_landed_history::content_on_base`. A HEAD that is an
+     ancestor of the base — a plain merge or a fast-forward — is landed. Any
+     other HEAD needs a two-way landing commit `M` on the base: the base's
+     tip is tried first, then each first-parent base commit since the fork
+     point that touches a file HEAD changed (oldest first, capped). `M`
+     admits only when four checks pass. (1) Merging HEAD into `M` changes no
+     file, so HEAD's changes since the fork are all in `M`. That cannot see a
+     later branch commit that takes part of a landing back — a revert to the
+     fork's version, or the deletion of a file the squash added — because
+     relative to the fork that commit changes nothing. (2) `M`'s own patch
+     (`M^1..M`, first parent) changes at least one file HEAD changed since the
+     fork; a commit that does not proves nothing about HEAD and is skipped,
+     never admitted, the tip included. (3) Every path some commit in
+     `<fork>..HEAD` touched (merges included, renames split) is either in
+     `M`'s patch or byte-identical in HEAD and `M`. (4) Applying `M`'s patch
+     onto HEAD changes no file those commits touched, and conflicts nowhere.
+     Check 4 sees an undo, but only on the paths `M`'s patch changes; checks
+     2 and 3 make sure every branch path is one of those or needs no proof.
+     Without them, `main` pushing an unrelated `u.txt` after the squash made
+     the tip a "landing commit" whose check-4 residue (`u.txt`) was filtered
+     away, and an unpushed revert on `f.txt` was admitted and lost; and a
+     later landing of `f.txt` alone vouched for an undone `g.txt` it never
+     touched. Check 4 ignores residue on paths no branch commit touched —
+     HEAD holds the fork's version there, which is on the remote. The basis
+     for that scoping is the 2026-09-22 owner ruling above: the #7889 donor
+     squash also carries a sibling's files, which HEAD never had, and those
+     trees are admitted. The tip gets no shortcut: an empty merge into the
+     tip no longer admits a non-ancestor on its own, because when the base
+     has not moved since the squash, the tip IS the squash and the same blind
+     spot applies there. A rebase-merged branch is landed at its last
+     replayed commit, which carries all of its content and whose own patch
+     HEAD holds. Ancestry is sufficient, never necessary; the test is still
+     content, judged only against commits already on the remote. A branch
+     holding a different version of the change, or a later commit the squash
+     never carried, is not admitted, and neither is a later commit that
+     undid part of the squash, whether or not the base has moved since —
+     except in one known residual, which predates #8633: the pre-#8633
+     tip-only forward merge admitted it too. A later base commit whose own
+     patch HEAD holds, on the same files, can stand in as `M`, and an
+     unpushed undo of lines an EARLIER landing carried on those files is then
+     not seen. Two one-PR shapes reach it. (A) Rebase-merge: branch commits
+     one (`f.txt` line 1 a→b), two (adds `new.txt`) and three (`f.txt` line
+     10 c→d) are replayed as one', two', three', and an unpushed branch
+     commit then reverts line 1 to a. That is admitted as landed at three',
+     because three' changes `f.txt`, so it covers the file, and its own
+     patch touches only line 10, which HEAD holds. (B) A later revert commit
+     R on the base that touches the same file: an unpushed undo of a landed
+     line is admitted at R. A second pull request from the same branch, or a
+     cherry-pick of a branch commit onto the base, reaches it the same way.
+     The repository allows rebase merges today (`allow_rebase_merge=true`);
+     disabling rebase-merge is the owner's pending decision. Shape A is
+     pinned as current behaviour by
+     `known_residual_rebase_merge_then_unpushed_undo_on_a_file_the_last_replay_touches_reads_landed`,
+     so a fix shows up as a deliberate change. A conflict is told apart from a git error by the tree
+     id `merge-tree` prints first; a git error (it also exits 1 for a ref it
+     cannot merge) stays undeterminable and quotes git's stderr, and
+     any error in either direction refuses. Every refusal names the
+     conflicted or residual files and how many base commits were searched —
+     "the oldest N of M" when the cap cut the search short.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

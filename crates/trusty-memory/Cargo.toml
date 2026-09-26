@@ -40,7 +40,7 @@ name = "trusty-memory"
 # 0.27.1 (#8589): patch — picks up trusty-common 0.52.3, whose secret filter
 # stops refusing identifier paths, Google doc URLs and common identifier
 # shapes as secrets during kuzu-import. No public item was removed or changed.
-version = "0.27.2"
+version = "0.28.0"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -134,6 +134,10 @@ anyhow = { workspace = true }
 # #4891: the backfill report reads a private COPY of each palace's redb store so
 # that opening it can never write to the live file (see commands/backfill_report).
 tempfile = { workspace = true }
+# #8434: `palace legacy-kg` reads the pre-redb SQLite `kg.db` read-only to
+# recover the drawers the #45 migration never imported (it compiled only under
+# a feature this binary never enabled).
+rusqlite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why axum and tower-http are gone (#6286): they were here for the HTTP/SSE

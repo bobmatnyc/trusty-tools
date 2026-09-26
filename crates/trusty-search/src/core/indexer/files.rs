@@ -117,7 +117,7 @@ impl CodeIndexer {
     /// Test: `enumerate_chunks_errors_when_rehydrate_did_not_commit`,
     /// `enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget`,
     /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index`.
-    async fn ensure_corpus_view_is_current(&self) -> Result<()> {
+    pub(super) async fn ensure_corpus_view_is_current(&self) -> Result<()> {
         let mut corpus_view_is_current = false;
         for _ in 0..crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES {
             self.ensure_chunks_loaded().await;
@@ -155,9 +155,10 @@ impl CodeIndexer {
     /// What: clones every `RawChunk` while briefly holding the read lock.
     ///
     /// Errors when the in-memory map is not a view of the corpus — #5917 made
-    /// this fallible because `grep` and `call_chain` are its only production
+    /// this fallible because `grep` and `call_chain` were its only production
     /// callers, and both reported an unreadable corpus as an answer: an empty
-    /// match set, and a real symbol declared nonexistent.
+    /// match set, and a real symbol declared nonexistent. grep now lists files
+    /// through `indexed_file_set` instead (#8266).
     /// Test: covered by `service::call_chain::tests`;
     /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index` and
     /// `call_chain_over_an_unreadable_corpus_is_503_not_404` cover the refusal.
