@@ -1200,11 +1200,36 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
         "re-dispatch fresh with `isolation: \"worktree\"`",
         "never `SendMessage` into the main checkout",
         "ADR-0061, #5649",
+        // #8004 recurrence: Claude Code removes an unchanged tree on stop, so
+        // the check covers every resume, and the fresh brief names the base.
+        "applies to EVERY resume",
+        "Claude Code removes an unchanged worktree",
+        "restate the base commit and branch in the brief",
+        "A worktree agent's tree must still exist first",
     ] {
         assert!(
             contains_prose_anchor(TM_DELEGATION_PATTERNS, needle),
             "tm-delegation-patterns' PM Re-Engagement section is missing the \
              #8004 worktree-survival check: {needle:?}"
+        );
+    }
+}
+
+/// 🔴 #8004 recurrence: the resident PM section routed only CI-pending and
+/// goal-unmet hand-backs to PM Re-Engagement, so a resume after an owner
+/// ruling or a released HOLD skipped the worktree-survival check.
+#[test]
+fn resident_re_engagement_routes_every_resume_to_the_worktree_check_8004() {
+    let section = include_str!("../assets/instructions/sections/subagent-re-engagement.md");
+    for needle in [
+        "Before any `SendMessage` resume",
+        "\"PM Re-Engagement\"",
+        "#8004",
+    ] {
+        assert!(
+            contains_prose_anchor(section, needle),
+            "subagent-re-engagement.md must route every resume to the #8004 \
+             worktree check: {needle:?}"
         );
     }
 }
