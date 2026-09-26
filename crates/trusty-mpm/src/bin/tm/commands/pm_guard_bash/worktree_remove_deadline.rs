@@ -254,9 +254,13 @@ impl<P: WorktreeRemovalProbe> WorktreeRemovalProbe for PendingProbe<P> {
         self.mark(CHECK_MERGED_PULL_REQUEST);
         self.inner.merged_pull_requests(dir, branch)
     }
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
+    fn content_on_base(
+        &self,
+        dir: &Path,
+        base_ref: &str,
+    ) -> Result<trusty_mpm::core::worktree_landed_history::ContentOnBase, String> {
         self.mark(CHECK_MERGED_PULL_REQUEST);
-        self.inner.merge_into_base_is_a_noop(dir, base_ref)
+        self.inner.content_on_base(dir, base_ref)
     }
     fn landing_admission(&self, dir: &Path) -> LandingAdmission {
         self.mark(LANDED_CONTENT_CHECK);

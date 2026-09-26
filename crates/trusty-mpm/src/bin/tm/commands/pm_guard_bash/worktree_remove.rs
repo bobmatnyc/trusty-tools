@@ -318,6 +318,7 @@ mod tests {
     use trusty_mpm::core::worktree_landed_content::{
         LANDED_CONTENT_CHECK as CHECK_LANDED_CONTENT, LandedContent, LandingAdmission,
     };
+    use trusty_mpm::core::worktree_landed_history::ContentOnBase;
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
     };
@@ -530,9 +531,16 @@ mod tests {
             }
             self.merged_related.clone().unwrap_or_else(|| Ok(lookup(0)))
         }
-        fn merge_into_base_is_a_noop(&self, _dir: &Path, base_ref: &str) -> Result<bool, String> {
+        fn content_on_base(&self, _dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
             *self.asked_base.borrow_mut() = Some(base_ref.to_string());
-            self.noop_merge.clone()
+            // #8633: `false` stands for a clean merge that still changes a file.
+            self.noop_merge.clone().map(|noop| match noop {
+                true => ContentOnBase::Landed { at: None },
+                false => ContentOnBase::Residual {
+                    paths: vec!["src/lib.rs".into()],
+                    searched: 0,
+                },
+            })
         }
         fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
             self.asked_fresh.set(Some(false));
@@ -646,6 +654,7 @@ mod tests {
             landed: LandedContent::Landed {
                 base: "origin/main".to_string(),
                 base_sha: "7df1c383f0a1b2c3d4e5f60718293a4b5c6d7e8f".to_string(),
+                landed_at: None,
             },
             ..FakeProbe::upstream_deleted()
         }
@@ -823,7 +832,7 @@ mod tests {
     /// 🔴 REGRESSION (#7275, round 2): the critic's CRITICAL. An empty merge
     /// tree with NO merged pull request anywhere must DENY.
     ///
-    /// Why: round 1 asked `merge_into_base_is_a_noop` the moment the lookup
+    /// Why: round 1 asked `content_on_base` the moment the lookup
     /// returned zero and granted on `Ok(true)`. A branch that was never pushed,
     /// holding one empty or self-reverting commit, answers that exactly the way
     /// a landed branch does — and it clears every other re-check by
@@ -873,6 +882,9 @@ mod tests {
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("would still change files"), "{reason}");
         assert!(reason.contains("diff --name-only"), "{reason}");
+        // #8633: the refusal quotes the probe's own result.
+        assert!(reason.contains("Probe result:"), "{reason}");
+        assert!(reason.contains("`src/lib.rs`"), "{reason}");
     }
 
     /// 🔴 REGRESSION (#7275, round 2): the base is the merged pull request's
@@ -1513,7 +1525,7 @@ mod tests {
     ///
     /// Why: `gh pr merge` leaves `@{upstream}` STALE, not level, so `Ahead(4)`
     /// is what a landed worktree reports. The `is_own && !ahead` short-circuit
-    /// therefore never fired, and `merge_into_base_is_a_noop` — asked next —
+    /// therefore never fired, and `content_on_base` — asked next —
     /// reported residue for a tree holding none. PR #7946's worktree, at head
     /// `9c8699fe0`, was refused that way on 2026-09-14. Fails on `983b7a2ae`,
     /// where this denies with `unpushed-commits`.

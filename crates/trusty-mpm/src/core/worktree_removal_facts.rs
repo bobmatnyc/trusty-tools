@@ -70,7 +70,7 @@
 //! are safe, so the merged-PR re-check still has to supply that evidence.
 //!
 //! **Content-equivalence is never landing evidence on its own (#7275 round
-//! 2).** [`WorktreeRemovalProbe::merge_into_base_is_a_noop`] answers "would
+//! 2).** [`WorktreeRemovalProbe::content_on_base`] answers "would
 //! landing this branch change anything", and a branch that was never pushed —
 //! holding one empty or self-reverting commit — answers it exactly the way a
 //! merged branch does. The policy therefore asks it only once a MERGED pull
@@ -147,8 +147,8 @@ use std::path::Path;
 
 use crate::core::worktree_landed_content::{
     LandedContent, LandingAdmission, landing_admission, landing_admission_on_fetched_refs,
-    merge_residue,
 };
+use crate::core::worktree_landed_history::ContentOnBase;
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
@@ -456,10 +456,11 @@ pub trait WorktreeRemovalProbe {
     /// `worktree_remove_rechecks::landing_evidence`.
     /// What: `base_ref` is the full ref the pull request merged into
     /// (`origin/<baseRefName>`), supplied by the caller rather than guessed
-    /// here. `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
-    /// would change files or conflict, `Err` when git could not be asked —
-    /// which denies, like every other undeterminable answer here.
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
+    /// here. `Ok` carries the verdict — landed at the tip or at an earlier
+    /// base commit (#8633), residue, or a conflict — and its description;
+    /// `Err` when git could not be asked, which denies, like every other
+    /// undeterminable answer here.
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String>;
 
     /// Is this tree's content landed, or its HEAD inside a merged pull
     /// request's history (#7889)?
@@ -683,7 +684,7 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         )
     }
 
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
         // #7275, owner correction 2026-09-09: NOT `git cherry`. Every merge here
         // is a squash, so its per-commit patch-id comparison reports `+` for
         // content that IS on the base — observed on #7258. Merging into the base
@@ -693,7 +694,9 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // branch, which is wrong for anything that merged elsewhere.
         // #7889: the two commands now live in `core::worktree_landed_content`,
         // so this check and the landed-content admission cannot drift apart.
-        Ok(merge_residue(dir, base_ref)?.is_empty())
+        // #8633: a squash whose files `main` later edited is found in the
+        // base's history instead of being read as a failed merge.
+        crate::core::worktree_landed_history::content_on_base(dir, base_ref)
     }
 
     fn landing_admission(&self, dir: &Path) -> LandingAdmission {
@@ -944,8 +947,11 @@ mod tests {
         fn merged_pull_requests(&self, _dir: &Path, _b: &str) -> Result<MergedPrLookup, String> {
             Ok(MergedPrLookup::new(0, "o/r", ""))
         }
-        fn merge_into_base_is_a_noop(&self, _dir: &Path, _base: &str) -> Result<bool, String> {
-            Ok(false)
+        fn content_on_base(&self, _dir: &Path, _base: &str) -> Result<ContentOnBase, String> {
+            Ok(ContentOnBase::Residual {
+                paths: vec!["x".into()],
+                searched: 0,
+            })
         }
     }
 

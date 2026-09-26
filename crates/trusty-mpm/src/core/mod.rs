@@ -370,6 +370,8 @@ pub mod worktree_carried_by_pr;
 pub mod worktree_index;
 // #7889: the landed-content admission both reclaim ladders share.
 pub mod worktree_landed_content;
+// #8633: the merge-into-base question, including a base that moved on.
+pub mod worktree_landed_history;
 pub mod worktree_naming;
 // See ADR-0057 — the facts the pm-guard's removal re-checks ask git and GitHub.
 pub mod worktree_removal_facts;

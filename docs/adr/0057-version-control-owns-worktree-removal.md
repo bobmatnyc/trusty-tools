@@ -274,6 +274,27 @@ the guard will establish every precondition itself.
      request is in evidence. The `landed-content` comparison is separate. It
      can grant without any pull request, but only after a successful refresh of
      `origin` and after the clean-tree and ownership checks.
+
+     Amended by #8633 — a `merge-tree` CONFLICT is a verdict, not a failure,
+     and the comparison may be made against an earlier commit on the base.
+     A squash-merged branch whose files the base edited afterwards conflicts
+     with the base's tip, so every such tree was refused — with an empty
+     reason, because `merge-tree` reports a conflict on stdout with exit 1.
+     PR #8655's worktree was refused that way on 2026-09-26. Both the
+     `landed-content` admission and the merged-pull-request residue check now
+     ask `core::worktree_landed_history::content_on_base`: when the tip merge
+     conflicts or leaves residue, it merges HEAD into each first-parent base
+     commit since the fork point that touches a file HEAD changed (oldest
+     first, capped), and an empty merge into any of them admits and names
+     that commit. This is still content, never ancestry: the same empty-merge
+     test decides, only against commits that are already on the remote. A
+     branch holding any change no single base commit contains — a different
+     version of the change, or a later commit the squash never carried — is
+     not admitted. A conflict is told apart from a git error by the tree id
+     `merge-tree` prints first; a git error (it also exits 1 for a ref it
+     cannot merge) stays undeterminable and quotes git's stderr. Every
+     refusal names the conflicted or residual files and how many base
+     commits were searched.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

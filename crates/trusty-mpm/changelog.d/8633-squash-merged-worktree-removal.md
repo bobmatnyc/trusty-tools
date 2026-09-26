@@ -1,0 +1,3 @@
+Fixed
+- `git worktree remove` under `tm hook --pm-guard`, and `tm session prune-worktrees --merged-prs`, no longer refuse a squash-merged worktree whose files `main` edited after the merge. The ADR-0057 landed-content probe now looks for the commit on the base's history that holds the branch's content, instead of reading a `git merge-tree` conflict against the tip as a failure (#8633, #8602).
+- A refusal from that probe now names its result — the conflicted or residual files and how many base commits were searched — and a `git merge-tree` error (a bad ref) is reported as undeterminable with git's stderr quoted, rather than as an empty "failed (exit status: 1)".
