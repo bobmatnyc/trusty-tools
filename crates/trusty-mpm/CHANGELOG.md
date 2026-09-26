@@ -6,6 +6,74 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.8] — 2026-09-26
+
+### Fixed
+
+- `cargo test -p trusty-mpm` no longer writes the operator's `~/.claude/settings.json`, `~/.claude.json`, `~/.trusty-tools/trusty-mpm/` (managed config, `session-mcp/`) or `~/.trusty-mpm/` (framework, `usage/`, `sessions/`, `projects/`, `banner.txt`, `pending_pair.json`). `tm launch`, `tm connect`, the guided fallback and the in-place relaunch take the user home as an argument, and compose the session MCP config, the compiled-prompt savings row and the catch-up watermark under it. The daemon writes pause records and session links under its own framework root and the resume statusLine under its user home. The lib, both bin and every integration test binary arm a home-write fence before `main`: a test that reaches a home-config writer panics there, naming the path, before anything is written ([#8545](https://github.com/bobmatnyc/trusty-tools/issues/8545))
+- The fence also covers `$CLAUDE_CONFIG_DIR` when it is set, the overseer audit log and the `manager-memory` portfolio palace. A lib test's `DaemonState::new()` builds under a temp root; the production daemon still uses `~/.trusty-mpm`. The public `prepare_isolated_session` and `prepare_interactive_config_dir` keep their signatures; the new `prepare_isolated_session_under` and `prepare_interactive_config_dir_under` take the home explicitly ([#8545](https://github.com/bobmatnyc/trusty-tools/issues/8545))
+- `tm pr queue-check` now requests GitHub's `mergeable` and `mergeStateStatus`
+  fields and refuses a PR marked `CONFLICTING` or `DIRTY`, reports `UNKNOWN`
+  as pending rather than mergeable, and fails closed on a missing field —
+  previously it never read either field and could report MERGEABLE for a PR
+  GitHub itself already flagged as conflicting.
+- `tm session decommission --force` now removes a task-bearing managed
+  worktree that holds only tm-written files. The timestamped
+  `.claude/settings.json.<timestamp>.bak` snapshots are now excused alongside
+  the other provisioning files. The untracked `TASK.md` is excused only while
+  its bytes equal the task tm wrote there at spawn; an edited `TASK.md`, or
+  one with no session task to compare against, keeps the worktree and is
+  named in the refusal. User work and unpushed commits still keep it too.
+- `--force` now also removes the worktree of a session that errored once.
+  A failed spawn appends one ` [error: …]` note to the session task after
+  `TASK.md` was written, so the unedited `TASK.md` is matched against the task
+  text before that note. This applies only when the task holds exactly one
+  ` [error: ` marker and ends with `]`. A session that errored more than once,
+  or whose task text itself contains the marker, keeps its tree.
+- A decommission refusal now states a file count that matches the entries it
+  lists: the count and the list now use the same excuse set.
+- The epic tracker's `phases` block State cell now resolves a phase's labels
+  through the issue state model — the state whose `label.name` the phase
+  carries, rendered as the state name minus `status_prefix` — instead of
+  matching raw labels by prefix. `tm issue transition` on a phase whose model
+  labels a state without the prefix (e.g. `status:in-progress` labelled
+  `in-progress`) no longer leaves the row at `open` and reports the block
+  "already current"; `tm issue epic sync`, `create` and the `tm issue audit`
+  phases-block row render through the same model, so a stale block is now
+  regenerated and FAILed rather than passed. A prefixed label no model state
+  issues reads `open`, the answer `tm issue current` gives
+  (refs [#8696](https://github.com/bobmatnyc/trusty-tools/issues/8696))
+- `tm session prune-worktrees --merged-prs` no longer reclaims a worktree
+  whose branch has no merged pull request of its own unless its content is
+  already on the base (the `merge-tree` no-op check). A head-commit match to
+  another branch's pull request, commits sitting on some remote ref, or a
+  failed or timed-out `gh` lookup now keeps the tree, and the refusal names
+  why. A no-PR tree reclaimed on landed content logs that as its reason.
+- A worktree the merged-PR sweep reclaims now has its local branch deleted
+  too, only when its content is proven landed, its tip is still the exact
+  commit that proof judged, and no other worktree (the main checkout
+  included) has it checked out. The deletion is one compare-and-delete
+  (`git update-ref --no-deref -d` at the proven commit, never through a
+  symref and never without a full commit SHA), so a commit made after the
+  proof keeps the branch. A failed branch lookup keeps the branch rather
+  than reporting it gone. Each deletion or kept branch is logged. The landed-content proof
+  (up to 40 s) now runs once per candidate before deletion, not twice.
+
+### Changed
+
+- PM guidance: every `SendMessage` resume of a worktree agent, not only a CI hand-back, first checks `git worktree list`; a gone tree gets a fresh `isolation: "worktree"` dispatch that restates the base commit and branch (#8004).
+
+### Documentation
+
+- `tm-workflow.md` no longer recommends `gh pr merge --delete-branch` — a
+  worktree holding the head branch (#8391) makes the flag fail post-merge the
+  same way a worktree holding the base branch already did (#7104). The skill
+  now names `tm pr merge` + `tm pr cleanup` as the sequence and adds the
+  merge-tree check before a manual `git branch -D`
+  (closes [#8391](https://github.com/bobmatnyc/trusty-tools/issues/8391))
+- `cleanup_deferred_report`'s message now names the remote branch as possibly
+  stranded too, not only the local one, matching the head-held failure mode
+
 ## [1.7.7] — 2026-09-26
 
 ### Fixed
