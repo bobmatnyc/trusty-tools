@@ -83,6 +83,7 @@ async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
         "a healthy index must report no migration error, got: {}",
         before["migration_error"]
     );
+    assert_eq!(before["status"], "ready", "precondition: {before}");
 
     let registry = MigrationRegistry {
         migrations: vec![Arc::new(FailingMigration)],
@@ -117,6 +118,11 @@ async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
     assert!(
         faults[0]["at"].is_string(),
         "the record must say when it was taken"
+    );
+    // #8134: an outstanding migration fault alone turns `status` to degraded.
+    assert_eq!(
+        after["status"], "degraded",
+        "#8134: status must not read ready while a migration fault is outstanding: {after}"
     );
 }
 
@@ -236,5 +242,10 @@ async fn a_succeeding_chain_clears_an_earlier_recorded_fault() {
         after["migration_error"].is_null(),
         "a successful chain must clear the record, got: {}",
         after["migration_error"]
+    );
+    // #8134: once the fault clears, `degraded` must not stick.
+    assert_eq!(
+        after["status"], "ready",
+        "#8134: a cleared fault returns status to ready: {after}"
     );
 }

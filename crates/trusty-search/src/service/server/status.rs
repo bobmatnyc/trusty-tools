@@ -290,10 +290,10 @@ pub(crate) async fn index_status_report(
     // or not yet reindexed since the last daemon restart).
     let in_memory_last_indexed = handle.last_indexed_at.read().await.clone();
     let last_indexed = in_memory_last_indexed.or(disk_last_indexed);
-    // Issue #80: surface a coarse lifecycle status. The legacy top-level
-    // `status` field stays for back-compat — it collapses to `indexing` while
-    // any reindex task is running and `ready` otherwise (mirrors the v0.8.x
-    // contract). Callers wanting per-stage granularity should consult the
+    // Issue #80: surface a coarse lifecycle status. The top-level `status`
+    // field is `indexing` while any reindex task is running, `degraded` when a
+    // stage has failed or a migration fault is outstanding (#8134), and
+    // `ready` otherwise. Callers wanting per-stage granularity should consult the
     // `stages` block introduced in v0.9.0 (issue #109, Phase 1) — that field
     // tracks lexical → semantic → graph progress and grows
     // `search_capabilities` as each lane comes online.

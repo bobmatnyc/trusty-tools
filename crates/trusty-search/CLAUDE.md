@@ -374,6 +374,7 @@ Per-index stats.
   {
     "index_id": "my-project",
     "root_path": "/Users/me/code/my-project",
+    "status": "ready",
     "chunk_count": 14823,
     "watcher": {
       "active": true,
@@ -382,6 +383,12 @@ Per-index stats.
     }
   }
   ```
+  - `status`: one of three values, checked in this order.
+    - `"indexing"` — a reindex task is running for this index.
+    - `"degraded"` (#8134) — a stage in `stages` has `failed`, or
+      `migration_error` is non-null. Both fields name the cause. An index
+      that restored vectors over an empty corpus reports this, not `ready`.
+    - `"ready"` — neither of the above.
   - `watcher` (issue #3408): `active` is whether a live OS-level watcher is
     currently running for this index. `network_mount_degraded` is `true` when
     the watcher was refused because `root_path` was detected as

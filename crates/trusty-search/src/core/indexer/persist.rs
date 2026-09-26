@@ -30,18 +30,12 @@ type RestoredCorpus = (Vec<RawChunk>, Vec<(String, Vec<RawEntity>)>);
 ///
 /// Why: the legacy log reported snapshot entries as restored chunks; a caller
 /// needs the distinct count and the number of entries folded by a repeated id.
-/// #8134: it also needs what the SOURCE held, because "0 restored" from an
-/// absent snapshot is a first boot and "0 restored" from a populated one is a
-/// lost corpus, and the migration answered `Ok` to both.
 /// What: `restored` distinct chunks now in memory; `duplicate_ids` snapshot
-/// entries that repeated an earlier id; `source_entries` chunk entries the
-/// snapshot file itself carried, before the id fold (`0` when the file is
-/// absent or genuinely empty).
+/// entries that repeated an earlier id.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotRestore {
     pub restored: usize,
     pub duplicate_ids: usize,
-    pub source_entries: usize,
 }
 
 /// Fail a JSON → redb migration whose store holds fewer rows than it migrated.
@@ -203,10 +197,7 @@ impl CodeIndexer {
         // publishes under one write lock — so it is refused on the empty-corpus
         // arm rather than writing a partial snapshot.
         self.snapshot_guard.mark_owned(path);
-        // #8134: what the FILE held, kept separately from what survived the id
-        // fold, so the migration can tell an absent source from a lost one.
-        let source_entries = snapshot.chunks.len();
-        let total = source_entries - duplicate_ids;
+        let total = snapshot.chunks.len() - duplicate_ids;
         // Phase 1: refill BM25 from the restored corpus before publishing the
         // chunks map so concurrent reads can't observe a half-state.
         {
@@ -254,7 +245,6 @@ impl CodeIndexer {
         Ok(SnapshotRestore {
             restored: total,
             duplicate_ids,
-            source_entries,
         })
     }
 
