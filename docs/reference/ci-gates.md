@@ -213,8 +213,8 @@ merge-base, in `trusty-mpm`'s `guided.rs`.
 contexts** (verified 2026-09-07 against the protection API) — a red run there
 never blocks merge. PR #6981 merged with `Public API / SemVer` and its own
 break self-test failing; #6981 and #6978 both merged with `Rustdoc intra-doc
-links` failing. `preflight-publish.sh` CHECK 5 reports a public-API break and
-never blocks — owner ruling 2026-09-26.
+links` failing. `preflight-publish.sh` CHECK 5 never blocks on a computed
+break; an infrastructure fault still stops it — owner ruling 2026-09-26.
 
 ## Running CI's clippy locally
 

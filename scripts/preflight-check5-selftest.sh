@@ -47,11 +47,11 @@
 #                             permits, and still must not print PASS.
 #     5.  no verdict (exit 3) real registry-unreachable run. An infrastructure
 #                             fault, same as case 3 — must [FAIL].
-#     6.  break (exit 1)      a computed verdict. Owner ruling 2026-09-26: this
-#                             is a REPORT, not a stop — must permit (status 0),
-#                             print [WARN] … RECORDED BREAK, and must NOT print
-#                             [PASS]. See the "record break" cases below for
-#                             what gets written to disk.
+#     6.  break (exit 1)      a computed verdict (real trusty-mpm break-lints.out).
+#                             Owner ruling 2026-09-26: this is a REPORT, not a
+#                             stop — must permit (status 0), print [WARN] …
+#                             RECORDED BREAK, and must NOT print [PASS]. See the
+#                             "record break" cases below for what gets written.
 #     7.  no summary          gate exit 0 with a summary line this script cannot
 #                             parse. Must [FAIL]: a reworded summary makes CHECK
 #                             5 red, never green.
@@ -88,24 +88,35 @@
 #                             is required for the clean arm, so a malfunctioning
 #                             differ lands in NO VERDICT rather than in [PASS].
 #
-#   "record break" cases (owner ruling 2026-09-26), driving
+#   "record break" cases (owner ruling 2026-09-26; #8699), driving
 #   semver_record_break() over the real trusty-mpm 1.6.3 -> 1.6.4 break
-#   (break-lints.out, 25 distinct entries across 7 lints):
-#     (r1) structured break     writes scripts/semver-accepted-breaks/<pkg>-
-#                               <version>.txt (crate/version/reason/accept rows,
-#                               one per computed entry) and a changelog.d
-#                               fragment; [WARN] RECORDED BREAK; permits.
+#   (break-lints.out, 25 distinct entries across 7 lints). Records go to
+#   PREFLIGHT_SEMVER_RECORD_DIR, a temp dir OUTSIDE the scratch REPO_ROOT:
+#     (r1) structured break     prints the record on stdout and writes
+#                               <pkg>-<version>/scripts/semver-accepted-breaks/
+#                               <pkg>-<version>.txt and .../changelog.d/ fragment
+#                               under the record dir — nothing under REPO_ROOT;
+#                               [WARN] RECORDED BREAK; permits.
 #     (r2) idempotent re-run    running it twice over the same gate output
-#                               produces BYTE-IDENTICAL files — no duplicated
-#                               accept rows, no duplicated bullets.
+#                               produces BYTE-IDENTICAL files.
 #     (r3) unparseable list     break.out carries no `--- failure <lint>:`
-#                               blocks (semver_break_entries's ERROR arm). Still
-#                               permits, still writes a file, with a single
-#                               generic accept row rather than nothing.
+#                               blocks (semver_break_entries's ERROR arm). A gate
+#                               malfunction, not a break: [FAIL], stops, writes
+#                               nothing.
 #     (r4) unresolved crate dir MANIFEST that names no crates/<dir>/Cargo.toml
-#                               still permits and says so, rather than writing a
-#                               changelog fragment nobody can attribute to a
-#                               crate.
+#                               still permits and says there is no fragment.
+#     (r5) check 5 + check 9    CHECK 5, CHECK 9 and CHECK 3 run in a scratch GIT
+#                               repo over break-lints.out. All three permit, the
+#                               tree stays clean, a committed declaration is
+#                               reported on and left byte-identical, and the
+#                               final summary lists the breaks and never says
+#                               "Safe to publish".
+#     (r6) NO VERDICT + exit 1  break-no-verdict.out: a break whose output also
+#                               says part of the API was never compared. [FAIL].
+#                               Same for an exit 1 with no `VERDICT: BREAK`.
+#     (r7) unwritable record    a record dir under a regular file, and one inside
+#                               the working tree: [FAIL] "break computed but
+#                               record could not be written", stops.
 #   The unrelated (i) full_mode_version_is_manifest cases below are unchanged
 #   by this ruling: a version argument that disagrees with the manifest is
 #   still refused on a full run, independent of what CHECK 5 decides.
@@ -115,8 +126,8 @@
 #   semver_accept_decide) is UNCHANGED and still governs the pull-request-time
 #   `Public API / SemVer` check (scripts/semver_ci_accept.sh) — its own
 #   coverage lives in scripts/check_semver_selftest.sh's `ci-accept/` cases,
-#   out of scope here. preflight-publish.sh's CHECK 5 no longer calls either
-#   function; semver_record_break replaces that call site.
+#   out of scope here. preflight-publish.sh's CHECK 5 calls neither decision
+#   function; semver_record_break only READS a committed declaration (r5).
 #
 # HOW IT DRIVES THE REAL DECISION: the functions are lifted out of
 #   preflight-publish.sh BY PATTERN (the same awk-extraction
@@ -173,7 +184,9 @@ pass_case() {
 # "${REPO_ROOT}/scripts/check_semver.sh"; this one replays a fixture.
 # ---------------------------------------------------------------------------
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+# Break records must land OUTSIDE REPO_ROOT (#8699), so they get their own dir.
+RECORDS="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5-records.XXXXXX")"
+trap 'rm -rf "$SCRATCH" "$RECORDS"' EXIT
 mkdir -p "${SCRATCH}/scripts"
 cat > "${SCRATCH}/scripts/check_semver.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -201,10 +214,22 @@ exit "${SELFTEST_TYPES_RC:-0}"
 STUB
 chmod +x "${SCRATCH}/scripts/check_semver_types.sh"
 
-# The scratch root doubles as REPO_ROOT for semver_record_break's own writes
-# (scripts/semver-accepted-breaks/, crates/<dir>/changelog.d/) — no git repo
-# needed for those, unlike the pre-2026-09-26 declare-first flow this replaced.
+# The scratch root doubles as REPO_ROOT; semver_record_break must write nothing
+# under it. Case (r5) builds a real git repo of its own.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+# lift_functions — eval the shipped definitions, by pattern, so a drifted copy
+# cannot be what passes. A function missing from an older script is simply
+# absent; the case that needs it fails.
+lift_functions() {
+  local fn
+  for fn in semver_record_root semver_record_outside_repo semver_record_write \
+    semver_record_declaration_note semver_record_break semver_decide \
+    semver_types_decide semver_types_advisory check5_semver \
+    check3_clean_tree check9_changelog_assembled preflight_ok_summary; do
+    eval "$(awk -v start="${fn}() {" 'index($0, start) == 1, /^\}/' "$UNDER_TEST")"
+  done
+}
 
 # ---------------------------------------------------------------------------
 # run_decision <fixture> <gate-rc> — run the shipped CHECK 5 end to end and
@@ -232,7 +257,8 @@ run_decision() {
     MANIFEST="${SELFTEST_MANIFEST_OVERRIDE:-crates/${PKG_NAME}/Cargo.toml}"
     CHECK_ONLY="${SELFTEST_CHECK_ONLY:-0}"
     REPO_ROOT="$SCRATCH"
-    TMP_SEMVER="$(mktemp "${SCRATCH}/log.XXXXXX")"
+    PREFLIGHT_SEMVER_RECORD_DIR="${SELFTEST_RECORD_DIR:-$RECORDS}"
+    TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-check5-log.XXXXXX")"
     SELFTEST_FIXTURE="${FIXTURES}/${fixture}"
     SELFTEST_GATE_RC="$gate_rc"
     export SELFTEST_FIXTURE SELFTEST_GATE_RC
@@ -241,13 +267,7 @@ run_decision() {
     # shellcheck source=lib/semver_accepted_breaks.sh
     . "$LIB_UNDER_TEST"
 
-    # The shipped definitions, lifted by pattern so a drifted copy cannot be
-    # what passes. A missing function is a loud failure, not a silent skip.
-    eval "$(awk '/^semver_record_break\(\) \{/,/^\}/' "$UNDER_TEST")"
-    eval "$(awk '/^semver_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
-    eval "$(awk '/^semver_types_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
-    eval "$(awk '/^semver_types_advisory\(\) \{/,/^\}/' "$UNDER_TEST")"
-    eval "$(awk '/^check5_semver\(\) \{/,/^\}/' "$UNDER_TEST")"
+    lift_functions
     if ! declare -f check5_semver > /dev/null; then
       echo "127"
       echo "SELF-TEST HARNESS: ${UNDER_TEST} defines no check5_semver()"
@@ -256,6 +276,7 @@ run_decision() {
 
     out="$(check5_semver 2>&1)"
     rc=$?
+    rm -f "$TMP_SEMVER"
     echo "$rc"
     printf '%s\n' "$out"
   )
@@ -308,8 +329,9 @@ assert_case "recorded skip (excluded crate)" \
 assert_case "no verdict (gate exit 3)" \
   no-verdict.out 3 1 "[FAIL]" "0 crate(s) were compared" "[PASS] semver:"
 
-assert_case "computed break (gate exit 1) — owner ruling 2026-09-26: reports, never blocks" \
-  break.out 1 0 "[WARN] semver: RECORDED BREAK" "break entry" "[PASS] semver:"
+SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 \
+  assert_case "computed break (gate exit 1) — owner ruling 2026-09-26: reports, never blocks" \
+  break-lints.out 1 0 "[WARN] semver: RECORDED BREAK" "break entry" "[PASS] semver:"
 
 assert_case "summary line unparsable" \
   no-summary.out 0 1 "[FAIL]" "no summary line this script could read" "[PASS] semver:"
@@ -354,7 +376,8 @@ fi
 #         nothing about it (owner ruling 2026-09-26): the run still takes the
 #         RECORDED BREAK arm, never the UNVERIFIED one — the override answers
 #         "the gate could not run", and this is the gate running and answering.
-raw="$(PREFLIGHT_SEMVER_UNVERIFIED="$REASON" run_decision break.out 1)"
+raw="$(PREFLIGHT_SEMVER_UNVERIFIED="$REASON" SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 \
+  run_decision break-lints.out 1)"
 status="$(printf '%s\n' "$raw" | sed -n 1p)"
 body="$(printf '%s\n' "$raw" | sed '1d')"
 if [[ "$status" != "0" ]]; then
@@ -520,71 +543,173 @@ run_mpm() {
   SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 run_decision "$1" "$2"
 }
 
-# --- (r1) A structured break list writes both files and permits.
+# in_tree_files — every file under the scratch REPO_ROOT that a case left
+# behind. semver_record_break must never write there (#8699).
+in_tree_files() {
+  find "$SCRATCH" -type f ! -path "${SCRATCH}/scripts/check_semver.sh" \
+    ! -path "${SCRATCH}/scripts/check_semver_types.sh" | LC_ALL=C sort
+}
+
+# --- (r1) A structured break list prints the record, writes it OUTSIDE the
+#          working tree, and permits.
 DECL_REL="scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
 FRAG_REL="crates/trusty-mpm/changelog.d/8699-semver-break-1.6.4.md"
-rm -f "${SCRATCH}/${DECL_REL}" "${SCRATCH}/${FRAG_REL}"
+REC_DIR="${RECORDS}/trusty-mpm-1.6.4"
 raw="$(run_mpm break-lints.out 1)"
 check_raw "record/(r1) structured break list" 0 "[PASS] semver:" \
   "[WARN] semver: RECORDED BREAK — trusty-mpm 1.6.4" \
-  "Recorded in ${DECL_REL} and ${FRAG_REL}" \
+  "--- semver break record: trusty-mpm 1.6.4 (lands as ${DECL_REL}) ---" \
+  "accept  constructible_struct_adds_field field BuilderSlotResponse.slot_refused" \
+  "Record written OUTSIDE the working tree: ${REC_DIR}" \
   "25 break entry(ies)"
-if [[ ! -f "${SCRATCH}/${DECL_REL}" ]]; then
-  fail_case "record/(r1) harness: ${DECL_REL} was not written" "$(ls -la "${SCRATCH}/scripts/semver-accepted-breaks" 2>&1)"
-elif ! grep -q '^crate   trusty-mpm$' "${SCRATCH}/${DECL_REL}" \
-    || ! grep -q '^version 1.6.4$' "${SCRATCH}/${DECL_REL}" \
-    || ! grep -q 'owner ruling 2026-09-26' "${SCRATCH}/${DECL_REL}" \
-    || ! grep -q '^accept  constructible_struct_adds_field field BuilderSlotResponse.slot_refused$' "${SCRATCH}/${DECL_REL}"; then
-  fail_case "record/(r1) ${DECL_REL} does not follow the README row format" "$(cat "${SCRATCH}/${DECL_REL}")"
+if [[ -n "$(in_tree_files)" ]]; then
+  fail_case "record/(r1) wrote inside the working tree (REPO_ROOT=${SCRATCH})" "$(in_tree_files)"
+elif [[ ! -f "${REC_DIR}/${DECL_REL}" ]]; then
+  fail_case "record/(r1) ${REC_DIR}/${DECL_REL} was not written" "$(find "$RECORDS" -type f 2>&1)"
+elif ! grep -q '^crate   trusty-mpm$' "${REC_DIR}/${DECL_REL}" \
+    || ! grep -q '^version 1.6.4$' "${REC_DIR}/${DECL_REL}" \
+    || ! grep -q 'owner ruling 2026-09-26' "${REC_DIR}/${DECL_REL}" \
+    || ! grep -q '^accept  constructible_struct_adds_field field BuilderSlotResponse.slot_refused$' "${REC_DIR}/${DECL_REL}"; then
+  fail_case "record/(r1) the record does not follow the README row format" "$(cat "${REC_DIR}/${DECL_REL}")"
+elif [[ "$(sed -n 1p "${REC_DIR}/${FRAG_REL}" 2>/dev/null)" != "Breaking" ]] \
+    || ! grep -q '^- ' "${REC_DIR}/${FRAG_REL}"; then
+  fail_case "record/(r1) ${REC_DIR}/${FRAG_REL} is not a Breaking fragment" "$(cat "${REC_DIR}/${FRAG_REL}" 2>&1)"
 else
-  pass_case "record/(r1) ${DECL_REL} follows the crate/version/reason/accept row format"
-fi
-if [[ ! -f "${SCRATCH}/${FRAG_REL}" ]]; then
-  fail_case "record/(r1) harness: ${FRAG_REL} was not written" "$(ls -la "${SCRATCH}/crates/trusty-mpm/changelog.d" 2>&1)"
-elif [[ "$(sed -n 1p "${SCRATCH}/${FRAG_REL}")" != "Breaking" ]] || ! grep -q '^- ' "${SCRATCH}/${FRAG_REL}"; then
-  fail_case "record/(r1) ${FRAG_REL} is not a valid changelog fragment (category line + '- ' bullets)" "$(cat "${SCRATCH}/${FRAG_REL}")"
-else
-  pass_case "record/(r1) ${FRAG_REL} is a Breaking-category fragment"
+  pass_case "record/(r1) record and fragment written outside the working tree, none inside"
 fi
 
 # --- (r2) Idempotent: a second run over the same gate output writes the SAME
 #          bytes — no duplicated accept rows, no duplicated bullets.
-DECL_BEFORE="$(cat "${SCRATCH}/${DECL_REL}")"
-FRAG_BEFORE="$(cat "${SCRATCH}/${FRAG_REL}")"
+DECL_BEFORE="$(cat "${REC_DIR}/${DECL_REL}" 2>/dev/null)"
+FRAG_BEFORE="$(cat "${REC_DIR}/${FRAG_REL}" 2>/dev/null)"
 raw="$(run_mpm break-lints.out 1)"
 check_raw "record/(r2) idempotent re-run" 0 "[PASS] semver:" "[WARN] semver: RECORDED BREAK"
-if [[ "$(cat "${SCRATCH}/${DECL_REL}")" != "$DECL_BEFORE" ]]; then
-  fail_case "record/(r2) ${DECL_REL} changed on a re-run over identical gate output" "diff:" \
-    "$(diff <(printf '%s' "$DECL_BEFORE") "${SCRATCH}/${DECL_REL}" 2>&1)"
-elif [[ "$(cat "${SCRATCH}/${FRAG_REL}")" != "$FRAG_BEFORE" ]]; then
-  fail_case "record/(r2) ${FRAG_REL} changed on a re-run over identical gate output" "diff:" \
-    "$(diff <(printf '%s' "$FRAG_BEFORE") "${SCRATCH}/${FRAG_REL}" 2>&1)"
+if [[ -z "$DECL_BEFORE" || "$(cat "${REC_DIR}/${DECL_REL}")" != "$DECL_BEFORE" ]]; then
+  fail_case "record/(r2) the record changed (or was never written) on a re-run over identical gate output"
+elif [[ "$(cat "${REC_DIR}/${FRAG_REL}")" != "$FRAG_BEFORE" ]]; then
+  fail_case "record/(r2) the fragment changed on a re-run over identical gate output"
 else
   pass_case "record/(r2) a re-run over the same gate output writes byte-identical files"
 fi
 
 # --- (r3) A break list that does not parse (break.out: 9 failed lints, no
-#          "--- failure <lint>:" block) still permits and still writes a file,
-#          with one generic accept row rather than nothing.
-STUB_DECL_REL="scripts/semver-accepted-breaks/stub-crate-9.9.9.txt"
-rm -f "${SCRATCH}/${STUB_DECL_REL}"
+#          "--- failure <lint>:" block) is a gate malfunction, not a break: it
+#          stops and records nothing.
+rm -rf "${RECORDS:?}"/*
 raw="$(run_decision break.out 1)"
-check_raw "record/(r3) unparseable break list still permits and records" 0 "[PASS] semver:" \
-  "[WARN] semver: RECORDED BREAK — stub-crate 9.9.9" "1 break entry(ies)"
-if [[ ! -f "${SCRATCH}/${STUB_DECL_REL}" ]]; then
-  fail_case "record/(r3) harness: ${STUB_DECL_REL} was not written" "-"
-elif ! grep -q '^accept  unparsed_break_list' "${SCRATCH}/${STUB_DECL_REL}"; then
-  fail_case "record/(r3) expected a generic unparsed_break_list accept row" "$(cat "${SCRATCH}/${STUB_DECL_REL}")"
+check_raw "record/(r3) unparseable break list stops" 1 "RECORDED BREAK" \
+  "[FAIL] semver: check_semver.sh exited 1 for stub-crate 9.9.9" "break list does not parse"
+if [[ -n "$(in_tree_files)$(find "$RECORDS" -type f)" ]]; then
+  fail_case "record/(r3) a malfunction wrote a record" "$(in_tree_files)" "$(find "$RECORDS" -type f)"
 else
-  pass_case "record/(r3) an unparseable break list still writes a generic record"
+  pass_case "record/(r3) a malfunction writes no record anywhere"
 fi
 
 # --- (r4) A MANIFEST that resolves to no crates/<dir>/Cargo.toml still
-#          permits and records the declaration; it just cannot attribute a
-#          changelog fragment to a crate, and says so instead of guessing.
-raw="$(SELFTEST_VERSION=9.9.8 SELFTEST_MANIFEST_OVERRIDE=Cargo.toml run_decision break.out 1)"
+#          permits and records; it just has no changelog fragment to propose.
+raw="$(SELFTEST_VERSION=9.9.8 SELFTEST_MANIFEST_OVERRIDE=Cargo.toml run_mpm break-lints.out 1)"
 check_raw "record/(r4) unresolved crate dir still permits" 0 "[PASS] semver:" \
-  "[WARN] semver: RECORDED BREAK" "not recorded — MANIFEST did not resolve"
+  "[WARN] semver: RECORDED BREAK" "no changelog fragment — MANIFEST did not resolve"
+
+# --- (r5) CHECK 5, CHECK 9 and CHECK 3 together, in a real git repo, over the
+#          real break. Before #8699, CHECK 5 wrote a changelog.d/ fragment into
+#          the checkout, CHECK 9 failed on it as STRANDED-FRAGMENTS, and CHECK 3
+#          on the next run saw a dirty tree. A committed declaration is present
+#          and covers only one of the 25 entries: it must be reported on and
+#          left byte-identical. The final summary must list the breaks.
+PREPO="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5-repo.XXXXXX")"
+mkdir -p "${PREPO}/scripts/semver-accepted-breaks" "${PREPO}/crates/trusty-mpm/changelog.d"
+cp "${SCRATCH}/scripts/check_semver.sh" "${SCRATCH}/scripts/check_semver_types.sh" "${PREPO}/scripts/"
+cp "${REPO_TOP}/scripts/check-changelog-assembled.sh" "${PREPO}/scripts/"
+printf '[package]\nname = "trusty-mpm"\nversion = "1.6.4"\n' > "${PREPO}/crates/trusty-mpm/Cargo.toml"
+printf '# Changelog\n\n## [1.6.4]\n\n### Fixed\n\n- a fix\n' > "${PREPO}/crates/trusty-mpm/CHANGELOG.md"
+printf 'Fragments go here.\n' > "${PREPO}/crates/trusty-mpm/changelog.d/README.md"
+printf 'crate   trusty-mpm\nversion 1.6.4\nreason  owner accepted the new field only\naccept  constructible_struct_adds_field BuilderSlotResponse.slot_refused\n' \
+  > "${PREPO}/${DECL_REL}"
+cp "${PREPO}/${DECL_REL}" "${RECORDS}/committed-decl.txt"
+git -C "$PREPO" init -q
+git -C "$PREPO" add -A
+git -C "$PREPO" -c user.name=selftest -c user.email=selftest@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m fixture
+raw="$(
+  cd "$PREPO" || exit 1
+  set +e
+  PKG_NAME=trusty-mpm VERSION=1.6.4 MANIFEST="${PREPO}/crates/trusty-mpm/Cargo.toml"
+  # shellcheck disable=SC2034  # read by the lifted functions
+  CHECK_ONLY=0 REPO_ROOT="$PREPO" SEMVER_GATE_COMPARED=0
+  # shellcheck disable=SC2034  # read by the lifted functions
+  PREFLIGHT_SEMVER_RECORD_DIR="${RECORDS}/r5"
+  TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-check5-log.XXXXXX")"
+  TMP_CHANGELOG="$(mktemp "${TMPDIR:-/tmp}/preflight-check5-cl.XXXXXX")"
+  SELFTEST_FIXTURE="${FIXTURES}/break-lints.out" SELFTEST_GATE_RC=1
+  export SELFTEST_FIXTURE SELFTEST_GATE_RC
+  # shellcheck source=lib/semver_accepted_breaks.sh
+  . "$LIB_UNDER_TEST"
+  lift_functions
+  # Into a file, not "$(...)": the summary reads what check5_semver set, and a
+  # command substitution would run the checks in a subshell and drop it.
+  run_log="$(mktemp "${TMPDIR:-/tmp}/preflight-check5-run.XXXXXX")"
+  {
+    check5_semver; echo "rc5=$?"
+    check9_changelog_assembled; echo "rc9=$?"
+    check3_clean_tree; echo "rc3=$?"
+    if declare -f preflight_ok_summary > /dev/null; then
+      preflight_ok_summary
+    else
+      echo "SELF-TEST HARNESS: ${UNDER_TEST} defines no preflight_ok_summary()"
+    fi
+  } > "$run_log" 2>&1
+  cat "$run_log"
+  rm -f "$TMP_SEMVER" "$TMP_CHANGELOG" "$run_log"
+)"
+if [[ "$raw" != *"rc5=0"* || "$raw" != *"rc9=0"* || "$raw" != *"rc3=0"* ]]; then
+  fail_case "record/(r5) CHECK 5 + CHECK 9 + CHECK 3 over a computed break must all permit" "$raw"
+elif [[ -n "$(git -C "$PREPO" status --porcelain --untracked-files=all)" ]]; then
+  fail_case "record/(r5) the working tree is dirty after CHECK 5" "$(git -C "$PREPO" status --porcelain --untracked-files=all)"
+elif ! cmp -s "${PREPO}/${DECL_REL}" "${RECORDS}/committed-decl.txt"; then
+  fail_case "record/(r5) the committed declaration was modified" "$(cat "${PREPO}/${DECL_REL}")"
+elif [[ "$raw" != *"Committed declaration ${DECL_REL} does NOT cover"* ]]; then
+  fail_case "record/(r5) did not report that the committed declaration misses entries" "$raw"
+elif [[ ! -f "${RECORDS}/r5/trusty-mpm-1.6.4/${DECL_REL}" ]]; then
+  fail_case "record/(r5) no record outside the working tree" "$raw"
+elif [[ "$raw" == *"Safe to publish"* ]]; then
+  fail_case "record/(r5) the summary said 'Safe to publish' over a recorded break" "$raw"
+elif [[ "$raw" != *"SHIPS"*"A PUBLIC-API BREAK: 25 break entry(ies)"* ]] \
+    || ! printf '%s\n' "$raw" | grep -q '^    enum_variant_added: '; then
+  fail_case "record/(r5) the summary does not list the recorded breaks" "$raw"
+else
+  pass_case "record/(r5) check 5 + check 9 + check 3 permit, tree clean, declaration untouched, summary lists breaks"
+fi
+rm -rf "$PREPO"
+
+# --- (r6) Exit 1 that is not a readable BREAK verdict stops as a malfunction:
+#          a break that also reports NO VERDICT (part of the API was never
+#          compared), and an exit 1 with no `VERDICT: BREAK` line at all.
+rm -rf "${RECORDS:?}"/*
+raw="$(run_mpm break-no-verdict.out 1)"
+check_raw "record/(r6) NO VERDICT + exit 1 stops" 1 "RECORDED BREAK" \
+  "[FAIL] semver: check_semver.sh exited 1 for trusty-mpm 1.6.4" "part of the API was never compared"
+raw="$(run_mpm checked-clean.out 1)"
+check_raw "record/(r6) exit 1 without VERDICT: BREAK stops" 1 "RECORDED BREAK" \
+  "no 'VERDICT: BREAK' line"
+if [[ -n "$(find "$RECORDS" -type f)" ]]; then
+  fail_case "record/(r6) a malfunction wrote a record" "$(find "$RECORDS" -type f)"
+fi
+
+# --- (r7) A record that cannot be written stops the publish: a record dir
+#          under a regular file (mkdir fails), and one inside the working tree.
+: > "${RECORDS}/blocker"
+raw="$(SELFTEST_RECORD_DIR="${RECORDS}/blocker/sub" run_mpm break-lints.out 1)"
+check_raw "record/(r7) unwritable record location stops" 1 "RECORDED BREAK" \
+  "[FAIL] semver: break computed but record could not be written" \
+  "--- semver break record: trusty-mpm 1.6.4"
+raw="$(SELFTEST_RECORD_DIR="${SCRATCH}/records-in-tree" run_mpm break-lints.out 1)"
+check_raw "record/(r7) record location inside the working tree stops" 1 "RECORDED BREAK" \
+  "[FAIL] semver: break computed but record could not be written" \
+  "not an absolute path outside the working tree"
+if [[ -e "${SCRATCH}/records-in-tree" ]]; then
+  fail_case "record/(r7) created ${SCRATCH}/records-in-tree inside the working tree"
+fi
 
 # --- (i) A full run whose version argument is not the manifest version is
 #         refused; --check-only keeps the hypothetical-version preview.

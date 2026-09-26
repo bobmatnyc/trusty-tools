@@ -1,21 +1,19 @@
 # Accepted SemVer breaks
 
-One file per release that ships a public-API break. `scripts/preflight-publish.sh`
-CHECK 5 writes `<package>-<version>.txt` here itself, automatically, whenever
-it computes a BREAK for that exact package and version — this is the crate's
-durable record of a break the trusty-tools internal numbering policy never
-required a version bump for. The policy, and what CHECK 5 does with a computed
-break, are in
-[semver-gate.md](../../docs/reference/semver-gate.md#versioning-policy-owner-ruling-2026-09-26-stands-until-the-owner-revokes-it).
+One file per release that ships a public-API break — the crate's durable
+record of a break the trusty-tools internal numbering policy never required a
+version bump for. The policy, and what CHECK 5 does with a computed break, are
+in
+[semver-gate.md](../../docs/reference/semver-gate.md#breaks-are-recorded-outside-the-working-tree-8699).
 
-**Auto-recorded, not hand-declared (owner ruling 2026-09-26).** `semver_decide`
-in `scripts/preflight-publish.sh` calls `semver_record_break`, which
-regenerates this file from what the gate computed on THIS run — same bytes on
-every re-run over the same gate output, so nothing here is ever hand-edited or
-duplicated. A break here never fails the publish and never picks a version;
-CHECK 5 prints `[WARN] semver: RECORDED BREAK` and continues. Leave the file in
-place after the release as the record of what shipped; a later version's break
-gets its own file.
+**Generated at release time, landed after it (owner ruling 2026-09-26, #8699).**
+When `scripts/preflight-publish.sh` CHECK 5 computes a break, `semver_record_break`
+prints `<package>-<version>.txt` on stdout and writes it OUTSIDE the working
+tree, under `$PREFLIGHT_SEMVER_RECORD_DIR/<package>-<version>/scripts/semver-accepted-breaks/`.
+It never writes into this directory and never modifies a file already committed
+here; when one exists it only reports whether that file covers the computed
+break. The operator lands the generated file here in the post-release PR. A
+later version's break gets its own file.
 
 **This supersedes the 2026-09-22 declare-first flow for CHECK 5 only.** The
 pull-request-time `Public API / SemVer` check

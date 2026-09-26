@@ -139,9 +139,9 @@ reaches for the full run as a substitute for the pre-tag one.
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
 🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
-— treat any nonzero exit as an absolute stop, EXCEPT CHECK 5 (semver), which
-reports a public-API break and never blocks (owner ruling 2026-09-26; see
-docs/reference/semver-gate.md).** On 2026-07-08 a crate was
+— treat any nonzero exit as an absolute stop. CHECK 5 (semver) never blocks on
+a computed break; an infrastructure fault still stops it (owner ruling
+2026-09-26; see docs/reference/semver-gate.md).** On 2026-07-08 a crate was
 published to crates.io out-of-band — from an UNMERGED branch, under the
 WRONG gh account — burning crates.io version 0.22.0 with fix-less content
 (a burned version number can never be reused). `check-publish-ready.sh`
@@ -173,11 +173,13 @@ version instead). Runs six checks and fails loud on any of them:
    INFRASTRUCTURE fault (missing `cargo-semver-checks`, unreachable registry,
    a run that compared zero crates), which is a different fact from a
    computed break. Requires `cargo install cargo-semver-checks@0.50.0
-   --locked`; a missing tool is a failure, not a skip. A computed break is
-   recorded automatically — `scripts/preflight-publish.sh`'s
-   `semver_record_break` writes the crate's `changelog.d/` fragment and
-   `scripts/semver-accepted-breaks/<package>-<version>.txt` — and prints
-   `[WARN] semver: RECORDED BREAK`, never `[FAIL]`; see
+   --locked`; a missing tool is a failure, not a skip. A computed break
+   prints `[WARN] semver: RECORDED BREAK` and a record on stdout, and
+   `semver_record_break` writes that record OUTSIDE the working tree
+   (`$PREFLIGHT_SEMVER_RECORD_DIR`, default
+   `~/.local/state/trusty-tools/semver-breaks/<package>-<version>/`). Land it
+   in the post-release PR. An exit 1 that is not a readable `VERDICT: BREAK`,
+   or a record that cannot be written, is `[FAIL]`; see
    `docs/reference/semver-gate.md`. (The pull-request-time `Public API /
    SemVer` check still follows the 2026-09-22 declare-first rule and blocks a
    PR on an undeclared break — unchanged, and out of scope for this ruling.)
