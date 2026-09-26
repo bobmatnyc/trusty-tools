@@ -458,21 +458,24 @@ impl PalaceHandle {
         // condition D4 demanded at admission, not a lifetime — read-time expiry
         // already stops it being served, and deleting the row would contradict
         // D6's "demoted, never deleted". See `Drawer::is_tier_c`.
+        //
+        // #8314: the durable deletes are bounded — a reopen sharing a live
+        // handle's database must not wait forever on that handle's write.
         let now = chrono::Utc::now();
-        let mut pruned = 0usize;
+        let mut expired_ids = Vec::new();
         all_drawers.retain(|d| {
             let expired = d.is_expired_at(now) && !d.is_tier_c();
             if expired {
-                if let Err(e) = kg.delete_drawer_sync(d.id) {
-                    tracing::warn!(
-                        palace = %palace.id, id = %d.id,
-                        "purge_expired: delete_drawer failed: {e:#}"
-                    );
-                }
-                pruned += 1;
+                expired_ids.push(d.id);
             }
             !expired
         });
+        let pruned = super::open_sweep::reclaim_expired_rows(
+            kg.store(),
+            expired_ids,
+            &palace.id,
+            super::open_sweep::OPEN_WRITE_BUDGET,
+        );
         if pruned > 0 {
             tracing::info!(palace = %palace.id, count = pruned, "purged expired drawers at open");
         }

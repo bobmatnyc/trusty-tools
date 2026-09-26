@@ -90,6 +90,7 @@ pub mod bm25_lane;
 pub mod bm25_repair;
 pub mod bootstrap;
 pub mod dream_scheduler;
+pub mod exit_runtime;
 pub mod fd_metrics;
 pub mod idle_evict;
 pub mod worker_liveness;

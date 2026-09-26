@@ -297,6 +297,10 @@ pub(super) struct KgDbState {
     /// always `PalaceHandle::write_mutex` then this, never the reverse.
     /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
     pub swap_lock: RwLock<()>,
+    /// Set while an open-time maintenance write for this file is outstanding.
+    /// #8314: single-flight, so reopens behind a stuck write do not each park
+    /// another helper thread. See `KgStoreRedb::try_claim_open_write`.
+    pub open_write_in_flight: std::sync::atomic::AtomicBool,
     pub mode: OpenMode,
     pub _snapshot_guard: SnapshotGuard,
 }

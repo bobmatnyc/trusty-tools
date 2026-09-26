@@ -1442,3 +1442,87 @@ fn release_if_unreferenced_skips_a_referenced_handle() {
         "the cache entry must be gone; redb remains the source of truth"
     );
 }
+
+/// #8314 (critic round 2): the daemon's reopen path answers behind a stuck write.
+///
+/// Why: the red-first tests for #8314 opened `PalaceHandle` directly, but the
+/// daemon reopens through [`PalaceRegistry::open_palace`], which also runs the
+/// room backfill and default-wing seeding. Those write when a row is missing,
+/// and redb's `begin_write` waits without a bound for a live write
+/// transaction, so a palace holding a drawer in an unregistered room never
+/// finished reopening while any write was stuck.
+/// What: for a palace whose rooms are all registered and for one with a drawer
+/// in an unregistered room, a Writer-intent registry creates the palace,
+/// evicts it while a handle stays alive, holds a raw kg.redb write, and reopens
+/// from another thread. The reopen must answer inside 5 s. Once the write
+/// ends, the deferred room row must land.
+/// Test: itself.
+#[test]
+fn a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time() {
+    use crate::memory_core::palace::{Drawer, Palace};
+    use std::sync::Arc;
+
+    for missing_room in [false, true] {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path().to_path_buf();
+        let id = PalaceId::new(if missing_room { "room-gap" } else { "room-ok" });
+        let reg = Arc::new(PalaceRegistry::new().with_writer_intent());
+        let palace = Palace {
+            id: id.clone(),
+            name: "Stuck".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: data_root.join(id.as_str()),
+        };
+        let live = reg.create_palace(&data_root, palace).expect("create");
+        let room_id = uuid::Uuid::new_v4();
+        if missing_room {
+            // Upserted below the registry, so no ROOMS row names this room.
+            let drawer = Drawer::new(room_id, "a drawer in an unregistered room");
+            live.kg.upsert_drawer_sync(&drawer).unwrap();
+        }
+        reg.remove(&id); // the idle-evict shape: `live` keeps the kg shared
+
+        let store = live.kg.store();
+        let db = store.db_for_test();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let wtx = db.begin_write().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            drop(wtx);
+        });
+        held_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (reopen_reg, reopen_root, reopen_id) =
+            (Arc::clone(&reg), data_root.clone(), id.clone());
+        std::thread::spawn(move || {
+            let out = reopen_reg
+                .open_palace(&reopen_root, &reopen_id)
+                .map(drop)
+                .map_err(|e| format!("{e:#}"));
+            let _ = done_tx.send(out);
+        });
+        let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        stuck.join().unwrap();
+
+        outcome
+            .unwrap_or_else(|_| {
+                panic!("reopen (missing_room={missing_room}) blocked behind the stuck write")
+            })
+            .expect("reopen succeeds");
+        if missing_room {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while store.get_room(room_id).unwrap().is_none() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the deferred room row never landed after the write ended"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+}
