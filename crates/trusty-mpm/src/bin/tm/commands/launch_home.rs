@@ -36,6 +36,32 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
     dir
 }
 
+/// Compose the session-scoped MCP config under `home`'s
+/// `~/.trusty-tools/trusty-mpm/session-mcp/` (#7422, #8545).
+///
+/// Why: `provision_for_spawn` resolves that root from the process home, so the
+/// `guided_fallback_*` tests still wrote the operator's `session-mcp/` after
+/// round 2 gave `launch`/`connect` a `home`.
+/// What: `provision_for_spawn_at` under `FrameworkPaths::under(home)`; with no
+/// home it keeps `provision_for_spawn`, which reports the unresolvable home.
+/// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+pub(crate) fn provision_session_mcp(
+    workspace: &Path,
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> anyhow::Result<Option<PathBuf>> {
+    use trusty_mpm::core::session_mcp_scope::{provision_for_spawn, provision_for_spawn_at};
+    let provisioned = match home {
+        Some(home) => {
+            let root = trusty_mpm::core::paths::FrameworkPaths::under(home).crate_config_root();
+            provision_for_spawn_at(&root, workspace, config_dir)
+        }
+        None => provision_for_spawn(workspace, config_dir),
+    };
+    provisioned
+        .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))
+}
+
 /// Strip trusty-mpm hooks from `home`'s two `~/.claude/settings*.json` files.
 ///
 /// #5875: those two files only, never a walk of the home tree. Best-effort: a

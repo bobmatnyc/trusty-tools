@@ -423,6 +423,7 @@ pub fn provision(cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
 /// `provision_writes_an_owner_only_file`,
 /// `provision_warns_and_still_writes_when_the_shared_config_is_malformed`.
 pub fn provision_at(path: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
+    crate::core::home_write_fence::check(path); // #8545
     let scope = resolve_scope(config_dir);
     if let Some(reason) = &scope.degraded {
         eprintln!("tm: warning: {reason}");

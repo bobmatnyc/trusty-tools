@@ -18,6 +18,9 @@
 //! Test: `projects_json_multiprocess_upsert_no_lost_updates`,
 //! `projects_json_survives_killed_writer`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};

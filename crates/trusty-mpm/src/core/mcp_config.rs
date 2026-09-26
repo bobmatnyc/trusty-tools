@@ -698,6 +698,7 @@ fn mcp_servers_mut(config: &mut Value) -> &mut Map<String, Value> {
 /// (temp-file + rename, backing the prior file up to `.claude.json.bak`).
 /// Test: covered transitively by every write-path test.
 fn write(path: &Path, config: &Value) -> Result<()> {
+    crate::core::home_write_fence::check(path); // #8545
     trusty_common::claude_config::write_json_atomic(path, config)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
 }

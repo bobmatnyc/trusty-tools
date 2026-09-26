@@ -596,7 +596,9 @@ pub(crate) async fn run_inplace_relaunch(
     //
     // #4832: scoped to THIS session's id, so the refreshed file is the one
     // `build_inplace_resume_command` is about to hand the runtime.
-    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt(
+    // #8545: the savings row lands under `fw`, not the process home.
+    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt_in(
+        &fw.root,
         &cwd,
         &record.id.to_string(),
     ) {

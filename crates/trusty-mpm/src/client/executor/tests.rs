@@ -490,7 +490,11 @@ async fn execute_connect_errors_when_daemon_unreachable() {
 async fn execute_launch_errors_when_daemon_unreachable() {
     // `/launch` registers via `POST /sessions`; with no daemon the failure
     // surfaces as a renderable `Error`.
-    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    // #8545: the launch prepares under a temp home, never the operator's.
+    let home = crate::test_support::hermetic_temp_dir();
+    let executor = CommandExecutor {
+        client: DaemonClient::new("http://127.0.0.1:0").with_home(home.path()),
+    };
     match executor
         .execute(TrustyCommand::Launch {
             project: "/tmp/no-such-project".into(),

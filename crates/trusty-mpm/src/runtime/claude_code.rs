@@ -43,7 +43,9 @@ mod claude_code_agents;
 // #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
 // relaunch below is a real run in the operator's own home and keeps the ambient
 // form.
-use super::prompt_file::{build_prompt_file, build_prompt_file_in};
+#[cfg(test)]
+use super::prompt_file::build_prompt_file;
+use super::prompt_file::build_prompt_file_in;
 
 /// #8233: every home-derived launch path reads this layout instead of
 /// `dirs::home_dir()`.
@@ -539,7 +541,8 @@ pub fn build_inplace_resume_command_under(
     })?;
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
-    let prompt_file = build_prompt_file(cwd, None);
+    // #8545: the savings row lands under `fw`, not the process home.
+    let prompt_file = build_prompt_file_in(&fw.root, cwd, None);
     let args = compose_inplace_args(
         cwd,
         Some(&config_dir),

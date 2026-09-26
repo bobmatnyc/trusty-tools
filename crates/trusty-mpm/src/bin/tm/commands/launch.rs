@@ -359,11 +359,8 @@ pub(crate) async fn launch(
     // #7422: compose this session's default-deny MCP config before the line
     // that names it. Fatal — launching without `--mcp-config` would hand the
     // pane the whole shared server map.
-    let scoped_mcp = trusty_mpm::core::session_mcp_scope::provision_for_spawn(
-        &managed_path,
-        config_dir.as_deref(),
-    )
-    .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))?;
+    let scoped_mcp =
+        super::launch_home::provision_session_mcp(&managed_path, config_dir.as_deref(), home)?;
     let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
         // #4181: `config_dir` selects `--setting-sources user,project,local` and
         // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
@@ -642,10 +639,7 @@ pub(crate) async fn connect(
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
         let scoped_mcp =
-            trusty_mpm::core::session_mcp_scope::provision_for_spawn(&path, config_dir.as_deref())
-                .map_err(|err| {
-                    anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}")
-                })?;
+            super::launch_home::provision_session_mcp(&path, config_dir.as_deref(), home)?;
         let claude_cmd =
             trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
                 prompt_path.as_deref(),

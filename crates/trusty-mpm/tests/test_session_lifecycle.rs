@@ -9,6 +9,9 @@
 //! router to a random loopback port and exercises the lifecycle with `reqwest`.
 //! Test: `cargo test -p trusty-mpm-daemon --test test_session_lifecycle`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -147,6 +147,31 @@ pub fn prepare_session_for_repair(
     hook_exe: Option<&Path>,
     memory_reachable: Option<bool>,
 ) -> Result<PrepReport, PrepError> {
+    let home = dirs::home_dir();
+    prepare_session_for_repair_under(
+        fw,
+        project_dir,
+        repo_url,
+        hook_exe,
+        memory_reachable,
+        home.as_deref(),
+    )
+}
+
+/// [`prepare_session_for_repair`] with the user home named (#8545).
+///
+/// Why: a daemon pinned to a test home repairs through here, so the user-tier
+/// statusLine and trust seed land under that home, never `$HOME`.
+/// What: the same preparation with `home` as the user-global home.
+/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+pub fn prepare_session_for_repair_under(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+    memory_reachable: Option<bool>,
+    home: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
         fw,
@@ -156,7 +181,7 @@ pub fn prepare_session_for_repair(
         repo_url,
         None,
         HostInputs {
-            home: dirs::home_dir().as_deref(),
+            home,
             hook_exe,
             memory_reachable,
         },

@@ -27,6 +27,9 @@
 //! `cargo test -p trusty-mpm --test sm_e2e_smoke -- --nocapture`
 //! (add `--features sm-memory` to include the delegation chain).
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

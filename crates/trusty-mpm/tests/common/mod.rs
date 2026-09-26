@@ -34,6 +34,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// Arm `core::home_write_fence` for this integration target, before `main`
+/// (#8545).
+///
+/// Why: every integration target declares `mod common;` (ratcheted by
+/// `every_integration_target_arms_the_home_write_fence`), so this one
+/// constructor fences them all. It runs before [`scratch_home`] can repoint
+/// `$HOME`, so the fenced roots are the harness's home and the password-database
+/// home, never the scratch dir.
+/// What: records the fenced roots; an in-process writer that reaches one panics.
+/// A spawned `tm` child is not fenced — [`isolate_spawned_tm`] confines it.
+/// Test: `the_home_write_fence_is_armed_for_integration_targets`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
 /// Redirect this test process's `$HOME` to a scratch directory, once (#6671).
 ///
 /// Returns the scratch home, so a caller may plant fixtures under it.

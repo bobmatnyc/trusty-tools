@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use super::deployment_check::ensure_deployment_complete;
+use super::deployment_check::{RepairHost, ensure_deployment_complete};
 use super::lifecycle::{
     SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env,
 };
@@ -218,7 +218,7 @@ pub(super) async fn spawn_managed_on_main(
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        memory_reachable,
+        RepairHost::new(memory_reachable, state.user_home()),
     ) {
         warn!(
             id = %session_id,

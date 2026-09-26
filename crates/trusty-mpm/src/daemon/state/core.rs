@@ -186,6 +186,9 @@ pub struct DaemonState {
     /// What: the framework root, the directory `pairing.json` lives in.
     /// Test: `pairing_persists_to_disk`.
     pub(super) framework_root: PathBuf,
+    /// The user home for user-global writes; `None` resolves the process home.
+    /// #8545: the isolated test constructors pin it under their temp root.
+    pub(super) user_home: Option<PathBuf>,
     /// The base the captured-error stores are read from, when this daemon must
     /// not resolve them from process-global state (#6505).
     ///
@@ -592,6 +595,7 @@ impl DaemonState {
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root: root,
+            user_home: None,
             // Production keeps the OS data-directory resolution; see the field doc.
             error_store_base: None,
             event_tx,
@@ -679,6 +683,7 @@ impl DaemonState {
             // root, so neither transport re-resolves the process data directory.
             error_store_base: Some(framework_root.clone()),
             framework_root,
+            user_home: None,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
@@ -724,6 +729,30 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// The user home this daemon's user-global writes resolve under (#8545).
+    ///
+    /// What: the pinned home of an isolated test state, else `dirs::home_dir()`.
+    /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+    pub fn user_home(&self) -> Option<PathBuf> {
+        self.user_home.clone().or_else(dirs::home_dir)
+    }
+
+    /// Self-heal `workspace`'s statusLine, the user tier under [`Self::user_home`].
+    ///
+    /// Why (#8545): the resume route used the ambient `$HOME`, so an isolated
+    /// daemon test wrote the operator's `~/.claude/settings.json`.
+    /// What: `session_launch::ensure_status_line_in` with `<home>/.claude/settings.json`.
+    /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+    pub fn ensure_status_line(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<(), crate::core::session_launch::PrepError> {
+        let user = self
+            .user_home()
+            .map(|h| h.join(".claude").join("settings.json"));
+        crate::core::session_launch::ensure_status_line_in(workspace, user.as_deref())
     }
 
     /// The base this daemon reads captured-error stores from, when one is
@@ -1059,7 +1088,8 @@ impl DaemonState {
     pub fn with_session_manager(
         mgr: std::sync::Arc<crate::session_manager::SessionManager>,
     ) -> Self {
-        let state = Self::new();
+        // #8545: a leaked temp root, never `~/.trusty-mpm` — handlers write under it.
+        let state = Self::with_root(crate::test_support::hermetic_temp_dir().keep());
         let _ = state.managed_sessions.set(mgr);
         state
     }
@@ -1152,7 +1182,8 @@ impl DaemonState {
         let mgr = SessionManager::new(&data_dir, driver)
             .await
             .expect("temp-dir fake session store must load");
-        let state = Self::with_root(root);
+        let mut state = Self::with_root(root.clone());
+        state.user_home = Some(root.join("home")); // #8545
         let _ = state.managed_sessions.set(std::sync::Arc::new(mgr));
         state
     }

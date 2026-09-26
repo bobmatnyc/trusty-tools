@@ -18,6 +18,9 @@
 
 #![cfg(feature = "daemon")]
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::host_state_gate::ALLOW_HOST_STATE_ENV;

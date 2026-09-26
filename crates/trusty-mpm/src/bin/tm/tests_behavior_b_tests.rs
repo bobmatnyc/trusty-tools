@@ -1940,6 +1940,18 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
          has no .claude",
         worktree.display()
     );
+    // #8545: the session-scoped MCP config is composed under the injected home,
+    // not the process home's `~/.trusty-tools/trusty-mpm/session-mcp/`.
+    let session_mcp = trusty_mpm::core::paths::FrameworkPaths::under(fw_home.path())
+        .crate_config_root()
+        .join(trusty_mpm::core::session_mcp_scope::SESSION_MCP_DIR);
+    let composed = std::fs::read_dir(&session_mcp).map_or(0, |d| d.count());
+    assert_eq!(
+        composed,
+        1,
+        "the launch must compose exactly one session MCP config under {}",
+        session_mcp.display()
+    );
 }
 
 /// The tmux binary the fallback's session-creation path resolves to.

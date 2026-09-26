@@ -11,6 +11,9 @@
 //! `cwd = workspace_path`) which the local spawn reuses verbatim.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use trusty_mpm::daemon::managed_routes::{is_local_workdir, write_task_md};
 use trusty_mpm::session_manager::ManagedSessionId;
 

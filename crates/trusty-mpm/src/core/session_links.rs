@@ -83,6 +83,7 @@ pub fn record_link(root: &Path, managed_id: &str, claude_id: &str) -> bool {
     let Some(path) = link_file(root, managed_id) else {
         return false;
     };
+    crate::core::home_write_fence::check(&path); // #8545
     if read_ids(&path).iter().any(|id| id == claude_id) {
         return false;
     }

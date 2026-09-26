@@ -53,6 +53,7 @@ pub fn preseed_home_trust(workspace: &Path) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let claude_json = home_claude_json()?;
+    crate::core::home_write_fence::check(&claude_json); // #8545
 
     // Issue #4072: hold the process-wide `~/.claude.json` lock across the WHOLE
     // read → mutate → write cycle below, not just the write. This function and

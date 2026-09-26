@@ -22,6 +22,30 @@ use tracing::{info, warn};
 
 use crate::session_manager::ManagedSessionId;
 
+/// What a launch already resolved about the host, for the deployment repair.
+///
+/// Why (#7763, #8545): the repair re-runs session preparation, which probes
+/// trusty-memory and writes the user-tier statusLine and trust seed under a
+/// home. An isolated test daemon pins its own home; production passes
+/// `DaemonState::user_home`.
+/// What: `memory_reachable` (`None` probes) and `home` (`None` skips the
+/// user-global writes).
+#[derive(Default)]
+pub(super) struct RepairHost {
+    pub(super) memory_reachable: Option<bool>,
+    pub(super) home: Option<std::path::PathBuf>,
+}
+
+impl RepairHost {
+    /// A host with trusty-memory's verdict and the user home.
+    pub(super) fn new(memory_reachable: Option<bool>, home: Option<std::path::PathBuf>) -> Self {
+        Self {
+            memory_reachable,
+            home,
+        }
+    }
+}
+
 /// Validate a workspace against the canonical bundled roster before handing
 /// the session to the operator, auto-repairing first when gaps are found
 /// (issue #2158).
@@ -76,17 +100,18 @@ pub(super) fn ensure_deployment_complete(
     workspace: &std::path::Path,
     repo_url: Option<&str>,
     session_id: &ManagedSessionId,
-    memory_reachable: Option<bool>,
+    host: RepairHost,
 ) -> Result<(), String> {
     if workspace == std::path::Path::new("/unknown") || !workspace.is_dir() {
         return Ok(());
     }
     // #7763: reuse the launch's own reachability verdict rather than re-probing.
-    let outcome = crate::core::deploy_validate::validate_and_repair_reusing_memory(
+    let outcome = crate::core::deploy_validate::validate_and_repair_under(
         fw,
         workspace,
         repo_url,
-        memory_reachable,
+        host.memory_reachable,
+        host.home.as_deref(),
     );
     // Warn-only carrier-reachability self-check (issue #2231) — see its own
     // doc comment. Runs regardless of the completeness verdict below and can

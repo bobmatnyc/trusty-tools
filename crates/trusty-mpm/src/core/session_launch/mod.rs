@@ -24,9 +24,10 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_session, prepare_session_for_managed,
-    prepare_session_for_repair, prepare_session_with_home, prepare_session_with_memory_reachable,
-    prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
-    prepare_session_with_style, prepare_session_with_style_and_native,
+    prepare_session_for_repair, prepare_session_for_repair_under, prepare_session_with_home,
+    prepare_session_with_memory_reachable, prepare_session_with_repo_url,
+    prepare_session_with_repo_url_and_exe, prepare_session_with_style,
+    prepare_session_with_style_and_native,
 };
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
@@ -1124,7 +1125,9 @@ pub(super) fn prepare_session_inner(
             full: false,
         };
         // Auto-inject advances the watermark so subsequent sessions are incremental.
-        let ctx = crate::core::catchup::run_catchup_blocking(opts, true);
+        // #8545: the watermark follows the injected home, not the process one.
+        let state_root = home.map(|h| FrameworkPaths::under(h).root);
+        let ctx = crate::core::catchup::run_catchup_blocking_in(opts, true, state_root);
         if ctx.is_empty() { None } else { Some(ctx) }
     } else {
         None
