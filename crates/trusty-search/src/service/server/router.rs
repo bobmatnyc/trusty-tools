@@ -237,8 +237,12 @@ pub struct CreateIndexRequest {
     /// the same layout, and for `false` that write is fatal (`500`), since no
     /// `roots.toml` scan rediscovers a data-dir index. A colocated request
     /// whose `.trusty-search/` the daemon cannot write is refused with `403`.
-    /// Both live in `create_layout`.
+    /// For an id already registered at the same root, resident or cold, the
+    /// recorded layout wins and an explicit mismatch is a `409`. All of this
+    /// lives in `create_layout`.
     /// Test: `create_index_honours_colocated_false`,
+    /// `create_index_cold_index_refuses_an_explicit_layout_change`,
+    /// `create_index_live_index_refuses_an_explicit_layout_change`,
     /// `create_index_colocated_false_over_a_read_only_colocated_dir_registers`,
     /// `create_index_colocated_on_read_only_root_names_the_permission_problem`,
     /// `create_index_colocated_false_with_an_unwritable_registry_is_a_500`.

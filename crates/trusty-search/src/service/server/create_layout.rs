@@ -4,10 +4,12 @@
 //! root-owned root answered `500 corpus open failed …` and could never be
 //! registered. The caller now chooses the layout, and a colocated request the
 //! daemon cannot write is refused before anything is built or recorded.
-//! What: [`resolve_layout`] reads `CreateIndexRequest::colocated`;
-//! [`preflight_colocated_root`] proves `<root>/.trusty-search/` is writable;
-//! [`registry_write_refusal`] makes a failed `indexes.toml` write fatal for a
-//! data-dir index, which no `roots.toml` scan can rediscover.
+//! What: [`resolve_layout`] reads `CreateIndexRequest::colocated`, deferring
+//! to the layout an existing id already records; [`refuse_live_layout_change`]
+//! does the same for a resident id; [`preflight_colocated_root`] proves
+//! `<root>/.trusty-search/` is writable; [`registry_write_refusal`] makes a
+//! failed `indexes.toml` write fatal for a data-dir index, which no
+//! `roots.toml` scan can rediscover.
 //! Test: `service::server::tests_8147`.
 
 use std::io::ErrorKind;
@@ -16,23 +18,97 @@ use std::path::Path;
 use axum::http::StatusCode;
 
 use super::router::CreateIndexRequest;
+use crate::core::registry::IndexHandle;
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+use crate::service::persistence::PersistedIndex;
+use crate::service::storage_layout::{layout_of, StorageLayout};
 
 /// The handler's error shape: a status and a JSON body.
 pub(super) type Refusal = (StatusCode, serde_json::Value);
 
-/// Resolve the storage layout a registration asked for: `true` is colocated.
+/// Resolve the storage layout a registration gets: `true` is colocated.
 ///
-/// Why: `None` must keep the #403 default byte-identical. An existing
-/// `<root>/.trusty-search/` is no reason to refuse `false`: since #8438 every
-/// write path, and the reindex hash-cache decision, follows the registry
-/// layout, and a `400` there left a root-owned directory with no way in (the
-/// `403` below says to retry with `colocated=false`).
-/// What: `None`/`true` → colocated; `false` → the data-dir store.
+/// Why: `None` must keep the #403 default byte-identical for a new id. An
+/// existing `<root>/.trusty-search/` is no reason to refuse `false`: since
+/// #8438 every write path, and the reindex hash-cache decision, follows the
+/// registry layout (the `403` below says to retry with `colocated=false`).
+/// For an id the daemon already records, that record decides: a cold-parked
+/// id misses the live-handle early return, and taking the layout from the
+/// request built an empty corpus in the other layout and orphaned the real one.
+/// What: `recorded` is the id's cold-store entry. When it names the same tree,
+/// its `colocated` wins, and an explicit request that differs is the `409`
+/// from [`layout_mismatch`]. An entry at another tree is the #3993
+/// recreate-after-move path, which registers a new tree, so there the request
+/// decides as for a new id: `None`/`true` → colocated, `false` → data dir.
 /// Test: `create_index_omitted_colocated_keeps_the_colocated_default`,
-/// `create_index_colocated_false_over_a_read_only_colocated_dir_registers`.
-pub(super) fn resolve_layout(req: &CreateIndexRequest) -> bool {
-    req.colocated.unwrap_or(true)
+/// `create_index_cold_data_dir_index_keeps_its_layout_when_colocated_is_omitted`,
+/// `create_index_cold_index_refuses_an_explicit_layout_change`.
+pub(super) fn resolve_layout(
+    req: &CreateIndexRequest,
+    recorded: Option<&PersistedIndex>,
+) -> Result<bool, Refusal> {
+    let recorded = recorded
+        .filter(|entry| super::helpers::identifies_same_root(&entry.root_path, &req.root_path))
+        .map(|entry| entry.colocated);
+    match (req.colocated, recorded) {
+        (Some(asked), Some(have)) if asked != have => Err(layout_mismatch(&req.id, have, asked)),
+        (_, Some(have)) => Ok(have),
+        (asked, None) => Ok(asked.unwrap_or(true)),
+    }
+}
+
+/// Refuse a same-id, same-tree create whose explicit `colocated` differs from
+/// the resident handle's layout (#8147).
+///
+/// Why: that request answered `200 created:false`, so the caller believed the
+/// index used the layout it asked for.
+/// What: `Ok` for an omitted or matching field; otherwise the `409` from
+/// [`layout_mismatch`]. Takes a short indexer read lock, so the caller must
+/// not hold an indexer guard.
+/// Test: `create_index_live_index_refuses_an_explicit_layout_change`.
+pub(super) async fn refuse_live_layout_change(
+    req: &CreateIndexRequest,
+    handle: &IndexHandle,
+) -> Result<(), Refusal> {
+    let Some(asked) = req.colocated else {
+        return Ok(());
+    };
+    let have = layout_of(handle).await == StorageLayout::Colocated;
+    if asked == have {
+        return Ok(());
+    }
+    Err(layout_mismatch(&req.id, have, asked))
+}
+
+/// The `409` for a request that would change a registered id's layout.
+fn layout_mismatch(id: &str, registered: bool, requested: bool) -> Refusal {
+    let name = |colocated: bool| {
+        if colocated {
+            "colocated=true (<root>/.trusty-search/)"
+        } else {
+            "colocated=false (the daemon's data directory)"
+        }
+    };
+    tracing::warn!(
+        "create_index: refusing '{id}' — registered {}, request asked for {} (issue #8147)",
+        name(registered),
+        name(requested),
+    );
+    (
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": format!(
+                "index '{id}' is registered with {}; this request asked for {}. A \
+                 registration never changes an existing index's storage layout: omit \
+                 `colocated`, or delete the index and register it again",
+                name(registered),
+                name(requested),
+            ),
+            "id": id,
+            "registered_colocated": registered,
+            "requested_colocated": requested,
+        }),
+    )
 }
 
 /// Refuse a colocated registration whose `.trusty-search/` the daemon cannot
@@ -118,4 +194,56 @@ pub(super) fn registry_write_refusal(
             "id": id,
         }),
     ))
+}
+
+/// Write `entry` to `indexes.toml` (#8147).
+///
+/// Why: a test that fails this write by planting a bad `indexes.toml` breaks
+/// every concurrent test reading the process-global `TRUSTY_DATA_DIR`.
+/// What: [`crate::service::persistence::upsert_index_registry_entry`]; in test
+/// builds an id armed through [`registry_fault::RegistryFault`] fails instead
+/// and touches no file.
+/// Test: `create_index_colocated_false_with_an_unwritable_registry_is_a_500`.
+pub(super) fn upsert_registry_entry(entry: PersistedIndex) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if registry_fault::is_armed(&entry.id) {
+        anyhow::bail!("injected indexes.toml write failure for '{}'", entry.id);
+    }
+    crate::service::persistence::upsert_index_registry_entry(entry)
+}
+
+/// Per-id fault seam for [`upsert_registry_entry`], test builds only.
+#[cfg(test)]
+pub(super) mod registry_fault {
+    use std::collections::BTreeSet;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ARMED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+    fn armed() -> MutexGuard<'static, BTreeSet<String>> {
+        ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(in crate::service::server) fn is_armed(id: &str) -> bool {
+        armed().contains(id)
+    }
+
+    /// Fails every registry write for one id until dropped. Keyed by id, so a
+    /// concurrent test registering another id is unaffected.
+    pub(in crate::service::server) struct RegistryFault(String);
+
+    impl RegistryFault {
+        pub(in crate::service::server) fn arm(id: &str) -> Self {
+            armed().insert(id.to_string());
+            Self(id.to_string())
+        }
+    }
+
+    impl Drop for RegistryFault {
+        fn drop(&mut self) {
+            armed().remove(&self.0);
+        }
+    }
 }

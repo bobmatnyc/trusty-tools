@@ -245,6 +245,13 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   records the choice, so warm boot restores the same layout; `roots.toml` is
   not touched. Only `POST /indexes` and the `search.index.create` socket method
   carry this field; the MCP `create_index` tool and the CLI do not.
+  For an id the daemon already has at the same `root_path` — resident or
+  cold-parked — the recorded layout wins: an omitted `colocated` keeps it.
+- **Response 409** (#8147): the id is already registered at this `root_path`
+  with the other layout, and the request set `colocated` explicitly. A
+  registration never changes an existing index's layout. The body carries
+  `registered_colocated` and `requested_colocated`; nothing is created or
+  changed. Omit the field, or `DELETE` the index and register it again.
 - **Response 403** (#8147): a colocated registration (omitted or `true`)
   whose `<root_path>/.trusty-search/` the daemon cannot create or write.
   `error` starts `permission denied:` and names the directory and the

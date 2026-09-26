@@ -379,8 +379,8 @@ pub(crate) async fn create_index_report(
     // that tree, so there is no wrong answer to prevent — see
     // `create_index_reaps_stale_cold_entry_for_recreated_id`. A resident handle
     // IS serving, which is the whole difference.
-    let registered_root = state.registry.get(&id).map(|h| h.root_path.clone());
-    if let Some(registered_root) = registered_root {
+    if let Some(registered) = state.registry.get(&id) {
+        let registered_root = registered.root_path.clone();
         if !identifies_same_root(&registered_root, &req.root_path) {
             tracing::warn!(
                 "create_index: refusing to re-register '{}' at {} — that id already \
@@ -395,6 +395,8 @@ pub(crate) async fn create_index_report(
                 &req.root_path,
             ));
         }
+        // #8147: an explicit `colocated` never changes a resident id's layout.
+        super::create_layout::refuse_live_layout_change(&req, &registered).await?;
         return Ok(serde_json::json!({
             "id": req.id,
             "created": false,
@@ -530,9 +532,11 @@ pub(crate) async fn create_index_report(
     // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
     // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
-    // #8147: the layout is the caller's to choose; a colocated root the daemon
-    // cannot write is refused here, before anything is built or registered.
-    let colocated = super::create_layout::resolve_layout(&req);
+    // #8147: the layout is the caller's to choose for a new id, and the
+    // record's for a cold-parked one; a colocated root the daemon cannot write
+    // is refused here, before anything is built or registered.
+    let recorded = state.cold_store.get_persisted(&id);
+    let colocated = super::create_layout::resolve_layout(&req, recorded.as_ref())?;
     if colocated {
         super::create_layout::preflight_colocated_root(&req.id, &req.root_path)?;
     }
@@ -702,8 +706,8 @@ pub(crate) async fn create_index_report(
     // with no git remote and no commits keeps the flat-index behaviour intact.
     let repo_identity =
         trusty_common::repo_identity::RepoIdentity::derive(&req.root_path).map(|r| r.canonical());
-    if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
-        crate::service::persistence::PersistedIndex {
+    if let Err(e) =
+        super::create_layout::upsert_registry_entry(crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
             root_path: req.root_path.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
@@ -735,8 +739,8 @@ pub(crate) async fn create_index_report(
             indexed_head_sha: None,
             // #4390: no deferred-embed pass has been queued for a new index.
             deferred_embed_pending: false,
-        },
-    ) {
+        })
+    {
         // #8147: fatal for a data-dir index — `indexes.toml` is its only record.
         if let Some(refusal) = super::create_layout::registry_write_refusal(&req.id, colocated, &e)
         {

@@ -365,10 +365,11 @@ async fn create_index_colocated_false_over_a_read_only_colocated_dir_registers()
 /// Why: warm boot rediscovers a colocated index from `roots.toml`, but a
 /// data-dir index lives only in `indexes.toml`. A warn-only write failure
 /// answered `200` for an index that vanished on restart.
-/// What: an unparseable `indexes.toml` makes the upsert fail. The request is a
-/// `500` naming `indexes.toml`; no handle is registered, the file is
-/// byte-identical, and `roots.toml` gains nothing. With the file removed, the
-/// same request registers.
+/// What: the per-id `RegistryFault` seam fails the upsert without touching the
+/// shared `indexes.toml` (round 3, finding 4: a planted unparseable file broke
+/// concurrent non-serial tests). The request is a `500` naming `indexes.toml`;
+/// no handle, no `indexes.toml` row and no `roots.toml` row. With the fault
+/// disarmed, the same request registers.
 /// Test: this test. Before the fix the first request answers `200`.
 #[tokio::test]
 #[serial_test::serial]
@@ -377,9 +378,7 @@ async fn create_index_colocated_false_with_an_unwritable_registry_is_a_500() {
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-noreg-");
     let id = IndexId::new("ts-8147-noreg");
-    let registry = crate::service::persistence::indexes_toml_path().expect("registry path");
-    let garbage = b"this is [[not toml".to_vec();
-    std::fs::write(&registry, &garbage).expect("plant an unparseable registry");
+    let fault = super::create_layout::registry_fault::RegistryFault::arm(&id.0);
 
     let refused = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -406,14 +405,15 @@ async fn create_index_colocated_false_with_an_unwritable_registry_is_a_500() {
         state.registry.get(&id).is_none(),
         "no half-registered handle"
     );
-    assert_eq!(
-        std::fs::read(&registry).expect("registry still there"),
-        garbage,
-        "the refused write left the registry untouched"
+    assert!(
+        crate::service::persistence::find_index_registry_entry(&id.0)
+            .expect("registry readable")
+            .is_none(),
+        "no half-registered indexes.toml row"
     );
     assert!(!roots_toml_lists(&root), "no roots.toml row either");
 
-    std::fs::remove_file(&registry).expect("clear the fault");
+    drop(fault);
     let retried = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
         Json(create_req_with_colocated(&id.0, root.clone(), Some(false))),
@@ -421,6 +421,211 @@ async fn create_index_colocated_false_with_an_unwritable_registry_is_a_500() {
     .await;
     assert_eq!(retried.status(), StatusCode::OK, "a clean retry registers");
     assert!(state.registry.get(&id).is_some());
+
+    state.watcher_manager.stop_for_index(&id).await;
+}
+
+/// Status and JSON body of a handler response.
+async fn status_and_body(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (status, serde_json::from_slice(&bytes).expect("json body"))
+}
+
+/// POST a create for `id` at `root` with `colocated`.
+async fn create(
+    state: &Arc<SearchAppState>,
+    id: &IndexId,
+    root: &std::path::Path,
+    colocated: Option<bool>,
+) -> (StatusCode, serde_json::Value) {
+    let resp = super::indexes::create_index_handler(
+        State(Arc::clone(state)),
+        Json(create_req_with_colocated(
+            &id.0,
+            root.to_path_buf(),
+            colocated,
+        )),
+    )
+    .await;
+    status_and_body(resp).await
+}
+
+/// Register `id` with `colocated`, then cold-park it through the residency
+/// sweep's own `cold_park_index`. Returns the parked `indexes.toml` entry.
+async fn register_then_park(
+    state: &Arc<SearchAppState>,
+    id: &IndexId,
+    root: &std::path::Path,
+    colocated: Option<bool>,
+) -> crate::service::persistence::PersistedIndex {
+    let (status, body) = create(state, id, root, colocated).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "precondition: register. Body: {body}"
+    );
+    state.watcher_manager.stop_for_index(id).await;
+    let entry = crate::service::persistence::find_index_registry_entry(&id.0)
+        .expect("registry readable")
+        .expect("registered");
+    let parked = crate::service::lazy_loader::cold_park_index(
+        id,
+        &state.registry,
+        &state.cold_store,
+        entry.clone(),
+        || false,
+    )
+    .await;
+    assert!(parked, "precondition: the index is cold-parked");
+    assert!(
+        state.registry.get(id).is_none(),
+        "precondition: not resident"
+    );
+    entry
+}
+
+/// #8147 round 3, finding 1: a cold-parked `colocated=false` index keeps its
+/// layout when a re-POST omits `colocated`.
+///
+/// Why: a cold id misses the live-handle early return, so the omitted field
+/// defaulted to colocated. The daemon created `<root>/.trusty-search/`, built
+/// an empty corpus there, rewrote `indexes.toml` to `colocated=true` and
+/// answered `created:true`, orphaning the data-dir corpus. The CLI, MCP
+/// `create_index` and session launch all omit the field.
+/// What: registers `colocated: false`, parks it, re-POSTs with the field
+/// omitted, and asserts `indexes.toml` still says `colocated=false`, the new
+/// handle serves the data-dir layout, and nothing exists under the root.
+/// Test: this test. At 27160dfe5 the root gains `.trusty-search/`.
+#[tokio::test]
+#[serial_test::serial]
+async fn create_index_cold_data_dir_index_keeps_its_layout_when_colocated_is_omitted() {
+    let _data_dir = super::tests_components::IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-cold-omit-");
+    let id = IndexId::new("ts-8147-cold-omit");
+    register_then_park(&state, &id, &root, Some(false)).await;
+
+    let (status, body) = create(&state, &id, &root, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the re-POST reloads it. Body: {body}"
+    );
+
+    assert!(
+        !root.join(".trusty-search").exists(),
+        "#8147: an omitted field must not move a data-dir index into the repo"
+    );
+    let entry = crate::service::persistence::find_index_registry_entry(&id.0)
+        .expect("registry readable")
+        .expect("still registered");
+    assert!(
+        !entry.colocated,
+        "#8147: indexes.toml must keep the recorded colocated=false"
+    );
+    let handle = state.registry.get(&id).expect("resident again");
+    assert_eq!(
+        crate::service::storage_layout::layout_of(&handle).await,
+        crate::service::storage_layout::StorageLayout::DataDir,
+        "the reloaded handle serves the data-dir corpus"
+    );
+    assert!(!roots_toml_lists(&root), "no roots.toml row");
+
+    state.watcher_manager.stop_for_index(&id).await;
+}
+
+/// #8147 round 3, finding 1: an explicit `colocated` that differs from a
+/// cold-parked index's recorded layout is a `409`, in both directions.
+///
+/// Why: `colocated: true` against a cold data-dir index built a colocated
+/// corpus and orphaned the data-dir one; `colocated: false` against a cold
+/// colocated index abandoned the live `.trusty-search/`. Both answered `200`.
+/// What: for each direction, registers, parks, POSTs the other layout, and
+/// asserts a `409` naming both layouts, the id still cold and not resident,
+/// `indexes.toml` unchanged, and no corpus created in the other layout.
+/// Test: this test. At 27160dfe5 both requests answer `200`.
+#[tokio::test]
+#[serial_test::serial]
+async fn create_index_cold_index_refuses_an_explicit_layout_change() {
+    let _data_dir = super::tests_components::IsolatedDataDir::new();
+    let state = mock_state().await;
+    for (name, registered) in [("to-colo", false), ("to-data", true)] {
+        let (_dir, root) =
+            super::test_support::allowlisted_index_root(&format!("ts-8147-cold-{name}-"));
+        let id = IndexId::new(format!("ts-8147-cold-{name}"));
+        register_then_park(&state, &id, &root, Some(registered)).await;
+        let repo_dir_before = root.join(".trusty-search").exists();
+
+        let (status, body) = create(&state, &id, &root, Some(!registered)).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "#8147 ({name}): a request must not change a recorded layout. Body: {body}"
+        );
+        assert_eq!(body["registered_colocated"], registered, "{body}");
+        assert_eq!(body["requested_colocated"], !registered, "{body}");
+
+        assert!(state.registry.get(&id).is_none(), "{name}: not registered");
+        assert!(state.cold_store.contains(&id), "{name}: still parked cold");
+        let entry = crate::service::persistence::find_index_registry_entry(&id.0)
+            .expect("registry readable")
+            .expect("still registered");
+        assert_eq!(
+            entry.colocated, registered,
+            "{name}: indexes.toml unchanged"
+        );
+        assert_eq!(
+            root.join(".trusty-search").exists(),
+            repo_dir_before,
+            "{name}: nothing created or removed under the root"
+        );
+        if registered {
+            let data_dir_corpus =
+                crate::service::persistence::corpus_redb_path(&id.0).expect("data-dir path");
+            assert!(
+                !data_dir_corpus.exists(),
+                "{name}: no data-dir corpus at {}",
+                data_dir_corpus.display()
+            );
+        }
+    }
+}
+
+/// #8147 round 3, finding 2: a resident index answers an explicit layout
+/// change with `409`; a matching or omitted field keeps `200 created:false`.
+///
+/// Why: the same-id, same-tree early return answered `200 created:false` to
+/// any `colocated`, so a caller asking for the other layout believed it got it.
+/// What: registers `colocated: false`, then POSTs `true` (`409`), `false` and
+/// omitted (both `200 created:false`), and asserts the root stays empty.
+/// Test: this test. At 27160dfe5 the `true` request answers `200`.
+#[tokio::test]
+#[serial_test::serial]
+async fn create_index_live_index_refuses_an_explicit_layout_change() {
+    let _data_dir = super::tests_components::IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8147-live-");
+    let id = IndexId::new("ts-8147-live");
+    let (status, _) = create(&state, &id, &root, Some(false)).await;
+    assert_eq!(status, StatusCode::OK, "precondition: register");
+
+    let (status, body) = create(&state, &id, &root, Some(true)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "#8147: {body}");
+    assert_eq!(body["registered_colocated"], false, "{body}");
+
+    for colocated in [Some(false), None] {
+        let (status, body) = create(&state, &id, &root, colocated).await;
+        assert_eq!(status, StatusCode::OK, "{colocated:?}: {body}");
+        assert_eq!(body["created"], false, "{colocated:?}: {body}");
+    }
+    assert!(state.registry.get(&id).is_some(), "still resident");
+    assert!(
+        !root.join(".trusty-search").exists(),
+        "nothing under the root"
+    );
 
     state.watcher_manager.stop_for_index(&id).await;
 }
