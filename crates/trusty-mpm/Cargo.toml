@@ -129,7 +129,13 @@ name = "trusty-mpm"
 # Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
 # surface, no library dependents); the change is a bug fix with no
 # signature break.
-version = "1.7.8"
+# 1.7.9 (Refs #8696): patch — 1.7.8 already landed on `origin/main` ahead of
+# crates.io (max_version still 1.7.7 there) and this PR edits `src/**`
+# (epic-state cell model), so bumping past 1.7.8 keeps this PR's "PR version
+# bump vs crates.io" check from colliding with the in-flight 1.7.8 bump.
+# Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
+# surface, no library dependents); the change has no signature break.
+version = "1.7.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
