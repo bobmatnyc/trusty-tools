@@ -361,6 +361,12 @@ mod tests {
                 && local.contains("#8596"),
             "`local-ops.md` must state the exit-status-only Keychain check (#8596)"
         );
+        // #8596 round 2: the value is consumed inline, as the `tm-secrets`
+        // skill says, never parked in a variable.
+        assert!(
+            local.contains("--password-stdin") && !local.contains("=$(security"),
+            "`local-ops.md` must consume a Keychain value inline, not via `FOO=$(…)`"
+        );
         let gcp = GCP_OPS.replace('\n', " ");
         assert!(
             gcp.contains("Never run `gcloud auth [application-default] print-access-token`")

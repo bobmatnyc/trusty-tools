@@ -159,9 +159,10 @@ Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation rep
   `security find-generic-password -s <service> >/dev/null 2>&1 && echo present`.
   Never add `-w` or `-g` to a check — `-w` prints the value on stdout, `-g` on
   stderr, and `| head -c N` prints all of a short one (#8596). When a command
-  needs the value, capture it there (`FOO=$(security find-generic-password -s
-  <service> -w)`) and never echo it. `tm hook --pm-guard` refuses the printing
-  forms.
+  needs the value, consume it inside that command — pipe it to a stdin reader
+  (`security find-generic-password -s <service> -w | docker login -u <user>
+  --password-stdin <registry>`) — never store it in a shell variable and never
+  echo it. `tm hook --pm-guard` refuses the printing forms.
 
 ## Brief Scope Overrides the Playbook (#8027)
 
