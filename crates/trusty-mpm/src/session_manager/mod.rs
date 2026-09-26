@@ -66,6 +66,8 @@ pub mod workspace_guard;
 pub(crate) mod worktree_adopt;
 // #8318: frees an adopted tree's branch and a dead agent's harness lock.
 pub(crate) mod worktree_adopt_release;
+// #8534 critic round 3: which gitignored agent and skill files tm deployed.
+mod worktree_deployed_assets;
 // #8534: gitignored run output that `git worktree remove` would delete. `pub`
 // for the `tm pr cleanup` probe the binary wires in.
 pub mod worktree_ignored_output;
@@ -163,6 +165,10 @@ mod decommission_worktree_tests;
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
 mod worktree_ignored_output_route_tests;
+
+// #8534 critic round 3: user agents and skills versus tm's deployed ones.
+#[cfg(test)]
+mod worktree_ignored_output_asset_tests;
 
 // #8511: the marker-location behaviour, through the pre-existing ownership API.
 #[cfg(test)]

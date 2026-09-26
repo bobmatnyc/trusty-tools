@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use super::{
-    ignored_output_blocks_removal, ignored_output_refusal, inspect_dirt_with_ignored_output,
-    is_harness_path, is_regenerable, kept_ignored_output,
+    ignored_entries, ignored_output_blocks_removal, ignored_output_refusal,
+    inspect_dirt_with_ignored_output, is_harness_path, is_regenerable, kept_ignored_output,
 };
 use crate::session_manager::DirtyWorktreePolicy;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
@@ -58,7 +58,39 @@ fn rule_excuses_build_output_and_keeps_run_output() {
     }
 }
 
+/// Critic round 3: framework, deploy and test caches, by last component only.
+/// Fails at 26b7c15ca, which kept each of the `true` rows.
+#[test]
+fn tool_caches_added_in_round_3_are_regenerable() {
+    for (entry, regenerable) in [
+        (".vercel/", true),
+        ("site/.astro/", true),
+        (".output/", true),
+        ("app/.angular/", true),
+        (".expo/", true),
+        ("docs/.docusaurus/", true),
+        (".wrangler/", true),
+        ("pkg/.dart_tool/", true),
+        (".direnv/", true),
+        (".hypothesis/", true),
+        ("htmlcov/", true),
+        (".eggs/", true),
+        ("py/mypkg.egg-info/", true),
+        ("web/.eslintcache", true),
+        ("web/tsconfig.tsbuildinfo", true),
+        (".coverage", true),
+        ("htmlcov/index.html", false),
+        (".vercel/output/notes.md", false),
+        ("egg-info-notes/", false),
+        (".coverage-report.json", false),
+    ] {
+        assert_eq!(is_regenerable(entry), regenerable, "{entry}");
+    }
+}
+
 /// Harness bookkeeping is excused at the tree root only, never a look-alike.
+/// Critic round 3: agents and skills are a ledger's call, not the name's —
+/// only the ledgers themselves are harness files.
 #[test]
 fn harness_paths_are_excused_and_look_alikes_are_not() {
     for (rel, harness) in [
@@ -69,9 +101,14 @@ fn harness_paths_are_excused_and_look_alikes_are_not() {
         (".claude/settings.json.20260926T0000Z.bak", true),
         (".claude/settings.json.lock", true),
         (".claude/settings.local.json", true),
-        (".claude/agents/", true),
-        (".claude/agents/engineer.md", true),
-        (".claude/skills/tm/SKILL.md", true),
+        (".claude/agents/", false),
+        (".claude/agents/engineer.md", false),
+        (".claude/agents/.trusty-mpm-manifest.json", true),
+        (".claude/agents/.trusty-mpm-manifest.json.lock", true),
+        (".claude/skills/tm/SKILL.md", false),
+        (".claude/skills/.trusty-mpm-skills-manifest.json", true),
+        (".claude/skills/.trusty-mpm-project-tier-stamp", true),
+        (".claude/skills/.trusty-mpm-mine/SKILL.md", false),
         (".claude/output-styles/trusty-mpm.md", true),
         (".claude/output-styles/x.tm-floor.md", true),
         (".claude/output-styles/mine.md", false),
@@ -137,7 +174,11 @@ fn tagged_cache_dirs_are_excused_by_content_not_name() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("tagged-caches");
     exclude(&fx, "target-*/\n");
-    put(&wt, "target-8510/.rustc_info.json", "{}");
+    put(
+        &wt,
+        "target-8510/CACHEDIR.TAG",
+        "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n",
+    );
     put(&wt, "target-8510/debug/app", "elf");
     put(&wt, "crates/py/.pytest_cache/.gitignore", "*\n");
     put(
@@ -155,6 +196,22 @@ fn tagged_cache_dirs_are_excused_by_content_not_name() {
     assert_eq!(kept.first, "target-analysis/");
 }
 
+/// Critic round 3: a `.rustc_info.json` is a file anyone can leave; only the
+/// tag excuses a directory. Fails at 26b7c15ca, which excused it.
+#[test]
+fn a_rustc_info_file_alone_does_not_excuse_a_directory() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("rustc-info-only");
+    exclude(&fx, "target-*/\n");
+    put(&wt, "target-copy/.rustc_info.json", "{}");
+    put(&wt, "target-copy/report.json", "{}");
+
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect("an untagged directory is kept output");
+    assert_eq!((kept.files, kept.first.as_str()), (2, "target-copy/"));
+}
+
 /// A `CACHEDIR.TAG` without the spec's signature does not excuse its directory.
 #[test]
 fn a_cachedir_tag_without_the_signature_is_not_a_cache() {
@@ -168,15 +225,29 @@ fn a_cachedir_tag_without_the_signature_is_not_a_cache() {
     assert_eq!(kept.map(|k| k.files), Some(2));
 }
 
-/// A wholly ignored `.claude/` holding only harness files is nothing to keep;
-/// a note beside them is.
+/// A wholly ignored `.claude/` holding only harness files and a ledger-recorded
+/// agent is nothing to keep; a note beside them is.
 #[test]
 fn a_wholly_ignored_claude_dir_counts_only_non_harness_files() {
+    use crate::core::agent_manifest::{AgentManifest, ManifestEntry, Origin, checksum};
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("ignored-claude");
     exclude(&fx, ".claude/\n");
     put(&wt, ".claude/settings.json", "{}");
     put(&wt, ".claude/agents/engineer.md", "# agent");
+    let mut ledger = AgentManifest::default();
+    ledger.managed.insert(
+        "engineer.md".to_string(),
+        ManifestEntry {
+            source_chain: vec!["engineer".to_string()],
+            checksum: checksum("# agent"),
+            deployed_at: "2026-09-26T00:00:00Z".to_string(),
+            origin: Origin::Bundled,
+        },
+    );
+    ledger
+        .save(&wt.join(".claude/agents"))
+        .expect("save ledger");
     assert_eq!(kept_ignored_output(&wt), Ok(None));
 
     put(&wt, ".claude/notes.md", "keep me");
@@ -194,18 +265,38 @@ fn kept_output_errors_when_git_cannot_answer() {
     assert!(err.contains("git"), "{err}");
 }
 
-/// Fail-safe: a path git has to quote is an error, and the tree is kept.
+/// Critic round 3: a name git would quote is classified like any other. The
+/// pinned `core.quotePath=false` already spells non-ASCII raw, but git still
+/// quotes a `"`, a backslash or a control character. A build directory under
+/// such a name lets removal proceed; run output under one is kept. Fails at
+/// 26b7c15ca, where every quoted name was an `Err`.
 #[test]
-fn kept_output_errors_on_a_quoted_path() {
+fn non_ascii_names_are_classified_not_refused() {
     let fx = GitWorktreeFixture::new();
-    let wt = fx.add_worktree("quoted-path");
-    exclude(&fx, "*.json\n");
-    put(&wt, "a\"b.json", "{}");
+    let wt = fx.add_worktree("non-ascii");
+    exclude(&fx, "node_modules/\nrésultats/\n*.json\n");
+    put(&wt, "café/node_modules/pkg/index.js", "x");
+    put(&wt, "we\"ird/node_modules/pkg/index.js", "x");
+    assert_eq!(kept_ignored_output(&wt), Ok(None));
 
-    let err = kept_ignored_output(&wt).expect_err("a quoted path cannot be classified");
-    assert!(err.contains("quoted path"), "{err}");
-    let reason = ignored_output_refusal(&wt).expect("a quoted path must refuse");
-    assert!(reason.contains("check failed"), "{reason}");
+    put(&wt, "résultats/sortie.txt", "x");
+    put(&wt, "a\"b.json", "{}");
+    put(&wt, "tab\tname.json", "{}");
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect("run output under a quoted name is kept");
+    assert_eq!(kept.files, 3, "{kept:?}");
+    assert!(
+        ["résultats/", "a\"b.json", "tab\tname.json"].contains(&kept.first.as_str()),
+        "{kept:?}"
+    );
+}
+
+/// A rename record's source path is not an entry, even one spelled `!! `.
+#[test]
+fn ignored_entries_skips_a_rename_source() {
+    let status = "R  new.rs\0!! old.rs\0!! results/\0 M lib.rs\0!! é/\0";
+    assert_eq!(ignored_entries(status), ["results/", "é/"]);
 }
 
 /// Fail-safe: an unreadable kept directory is an error, and the tree is kept.
@@ -278,12 +369,18 @@ fn probe_counts_ignored_output_as_dirt() {
 /// The probe fails toward the "could not read" arm when its own check fails.
 #[test]
 fn probe_fails_toward_dirty_when_the_ignored_check_fails() {
+    use std::os::unix::fs::PermissionsExt;
     let fx = GitWorktreeFixture::new();
-    let wt = fx.add_worktree("probe-quoted");
-    exclude(&fx, "*.json\n");
-    put(&wt, "a\"b.json", "{}");
+    let wt = fx.add_worktree("probe-unreadable");
+    ignore_target_and_results(&fx);
+    put(&wt, "results/sub/out.json", "{}");
+    let sub = wt.join("results/sub");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-    let dirt = inspect_dirt_with_ignored_output(&wt).expect("a failed check is dirt");
+    let dirt = inspect_dirt_with_ignored_output(&wt);
+
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+    let dirt = dirt.expect("a failed check is dirt");
     assert_eq!(
         (dirt.dirty_files, dirt.unpushed_commits),
         (0, 0),

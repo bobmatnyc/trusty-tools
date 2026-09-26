@@ -86,7 +86,30 @@ pub(super) const DISPOSABLE_DIR_NAMES: &[&str] = &[
     "coverage",
     ".nyc_output",
     ".terraform",
+    // #8534 critic round 3: framework, deploy and test caches.
+    ".vercel",
+    ".astro",
+    ".output",
+    ".angular",
+    ".expo",
+    ".docusaurus",
+    ".wrangler",
+    ".dart_tool",
+    ".direnv",
+    ".hypothesis",
+    "htmlcov",
+    ".eggs",
 ];
+
+/// Is a directory named `name` regenerable build or cache output?
+///
+/// Why: setuptools names its metadata directory `<project>.egg-info`, which no
+/// fixed list can hold (#8534 critic round 3).
+/// What: `name` is in [`DISPOSABLE_DIR_NAMES`] or ends in `.egg-info`.
+/// Test: `rule_excuses_build_output_and_keeps_run_output`.
+pub(super) fn is_disposable_dir_name(name: &str) -> bool {
+    DISPOSABLE_DIR_NAMES.contains(&name) || name.ends_with(".egg-info")
+}
 
 /// The entries that identify a BARE repository root on disk (#4166).
 ///
@@ -588,7 +611,7 @@ fn scan_for_repos(root: &Path, scan: &mut IgnoredScan, budget: &mut usize) -> Re
             Err(e) => return Err(format!("`{}` is unreadable: {e}", dir.display())),
         }
         let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if DISPOSABLE_DIR_NAMES.contains(&name) {
+        if is_disposable_dir_name(name) {
             continue;
         }
         let entries = std::fs::read_dir(&dir)

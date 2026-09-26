@@ -1,8 +1,8 @@
 //! Gitignored output a worktree removal would destroy (#8534).
 //!
-//! Why: every automatic removal route gates on
+//! Why: the `git worktree remove` routes gate on
 //! [`super::worktree_safety::inspect_dirt`], which counts modified tracked files
-//! and untracked files that are NOT gitignored, and then runs `git worktree
+//! and untracked files that are NOT gitignored, and then run `git worktree
 //! remove` — which deletes every gitignored file, with or without `--force`. An
 //! agent with zero commits whose run wrote its results into a gitignored
 //! directory therefore read as clean, and the results went with the tree.
@@ -10,24 +10,32 @@
 //! What — THE RULE: a gitignored entry does not block removal when
 //! - it is harness bookkeeping tm or Claude Code writes into every tree
 //!   ([`is_harness_path`]: `.trusty-mpm/`, the ownership marker,
-//!   `.claude/settings*.json` and their sidecars, and the scaffold paths);
+//!   `.claude/settings*.json` and their sidecars, the deploy ledgers, and the
+//!   scaffold paths outside `.claude/agents/` and `.claude/skills/`);
+//! - it is an agent or skill file tm deployed and nobody edited since
+//!   ([`super::worktree_deployed_assets`]);
 //! - the directory git matched is build or tool output: its last component is
-//!   in [`DISPOSABLE_DIR_NAMES`] or its trailing path in
-//!   [`DISPOSABLE_DIR_PATHS`], or its basename is OS or bytecode litter
-//!   ([`is_regenerable`]); or
+//!   a disposable name ([`super::worktree_nested::is_disposable_dir_name`]) or
+//!   its trailing path is in [`DISPOSABLE_DIR_PATHS`], or its basename is OS,
+//!   bytecode or tool-cache litter ([`is_regenerable`]); or
 //! - it is, or sits inside, a directory a cache tool tagged as its own
-//!   ([`under_cache_dir`]: a `CACHEDIR.TAG`, or cargo's `.rustc_info.json`).
+//!   ([`under_cache_dir`]: a `CACHEDIR.TAG` carrying the spec's signature).
 //!
 //! Every other gitignored entry is kept output and blocks removal. Only the
 //! entry's LAST component is matched by name, so `build/out.json` under a
 //! tracked `build/` and a user's `target-analysis/` are kept.
 //!
-//! FAIL-SAFE: a git error, a path this check cannot spell, or an unreadable
-//! directory is an `Err`, and every caller keeps the tree on `Err`.
-//! Where it is enforced: the agent reap (gate 5a), the shared remover
-//! `decommission::remove_registered_worktree` (decommission, merged-PR
-//! reclaim, orphan prune), and the `tm pr cleanup` probe
-//! [`inspect_dirt_with_ignored_output`].
+//! FAIL-SAFE: a git error or an unreadable directory is an `Err`, and every
+//! caller keeps the tree on `Err`. An unreadable deploy ledger counts every
+//! file it would have excused.
+//! Where it is enforced: the agent reap (gate 5a), the `git worktree remove`
+//! step of the shared remover `decommission::remove_registered_worktree`
+//! (decommission, merged-PR reclaim, orphan prune), and the `tm pr cleanup`
+//! probe [`inspect_dirt_with_ignored_output`].
+//! NOT enforced: two routes delete with `remove_dir_all` and never reach it —
+//! decommission effect 3 (an SM-owned workspace) and
+//! `decommission::remove_unclaimed_directory` when no repository claims the
+//! path. Both are tracked in #8663.
 //! Test: `worktree_ignored_output_tests`.
 
 use std::io::Read;
@@ -35,7 +43,8 @@ use std::path::Path;
 
 use tracing::warn;
 
-use super::worktree_nested::DISPOSABLE_DIR_NAMES;
+use super::worktree_deployed_assets::{DeployedAssets, is_asset_path};
+use super::worktree_nested::is_disposable_dir_name;
 use super::worktree_safety::{DirtyWorktree, DirtyWorktreePolicy, git_stdout, inspect_dirt};
 use crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS;
 
@@ -45,8 +54,11 @@ use crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS;
 /// regenerates `src-tauri/gen/` on every build.
 const DISPOSABLE_DIR_PATHS: &[&str] = &["src-tauri/gen"];
 
-/// File basenames that are OS or editor litter, never run output.
-const REGENERABLE_FILES: &[&str] = &[".DS_Store", "Thumbs.db"];
+/// File basenames that are OS litter or a tool's own cache, never run output.
+const REGENERABLE_FILES: &[&str] = &[".DS_Store", "Thumbs.db", ".eslintcache", ".coverage"];
+
+/// File-name suffixes of bytecode and incremental-build caches.
+const REGENERABLE_SUFFIXES: &[&str] = &[".pyc", ".tsbuildinfo"];
 
 /// Harness paths beyond [`SCAFFOLD_IGNORED_PATHS`] that tm writes into a tree.
 /// A trailing `*` matches the rest of that path segment.
@@ -54,18 +66,24 @@ const HARNESS_PATHS: &[&str] = &[
     ".trusty-mpm/",
     ".claude/settings.json*",
     ".claude/settings.local.json*",
+    // #8534 critic round 3: the deploy ledgers with their lock and temp
+    // sidecars, and the project-tier stamp.
+    ".claude/skills/.trusty-mpm-skills-manifest.json*",
+    ".claude/skills/.trusty-mpm-project-tier-stamp",
+    ".claude/agents/.trusty-mpm-manifest.json*",
 ];
 
 /// The Cache Directory Tagging signature (<https://bford.info/cachedir/>).
 const CACHEDIR_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
-/// The file cargo writes into the root of every target directory it builds in.
-const CARGO_TARGET_MARKER: &str = ".rustc_info.json";
-
 /// `git status` listing gitignored entries, collapsed to the matching directory.
+/// #8534 critic round 3: `-z`. Even under the pinned `core.quotePath=false`,
+/// git quotes a name holding `"`, `\` or a control character, and a quoted
+/// name kept the tree forever.
 const IGNORED_STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain",
+    "-z",
     "--ignored=matching",
     "--untracked-files=normal",
     "--ignore-submodules=none",
@@ -92,25 +110,27 @@ pub(crate) struct IgnoredOutput {
 pub(crate) fn is_regenerable(entry: &str) -> bool {
     let entry = entry.trim_end_matches('/');
     let basename = entry.rsplit('/').next().unwrap_or(entry);
-    DISPOSABLE_DIR_NAMES.contains(&basename)
+    is_disposable_dir_name(basename)
         || DISPOSABLE_DIR_PATHS
             .iter()
             .any(|p| entry == *p || entry.ends_with(&format!("/{p}")))
         || REGENERABLE_FILES.contains(&basename)
-        || basename.ends_with(".pyc")
+        || REGENERABLE_SUFFIXES.iter().any(|s| basename.ends_with(s))
 }
 
 /// Is this repo-relative path harness bookkeeping, not run output?
 ///
 /// Why: a managed tree always holds tm's gitignored harness files; without
 /// this excuse every decommission of one would refuse (#8534 critic round 2).
+/// #8534 critic round 3: the scaffold's `.claude/agents/` and `.claude/skills/*`
+/// are left out; a user's agent or skill lives there too, so a ledger decides.
 /// Test: `harness_paths_are_excused_and_look_alikes_are_not`.
 pub(crate) fn is_harness_path(rel: &str) -> bool {
     let rel = rel.trim_end_matches('/');
     rel == super::decommission::WORKTREE_SENTINEL_FILE
         || HARNESS_PATHS
             .iter()
-            .chain(SCAFFOLD_IGNORED_PATHS)
+            .chain(SCAFFOLD_IGNORED_PATHS.iter().filter(|p| !is_asset_path(p)))
             .any(|pattern| path_matches(pattern, rel))
 }
 
@@ -133,8 +153,10 @@ fn path_matches(pattern: &str, rel: &str) -> bool {
 /// Why: pytest, mypy and ruff tag their caches and ignore their own contents,
 /// so git lists `.pytest_cache/README.md` rather than the directory; and an
 /// agent's `CARGO_TARGET_DIR=target-<n>` is cargo output under a name no list
-/// can hold. The tag is written by the tool, never by a user.
-/// Test: `tagged_cache_dirs_are_excused_by_content_not_name`.
+/// can hold. The tag is written by the tool, never by a user. Cargo tags only a
+/// target directory it creates itself, so a pre-created one is kept.
+/// Test: `tagged_cache_dirs_are_excused_by_content_not_name`,
+/// `a_rustc_info_file_alone_does_not_excuse_a_directory`.
 fn under_cache_dir(root: &Path, rel: &str) -> bool {
     let mut prefix = root.to_path_buf();
     rel.split('/').filter(|p| !p.is_empty()).any(|part| {
@@ -143,15 +165,13 @@ fn under_cache_dir(root: &Path, rel: &str) -> bool {
     })
 }
 
-/// Does `dir` hold a valid `CACHEDIR.TAG` or cargo's target-root marker?
+/// Does `dir` hold a `CACHEDIR.TAG` that opens with the spec's signature?
 /// Anything unreadable answers `false`, which keeps the entry.
+/// #8534 critic round 3: cargo's `.rustc_info.json` no longer counts; any
+/// directory can hold a file of that name.
 fn is_tagged_cache_dir(dir: &Path) -> bool {
-    let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-    if regular(&dir.join(CARGO_TARGET_MARKER)) {
-        return true;
-    }
     let tag = dir.join("CACHEDIR.TAG");
-    if !regular(&tag) {
+    if !std::fs::symlink_metadata(&tag).is_ok_and(|m| m.is_file()) {
         return false;
     }
     let mut head = Vec::with_capacity(CACHEDIR_TAG_SIGNATURE.len());
@@ -168,31 +188,24 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// Why: see the module doc — `git worktree remove` deletes what `git status`
 /// hides.
 /// What: lists `!!` entries from [`IGNORED_STATUS_ARGS`], drops the ones the
-/// rule excuses, and counts the files left, skipping harness files inside a
-/// wholly ignored directory such as `.claude/`. `Ok(None)` means nothing is
-/// kept. Any failure — git, a quoted path, an unreadable file — is `Err`.
+/// rule excuses, and counts the files left, skipping harness files and tm's
+/// deployed agents and skills inside a directory such as `.claude/`.
+/// `Ok(None)` means nothing is kept. A git failure or an unreadable file is
+/// `Err`.
 /// Test: `kept_output_counts_files_in_an_ignored_results_dir`,
 /// `kept_output_is_none_for_build_output_only`,
 /// `kept_output_errors_when_git_cannot_answer`,
-/// `kept_output_errors_on_a_quoted_path`.
+/// `non_ascii_names_are_classified_not_refused`.
 pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, String> {
     let status = git_stdout(path, IGNORED_STATUS_ARGS)?;
+    let mut assets = DeployedAssets::new(path);
     let mut kept: Option<IgnoredOutput> = None;
-    for line in status.lines() {
-        let Some(entry) = line.strip_prefix("!! ") else {
-            continue;
-        };
-        let entry = entry.trim();
-        if entry.starts_with('"') {
-            return Err(format!(
-                "`{entry}` has a quoted path this check cannot classify"
-            ));
-        }
+    for entry in ignored_entries(&status) {
         let bare = entry.trim_end_matches('/');
         if is_harness_path(bare) || is_regenerable(bare) || under_cache_dir(path, bare) {
             continue;
         }
-        let files = count_files(path, bare)?;
+        let files = count_files(path, bare, &mut assets)?;
         if files == 0 {
             continue; // nothing but harness files, or an empty directory
         }
@@ -203,6 +216,25 @@ pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, 
         found.files += files;
     }
     Ok(kept)
+}
+
+/// The `!!` entries of a `git status --porcelain -z` listing.
+///
+/// Why: `-z` records end in NUL and are never quoted. A rename or copy record
+/// carries its source path as the NEXT record, which is not an entry.
+/// Test: `ignored_entries_skips_a_rename_source`.
+fn ignored_entries(status: &str) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let mut records = status.split('\0');
+    while let Some(record) = records.next() {
+        let xy = record.as_bytes().get(..2).unwrap_or_default();
+        if xy.iter().any(|c| matches!(c, b'R' | b'C')) {
+            records.next();
+        } else if let Some(entry) = record.strip_prefix("!! ") {
+            entries.push(entry);
+        }
+    }
+    entries
 }
 
 /// Why `path` must be kept for its gitignored output, or `None` to proceed.
@@ -297,14 +329,14 @@ pub fn inspect_dirt_with_ignored_output(path: &Path) -> Option<DirtyWorktree> {
 }
 
 /// Count the files at `root/rel`: 1 for a file or symlink, the regular files
-/// and symlinks beneath it for a directory, skipping harness paths (symlinks
-/// are not followed).
-fn count_files(root: &Path, rel: &str) -> Result<usize, String> {
+/// and symlinks beneath it for a directory, skipping harness paths and tm's
+/// deployed agents and skills (symlinks are not followed).
+fn count_files(root: &Path, rel: &str, assets: &mut DeployedAssets) -> Result<usize, String> {
     let top = root.join(rel);
     let meta = std::fs::symlink_metadata(&top)
         .map_err(|e| format!("`{}` is unreadable: {e}", top.display()))?;
     if !meta.is_dir() {
-        return Ok(1);
+        return Ok(usize::from(!assets.is_tm_deployed(rel)));
     }
     let mut count = 0usize;
     let mut stack = vec![(top, rel.to_string())];
@@ -323,7 +355,7 @@ fn count_files(root: &Path, rel: &str) -> Result<usize, String> {
             }
             if kind.is_dir() {
                 stack.push((entry.path(), child_rel));
-            } else {
+            } else if !assets.is_tm_deployed(&child_rel) {
                 count += 1;
                 if count >= FILE_COUNT_CAP {
                     return Ok(count);

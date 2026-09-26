@@ -438,8 +438,11 @@ fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> Work
     };
     let repo_root = repo_root.as_path();
     // #8534: `--force` deletes gitignored files the callers' dirt gates never
-    // count. Here, not per caller, so no route can skip it; after registry
-    // resolution, because only a registered tree has a status to read.
+    // count. Here, not per caller, so every `git worktree remove` route through
+    // this function runs it; after registry resolution, because only a
+    // registered tree has a status to read. Two deletions never reach it:
+    // `remove_unclaimed_directory` above, when no repository claims the path,
+    // and effect 3's `remove_dir_all` of an SM-owned workspace (#8663).
     if let Some(refusal) = ignored_output_blocks_removal(path, ignored) {
         return WorktreeRemoval::Kept(refusal);
     }
