@@ -39,6 +39,8 @@ pub(crate) mod corpus_fault;
 pub(crate) mod docs_penalty;
 // #6581: the migration-in-progress window and the error a query lands on there.
 mod files;
+// #8266: grep's file set, read without rehydrating an evicted corpus.
+mod file_set;
 pub(crate) mod helpers;
 mod idle_evict;
 mod ingest;

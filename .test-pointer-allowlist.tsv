@@ -758,7 +758,6 @@ crates/trusty-search/src/commands/setup.rs	setup_patches_existing_settings_file
 crates/trusty-search/src/commands/start_restore.rs	restore_missing_root_with_ambiguous_candidates_skips
 crates/trusty-search/src/commands/start_restore.rs	restore_missing_root_with_no_candidate_skips
 crates/trusty-search/src/core/chunker/classify.rs	test_rust_pub_const_chunking
-crates/trusty-search/src/core/corpus/corpus_ops.rs	list_indexed_files_returns_distinct_files
 crates/trusty-search/src/core/corpus/kg_ops.rs	save_load_communities_roundtrip
 crates/trusty-search/src/core/corpus/meta_ops.rs	test_meta_schema_version_roundtrip
 crates/trusty-search/src/core/corpus/store_impl.rs	test_force_reindex_atomic_corpus_swap

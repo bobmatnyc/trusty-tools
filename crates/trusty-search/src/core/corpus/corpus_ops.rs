@@ -295,19 +295,30 @@ impl CorpusStore {
     /// carryover and after all batch writes), so the result reflects the full
     /// committed state that will be promoted.
     /// What: opens a read transaction and collects every distinct `RawChunk.file`
-    /// value by deserialising each row's JSON. Corrupt rows are skipped with a
-    /// `warn` to match `load_all_chunks`'s tolerance.
-    /// Test: `list_indexed_files_returns_distinct_files` below.
+    /// value. Each row decodes ONLY its `file` field — #8266: grep lists files
+    /// this way on a cold index, and decoding every chunk body to read one
+    /// field is the cost it avoids. Rows whose `file` cannot be read are
+    /// skipped with a `warn` to match `load_all_chunks`'s tolerance.
+    /// Test: `list_indexed_files_returns_distinct_paths`,
+    /// `a_cold_narrow_grep_does_not_materialize_the_corpus`.
     pub fn list_indexed_files(&self) -> Result<Vec<String>> {
         use std::collections::HashSet;
+        /// The one field of a `RawChunk` row this listing needs.
+        #[derive(serde::Deserialize)]
+        struct FileField<'a> {
+            #[serde(borrow)]
+            file: std::borrow::Cow<'a, str>,
+        }
         let txn = self.db.begin_read().context("begin list_files read txn")?;
         let table = txn.open_table(CHUNKS_TABLE)?;
         let mut seen: HashSet<String> = HashSet::new();
         for entry in table.iter().context("iterate chunks for list_files")? {
             let (key, value) = entry.context("read chunk row for list_files")?;
-            match serde_json::from_slice::<RawChunk>(value.value()) {
-                Ok(chunk) => {
-                    seen.insert(chunk.file);
+            match serde_json::from_slice::<FileField<'_>>(value.value()) {
+                Ok(row) => {
+                    if !seen.contains(row.file.as_ref()) {
+                        seen.insert(row.file.into_owned());
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
