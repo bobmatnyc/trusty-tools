@@ -257,17 +257,28 @@ pub(crate) fn isolated_framework_paths(project_dir: &Path) -> FrameworkPaths {
 /// [`prepare_session`] with their own `fw` — notably `tm session start`, which
 /// spawns a bare `claude` (`commands/session/start.rs`) and so genuinely does
 /// read the user tier; pointing it here would be a regression, not a fix.
+/// What: [`prepare_isolated_session_under`] with `dirs::home_dir()` as the home.
+/// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`;
+/// `launch_paths_prepare_through_the_isolated_seam` (tm binary) binds the call
+/// sites to it.
+pub fn prepare_isolated_session(
+    project_dir: &Path,
+    repo_url: Option<&str>,
+) -> Result<PrepReport, PrepError> {
+    // #8545: the pre-#8545 signature, resolving the real home.
+    prepare_isolated_session_under(project_dir, repo_url, dirs::home_dir().as_deref())
+}
+
+/// [`prepare_isolated_session`] with the user home named (#8545).
+///
+/// Why: the `guided_fallback_*` tests drive the real launch path; a named home
+/// keeps its framework source and user-global writes under a temp dir.
 /// What: resolves [`isolated_framework_paths`] for `project_dir` (the cwd the
 /// harness is spawned in) — under `home` when one is given — and runs the
 /// same pipeline [`prepare_session_with_repo_url`] does.
-/// #8545: `home` is the user home the framework source and the user-global
-/// writes resolve under — production passes `dirs::home_dir()`, a test a temp
-/// dir, so driving the real launch path never touches the operator's home.
-/// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`;
-/// `launch_paths_prepare_through_the_isolated_seam` (tm binary) binds the call
-/// sites to it; `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
+/// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// drives it under a temp home.
-pub fn prepare_isolated_session(
+pub fn prepare_isolated_session_under(
     project_dir: &Path,
     repo_url: Option<&str>,
     home: Option<&Path>,

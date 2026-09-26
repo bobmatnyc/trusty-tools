@@ -187,27 +187,26 @@ pub(crate) async fn launch_and_wait(
     // `$HOME/.claude` deploy would never be read by the session it prepares.
     // #7685: keep the trusty-memory reachability preparation resolved, so the
     // adapter at (3) reuses it instead of probing a second time.
-    let memory_reachable =
-        match prepare_isolated_session(project_dir, None, dirs::home_dir().as_deref()) {
-            Ok(report) => {
-                info!(
-                    agents = report.deploy.deployed.len(),
-                    project = %project_dir.display(),
-                    "meta run: prepared session (agents/skills/CLAUDE.md/MCP deployed)"
-                );
-                Some(report.memory_reachable)
-            }
-            // #4752: a compiled-prompt write failure refuses the launch; every
-            // other prep failure stays non-fatal (#2149).
-            Err(e) if e.is_fatal() => anyhow::bail!("{e}"),
-            Err(e) => {
-                warn!(
-                    project = %project_dir.display(),
-                    "meta run: session preparation failed (continuing): {e}"
-                );
-                None
-            }
-        };
+    let memory_reachable = match prepare_isolated_session(project_dir, None) {
+        Ok(report) => {
+            info!(
+                agents = report.deploy.deployed.len(),
+                project = %project_dir.display(),
+                "meta run: prepared session (agents/skills/CLAUDE.md/MCP deployed)"
+            );
+            Some(report.memory_reachable)
+        }
+        // #4752: a compiled-prompt write failure refuses the launch; every
+        // other prep failure stays non-fatal (#2149).
+        Err(e) if e.is_fatal() => anyhow::bail!("{e}"),
+        Err(e) => {
+            warn!(
+                project = %project_dir.display(),
+                "meta run: session preparation failed (continuing): {e}"
+            );
+            None
+        }
+    };
 
     // (2) Create the tmux host rooted at the local project dir. Passing
     // `cwd = Some(project_dir)` and NO workspace/repo means the manager creates

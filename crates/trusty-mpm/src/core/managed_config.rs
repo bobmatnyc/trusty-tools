@@ -415,11 +415,22 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `interactive_config_dir_never_writes_the_home_claude_json`,
 /// `interactive_config_dir_survives_a_malformed_managed_claude_json`,
 /// `interactive_config_dir_withholds_builtins_when_a_pin_failed`.
-pub fn prepare_interactive_config_dir(
+pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::PathBuf> {
+    // #8545: the pre-#8545 signature, resolving the real home.
+    prepare_interactive_config_dir_under(workspace, dirs::home_dir().as_deref())
+}
+
+/// [`prepare_interactive_config_dir`] with the user home named (#8545).
+///
+/// Why: the `guided_fallback_*` tests drive the real launch path; a named home
+/// keeps the managed config dir and its framework source under a temp dir.
+/// What: the same steps, with `<home>/.trusty-tools/trusty-mpm/claude-config`
+/// as the config dir; `None` for `home` takes the unresolved-home arm.
+/// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+pub fn prepare_interactive_config_dir_under(
     workspace: &Path,
     home: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
-    // #8545: resolved under the caller's `home` (production: `dirs::home_dir()`).
     let Some(home) = home else {
         // #4181: home unresolved — nothing to relocate to. Keep the legacy
         // home-trust seed so the startup dialogs are still dismissed.

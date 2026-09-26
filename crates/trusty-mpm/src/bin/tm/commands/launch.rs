@@ -234,7 +234,7 @@ pub(crate) async fn launch(
     //     `claude` spawned at step 13 carries `--setting-sources project,local`
     //     and would never read a `$HOME/.claude` deploy.
     let config_dir = {
-        match trusty_mpm::core::session_launch::prepare_isolated_session(
+        match trusty_mpm::core::session_launch::prepare_isolated_session_under(
             &managed_path,
             Some(&origin_url),
             home,
@@ -523,7 +523,7 @@ pub(crate) async fn connect(
     //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
     //     the `claude` spawned at step 5 carries `--setting-sources
     //     project,local` and would never read a `$HOME/.claude` deploy.
-    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None, home) {
+    match trusty_mpm::core::session_launch::prepare_isolated_session_under(&path, None, home) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());

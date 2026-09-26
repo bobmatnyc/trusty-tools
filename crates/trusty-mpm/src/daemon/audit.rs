@@ -198,8 +198,10 @@ impl AuditLogger {
     /// survive them.
     /// Test: `concurrent_publishers_lose_nothing_without_a_record` — it parses
     /// every line the concurrent publishes produced, so an interleaved one
-    /// fails it before its accounting runs.
+    /// fails it before its accounting runs; `an_audit_write_under_a_fenced_home_is_refused`.
     fn try_log<T: Serialize>(&self, entry: &T) -> std::io::Result<()> {
+        // #8545: a test binary fences its home; see `core::home_write_fence`.
+        crate::core::home_write_fence::check(&self.path);
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -326,5 +328,19 @@ mod tests {
             // Every line must independently parse as a valid entry.
             let _: AuditEntry = serde_json::from_str(line).unwrap();
         }
+    }
+
+    /// #8545: an audit write under a fenced home root is refused by a panic
+    /// before any directory or file is created.
+    #[test]
+    #[should_panic(expected = "#8545")]
+    fn an_audit_write_under_a_fenced_home_is_refused() {
+        let roots = crate::core::home_write_fence::armed_roots();
+        let root = roots
+            .iter()
+            .find(|r| r.ends_with(".trusty-mpm"))
+            .expect("the lib binary fences ~/.trusty-mpm");
+        let logger = AuditLogger::for_stream(&root.join("tm-8545-fence-probe"), "overseer");
+        logger.log(sample_entry());
     }
 }

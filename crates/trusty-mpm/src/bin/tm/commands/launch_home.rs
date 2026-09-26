@@ -15,14 +15,15 @@ use std::path::{Path, PathBuf};
 /// Why (issue #4181): one call shared by `tm launch` and `tm connect`. Why
 /// relocation preserves #1269 lives on the library function.
 /// What: delegates to
-/// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir`], then
+/// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir_under`], then
 /// warns once when the spawn will relocate with no resolvable
 /// `CLAUDE_CODE_OAUTH_TOKEN` — the #2246 shape where a Keychain credential
 /// stored under the operator's default config dir is unreadable under the
 /// relocated one.
 /// Test: `core::managed_config`'s `interactive_config_dir_*` tests.
 pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(workspace, home);
+    let dir =
+        trusty_mpm::core::managed_config::prepare_interactive_config_dir_under(workspace, home);
     // #2246: relocating moves which Keychain entry `claude` reads. Say so once
     // rather than let the session present as "logged in, then not logged in".
     if dir.is_some() && trusty_mpm::core::oauth_token::resolve_oauth_token().is_none() {

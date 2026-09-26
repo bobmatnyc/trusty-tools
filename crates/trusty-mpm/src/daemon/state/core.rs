@@ -530,11 +530,13 @@ impl DaemonState {
     /// What: delegates to [`Self::with_root`] using the default
     /// [`FrameworkPaths`] root (`~/.trusty-mpm`), so startup cleanup and
     /// pairing restore are handled exactly once in the shared inner constructor.
+    /// The lib test binary builds under a temp root instead (#8545).
     /// Test: `new_reads_default_when_optimizer_file_missing`,
-    /// `new_overseer_is_disabled_when_file_missing`.
+    /// `new_overseer_is_disabled_when_file_missing`,
+    /// `new_never_writes_under_the_real_home`.
     pub fn new() -> Self {
-        let framework_root = FrameworkPaths::default().root;
-        Self::with_root(framework_root)
+        // #8545: see `overseer::default_framework_root`.
+        Self::with_root(super::overseer::default_framework_root())
     }
 
     /// Wrap the state in an `Arc` for sharing across tasks.

@@ -2223,8 +2223,10 @@ fn launch_paths_prepare_through_the_isolated_seam() {
             trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG,
             trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG_RELOCATED
         );
+        // #8545: `_under` is the same seam with the home named.
         assert_eq!(
-            src.matches("prepare_isolated_session(").count(),
+            src.matches("prepare_isolated_session(").count()
+                + src.matches("prepare_isolated_session_under(").count(),
             expected_calls,
             "{name} must deploy through `prepare_isolated_session` exactly \
              {expected_calls}x (issue #4203); if a call site was added or removed, \

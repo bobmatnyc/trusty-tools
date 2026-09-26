@@ -117,6 +117,8 @@ impl PortfolioPalace {
         #[cfg(feature = "manager-memory")]
         {
             let data_root = framework_root.join(MANAGER_DATA_SUBDIR).join("palace");
+            // #8545: a test binary fences its home; see `core::home_write_fence`.
+            crate::core::home_write_fence::check(&data_root);
             match PortfolioMemory::open(data_root) {
                 Ok(memory) => Self {
                     id,

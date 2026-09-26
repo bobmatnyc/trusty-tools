@@ -23,11 +23,11 @@ mod entry;
 // `isolated_framework_paths` has no caller outside `entry` itself; the tests
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
-    prepare_isolated_session, prepare_session, prepare_session_for_managed,
-    prepare_session_for_repair, prepare_session_for_repair_under, prepare_session_with_home,
-    prepare_session_with_memory_reachable, prepare_session_with_repo_url,
-    prepare_session_with_repo_url_and_exe, prepare_session_with_style,
-    prepare_session_with_style_and_native,
+    prepare_isolated_session, prepare_isolated_session_under, prepare_session,
+    prepare_session_for_managed, prepare_session_for_repair, prepare_session_for_repair_under,
+    prepare_session_with_home, prepare_session_with_memory_reachable,
+    prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
+    prepare_session_with_style, prepare_session_with_style_and_native,
 };
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;

@@ -50,3 +50,35 @@ fn arm_is_first_writer_wins() {
         armed_roots()
     );
 }
+
+/// #8545: a `$CLAUDE_CONFIG_DIR` outside every home is fenced, together with
+/// the home roots, and a sibling of it stays writable. The value is injected,
+/// so no test mutates the process environment.
+#[test]
+fn a_claude_config_dir_outside_home_is_fenced() {
+    let home = Path::new("/fence-test-home");
+    let config_dir = Path::new("/elsewhere/claude-config");
+    let from_env = claude_config_dir_root(Some(config_dir.into()));
+    let roots = fence_roots(&[home], from_env.as_deref());
+    for fenced in [
+        config_dir.join("settings.json"),
+        config_dir.join("agents/engineer.md"),
+        home.join(".claude/settings.json"),
+    ] {
+        let outcome = std::panic::catch_unwind(|| check_against(&fenced, &roots));
+        assert!(outcome.is_err(), "{} must be fenced", fenced.display());
+    }
+    check_against(Path::new("/elsewhere/claude-config-other/x"), &roots);
+    check_against(Path::new("/elsewhere/project/.claude"), &roots);
+}
+
+/// An unset or empty `$CLAUDE_CONFIG_DIR` adds no root.
+#[test]
+fn an_empty_claude_config_dir_fences_nothing() {
+    assert_eq!(claude_config_dir_root(None), None);
+    assert_eq!(claude_config_dir_root(Some("".into())), None);
+    let home = Path::new("/fence-test-home");
+    assert_eq!(fence_roots(&[home], None), fenced_roots_under(home));
+    // `$HOME` and the passwd home are usually the same path: one set of roots.
+    assert_eq!(fence_roots(&[home, home], None), fenced_roots_under(home));
+}

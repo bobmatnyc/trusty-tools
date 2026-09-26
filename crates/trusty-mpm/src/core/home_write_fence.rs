@@ -37,17 +37,42 @@ pub fn fenced_roots_under(home: &Path) -> Vec<PathBuf> {
 /// call armed the fence.
 /// Test: `tests::arm_is_first_writer_wins`.
 pub fn arm(homes: &[&Path]) -> bool {
-    let mut roots: Vec<PathBuf> = homes.iter().flat_map(|h| fenced_roots_under(h)).collect();
-    roots.dedup();
-    FENCED_ROOTS.set(roots).is_ok()
+    FENCED_ROOTS.set(fence_roots(homes, None)).is_ok()
 }
 
-/// Arm the fence over this process's `$HOME` and the password-database home.
+/// The roots to fence: [`fenced_roots_under`] each of `homes`, plus
+/// `claude_config_dir` itself when one is given.
+///
+/// Why (#8545): Claude Code reads its user config from `$CLAUDE_CONFIG_DIR`
+/// when that is set, and it may lie outside every home.
+/// What: pure; duplicates dropped.
+/// Test: `tests::a_claude_config_dir_outside_home_is_fenced`.
+fn fence_roots(homes: &[&Path], claude_config_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = homes.iter().flat_map(|h| fenced_roots_under(h)).collect();
+    roots.extend(claude_config_dir.map(Path::to_path_buf));
+    // `$HOME` and the passwd home are usually one path; `dedup` alone keeps
+    // non-adjacent repeats.
+    let mut seen = std::collections::HashSet::new();
+    roots.retain(|root| seen.insert(root.clone()));
+    roots
+}
+
+/// A `$CLAUDE_CONFIG_DIR` value as a fence root: `None` when unset or empty.
+///
+/// Test: `tests::an_empty_claude_config_dir_fences_nothing`.
+fn claude_config_dir_root(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// Arm the fence over this process's `$HOME`, the password-database home and
+/// `$CLAUDE_CONFIG_DIR`.
 ///
 /// Why: `$HOME` is where a home-resolving writer goes; the password-database
 /// home is the operator's real one even when `$HOME` was repointed (#5784).
-/// What: [`arm`] over whichever of the two resolve.
-/// Test: `the_home_write_fence_is_armed_for_this_binary` (tm bin target).
+/// #8545: `$CLAUDE_CONFIG_DIR` is the operator's live Claude config when set.
+/// What: arms [`fence_roots`] over whichever of the three resolve.
+/// Test: `the_home_write_fence_is_armed_for_this_binary` (tm bin target),
+/// `tests::a_claude_config_dir_outside_home_is_fenced`.
 pub fn arm_for_this_process() -> bool {
     let env_home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
@@ -58,7 +83,10 @@ pub fn arm_for_this_process() -> bool {
         .chain(passwd_home.iter())
         .map(PathBuf::as_path)
         .collect();
-    arm(&homes)
+    let claude_config_dir = claude_config_dir_root(std::env::var_os("CLAUDE_CONFIG_DIR"));
+    FENCED_ROOTS
+        .set(fence_roots(&homes, claude_config_dir.as_deref()))
+        .is_ok()
 }
 
 /// The roots this process fences; empty when the fence is not armed.
