@@ -785,7 +785,8 @@ fn resolve_layout_inherits_or_decides_per_request_and_record() {
         let req = create_req_with_colocated("ts-8147-resolve", root.clone(), asked);
         let recorded = recorded.map(row);
         let got = super::create_layout::resolve_layout(&req, recorded.as_ref());
-        let context = format!("{root:?} asked={asked:?} recorded={recorded:?}");
+        let recorded_layout = recorded.as_ref().map(|r| r.colocated);
+        let context = format!("{root:?} asked={asked:?} recorded={recorded_layout:?}");
         match want {
             Some(layout) => assert_eq!(got.ok(), Some(layout), "{context}"),
             None => assert_eq!(

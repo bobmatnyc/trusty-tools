@@ -245,13 +245,17 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   records the choice, so warm boot restores the same layout; `roots.toml` is
   not touched. Only `POST /indexes` and the `search.index.create` socket method
   carry this field; the MCP `create_index` tool and the CLI do not.
-  For an id the daemon already has at the same `root_path` — resident or
-  cold-parked — the recorded layout wins: an omitted `colocated` keeps it.
+  For an id that already exists, its `indexes.toml` row is the authority —
+  not the in-memory stores, which a concurrent lazy load changes. An omitted
+  `colocated` keeps the recorded layout, even at a new `root_path` (as a
+  relocation does, #1089); at a new `root_path` an explicit value decides.
 - **Response 409** (#8147): the id is already registered at this `root_path`
   with the other layout, and the request set `colocated` explicitly. A
   registration never changes an existing index's layout. The body carries
   `registered_colocated` and `requested_colocated`; nothing is created or
   changed. Omit the field, or `DELETE` the index and register it again.
+  Checked before embedder readiness, so a warming embedder's `503` never
+  hides this refusal.
 - **Response 403** (#8147): a colocated registration (omitted or `true`)
   whose `<root_path>/.trusty-search/` the daemon cannot create or write.
   `error` starts `permission denied:` and names the directory and the
@@ -262,7 +266,9 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   `indexes.toml` row could not be written. That row is the only record of a
   data-dir index, so the request is refused and nothing is registered. A
   colocated registration still treats this write as best-effort, since warm
-  boot rediscovers it from `roots.toml`.
+  boot rediscovers it from `roots.toml`. Also a `500`: `indexes.toml` could
+  not be READ, so the id's recorded layout is unknown. Nothing is registered;
+  the request's own `colocated` is never used in its place.
 
 ###### Off-box per-index delivery (issue #8135)
 
