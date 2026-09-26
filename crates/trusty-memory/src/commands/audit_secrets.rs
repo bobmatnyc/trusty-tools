@@ -27,8 +27,11 @@
 //! `undecodable_drawer_row_is_counted_and_fails_the_run`,
 //! `scan_leaves_palace_files_byte_identical_under_a_live_writer`.
 
+use std::future::Future;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -247,6 +250,16 @@ fn screen_drawer(counts: &mut PalaceSecretCounts, content: &str) {
     }
 }
 
+/// A scan halted by its `stop` signal before every palace was read (#8645).
+///
+/// What: `scanned` is how many palaces finished before the stop was seen.
+/// Test: `stop_signal_halts_the_scan_between_palaces`.
+#[derive(Debug, thiserror::Error)]
+#[error("audit secrets: scan stopped after {scanned} palace(s)")]
+pub struct ScanInterrupted {
+    pub scanned: usize,
+}
+
 /// Scan every palace (or one) under `registry_dir`.
 ///
 /// Why: the testable core — the CLI handler only resolves the data root and
@@ -257,16 +270,20 @@ fn screen_drawer(counts: &mut PalaceSecretCounts, content: &str) {
 /// that cannot be read is recorded with an error and the scan continues; one
 /// with no store is recorded as `Absent`; undecodable drawer rows are counted
 /// in `drawers_unreadable`, never dropped. A `palace_filter` naming no palace
-/// is an error, not an empty report.
+/// is an error, not an empty report. `stop` is polled before each palace; once
+/// it returns true no further palace is copied, and the scan returns
+/// [`ScanInterrupted`] instead of partial counts.
 /// Test: `counts_refusals_per_palace_and_variant`,
 /// `palace_filter_scans_one_and_rejects_an_unknown_name`,
 /// `scan_leaves_palace_files_byte_identical_under_a_live_writer`,
 /// `undecodable_drawer_row_is_counted_and_fails_the_run`,
-/// `truncated_store_copy_is_an_error_row`.
+/// `truncated_store_copy_is_an_error_row`,
+/// `stop_signal_halts_the_scan_between_palaces`.
 pub fn scan_palaces(
     registry_dir: &Path,
     palace_filter: Option<&str>,
     scratch_parent: &Path,
+    stop: &dyn Fn() -> bool,
 ) -> Result<Vec<PalaceSecretCounts>> {
     let palaces = PalaceRegistry::list_palaces(registry_dir)
         .with_context(|| format!("list palaces under {}", registry_dir.display()))?;
@@ -275,6 +292,9 @@ pub fn scan_palaces(
         let id = palace.id.0.clone();
         if palace_filter.is_some_and(|f| f != id) {
             continue;
+        }
+        if stop() {
+            return Err(ScanInterrupted { scanned: out.len() }.into());
         }
         let mut counts = PalaceSecretCounts {
             palace: id,
@@ -437,11 +457,10 @@ pub fn render(
 /// Why: a thin shim over [`scan_palaces`] and [`render`], matching
 /// `backfill-report`'s shape.
 /// What: resolves the data root, sweeps store copies a dead run left in the
-/// system temp dir, then scans on a blocking thread with every copy under one
-/// run-level scratch dir. Ctrl-C deletes that dir — and every plaintext copy in
-/// it — before exiting non-zero with no counts. Renders, then exits through
-/// [`scan_verdict`], so a partial scan never passes as a complete one.
-/// Test: not unit-tested (process-level entry point); `scan_palaces`,
+/// system temp dir, then scans through [`scan_until_interrupted`] with Ctrl-C
+/// as the interrupt. Renders, then exits through [`scan_verdict`], so a partial
+/// scan never passes as a complete one.
+/// Test: not unit-tested (process-level entry point); `scan_until_interrupted`,
 /// `render`, `scan_verdict` and `sweep_stale_copies` are the testable surfaces
 /// (`sweep_removes_only_stale_scratch_dirs`).
 pub async fn handle_audit_secrets(opts: AuditSecretsOptions) -> Result<()> {
@@ -453,19 +472,13 @@ pub async fn handle_audit_secrets(opts: AuditSecretsOptions) -> Result<()> {
     sweep_stale_copies(&tmp, STALE_COPY_AGE);
     let run_dir = tempfile::TempDir::with_prefix_in(SCRATCH_PREFIX, &tmp)
         .context("create scratch dir for the audit run")?;
-    let run_path = run_dir.path().to_path_buf();
-    let palace = opts.palace.clone();
-    let scan = tokio::task::spawn_blocking(move || {
-        scan_palaces(&registry_dir, palace.as_deref(), &run_path)
-    });
-    let rows = tokio::select! {
-        joined = scan => joined.context("audit scan task")??,
-        _ = tokio::signal::ctrl_c() => {
-            // #8645: drop the run dir now; an interrupted exit skips destructors.
-            drop(run_dir);
-            anyhow::bail!("audit secrets: interrupted — store copies deleted, no counts reported");
-        }
-    };
+    let rows = scan_until_interrupted(
+        registry_dir,
+        opts.palace.clone(),
+        run_dir,
+        tokio::signal::ctrl_c(),
+    )
+    .await?;
     render(
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
@@ -473,6 +486,54 @@ pub async fn handle_audit_secrets(opts: AuditSecretsOptions) -> Result<()> {
         opts.json,
     )?;
     scan_verdict(&rows)
+}
+
+/// Run [`scan_palaces`] on a blocking thread until it finishes or `interrupt`
+/// fires.
+///
+/// Why: #8645 — each store copy holds drawers in plaintext. On Ctrl-C the scan
+/// must stop copying, and the copies must be gone before the process exits.
+/// The runtime waits for a running blocking task at shutdown, so an
+/// uncancelled worker would hold the exit until every palace was scanned.
+/// What: every copy lives under `run_dir`. If `interrupt` resolves `Ok` first,
+/// sets the stop flag, waits for the worker (it finishes at most the in-flight
+/// palace), removes `run_dir`, and returns an error that says whether the
+/// removal succeeded. An `Err` from `interrupt` — the handler could not be
+/// registered — disables that arm and the scan runs to completion.
+/// Test: `interrupt_stops_the_scan_and_removes_the_run_dir`,
+/// `failed_interrupt_registration_lets_the_scan_finish`.
+async fn scan_until_interrupted(
+    registry_dir: PathBuf,
+    palace: Option<String>,
+    run_dir: tempfile::TempDir,
+    interrupt: impl Future<Output = std::io::Result<()>>,
+) -> Result<Vec<PalaceSecretCounts>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let run_path = run_dir.path().to_path_buf();
+    let mut scan = tokio::task::spawn_blocking(move || {
+        let stopped = || worker_stop.load(Ordering::Relaxed);
+        scan_palaces(&registry_dir, palace.as_deref(), &run_path, &stopped)
+    });
+    tokio::select! {
+        biased;
+        Ok(()) = interrupt => {}
+        joined = &mut scan => return joined.context("audit scan task")?,
+    }
+    stop.store(true, Ordering::Relaxed);
+    // #8645: the worker's result is moot; waiting means no copy is in flight
+    // when the run dir goes.
+    let _ = scan.await;
+    let dir = run_dir.path().display().to_string();
+    match run_dir.close() {
+        Ok(()) => {
+            anyhow::bail!("audit secrets: interrupted — store copies deleted, no counts reported")
+        }
+        Err(e) => anyhow::bail!(
+            "audit secrets: interrupted — could not delete store copies under {dir}: {e}; \
+             no counts reported"
+        ),
+    }
 }
 
 #[cfg(test)]

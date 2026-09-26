@@ -58,6 +58,11 @@ fn fixture_palace(root: &Path, slug: &str, contents: &[String]) {
     }
 }
 
+/// A stop signal that never fires.
+fn never() -> bool {
+    false
+}
+
 /// Two palaces with known refusal counts, plus every fake value used.
 fn seeded_estate(root: &Path) -> Vec<String> {
     let s: Vec<String> = (0..6).map(|_| fake_value()).collect();
@@ -173,7 +178,7 @@ fn counts_refusals_per_palace_and_variant() {
     let scratch = tempfile::tempdir().expect("scratch");
     seeded_estate(root.path());
 
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
     assert_eq!(rows.len(), 2);
     let alpha = row(&rows, "alpha");
     assert_eq!(
@@ -232,7 +237,7 @@ fn output_and_tracing_carry_no_drawer_content() {
     tracing::subscriber::with_default(capture.clone(), || {
         tracing::callsite::rebuild_interest_cache();
         tracing::info!(probe = "capture-is-live");
-        let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+        let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
         render(&mut out, &mut err, &rows, false).expect("render text");
         render(&mut out, &mut err, &rows, true).expect("render json");
     });
@@ -288,7 +293,7 @@ fn scan_leaves_palace_files_byte_identical_under_a_live_writer() {
     seeded_estate(root.path());
 
     let unlocked = snapshot(root.path());
-    scan_palaces(root.path(), None, scratch.path()).expect("unlocked scan");
+    scan_palaces(root.path(), None, scratch.path(), &never).expect("unlocked scan");
     assert_eq!(
         snapshot(root.path()),
         unlocked,
@@ -301,7 +306,7 @@ fn scan_leaves_palace_files_byte_identical_under_a_live_writer() {
     )
     .expect("writer open");
     let locked = snapshot(root.path());
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("locked scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("locked scan");
     assert_eq!(
         row(&rows, "alpha").drawers_refused,
         3,
@@ -324,10 +329,10 @@ fn palace_filter_scans_one_and_rejects_an_unknown_name() {
     let scratch = tempfile::tempdir().expect("scratch");
     seeded_estate(root.path());
 
-    let rows = scan_palaces(root.path(), Some("beta"), scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), Some("beta"), scratch.path(), &never).expect("scan");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].palace, "beta");
-    let missing = scan_palaces(root.path(), Some("gamma"), scratch.path());
+    let missing = scan_palaces(root.path(), Some("gamma"), scratch.path(), &never);
     assert!(missing.is_err(), "an unknown palace is an error");
 }
 
@@ -342,7 +347,7 @@ fn unreadable_palace_is_an_error_row_not_a_fatal_scan() {
     let bad = root.path().join("beta").join("kg.redb");
     std::fs::write(&bad, format!("not a redb file {}", values[4])).expect("corrupt");
 
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
     let beta = row(&rows, "beta");
     let error = beta.error.as_deref().expect("beta must report an error");
     assert!(!leaks(error, &values), "an error line leaked store bytes");
@@ -359,7 +364,7 @@ fn json_output_is_counts_only() {
     let root = tempfile::tempdir().expect("root");
     let scratch = tempfile::tempdir().expect("scratch");
     seeded_estate(root.path());
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
     let (mut out, mut err) = (Vec::new(), Vec::new());
     render(&mut out, &mut err, &rows, true).expect("render");
 
@@ -479,7 +484,7 @@ fn undecodable_drawer_row_is_counted_and_fails_the_run() {
         wtx.commit().expect("commit");
     }
 
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
     let alpha = row(&rows, "alpha");
     assert_eq!(
         (
@@ -538,7 +543,7 @@ fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
     .expect("save delta");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-    let rows = scan_palaces(root.path(), None, scratch.path());
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("restore");
     let rows = rows.expect("scan");
 
@@ -589,7 +594,7 @@ fn truncated_store_copy_is_an_error_row() {
         .set_len(len / 2)
         .expect("truncate");
 
-    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let rows = scan_palaces(root.path(), None, scratch.path(), &never).expect("scan");
     let beta = row(&rows, "beta");
     assert_eq!(beta.store, StoreState::Error, "a torn copy is an error row");
     assert!(beta.error.is_some());
@@ -676,4 +681,103 @@ fn sweep_removes_only_stale_scratch_dirs() {
     assert_eq!(sweep_stale_copies(parent.path(), STALE_COPY_AGE), 1);
     assert!(!stale.exists(), "the stale copy is removed");
     assert!(fresh.exists() && unrelated.exists() && target.exists());
+}
+
+/// Why: #8645 round 2 — Ctrl-C must stop the scan, not let it copy and screen
+/// every remaining palace.
+/// What: a stop signal already set scans no palace; one that fires on its
+/// second poll lets exactly the first palace finish. Both return
+/// `ScanInterrupted`, never partial rows, and leave no copy behind.
+/// Test: This test.
+#[test]
+fn stop_signal_halts_the_scan_between_palaces() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("root");
+    let scratch = tempfile::tempdir().expect("scratch");
+    seeded_estate(root.path());
+    let scanned = |stop: &dyn Fn() -> bool| {
+        let e = scan_palaces(root.path(), None, scratch.path(), stop).expect_err("stopped");
+        e.downcast_ref::<ScanInterrupted>()
+            .expect("a stopped scan is ScanInterrupted")
+            .scanned
+    };
+
+    assert_eq!(scanned(&|| true), 0, "a pre-set stop scans no palace");
+    let polls = AtomicUsize::new(0);
+    let second_poll = || polls.fetch_add(1, Ordering::Relaxed) >= 1;
+    assert_eq!(scanned(&second_poll), 1, "the in-flight palace finishes");
+    assert_eq!(
+        std::fs::read_dir(scratch.path()).expect("scratch").count(),
+        0
+    );
+}
+
+/// Why: #8645 round 2 — the Ctrl-C arm removed the run dir while the worker
+/// could still be copying into it, and reported success regardless.
+/// What: an interrupt that is already ready stops the scan, the call returns
+/// the "store copies deleted" error, and the run dir is gone.
+/// Test: This test.
+#[tokio::test]
+async fn interrupt_stops_the_scan_and_removes_the_run_dir() {
+    use crate::commands::store_snapshot::SCRATCH_PREFIX;
+
+    let root = tempfile::tempdir().expect("root");
+    let parent = tempfile::tempdir().expect("parent");
+    seeded_estate(root.path());
+    let run_dir = tempfile::TempDir::with_prefix_in(SCRATCH_PREFIX, parent.path()).expect("run");
+    let run_path = run_dir.path().to_path_buf();
+
+    let interrupt = std::future::ready(Ok(()));
+    let e = scan_until_interrupted(root.path().to_path_buf(), None, run_dir, interrupt)
+        .await
+        .expect_err("an interrupted scan fails");
+    assert!(
+        e.to_string().contains("interrupted — store copies deleted"),
+        "{e}"
+    );
+    assert!(!run_path.exists(), "the run dir is removed");
+}
+
+/// Why: #8645 round 2 — a Ctrl-C handler that fails to register must not make
+/// the run report "interrupted".
+/// What: an interrupt future resolving `Err` is ignored and the scan returns
+/// every palace's counts.
+/// Test: This test.
+#[tokio::test]
+async fn failed_interrupt_registration_lets_the_scan_finish() {
+    let root = tempfile::tempdir().expect("root");
+    let parent = tempfile::tempdir().expect("parent");
+    seeded_estate(root.path());
+    let run_dir = tempfile::TempDir::new_in(parent.path()).expect("run");
+
+    let interrupt = std::future::ready(Err(std::io::Error::other("no signal handler")));
+    let rows = scan_until_interrupted(root.path().to_path_buf(), None, run_dir, interrupt)
+        .await
+        .expect("the scan completes");
+    assert_eq!(row(&rows, "alpha").drawers_scanned, 5);
+    assert_eq!(row(&rows, "beta").drawers_scanned, 2);
+}
+
+/// Why: #8645 round 2 — a panic in the caller's read closure was reported as
+/// a torn store, a cause nothing had established.
+/// What: a closure that panics yields an error naming both possible causes.
+/// Test: This test.
+#[test]
+fn read_closure_panic_is_not_reported_as_a_torn_store() {
+    use crate::commands::store_snapshot::with_store_copy;
+
+    let root = tempfile::tempdir().expect("root");
+    let scratch = tempfile::tempdir().expect("scratch");
+    seeded_estate(root.path());
+
+    let e = with_store_copy(
+        &root.path().join("alpha"),
+        scratch.path(),
+        |_| -> Result<()> { panic!("reader bug") },
+    )
+    .expect_err("a panic is an error");
+    let msg = e.to_string();
+    assert!(msg.contains("torn copy or internal error"), "{msg}");
+    assert!(!msg.contains("is torn or truncated"), "{msg}");
 }

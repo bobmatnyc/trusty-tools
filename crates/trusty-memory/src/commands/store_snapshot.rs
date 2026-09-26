@@ -51,11 +51,13 @@ pub(crate) const STALE_COPY_AGE: Duration = Duration::from_secs(60 * 60);
 /// A copy taken while the daemon commits can be torn. redb then either
 /// recovers the copy to an earlier commit or fails — or panics — opening or
 /// reading it; the latter two surface as an error for that palace, never as a
-/// write to the live file or an aborted scan.
+/// write to the live file or an aborted scan. A panic in `read` itself is
+/// caught the same way, so the panic error names both possible causes.
 /// Test: `report_writes_nothing_to_the_palace`,
 /// `incompatible_store_is_reported_not_recreated`,
 /// `unstattable_palace_dir_is_an_error_row_not_an_absent_store`,
-/// `truncated_store_copy_is_an_error_row`.
+/// `truncated_store_copy_is_an_error_row`,
+/// `read_closure_panic_is_not_reported_as_a_torn_store`.
 pub(crate) fn with_store_copy<T>(
     data_dir: &Path,
     scratch_parent: &Path,
@@ -78,7 +80,9 @@ pub(crate) fn with_store_copy<T>(
 
     // #8645: redb 4.1 `assert!`s that the file is at least as long as its
     // header's layout (page_manager.rs), so a truncated copy panics instead of
-    // erroring. Contain that to this palace; the payload is dropped unread.
+    // erroring. Contain that to this palace. `trusty_common::panic_hook` has
+    // already logged the payload (redb's assert text names no stored bytes);
+    // this function discards it.
     let opened = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let store = KgStoreRedb::open_with_intent(&copy, OpenIntent::ReadOnlyClient)
             .with_context(|| format!("open copy of KG store {}", live.display()))?;
@@ -86,8 +90,11 @@ pub(crate) fn with_store_copy<T>(
     }));
     match opened {
         Ok(result) => result.map(Some),
+        // #8645: a panic here is either redb on a torn copy or a bug in the
+        // reader; nothing tells them apart, so the message claims neither.
         Err(_) => anyhow::bail!(
-            "copy of KG store {} is torn or truncated: redb panicked reading it",
+            "panic while opening or reading the copy of KG store {} \
+             (torn copy or internal error)",
             live.display()
         ),
     }
