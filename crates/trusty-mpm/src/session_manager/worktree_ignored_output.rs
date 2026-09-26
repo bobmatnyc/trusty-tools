@@ -34,11 +34,11 @@
 //! Where it is enforced: the agent reap (gate 5a), the `git worktree remove`
 //! step of the shared remover `decommission::remove_registered_worktree`
 //! (decommission, merged-PR reclaim, orphan prune), and the `tm pr cleanup`
-//! probe [`inspect_dirt_with_ignored_output`].
-//! NOT enforced: two routes delete with `remove_dir_all` and never reach it —
-//! decommission effect 3 (an SM-owned workspace) and
-//! `decommission::remove_unclaimed_directory` when no repository claims the
-//! path. Both are tracked in #8663.
+//! probe [`inspect_dirt_with_ignored_output`]. The two `remove_dir_all` routes
+//! — decommission of an SM-owned workspace and
+//! `decommission::remove_unclaimed_directory` — apply the same rule to a
+//! directory git holds no state for through [`kept_unversioned_content`]
+//! (#8663).
 //! Test: `worktree_ignored_output_tests`.
 
 use std::io::Read;
@@ -204,9 +204,45 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// `a_vercel_dir_holding_an_env_file_keeps_the_tree`.
 pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, String> {
     let status = git_stdout(path, IGNORED_STATUS_ARGS)?;
+    kept_among(path, ignored_entries(&status))
+}
+
+/// The content of a directory git holds no state for that deleting it would
+/// lose (#8663).
+///
+/// Why: two routes delete a directory with `remove_dir_all` rather than `git
+/// worktree remove` — an SM-owned workspace that is not a repository, and a
+/// leftover git has disowned — so there is no `git status` to ask. The same
+/// rule has to decide, or an agent that deleted `.git` loses its results.
+/// What: every top-level entry of `path` goes through the rule
+/// [`kept_ignored_output`] applies to a `!!` entry. `Ok(None)` means `path`
+/// holds only harness files, tm's unedited deployed assets and regenerable
+/// output. An unreadable directory or entry is `Err`.
+/// Test: `unversioned_content_keeps_run_output_and_excuses_harness_files`,
+/// `unclaimed_directory_with_results_is_kept`.
+pub(crate) fn kept_unversioned_content(path: &Path) -> Result<Option<IgnoredOutput>, String> {
+    let unreadable = |e: std::io::Error| format!("`{}` is unreadable: {e}", path.display());
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(unreadable)? {
+        names.push(entry.map_err(unreadable)?.file_name());
+    }
+    // A non-UTF-8 name maps to a path that does not exist, so `count_files`
+    // fails on it and the directory is kept.
+    let names: Vec<String> = names
+        .iter()
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+    kept_among(path, names.iter().map(String::as_str))
+}
+
+/// The rule of the module doc over `entries`, repo-relative to `path`.
+fn kept_among<'e>(
+    path: &Path,
+    entries: impl IntoIterator<Item = &'e str>,
+) -> Result<Option<IgnoredOutput>, String> {
     let mut assets = DeployedAssets::new(path);
     let mut kept: Option<IgnoredOutput> = None;
-    for entry in ignored_entries(&status) {
+    for entry in entries {
         let bare = entry.trim_end_matches('/');
         // #8534 final round: under the deploy directories only a ledger
         // decides; a user skill named `build/` or `dist/` is not excused.
@@ -267,6 +303,30 @@ pub(crate) fn ignored_output_refusal(path: &Path) -> Option<String> {
         )),
         Err(e) => Some(format!(
             "{}: the gitignored-output check failed ({e}); keeping it (#8534)",
+            path.display()
+        )),
+    }
+}
+
+/// Why `path`, a directory git holds no state for, must be kept, or `None`
+/// to proceed (#8663).
+///
+/// What: [`kept_unversioned_content`] as one operator-facing sentence naming
+/// the path. `Some` for kept content and for every error.
+/// Test: `unclaimed_directory_with_results_is_kept`,
+/// `unclaimed_directory_is_kept_when_the_content_check_fails`.
+pub(crate) fn unversioned_content_refusal(path: &Path) -> Option<String> {
+    match kept_unversioned_content(path) {
+        Ok(None) => None,
+        Ok(Some(out)) => Some(format!(
+            "{} is not tracked by git and holds {} file(s) that are not harness files or \
+             build output (first: `{}`); deleting it would lose them (#8663)",
+            path.display(),
+            out.files,
+            out.first
+        )),
+        Err(e) => Some(format!(
+            "{}: the content check failed ({e}); keeping it (#8663)",
             path.display()
         )),
     }

@@ -742,6 +742,24 @@ mod tests {
                 .status
                 .success()
         );
+        // #8663: pushed, so the owned workspace holds no unpushed commit.
+        let remote = workspace_root.join("tm-5949-remote.git");
+        assert!(
+            git(
+                &workspace_root,
+                &["init", "--quiet", "--bare", "tm-5949-remote.git"]
+            )
+            .status
+            .success()
+        );
+        let remote = remote.to_string_lossy();
+        for args in [
+            &["remote", "add", "origin", &remote][..],
+            &["push", "--quiet", "origin", "HEAD"],
+            &["fetch", "--quiet", "origin"],
+        ] {
+            assert!(git(&base, args).status.success(), "git {args:?}");
+        }
 
         let id = crate::session_manager::ManagedSessionId::new();
         let leaf = format!("tm-5949-{id}");

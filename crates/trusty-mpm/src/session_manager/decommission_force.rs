@@ -318,7 +318,7 @@ const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"
 /// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
 /// `decommission_refusal_warning_names_a_single_untracked_file`,
 /// `decommission_refusal_omits_the_warning_without_untracked_claude_files`.
-fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
+pub(super) fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
     let files = PROVISIONING_FILES.join(", ");
     let entries = dirty_entries(ws);
     // #7660: name what blocked the removal, not only how many entries did.
@@ -374,7 +374,7 @@ fn blocking_entries(ws: &Path, entries: &[String], policy: ProvisioningDirt) -> 
 /// `ws`'s per-file `git status --porcelain` lines, without the ownership
 /// sentinel and `.trusty-mpm/`, which the dirty-tree guard accounts for
 /// itself; empty when status cannot be read (display only, #7660).
-fn dirty_entries(ws: &Path) -> Vec<String> {
+pub(super) fn dirty_entries(ws: &Path) -> Vec<String> {
     let args = [
         "status",
         "--porcelain",

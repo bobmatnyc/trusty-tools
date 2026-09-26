@@ -614,6 +614,19 @@ fn init_repo_with_commit(dir: &std::path::Path) -> bool {
     std::fs::write(dir.join("README.md"), "seed\n").expect("write README");
     assert!(git(&["add", "README.md"]));
     assert!(git(&["commit", "--quiet", "-m", "seed"]));
+    // #8663: pushed, so an owned workspace's decommission sees no unpushed
+    // commit and removes it.
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let remote = dir.with_file_name(format!("{name}-remote.git"));
+    let bare = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare"])
+        .arg(&remote)
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(bare, "fixture: bare remote");
+    assert!(git(&["remote", "add", "origin", &remote.to_string_lossy()]));
+    assert!(git(&["push", "--quiet", "origin", "HEAD"]));
+    assert!(git(&["fetch", "--quiet", "origin"]));
     true
 }
 

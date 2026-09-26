@@ -13,6 +13,8 @@ pub mod create;
 pub mod decommission;
 // #7660: the in-project removal step, `--force` policy and kept reason.
 pub mod decommission_force;
+// #8663: the content gates on decommission's two `remove_dir_all` routes.
+mod decommission_owned;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
@@ -161,6 +163,10 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8663: the owned-workspace and unclaimed-directory content gates.
+#[cfg(test)]
+mod decommission_owned_tests;
 
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
