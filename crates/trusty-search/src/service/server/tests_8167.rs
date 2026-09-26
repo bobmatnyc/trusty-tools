@@ -12,7 +12,9 @@
 //! Test: this module; the SIGBUS reproduction is
 //! `tests/delete_releases_mmap_8232.rs`.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -21,7 +23,9 @@ use tower::ServiceExt;
 use trusty_common::embedder::MockEmbedder;
 
 use super::build_router;
+use super::delete_close::{close_index_files, CLOSE_BUDGET};
 use super::tests_components::IsolatedDataDir;
+use crate::core::indexer::TEST_REHYDRATE_DELAY_MS;
 use crate::core::indexer::{IndexDeleted, SearchQuery};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::Embedder;
@@ -29,6 +33,7 @@ use crate::service::persistence::{
     corpus_redb_path_for_entry, hnsw_path_for_entry, PersistedIndex,
 };
 use crate::service::persistence_loader::build_indexer_from_entry;
+use crate::service::reindex::index_teardown_lock;
 use crate::service::server::SearchAppState;
 
 const INDEX_ID: &str = "delete-close-8167";
@@ -194,4 +199,175 @@ async fn a_corpus_still_referenced_elsewhere_abandons_the_delete() {
     let (status, body) = send_delete(&fx.router).await;
     assert_eq!(status, StatusCode::OK, "the retry must succeed: {body}");
     assert!(redb::Database::open(&fx.redb).is_ok());
+}
+
+/// Poll until `index.redb` can be opened, i.e. this process closed it.
+async fn redb_closes_within(redb: &std::path::Path, bound: Duration) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    while std::time::Instant::now() < deadline {
+        if redb::Database::open(redb).is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// #8167: a `delete_data=false` delete whose writer outlives the quiesce wait
+/// answers `quiesced: false`, and closes the files once the writer finishes.
+/// A second delete cannot do it: the id is already deregistered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_writer_outliving_the_quiesce_wait_closes_the_files_when_it_finishes() {
+    let _isolated = IsolatedDataDir::new();
+    let fx = fixture().await;
+    let writer = index_teardown_lock(&IndexId::new(INDEX_ID))
+        .read_owned()
+        .await;
+
+    let (status, body) = send_delete(&fx.router).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["quiesced"], false,
+        "the writer must outlive the wait: {body}"
+    );
+    assert!(
+        redb::Database::open(&fx.redb).is_err(),
+        "nothing may close the files while the writer still runs"
+    );
+
+    drop(writer);
+    assert!(
+        redb_closes_within(&fx.redb, Duration::from_secs(5)).await,
+        "index.redb must close once the writer that outlived the delete finishes"
+    );
+    assert_eq!(
+        fx.handle.indexer.read().await.vector_count().await,
+        None,
+        "the vector store must be closed too"
+    );
+}
+
+/// Resets the artificial rehydrate delay, even when an assertion panics.
+struct RehydrateDelay;
+
+impl RehydrateDelay {
+    fn set(ms: u64) -> Self {
+        TEST_REHYDRATE_DELAY_MS.store(ms, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for RehydrateDelay {
+    fn drop(&mut self) {
+        TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Evict the fixture's caches and leave a detached rehydrate (#3683) holding
+/// its corpus clone for `SLOW_SCAN_MS`.
+const SLOW_SCAN_MS: u64 = 800;
+
+async fn start_slow_rehydrate(handle: &Arc<IndexHandle>) -> RehydrateDelay {
+    let delay = RehydrateDelay::set(SLOW_SCAN_MS);
+    let indexer = handle.indexer.read().await;
+    assert!(
+        indexer.reclaim_memory_now().await > 0,
+        "precondition: warm caches"
+    );
+    // The search starts the rehydrate; dropping it on timeout leaves the
+    // detached scan running, as a query-timeout 408 does.
+    let _ = tokio::time::timeout(Duration::from_millis(50), indexer.search(&query())).await;
+    assert!(
+        indexer.rehydrate_gate().in_flight(),
+        "precondition: the rehydrate scan is running"
+    );
+    delay
+}
+
+/// #3683 vs #8167: a delete landing during a slow corpus rehydrate waits the
+/// scan out WITHOUT the indexer write lock — searches keep running — and then
+/// succeeds. Before, it held the write lock through the close budget and
+/// answered 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_delete_during_a_slow_rehydrate_waits_without_the_write_lock() {
+    let _isolated = IsolatedDataDir::new();
+    let fx = fixture().await;
+    let _delay = start_slow_rehydrate(&fx.handle).await;
+
+    let router = fx.router.clone();
+    let delete = tokio::spawn(async move { send_delete(&router).await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        fx.handle.indexer.try_read().is_ok(),
+        "a delete waiting out a rehydrate must not hold the indexer write lock"
+    );
+
+    let (status, body) = delete.await.expect("delete task");
+    assert_eq!(status, StatusCode::OK, "the delete must succeed: {body}");
+    assert!(
+        redb::Database::open(&fx.redb).is_ok(),
+        "index.redb must be closed"
+    );
+}
+
+/// #3683 vs #8167: a rehydrate that outlasts the delete's rehydrate budget
+/// abandons the delete with a retryable reason and nothing changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_rehydrate_outlasting_its_budget_abandons_the_delete_unchanged() {
+    let _isolated = IsolatedDataDir::new();
+    let fx = fixture().await;
+    let _delay = start_slow_rehydrate(&fx.handle).await;
+
+    let started = std::time::Instant::now();
+    let reason = close_index_files(Some(&fx.handle), Duration::from_millis(100), CLOSE_BUDGET)
+        .await
+        .expect_err("a rehydrate still scanning must abandon the close");
+    assert!(
+        reason.contains("rehydrate"),
+        "the reason must name the scan: {reason}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(SLOW_SCAN_MS),
+        "the abandon must come at the rehydrate budget, not after the scan"
+    );
+    assert!(
+        !fx.handle.indexer.read().await.is_deleted(),
+        "nothing was changed"
+    );
+    assert!(
+        !redb_closes_within(&fx.redb, Duration::from_millis(200)).await,
+        "the index keeps its corpus open"
+    );
+}
+
+/// #8167 LOW: a snapshot write reaching a deleted index is skipped quietly,
+/// not reported as the #7920 staged-swap ERROR, and is not counted as a
+/// quarantine refusal.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_deleted_index_skips_snapshot_writes_without_the_swap_error() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use trusty_common::error_capture::{BugCaptureLayer, ErrorStore};
+
+    let isolated = IsolatedDataDir::new();
+    let fx = fixture().await;
+    let surviving = Arc::clone(&fx.handle);
+    let (status, body) = send_delete(&fx.router).await;
+    assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
+
+    let store = ErrorStore::with_path(Some(isolated.path().join("errors.jsonl")), 64);
+    let layer = BugCaptureLayer::new(store.clone(), env!("CARGO_PKG_VERSION"));
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+    let indexer = surviving.indexer.read().await;
+    indexer.force_incremental_persist();
+
+    let captured = store.recent_errors(16);
+    assert!(
+        !captured.iter().any(|e| e.message.contains("#7920")),
+        "a deletion must not be logged as a staged reindex swap: {captured:?}"
+    );
+    assert_eq!(indexer.refused_incremental_writes(), 0);
 }

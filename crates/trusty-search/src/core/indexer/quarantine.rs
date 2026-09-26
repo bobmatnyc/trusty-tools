@@ -216,12 +216,28 @@ impl CodeIndexer {
     /// What: no-op returning `false` when not quarantined. Otherwise bumps
     /// [`Self::refused_incremental_writes`] and logs — ERROR on the first
     /// refusal and every [`QUARANTINE_ERROR_LOG_INTERVAL`]th thereafter,
-    /// DEBUG in between — then returns `true`.
-    /// Test: `quarantined_shutdown_flush_does_not_destroy_chunks_json` and
+    /// DEBUG in between — then returns `true`. A deleted index (#8167) returns
+    /// `true` first, logged at INFO and not counted.
+    /// Test: `a_deleted_index_skips_snapshot_writes_without_the_swap_error`,
+    /// `quarantined_shutdown_flush_does_not_destroy_chunks_json` and
     /// `quarantined_index_refuses_hnsw_snapshot_write` in
     /// `tests/quarantine_durable_writes_4226.rs`; the detach predicate alone:
     /// `snapshot_writers_refuse_between_take_and_reattach`.
     pub(crate) fn refuse_durable_write(&self, op: &str, target: &str) -> bool {
+        // #8167: checked first. A deleted index refuses every snapshot write,
+        // and the #7920 "staged swap" ERROR below would misdiagnose it. Not a
+        // quarantine refusal, so the counter is left alone.
+        if self.deleted {
+            tracing::info!(
+                index_id = %self.index_id,
+                op = %op,
+                target = %target,
+                "index '{}': skipping durable snapshot write ({op} {target}) — this \
+                 index was deleted and its files are closed (issue #8167)",
+                self.index_id
+            );
+            return true;
+        }
         // #7920: a corpus once wired and now absent was detached by a staged
         // swap; the snapshot writers must not stand in for it.
         let detached = self.corpus_ever_wired && self.corpus.is_none();

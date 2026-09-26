@@ -336,10 +336,14 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// under-lock expectation re-check by
 /// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`; the
 /// file close by `delete_releases_the_corpus_and_vector_files_while_a_clone_survives`
-/// and `a_corpus_still_referenced_elsewhere_abandons_the_delete`.
+/// and `a_corpus_still_referenced_elsewhere_abandons_the_delete`; the
+/// deferred close by
+/// `a_writer_outliving_the_quiesce_wait_closes_the_files_when_it_finishes`.
 ///
 /// #8167/#8232: a quiesced delete closes the index's redb corpus and HNSW
 /// mapping before deregistering — see [`super::delete_close::close_index_files`].
+/// An unquiesced one closes them in the background once the writer finishes —
+/// see [`super::delete_close::close_after_writer_drains`].
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -447,14 +451,15 @@ pub(super) async fn unregister_index(
         }
     }
     // #8167/#8232: close the index's files BEFORE deregistering, so a close
-    // that cannot finish abandons a delete that changed nothing. Skipped when
-    // not quiesced: a live writer still holds them, and `quiesced: false` on
-    // the wire already says the delete ran without draining.
+    // that cannot finish abandons a delete that changed nothing. When not
+    // quiesced a live writer still holds them; the close runs once it
+    // finishes, after the deregistration below.
     let mut errors: Vec<String> = Vec::new();
     if quiesced {
         let hot = state.registry.get(&index_id);
         match super::delete_close::close_index_files(
             hot.as_ref(),
+            super::delete_close::REHYDRATE_WAIT_BUDGET,
             super::delete_close::CLOSE_BUDGET,
         )
         .await
@@ -478,6 +483,10 @@ pub(super) async fn unregister_index(
         }
     }
     let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
+    if !quiesced {
+        // #8167: the id is gone, so no later delete can close these files.
+        super::delete_close::close_after_writer_drains(index_id.clone(), removed_handle.clone());
+    }
     let root_path_for_cleanup = removed_handle.as_ref().map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
     // forever for an id that is now absent from every store. Sampled BEFORE the

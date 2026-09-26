@@ -12,7 +12,9 @@
 //! `a_surviving_clone_gets_an_error_not_an_empty_result` in
 //! `service::server::tests_8167`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+
+use tokio::sync::Notify;
 
 use super::CodeIndexer;
 use crate::core::corpus::CorpusStore;
@@ -45,6 +47,18 @@ pub(crate) struct DetachedFiles {
     pub(crate) store: Option<Arc<dyn VectorStore>>,
 }
 
+/// Polls whether a detached corpus rehydrate is in flight, without a lock on
+/// the indexer. See [`CodeIndexer::rehydrate_gate`].
+pub(crate) struct RehydrateGate(Arc<StdMutex<Option<Arc<Notify>>>>);
+
+impl RehydrateGate {
+    /// `true` until the rehydrate task clears its gate, which it does only
+    /// after its corpus reference has dropped.
+    pub(crate) fn in_flight(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+}
+
 impl CodeIndexer {
     /// Mark this indexer deleted and take its corpus out.
     ///
@@ -73,6 +87,25 @@ impl CodeIndexer {
     pub(crate) fn reattach_after_abandoned_delete(&mut self, corpus: Option<Arc<CorpusStore>>) {
         self.corpus = corpus;
         self.deleted = false;
+    }
+
+    /// Whether a delete has started closing this indexer's files.
+    #[cfg(test)]
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// A lock-free view of this indexer's corpus-rehydrate gate.
+    ///
+    /// Why: the detached rehydrate (#3683) holds an `Arc<CorpusStore>` for its
+    /// whole redb scan — 27-40 s on a large corpus — without any indexer lock.
+    /// A delete must wait that out BEFORE it takes the indexer write lock, or
+    /// every search on the index stalls behind a delete that then fails.
+    /// What: clones the `rehydrate_inflight` gate so the caller can poll it
+    /// after releasing its read guard.
+    /// Test: `a_delete_during_a_slow_rehydrate_waits_without_the_write_lock`.
+    pub(crate) fn rehydrate_gate(&self) -> RehydrateGate {
+        RehydrateGate(Arc::clone(&self.rehydrate_inflight))
     }
 
     /// `Err(IndexDeleted)` once a delete has closed this indexer's files.

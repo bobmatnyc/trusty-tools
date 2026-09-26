@@ -103,6 +103,9 @@ pub(crate) use helpers::{
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
 pub use delete_close::IndexDeleted;
+// #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
+#[cfg(test)]
+pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #7979: the failed-migration record `GET /indexes/:id/status` reports.
 pub use migration_state::{

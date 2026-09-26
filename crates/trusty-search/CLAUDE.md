@@ -270,9 +270,16 @@ filesystem watcher and drops its in-memory handle before returning. A
 delete that answers `quiesced: true` also closes the redb corpus and unmaps
 `hnsw.usearch` first, even while another handle clone survives it (#8167,
 #8232), so the files can then be replaced and the root unmounted. A delete
-that answers `quiesced: false` skips that close, because a live writer
-still holds the files: do not replace them or unmount until a later delete
-answers `quiesced: true`. Skipping the `DELETE` and dropping a handle out-of-process (or
+that lands during a detached corpus rehydrate (#3683) first waits up to 30 s
+for the scan, without blocking searches; a scan still running then answers
+`500` with a `rehydrate` reason and nothing changed — re-issue the delete. A
+delete that answers `quiesced: false` could not close the files, because a
+live writer still holds them. The id is already deregistered, so a second
+delete answers `404` and cannot help. Instead the daemon closes the files in
+the background once that writer finishes, and the response says nothing
+about it: do not replace the files or unmount until the daemon log shows
+`delete[<id>]: deferred close done`. An ERROR line starting
+`delete[<id>]: deferred close` means they stayed open. Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
