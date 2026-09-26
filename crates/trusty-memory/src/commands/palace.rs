@@ -72,9 +72,10 @@ pub enum PalaceAction {
     /// Report, and with `--apply` import, drawers stranded in a pre-redb
     /// SQLite `kg.db` (#8434).
     ///
-    /// Dry run by default: reads `kg.db` read-only and a private copy of
-    /// kg.redb, so it is safe with the daemon up. `--apply` needs the write
-    /// lock (stop the daemon first). Nothing is ever deleted or renamed.
+    /// Dry run by default: reads private copies of `kg.db` and kg.redb, so it
+    /// is safe with the daemon up. `--apply` needs the write lock (stop the
+    /// daemon first) and refuses a store it would have to recreate. Nothing
+    /// is ever deleted or renamed.
     LegacyKg {
         /// Palace id.
         name: String,
@@ -118,7 +119,11 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
                 super::legacy_kg::scan_report(&palace)?
             };
             print!("{}", report.render());
-            Ok(())
+            // #8434: the import committed; print it before failing on embed.
+            match report.embed_error {
+                Some(e) => anyhow::bail!("embed imported drawers: {e}"),
+                None => Ok(()),
+            }
         }
     }
 }

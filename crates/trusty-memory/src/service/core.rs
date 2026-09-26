@@ -349,16 +349,17 @@ impl MemoryService {
     /// "must be empty" guard prevents fat-finger destruction of populated
     /// palaces; `force=true` is the explicit opt-in to the destructive path.
     /// What: 1) confirms the palace exists on disk (else `NotFound`),
-    /// 2) when `!force`, lists drawers via the live handle and returns
-    /// `BadRequest("Palace has drawers; pass force=true to delete")` if
-    /// the palace is non-empty, and `Conflict` while a legacy `kg.db` holds
-    /// drawers or a `.v2-incompatible` file remains (#8434), 3) drops the in-memory registry entry so
+    /// 2) when `!force`, opens the palace and returns `Conflict` if the open
+    /// fails, if its drawer table loaded degraded, if it has drawers, or while
+    /// a legacy `kg.db` holds drawers or triples or a `.v2-incompatible` file
+    /// remains (#8434), 3) drops the in-memory registry entry so
     /// future opens hit the (now-missing) disk state, 4) removes
     /// `<data_root>/<palace_id>/` recursively via `tokio::fs::remove_dir_all`,
     /// and 5) emits an aggregate `StatusChanged` so dashboards refresh.
     /// Test: `delete_palace_removes_dir_when_empty`,
     /// `delete_palace_refuses_when_drawers_present`,
     /// `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`,
+    /// `delete_palace_refuses_when_open_fails_or_load_is_degraded`,
     /// `delete_palace_force_removes_populated_palace`,
     /// `delete_palace_returns_not_found_for_missing_id` in `web::tests`.
     pub async fn delete_palace(&self, palace_id: &str, force: bool) -> ServiceResult<()> {
@@ -373,20 +374,34 @@ impl MemoryService {
             // Open the palace just long enough to count its drawers; we don't
             // hold the handle past this check because the caller is about to
             // delete the on-disk directory.
-            if let Ok(handle) = self
+            // #8434: fail closed — a palace that cannot be opened, or whose
+            // drawer table loaded degraded, has not been shown to be empty.
+            let handle = self
                 .state
                 .registry
                 .open_palace(&self.state.data_root, &PalaceId::new(palace_id))
-            {
-                if !handle.drawers.read().is_empty() {
-                    return Err(ServiceError::conflict(
-                        "Palace has drawers; pass force=true to delete",
-                    ));
-                }
+                .map_err(|e| {
+                    ServiceError::conflict(format!(
+                        "Palace could not be opened to confirm it is empty ({e:#}); refusing \
+                         to delete"
+                    ))
+                })?;
+            if handle.drawer_load_degraded {
+                return Err(ServiceError::conflict(
+                    "Palace drawer table loaded degraded, so it cannot be confirmed empty; \
+                     refusing to delete",
+                ));
             }
+            if !handle.drawers.read().is_empty() {
+                return Err(ServiceError::conflict(
+                    "Palace has drawers; pass force=true to delete",
+                ));
+            }
+            drop(handle);
             // #8434: "0 live drawers" is not "empty" while a legacy kg.db or a
             // quarantined redb 2.x store holds data the live store never saw.
-            // The live set is empty here — a non-empty palace returned above.
+            // Reached only after a clean open found no drawers, so the live
+            // set is empty.
             let dir = self.state.data_root.join(palace_id);
             let unaccounted = tokio::task::spawn_blocking(move || {
                 crate::commands::legacy_kg::unaccounted_legacy_data(
@@ -397,9 +412,10 @@ impl MemoryService {
             .await
             .map_err(|e| ServiceError::internal(format!("legacy data check: {e}")))?;
             if let Some(reason) = unaccounted {
+                // #8434: no force hint — force destroys this data unimported.
                 return Err(ServiceError::conflict(format!(
                     "Palace holds legacy data ({reason}); run `trusty-memory palace legacy-kg \
-                     {palace_id}` to review it, or pass force=true to delete"
+                     {palace_id}` to review it"
                 )));
             }
         }

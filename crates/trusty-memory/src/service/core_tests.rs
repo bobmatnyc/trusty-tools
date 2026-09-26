@@ -262,13 +262,70 @@ async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
         };
 
         match svc.delete_palace(name, false).await {
-            Err(ServiceError::Conflict(msg)) => assert!(msg.contains("legacy"), "{msg}"),
+            Err(ServiceError::Conflict(msg)) => {
+                assert!(msg.contains("legacy"), "{msg}");
+                assert!(!msg.contains("force"), "must not steer to force: {msg}");
+            }
             other => panic!("{name}: expected a legacy-data conflict, got {other:?}"),
         }
         assert!(
             marker.exists(),
             "{name}: a refused delete removed legacy data"
         );
+
+        svc.delete_palace(name, true)
+            .await
+            .expect("force still deletes");
+        assert!(!dir.exists());
+    }
+}
+
+/// Why (#8434): the emptiness check must fail closed. A palace that cannot be
+/// opened, or whose drawer table loaded degraded, has not been shown empty, so
+/// a non-force delete refuses it; `force` still deletes.
+/// Test: itself.
+#[tokio::test]
+async fn delete_palace_refuses_when_open_fails_or_load_is_degraded() {
+    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+    use trusty_common::memory_core::store::kg_store::DRAWERS;
+    use trusty_common::memory_core::store::PalaceStore;
+    use trusty_common::memory_core::{Palace, PalaceId};
+    let (svc, state) = service();
+    for (name, degraded) in [("unopenable", false), ("degraded", true)] {
+        // Persist the palace without opening it, so no handle holds kg.redb.
+        let dir = state.data_root.join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        PalaceStore::save_palace(&Palace {
+            id: PalaceId::new(name),
+            name: name.into(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: dir.clone(),
+        })
+        .expect("save palace");
+        if degraded {
+            // A DRAWERS row whose value cannot decode: the open skips it.
+            drop(KgStoreRedb::open(&dir.join("kg.redb")).expect("init kg.redb"));
+            let db = redb::Database::create(dir.join("kg.redb")).expect("open kg.redb");
+            let wtx = db.begin_write().expect("begin write");
+            wtx.open_table(DRAWERS)
+                .expect("drawers table")
+                .insert(
+                    uuid::Uuid::new_v4().as_bytes().as_slice(),
+                    [0xFF_u8; 4].as_slice(),
+                )
+                .expect("insert corrupt row");
+            wtx.commit().expect("commit");
+        } else {
+            // identity.txt as a directory makes the palace open fail.
+            std::fs::create_dir_all(dir.join("identity.txt")).expect("mkdir");
+        }
+
+        match svc.delete_palace(name, false).await {
+            Err(ServiceError::Conflict(msg)) => assert!(msg.contains("refusing"), "{msg}"),
+            other => panic!("{name}: expected a conflict, got {other:?}"),
+        }
+        assert!(dir.exists(), "{name}: a refused delete removed the palace");
 
         svc.delete_palace(name, true)
             .await

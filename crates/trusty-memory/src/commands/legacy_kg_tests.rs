@@ -108,9 +108,18 @@ fn bytes(p: &Path) -> Vec<u8> {
 fn dry_run_counts_legacy_drawers_and_writes_nothing() {
     let (_root, palace) = fixture();
     let dir = &palace.data_dir;
+    // B's content, live under another id: counted as a duplicate, not deduped.
+    KgStoreRedb::open(&dir.join("kg.redb"))
+        .expect("open kg.redb")
+        .upsert_drawer(&Drawer::new(
+            Uuid::new_v4(),
+            "release notes live in docs/releases",
+        ))
+        .expect("seed duplicate content");
     let before = (bytes(&dir.join("kg.db")), bytes(&dir.join("kg.redb")));
 
     let r = scan_report(&palace).expect("scan");
+    assert_eq!(r.content_duplicates, Some(1));
 
     assert!(r.dry_run && r.legacy_present);
     assert_eq!(r.legacy_rows, 4);
@@ -123,6 +132,14 @@ fn dry_run_counts_legacy_drawers_and_writes_nothing() {
     let text = r.render();
     assert!(text.contains("missing=2"), "{text}");
     assert!(text.contains("nothing was written"), "{text}");
+    assert!(text.contains("content_duplicates=1"), "{text}");
+    let failed = LegacyReport {
+        embed_error: Some("embedder down".into()),
+        ..LegacyReport::default()
+    };
+    assert!(failed
+        .render()
+        .contains("FAILED after the import committed"));
 
     let after = (bytes(&dir.join("kg.db")), bytes(&dir.join("kg.redb")));
     assert!(before == after, "a dry run changed kg.db or kg.redb");
@@ -186,4 +203,163 @@ fn palace_without_legacy_kg_reports_none() {
         read_legacy_kg(&dir).is_err(),
         "a non-SQLite kg.db is an error"
     );
+}
+
+/// Why (#8434): the L1 snapshot is a capped cache that the next flush
+/// rewrites; a legacy drawer present only there is not persisted, so both the
+/// dry run and the apply must treat it as missing and write it to `kg.redb`.
+/// Test: itself.
+#[tokio::test]
+async fn l1_only_legacy_drawer_is_imported_to_redb() {
+    let (_root, palace) = fixture();
+    let a = Uuid::parse_str(MISSING_A).expect("id");
+    let mut l1 = Drawer::new(
+        Uuid::parse_str(ROOM).expect("room"),
+        "the deploy key rotates every ninety days",
+    );
+    l1.id = a;
+    trusty_common::memory_core::store::L1Cache::save_l1_cache(&[l1], &palace.data_dir)
+        .expect("seed L1 snapshot");
+
+    let scan = scan_report(&palace).expect("scan");
+    assert_eq!((scan.already_live, scan.missing), (1, 2), "L1 is not live");
+
+    let r = apply_report(&palace, false).await.expect("apply");
+    assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
+    let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
+        .expect("reopen kg.redb")
+        .load_drawer_ids()
+        .expect("ids");
+    assert!(
+        ids.contains(&a),
+        "the L1-only legacy drawer must reach kg.redb"
+    );
+}
+
+/// Why (#8434): a `Writer` open renames an unreadable `kg.redb` or vector
+/// index aside and recreates it empty. The import must refuse first and
+/// leave both files, and `kg.db`, exactly as found.
+/// Test: itself.
+#[tokio::test]
+async fn apply_refuses_a_store_the_writer_open_would_rename_aside() {
+    for file in ["kg.redb", "index.usearch.redb"] {
+        let (_root, palace) = fixture();
+        let dir = &palace.data_dir;
+        std::fs::write(dir.join(file), b"not a redb file at all").expect("corrupt");
+        let before = (bytes(&dir.join(file)), bytes(&dir.join(LEGACY_KG_FILE)));
+        let quarantined = list_incompatible_files(dir).expect("list").len();
+
+        assert!(
+            apply_report(&palace, false).await.is_err(),
+            "{file}: apply must refuse"
+        );
+
+        let after = (bytes(&dir.join(file)), bytes(&dir.join(LEGACY_KG_FILE)));
+        assert!(before == after, "{file}: a refused apply changed a file");
+        assert_eq!(
+            list_incompatible_files(dir).expect("list").len(),
+            quarantined,
+            "{file}: a refused apply renamed a store aside"
+        );
+    }
+}
+
+/// Why (#8434): the delete guard must fail closed. Legacy triples are never
+/// imported, and a `kg.db` this binary cannot decode — an unexpected schema
+/// or corrupt pages — cannot be proven empty.
+/// Test: itself.
+#[test]
+fn unaccounted_legacy_data_refuses_triples_and_unreadable_kg_db() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let none = HashSet::new();
+
+    let triples_only = root.path().join("triples-only");
+    std::fs::create_dir_all(&triples_only).expect("mkdir");
+    Connection::open(triples_only.join(LEGACY_KG_FILE))
+        .expect("create")
+        .execute_batch(
+            "CREATE TABLE triples (subject TEXT, predicate TEXT, object TEXT);
+             INSERT INTO triples VALUES ('a', 'knows', 'b');",
+        )
+        .expect("triples");
+    let why = unaccounted_legacy_data(&triples_only, &none).expect("refuse triples");
+    assert!(why.contains("1 triple"), "{why}");
+
+    let odd_schema = root.path().join("odd-schema");
+    std::fs::create_dir_all(&odd_schema).expect("mkdir");
+    Connection::open(odd_schema.join(LEGACY_KG_FILE))
+        .expect("create")
+        .execute_batch("CREATE TABLE drawers (id TEXT PRIMARY KEY, body TEXT);")
+        .expect("schema");
+    assert!(
+        unaccounted_legacy_data(&odd_schema, &none).is_some(),
+        "an unexpected drawers schema must refuse"
+    );
+
+    let corrupt = root.path().join("corrupt");
+    write_legacy_kg(&corrupt, &[(MISSING_A, "x", "2026-04-02T09:00:00Z")]);
+    let path = corrupt.join(LEGACY_KG_FILE);
+    let mut raw = bytes(&path);
+    // Keep the 100-byte file header; garble the schema page and all after it.
+    raw[100..].fill(0xA5);
+    std::fs::write(&path, raw).expect("corrupt pages");
+    assert!(
+        unaccounted_legacy_data(&corrupt, &none).is_some(),
+        "corrupt pages must refuse"
+    );
+}
+
+/// Why (#8434): a legacy writer that died in WAL mode leaves committed rows
+/// only in `kg.db-wal`. They must be counted and imported, and neither file
+/// may change — no checkpoint, and no `-shm` created in the palace.
+/// Test: itself.
+#[tokio::test]
+async fn wal_only_legacy_rows_are_counted_and_imported() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let staging = root.path().join("staging");
+    write_legacy_kg(&staging, &[]);
+    let data_dir = root.path().join("wal");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    {
+        let conn = Connection::open(staging.join(LEGACY_KG_FILE)).expect("open");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("wal");
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .expect("no checkpoint");
+        for (id, created) in [
+            (MISSING_A, "2026-04-02T09:00:00Z"),
+            (MISSING_B, "2026-04-03T09:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO drawers (id, room_id, content, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                [id, ROOM, "a row only the WAL holds", created],
+            )
+            .expect("insert");
+        }
+        // Copy while the writer is still open: the shape a crash leaves.
+        for f in ["kg.db", "kg.db-wal"] {
+            std::fs::copy(staging.join(f), data_dir.join(f)).expect("copy");
+        }
+    }
+    let palace = Palace {
+        id: PalaceId::new("wal"),
+        name: "wal".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_dir.clone(),
+    };
+    let files = |d: &Path| (bytes(&d.join("kg.db")), bytes(&d.join("kg.db-wal")));
+    let before = files(&data_dir);
+
+    let scan = scan_report(&palace).expect("scan");
+    assert_eq!((scan.legacy_rows, scan.missing), (2, 2));
+    let r = apply_report(&palace, false).await.expect("apply");
+    assert_eq!(r.imported, 2);
+
+    assert!(
+        before == files(&data_dir),
+        "reading changed kg.db or its WAL"
+    );
+    assert!(!data_dir.join("kg.db-shm").exists(), "a -shm was created");
 }
