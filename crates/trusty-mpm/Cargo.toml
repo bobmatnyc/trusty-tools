@@ -116,7 +116,14 @@ name = "trusty-mpm"
 # Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
 # surface, no library dependents); the change is a new doctor check with no
 # signature break.
-version = "1.7.5"
+# 1.7.6 (Refs #8638): patch — 1.7.5 is published on crates.io and this PR
+# edits `src/**` (`tm pr queue-check`/`tm wait` rollup: per-GraphQL-type
+# deciding-run selection, an allow-list `failed()` check, and an
+# `is_unfinished = !settled()` fix), so the "PR version bump vs crates.io"
+# check requires the bump. Patch: trusty-mpm is excluded from the semver
+# gate (binary-only consumer surface, no library dependents); the change is
+# a bug fix with no signature break.
+version = "1.7.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

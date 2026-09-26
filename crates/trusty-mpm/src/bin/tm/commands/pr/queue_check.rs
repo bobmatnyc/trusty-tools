@@ -14,7 +14,9 @@
 //!   2. a hold label (`do-not-merge*`, `hold`)
 //!   3. `reviewDecision: CHANGES_REQUESTED`
 //!   4. an unresolved `code-critic` BLOCK in the PR comments
-//!   5. a required status context missing, or not `SUCCESS`, on the head SHA
+//!   5. a required status context missing, pending, or not `SUCCESS` on the
+//!      head SHA — pending while any run has no result, else judged on its
+//!      latest run (#8638)
 //!
 //! Order matters: the required contexts are the LAST gate, not the first, so a
 //! draft PR reports "draft" rather than "checks pending". Required contexts
@@ -26,6 +28,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// #8638: one rollup entry shape and one latest-run rule, shared with `tm wait`.
+use super::rollup::{RollupEntry, deciding_runs};
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -71,49 +75,6 @@ struct Label {
     name: String,
 }
 
-/// One entry of `statusCheckRollup`.
-///
-/// Why: the rollup mixes two GraphQL types. A `CheckRun` carries `name` +
-/// `status` + `conclusion`; a `StatusContext` carries `context` + `state`.
-/// Deserializing both permissively into one struct keeps the matcher single.
-/// What: every field optional; [`RollupEntry::label`] and
-/// [`RollupEntry::is_success`] normalize across the two shapes.
-/// Test: `queue_required_context_not_success`, `queue_accepts_status_context`.
-#[derive(Debug, Deserialize)]
-struct RollupEntry {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    context: Option<String>,
-    #[serde(default)]
-    conclusion: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-}
-
-impl RollupEntry {
-    /// The context name this entry reports under.
-    fn label(&self) -> Option<&str> {
-        self.name
-            .as_deref()
-            .or(self.context.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Did this check pass?
-    ///
-    /// Why: `SUCCESS` only. `NEUTRAL` and `SKIPPED` are not success, and a
-    /// required context that skipped has not proven anything.
-    /// What: `conclusion == SUCCESS` (CheckRun) or `state == SUCCESS`
-    /// (StatusContext).
-    /// Test: `queue_required_context_not_success`.
-    fn is_success(&self) -> bool {
-        let v = self.conclusion.as_deref().or(self.state.as_deref());
-        v.is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
-    }
-}
-
 /// One PR comment.
 #[derive(Debug, Deserialize)]
 struct Comment {
@@ -148,7 +109,12 @@ struct PrView {
 /// Test: `queue_stop_order_prefers_draft`, `queue_stop_order_prefers_hold`,
 /// `queue_stop_order_prefers_changes_requested`,
 /// `queue_stop_order_prefers_critic_block`,
-/// `queue_required_context_missing`, `queue_required_context_not_success`.
+/// `queue_required_context_missing`, `queue_required_context_not_success`,
+/// `queue_duplicate_cancelled_then_success_is_mergeable`,
+/// `queue_duplicate_success_then_failure_is_blocked`,
+/// `queue_duplicate_success_then_running_is_pending`,
+/// `queue_duplicate_success_then_queued_is_pending`,
+/// `queue_check_and_status_same_name_both_required`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -167,20 +133,22 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
         return Some("unresolved code-critic BLOCK in the PR comments".to_string());
     }
     for context in required {
-        match view
-            .rollup
-            .iter()
-            .find(|e| e.label() == Some(context.as_str()))
-        {
-            None => {
-                return Some(format!(
-                    "required context `{context}` is missing on the head SHA"
-                ));
-            }
-            Some(e) if !e.is_success() => {
-                return Some(format!("required context `{context}` is not SUCCESS"));
-            }
-            Some(_) => {}
+        // #8638: the latest run decides, never the first listed, and a
+        // CheckRun and a StatusContext sharing the name must BOTH pass.
+        let runs = deciding_runs(&view.rollup, context);
+        if runs.is_empty() {
+            return Some(format!(
+                "required context `{context}` is missing on the head SHA"
+            ));
+        }
+        if runs.iter().any(|e| e.settled() && !e.is_success()) {
+            return Some(format!("required context `{context}` is not SUCCESS"));
+        }
+        if let Some(e) = runs.iter().find(|e| e.is_unfinished()) {
+            return Some(format!(
+                "required context `{context}` is pending: a run has no result yet {}",
+                e.run_summary()
+            ));
         }
     }
     None
