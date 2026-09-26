@@ -141,7 +141,10 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 ///
 /// Why: thin wrapper over
 /// [`crate::session_manager::SessionManager::decommission`].
-/// What: parses the id, calls `decommission`, returns the tombstone record.
+/// What: parses the id, calls `decommission_reporting` (the same teardown
+/// as `decommission`, without `--force`), returns the tombstone record plus
+/// `workspace_removed` (bool) and `workspace_kept_reason` (string or null) —
+/// a workspace kept for the work it holds is reported, not hidden (#8663).
 ///
 /// `caller` (#3649, Option B): the trait-level MCP `Backend::session_decommission`
 /// method currently carries no per-connection caller identity — the wire
@@ -151,7 +154,9 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 /// session already carries), this always passes `None`, which preserves
 /// full pre-#3649 authority — i.e. an MCP-driven decommission behaves
 /// exactly as it did before this issue, never gated by the new owner check.
-/// Test: `session_decommission_unknown_id_errors` in the `tests` module.
+/// Test: `session_decommission_unknown_id_errors`,
+/// `session_decommission_prunes_stale_worktree_bookkeeping` in the `tests`
+/// module.
 pub async fn session_decommission(
     state: &Arc<DaemonState>,
     session_id: &str,
@@ -160,10 +165,28 @@ pub async fn session_decommission(
     let mgr = state.session_manager().await;
     // TODO(#3649): populate `caller` from the calling session's identity once
     // the MCP transport threads it through; `None` preserves current authority.
-    mgr.decommission(&id, None)
+    let report = mgr
+        .decommission_reporting(
+            &id,
+            None,
+            crate::session_manager::decommission_force::ProvisioningDirt::Refuse,
+        )
         .await
-        .map(|(r, _workspace_removed)| record_to_json(&r))
-        .map_err(managed_err)
+        .map_err(managed_err)?;
+    let mut value = record_to_json(&report.record);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "workspace_removed".to_string(),
+            Value::Bool(report.workspace_removed),
+        );
+        obj.insert(
+            "workspace_kept_reason".to_string(),
+            report
+                .workspace_kept_reason
+                .map_or(Value::Null, Value::String),
+        );
+    }
+    Ok(value)
 }
 
 /// Hard-delete a session's RECORD from the store (`session_delete` tool, #2012).
@@ -812,6 +835,13 @@ mod tests {
             .await
             .expect("decommission");
         assert_eq!(json["state"], "decommissioned", "{json}");
+        // #8663 critic round 1: the verdict is reported, not discarded.
+        assert_eq!(json["workspace_removed"], Value::Bool(true), "{json}");
+        assert_eq!(
+            json.get("workspace_kept_reason"),
+            Some(&Value::Null),
+            "{json}"
+        );
         assert!(!ws.exists(), "the workspace must be gone: {}", ws.display());
         assert!(
             !listed(&base).contains(&leaf),
@@ -820,5 +850,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #8663 critic round 1: a kept owned workspace comes back from the MCP
+    /// tool as `workspace_removed: false` with the reason, not as a bare
+    /// tombstone.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn session_decommission_reports_a_kept_workspace() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home_guard = HomeGuard::redirect(home.path());
+        let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
+        let ws = workspace_root
+            .join("owner")
+            .join("repo")
+            .join("tm-8663-kept");
+        std::fs::create_dir_all(&ws).expect("create workspace");
+        std::fs::write(ws.join("notes.md"), "agent work\n").expect("write notes");
+
+        let (_root, s) = state().await;
+        let id = crate::session_manager::ManagedSessionId::new();
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8663 MCP kept workspace".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                true,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_decommission(&s, &id.to_string())
+            .await
+            .expect("a refusal is not an error");
+        assert_eq!(json["state"], "decommissioned", "{json}");
+        assert_eq!(json["workspace_removed"], Value::Bool(false), "{json}");
+        let reason = json["workspace_kept_reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the kept reason is a string: {json}"));
+        assert!(reason.contains("notes.md"), "{reason}");
+        assert!(ws.join("notes.md").exists(), "the work must survive");
     }
 }

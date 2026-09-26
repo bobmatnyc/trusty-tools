@@ -18,9 +18,11 @@ use tracing::{info, warn};
 
 use super::decommission::WorktreeRemoval;
 use super::decommission_force::{
-    ProvisioningDirt, WorkspaceVerdict, dirty_entries, is_provisioning_entry, kept_for_dirt,
+    ProvisioningDirt, WorkspaceVerdict, dirty_entries, force_blocker, is_provisioning_entry,
+    kept_for_dirt, linked_worktree_git_dir, lock_blocker,
 };
 use super::manager::ManagedError;
+use super::provisioning_ledger;
 use super::record::ManagedSessionId;
 use super::worktree_ignored_output::{
     ignored_output_refusal, kept_unversioned_content, unversioned_content_refusal,
@@ -35,31 +37,56 @@ use super::worktree_safety::{
 /// Why: `workspace_owned` says tm created the directory, not that nothing in
 /// it is worth keeping.
 /// What: a directory that is its own git worktree root gets the worktree
-/// guard — [`inspect_dirt`] (dirty files, unpushed commits, nested
-/// repositories), then [`ignored_output_refusal`]. Under
-/// [`ProvisioningDirt::Discard`] (`--force`) the dirt check excuses tm's
-/// provisioning files exactly as the in-project route does, and nothing else.
-/// A `.git` entry git cannot resolve keeps it. Any other directory must hold
-/// only harness files and regenerable output ([`unversioned_content_refusal`]).
-/// Every reason names the path.
+/// guard. A linked worktree that `git worktree lock` protects is kept under
+/// either policy ([`lock_blocker`]). Then [`inspect_dirt`] (dirty files,
+/// unpushed commits, nested repositories), excusing only entries that match
+/// the [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
+/// [`ProvisioningDirt::Discard`] (`--force`), when that check still finds
+/// dirt, a linked worktree must pass [`force_blocker`] for `id`, and the dirt
+/// check then also excuses tm's provisioning files as the in-project route
+/// does. Last, [`ignored_output_refusal`]. A `.git` entry git cannot resolve
+/// keeps it. Any other directory must hold only harness files and regenerable
+/// output ([`unversioned_content_refusal`]). Every reason names the path.
 /// Test: `owned_worktree_with_an_unpushed_commit_is_kept`,
 /// `owned_worktree_with_untracked_results_is_kept`,
 /// `owned_non_git_workspace_with_user_files_is_kept`,
-/// `owned_workspace_is_kept_when_the_content_check_fails`.
-pub(super) fn owned_workspace_keep_reason(ws: &Path, policy: ProvisioningDirt) -> Option<String> {
+/// `owned_workspace_is_kept_when_the_content_check_fails`,
+/// `ledger_excuses_only_provisioning_dirt_on_a_clone`,
+/// `locked_owned_worktree_is_kept_even_with_force`.
+pub(super) fn owned_workspace_keep_reason(
+    ws: &Path,
+    id: &ManagedSessionId,
+    policy: ProvisioningDirt,
+) -> Option<String> {
     if is_worktree_root(ws).unwrap_or(false) {
-        let dirt = match policy {
-            ProvisioningDirt::Refuse => inspect_dirt(ws),
-            ProvisioningDirt::Discard => {
-                inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
-            }
+        let named = |reason: String| Some(format!("{}: {reason}", ws.display()));
+        let linked = linked_worktree_git_dir(ws);
+        // #8663 critic round 1: a lock keeps it under both policies.
+        if let Some(blocker) = linked.as_deref().ok().and_then(lock_blocker) {
+            return named(format!("{blocker}; nothing was removed"));
+        }
+        // #8663 critic round 1: tm's provisioning writes, proven by the ledger.
+        let ledger = provisioning_ledger::load(ws);
+        let dirt = match &ledger {
+            Some(ledger) => inspect_dirt_excusing(ws, &|line| ledger.excuses(ws, line)),
+            None => inspect_dirt(ws),
         };
-        if let Some(dirt) = dirt {
-            return Some(format!(
-                "{}: {}",
-                ws.display(),
-                kept_for_dirt(ws, &dirt.reason, policy)
-            ));
+        let Some(dirt) = dirt else {
+            return ignored_output_refusal(ws);
+        };
+        if policy == ProvisioningDirt::Refuse {
+            return named(kept_for_dirt(ws, &dirt.reason, policy));
+        }
+        if linked.is_ok()
+            && let Some(blocker) = force_blocker(ws, id)
+        {
+            return named(format!("--force declined: {blocker}; nothing was removed"));
+        }
+        let excuse = |line: &str| {
+            is_provisioning_entry(ws, line) || ledger.as_ref().is_some_and(|l| l.excuses(ws, line))
+        };
+        if let Some(dirt) = inspect_dirt_excusing(ws, &excuse) {
+            return named(kept_for_dirt(ws, &dirt.reason, policy));
         }
         return ignored_output_refusal(ws);
     }
@@ -95,6 +122,7 @@ pub(super) async fn remove_owned_workspace(
     policy: ProvisioningDirt,
 ) -> Result<WorkspaceVerdict, ManagedError> {
     let path = ws.to_path_buf();
+    let owner = *id;
     let join = tokio::task::spawn_blocking(move || {
         let mut failure: Option<std::io::Error> = None;
         // #7885 critic round: audited like every other removal route.
@@ -102,7 +130,7 @@ pub(super) async fn remove_owned_workspace(
             &path,
             "session decommission: owned workspace, containment guard passed",
             || {
-                if let Some(reason) = owned_workspace_keep_reason(&path, policy) {
+                if let Some(reason) = owned_workspace_keep_reason(&path, &owner, policy) {
                     return WorktreeRemoval::Kept(reason);
                 }
                 if policy == ProvisioningDirt::Discard {
@@ -168,8 +196,9 @@ fn warn_force_losses(ws: &Path) {
 /// `.git` in its worktree lost its results to the orphan prune.
 /// What: [`unversioned_content_refusal`], logged. Under
 /// [`DirtyWorktreePolicy::ForceDiscard`] (`prune-worktrees --discard-dirty`)
-/// found content is deleted after a `warn!` naming it; a failed check keeps the
-/// directory under either policy.
+/// found content is deleted after a `warn!` naming every kept entry and its
+/// file count ([`discarded_entries`]); a failed check keeps the directory under
+/// either policy.
 /// Test: `unclaimed_directory_with_results_is_kept`,
 /// `unclaimed_directory_holding_only_harness_files_is_removed`,
 /// `unclaimed_directory_is_kept_when_the_content_check_fails`,
@@ -184,10 +213,10 @@ pub(super) fn unclaimed_directory_blocks_removal(
             Ok(Some(out)) => {
                 warn!(
                     path = %path.display(),
-                    "worktree removal: DISCARDING {} file(s) git holds no record of (first: \
-                     `{}`) — explicit force-discard opt-in was supplied (#8663)",
+                    "worktree removal: DISCARDING {} file(s) git holds no record of: {} — \
+                     explicit force-discard opt-in was supplied (#8663)",
                     out.files,
-                    out.first
+                    discarded_entries(&out.entries)
                 );
                 return None;
             }
@@ -198,4 +227,28 @@ pub(super) fn unclaimed_directory_blocks_removal(
     let refusal = unversioned_content_refusal(path)?;
     warn!(path = %path.display(), "worktree removal refused — {refusal}");
     Some(refusal)
+}
+
+/// How many entries [`discarded_entries`] names before it summarises.
+const DISCARD_LOG_CAP: usize = 50;
+
+/// `` `a` (3 files), `b` (1 file)`` for every kept top-level entry, capped at
+/// [`DISCARD_LOG_CAP`] with `+N more` (#8663 critic round 1).
+///
+/// Why: `--discard-dirty` deletes all of them; a log naming only the first
+/// leaves the operator unable to say what was lost.
+/// Test: `discarded_entries_names_every_entry_up_to_the_cap`.
+pub(super) fn discarded_entries(entries: &[(String, usize)]) -> String {
+    let mut named: Vec<String> = entries
+        .iter()
+        .take(DISCARD_LOG_CAP)
+        .map(|(entry, files)| {
+            let noun = if *files == 1 { "file" } else { "files" };
+            format!("`{entry}` ({files} {noun})")
+        })
+        .collect();
+    if entries.len() > DISCARD_LOG_CAP {
+        named.push(format!("+{} more", entries.len() - DISCARD_LOG_CAP));
+    }
+    named.join(", ")
 }

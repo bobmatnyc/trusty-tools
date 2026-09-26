@@ -146,7 +146,9 @@ pub(super) fn session_tools() -> Vec<Value> {
             "Permanently tear down a managed session: kill the runtime, REMOVE the \
              workspace directory from disk, and mark the record Decommissioned. \
              This is terminal — the session can NOT be resumed afterwards. A \
-             tombstone record is retained for audit.",
+             tombstone record is retained for audit. A workspace holding work \
+             (dirty files, unpushed commits, run output) is kept: the result's \
+             `workspace_removed` is false and `workspace_kept_reason` says why.",
             json!({
                 "type": "object",
                 "properties": {

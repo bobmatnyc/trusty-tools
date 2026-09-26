@@ -583,6 +583,8 @@ pub(super) fn prepare_session_inner(
     host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
     let home = host.home;
+    // #8663: before any provisioning write, so `record` below sees tm's edits.
+    let ledger_before = crate::session_manager::provisioning_ledger::snapshot(project_dir);
     // #7806: opens this launch's stack-detection scope. Every manifest
     // resolution below — and the five-plus in the call sites it reaches — then
     // shares ONE nested walk, while a daemon-hosted launch still re-detects a
@@ -1091,6 +1093,13 @@ pub(super) fn prepare_session_inner(
     // not this step.
     if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
         tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
+    }
+    // #8663: after the last write to a ledgered path. A failure only means a
+    // later decommission keeps this workspace.
+    if let Err(err) =
+        crate::session_manager::provisioning_ledger::record(project_dir, &ledger_before)
+    {
+        tracing::warn!("failed to record the provisioning ledger (#8663): {err}");
     }
 
     // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).

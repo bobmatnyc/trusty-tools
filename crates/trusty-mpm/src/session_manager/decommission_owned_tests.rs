@@ -20,6 +20,8 @@ use super::record::{ManagedSessionId, ManagedSessionState};
 use super::tests::FakeTmuxDriver;
 use super::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use super::worktree_ignored_output::kept_unversioned_content;
+use super::worktree_ownership::sentinel_payload_bytes;
+use super::worktree_ownership_location::write_sentinel_bytes;
 use super::worktree_safety::DirtyWorktreePolicy;
 
 /// Run `git -C <dir> <args>` and assert it succeeded.
@@ -109,8 +111,9 @@ async fn owned_worktree_with_an_unpushed_commit_is_kept() {
     git(&wt, &["add", "work.rs"]);
     git(&wt, &["commit", "-q", "-m", "agent work"]);
 
-    let reason = owned_workspace_keep_reason(&wt, ProvisioningDirt::Refuse)
-        .expect("an unpushed commit keeps the workspace");
+    let reason =
+        owned_workspace_keep_reason(&wt, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+            .expect("an unpushed commit keeps the workspace");
     assert!(reason.contains(&wt.display().to_string()), "{reason}");
     assert!(reason.contains("1 unpushed commit"), "{reason}");
     assert_decommission_keeps(&fx.repos_root, &wt).await;
@@ -143,26 +146,29 @@ async fn owned_worktree_with_gitignored_results_is_kept() {
     std::fs::write(fx.repo.join(".git/info/exclude"), "results/\n").expect("exclude");
     write(&wt, "results/out.json");
 
-    let reason = owned_workspace_keep_reason(&wt, ProvisioningDirt::Refuse)
-        .expect("ignored output keeps the workspace");
+    let reason =
+        owned_workspace_keep_reason(&wt, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+            .expect("ignored output keeps the workspace");
     assert!(reason.contains("gitignored"), "{reason}");
     assert_decommission_keeps(&fx.repos_root, &wt).await;
 }
 
-/// #8663: `--force` excuses tm's provisioning files on an owned worktree and
-/// nothing else.
+/// #8663: `--force` excuses tm's provisioning files on an owned worktree
+/// whose marker names the session, and nothing else.
 #[test]
 fn owned_worktree_force_excuses_only_provisioning_files() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("owned-8663-force");
+    let me = ManagedSessionId::new();
+    write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
     write(&wt, "CLAUDE.md");
-    assert!(owned_workspace_keep_reason(&wt, ProvisioningDirt::Refuse).is_some());
+    assert!(owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Refuse).is_some());
     assert_eq!(
-        owned_workspace_keep_reason(&wt, ProvisioningDirt::Discard),
+        owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Discard),
         None
     );
     write(&wt, "notes.md");
-    let reason = owned_workspace_keep_reason(&wt, ProvisioningDirt::Discard)
+    let reason = owned_workspace_keep_reason(&wt, &me, ProvisioningDirt::Discard)
         .expect("--force never excuses user files");
     assert!(reason.contains("notes.md"), "{reason}");
 }
@@ -175,8 +181,9 @@ async fn owned_non_git_workspace_with_user_files_is_kept() {
     write(&ws, WORKTREE_SENTINEL_FILE);
     write(&ws, "notes.md");
 
-    let reason = owned_workspace_keep_reason(&ws, ProvisioningDirt::Refuse)
-        .expect("a user file keeps the workspace");
+    let reason =
+        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+            .expect("a user file keeps the workspace");
     assert!(reason.contains(&ws.display().to_string()), "{reason}");
     assert!(reason.contains("notes.md"), "{reason}");
     assert_decommission_keeps(root.path(), &ws).await;
@@ -228,8 +235,9 @@ async fn owned_workspace_is_kept_when_the_content_check_fails() {
     write(&ws, "data/run.json");
     let _restore = deny_all(&ws.join("data"));
 
-    let reason = owned_workspace_keep_reason(&ws, ProvisioningDirt::Refuse)
-        .expect("an unreadable directory keeps the workspace");
+    let reason =
+        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+            .expect("an unreadable directory keeps the workspace");
     assert!(reason.contains("content check failed"), "{reason}");
     assert_decommission_keeps(root.path(), &ws).await;
 }

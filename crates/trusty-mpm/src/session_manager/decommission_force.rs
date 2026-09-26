@@ -164,6 +164,17 @@ fn is_provisioning_gitignore_line(line: &str) -> bool {
 /// Test: `gitignore_body_line_shaped_like_a_header_is_not_excused`,
 /// `force_decommission_keeps_the_tree_when_the_gitignore_diff_cannot_be_read`.
 fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
+    gitignore_diff_only_adds(ws, &is_provisioning_gitignore_line)
+}
+
+/// Whether `ws`'s unstaged `.gitignore` diff adds at least one line, removes
+/// none, and every added line passes `accept` (#7660, #8663).
+///
+/// What: the parser behind [`gitignore_diff_is_provisioning`], shared with the
+/// provisioning ledger, which accepts only the lines tm recorded appending.
+/// Test: `gitignore_body_line_shaped_like_a_header_is_not_excused`,
+/// `ledger_keeps_a_clone_whose_gitignore_gained_a_user_line`.
+pub(super) fn gitignore_diff_only_adds(ws: &Path, accept: &dyn Fn(&str) -> bool) -> bool {
     let args = [
         "diff",
         "--no-color",
@@ -199,7 +210,7 @@ fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
             continue;
         }
         match line.strip_prefix('+') {
-            Some(body) if is_provisioning_gitignore_line(body) => added += 1,
+            Some(body) if accept(body) => added += 1,
             _ => return false,
         }
     }
@@ -517,7 +528,7 @@ fn ownership_blocker(ws: &Path, id: &ManagedSessionId) -> Option<String> {
 /// Test: `force_decommission_keeps_a_main_checkout_under_the_worktrees_dir`,
 /// `force_decommission_keeps_a_worktree_git_cannot_resolve`,
 /// `force_blocker_refuses_a_directory_that_is_not_a_worktree_root`.
-fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
+pub(super) fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
     let args = [
         "rev-parse",
         "--path-format=absolute",

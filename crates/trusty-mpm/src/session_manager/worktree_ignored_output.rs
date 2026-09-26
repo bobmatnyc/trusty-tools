@@ -102,6 +102,8 @@ pub(crate) struct IgnoredOutput {
     pub files: usize,
     /// The first kept entry, repo-relative, for the operator to look at.
     pub first: String,
+    /// #8663: every kept entry with its file count, in listing order.
+    pub entries: Vec<(String, usize)>,
 }
 
 /// Is the directory or file git matched, by its own name, regenerable output?
@@ -258,8 +260,10 @@ fn kept_among<'e>(
         let found = kept.get_or_insert_with(|| IgnoredOutput {
             files: 0,
             first: entry.to_string(),
+            entries: Vec::new(),
         });
         found.files += files;
+        found.entries.push((entry.to_string(), files));
     }
     Ok(kept)
 }
