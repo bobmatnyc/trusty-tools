@@ -26,7 +26,7 @@ use async_trait::async_trait;
 
 use super::health::HealthResponse;
 use super::search_client::{
-    IndexInfo, IndexStatusResponse, SearchClient, SearchClientError, SearchResult,
+    IndexIdentity, IndexInfo, IndexStatusResponse, SearchClient, SearchClientError, SearchResult,
 };
 
 /// A `SearchClient` that always reports itself unavailable with a fixed reason.
@@ -66,6 +66,15 @@ impl SearchClient for NullSearchClient {
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
         Ok(Vec::new())
+    }
+
+    // #8649: no registry to read, so `review_pr` degrades (or names the error
+    // when search is required) with this client's own reason.
+    async fn list_index_identities(
+        &self,
+        _repo_identity: Option<&str>,
+    ) -> Result<Vec<IndexIdentity>, SearchClientError> {
+        Err(SearchClientError::Unavailable(self.reason.clone()))
     }
 
     // #6686: no index is under review on this path — the gate never reaches the

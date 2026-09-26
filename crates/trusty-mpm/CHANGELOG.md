@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.6] — 2026-09-26
+
+### Added
+
+- The bundled `git-workflow` skill gains a "GitHub Actions Spend" section: four checks to report before a workflow edit or a PR on a billed repo (default-branch-only push CI, PR-only cancel-in-progress, `timeout-minutes` on every job, change filters that keep required checks reporting), no runs spent for no new signal, and the "spending limit" billing failure as an owner blocker ([#8630](https://github.com/bobmatnyc/trusty-tools/issues/8630)).
+
+### Fixed
+
+- A read-only dispatch (`research`, `code-critic`, `code-analyzer`, `security`, `Explore`, `Plan`) may now run GitHub reads — `gh issue view|list`, `gh pr view|list|diff|checks`, `gh run view|list`, and `gh api` sending GET to a path on the default host — plus a print-only `date` (`-u`, `-R`, `-j`, `-I*`, `--iso-8601*`, `--rfc-3339=*`, `--rfc-email`, `-r <value>`, `+format`). Mutating `gh` verbs, `--web`/`--watch`, `gh api` with a non-GET method, a request field, `--input`, `--hostname`, a full URL, or a `graphql` path segment in any case stay refused, as does any `gh` verb not named. `date -s`/`--set`, a bare time operand and `date -f` stay refused, since each can set the clock (#8567).
+- A double-quoted `rg`/`grep` pattern may carry `\` escapes (`\(`, `\.`, `\s`) and an end-of-line `$`, which the shell passes through as text. `$(…)`, `${…}`, `$NAME` and backticks inside double quotes, every unquoted shell metacharacter, and the same escapes given to any other program stay refused (#8586).
+- `tm pr queue-check` judges each required context on its latest run when a workflow ran more than once on the head SHA, ordered by `completedAt` then `startedAt`. A cancelled run listed before a fresh SUCCESS no longer reports BLOCKED, and a stale SUCCESS no longer hides a later FAILURE. While any run of a context is queued or in progress, the context reads as pending, whatever the timestamps, and the reason names that run's status and start time. A CheckRun and a StatusContext that share a name must both pass (Refs [#8638](https://github.com/bobmatnyc/trusty-tools/issues/8638))
+- `tm wait --for check` counts only the latest run of each check, so a superseded cancelled run no longer shows as a failing check, and a queued rerun keeps the wait pending. Every settled result other than SUCCESS, NEUTRAL or SKIPPED now counts as failing, including STARTUP_FAILURE, ACTION_REQUIRED and STALE (Refs [#8638](https://github.com/bobmatnyc/trusty-tools/issues/8638))
+
 ## [1.7.5] — 2026-09-25
 
 ### Breaking

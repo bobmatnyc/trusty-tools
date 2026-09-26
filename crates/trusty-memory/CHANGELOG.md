@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.27.2] — 2026-09-26
+
+### Added
+
+- `trusty-memory audit secrets --count-only [--palace <id>] [--json]` re-screens every stored drawer with the current `check_secret` filter and prints counts only: drawers scanned, drawers refused, a per-`FilterReject` breakdown, and two `KEY=value` counters (`key_value_first`, `key_value_only`) for the value half #8589 started screening. No drawer text, id or token preview is printed. Each palace store is read from a private temporary copy, so the scan writes nothing to any palace, takes no lock, and is safe while the daemon runs. A scan that could not see everything fails: each palace line carries `store=read|absent|error` and an `unreadable=` count of undecodable drawer rows, and the command exits non-zero when any palace could not be read — including a denied stat or a torn copy — or held unreadable rows. Store copies left by a killed run are swept after an hour, and Ctrl-C deletes the current run's copies (#8645).
+
 ## [0.27.1] — 2026-09-25
 
 ### Fixed

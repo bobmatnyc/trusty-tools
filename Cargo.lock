@@ -11396,7 +11396,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11911,7 +11911,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.27.1"
+version = "0.27.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11950,7 +11950,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.7.5"
+version = "1.7.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12045,7 +12045,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.36.0"
+version = "0.36.1"
 dependencies = [
  "anyhow",
  "async-trait",

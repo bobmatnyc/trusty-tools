@@ -2771,3 +2771,7 @@ async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
 // could not catch the actual defect (a marker-based `diff_chars` proxy that
 // silently agrees with an exact length everywhere except a narrow band), so
 // it was replaced rather than kept alongside these.
+
+// #4044: mixed refuted/confirmed sets through the whole run_review path.
+#[path = "runner_refuted_floor_tests.rs"]
+mod refuted_floor;

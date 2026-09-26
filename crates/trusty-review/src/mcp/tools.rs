@@ -25,7 +25,7 @@ use trusty_common::console_metrics::CONSOLE_METRICS_METHOD;
 
 use crate::{
     config::{InvocationSurface, ReviewConfig},
-    integrations::github::{AuthStrategy, GithubClient, RunMode},
+    integrations::github::RunMode,
     mcp::console_metrics,
     models::{ReviewResult, ReviewStatus},
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
@@ -71,7 +71,12 @@ pub fn tool_descriptors() -> Value {
                            actionable findings.  Requires GITHUB_TOKEN and AWS Bedrock \
                            credentials (or OPENROUTER_API_KEY for OpenRouter provider). \
                            Dry-run by default (PR_INTELLIGENCE_DRY_RUN=true — no GitHub \
-                           comments posted).  trusty-search must be running on :7878.",
+                           comments posted).  Reviews against the trusty-search index \
+                           registered for owner/repo; with none registered the tool \
+                           returns an error naming the repo and index id.  If \
+                           trusty-search on :7878 is unreachable the review runs \
+                           DEGRADED on the diff alone, unless search is required \
+                           (TRUSTY_REVIEW_REQUIRE_SEARCH=true).",
             "inputSchema": {
                 "type": "object",
                 "required": ["owner", "repo", "pr"],
@@ -179,7 +184,7 @@ pub enum ToolError {
 /// Test: `call_unknown_tool_returns_error`, `review_health_does_not_require_creds`.
 pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Value, ToolError> {
     match tool {
-        "review_pr" => call_review_pr(args, state).await,
+        "review_pr" => review_pr::call_review_pr(args, state).await,
         "review_diff" => call_review_diff(args, state).await,
         "review_health" => Ok(call_review_health(state).await),
         name if name == CONSOLE_METRICS_METHOD => Ok(wrap_value(
@@ -190,65 +195,9 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
 }
 
 // ─── review_pr ───────────────────────────────────────────────────────────────
-
-/// Execute the `review_pr` tool.
-///
-/// Why: lets Claude Code trigger a full GitHub PR review via MCP without
-/// requiring the user to invoke the CLI manually.
-/// What: resolves the GitHub token, builds a `DiffSource::Github`, constructs
-/// `ReviewDeps` from the shared `AppState`, runs the pipeline, and returns the
-/// `ReviewResult` as a JSON string in the MCP content envelope.
-/// Test: `review_pr_returns_review_result_envelope`.
-async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolError> {
-    let owner = require_str(args, "owner")?;
-    let repo = require_str(args, "repo")?;
-    let pr = args
-        .get("pr")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| ToolError::InvalidParams("missing or non-integer 'pr'".into()))?;
-
-    let reviewer_model = args
-        .get("reviewer_model")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.config.role_models.reviewer.model)
-        .to_string();
-
-    // Resolve GitHub token.
-    let client = GithubClient::new()
-        .map_err(|e| ToolError::InvalidParams(format!("failed to build HTTP client: {e}")))?;
-    let token = AuthStrategy::select(mcp_run_mode(&state.config), None)
-        .resolve_token(&client, &state.config, owner)
-        .await
-        .map_err(|e| ToolError::InvalidParams(format!("GitHub auth failed: {e}")))?;
-
-    let diff_source = DiffSource::Github {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-        pr,
-        token,
-    };
-
-    let deps = deps_from_state(state, &reviewer_model).await?;
-    let input = ReviewInput {
-        diff_source,
-        reviewer_model: reviewer_model.clone(),
-        write_log: false,
-        print_result: false,
-        trigger: MCP_REVIEW_TRIGGER,
-        run_mode: mcp_run_mode(&state.config),
-        allow_posting: MCP_REVIEW_ALLOW_POSTING,
-        caller_context: crate::pipeline::runner::CallerContext::default(),
-        // Search-unreachable semantics fix: the MCP tool surface can never post
-        // to a real PR (`allow_posting: false` above), so a search outage
-        // safely defaults to a loud DEGRADED diff-only review instead of a
-        // hard-Skip — see `InvocationSurface`.
-        surface: InvocationSurface::Interactive,
-    };
-
-    info!(owner, repo, pr, reviewer_model, "mcp: review_pr");
-    let result = run_review(&state.config, input, deps).await;
-    Ok(wrap_result(&result))
-}
+// #8649: the handler and its per-call index resolution live in `review_pr.rs`.
+#[path = "review_pr.rs"]
+mod review_pr;
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
 
@@ -630,9 +579,11 @@ pub fn wrap_tool_error(msg: &str) -> Value {
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
-// Split across two test modules to keep each file under the 500-line cap.
+// Split across test modules to keep each file under the 500-line cap.
 //  - `tools_tests.rs`          — descriptors, helpers, review_health (#719/#722)
 //  - `tools_dispatch_tests.rs` — call_tool dispatch: review_diff / review_pr (#949)
+//  - `tools_pr_index_tests.rs` — review_pr's per-call index resolution (#8649),
+//    declared from `review_pr.rs`
 
 #[cfg(test)]
 #[path = "tools_tests.rs"]

@@ -114,7 +114,7 @@ name        = "trusty-review"
 # `0.y.z` crate the breaking bump is the MINOR position. `#[non_exhaustive]` is
 # the same choice made at 0.18.0 for the three report types: field additions
 # stay non-breaking from here on, so the next one costs no bump.
-version     = "0.36.0"
+version     = "0.36.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
