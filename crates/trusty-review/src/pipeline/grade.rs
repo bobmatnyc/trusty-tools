@@ -777,8 +777,9 @@ fn derive_verdict_with(
 /// `confidence:0.45`, `effort:High`) would be excluded from the floor and silently
 /// soften to APPROVE.  PR #1350's review flagged this; we restore the net here.
 /// What: returns `false` when the finding is any refutation variant
-/// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) — a verifier-refuted finding
-/// is disproven evidence and is excluded REGARDLESS of effort.  Otherwise returns
+/// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`), REGARDLESS of effort — a
+/// clean `Refuted` is disproven evidence; the other two are unverified, and
+/// their weight is carried by the verification round (#8653).  Otherwise returns
 /// `true` when EITHER its `confidence >= FLOOR_COUNT_MIN_CONFIDENCE` (0.50) OR it is
 /// `Effort::High` — a non-refuted High-effort finding is retained even at low
 /// confidence so it still drives the BLOCK floor / `has_high` path.
@@ -792,6 +793,7 @@ fn is_substantive(f: &Finding, thresholds: &Thresholds) -> bool {
             | Some(VerifyOutcome::ErrorRefuted { .. })
             | Some(VerifyOutcome::TruncationRefuted)
     );
+    // #8653: excluded by variant; ErrorRefuted / TruncationRefuted are unverified — verify::unverified_floor carries their pre-verification floor.
     // A refuted finding is disproven evidence — always excluded, even high-severity.
     // Otherwise retain it if it clears the confidence floor OR is a high-severity
     // (critical or high) finding: a genuine critical or high-severity concern must

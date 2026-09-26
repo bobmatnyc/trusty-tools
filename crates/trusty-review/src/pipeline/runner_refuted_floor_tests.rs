@@ -188,3 +188,7 @@ async fn run_review_confirmed_blocker_beside_refuted_one_still_blocks() {
 // #4044: the cto-reports#731 finding mix, replayed through the same path.
 #[path = "runner_cto_reports_731_tests.rs"]
 mod cto_reports_731;
+
+// #8653: a blocker whose verification failed, beside a cleanly refuted nit.
+#[path = "runner_unverified_floor_tests.rs"]
+mod unverified_floor;

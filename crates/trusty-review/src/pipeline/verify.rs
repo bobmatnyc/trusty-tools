@@ -302,7 +302,7 @@ pub async fn run_verification_round_with_policy(
     // Verify candidates concurrently (bounded).  Each task borrows the finding
     // immutably to build its request; the outcome is applied afterwards so we
     // never hold a mutable borrow across the await points.
-    let outcomes: Vec<(usize, VerifyOutcome)> = stream::iter(candidate_idxs)
+    let outcomes: Vec<(usize, VerifyOutcome, VerifierReach)> = stream::iter(candidate_idxs)
         .map(|idx| {
             let req = build_verify_request(
                 verifier_model,
@@ -313,8 +313,8 @@ pub async fn run_verification_round_with_policy(
                 author_rationale,
             );
             async move {
-                let outcome = verify_one(verifier, req, policy).await;
-                (idx, outcome)
+                let (outcome, reach) = verify_one(verifier, req, policy).await;
+                (idx, outcome, reach)
             }
         })
         .buffer_unordered(policy.concurrency.max(1))
@@ -325,11 +325,16 @@ pub async fn run_verification_round_with_policy(
     let mut any_confirmed = false;
     let mut any_clean_refuted = false;
     let mut unverified = 0usize;
-    for (idx, outcome) in outcomes {
+    // #8653: pre-demotion copies of the findings whose verification failed.
+    let mut infra_failed: Vec<Finding> = Vec::new();
+    for (idx, outcome, reach) in outcomes {
         match &outcome {
             VerifyOutcome::Confirmed => any_confirmed = true,
             VerifyOutcome::Refuted => any_clean_refuted = true,
             _ => {}
+        }
+        if reach == VerifierReach::Failed {
+            infra_failed.push(findings[idx].clone());
         }
         if outcome.is_unverified() {
             unverified += 1;
@@ -343,6 +348,7 @@ pub async fn run_verification_round_with_policy(
         any_confirmed,
         any_clean_refuted,
         findings,
+        &infra_failed,
     );
     info!(
         primary = %primary_verdict,
@@ -391,10 +397,15 @@ pub async fn run_verification_round_with_policy(
 ///       set trips `grade`'s low-confidence collapse, which dissolved the
 ///       model's own BLOCK. Surviving findings may still escalate.
 ///
+/// On every path, a finding whose verification failed — an alarm error, a
+/// truncated answer, or an exhausted retry budget (`infra_failed`, its
+/// pre-demotion copy) — keeps the floor it drove before verification (#8653).
+///
 /// `UNKNOWN` is handled by the caller and never reaches here.
 /// What: filters survivors (non-refuted), selects baseline (path a2 takes the
 /// severity-min of `primary_verdict` and APPROVE*), calls
-/// `derive_verdict(baseline, survivors)`.
+/// `derive_verdict(baseline, survivors)`, then raises the result to
+/// [`unverified_floor`].
 /// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
 /// `rederive_confirmed_medium_still_escalates_to_request_changes` (a2 — #1876,
 /// supersedes the pre-#1876 `..._caps_at_approve_star` expectation),
@@ -402,12 +413,14 @@ pub async fn run_verification_round_with_policy(
 /// `rederive_refuted_finding_does_not_clear_standing_medium_finding` (a2 — #1876),
 /// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
 /// `rederive_truncation_refuted_preserves_primary_verdict` (c),
-/// `run_review_refuted_sole_blocker_does_not_clamp_to_block` (a vs a2 — #4044).
+/// `run_review_refuted_sole_blocker_does_not_clamp_to_block` (a vs a2 — #4044),
+/// `run_review_truncated_blocker_beside_refuted_nit_keeps_block` (#8653).
 fn rederive_verdict(
     primary_verdict: Verdict,
     any_confirmed: bool,
     any_clean_refuted: bool,
     findings: &[Finding],
+    infra_failed: &[Finding],
 ) -> Verdict {
     let survivors: Vec<Finding> = findings
         .iter()
@@ -492,7 +505,39 @@ fn rederive_verdict(
         // what the model itself said.
         return verdict_max(rederived, primary_verdict);
     }
-    rederived
+    // #8653: ErrorRefuted / TruncationRefuted (and a retry-exhausted
+    // Unverifiable) mean UNVERIFIED, not refuted — the same reading path (c)
+    // gives an all-infra round. A clean refutation or confirmation elsewhere in
+    // the round is no evidence against them.
+    verdict_max(rederived, unverified_floor(&primary_verdict, infra_failed))
+}
+
+/// The verdict floor that findings whose verification failed still carry.
+///
+/// Why (#8653): a verifier error, truncation or exhausted retry budget is not a
+/// refutation, so the finding keeps the weight it had before the round. Only
+/// path (c) honoured that; a mixed round let one unrelated clean refutation
+/// drop an unverified blocker to APPROVE.
+/// What: `derive_verdict` over the pre-demotion `infra_failed` findings,
+/// starting from APPROVE — so category caps apply, and the #1897 cap holds a
+/// lone marginal Medium at APPROVE* — capped at `primary` so an unverified
+/// finding never raises the verdict above what it was before verification. A
+/// blocker that floored `primary` to BLOCK therefore keeps BLOCK. APPROVE when
+/// empty.
+/// Test: `run_review_truncated_blocker_beside_refuted_nit_keeps_block`,
+/// `run_review_errored_blocker_beside_refuted_nit_keeps_block`,
+/// `run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block`,
+/// `rederive_refuted_blocker_beside_truncated_low_nit_still_relaxes`,
+/// `run_review_truncated_blocker_beside_confirmed_conformance_keeps_block`,
+/// `run_review_refuted_blocker_beside_refuted_nit_still_relaxes`.
+fn unverified_floor(primary: &Verdict, infra_failed: &[Finding]) -> Verdict {
+    if infra_failed.is_empty() {
+        return Verdict::Approve;
+    }
+    verdict_min(
+        primary.clone(),
+        derive_verdict(Verdict::Approve, infra_failed),
+    )
 }
 
 /// Return the *more severe* (severity-max) of two verdicts.
@@ -639,18 +684,27 @@ struct VerifyJudgment {
 /// `verify_transient_error_is_not_plain_refuted` (#1876),
 /// `verify_transient_failure_is_retried_until_it_succeeds` (#4459),
 /// `verify_permanent_transport_failure_lands_in_unverified` (#4459).
+/// #8653: also returns [`VerifierReach`], `Failed` for an alarm error, a
+/// truncated answer, or an exhausted retry budget.
 async fn verify_one(
     verifier: &Arc<dyn LlmProvider>,
     req: crate::llm::LlmRequest,
     policy: VerifyPolicy,
-) -> VerifyOutcome {
+) -> (VerifyOutcome, VerifierReach) {
     let model = req.model.clone();
     let attempts = policy.max_attempts.max(1);
     let mut last_class = String::new();
     for attempt in 1..=attempts {
         match attempt_verify(verifier, req.clone(), &model).await {
-            Ok(outcome) => return outcome,
-            Err(AttemptError::Alarm(outcome)) => return outcome,
+            Ok(outcome) => {
+                let reach = if matches!(outcome, VerifyOutcome::TruncationRefuted) {
+                    VerifierReach::Failed
+                } else {
+                    VerifierReach::Judged
+                };
+                return (outcome, reach);
+            }
+            Err(AttemptError::Alarm(outcome)) => return (outcome, VerifierReach::Failed),
             Err(AttemptError::Transient(class)) => {
                 last_class = class;
                 if attempt < attempts {
@@ -674,12 +728,31 @@ async fn verify_one(
         error_class = %last_class,
         "verifier unreachable after every attempt — recording the finding as UNVERIFIED (#4459)"
     );
-    VerifyOutcome::Unverifiable {
+    let outcome = VerifyOutcome::Unverifiable {
         reason: format!(
             "the verifier could not be reached after {attempts} attempt(s) ({last_class}); \
              the finding was neither confirmed nor refuted"
         ),
-    }
+    };
+    (outcome, VerifierReach::Failed)
+}
+
+/// Whether the verifier rendered a judgment on a finding (#8653).
+///
+/// Why: a retry-exhausted failure and a verifier-judged UNVERIFIABLE (#5309)
+/// share one public `VerifyOutcome` variant, but only the failure may keep the
+/// finding's pre-verification floor. A typed flag tells them apart without
+/// widening the serialized enum or reading the reason string.
+/// What: `Judged` for any parseable answer; `Failed` for an alarm error, a
+/// truncated answer, or an exhausted retry budget.
+/// Test: `run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block`,
+/// `run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifierReach {
+    /// The verifier answered with a parseable judgment.
+    Judged,
+    /// The verifier call failed or its answer was cut off.
+    Failed,
 }
 
 /// Why one attempt failed, when it did (#4459).
