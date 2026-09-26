@@ -66,9 +66,19 @@ async fn launch_session_errors_when_daemon_unreachable() {
     // Why: `/connect <dir>` launches via `launch_session`; when the daemon
     // POST fails (port 0 never connects) the error must surface rather than
     // proceeding to spawn tmux against an unregistered session.
-    let client = DaemonClient::new("http://127.0.0.1:0");
+    // #8545: session prep runs before the POST and refreshes the framework
+    // skill source, so it must land under a temp home, never the operator's.
+    let home = crate::test_support::hermetic_temp_dir();
+    let client = DaemonClient::new("http://127.0.0.1:0").with_home(home.path());
     let result = client.launch_session("/tmp/no-such-project").await;
     assert!(result.is_err(), "expected launch to fail with no daemon");
+    // The refresh no-ops when a checkout's `agents/skills` submodule is the source.
+    let fw = crate::core::paths::FrameworkPaths::under(home.path());
+    assert!(
+        fw.skill_source_dir() != fw.skills || fw.skills.is_dir(),
+        "prep did not write the skill source under the pinned home: {}",
+        fw.skills.display()
+    );
 }
 
 #[tokio::test]
