@@ -144,8 +144,8 @@ Default to review: `tm pr open` opens the PR and `tm pr merge <n> --auto` arms
 auto-merge, re-validating the PR body and passing it as the squash commit
 message so the landing commit is the body you wrote, not a concatenation of the
 branch's raw commit messages (#6808). On a host without `tm`, fall back to
-`gh pr merge --squash --delete-branch --auto`. Never merge on your own
-initiative.
+`gh pr merge --squash --auto` — never `--delete-branch` (#7104, #8391). Never
+merge on your own initiative.
 
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
@@ -155,16 +155,30 @@ already landed: stop, do not re-run the merge, and finish only the step that
 actually failed (deleting the branch, for example). Retry the original call
 only when the state read shows it did not land.
 
-<!-- #7104: gh pr merge --delete-branch collides with a checked-out base branch elsewhere -->
-When the PR's base branch is checked out elsewhere — the main checkout, per
-this project's worktree discipline — `gh pr merge --delete-branch` fails
-post-merge with `fatal: '<branch>' is already used by worktree at <path>`,
-even though the squash already landed. Use `tm pr merge <n> --auto
---no-delete-branch` (the flag exists:
-`crates/trusty-mpm/src/bin/tm/commands/pr/merge.rs:201-202`), or `gh pr merge
---squash --auto` with no `--delete-branch`. Confirm `gh pr view <n> --json
-state` reports `MERGED`, then delete the remote branch yourself: `gh api -X
-DELETE repos/<owner>/<repo>/git/refs/heads/<branch>`.
+Never pass `--delete-branch`: a worktree holds the base branch (#7104 —
+`fatal: '<base>' is already used by worktree at <path>`) or the head branch
+(#8391 — `failed to delete local branch <head>: ... used by worktree at
+<path>`), and the flag fails post-merge either way though the squash landed.
+`gh` deletes the local branch before the remote one, so a head-held failure
+leaves the remote ref stranded too.
+
+Use `tm pr merge <n>` — exits 0 on this failure (#7945:
+`crates/trusty-mpm/src/bin/tm/commands/pr/merge.rs:436`) — then `tm pr cleanup
+<n>`, which clears the remote ref, worktree, and local branch
+(`crates/trusty-mpm/src/core/pr_cleanup/mod.rs:315,325,589`).
+`--no-delete-branch` lives at `crates/trusty-mpm/src/bin/tm/cli/actions/pr.rs:207`.
+
+Fallback without `tm`: (1) `gh pr merge <n> --squash --auto`; (2) confirm
+`gh pr view <n> --json state` is `MERGED`;
+(3) `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<head>`; (4) confirm
+`git ls-remote --heads origin <head>` prints nothing; (5) remove the worktree
+and branch.
+
+A squash breaks ancestry, so `git branch -d` refuses regardless. Before
+`git branch -D`: `git fetch origin`, then check `git merge-tree --write-tree
+origin/<base> <head>` equals `git rev-parse origin/<base>^{tree}` — never the
+tip's tree against the squash commit's tree, which differ once `<base>`
+advanced first (`crates/trusty-mpm/src/core/pr_cleanup/landed.rs:122`).
 
 When the PM relays operator authorization to merge directly (e.g. an
 admin-merge), that IS operator authority — comply. Do not demand direct user
@@ -268,10 +282,10 @@ read it and act on it, never retry the same command. When the direct path
 refuses, report the path and the refusal to the PM and stop; never fall back
 to a fleet sweep for one refused tree (#8577).
 
-`gh pr merge --delete-branch` removes the remote branch at merge time; the local
-branch goes with the prune pass. From a worktree whose base branch is checked
-out elsewhere, that flag fails post-merge instead (See #7104) — use the
-confirm-then-delete sequence above.
+`gh pr merge --delete-branch` deletes the remote branch only when no worktree
+holds the base or the head branch. One always does here, so the flag fails
+post-merge (#7104, #8391) — use the `tm pr merge` + `tm pr cleanup` sequence
+above.
 
 ## Memory Management for Git Operations
 

@@ -449,7 +449,8 @@ tm session prune-worktrees --merged-prs --force    # reclaim
 That pass spares any worktree still holding unsaved work, still claimed by a
 managed session, or still owned by a live agent, and it reports each one it
 spared with the reason. It removes the checkout only — the local branch stays,
-and the remote branch is usually already gone via `gh pr merge --delete-branch`.
+and the remote branch is deleted by `tm pr cleanup <n>`; `--delete-branch`
+leaves it behind when a worktree holds the head (#8391).
 `tm hook --pm-guard` denies an agent-side `git worktree remove` and names this
 command as the remedy, so an agent that reaches for it gets redirected rather
 than silently blocked. BASE-AGENT's Git Workflow section states the agent's half.
@@ -717,11 +718,24 @@ landing on `main`.
 
 ```bash
 tm pr merge <PR>                                  # validated body becomes the squash commit (#6808)
-gh pr merge <PR> --squash --delete-branch         # fallback on a host without `tm`
+tm pr cleanup <PR>                                # remote ref, worktree, local branch
+gh pr merge <PR> --squash                         # fallback on a host without `tm` — no --delete-branch
 ```
 
+`--delete-branch` fails post-merge whenever a worktree holds the base branch
+(#7104) or the head branch (#8391) — every `isolation: "worktree"` delivery
+holds the head, so treat this as the common case, not the exception. `tm pr
+merge` already tolerates the failure and exits 0; `tm pr cleanup <PR>` finishes
+the job. See version-control's delete-branch sequence for the fallback without
+`tm`.
+
 After a squash-merge the local feature branch shows as "unmerged" to git (the
-squashed commit has a different hash). That is expected, not a failed merge.
+squashed commit has a different hash). That is expected, not a failed merge —
+but it also means `git branch -d`/`-D` cannot rely on ancestry. Before
+deleting, `git fetch origin`, then confirm `git merge-tree --write-tree
+origin/<base> <head>` equals `git rev-parse origin/<base>^{tree}`; never
+compare the tip's tree against the squash commit's tree, which differ
+whenever `<base>` advanced after the merge.
 
 ## Merge-Queue Ownership — the Procedure
 

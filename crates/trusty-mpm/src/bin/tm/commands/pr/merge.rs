@@ -347,10 +347,13 @@ pub(crate) fn cleanup_deferred_report(
     commit_suffix: &str,
     stderr: &str,
 ) -> String {
+    // #8391: the head-held case leaves the remote ref stranded too, not just
+    // the local branch — say so.
     format!(
         "MERGE LANDED: #{pr} ({head}) was squash-merged{commit_suffix}.\n\
-         CLEANUP DEFERRED: the local branch was not deleted — {}. Run `tm pr cleanup {pr}` to \
-         remove the worktree holding `{head}` and then the branch.",
+         CLEANUP DEFERRED: the local branch, and possibly the remote branch \
+         too (#8391), were not deleted — {}. Run `tm pr cleanup {pr}` to \
+         remove the worktree holding `{head}` and then both branches.",
         stderr.trim()
     )
 }
