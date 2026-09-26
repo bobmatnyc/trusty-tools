@@ -92,6 +92,11 @@ pub enum PalaceAction {
         /// drawer already holds under another id (default: skip them).
         #[arg(long, requires = "apply")]
         include_content_duplicates: bool,
+        /// Skip the 8-token minimum alone, as `memory_note` does (#8434). The
+        /// secret, blocklist, word-count and noise-pattern gates still apply.
+        /// Works with and without `--apply`, so the dry run previews it.
+        #[arg(long)]
+        allow_short: bool,
     },
 }
 
@@ -119,13 +124,19 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             apply,
             no_embed,
             include_content_duplicates,
+            allow_short,
         } => {
             let palace = resolve(&name)?;
             let report = if apply {
-                super::legacy_kg::apply_report(&palace, !no_embed, include_content_duplicates)
-                    .await?
+                super::legacy_kg::apply_report(
+                    &palace,
+                    !no_embed,
+                    include_content_duplicates,
+                    allow_short,
+                )
+                .await?
             } else {
-                super::legacy_kg::scan_report(&palace)?
+                super::legacy_kg::scan_report(&palace, allow_short)?
             };
             print!("{}", report.render());
             // #8434: the import committed; print it before failing on embed.

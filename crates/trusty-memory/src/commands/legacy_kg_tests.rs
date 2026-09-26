@@ -63,12 +63,12 @@ fn fixture() -> (tempfile::TempDir, Palace) {
             (LIVE_ID, "already migrated fact", "2026-04-01T09:00:00Z"),
             (
                 MISSING_A,
-                "the deploy key rotates every ninety days",
+                "the deploy key rotates every ninety days per the ops runbook",
                 "2026-04-02T09:00:00Z",
             ),
             (
                 MISSING_B,
-                "release notes live in docs/releases",
+                "release notes for every shipped version live in docs/releases",
                 "2026-04-03 10:30:00",
             ),
             (
@@ -113,12 +113,12 @@ fn dry_run_counts_legacy_drawers_and_writes_nothing() {
         .expect("open kg.redb")
         .upsert_drawer(&Drawer::new(
             Uuid::new_v4(),
-            "release notes live in docs/releases",
+            "release notes for every shipped version live in docs/releases",
         ))
         .expect("seed duplicate content");
     let before = (bytes(&dir.join("kg.db")), bytes(&dir.join("kg.redb")));
 
-    let r = scan_report(&palace).expect("scan");
+    let r = scan_report(&palace, false).expect("scan");
     assert_eq!(r.content_duplicates, Some(1));
 
     assert!(r.dry_run && r.legacy_present);
@@ -144,6 +144,365 @@ fn dry_run_counts_legacy_drawers_and_writes_nothing() {
     let after = (bytes(&dir.join("kg.db")), bytes(&dir.join("kg.redb")));
     assert!(before == after, "a dry run changed kg.db or kg.redb");
     assert!(!dir.join("kg.db.migrated").exists());
+    // #8434: a dry run takes no backup either.
+    assert!(backup_dirs(dir).is_empty(), "a dry run wrote a backup");
+    assert!(text.contains("backup: none"), "{text}");
+}
+
+/// Every `legacy-kg-backup-*` directory under `dir`.
+fn backup_dirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("list")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(guard::BACKUP_PREFIX))
+        })
+        .collect()
+}
+
+/// Name and bytes of every file directly under `dir`, plus each subdir name.
+fn dir_state(dir: &Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+    std::fs::read_dir(dir)
+        .expect("list")
+        .map(|e| {
+            let p = e.expect("entry").path();
+            let name = p.file_name().expect("name").to_string_lossy().into_owned();
+            (name, p.is_file().then(|| bytes(&p)))
+        })
+        .collect()
+}
+
+/// Legacy rows the write gates must refuse (#8434).
+const SECRET_ID: &str = "4d3e8cab-4a0e-4f68-8d85-7c6cac5c3d04";
+const SECRET_TOKEN: &str = "AbCd1234EfGh5678IjKl9012"; // pragma: allowlist secret
+const NOISE_ID: &str = "5e4f9dbc-5b1f-4079-9e96-8d7dbd6d4e05";
+const NOISE_TEXT: &str = "fix(auth): rotate the webhook signing key on every deploy run";
+
+/// A short, clean legacy row: 5 words, under the 8-token minimum.
+const SHORT_ID: &str = "6f5a0ecd-6c2a-418a-8fa7-9e8ece7e5f06";
+const SHORT_TEXT: &str = "release train leaves every Thursday";
+
+/// Add `(id, content)` to the palace's legacy `kg.db`.
+fn insert_legacy_row(palace: &Palace, id: &str, content: &str) {
+    Connection::open(palace.data_dir.join(LEGACY_KG_FILE))
+        .expect("open kg.db")
+        .execute(
+            "INSERT INTO drawers (id, room_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+            [id, ROOM, content, "2026-04-05T09:00:00Z"],
+        )
+        .expect("insert");
+}
+
+/// Add `(id, content)` to the fixture's legacy `kg.db`, run the dry run and
+/// the apply with `allow_short`, and check both refuse it for `reason`
+/// without printing it.
+async fn assert_rejected_in_both_modes(
+    id: &str,
+    content: &str,
+    reason: guard::RejectReason,
+    allow_short: bool,
+) {
+    let (_root, palace) = fixture();
+    insert_legacy_row(&palace, id, content);
+    let want = vec![Rejected {
+        id: Uuid::parse_str(id).expect("id"),
+        reason,
+    }];
+    let counts = match reason {
+        guard::RejectReason::Secret => "rejected_secret=1 rejected_noise=0 (too_short=0)",
+        guard::RejectReason::Noise(guard::TOO_SHORT) => {
+            "rejected_secret=0 rejected_noise=1 (too_short=1)"
+        }
+        guard::RejectReason::Noise(_) => "rejected_secret=0 rejected_noise=1 (too_short=0)",
+    };
+    let check = |r: &LegacyReport| {
+        assert_eq!(r.rejected, want, "dry_run={}", r.dry_run);
+        assert_eq!(r.missing, 3, "a rejected row is still missing");
+        let text = r.render();
+        assert!(text.contains(counts), "{text}");
+        assert!(text.contains(&format!("rejected {id}: {reason}")), "{text}");
+        assert!(
+            !text.contains(content),
+            "the report printed content: {text}"
+        );
+        // #8434: no fragment of a token, and no `FilterReject` message, which
+        // for a secret quotes a preview of the token.
+        assert!(!text.contains(&SECRET_TOKEN[..8]), "token leaked: {text}");
+        for message in [
+            "Content rejected",
+            "Content too short",
+            "secret/credential token",
+        ] {
+            assert!(!text.contains(message), "FilterReject printed: {text}");
+        }
+    };
+
+    check(&scan_report(&palace, allow_short).expect("scan"));
+    let r = apply_report(&palace, false, false, allow_short)
+        .await
+        .expect("apply");
+    check(&r);
+    assert_eq!(r.imported, 2, "only the two clean rows are imported");
+    let live = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
+        .expect("reopen kg.redb")
+        .load_drawers()
+        .expect("drawers");
+    assert!(
+        !live.iter().any(|d| d.id.to_string() == id),
+        "{id} imported"
+    );
+    assert!(
+        !live.iter().any(|d| d.content() == content),
+        "content imported"
+    );
+}
+
+/// Why (#8434): an imported row bypassed `check_secret`, so a legacy
+/// credential would land in `kg.redb`. The dry run must show the refusal the
+/// apply then makes.
+/// Test: itself.
+#[tokio::test]
+async fn credential_row_is_rejected_in_dry_run_and_apply() {
+    let content = format!("deploy uses token {SECRET_TOKEN} for the prod webhook auth");
+    assert_rejected_in_both_modes(SECRET_ID, &content, guard::RejectReason::Secret, false).await;
+}
+
+/// Why (#8434): the quality filter a live write runs must hold back legacy
+/// noise the same way, reported as noise rather than as a secret — with or
+/// without `--allow-short`, which skips only the 8-token minimum.
+/// Test: itself.
+#[tokio::test]
+async fn noise_row_is_rejected_in_dry_run_and_apply() {
+    let reason = guard::RejectReason::Noise("noise_pattern");
+    for allow_short in [false, true] {
+        assert_rejected_in_both_modes(NOISE_ID, NOISE_TEXT, reason, allow_short).await;
+    }
+}
+
+/// Why (#8434): the 4-word `content_gate` and the prefix blocklist are live
+/// write gates `memory_note` applies too, so `--allow-short` must not skip
+/// either.
+/// Test: itself.
+#[tokio::test]
+async fn word_count_and_blocklist_rows_are_rejected_with_and_without_allow_short() {
+    let table = [
+        (
+            SHORT_ID,
+            "ship it Thursday",
+            guard::RejectReason::Noise("too_few_words"),
+        ),
+        (
+            NOISE_ID,
+            "Claude Code session ended while the release branch was open",
+            guard::RejectReason::Noise("blocklisted"),
+        ),
+    ];
+    for (id, content, reason) in table {
+        for allow_short in [false, true] {
+            assert_rejected_in_both_modes(id, content, reason, allow_short).await;
+        }
+    }
+}
+
+/// Why (#8434): a failure after the backup (here the `Writer` open, refused
+/// because the L1 snapshot turns unreadable once the backup is taken) must
+/// still name the backup.
+/// Test: itself.
+#[tokio::test]
+async fn apply_error_after_backup_names_the_kept_backup() {
+    let (_root, palace) = fixture();
+    let dir = &palace.data_dir;
+    // `kg.db` is the last file backed up; the palace dir is the backup's parent.
+    let then_break_identity: CopyFn = |from, to| {
+        let n = std::fs::copy(from, to)?;
+        if from.ends_with(LEGACY_KG_FILE) {
+            let data_dir = to.parent().and_then(Path::parent).expect("palace dir");
+            std::fs::write(data_dir.join("l1_cache.json"), b"{ not json")?;
+        }
+        Ok(n)
+    };
+
+    let err = apply_report_with(&palace, (false, false, false), dir, then_break_identity)
+        .await
+        .expect_err("an unreadable L1 snapshot refuses the Writer open");
+
+    let kept = backup_dirs(dir);
+    assert_eq!(kept.len(), 1, "the verified backup stays");
+    let want = format!("backup kept at {}", kept[0].display());
+    assert!(format!("{err:#}").contains(&want), "{err:#}");
+}
+
+/// Why (#8434): a failed backup whose partial directory cannot be removed
+/// must say where it is, so it is not mistaken for a good one.
+/// Test: itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_backup_cleanup_names_the_partial_backup() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: `geteuid` has no preconditions. Root ignores the mode below.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_root, palace) = fixture();
+    let locked: CopyFn = |from, to| {
+        std::fs::copy(from, to)?;
+        let parent = to.parent().expect("backup dir");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))?;
+        Err(std::io::Error::other("disk full"))
+    };
+
+    let err = apply_report_with(&palace, (false, false, false), &palace.data_dir, locked)
+        .await
+        .expect_err("a failed copy aborts");
+
+    let partial = backup_dirs(&palace.data_dir);
+    assert_eq!(partial.len(), 1, "the unremovable partial dir remains");
+    std::fs::set_permissions(&partial[0], std::fs::Permissions::from_mode(0o700))
+        .expect("unlock for cleanup");
+    let want = format!("partial backup left at {}", partial[0].display());
+    assert!(format!("{err:#}").contains(&want), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("nothing was written"),
+        "{err:#}"
+    );
+}
+
+/// Why (#8434): by default a short drawer meets the live 8-token minimum and
+/// is refused; the dry run must say `--allow-short` would import it, and the
+/// flag must then import it, as `memory_note` would store it.
+/// Test: itself.
+#[tokio::test]
+async fn short_row_is_rejected_by_default_and_imported_with_allow_short() {
+    let too_short = guard::RejectReason::Noise(guard::TOO_SHORT);
+    assert_rejected_in_both_modes(SHORT_ID, SHORT_TEXT, too_short, false).await;
+
+    let (_root, palace) = fixture();
+    insert_legacy_row(&palace, SHORT_ID, SHORT_TEXT);
+    let text = scan_report(&palace, false).expect("scan").render();
+    assert!(
+        text.contains("--allow-short would import these 1 too_short drawer(s)"),
+        "{text}"
+    );
+    let preview = scan_report(&palace, true).expect("scan --allow-short");
+    assert!(preview.rejected.is_empty(), "{:?}", preview.rejected);
+    assert!(
+        preview.render().contains("rejected_noise=0 (too_short=0)"),
+        "{}",
+        preview.render()
+    );
+
+    let r = apply_report(&palace, false, false, true)
+        .await
+        .expect("apply --allow-short");
+    assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+    assert_eq!(r.imported, 3, "the short row joins the two clean rows");
+    let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
+        .expect("reopen kg.redb")
+        .load_drawer_ids()
+        .expect("ids");
+    assert!(ids.contains(&Uuid::parse_str(SHORT_ID).expect("id")));
+}
+
+/// Why (#8434): `--allow-short` relaxes the length check only; a short row
+/// that carries a credential stays out, whatever the flag.
+/// Test: itself.
+#[tokio::test]
+async fn short_secret_row_is_rejected_even_with_allow_short() {
+    let content = format!("token {SECRET_TOKEN} for prod");
+    assert_rejected_in_both_modes(SECRET_ID, &content, guard::RejectReason::Secret, true).await;
+}
+
+/// Why (#8434): the Fail-Open Check error arm. A backup that cannot be made
+/// or does not verify must stop the apply before its first write.
+/// Test: itself.
+#[tokio::test]
+async fn apply_with_a_failing_backup_writes_nothing() {
+    let plain: CopyFn = |from, to| std::fs::copy(from, to);
+    let refused: CopyFn = |_, _| Err(std::io::Error::other("disk full"));
+    let torn: CopyFn = |from, to| {
+        let n = std::fs::copy(from, to)?;
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new().append(true).open(to)?,
+            b"x",
+        )?;
+        Ok(n)
+    };
+    for (label, parent_is_file, copy) in [
+        ("unwritable destination", true, plain),
+        ("copy error", false, refused),
+        ("copy that does not verify", false, torn),
+    ] {
+        let (root, palace) = fixture();
+        let dir = &palace.data_dir;
+        let parent = if parent_is_file {
+            let f = root.path().join("a-file-not-a-dir");
+            std::fs::write(&f, b"x").expect("write");
+            f
+        } else {
+            dir.clone()
+        };
+        let before = dir_state(dir);
+
+        let err = apply_report_with(&palace, (false, false, false), &parent, copy)
+            .await
+            .expect_err(label);
+
+        assert!(
+            format!("{err:#}").contains("nothing was written"),
+            "{label}: {err:#}"
+        );
+        assert!(before == dir_state(dir), "{label}: the palace dir changed");
+    }
+}
+
+/// Why (#8434): the backup is only worth anything if it holds the bytes the
+/// apply is about to overwrite, and says so in the report.
+/// Test: itself.
+#[tokio::test]
+async fn apply_leaves_a_verified_backup_of_the_pre_apply_bytes() {
+    use sha2::{Digest, Sha256};
+    use trusty_common::memory_core::store::vector::UsearchStore;
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    let (_root, palace) = fixture();
+    let dir = &palace.data_dir;
+    drop(
+        UsearchStore::new_with_intent(dir.join("index.usearch"), 384, OpenIntent::Writer)
+            .expect("create the vector index"),
+    );
+    let names = ["kg.redb", "index.usearch.redb", "kg.db"];
+    let before: Vec<Vec<u8>> = names.iter().map(|n| bytes(&dir.join(n))).collect();
+
+    let r = apply_report(&palace, true, false, false)
+        .await
+        .expect("apply");
+
+    let backup = r.backup.clone().expect("a backup");
+    assert_eq!(backup_dirs(dir), vec![backup.dir.clone()]);
+    assert_ne!(
+        bytes(&dir.join("kg.redb")),
+        before[0],
+        "the apply wrote kg.redb"
+    );
+    let got: Vec<&str> = backup.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(got, names);
+    let mut manifest = String::new();
+    for (f, old) in backup.files.iter().zip(&before) {
+        assert_eq!(&bytes(&backup.dir.join(&f.name)), old, "{}", f.name);
+        assert_eq!(f.bytes, old.len() as u64);
+        assert_eq!(f.sha256, format!("{:x}", Sha256::digest(old)));
+        manifest.push_str(&format!("{}  {}\n", f.sha256, f.name));
+    }
+    assert_eq!(
+        std::fs::read_to_string(backup.dir.join(guard::MANIFEST_FILE)).expect("manifest"),
+        manifest
+    );
+    let text = r.render();
+    assert!(
+        text.contains(&format!("backup: {}", backup.dir.display())),
+        "{text}"
+    );
+    assert!(text.contains("verified kg.redb bytes="), "{text}");
 }
 
 /// Why: the point of #8434 — after an apply the stranded drawers are served by
@@ -156,7 +515,9 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
     let (_root, palace) = fixture();
     let legacy_before = bytes(&palace.data_dir.join("kg.db"));
 
-    let r = apply_report(&palace, true, false).await.expect("apply");
+    let r = apply_report(&palace, true, false, false)
+        .await
+        .expect("apply");
     assert!(!r.dry_run);
     assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
     let (_, still_missing) = r.vectors.expect("vectors ran");
@@ -181,7 +542,9 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
         assert!(hits.iter().any(|h| h.drawer.id == a), "A recalled");
     }
 
-    let again = apply_report(&palace, true, false).await.expect("re-run");
+    let again = apply_report(&palace, true, false, false)
+        .await
+        .expect("re-run");
     assert_eq!(
         (again.already_live, again.missing, again.imported),
         (3, 0, 0)
@@ -215,16 +578,18 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     let a = Uuid::parse_str(MISSING_A).expect("id");
     let mut l1 = Drawer::new(
         Uuid::parse_str(ROOM).expect("room"),
-        "the deploy key rotates every ninety days",
+        "the deploy key rotates every ninety days per the ops runbook",
     );
     l1.id = a;
     trusty_common::memory_core::store::L1Cache::save_l1_cache(&[l1], &palace.data_dir)
         .expect("seed L1 snapshot");
 
-    let scan = scan_report(&palace).expect("scan");
+    let scan = scan_report(&palace, false).expect("scan");
     assert_eq!((scan.already_live, scan.missing), (1, 2), "L1 is not live");
 
-    let r = apply_report(&palace, false, false).await.expect("apply");
+    let r = apply_report(&palace, false, false, false)
+        .await
+        .expect("apply");
     assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
     let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
         .expect("reopen kg.redb")
@@ -250,7 +615,7 @@ async fn apply_refuses_a_store_the_writer_open_would_rename_aside() {
         let quarantined = list_incompatible_files(dir).expect("list").len();
 
         assert!(
-            apply_report(&palace, false, false).await.is_err(),
+            apply_report(&palace, false, false, false).await.is_err(),
             "{file}: apply must refuse"
         );
 
@@ -333,7 +698,12 @@ async fn wal_only_legacy_rows_are_counted_and_imported() {
             conn.execute(
                 "INSERT INTO drawers (id, room_id, content, created_at) \
                  VALUES (?1, ?2, ?3, ?4)",
-                [id, ROOM, "a row only the WAL holds", created],
+                [
+                    id,
+                    ROOM,
+                    "a row that only the write-ahead log still holds after the crash",
+                    created,
+                ],
             )
             .expect("insert");
         }
@@ -352,9 +722,11 @@ async fn wal_only_legacy_rows_are_counted_and_imported() {
     let files = |d: &Path| (bytes(&d.join("kg.db")), bytes(&d.join("kg.db-wal")));
     let before = files(&data_dir);
 
-    let scan = scan_report(&palace).expect("scan");
+    let scan = scan_report(&palace, false).expect("scan");
     assert_eq!((scan.legacy_rows, scan.missing), (2, 2));
-    let r = apply_report(&palace, false, false).await.expect("apply");
+    let r = apply_report(&palace, false, false, false)
+        .await
+        .expect("apply");
     assert_eq!(r.imported, 2);
 
     assert!(
@@ -376,7 +748,7 @@ async fn apply_skips_content_duplicates_unless_included() {
         .expect("open kg.redb")
         .upsert_drawer(&Drawer::new(
             Uuid::new_v4(),
-            "release notes live in docs/releases",
+            "release notes for every shipped version live in docs/releases",
         ))
         .expect("seed B's content under another id");
     let (a, b) = (
@@ -390,7 +762,9 @@ async fn apply_skips_content_duplicates_unless_included() {
             .expect("ids")
     };
 
-    let r = apply_report(&palace, false, false).await.expect("apply");
+    let r = apply_report(&palace, false, false, false)
+        .await
+        .expect("apply");
     assert_eq!(
         (r.missing, r.content_duplicates, r.imported),
         (2, Some(1), 1)
@@ -405,10 +779,14 @@ async fn apply_skips_content_duplicates_unless_included() {
     assert!(ids.contains(&a), "the distinct drawer is imported");
     assert!(!ids.contains(&b), "the content duplicate is skipped");
 
-    let again = apply_report(&palace, false, false).await.expect("re-run");
+    let again = apply_report(&palace, false, false, false)
+        .await
+        .expect("re-run");
     assert_eq!((again.content_duplicates, again.imported), (Some(1), 0));
 
-    let r = apply_report(&palace, false, true).await.expect("include");
+    let r = apply_report(&palace, false, true, false)
+        .await
+        .expect("include");
     assert_eq!((r.content_duplicates, r.imported), (Some(1), 1));
     assert!(
         r.render().contains("imported by --include"),
@@ -427,9 +805,15 @@ fn merge_imported_replaces_l1_entries_and_appends_the_rest() {
     let mut stale = Drawer::new(room, "stale L1 text");
     stale.id = Uuid::parse_str(MISSING_A).expect("id");
     let other = Drawer::new(room, "an unrelated live drawer");
-    let mut fresh_a = Drawer::new(room, "the deploy key rotates every ninety days");
+    let mut fresh_a = Drawer::new(
+        room,
+        "the deploy key rotates every ninety days per the ops runbook",
+    );
     fresh_a.id = stale.id;
-    let fresh_b = Drawer::new(room, "release notes live in docs/releases");
+    let fresh_b = Drawer::new(
+        room,
+        "release notes for every shipped version live in docs/releases",
+    );
     let mut in_memory = vec![stale, other.clone()];
 
     merge_imported(&mut in_memory, vec![fresh_a.clone(), fresh_b.clone()]);
