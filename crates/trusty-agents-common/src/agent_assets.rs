@@ -349,6 +349,27 @@ mod tests {
         );
     }
 
+    /// The ops agents that handle credentials name the non-printing form.
+    /// See #8596 (`local-ops` printed Keychain values while "checking" them)
+    /// and #8248 (`gcp-ops` ran `print-access-token` bare to see it work).
+    #[test]
+    fn ops_agents_state_the_non_printing_credential_forms() {
+        let local = LOCAL_OPS.replace('\n', " ");
+        assert!(
+            local.contains("find-generic-password -s <service> >/dev/null 2>&1")
+                && local.contains("Never add `-w` or `-g`")
+                && local.contains("#8596"),
+            "`local-ops.md` must state the exit-status-only Keychain check (#8596)"
+        );
+        let gcp = GCP_OPS.replace('\n', " ");
+        assert!(
+            gcp.contains("Never run `gcloud auth [application-default] print-access-token`")
+                && gcp.contains("Bearer $(gcloud auth print-access-token)")
+                && gcp.contains("#8248"),
+            "`gcp-ops.md` must forbid a bare `print-access-token` run (#8248)"
+        );
+    }
+
     /// `ticketing` and `version-control` are sonnet-tier, never haiku.
     ///
     /// Why (#7274, owner ruling 2026-09-09): both agents carry judgment the
