@@ -968,7 +968,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
 /// still renders).
 /// Test: `tests::binary_size_reads_the_concrete_path`,
 /// `tests::binary_size_is_zero_for_a_missing_path`.
-fn binary_size(path: &Path) -> u64 {
+pub(super) fn binary_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|md| md.len()).unwrap_or(0)
 }
 

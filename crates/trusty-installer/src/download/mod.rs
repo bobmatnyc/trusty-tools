@@ -171,13 +171,63 @@ pub enum Outcome {
 /// fixture in `tests::a_checksum_mismatch_is_reported_as_a_checksum_mismatch`;
 /// the live path by the `#[ignore]`-tagged integration test.
 pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Path) -> Outcome {
+    try_install_prebuilt_with_floor(crate_name, install_dir, None).await
+}
+
+/// [`try_install_prebuilt`], refusing any release not newer than `floor`.
+///
+/// Why (#8642): `tctl upgrade` read "10.0.0 available" from crates.io, the
+/// prebuilt path found only 8.0.0, placed it over 8.0.0, and reported an
+/// upgrade. An upgrade must never place a release that does not advance the
+/// installed version. The floor is the INSTALLED version, not crates.io's
+/// latest: prebuilt uploads lag publishes (#6164), so a release newer than
+/// installed but older than latest is still a real upgrade.
+///
+/// What: resolves the crate's own release repo ([`release::release_repo_for`])
+/// and, when `floor` is `Some` and the newest release is not strictly newer,
+/// returns [`Outcome::Fallback`] naming both versions before any download.
+/// `None` is [`try_install_prebuilt`].
+///
+/// Test: `mod_tests::a_release_not_newer_than_the_floor_falls_back_before_download`,
+/// `mod_tests::floor_reason_names_both_versions`.
+pub async fn try_install_prebuilt_with_floor(
+    crate_name: &str,
+    install_dir: &std::path::Path,
+    floor: Option<&str>,
+) -> Outcome {
     try_install_prebuilt_at(
         &http_client(),
-        &pinned::Endpoints::default(),
+        // #8642: each crate's own release repo, not one hardcoded repo.
+        &pinned::Endpoints::for_crate(crate_name),
         crate_name,
         install_dir,
+        floor,
     )
     .await
+}
+
+/// Why a resolved release must not be installed over `floor`, if it must not.
+///
+/// Why (#8642): the pure half of the floor check, so the decision is testable
+/// without a server.
+/// What: `Some(reason)` when both parse as semver and `resolved <= floor`;
+/// `None` otherwise. An unparseable floor proves nothing, so it does not block;
+/// the caller's post-install version check still catches a non-advance.
+/// Test: `mod_tests::floor_reason_names_both_versions`.
+fn floor_fallback_reason(crate_name: &str, resolved: &str, floor: Option<&str>) -> Option<String> {
+    let floor = floor?;
+    let (Ok(have), Ok(got)) = (
+        semver::Version::parse(floor),
+        semver::Version::parse(resolved),
+    ) else {
+        return None;
+    };
+    (got <= have).then(|| {
+        format!(
+            "newest {crate_name} prebuilt release is {resolved}, not newer than installed \
+             {floor}; falling back to cargo install"
+        )
+    })
 }
 
 /// [`try_install_prebuilt`], against caller-supplied endpoints and client.
@@ -199,6 +249,7 @@ pub(crate) async fn try_install_prebuilt_at(
     endpoints: &pinned::Endpoints<'_>,
     crate_name: &str,
     install_dir: &std::path::Path,
+    floor: Option<&str>,
 ) -> Outcome {
     // Step 1: Check Tier-1 target.
     let target = match platform::current_target() {
@@ -233,6 +284,13 @@ pub(crate) async fn try_install_prebuilt_at(
             };
         }
     };
+
+    // #8642: refuse a release that would not advance the installed version,
+    // before a single byte is downloaded or placed.
+    if let Some(reason) = floor_fallback_reason(crate_name, &resolved.version, floor) {
+        tracing::info!(crate_name, version = %resolved.version, ?floor, "prebuilt not newer");
+        return Outcome::Fallback { reason };
+    }
 
     // Step 3: Pick the glibc-aware asset suffix. On a low-glibc Linux host the
     // native ORT asset would crash with `GLIBC_2.39 not found`, so an ORT crate

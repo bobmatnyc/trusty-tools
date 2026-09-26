@@ -74,6 +74,12 @@ pub struct UpgradeOutcome {
     pub shadow_ok: bool,
     /// Human note for the shadow-detection outcome (empty when `shadow_ok`).
     pub shadow_detail: String,
+    /// #8642: the version installed before this run (`None` if absent).
+    pub installed: Option<String>,
+    /// #8642: the version the placed binary reports (`None` on failure).
+    pub applied: Option<String>,
+    /// #8642: on-disk size of the placed binary, in bytes (0 on failure).
+    pub size_bytes: u64,
 }
 
 /// The aggregate upgrade report.
@@ -334,17 +340,23 @@ struct UpgradeDetail {
     detail: String,
     shadow_ok: bool,
     shadow_detail: String,
+    /// #8642: the version the placed binary reported.
+    applied: String,
+    /// #8642: the concrete path health-gated, for the size column.
+    bin_path: std::path::PathBuf,
 }
 
 impl UpgradeDetail {
     /// A clean success with no shadow check performed or nothing found
     /// (the daemon-restart path; see `upgrade_one`'s doc for why that path
     /// does not run `shadow_check`).
-    fn ok(detail: String) -> Self {
+    fn ok(detail: String, applied: String, bin_path: std::path::PathBuf) -> Self {
         Self {
             detail,
             shadow_ok: true,
             shadow_detail: String::new(),
+            applied,
+            bin_path,
         }
     }
 
@@ -355,18 +367,18 @@ impl UpgradeDetail {
     /// #5805: takes a LIST because the check now covers every binary the
     /// member places, not just its health-probe name — `tctl` and `tm` can be
     /// shadowed while the primary name is clear.
-    fn from_shadows(detail: String, shadows: Vec<shadow_check::ShadowReport>) -> Self {
+    fn from_shadows(ok: Self, shadows: Vec<shadow_check::ShadowReport>) -> Self {
         if shadows.is_empty() {
-            return Self::ok(detail);
+            return ok;
         }
         Self {
-            detail,
             shadow_ok: false,
             shadow_detail: shadows
                 .iter()
                 .map(|r| r.message())
                 .collect::<Vec<_>>()
                 .join(" | "),
+            ..ok
         }
     }
 }
@@ -406,14 +418,20 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
                 if !d.shadow_ok {
                     let _ = narr.error(&format!("{}: {}", c.crate_name, d.shadow_detail));
                 }
+                // #8642: the real size of the binary just placed, via the
+                // same helper `tctl install` uses — not a hardcoded 0.
+                let size_bytes = super::install::binary_size(&d.bin_path);
                 outcomes.push(UpgradeOutcome {
                     member: c.crate_name.clone(),
                     ok: true,
                     detail: d.detail,
                     shadow_ok: d.shadow_ok,
                     shadow_detail: d.shadow_detail,
+                    installed: c.installed.clone(),
+                    applied: Some(d.applied),
+                    size_bytes,
                 });
-                tracker.add(Component::new(c.binary.clone(), 0));
+                tracker.add(Component::new(c.binary.clone(), size_bytes));
             }
             Err(e) => {
                 let _ = narr.error(&format!("{}: {e}", c.crate_name));
@@ -423,6 +441,9 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
                     detail: e.to_string(),
                     shadow_ok: true,
                     shadow_detail: String::new(),
+                    installed: c.installed.clone(),
+                    applied: None,
+                    size_bytes: 0,
                 });
             }
         }
@@ -496,7 +517,14 @@ async fn upgrade_one(
     let install_dir = download::default_install_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
-    let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
+    // #8642: the installed version is the floor — a prebuilt that would not
+    // advance it falls back before anything is placed.
+    let outcome = download::try_install_prebuilt_with_floor(
+        &c.crate_name,
+        &install_dir,
+        c.installed.as_deref(),
+    )
+    .await;
 
     match outcome {
         Outcome::Installed { paths, version } => {
@@ -512,27 +540,12 @@ async fn upgrade_one(
                 .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
                 .cloned()
                 .unwrap_or_else(|| install_dir.join(&c.binary));
-            trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
-            if c.daemon {
-                // #4964: no `cargo install` on this branch — the binary is
-                // already on disk, health-gated, and only needs activating.
-                let restarted = restart_daemon_member(c)?;
-                Ok(UpgradeDetail::ok(format!(
-                    "upgraded to {version}; {restarted}"
-                )))
-            } else {
-                let shadows = shadow_check::detect_all(
-                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
-                    &bin_path,
-                    Some(&version),
-                    path_env,
-                )
-                .await;
-                Ok(UpgradeDetail::from_shadows(
-                    format!("upgraded to {version}"),
-                    shadows,
-                ))
-            }
+            let reported =
+                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
+            // #8642: the placed binary must report the tag's version and advance.
+            // #4964: no `cargo install` on this branch — only activation.
+            let applied = verify_applied(c, Some(&version), &reported)?;
+            finish_member(c, applied, bin_path, path_env).await
         }
         // #5518: verification failed — abort this candidate instead of
         // upgrading it from source. `apply_all`'s Err arm already renders this
@@ -558,31 +571,104 @@ async fn upgrade_one(
                 .join(&c.binary);
             let reported =
                 trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
-            if c.daemon {
-                // #4964: the restart is NEW behaviour on this path too — it
-                // previously produced a manual-restart hint reported as
-                // success.
-                let restarted = restart_daemon_member(c)?;
-                Ok(UpgradeDetail::ok(format!(
-                    "upgraded to {}; {restarted}",
-                    c.latest
-                )))
-            } else {
-                let reported_version = super::update_engine::extract_version_from_line(&reported);
-                let shadows = shadow_check::detect_all(
-                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
-                    &bin_path,
-                    reported_version.as_deref(),
-                    path_env,
-                )
-                .await;
-                Ok(UpgradeDetail::from_shadows(
-                    format!("upgraded to {}", c.latest),
-                    shadows,
-                ))
-            }
+            // #8642: cargo could not advance it either → an error, not "ok".
+            let applied = verify_applied(c, None, &reported)?;
+            finish_member(c, applied, bin_path, path_env).await
         }
     }
+}
+
+/// Activate (daemon) or shadow-check (non-daemon) a verified upgrade.
+///
+/// Why: both install branches of [`upgrade_one`] end the same way once the
+/// placed binary has proved its version; one tail keeps them from drifting.
+/// What: a daemon is restarted via [`restart_daemon_member`] (#4964 — the
+/// restart is new on the cargo branch too; it used to be a manual hint
+/// reported as success); a non-daemon runs `shadow_check::detect_all` (#3554).
+/// The detail names installed → applied and, when they differ, crates.io's
+/// latest (#8642).
+/// Test: `tests::upgrade_summary_names_installed_applied_and_latest`; the
+/// restart and shadow probes are side-effecting.
+async fn finish_member(
+    c: &UpdateCandidate,
+    applied: String,
+    bin_path: std::path::PathBuf,
+    path_env: &std::ffi::OsStr,
+) -> anyhow::Result<UpgradeDetail> {
+    let summary = upgrade_summary(c, &applied);
+    if c.daemon {
+        let restarted = restart_daemon_member(c)?;
+        let detail = format!("{summary}; {restarted}");
+        return Ok(UpgradeDetail::ok(detail, applied, bin_path));
+    }
+    let shadows = shadow_check::detect_all(
+        &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
+        &bin_path,
+        Some(&applied),
+        path_env,
+    )
+    .await;
+    let ok = UpgradeDetail::ok(summary, applied, bin_path);
+    Ok(UpgradeDetail::from_shadows(ok, shadows))
+}
+
+/// The human summary of a verified upgrade (#8642).
+///
+/// Why: a prebuilt can advance the install yet lag crates.io (#6164); the
+/// operator must see both numbers rather than a bare "upgraded".
+/// What: `upgraded <installed> → <applied>`, plus `(crates.io latest <v>)`
+/// when the applied version is not the latest.
+/// Test: `tests::upgrade_summary_names_installed_applied_and_latest`.
+fn upgrade_summary(c: &UpdateCandidate, applied: &str) -> String {
+    let installed = c.installed.as_deref().unwrap_or("(absent)");
+    let mut s = format!("upgraded {installed} → {applied}");
+    if applied != c.latest {
+        s.push_str(&format!(" (crates.io latest {})", c.latest));
+    }
+    s
+}
+
+/// Check that a placed binary is the release expected and advances the install.
+///
+/// Why (#8642): `tctl upgrade` placed tga 8.0.0 over 8.0.0 and reported it
+/// upgraded; neither branch compared what landed against what was installed.
+/// What: parses the version from the `--version` line. With `tag_version`
+/// (the prebuilt branch) it must equal the tag. With an installed version it
+/// must be strictly newer (semver; string inequality when either does not
+/// parse). Returns the applied version.
+/// Test: `tests::verify_applied_rejects_a_version_that_does_not_match_the_tag`,
+/// `tests::verify_applied_rejects_a_non_advancing_upgrade`,
+/// `tests::verify_applied_accepts_an_advance_that_lags_latest`.
+fn verify_applied(
+    c: &UpdateCandidate,
+    tag_version: Option<&str>,
+    reported_line: &str,
+) -> anyhow::Result<String> {
+    let name = &c.crate_name;
+    let reported = super::update_engine::extract_version_from_line(reported_line)
+        .ok_or_else(|| anyhow::anyhow!("{name}: `--version` printed {reported_line:?}"))?;
+    if let Some(tag) = tag_version {
+        anyhow::ensure!(
+            reported == tag,
+            "{name}: placed binary reports {reported}, but the release tag is {tag}"
+        );
+    }
+    if let Some(installed) = c.installed.as_deref() {
+        let advanced = match (
+            semver::Version::parse(&reported),
+            semver::Version::parse(installed),
+        ) {
+            (Ok(now), Ok(was)) => now > was,
+            _ => reported != installed,
+        };
+        anyhow::ensure!(
+            advanced,
+            "{name} did not advance: installed {installed}, now reports {reported} \
+             (crates.io latest {}); no prebuilt or cargo build newer than installed",
+            c.latest
+        );
+    }
+    Ok(reported)
 }
 
 /// Activate a just-placed daemon binary by restarting the member (#4964).
@@ -711,6 +797,10 @@ fn print_human(report: &UpgradeReport) {
         ),
         "declined" => eprintln!("tctl upgrade: aborted (no confirmation)."),
         "applied" => {
+            // #8642: name what each member moved from and to, with its size.
+            for m in report.members.iter().filter(|m| m.ok) {
+                println!("  {}", member_line(m));
+            }
             let ok = report.members.iter().filter(|m| m.ok).count();
             println!("upgraded {}/{}", ok, report.members.len());
             for m in report.members.iter().filter(|m| !m.ok) {
@@ -726,6 +816,21 @@ fn print_human(report: &UpgradeReport) {
         }
         _ => {}
     }
+}
+
+/// One applied member's human line: `<member>: <installed> → <applied> (<size>)`.
+///
+/// Why (#8642): the summary said only `upgraded 1/1`, which hid a no-op.
+/// What: absent versions render as `(absent)` / `?`; size in MiB.
+/// Test: `tests::member_line_shows_versions_and_size`.
+fn member_line(m: &UpgradeOutcome) -> String {
+    let mib = m.size_bytes as f64 / (1024.0 * 1024.0);
+    format!(
+        "{}: {} → {} ({mib:.2} MiB)",
+        m.member,
+        m.installed.as_deref().unwrap_or("(absent)"),
+        m.applied.as_deref().unwrap_or("?"),
+    )
 }
 
 #[cfg(test)]
