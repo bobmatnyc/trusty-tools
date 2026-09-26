@@ -66,8 +66,9 @@ pub mod workspace_guard;
 pub(crate) mod worktree_adopt;
 // #8318: frees an adopted tree's branch and a dead agent's harness lock.
 pub(crate) mod worktree_adopt_release;
-// #8534: gitignored run output that `git worktree remove --force` would delete.
-pub(crate) mod worktree_ignored_output;
+// #8534: gitignored run output that `git worktree remove` would delete. `pub`
+// for the `tm pr cleanup` probe the binary wires in.
+pub mod worktree_ignored_output;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
@@ -158,6 +159,10 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8534 critic round 2: the gitignored-output gate, route by route.
+#[cfg(test)]
+mod worktree_ignored_output_route_tests;
 
 // #8511: the marker-location behaviour, through the pre-existing ownership API.
 #[cfg(test)]

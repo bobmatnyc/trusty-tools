@@ -119,6 +119,7 @@ fn worktree_7885_a_removal_emits_one_audit_line_before_deleting() {
         crate::session_manager::decommission::remove_session_worktree(
             &wt,
             "merged-PR reclaim, every gate passed",
+            crate::session_manager::DirtyWorktreePolicy::Skip,
         )
     });
     assert!(outcome.removed(), "the fixture worktree must be removable");
@@ -148,6 +149,7 @@ fn worktree_7885_a_removal_emits_one_audit_line_before_deleting() {
         crate::session_manager::decommission::remove_session_worktree(
             &locked,
             "orphan sweep, no live session claims it",
+            crate::session_manager::DirtyWorktreePolicy::Skip,
         )
     });
     assert!(!outcome.removed(), "a git-locked worktree must be refused");
@@ -183,6 +185,7 @@ fn worktree_7885_a_refused_removal_is_never_audited_as_a_deletion() {
         crate::session_manager::decommission::remove_session_worktree(
             &locked,
             "merged-PR reclaim, every gate passed",
+            crate::session_manager::DirtyWorktreePolicy::Skip,
         )
     });
     assert!(!outcome.removed(), "a git-locked worktree must be refused");
@@ -217,6 +220,7 @@ fn worktree_7885_a_completed_removal_is_audited_as_removed() {
         crate::session_manager::decommission::remove_session_worktree(
             &wt,
             "merged-PR reclaim, every gate passed",
+            crate::session_manager::DirtyWorktreePolicy::Skip,
         )
     });
     assert!(

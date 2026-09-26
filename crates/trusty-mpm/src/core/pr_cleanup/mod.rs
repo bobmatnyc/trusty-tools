@@ -176,8 +176,10 @@ impl CleanupReport {
 /// Why: passing a precomputed answer would let a caller reach the worktree
 /// step with a `None` meaning "not checked" instead of "checked and clean" —
 /// the same reason `worktree_reclaim::classify` takes its probe as a closure.
-/// Production passes [`crate::session_manager::worktree_safety::inspect_dirt`],
-/// which fails toward DIRTY on every error.
+/// Production passes
+/// [`crate::session_manager::worktree_ignored_output::inspect_dirt_with_ignored_output`]
+/// — `inspect_dirt` plus the gitignored output `git worktree remove` would
+/// delete (#8534) — which fails toward DIRTY on every error.
 pub type DirtProbe<'a> = &'a dyn Fn(&Path) -> Option<DirtyWorktree>;
 
 /// Run the five cleanup steps and report each one.

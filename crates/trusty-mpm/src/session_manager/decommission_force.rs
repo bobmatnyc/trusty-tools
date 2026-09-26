@@ -40,7 +40,7 @@ use super::worktree_ownership::SentinelOwner;
 use super::worktree_ownership_location::{
     OwnerReadError, admin_sentinel_path, legacy_sentinel_path, read_sentinel_owner_strict,
 };
-use super::worktree_safety::{inspect_dirt, inspect_dirt_excusing};
+use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt, inspect_dirt_excusing};
 
 /// The paths tm's own provisioning writes into a workspace (#7660).
 ///
@@ -263,6 +263,8 @@ pub(super) async fn remove_in_project_worktree(
             &ws_clone,
             "session decommission: the session ended and its tree is clean",
             &guard,
+            // #8534: `--force` excuses provisioning files only, never run output.
+            DirtyWorktreePolicy::Skip,
         )
     });
     let outcome = match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {

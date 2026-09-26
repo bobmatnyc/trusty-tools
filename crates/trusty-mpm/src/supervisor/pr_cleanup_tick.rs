@@ -28,7 +28,7 @@ use crate::core::pr_cleanup::{
     auth_backoff, holder_state_of, host_tree_gate, sweep,
 };
 use crate::session_manager::SessionManager;
-use crate::session_manager::worktree_safety::inspect_dirt;
+use crate::session_manager::worktree_ignored_output::inspect_dirt_with_ignored_output;
 
 /// The session claims the daemon can see and end, read straight from the store.
 ///
@@ -170,7 +170,8 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
         // #7275: the merged-pull-request matcher decides "landed", never an
         // ahead-of-upstream count.
         &RealLanding,
-        &inspect_dirt,
+        // #8534: `git worktree remove` deletes gitignored output; the probe counts it.
+        &inspect_dirt_with_ignored_output,
         &CleanupRegistry::production(),
         auth_backoff::shared(),
     )

@@ -61,9 +61,10 @@ use super::worktree_safety::{DirtyWorktree, count_dirty_files, git_stdout, inspe
 /// losing them costs only CPU.
 /// What: matched against a directory's own file name at any depth. A nested
 /// repository underneath one of these is NOT seen — see the residual-risk note
-/// in `worktree_safety`.
+/// in `worktree_safety`. #8534: also the name list the gitignored-output gate
+/// excuses (`super::worktree_ignored_output::is_regenerable`) — one list.
 /// Test: `inspect_dirt_does_not_scan_disposable_build_dirs`.
-const DISPOSABLE_DIR_NAMES: &[&str] = &[
+pub(super) const DISPOSABLE_DIR_NAMES: &[&str] = &[
     "target",
     "node_modules",
     "dist",
@@ -83,6 +84,7 @@ const DISPOSABLE_DIR_NAMES: &[&str] = &[
     "venv",
     ".gradle",
     "coverage",
+    ".nyc_output",
     ".terraform",
 ];
 
