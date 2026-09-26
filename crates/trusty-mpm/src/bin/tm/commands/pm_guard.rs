@@ -229,7 +229,7 @@ use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_enter_worktree;
-use crate::commands::pm_guard_fanout;
+use crate::commands::{pm_guard_fanout, pm_guard_profile};
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 pub(crate) use crate::commands::pm_guard_response::{
@@ -948,7 +948,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         return Ok(());
     }
 
-    let Some(reason) = evaluate_tool(tool_name, tool_input) else {
+    // #8453: the PM delegation rules bind by session profile; a supervisor is
+    // exempt, and every ABSOLUTE guard above has already run for it.
+    let Some(reason) = pm_guard_profile::verdict(tool_name, tool_input, &hook_cwd) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies —
         // unless #8261 admitted this dispatch to a builder slot, which is the
         // one thing an allowed dispatch still has to be TOLD. This is the exit

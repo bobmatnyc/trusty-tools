@@ -140,6 +140,10 @@ mod tests_settings_lock_7762;
 #[cfg(test)]
 #[path = "tests_style_selection_8533.rs"]
 mod tests_style_selection_8533;
+// #8453: a supervisor launch writes the supervisor prompt, style and model.
+#[cfg(test)]
+#[path = "tests_supervisor_profile_8453.rs"]
+mod tests_supervisor_profile_8453;
 
 use std::path::{Path, PathBuf};
 
@@ -856,6 +860,17 @@ pub(super) fn prepare_session_inner(
     // still launches, it just shows the operator's default style.
     if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+    // #8453: every launch path reads the project settings' `model`, including
+    // those that pass no `--model`; a supervisor runs on the Opus tier alias.
+    if crate::core::session_profile::resolve(project_dir).is_supervisor()
+        && let Err(err) = settings::merge_settings_key(
+            project_dir,
+            "model",
+            serde_json::Value::from(crate::core::session_profile::SUPERVISOR_MODEL),
+        )
+    {
+        tracing::warn!("failed to set the supervisor model: {err}");
     }
 
     // Stash the EXACT text the launch path passes to

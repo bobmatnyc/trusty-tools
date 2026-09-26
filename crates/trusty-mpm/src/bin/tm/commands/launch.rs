@@ -340,7 +340,8 @@ pub(crate) async fn launch(
     // paths' default constructor at all, and matches on source text, so even a
     // comment spelling that symbol out would trip it.
     let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
-    let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
+    // #8453: a supervisor project launches on the Opus tier alias.
+    let pm_model = trusty_mpm::core::session_profile::launch_model(&managed_path, &mpm_cfg);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
     // framework was deployed at session prep). Style is not supported in managed

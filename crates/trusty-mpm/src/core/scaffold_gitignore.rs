@@ -108,6 +108,8 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/output-styles/trusty-mpm.md",
     ".claude/output-styles/trusty-mpm-teacher.md",
     ".claude/output-styles/trusty-mpm-research.md",
+    // #8453: the supervisor profile's style.
+    ".claude/output-styles/trusty-mpm-supervisor.md",
     ".claude/output-styles/*.tm-floor.md",
     ".claude/settings.json.lock",
     ".claude/settings.local.json.lock",

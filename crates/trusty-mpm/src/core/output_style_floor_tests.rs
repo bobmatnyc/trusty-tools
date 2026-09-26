@@ -57,7 +57,14 @@ fn the_bundled_styles_get_no_appended_floor() {
         let delivered = delivered_style_text(&style);
         assert_eq!(delivered, strip_frontmatter(bundled.content).trim());
         assert!(!delivered.contains(STYLE_FLOOR_HEADING), "{}", bundled.id);
-        // Each bundled style carries its own floor, once — so none needs ours.
+        // #8453: the supervisor style is bundled but is no PM style; it carries
+        // the Write Plainly section and no delegation directive.
+        if bundled.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID {
+            assert_eq!(delivered.matches(FLOOR_SECTIONS[0]).count(), 0);
+            assert_eq!(delivered.matches(FLOOR_SECTIONS[1]).count(), 1);
+            continue;
+        }
+        // Each PM style carries its own floor, once — so none needs ours.
         for heading in FLOOR_SECTIONS {
             assert_eq!(
                 delivered.matches(heading).count(),
@@ -167,8 +174,8 @@ fn every_primary_directive_states_the_four_prohibitions_and_seven_override_phras
     // state every item, and each item must be stated once, so removing any one
     // makes this test fail.
     let floor = style_floor();
-    let docs = OUTPUT_STYLES
-        .iter()
+    // #8453: every PM style; the supervisor style has no PRIMARY DIRECTIVE.
+    let docs = crate::core::bundle::pm_output_styles()
         .map(|style| (style.id, style.content))
         .chain([("project-style floor", floor.as_str())]);
     for (name, doc) in docs {

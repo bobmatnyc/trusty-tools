@@ -240,6 +240,19 @@ fn project_config_parses_style() {
     assert!(ProjectLevelConfig::from_toml("[style]\nactiv = \"x\"\n", Path::new("/p")).is_err());
 }
 
+#[test]
+fn project_config_parses_profile() {
+    // #8453: a top-level scalar; an absent key selects nothing.
+    let cfg = ProjectLevelConfig::from_toml("profile = \"supervisor\"\n", Path::new("/p")).unwrap();
+    assert_eq!(cfg.profile.as_deref(), Some("supervisor"));
+    let cfg = ProjectLevelConfig::from_toml("worktree = true\n", Path::new("/p")).unwrap();
+    assert_eq!(cfg.profile, None);
+    assert!(
+        ProjectLevelConfig::from_toml("[session]\nprofile = \"supervisor\"\n", Path::new("/p"))
+            .is_err()
+    );
+}
+
 /// An absent key declines to decide, so the host layer answers — it does NOT
 /// mean "off".
 #[test]

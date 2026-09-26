@@ -21,6 +21,8 @@
 //! | `pm-prompt-bundled-fallback.md` | no `.trusty-mpm/` override, roster present | `InstructionPackage` |
 //! | `pm-prompt-roster-absent.md` | no agent deployed in any tier | legacy assembly |
 //! | `pm-prompt-claude-md-override.md` | `CLAUDE.md` named sections (#4286) | `InstructionPackage` |
+//! | `pm-prompt-launch-with-style.md` | roster present, default style injected (#8453) | `InstructionPackage` + style |
+//! | `supervisor-prompt.md` | `profile = "supervisor"` (#8453) | `session_profile` |
 //!
 //! The second is not redundant. It is the check that a project composing through
 //! the string assembly still receives the *same* Core/Memory/Search/Workflow and
@@ -162,6 +164,39 @@ fn golden_claude_md_override_prompt() {
 
     let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_golden("pm-prompt-claude-md-override.md", &prompt);
+}
+
+#[test]
+fn golden_pm_launch_prompt_with_output_style() {
+    // #8453: the supervisor profile must leave a PM session untouched. This
+    // snapshot was written from the pre-#8453 tree: the roster-present prompt
+    // with the default output style injected ahead of it (the path a Claude
+    // Code without native `outputStyle` support takes), so it pins the PM
+    // instructions and the PM output style in one byte-exact comparison.
+    let tmp = TempDir::new().expect("tempdir");
+    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
+        tmp.path(),
+        Some(crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID),
+        prompt,
+        false,
+    );
+    assert_golden("pm-prompt-launch-with-style.md", &styled);
+}
+
+#[test]
+fn golden_supervisor_prompt() {
+    // #8453: the supervisor profile's composed instructions — what a
+    // `profile = "supervisor"` project receives in place of the PM prompt.
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .expect("write config");
+    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    assert_eq!(prompt, crate::core::session_profile::supervisor_prompt());
+    assert_golden("supervisor-prompt.md", &prompt);
 }
 
 /// The memory section as DELIVERED, or `None` when the heading is absent.

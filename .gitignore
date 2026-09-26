@@ -207,6 +207,7 @@ docs/certificates/*.mobileprovision
 .claude/output-styles/trusty-mpm.md
 .claude/output-styles/trusty-mpm-teacher.md
 .claude/output-styles/trusty-mpm-research.md
+.claude/output-styles/trusty-mpm-supervisor.md
 .claude/output-styles/*.tm-floor.md
 .trusty-mpm/sessions/
 .trusty-mpm/logs/

@@ -124,6 +124,8 @@ pub(crate) mod repair_delegation_list;
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
+// #8453: the PM delegation rules apply by session profile.
+pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;
 pub(crate) mod pm_guard_routing;
 // #7266: a line-range or partial READ of a secret-bearing file, refused for

@@ -338,6 +338,30 @@ fn staleness_ok_when_in_sync() {
 }
 
 #[test]
+fn doctor_recognises_the_supervisor_style() {
+    // #8453: the supervisor style is a bundled style — its deployed file is no
+    // orphan, and a project naming it passes the resolution check.
+    let home = tempfile::tempdir().unwrap();
+    deploy_all_styles(home.path());
+    let supervisor = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
+    assert!(
+        home.path()
+            .join(".claude/output-styles")
+            .join(format!("{supervisor}.md"))
+            .is_file()
+    );
+    let stale = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
+    assert_eq!(stale.status, CheckStatus::Ok, "message: {}", stale.message);
+
+    write_settings(
+        home.path(),
+        &format!(r#"{{"outputStyle": "{supervisor}"}}"#),
+    );
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+}
+
+#[test]
 fn staleness_warns_on_drift() {
     // This is the exact incident condition (issue #2333): PR #2328
     // corrected the bundled content, but the deployed copy never got
