@@ -95,7 +95,7 @@ async fn plain_decommission(managed_root: &Path, ws: &Path) -> bool {
 
 /// The reason a plain decommission keeps `ws`.
 fn kept(ws: &Path) -> String {
-    owned_workspace_keep_reason(ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse)
+    owned_workspace_keep_reason(ws, &ManagedSessionId::new(), None, ProvisioningDirt::Refuse)
         .expect("the workspace is kept")
 }
 
@@ -110,7 +110,12 @@ async fn ledger_excuses_only_provisioning_dirt_on_a_clone() {
     assert!(ws.join(".git").join(LEDGER_NAME).is_file(), "admin dir");
 
     assert_eq!(
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse),
+        owned_workspace_keep_reason(
+            &ws,
+            &ManagedSessionId::new(),
+            None,
+            ProvisioningDirt::Refuse
+        ),
         None
     );
     assert!(plain_decommission(&fx.repos_root, &ws).await);
@@ -200,7 +205,7 @@ fn locked_owned_worktree_is_kept_even_with_force() {
     fx.lock_worktree(&wt);
 
     for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
-        let reason = owned_workspace_keep_reason(&wt, &me, policy)
+        let reason = owned_workspace_keep_reason(&wt, &me, None, policy)
             .unwrap_or_else(|| panic!("a locked worktree is kept under {policy:?}"));
         assert!(reason.contains("locked"), "{reason}");
     }
@@ -239,7 +244,7 @@ fn owned_worktree_whose_probe_fails_is_kept() {
     let probe = worktree_kind(&wt).expect_err("precondition: the probe fails");
 
     for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
-        let reason = owned_workspace_keep_reason(&wt, &me, policy)
+        let reason = owned_workspace_keep_reason(&wt, &me, None, policy)
             .unwrap_or_else(|| panic!("a tree the probe cannot read is kept under {policy:?}"));
         assert!(reason.contains(&probe), "{reason}");
         assert!(reason.contains("nothing was removed"), "{reason}");
@@ -267,7 +272,7 @@ fn force_on_owned_worktree_of_another_session_is_kept() {
 
     for (wt, names) in [(&other, "names session"), (&agent, "agent-synthetic-8663")] {
         std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("provisioning dirt");
-        let reason = owned_workspace_keep_reason(wt, &me, ProvisioningDirt::Discard)
+        let reason = owned_workspace_keep_reason(wt, &me, None, ProvisioningDirt::Discard)
             .expect("--force is declined");
         assert!(reason.contains("--force declined"), "{reason}");
         assert!(reason.contains(names), "{reason}");
@@ -331,7 +336,12 @@ fn ledger_adopts_a_relaunch_rewrite_of_tm_or_head_bytes() {
         assert!(ledger.files.contains_key(rel), "{rel}: {ledger:?}");
     }
     assert_eq!(
-        owned_workspace_keep_reason(&ws, &ManagedSessionId::new(), ProvisioningDirt::Refuse),
+        owned_workspace_keep_reason(
+            &ws,
+            &ManagedSessionId::new(),
+            None,
+            ProvisioningDirt::Refuse
+        ),
         None
     );
 }

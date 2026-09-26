@@ -44,7 +44,7 @@ use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_work
 /// [`ProvisioningDirt::Discard`] (`--force`), when that check still finds
 /// dirt, a linked worktree must pass [`force_blocker`] for `id`, and the dirt
 /// check then also excuses tm's provisioning files as the in-project route
-/// does. Last, [`ignored_output_refusal`]. A `.git` entry git cannot resolve
+/// does, `TASK.md` only while it equals `task`, the record's task (#8688). Last, [`ignored_output_refusal`]. A `.git` entry git cannot resolve
 /// keeps it. Any other directory must hold only harness files and regenerable
 /// output ([`unversioned_content_refusal`]). Every reason names the path.
 /// Test: `owned_worktree_with_an_unpushed_commit_is_kept`,
@@ -58,6 +58,7 @@ use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_work
 pub(super) fn owned_workspace_keep_reason(
     ws: &Path,
     id: &ManagedSessionId,
+    task: Option<&str>,
     policy: ProvisioningDirt,
 ) -> Option<String> {
     if is_worktree_root(ws).unwrap_or(false) {
@@ -88,7 +89,8 @@ pub(super) fn owned_workspace_keep_reason(
         {
             return named(format!("--force declined: {blocker}; nothing was removed"));
         }
-        let excuse = |line: &str| is_provisioning_entry(ws, line) || ledgered(line);
+        // #8688: `task` decides whether `TASK.md` is tm's write.
+        let excuse = |line: &str| is_provisioning_entry(ws, task, line) || ledgered(line);
         if let Some(dirt) = inspect_dirt_excusing(ws, &excuse) {
             return named(kept_for_dirt(ws, &dirt.reason, policy, &excuse));
         }
@@ -122,11 +124,14 @@ pub(super) fn owned_workspace_keep_reason(
 /// `decommission_prunes_the_base_repo_worktree_registry`.
 pub(super) async fn remove_owned_workspace(
     id: &ManagedSessionId,
+    task: Option<&str>,
     ws: &Path,
     policy: ProvisioningDirt,
 ) -> Result<WorkspaceVerdict, ManagedError> {
     let path = ws.to_path_buf();
     let owner = *id;
+    // #8688: `TASK.md` is excused only while it equals the record's task.
+    let task = task.map(str::to_owned);
     let join = tokio::task::spawn_blocking(move || {
         let mut failure: Option<std::io::Error> = None;
         // #7885 critic round: audited like every other removal route.
@@ -134,7 +139,8 @@ pub(super) async fn remove_owned_workspace(
             &path,
             "session decommission: owned workspace, containment guard passed",
             || {
-                if let Some(reason) = owned_workspace_keep_reason(&path, &owner, policy) {
+                let task = task.as_deref();
+                if let Some(reason) = owned_workspace_keep_reason(&path, &owner, task, policy) {
                     return WorktreeRemoval::Kept(reason);
                 }
                 if policy == ProvisioningDirt::Discard {

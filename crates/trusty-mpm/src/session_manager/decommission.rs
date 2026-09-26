@@ -1080,7 +1080,9 @@ impl SessionManager {
                 if is_session_worktree(ws) {
                     // #4091/#4344 dirty gate, and #7660's --force excuse and
                     // kept reason: see `decommission_force`.
-                    let verdict = remove_in_project_worktree(id, ws, dirt_policy).await;
+                    // #8688: the record's task vouches for `TASK.md`.
+                    let task = Some(record.task.as_str());
+                    let verdict = remove_in_project_worktree(id, task, ws, dirt_policy).await;
                     workspace_removed = verdict.removed;
                     kept_reason = verdict.kept_reason;
                 } else {
@@ -1133,7 +1135,9 @@ impl SessionManager {
                     } else {
                         // #8663: dirty files, unpushed commits and kept output
                         // refuse here exactly as on every worktree route.
-                        let verdict = remove_owned_workspace(id, ws, dirt_policy).await?;
+                        // #8688: the record's task vouches for `TASK.md`.
+                        let task = Some(record.task.as_str());
+                        let verdict = remove_owned_workspace(id, task, ws, dirt_policy).await?;
                         workspace_removed = verdict.removed;
                         kept_reason = verdict.kept_reason;
                         // #5949: `remove_dir_all` is invisible to git, so the

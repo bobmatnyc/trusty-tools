@@ -8,9 +8,12 @@
 //! What: [`remove_in_project_worktree`] — the dirty-gated removal step that used
 //! to sit inline in `decommission_with_root_checked` — now returns a
 //! [`WorkspaceVerdict`] that carries WHY a workspace was kept, and honours
-//! [`ProvisioningDirt::Discard`], under which the four provisioning paths are
+//! [`ProvisioningDirt::Discard`], under which tm's provisioning writes are
 //! excused only in the exact state provisioning leaves them
-//! ([`is_provisioning_entry`]). Unpushed commits, any other modified or
+//! ([`is_provisioning_entry`]): `.gitignore`, `.claude/settings.json`,
+//! `.claude/settings.json.bak`, `CLAUDE.md`, a timestamped
+//! `.claude/settings.json.<timestamp>.bak` snapshot, and a `TASK.md` whose
+//! bytes still equal the session's task (#8688). Unpushed commits, any other modified or
 //! untracked file, an edit to a tracked provisioning path, nested-repository
 //! work, and every check that cannot complete still keep the workspace.
 //! When its excuse is needed, `--force` acts only on a linked worktree tm
@@ -20,6 +23,7 @@
 //! reason ([`unowned_kept_reason`]): a by-design note without `--force`, and a
 //! refusal that makes the CLI exit non-zero only under `--force`.
 //! Test: `force_decommission_removes_a_provisioning_only_worktree`,
+//! `force_decommission_keeps_a_task_md_edited_after_spawn`,
 //! `force_decommission_keeps_an_edited_tracked_claude_md`,
 //! `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
 //! `force_decommission_still_refuses_user_work`,
@@ -56,7 +60,8 @@ pub(crate) const PROVISIONING_FILES: [&str; 6] = [
     ".claude/settings.json.bak",
     ".claude/settings.json.<timestamp>.bak",
     "CLAUDE.md",
-    "TASK.md",
+    // #8688: excused only while it holds the task tm wrote.
+    "unedited TASK.md",
 ];
 
 /// Whether decommission may discard tm's own provisioning dirt (#7660).
@@ -111,12 +116,10 @@ pub(super) struct WorkspaceVerdict {
 /// The provisioning paths `--force` excuses only while git does not track them
 /// (#7660). A tracked one showing ` M` is an edit someone made, not a write
 /// provisioning did, so it is never excused.
-const UNTRACKED_PROVISIONING_FILES: [&str; 4] = [
+const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
     ".claude/settings.json",
     ".claude/settings.json.bak",
     "CLAUDE.md",
-    // #8688: the daemon writes the task brief here at spawn.
-    "TASK.md",
 ];
 
 /// Is this `git status --porcelain` line in `ws` one of tm's provisioning
@@ -126,18 +129,21 @@ const UNTRACKED_PROVISIONING_FILES: [&str; 4] = [
 /// whatever it excused. A repository that tracks `CLAUDE.md` shows an agent's
 /// edit to it as ` M CLAUDE.md`, and excusing that by path alone discarded it.
 /// What: the [`UNTRACKED_PROVISIONING_FILES`] and a `.claude/settings.json`
-/// snapshot ([`is_settings_snapshot`]) are excused only as `??`.
-/// `.gitignore` is excused as ` M` only when its unstaged diff adds nothing
-/// but the lines provisioning writes and removes nothing, and as `??` only
-/// when every line of it is such a line. Anything else — staged, deleted,
-/// renamed, conflicted, or an unreadable diff — is not excused.
+/// snapshot ([`is_settings_snapshot`]) are excused only as `??`. `TASK.md` is
+/// excused only as `??` and only when [`task_md_is_unedited`] against `task`,
+/// the session record's task. `.gitignore` is excused as ` M` only when its
+/// unstaged diff adds nothing but the lines provisioning writes and removes
+/// nothing, and as `??` only when every line of it is such a line. Anything
+/// else — staged, deleted, renamed, conflicted, or an unreadable diff — is not
+/// excused.
 /// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`,
 /// `provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked`,
+/// `provisioning_entry_excuses_task_md_only_when_it_equals_the_session_task`,
 /// `force_decommission_keeps_an_edited_tracked_claude_md`,
 /// `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
 /// `force_decommission_removes_a_tree_with_an_untracked_scaffold_gitignore`,
 /// `force_decommission_keeps_an_untracked_gitignore_with_a_user_line`.
-pub(crate) fn is_provisioning_entry(ws: &Path, line: &str) -> bool {
+pub(crate) fn is_provisioning_entry(ws: &Path, task: Option<&str>, line: &str) -> bool {
     let (Some(status), Some(path)) = (line.get(..3), line.get(3..)) else {
         return false;
     };
@@ -146,9 +152,35 @@ pub(crate) fn is_provisioning_entry(ws: &Path, line: &str) -> bool {
         (" M ", ".gitignore") => gitignore_diff_is_provisioning(ws),
         ("?? ", ".gitignore") => std::fs::read_to_string(ws.join(".gitignore"))
             .is_ok_and(|body| body.lines().all(is_provisioning_gitignore_line)),
+        // #8688: agents may write to `TASK.md`, so it is checked by content.
+        ("?? ", TASK_MD) => task_md_is_unedited(ws, task),
         ("?? ", path) => UNTRACKED_PROVISIONING_FILES.contains(&path) || is_settings_snapshot(path),
         _ => false,
     }
+}
+
+/// The task brief the daemon writes at spawn (`write_task_md`, #1693).
+const TASK_MD: &str = "TASK.md";
+
+/// Whether `ws/TASK.md` still holds exactly the bytes tm wrote there (#8688).
+///
+/// Why: PMs and agents are told they may write to `TASK.md`, and `--force`
+/// deletes whatever it excuses, so excusing it by path lost their notes.
+/// What: `task` is the session record's task, which `write_task_md` writes
+/// verbatim. True only when `task` is non-empty, `TASK.md` is a regular file,
+/// and its bytes equal `task`. No record, an empty task, an unreadable file or
+/// any byte difference is `false`, so the file keeps the worktree.
+/// Test: `provisioning_entry_excuses_task_md_only_when_it_equals_the_session_task`,
+/// `force_decommission_keeps_a_task_md_edited_after_spawn`,
+/// `force_decommission_keeps_a_task_md_without_a_session_task`,
+/// `force_decommission_removes_a_worktree_holding_task_md_and_a_settings_snapshot`.
+fn task_md_is_unedited(ws: &Path, task: Option<&str>) -> bool {
+    let Some(task) = task.filter(|task| !task.is_empty()) else {
+        return false;
+    };
+    let path = ws.join(TASK_MD);
+    std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+        && std::fs::read(&path).is_ok_and(|bytes| bytes == task.as_bytes())
 }
 
 /// Whether the repo-relative `path` is a `.claude/settings.json` snapshot the
@@ -245,16 +277,19 @@ pub(super) fn gitignore_diff_only_adds(ws: &Path, accept: &dyn Fn(&str) -> bool)
 /// What: runs [`keep_reason`] on a blocking thread — a plain dirt check, and
 /// only when that finds dirt under [`ProvisioningDirt::Discard`],
 /// [`force_blocker`] then [`inspect_dirt_excusing`] with
-/// [`is_provisioning_entry`]. Any dirt, a blocker, a
+/// [`is_provisioning_entry`], which checks `TASK.md` against `task`, the
+/// session record's task (`None` without a record). Any dirt, a blocker, a
 /// panicked check or a failed check keeps the worktree and returns the reason;
 /// a clean answer removes it through [`remove_session_worktree_guarded`]. Under
 /// `Discard` its guard re-asks the same questions immediately before
 /// `git worktree remove --force`. An absent path is neither removed nor kept.
 /// Test: `force_decommission_removes_a_provisioning_only_worktree`,
 /// `force_decommission_removes_nothing_when_the_dirty_check_cannot_complete`,
-/// `decommission_reports_why_it_kept_a_provisioned_worktree`.
+/// `decommission_reports_why_it_kept_a_provisioned_worktree`,
+/// `force_decommission_keeps_a_task_md_edited_after_spawn`.
 pub(super) async fn remove_in_project_worktree(
     id: &ManagedSessionId,
+    task: Option<&str>,
     ws: &Path,
     policy: ProvisioningDirt,
 ) -> WorkspaceVerdict {
@@ -264,12 +299,17 @@ pub(super) async fn remove_in_project_worktree(
     }
     let ws_for_check = ws.to_path_buf();
     let owner = *id;
-    let kept = tokio::task::spawn_blocking(move || keep_reason(&ws_for_check, &owner, policy))
-        .await
-        .unwrap_or_else(|e| {
-            // Fail-safe: a panicked check is dirty, never a green light.
-            Some(format!("the dirty-tree check panicked: {e}"))
-        });
+    // #8688: both checks compare `TASK.md` with the task tm wrote.
+    let task_for_check = task.map(str::to_owned);
+    let task_for_guard = task_for_check.clone();
+    let kept = tokio::task::spawn_blocking(move || {
+        keep_reason(&ws_for_check, &owner, task_for_check.as_deref(), policy)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // Fail-safe: a panicked check is dirty, never a green light.
+        Some(format!("the dirty-tree check panicked: {e}"))
+    });
     if let Some(reason) = kept {
         warn!(
             id = %id, workspace = %ws.display(), reason = %reason,
@@ -288,7 +328,9 @@ pub(super) async fn remove_in_project_worktree(
         // dirt — inside the audit window; the default path is unchanged.
         let guard = || match policy {
             ProvisioningDirt::Refuse => None,
-            ProvisioningDirt::Discard => keep_reason(&ws_clone, &owner, policy),
+            ProvisioningDirt::Discard => {
+                keep_reason(&ws_clone, &owner, task_for_guard.as_deref(), policy)
+            }
         };
         // #7885: name the route in the audit line.
         remove_session_worktree_guarded(
@@ -326,11 +368,18 @@ pub(super) async fn remove_in_project_worktree(
 /// Only when `--force`'s excuse is needed does [`force_blocker`] run: it acts
 /// only on a worktree tm provably created and nothing locks. Then the dirt
 /// `policy` does not excuse keeps it, named file by file. `id` is the session
-/// being decommissioned.
+/// being decommissioned and `task` its record's task, which `TASK.md` must
+/// still equal to be excused (#8688).
 /// Test: `force_decommission_is_never_stricter_than_plain_on_a_clean_tree`,
 /// `force_decommission_keeps_a_worktree_without_the_sentinel`,
-/// `decommission_refusal_count_matches_the_entries_it_lists`.
-fn keep_reason(ws: &Path, id: &ManagedSessionId, policy: ProvisioningDirt) -> Option<String> {
+/// `decommission_refusal_count_matches_the_entries_it_lists`,
+/// `force_decommission_keeps_a_task_md_edited_after_spawn`.
+fn keep_reason(
+    ws: &Path,
+    id: &ManagedSessionId,
+    task: Option<&str>,
+    policy: ProvisioningDirt,
+) -> Option<String> {
     // #8688: counted per file, as `kept_for_dirt` lists them — a collapsed
     // `?? .claude/` counted one entry where the list named three.
     let nothing = |_: &str| false;
@@ -341,14 +390,14 @@ fn keep_reason(ws: &Path, id: &ManagedSessionId, policy: ProvisioningDirt) -> Op
     if let Some(blocker) = force_blocker(ws, id) {
         return Some(format!("--force declined: {blocker}; nothing was removed"));
     }
-    let excuse = |line: &str| is_provisioning_entry(ws, line);
+    let excuse = |line: &str| is_provisioning_entry(ws, task, line);
     inspect_dirt_excusing(ws, &excuse).map(|d| kept_for_dirt(ws, &d.reason, policy, &excuse))
 }
 
 /// The untracked provisioning files `--force` excuses by path alone, never by
 /// content, so an edit to one is lost with the worktree. See #8540.
-// #8688: `TASK.md` joined the path-only excuse, so the warning names it too.
-const CONTENT_UNCHECKED_FILES: [&str; 3] = [".claude/settings.json", "CLAUDE.md", "TASK.md"];
+// #8688: `TASK.md` is content-checked (`task_md_is_unedited`), so not listed.
+const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"];
 
 /// The operator-facing reason a dirty worktree was kept (#7660).
 ///
