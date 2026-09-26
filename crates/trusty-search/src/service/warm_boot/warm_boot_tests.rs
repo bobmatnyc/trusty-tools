@@ -818,3 +818,49 @@ fn stuck_mid_walk_and_stuck_unwalked_partition_the_in_progress_lane() {
         }
     }
 }
+
+/// #8134: the classifier reads semantic `Ready` off the snapshot alone, so the
+/// guard must fail it when the corpus is empty and vectors exist — and touch
+/// nothing else.
+#[test]
+fn orphaned_vectors_over_an_empty_corpus_fail_the_semantic_stage() {
+    use crate::core::registry::StageStatus;
+    use crate::service::warm_boot::fail_semantic_over_empty_corpus;
+
+    let classify = |chunk_count| {
+        derive_warm_boot_stages(WarmBootInputs {
+            chunk_count,
+            hnsw_snapshot_ready: true,
+            graph_node_count: 0,
+            lexical_only: false,
+            skip_kg: false,
+            skip_vector: false,
+            corpus_open_failure: None,
+        })
+    };
+    let mut orphaned = classify(0);
+    assert_eq!(orphaned.semantic.status, StageStatus::Ready, "precondition");
+    assert!(fail_semantic_over_empty_corpus(&mut orphaned, 0, 42));
+    assert_eq!(orphaned.semantic.status, StageStatus::Failed);
+    assert!(orphaned
+        .semantic
+        .failure
+        .as_deref()
+        .is_some_and(|r| r.contains("42 vectors") && r.contains("0 chunks")));
+
+    // A populated corpus, or no vectors at all, is left exactly as classified.
+    for (chunks, vectors) in [(3, 42), (0, 0)] {
+        let mut stages = classify(chunks);
+        assert!(!fail_semantic_over_empty_corpus(
+            &mut stages,
+            chunks,
+            vectors
+        ));
+        assert_eq!(
+            stages.semantic.status,
+            StageStatus::Ready,
+            "chunks={chunks} vectors={vectors}"
+        );
+        assert!(stages.semantic.failure.is_none());
+    }
+}

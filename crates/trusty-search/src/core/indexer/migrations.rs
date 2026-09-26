@@ -22,7 +22,7 @@
 //! integration tests; the runner contract itself is unit-tested in
 //! `trusty-common::migrations`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use trusty_common::migrations::{Migration, SchemaVersion};
 
@@ -61,10 +61,14 @@ pub const TRUSTY_SEARCH_SCHEMA_TARGET: SchemaVersion = SchemaVersion(1);
 /// the genuine first-boot case and yields `Ok(())` — the stamp still moves
 /// to v1 so subsequent boots skip this step entirely. #7923: a corrupt
 /// snapshot, no wired corpus store, or a failed or short redb write yields
-/// `Err`, so the stamp stays put and the next boot retries.
-/// Test: end-to-end coverage lives in
-/// `service::persistence_loader`-driven integration tests; the runner-skip
-/// semantics are unit-tested in `trusty-common::migrations`.
+/// `Err`, so the stamp stays put and the next boot retries. #8134: a durable
+/// corpus that already holds rows is never written over, and a snapshot that
+/// seeded redb is renamed to `chunks.json.migrated`, so an index emptied later
+/// does not re-import it on every boot.
+/// Test: `tests/migration_zero_row_8134.rs`
+/// (`a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty`,
+/// `a_v1_stamp_never_imports_over_rows_the_load_could_not_decode`); the
+/// runner-skip semantics are unit-tested in `trusty-common::migrations`.
 pub struct JsonCorpusToRedbMigration;
 
 impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
@@ -77,16 +81,10 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
     }
 
     fn apply(&self, indexer: &CodeIndexer) -> Result<()> {
-        let index_id = indexer.index_id.clone();
-        let chunks_path = match persistence::chunks_path(&index_id) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "migrations: cannot resolve chunks.json path for '{index_id}' ({e}) — \
-                     skipping legacy JSON load"
-                );
-                return Ok(());
-            }
+        // #8134: read the snapshot where THIS index's artifacts live, not only
+        // where the global layout would have put it.
+        let Some(chunks_path) = legacy_snapshot_source(indexer) else {
+            return Ok(());
         };
 
         // Bridge the sync runner into the existing async migration helpers.
@@ -96,7 +94,7 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
         // we spawn a fresh worker thread that hosts its own block_on call so
         // we never deadlock the calling runtime.
         let handle = tokio::runtime::Handle::current();
-        match handle.runtime_flavor() {
+        let seeded = match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
                 // We can't `block_in_place` on a current-thread runtime; the
                 // safe pattern is to hand the async work off to a fresh
@@ -107,6 +105,83 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
             _ => tokio::task::block_in_place(|| {
                 handle.block_on(run_migration_async(indexer, &chunks_path))
             }),
+        }?;
+        // #8134: only a snapshot that seeded redb is retired; every failure
+        // above has already returned with the file untouched (#7923).
+        if seeded > 0 {
+            retire_snapshot(&chunks_path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Rename a snapshot that redb supersedes to `<name>.migrated` (#8134).
+///
+/// Why: nothing refreshes a colocated `chunks.json`. Left in place, an index
+/// emptied later by a reindex re-imported the old snapshot on every restart.
+/// What: renames in place. Called after the snapshot seeded redb, and at warm
+/// boot for a snapshot left beside an already-populated redb. A failed rename
+/// is `Err` naming both paths, so the caller records a fault instead of
+/// leaving a live snapshot unreported.
+/// Test: `a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty`,
+/// `a_stale_snapshot_beside_a_populated_corpus_is_retired`,
+/// `a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing`.
+pub(crate) fn retire_snapshot(chunks_path: &std::path::Path) -> Result<()> {
+    let mut name = chunks_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".migrated");
+    let retired = chunks_path.with_file_name(name);
+    std::fs::rename(chunks_path, &retired).with_context(|| {
+        format!(
+            "legacy snapshot {} is superseded by redb but could not be renamed to {}; \
+             while it stays, an emptied corpus re-imports it — remove or rename it to clear this \
+             fault (#8134)",
+            chunks_path.display(),
+            retired.display()
+        )
+    })?;
+    tracing::info!(
+        "migrations: retired legacy snapshot {} -> {}",
+        chunks_path.display(),
+        retired.display()
+    );
+    Ok(())
+}
+
+/// Resolve the legacy `chunks.json` that belongs to THIS index (#8134).
+///
+/// Why: `persistence::chunks_path` names the GLOBAL data dir and nothing else.
+/// A colocated index (issue #403) keeps every other artifact — `index.redb`,
+/// `hnsw.usearch`, `schema_version.json` — under `<root>/.trusty-search/`, and
+/// its `chunks.json` sits there too; reading only the global path stamped v1
+/// over a populated snapshot that was then never read again. The probe is
+/// gated on the registry layout (#8438): a `DataDir` index sharing a root with
+/// a colocated one must never import that index's chunks.
+/// What: `Colocated` → `<root>/.trusty-search/chunks.json` when it exists as a
+/// file, else the global path; `DataDir` → the global path only. `None` when
+/// no candidate exists — the real first boot — or when the global path cannot
+/// be resolved.
+/// Test: `colocated_snapshot_is_the_resolved_source`,
+/// `legacy_global_snapshot_is_still_resolved_and_absence_is_none`,
+/// `data_dir_index_ignores_a_foreign_colocated_snapshot`.
+pub(crate) fn legacy_snapshot_source(indexer: &CodeIndexer) -> Option<std::path::PathBuf> {
+    use crate::service::storage_layout::StorageLayout;
+    if indexer.storage_layout() == StorageLayout::Colocated {
+        let colocated =
+            crate::service::colocated_storage::colocated_chunks_path(&indexer.root_path);
+        if colocated.is_file() {
+            return Some(colocated);
+        }
+    }
+    match persistence::chunks_path(&indexer.index_id) {
+        Ok(p) if p.is_file() => Some(p),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                "migrations: cannot resolve chunks.json path for '{}' ({e}) — \
+                 skipping legacy JSON load",
+                indexer.index_id
+            );
+            None
         }
     }
 }
@@ -116,15 +191,20 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
 /// Why: extracted into its own function so the two runtime-flavour bridges
 /// (`block_in_place` for the multi-threaded path, off-thread runtime for
 /// the current-thread path) can share one implementation.
-/// What: returns `Ok(())` on success (including the "no JSON file" fresh
-/// install case). #7923: returns `Err` — so the runner does not stamp v1 and
-/// the next boot retries — when no corpus store is wired, the snapshot is
-/// unreadable or corrupt, or the redb write fails or comes up short. The
-/// snapshot file is never modified.
+/// What: returns the number of chunks seeded (0 for an empty snapshot). #7923:
+/// returns `Err` — so the runner does not stamp v1 and the next boot retries —
+/// when no corpus store is wired, the snapshot is unreadable or corrupt, or
+/// the redb write fails or comes up short. #8134: also `Err`, before anything
+/// is read into memory, when the durable corpus already holds rows or its
+/// count cannot be read. The snapshot file is never modified here.
 /// Test: `tests::json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids`,
 /// `json_migration_fails_on_corrupt_snapshot_and_keeps_it`,
-/// `json_migration_fails_without_a_corpus_store_and_keeps_snapshot`.
-async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<()> {
+/// `json_migration_fails_without_a_corpus_store_and_keeps_snapshot`,
+/// `json_migration_refuses_a_populated_durable_corpus`.
+async fn run_migration_async(
+    indexer: &CodeIndexer,
+    chunks_path: &std::path::Path,
+) -> Result<usize> {
     // #7923: "success" with no store to seed stamped v1, so the snapshot was
     // never read again once the store did open.
     anyhow::ensure!(
@@ -135,10 +215,22 @@ async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Pat
         indexer.corpus_open_failed,
         chunks_path.display()
     );
+    // #8134: never import over rows the load did not restore. Checked before
+    // the read, so a refusal leaves nothing stale in memory either.
+    ensure_durable_corpus_empty(indexer, chunks_path)?;
     // Step 1: read the JSON snapshot. Missing → nothing to do; corrupt → Err.
-    let loaded = indexer.restore_chunk_snapshot(chunks_path).await?;
+    let loaded = indexer
+        .restore_chunk_snapshot(chunks_path)
+        .await
+        .with_context(|| {
+            format!(
+                "legacy snapshot {} could not be imported — remove or rename it to \
+                 clear this fault (#8134)",
+                chunks_path.display()
+            )
+        })?;
     if loaded.restored == 0 {
-        return Ok(());
+        return Ok(0);
     }
     tracing::info!(
         "migrations: '{}' loaded {} chunks from legacy {} ({} duplicate-id entries \
@@ -149,7 +241,36 @@ async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Pat
         loaded.duplicate_ids
     );
     // Step 2: seed redb; a failed or short write fails the step (#7923).
-    indexer.migrate_corpus_to_redb().await?;
+    indexer.migrate_corpus_to_redb().await
+}
+
+/// Refuse the import unless the durable corpus holds no rows (#8134).
+///
+/// Why: a corpus whose rows this build cannot decode loads as 0 chunks, and
+/// the snapshot's `path:start:end` ids would overwrite those rows.
+/// What: `Err` naming the snapshot when the row count is non-zero or cannot be
+/// read; `Ok` when the store is empty.
+/// Test: `json_migration_refuses_a_populated_durable_corpus`.
+fn ensure_durable_corpus_empty(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<()> {
+    let corpus = indexer
+        .corpus_store()
+        .context("no durable corpus store is wired")?;
+    let rows = corpus.chunk_count().with_context(|| {
+        format!(
+            "index '{}': cannot count the durable corpus rows — refusing to import \
+             legacy snapshot {} (#8134)",
+            indexer.index_id,
+            chunks_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        rows == 0,
+        "index '{}': the durable corpus holds {rows} chunk rows that the load did not \
+         restore — refusing to import legacy snapshot {} over them (#8134). Reindex to \
+         rebuild the corpus, or remove or rename the snapshot to clear this fault.",
+        indexer.index_id,
+        chunks_path.display()
+    );
     Ok(())
 }
 
@@ -168,12 +289,12 @@ async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Pat
 /// Test: exercised by the trusty-search lib tests that build the
 /// persistence loader on a current-thread runtime
 /// (`create_index_accepts_valid_absolute_root_path` et al.).
-fn run_migration_off_thread(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<()> {
+fn run_migration_off_thread(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<usize> {
     // The migration body needs `&CodeIndexer` and `&Path` — both Send +
     // Sync. We can borrow across the thread boundary via `std::thread::scope`
     // so no `'static` clones are required.
     std::thread::scope(|s| {
-        let handle = s.spawn(|| -> Result<()> {
+        let handle = s.spawn(|| -> Result<usize> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -267,7 +388,7 @@ mod tests {
             report,
             crate::core::indexer::SnapshotRestore {
                 restored: 4,
-                duplicate_ids: 1
+                duplicate_ids: 1,
             }
         );
     }
@@ -331,6 +452,164 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(indexer.chunk_count(), 1, "the in-memory corpus stays live");
+    }
+
+    /// Content of the durable row `id`.
+    fn durable_content(corpus: &CorpusStore, id: &str) -> Option<String> {
+        corpus
+            .get_chunks(&[id])
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|c| c.content)
+    }
+
+    /// Why (#8134): the snapshot's ids overwrite any durable row they share.
+    /// What: a store holding a current `a` and a snapshot carrying a stale `a`
+    /// — the import is refused before the read, so nothing reaches memory, the
+    /// row keeps its content, and the snapshot is untouched.
+    /// Test: this test.
+    #[tokio::test]
+    async fn json_migration_refuses_a_populated_durable_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn stale() {}")]);
+        let before = std::fs::read(&path).unwrap();
+        let (indexer, corpus) = indexer_with_corpus(dir.path());
+        corpus
+            .upsert_batch(&[chunk("a", "fn current() {}")], &[])
+            .unwrap();
+
+        let err = run_migration_async(&indexer, &path)
+            .await
+            .expect_err("#8134: a populated store must refuse the import");
+        assert!(err.to_string().contains("refusing to import"), "{err:#}");
+        assert_eq!(indexer.chunk_count(), 0, "nothing stale reaches memory");
+        assert_eq!(
+            durable_content(&corpus, "a").as_deref(),
+            Some("fn current() {}")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "snapshot untouched");
+    }
+
+    /// #8134: `migrate_corpus_to_redb` re-reads the durable count at the write
+    /// and refuses to overwrite a populated store, independent of the guard
+    /// `run_migration_async` applies before the read.
+    #[tokio::test]
+    async fn migrate_corpus_to_redb_never_overwrites_a_populated_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn stale() {}")]);
+        let (indexer, corpus) = indexer_with_corpus(dir.path());
+        assert_eq!(indexer.load_chunks_from_disk(&path).await.unwrap(), 1);
+        corpus
+            .upsert_batch(&[chunk("a", "fn current() {}")], &[])
+            .unwrap();
+
+        let err = indexer
+            .migrate_corpus_to_redb()
+            .await
+            .expect_err("#8134: a populated store must not be overwritten");
+        assert!(format!("{err:#}").contains("refusing to"), "{err:#}");
+        assert_eq!(
+            durable_content(&corpus, "a").as_deref(),
+            Some("fn current() {}")
+        );
+    }
+
+    // ── #8134: the snapshot source follows the registry layout ───────────────
+
+    /// Why (#8134): a colocated index keeps its `chunks.json` beside
+    /// `index.redb`, and the migration only ever looked in the global data dir.
+    /// What: with a snapshot under `<root>/.trusty-search/`, that file is the
+    /// resolved source.
+    /// Test: this test.
+    #[test]
+    fn colocated_snapshot_is_the_resolved_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let colocated = dir.path().join(".trusty-search");
+        std::fs::create_dir_all(&colocated).unwrap();
+        let path = colocated.join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn a() {}")]);
+
+        let indexer = CodeIndexer::new("colocated-8134", dir.path())
+            .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
+        assert_eq!(legacy_snapshot_source(&indexer).as_deref(), Some(&*path));
+    }
+
+    /// Restore `TRUSTY_DATA_DIR` when the test that pinned it ends.
+    ///
+    /// Why: the variable is process-global, so a test that leaves it pointing
+    /// at a deleted temp dir breaks every later test in this binary. Mirrors
+    /// the guard `tests::snapshot_guard_7920` uses for the same variable.
+    struct RestoreDataDir(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreDataDir {
+        fn drop(&mut self) {
+            // SAFETY: dropped inside the same #[serial] span that set it.
+            match self.0.take() {
+                Some(v) => unsafe { std::env::set_var("TRUSTY_DATA_DIR", v) },
+                None => unsafe { std::env::remove_var("TRUSTY_DATA_DIR") },
+            }
+        }
+    }
+
+    /// Why (#8134): the colocated probe must not cost a legacy index its own
+    /// snapshot — the global path stays the fallback.
+    /// What: with no colocated file, resolution falls through to
+    /// `persistence::chunks_path`, and `None` only when neither exists.
+    /// Test: this test covers both, under a pinned `TRUSTY_DATA_DIR`.
+    #[test]
+    #[serial_test::serial]
+    fn legacy_global_snapshot_is_still_resolved_and_absence_is_none() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Declared after `data_dir`, so the variable is restored before the
+        // directory it names is removed.
+        let _restore = RestoreDataDir(std::env::var_os("TRUSTY_DATA_DIR"));
+        // SAFETY: #[serial] excludes every other #[serial] test for this span.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+
+        let root = tempfile::tempdir().unwrap();
+        let indexer = CodeIndexer::new("global-8134", root.path());
+        assert_eq!(
+            legacy_snapshot_source(&indexer),
+            None,
+            "no snapshot in either location resolves to None — the real first boot"
+        );
+
+        let global = persistence::chunks_path("global-8134").unwrap();
+        write_snapshot(&global, &[chunk("a", "fn a() {}")]);
+        assert_eq!(legacy_snapshot_source(&indexer).as_deref(), Some(&*global));
+    }
+
+    /// Why (#8134, #8438): the registry decides layout, not the disk. A
+    /// `DataDir` index sharing its root with a colocated index must not adopt
+    /// that index's `<root>/.trusty-search/chunks.json` — the import would be
+    /// stamped v1 and the contamination made permanent.
+    /// What: a `DataDir` indexer whose root holds a foreign colocated snapshot
+    /// and whose own global path holds nothing resolves to `None`.
+    /// Test: this test; the end-to-end "imports nothing" arm is
+    /// `data_dir_index_does_not_import_a_colocated_neighbours_snapshot`.
+    #[test]
+    #[serial_test::serial]
+    fn data_dir_index_ignores_a_foreign_colocated_snapshot() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os("TRUSTY_DATA_DIR"));
+        // SAFETY: #[serial] excludes every other #[serial] test for this span.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+
+        let root = tempfile::tempdir().unwrap();
+        let foreign = root.path().join(".trusty-search");
+        std::fs::create_dir_all(&foreign).unwrap();
+        write_snapshot(&foreign.join("chunks.json"), &[chunk("a", "fn a() {}")]);
+
+        let indexer = CodeIndexer::new("docs-8134", root.path())
+            .with_storage_layout(crate::service::storage_layout::StorageLayout::DataDir);
+        assert_eq!(
+            legacy_snapshot_source(&indexer),
+            None,
+            "#8438: a DataDir index must never read the colocated neighbour's snapshot"
+        );
     }
 
     /// #7923: a store holding fewer rows than were migrated fails the step.

@@ -542,9 +542,11 @@ impl CodeIndexer {
     /// What: snapshots the current in-memory `chunks` + `entities` under read
     /// locks, writes them to the `CorpusStore` in one transaction on a blocking
     /// worker, and returns the migrated count. `Err` when no store is wired,
-    /// the write fails, or redb then holds fewer rows than were migrated.
+    /// the store already holds rows (#8134), the write fails, or redb then
+    /// holds fewer rows than were migrated.
     /// Test: `tests::branch_and_corpus::test_corpus_store_migrates_from_json`,
     /// `migrations::tests::migrate_corpus_to_redb_without_a_store_is_an_error`,
+    /// `migrations::tests::migrate_corpus_to_redb_never_overwrites_a_populated_store`,
     /// `migrations::tests::ensure_all_migrated_rejects_a_short_write`.
     pub async fn migrate_corpus_to_redb(&self) -> Result<usize> {
         let corpus = self.corpus.clone().with_context(|| {
@@ -569,6 +571,14 @@ impl CodeIndexer {
         // Issue #29: write chunks + entities in one atomic redb transaction so
         // a crash mid-migration never leaves the two tables inconsistent.
         let stored = tokio::task::spawn_blocking(move || -> Result<usize> {
+            // #8134: a migration seeds an empty store. Re-read the durable
+            // count at the write itself, so no id can overwrite a live row.
+            let existing = corpus.chunk_count()?;
+            anyhow::ensure!(
+                existing == 0,
+                "the durable corpus already holds {existing} chunk rows — refusing to \
+                 overwrite them from a legacy snapshot (#8134)"
+            );
             corpus.upsert_batch(&chunks, &entities)?;
             corpus.chunk_count()
         })

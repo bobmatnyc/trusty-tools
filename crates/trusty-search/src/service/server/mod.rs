@@ -107,6 +107,9 @@ mod tests_8438;
 // #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
 #[cfg(test)]
 mod tests_8148;
+// #8134: vectors restored over an empty corpus never register as ready.
+#[cfg(test)]
+mod tests_8134;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

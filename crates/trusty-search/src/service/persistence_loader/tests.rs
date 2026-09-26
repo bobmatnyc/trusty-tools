@@ -868,3 +868,136 @@ async fn failed_json_to_redb_migration_is_recorded_on_the_indexer() {
         "#7923: the snapshot must still be on disk, byte-identical"
     );
 }
+
+// ── Issue #8134: no migration runs over a corpus whose load failed ─────────
+
+/// #8134 regression: a failed redb load never imports the legacy snapshot.
+///
+/// Why: a load that errs on a populated redb (#6043, #5917) leaves 0 chunks
+/// in memory. Keyed on that count, the recovery imported the stale snapshot
+/// and overwrote the current rows that share its ids, with no fault recorded.
+/// What: a colocated index whose durable store holds a current `a`, with a
+/// snapshot carrying a stale `a`, is handed a failed load. Nothing reaches
+/// memory, the durable row keeps its content, the snapshot is untouched, and a
+/// `json_to_redb` fault names the snapshot and the load error.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_failed_redb_load_never_imports_and_records_a_fault() {
+    let root = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
+    let snapshot = colocated_storage::colocated_chunks_path(root.path());
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    let mut stale = minimal_raw_chunk("a");
+    stale.content = "fn stale() {}".to_string();
+    let json = serde_json::json!({ "version": 1, "chunks": [stale], "entities": [] });
+    std::fs::write(&snapshot, serde_json::to_vec(&json).unwrap()).unwrap();
+    let before = std::fs::read(&snapshot).unwrap();
+
+    let corpus = Arc::new(CorpusStore::open(&store_dir.path().join("index.redb")).unwrap());
+    corpus.upsert_batch(&[minimal_raw_chunk("a")], &[]).unwrap();
+    let mut indexer = CodeIndexer::new("failed-load-8134", root.path())
+        .with_storage_layout(StorageLayout::Colocated);
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let entry = PersistedIndex {
+        id: "failed-load-8134".to_string(),
+        root_path: root.path().to_path_buf(),
+        colocated: true,
+        ..Default::default()
+    };
+
+    migrate_after_redb_load(
+        &mut indexer,
+        &entry,
+        Err(anyhow::anyhow!("simulated redb read failure")),
+    );
+
+    assert_eq!(indexer.chunk_count(), 0, "nothing stale reaches memory");
+    let rows = corpus.get_chunks(&["a"]).unwrap();
+    assert_eq!(
+        rows.first().map(|c| c.content.as_str()),
+        Some("fn hello() {}"),
+        "#8134: the current durable row must keep its content"
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).unwrap(),
+        before,
+        "snapshot untouched"
+    );
+    let faults = indexer.migration_faults();
+    assert_eq!(faults.len(), 1, "a refused import is a recorded fault");
+    assert_eq!(
+        faults[0].stage,
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB
+    );
+    let detail = &faults[0].detail;
+    assert!(
+        detail.contains("simulated redb read failure")
+            && detail.contains(&snapshot.display().to_string()),
+        "the fault must name the load error and the snapshot, got: {detail}"
+    );
+}
+
+/// #8134 round 4: a snapshot beside a populated corpus that cannot be retired
+/// is a recorded fault, and nothing else changes.
+///
+/// Why: a failed rename leaves a live snapshot that a later empty corpus would
+/// re-import; left unreported, that re-import is silent.
+/// What: a colocated index with a current `a` in redb and a stale snapshot
+/// beside it, whose retire target `chunks.json.migrated` is a non-empty
+/// directory, so the rename fails on every unix even as root. The restore
+/// serves the redb row, keeps the durable row and the snapshot byte-identical,
+/// and records one `json_to_redb` fault naming the snapshot.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing() {
+    let root = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
+    let snapshot = colocated_storage::colocated_chunks_path(root.path());
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    let mut stale = minimal_raw_chunk("a");
+    stale.content = "fn stale() {}".to_string();
+    let json = serde_json::json!({ "version": 1, "chunks": [stale], "entities": [] });
+    std::fs::write(&snapshot, serde_json::to_vec(&json).unwrap()).unwrap();
+    let before = std::fs::read(&snapshot).unwrap();
+    let blocker = snapshot.with_file_name("chunks.json.migrated");
+    std::fs::create_dir_all(blocker.join("occupied")).unwrap();
+
+    let corpus = Arc::new(CorpusStore::open(&store_dir.path().join("index.redb")).unwrap());
+    corpus.upsert_batch(&[minimal_raw_chunk("a")], &[]).unwrap();
+    let mut indexer = CodeIndexer::new("failed-retire-8134", root.path())
+        .with_storage_layout(StorageLayout::Colocated);
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let entry = PersistedIndex {
+        id: "failed-retire-8134".to_string(),
+        root_path: root.path().to_path_buf(),
+        colocated: true,
+        ..Default::default()
+    };
+
+    restore_corpus_for_entry(&mut indexer, &entry).await;
+
+    assert_eq!(indexer.chunk_count(), 1, "the redb row is served");
+    let rows = corpus.get_chunks(&["a"]).unwrap();
+    assert_eq!(
+        rows.first().map(|c| c.content.as_str()),
+        Some("fn hello() {}"),
+        "#8134: the durable row keeps its content"
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).unwrap(),
+        before,
+        "snapshot untouched"
+    );
+    assert!(blocker.join("occupied").is_dir(), "retire target untouched");
+    let faults = indexer.migration_faults();
+    assert_eq!(faults.len(), 1, "a failed retire is a recorded fault");
+    assert_eq!(
+        faults[0].stage,
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB
+    );
+    let detail = &faults[0].detail;
+    assert!(
+        detail.contains("could not be renamed") && detail.contains(&snapshot.display().to_string()),
+        "the fault must name the snapshot and the failed rename, got: {detail}"
+    );
+}
