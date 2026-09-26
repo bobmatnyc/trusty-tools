@@ -88,6 +88,12 @@ set, or through the store. Do not invent a substitute: `export
 KEY=$(something)` puts the value in a variable your own turn can echo, and a
 value in argv is visible in `ps` to every process on the host.
 
+A credential CLI (`security … -w`, `gcloud auth print-access-token`) is the one
+inline form: consume its output inside the command that needs it — a pipe to a
+stdin reader (`… | docker login --password-stdin …`), or `$(…)` in the one
+argument that needs it when the program takes no stdin. Never assign it to a
+variable first (#8596, #8248).
+
 ## Never
 
 - Never print a resolved secret value — to the transcript, a log line, a hook

@@ -52,6 +52,11 @@ fn denies_the_reported_leaks() {
             "$(gcloud auth print-access-token)",
             "cat <<< \"$(gcloud auth print-access-token)\"",
             "gcloud auth print-access-token | xargs echo",
+            // #8596 finding 10 narrows xargs to printing programs only.
+            "gcloud auth print-access-token | xargs -I{} echo {}",
+            "gcloud auth print-access-token | xargs -I{} sh -c 'echo {}'",
+            "gcloud auth print-access-token | xargs -I{} {}",
+            "gcloud auth print-access-token | xargs",
             "bash -c 'gcloud auth print-access-token'",
             "sh -c \"security find-generic-password -s fake-svc -w\" | head",
             "X=$(echo \"$(gcloud auth print-access-token)\" | head -c 5); echo hi; gcloud auth print-access-token",
@@ -90,6 +95,150 @@ fn allows_the_capturing_forms() {
             "gcloud auth list",
         ],
     );
+}
+
+/// #8596 round 2: every bypass the code-critic found. Each row was allowed at
+/// f61a451ae.
+#[test]
+fn denies_the_round_two_bypasses() {
+    check(
+        true,
+        &[
+            // 1: a `<(…)` file is printed by any reader.
+            "head -c 8 <(security find-generic-password -s fake-svc -w)",
+            "diff <(gcloud auth print-access-token) want.txt",
+            "sort < <(gcloud auth print-access-token)",
+            // 2: a substitution the outer shell lifted, inside a wrapper.
+            "bash -c \"echo $(gcloud auth print-access-token)\"",
+            "echo x | xargs echo $(gcloud auth print-access-token)",
+            "env -S \"echo $(gcloud auth print-access-token)\"",
+            // 3: a copy through a descriptor the rule did not track.
+            "security find-generic-password -s fake-svc -w 3>&1 1>&3",
+            "security find-generic-password -s fake-svc -w 3>&1 1>&3-",
+            "security find-generic-password -s fake-svc -w 1>&4",
+            "gcloud auth print-access-token >& 1",
+            // 4: APFS is case-insensitive.
+            "SECURITY find-generic-password -s fake-svc -w",
+            "GCloud auth print-access-token",
+            // Subshell grouping and a keyword before a run-time program.
+            "(gcloud auth print-access-token)",
+            "if true; then $(gcloud auth print-access-token); fi",
+            // 6: consumers accepted only where they really consume.
+            "gcloud auth print-access-token | tee --password-stdin",
+            "gcloud auth print-access-token | cat --with-token",
+            "gcloud auth print-access-token | grep -eq .",
+            "gcloud auth print-access-token | rg -rq .",
+            "gcloud auth print-access-token | wc --files0-from=-",
+            "gcloud auth print-access-token | wc -c -L --files0-from -",
+            // 7: xtrace prints expanded values.
+            "set -x; TOKEN=$(gcloud auth print-access-token)",
+            "set -o xtrace; curl -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "set -euxo pipefail; T=$(gcloud auth print-access-token)",
+            "bash -x -c 'T=$(gcloud auth print-access-token)'",
+            "bash -xc 'T=$(gcloud auth print-access-token)'",
+            "SHELLOPTS=xtrace bash -c 'T=$(gcloud auth print-access-token)'",
+            // 8: more credential-printing calls.
+            "gcloud config config-helper --format='value(credential.access_token)'",
+            "gcloud config config-helper --format=json",
+            "gcloud config config-helper",
+            "security dump-keychain -d",
+            "security dump-keychain -d login.keychain | head",
+        ],
+    );
+}
+
+/// #8596 round 2, finding 5: credential-command text handed to something that
+/// runs it, or a program named at run time. The guard cannot follow the value,
+/// so it refuses as unreadable.
+#[test]
+fn denies_evaluated_trigger_text() {
+    let rows = [
+        "S=security; $S find-generic-password -s fake-svc -w",
+        "G=gcloud; timeout 5 $G auth print-access-token",
+        "C='gcloud auth print-access-token'; $C",
+        "eval \"security find-generic-password -s fake-svc -w\"",
+        "bash <<< 'gcloud auth print-access-token'",
+        "echo 'gcloud auth print-access-token' | sh",
+        "osascript -e 'do shell script \"security find-generic-password -s fake-svc -w\"'",
+        "python3 -c 'import os; os.system(\"gcloud auth print-access-token\")'",
+        "ssh fake-host 'security find-generic-password -s fake-svc -w'",
+        "sudo -u fake bash -c 'gcloud auth print-access-token'",
+        "bash <<'EOF'\ngcloud auth print-access-token\nEOF",
+        "python3 <<'PY'\nimport os; os.system('gcloud auth print-access-token')\nPY",
+        "python3 <<PY\nimport os; os.system(\"gcloud auth print-access-token\")\nPY",
+    ];
+    let wrong: Vec<String> = rows
+        .iter()
+        .filter_map(|c| {
+            let reason = evaluate_credential_print_command(c);
+            (!reason.as_deref().is_some_and(|r| r.contains("cannot read")))
+                .then(|| format!("{c:?} -> {reason:?}"))
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "expected unreadable:\n{}",
+        wrong.join("\n")
+    );
+    // An unquoted body is shell source: its credential call is judged as one.
+    check(true, &["bash <<EOF\ngcloud auth print-access-token\nEOF"]);
+}
+
+/// #8596 round 2, findings 9 and 10: data here-documents and a non-printing
+/// xargs program are allowed; so are the mentions finding 5 must not catch.
+#[test]
+fn allows_quoted_heredoc_bodies() {
+    check(
+        false,
+        &[
+            "gh issue comment 1 --body-file - <<'EOF'\nNever run gcloud auth print-access-token bare; it's a leak.\nEOF",
+            "cat > notes.md <<'EOF'\nsecurity find-generic-password -s x -w | head -c 50 (don't)\nEOF",
+            "gh pr create --title t --body \"$(cat <<'EOF'\nuse `security find-generic-password -s x >/dev/null`, isn't that it\nEOF\n)\"",
+            "gcloud auth print-access-token | xargs -I{} curl -H \"Authorization: Bearer {}\" https://example.test",
+            "gcloud auth print-access-token | xargs -I % curl -sS -H 'Authorization: Bearer %' https://example.test",
+            "git log --grep print-access-token",
+            "git grep -n find-generic-password",
+            "gh issue create --title x --body 'gcloud auth print-access-token leaked'",
+            "gcloud auth print-access-token | gh auth login --with-token",
+            "gcloud auth print-access-token | podman login -u oauth2accesstoken --password-stdin example.test",
+            "gcloud auth print-access-token | grep -cq .",
+            "gcloud auth print-access-token | wc -lc",
+            "wc -c <(gcloud auth print-access-token)",
+            "gcloud config config-helper --format='value(configuration.properties.core.project)'",
+            "security find-generic-password -s fake-svc -w 3>/dev/null 1>&3",
+            "set +x; T=$(gcloud auth print-access-token)",
+        ],
+    );
+}
+
+/// No prefix of a credential command panics, and each gets a verdict: a panic
+/// would exit the hook 101 and fail open.
+#[test]
+fn no_prefix_of_a_command_panics() {
+    let commands = [
+        "gh pr create --body \"$(cat <<'EOF'\nsecurity find-generic-password -s é -w\nEOF\n)\" 3>&1 1>&3- 2>& 1",
+        "bash -c \"echo $(gcloud auth print-access-token)\" | xargs -I{} sh -c '{}' <<< `x` >(cat) <(y)",
+        "(set -o xtrace; eval \"$(security dump-keychain -d)\") <<-\\EOF\n\tbody ünï\n\tEOF\n",
+    ];
+    for command in commands {
+        for (end, _) in command.char_indices().chain([(command.len(), ' ')]) {
+            let prefix = &command[..end];
+            let outcome = std::panic::catch_unwind(|| scan_for_test(prefix));
+            assert!(outcome.is_ok(), "panicked on {prefix:?}");
+        }
+    }
+}
+
+/// The scan without the entry point's panic guard, so a panic is visible.
+fn scan_for_test(command: &str) -> bool {
+    super::scan(
+        command,
+        super::Sink::Terminal,
+        super::Sink::Terminal,
+        0,
+        &super::Lifted::default(),
+    )
+    .is_ok()
 }
 
 /// Fail-closed: a credential command the scanner cannot read is refused, and
