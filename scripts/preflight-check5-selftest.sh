@@ -114,9 +114,11 @@
 #     (r6) NO VERDICT + exit 1  break-no-verdict.out: a break whose output also
 #                               says part of the API was never compared. [FAIL].
 #                               Same for an exit 1 with no `VERDICT: BREAK`.
-#     (r7) unwritable record    a record dir under a regular file, and one inside
-#                               the working tree: [FAIL] "break computed but
-#                               record could not be written", stops.
+#     (r7) unwritable record    a record dir under a regular file, one inside the
+#                               working tree, a relative path, a `..` component,
+#                               and a symlink into the tree: [FAIL] "break
+#                               computed but record could not be written", stops,
+#                               and creates nothing.
 #   The unrelated (i) full_mode_version_is_manifest cases below are unchanged
 #   by this ruling: a version argument that disagrees with the manifest is
 #   still refused on a full run, independent of what CHECK 5 decides.
@@ -710,6 +712,29 @@ check_raw "record/(r7) record location inside the working tree stops" 1 "RECORDE
 if [[ -e "${SCRATCH}/records-in-tree" ]]; then
   fail_case "record/(r7) created ${SCRATCH}/records-in-tree inside the working tree"
 fi
+
+# The other refusal arms of semver_record_outside_repo: a relative path, a `..`
+# component, and a symlink under the record root that points into the tree.
+# Each must refuse before any mkdir, so nothing appears in the tree or in cwd.
+# The cases run from inside RECORDS, so a regression's relative write lands
+# there and never in the checkout this self-test runs from.
+ln -s "$SCRATCH" "${RECORDS}/into-tree"
+for spec in "relative path|rel/dir" \
+  "dot-dot component|${RECORDS}/x/../y" \
+  "symlink into the working tree|${RECORDS}/into-tree/recs"; do
+  raw="$(cd "$RECORDS" && SELFTEST_RECORD_DIR="${spec#*|}" run_mpm break-lints.out 1)"
+  check_raw "record/(r7) ${spec%%|*} stops" 1 "RECORDED BREAK" \
+    "[FAIL] semver: break computed but record could not be written" \
+    "not an absolute path outside the working tree"
+done
+if [[ -n "$(find "$SCRATCH" -mindepth 1 ! -path "${SCRATCH}/scripts" ! -path "${SCRATCH}/scripts/*")" ]] \
+    || [[ -e "${RECORDS}/rel" ]] || [[ -e "${RECORDS}/x" ]] || [[ -e "${RECORDS}/y" ]]; then
+  fail_case "record/(r7) a refused record location still created something" \
+    "$(find "$SCRATCH" -mindepth 1 ! -path "${SCRATCH}/scripts/*")"
+else
+  pass_case "record/(r7) refused locations write nothing in the tree, cwd or record root"
+fi
+rm -f "${RECORDS}/into-tree"
 
 # --- (i) A full run whose version argument is not the manifest version is
 #         refused; --check-only keeps the hypothetical-version preview.

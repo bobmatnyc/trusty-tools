@@ -297,9 +297,11 @@
 #
 # Exit codes: 0 = all checks passed, or were downgraded by an override that
 #   named itself in the output (PREFLIGHT_ALLOW_DETACHED for check 1,
-#   PREFLIGHT_SEMVER_UNVERIFIED for check 5), or check 5 recorded a computed
-#   break — safe to `cargo publish`, with whatever the WARN lines disclosed. Nonzero = at least one check failed —
-#   DO NOT PUBLISH. 2 = usage error (bad arguments).
+#   PREFLIGHT_SEMVER_UNVERIFIED for check 5) — safe to `cargo publish`, with
+#   whatever the WARN lines disclosed. Exit 0 is also returned when check 5
+#   recorded a computed break: the publish is PERMITTED, not called safe, and
+#   the final summary lists every break entry. Nonzero = at least one check
+#   failed — DO NOT PUBLISH. 2 = usage error (bad arguments).
 #
 # Test: checks 1-4 are exercised manually — they are bound to the network, the
 #   real crates.io registry, and the logged-in gh account, none of which a
@@ -383,7 +385,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# CHECK 5's accepted-breaks declaration (owner ruling 2026-09-22).
+# CHECK 5 reads a committed accepted-breaks declaration only to report whether
+# it covers a computed break, and never writes one (#8699). It also reuses the
+# library's break-list parser.
 # shellcheck source=lib/semver_accepted_breaks.sh
 . "${REPO_ROOT}/scripts/lib/semver_accepted_breaks.sh"
 

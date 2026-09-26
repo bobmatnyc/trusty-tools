@@ -177,7 +177,8 @@ version instead). Runs six checks and fails loud on any of them:
    prints `[WARN] semver: RECORDED BREAK` and a record on stdout, and
    `semver_record_break` writes that record OUTSIDE the working tree
    (`$PREFLIGHT_SEMVER_RECORD_DIR`, default
-   `~/.local/state/trusty-tools/semver-breaks/<package>-<version>/`). Land it
+   `${XDG_STATE_HOME:-~/.local/state}/trusty-tools/semver-breaks`, one
+   `<package>-<version>/` directory per release). Land it
    in the post-release PR. An exit 1 that is not a readable `VERDICT: BREAK`,
    or a record that cannot be written, is `[FAIL]`; see
    `docs/reference/semver-gate.md`. (The pull-request-time `Public API /
