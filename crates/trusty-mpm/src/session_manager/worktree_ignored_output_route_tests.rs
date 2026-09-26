@@ -173,6 +173,7 @@ fn reclaim(fx: &GitWorktreeFixture, name: &str, s: Seed) -> (PathBuf, ReclaimOut
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,

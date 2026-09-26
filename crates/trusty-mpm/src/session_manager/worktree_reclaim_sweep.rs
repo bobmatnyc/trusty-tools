@@ -41,7 +41,9 @@ use std::time::{Duration, Instant};
 // current before anything is classified against them, and the landed-content
 // admission gate 5 asks when no pull request carries the branch's name.
 use super::worktree_landing_refresh::refresh_landing_refs;
-use super::worktree_reclaim_landed::{landing_recheck, reclaim_landed_content};
+use super::worktree_reclaim_landed::{
+    ReclaimProof, landing_recheck, reclaim_landed_content, reclaim_landed_proof,
+};
 
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims, NOT_INSPECTED_REASON,
@@ -54,7 +56,11 @@ use super::worktree_reclaim::{
 use super::worktree_reclaim_launch::launch_refusal;
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
-use super::worktree_reclaim_pr_match::{GhLandingProbe, resolve_with_index};
+use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
+// #8109: the own-pull-request proof rule and the reclaimed branch's deletion.
+use super::worktree_reclaim_branch::{
+    OnceProof, cleanup_reclaimed_branch, deletion_proof, own_pr_gate,
+};
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
 
@@ -221,7 +227,11 @@ pub(crate) fn survey_with_landed_content(
         // #6561 (the per-branch retry) and #7267 (the round-stem and head-commit
         // widening) both live in `resolve_with_index`, so this call site and the
         // pre-delete re-check below cannot drift apart.
-        let pr = resolve_with_index(
+        // #8109: the by-name answer rides beside the final one.
+        let PrResolution {
+            by_name,
+            landing: pr,
+        } = resolve_with_index(
             &scanned.path,
             &scanned.registry_root,
             scanned.branch.as_deref(),
@@ -248,6 +258,8 @@ pub(crate) fn survey_with_landed_content(
             keep_list,
             landed_content,
         );
+        // #8109: no pull request of its own admits only on the landed proof.
+        let verdict = own_pr_gate(&scanned.path, verdict, &by_name, landed_content);
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
             bytes: None,
@@ -488,6 +500,12 @@ pub(crate) struct FreshProbes<'a> {
     /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
     /// An empty slice is the pre-#7504 behaviour — a no-op gate.
     pub launched_from: &'a [PathBuf],
+    /// Take a candidate's landed proof before its deletion (#8109).
+    ///
+    /// Production passes [`reclaim_landed_proof`]. A probe so a test can change
+    /// the tree after the proof returns and show the branch deletion still
+    /// judges the SHA the proof judged.
+    pub prove: &'a dyn Fn(&Path) -> ReclaimProof,
 }
 
 /// Gates 2, 4b and 4c re-asked against a claim set read immediately before the
@@ -691,7 +709,10 @@ pub(crate) fn reclaim_with_probes(
         // #6561, #7267: the same resolution the survey ran, re-run FRESH — the
         // survey's answer is minutes old, and a widening applied only there
         // would propose a candidate this re-check could not confirm.
-        let pr_now = resolve_with_index(
+        let PrResolution {
+            by_name,
+            landing: pr_now,
+        } = resolve_with_index(
             &path,
             &candidate.registry_root,
             candidate.branch.as_deref(),
@@ -704,6 +725,11 @@ pub(crate) fn reclaim_with_probes(
         let in_use_now = (probes.in_use_now)();
         // #6927: re-read, not reused — see `FreshProbes::keep_list`.
         let keep_list_now = (probes.keep_list)();
+        // #8109: the `merge-tree` proof, taken once per candidate. The re-check
+        // asks it for a no-PR candidate; the own-PR rule and the branch
+        // deletion read that same answer, and the SHA it judged.
+        let once = OnceProof::new(&path, probes.prove);
+        let ask = |p: &Path| once.admission(p);
         // #7889: the survey offered gate 5's landed-content admission, so the
         // re-check re-asks it for a candidate no pull request carries.
         if let Some(reason) = recheck_before_delete(
@@ -712,7 +738,7 @@ pub(crate) fn reclaim_with_probes(
             in_use_now.as_ref(),
             &pr_now,
             probes.agent_state,
-            Some(&reclaim_landed_content),
+            Some(&ask),
         ) {
             tracing::warn!(
                 path = %path.display(),
@@ -722,6 +748,18 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
+        let proof = match deletion_proof(&by_name, &once) {
+            Ok(proof) => proof,
+            Err(reason) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "worktree-reclaim: re-check refused a surveyed candidate — {reason}"
+                );
+                out.refused_at_recheck
+                    .push(format!("{}: {reason}", path.display()));
+                continue;
+            }
+        };
         // #7885: the route names itself in the audit line the remover emits
         // before it deletes — an operator reading the log after the fact could
         // not otherwise tell this pass from the orphan sweep.
@@ -775,6 +813,14 @@ pub(crate) fn reclaim_with_probes(
                 evidence = ?candidate.verdict,
                 bytes_freed = candidate.bytes,
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
+            );
+            // #8109: the tree is gone, so its branch goes too — on the proof,
+            // at the SHA the proof judged.
+            cleanup_reclaimed_branch(
+                &candidate.registry_root,
+                &path,
+                candidate.branch.as_deref(),
+                &proof,
             );
             out.removed_bytes = out
                 .removed_bytes
@@ -836,6 +882,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             agent_state,
             keep_list,
             launched_from,
+            prove: &reclaim_landed_proof,
         },
         mode,
         adopted,

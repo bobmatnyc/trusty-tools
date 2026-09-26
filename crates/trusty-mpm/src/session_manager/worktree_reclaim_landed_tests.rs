@@ -239,11 +239,11 @@ fn worktree_7889_dirt_that_appears_during_the_admission_refuses() {
         std::fs::write(p.join("late.txt"), "written mid-admission\n").expect("write");
         landed()
     });
-    assert!(!late_file.admits(), "{late_file:?}");
+    assert!(!late_file.admission.admits(), "{late_file:?}");
     assert!(
-        late_file.note().contains("appeared while"),
+        late_file.admission.note().contains("appeared while"),
         "{}",
-        late_file.note()
+        late_file.admission.note()
     );
 
     let (_fx2, wt2) = donor("donor-late-commit-7889");
@@ -251,11 +251,11 @@ fn worktree_7889_dirt_that_appears_during_the_admission_refuses() {
         GitWorktreeFixture::commit_unpushed(p);
         landed()
     });
-    assert!(!late_commit.admits(), "{late_commit:?}");
+    assert!(!late_commit.admission.admits(), "{late_commit:?}");
     assert!(
-        late_commit.note().contains("HEAD moved"),
+        late_commit.admission.note().contains("HEAD moved"),
         "{}",
-        late_commit.note()
+        late_commit.admission.note()
     );
 }
 

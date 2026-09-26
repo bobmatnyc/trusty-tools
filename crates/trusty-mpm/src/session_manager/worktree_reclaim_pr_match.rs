@@ -139,18 +139,58 @@ pub(crate) fn resolve_landing(
     exact: BranchPrState,
     probe: &dyn LandingProbe,
 ) -> BranchPrState {
+    resolve_landing_parts(worktree, registry_root, branch, exact, probe).landing
+}
+
+/// What the ladder answered by the branch's NAME, and what it answered in the
+/// end (#8109).
+///
+/// Why: rung 3 matches a merged pull request by head COMMIT, so its `Merged`
+/// can belong to another branch entirely. On 2026-09-16 it matched PR #514
+/// (`…-v2`) for a `…-wt` branch that never had a pull request, and the tree was
+/// reclaimed with no proof its own content had landed. The reclaim sweep needs
+/// both answers to tell those two kinds of `Merged` apart.
+/// What: `by_name` is rungs 1 and 2 — the branch's own name or its `-rN` round
+/// stem, the one workstream equivalence `strip_round_suffix` defines.
+/// `landing` adds rung 3, and is what [`resolve_landing`] returns.
+/// Test: `worktree_8109_a_head_commit_match_is_not_the_branchs_own_pr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrResolution {
+    /// The answer for this branch's own name or round stem.
+    pub by_name: BranchPrState,
+    /// The answer after the head-commit widening.
+    pub landing: BranchPrState,
+}
+
+/// [`resolve_landing`], returning the by-name answer beside the final one
+/// (#8109).
+fn resolve_landing_parts(
+    worktree: &Path,
+    registry_root: &Path,
+    branch: Option<&str>,
+    exact: BranchPrState,
+    probe: &dyn LandingProbe,
+) -> PrResolution {
+    let settled = |state: BranchPrState| PrResolution {
+        by_name: state.clone(),
+        landing: state,
+    };
     // Rung 1: a settled answer about this branch is the answer. An OPEN pull
     // request on the branch itself is work in flight, and widening past it
     // would be the one mistake this ladder must not make.
     if !matches!(exact, BranchPrState::NoPr | BranchPrState::Unknown) {
-        return exact;
+        return settled(exact);
     }
     if let Some(pr) = merged_round_sibling(registry_root, branch, probe) {
-        return pr;
+        return settled(pr);
     }
-    match merged_by_head_commit(worktree, registry_root, probe) {
-        Some(pr) => pr,
-        None => exact,
+    // #8109: a rung-3 match is another branch's pull request, so `by_name`
+    // keeps rung 1's refusal.
+    let landing =
+        merged_by_head_commit(worktree, registry_root, probe).unwrap_or_else(|| exact.clone());
+    PrResolution {
+        by_name: exact,
+        landing,
     }
 }
 
@@ -333,9 +373,14 @@ fn vouches_for_head(
 /// not resolve, then [`resolve_landing`]. With `per_branch_fallback` clear the
 /// index's answer is returned unchanged, which is what keeps the `tm doctor`
 /// probe inside its three-second budget.
+///
+/// #8109: returns the by-name answer beside the final one, so the sweep can
+/// tell whether a `Merged` is the branch's own — see [`PrResolution`].
+/// Without `per_branch_fallback` both fields hold the index's answer.
 /// Test: `resolve_with_index_without_fallback_never_calls_the_probe`,
 /// `resolve_with_index_retries_a_truncated_index_per_branch`,
-/// `survey_reclaims_a_round_sibling_of_a_merged_pr`.
+/// `survey_reclaims_a_round_sibling_of_a_merged_pr`,
+/// `worktree_8109_a_head_commit_match_is_not_the_branchs_own_pr`.
 pub(crate) fn resolve_with_index(
     worktree: &Path,
     registry_root: &Path,
@@ -343,10 +388,13 @@ pub(crate) fn resolve_with_index(
     index: &PrIndex,
     per_branch_fallback: bool,
     probe: &dyn LandingProbe,
-) -> BranchPrState {
+) -> PrResolution {
     let mut pr = index.state_for(branch);
     if !per_branch_fallback {
-        return pr;
+        return PrResolution {
+            by_name: pr.clone(),
+            landing: pr,
+        };
     }
     // #6561: a truncated or FAILED bulk lookup retries per-branch. The bulk
     // call and the targeted one can fail for different reasons (a page limit is
@@ -360,7 +408,7 @@ pub(crate) fn resolve_with_index(
     {
         pr = probe.state_for_head(registry_root, branch);
     }
-    resolve_landing(worktree, registry_root, branch, pr, probe)
+    resolve_landing_parts(worktree, registry_root, branch, pr, probe)
 }
 
 /// Ask GitHub, in an ALREADY-RESOLVED repository, for the MERGED pull requests

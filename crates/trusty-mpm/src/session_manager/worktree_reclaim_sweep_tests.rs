@@ -482,6 +482,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &agent_live,
@@ -522,6 +523,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &agent_live,
@@ -564,6 +566,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1015,6 +1018,7 @@ fn reclaim_report_mode_removes_nothing() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1053,6 +1057,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1089,6 +1094,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1139,6 +1145,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1177,6 +1184,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1219,6 +1227,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1254,6 +1263,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1282,6 +1292,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1379,6 +1390,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &keep_list,
             agent_state: &no_agents,
@@ -1449,6 +1461,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &keep_list,
             agent_state: &no_agents,
@@ -1485,6 +1498,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -1520,6 +1534,7 @@ fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &inside,
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -2010,6 +2025,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
@@ -2044,6 +2060,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
@@ -2070,6 +2087,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
@@ -2104,6 +2122,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
@@ -2143,6 +2162,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
@@ -2323,6 +2343,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
@@ -2394,6 +2415,7 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
         reclaim_with_probes(
             &fx.repos_root,
             &FreshProbes {
+                prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
                 launched_from: &[],
                 keep_list: &no_keeps,
                 agent_state: &no_agents,

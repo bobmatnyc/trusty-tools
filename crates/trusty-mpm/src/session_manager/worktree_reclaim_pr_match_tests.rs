@@ -423,7 +423,8 @@ fn resolve_with_index_without_fallback_never_calls_the_probe() {
         &index("fix/7267-thing", 102, "MERGED"),
         false,
         &probe,
-    );
+    )
+    .landing;
     assert_eq!(out, BranchPrState::NoPr);
     assert!(probe.calls().is_empty(), "{:?}", probe.calls());
 }
@@ -446,7 +447,8 @@ fn resolve_with_index_retries_a_truncated_index_per_branch() {
         &truncated,
         true,
         &probe,
-    );
+    )
+    .landing;
     assert_eq!(out, BranchPrState::Merged { pr: 104 });
     assert_eq!(probe.calls(), vec!["head:fix/7267-mine".to_string()]);
 }
@@ -463,6 +465,7 @@ fn resolve_with_index_widens_a_complete_index_no_pr_answer() {
         &index("someone/else", 103, "MERGED"),
         true,
         &probe,
-    );
+    )
+    .landing;
     assert_eq!(out, BranchPrState::Merged { pr: 105 });
 }
