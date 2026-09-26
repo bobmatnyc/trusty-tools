@@ -41,14 +41,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use trusty_common::memory_core::decay::DecayConfig;
 use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
 use trusty_common::memory_core::store::rooms::list_room_summaries;
-use trusty_common::memory_core::store::OpenIntent;
 use trusty_common::memory_core::PalaceRegistry;
 
 use super::log_index::InjectionIndex;
 use super::signals::Signal;
 use crate::commands::prompt_context::format::drawer_preview;
+use crate::commands::store_snapshot::with_store_copy;
 
 /// One drawer's evidence row.
 ///
@@ -265,21 +264,13 @@ fn content_digest(content: &str) -> String {
     format!("{:08x}", hasher.finish() as u32)
 }
 
-/// Filename of a palace's KG store.
-const KG_FILE: &str = "kg.redb";
-
-/// Suffix `redb_open::backup_incompatible_file` gives a store it moves aside.
-const INCOMPATIBLE_SUFFIX: &str = ".v2-incompatible";
-
 /// Read one palace's drawer table and rooms without touching its store.
 ///
-/// Why: see the module doc — this is the one place the read-only guarantee is
-/// made, and it is made by never handing the palace's own file to redb.
-/// What: copies `<data_dir>/kg.redb` into a private temp dir, opens the copy,
-/// and performs two reads. The `TempDir` drops at return, taking the copy and
-/// anything redb wrote beside it. A store in an incompatible format is detected
-/// by the backup redb leaves next to the copy and reported as an error rather
-/// than silently reading as an empty palace.
+/// Why: see the module doc — the read-only guarantee is made in
+/// [`with_store_copy`], which never hands the palace's own file to redb.
+/// What: runs two reads against a private copy of `<data_dir>/kg.redb`. A
+/// palace with no store has no drawers — an empty palace, not a failure. An
+/// incompatible-format store is an error, never a silently empty palace.
 /// Test: `report_writes_nothing_to_the_palace`,
 /// `incompatible_store_is_reported_not_recreated`.
 fn read_palace_drawers(
@@ -288,38 +279,14 @@ fn read_palace_drawers(
     Vec<Drawer>,
     Vec<trusty_common::memory_core::store::rooms::RoomSummary>,
 )> {
-    let live = data_dir.join(KG_FILE);
-    if !live.exists() {
-        // A palace directory with no KG store has no drawers to report. That is
-        // an empty palace, not a failure.
-        return Ok((Vec::new(), Vec::new()));
-    }
-    // #4891: read a copy, never the live file. `OpenIntent::ReadOnlyClient`
-    // alone does NOT prevent writes — it only snapshots when the file is
-    // already locked, and otherwise reaches `Database::create`, which runs an
-    // init write txn and can rename an incompatible store aside.
-    let scratch = tempfile::tempdir().context("create scratch dir for read-only palace copy")?;
-    let copy = scratch.path().join(KG_FILE);
-    std::fs::copy(&live, &copy)
-        .with_context(|| format!("copy {} for read-only inspection", live.display()))?;
-
-    let store = KgStoreRedb::open_with_intent(&copy, OpenIntent::ReadOnlyClient)
-        .with_context(|| format!("open copy of KG store {}", live.display()))?;
-    if scratch
-        .path()
-        .join(format!("{KG_FILE}{INCOMPATIBLE_SUFFIX}"))
-        .exists()
-    {
-        anyhow::bail!(
-            "KG store at {} is in an incompatible redb format — reading it would have \
-             required recreating it, which this report never does. Rebuild the palace.",
-            live.display()
-        );
-    }
-    let drawers = store.load_drawers().context("load drawers")?;
-    let store = Arc::new(store);
-    let rooms = list_room_summaries(&store).unwrap_or_default();
-    Ok((drawers, rooms))
+    // #4891: read a copy, never the live file.
+    let read = with_store_copy(data_dir, &std::env::temp_dir(), |store| {
+        let drawers = store.load_drawers().context("load drawers")?;
+        let store = Arc::new(store);
+        let rooms = list_room_summaries(&store).unwrap_or_default();
+        Ok((drawers, rooms))
+    })?;
+    Ok(read.unwrap_or_default())
 }
 
 /// Resolve a drawer's room label, falling back to a short id.

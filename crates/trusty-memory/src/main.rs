@@ -436,6 +436,11 @@ enum Command {
         action: PalaceAction,
     },
 
+    /// Read-only audits of stored drawers (#8645).
+    ///
+    ///   trusty-memory audit secrets --count-only
+    Audit(trusty_memory::commands::audit_secrets::AuditArgs),
+
     /// Rank existing drawers by how often they are actually injected, so a
     /// human can decide which deserve an `expires_at` (ADR-0028, Migration).
     ///
@@ -797,6 +802,7 @@ async fn main() -> Result<()> {
             action: RoomsAction::Backfill { palace, apply, .. },
         } => trusty_memory::commands::rooms::handle_rooms_backfill(palace, apply).await,
         Command::Palace { action } => trusty_memory::commands::palace::dispatch(action).await,
+        Command::Audit(args) => trusty_memory::commands::audit_secrets::dispatch(args).await,
         Command::BackfillReport {
             palace,
             limit,
