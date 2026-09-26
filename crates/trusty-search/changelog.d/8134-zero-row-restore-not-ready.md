@@ -1,0 +1,3 @@
+Fixed
+
+- An index whose restore yields 0 corpus chunks no longer reports `ready` (#8134). The `chunks.json → index.redb` migration now reads a colocated `<root>/.trusty-search/chunks.json`, not only the global data-dir copy, and fails instead of stamping the schema when a populated snapshot restores nothing. When vectors restore over an empty corpus, `POST /indexes`, warm boot and lazy reload mark the semantic stage `failed` with a reason naming both counts, so `vector` is no longer advertised. `GET /indexes/{id}/status` reports `status: "degraded"` whenever a stage has failed or a migration fault is outstanding.

@@ -481,7 +481,7 @@ pub(crate) async fn restore_one_index(
             .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
             .unwrap_or(false);
     let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
-    let stages = derive_warm_boot_stages(WarmBootInputs {
+    let mut stages = derive_warm_boot_stages(WarmBootInputs {
         chunk_count,
         hnsw_snapshot_ready,
         graph_node_count,
@@ -490,6 +490,9 @@ pub(crate) async fn restore_one_index(
         skip_vector,
         corpus_open_failure,
     });
+    // #8134: vectors restored over an empty corpus are not a ready lane.
+    let vectors = indexer.vector_count().await.unwrap_or(0);
+    crate::service::warm_boot::fail_semantic_over_empty_corpus(&mut stages, chunk_count, vectors);
     tracing::info!(
         "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
          graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failure={:?} → \

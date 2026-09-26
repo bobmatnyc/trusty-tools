@@ -297,14 +297,13 @@ pub(crate) async fn index_status_report(
     // `stages` block introduced in v0.9.0 (issue #109, Phase 1) — that field
     // tracks lexical → semantic → graph progress and grows
     // `search_capabilities` as each lane comes online.
-    let legacy_status = match state
-        .reindex_progress
-        .get(&index_id)
-        .map(|p| p.status.load())
-    {
-        Some(ReindexStatus::Running) => "indexing",
-        _ => "ready",
-    };
+    let reindex_running = matches!(
+        state
+            .reindex_progress
+            .get(&index_id)
+            .map(|p| p.status.load()),
+        Some(ReindexStatus::Running)
+    );
     // Issue #109 Phase 1: snapshot the staged-pipeline state so the response
     // can surface per-stage status and derive the public `search_capabilities`
     // array. The legacy `status` field stays at the top level, but
@@ -372,6 +371,16 @@ pub(crate) async fn index_status_report(
                 .collect(),
         )
     });
+    // #8134: `ready` over a failed lane or an outstanding migration fault is
+    // the fail-open this field used to report; `stages` and `migration_error`
+    // name the cause.
+    let legacy_status = if reindex_running {
+        "indexing"
+    } else if stages_snapshot.any_failed() || !faults.is_empty() {
+        "degraded"
+    } else {
+        "ready"
+    };
     // #7991: a staged reindex that ran to completion and could not promote.
     // The live corpus is at its PRE-reindex state; nothing else says so.
     let promotion_deferred = indexer.promotion_deferred().map(|d| {

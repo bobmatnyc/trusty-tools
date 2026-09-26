@@ -255,3 +255,33 @@ pub fn index_is_stuck_mid_walk(
 ) -> bool {
     walk_started && !reindex_in_flight && matches!(lexical, StageStatus::InProgress)
 }
+
+/// Refuse `semantic: Ready` when vectors survive over an empty corpus (#8134).
+///
+/// Why: [`derive_warm_boot_stages`] reads the semantic lane from the HNSW
+/// snapshot alone. A restore that loads vectors but finds zero corpus rows —
+/// a legacy artifact whose `chunks.json` was never migrated, or an
+/// `index.redb` replaced by an empty file — was reported `semantic: Ready`
+/// with `search_capabilities: ["vector"]`, while every hit was dropped at
+/// materialisation because no row answers its id.
+/// What: when `chunk_count == 0`, `vector_count > 0`, and the classifier said
+/// semantic `Ready`, rewrite semantic to `Failed` with a reason naming both
+/// counts. Returns `true` when it fired. Any other state is left untouched:
+/// an empty index with no vectors is a genuine first boot.
+/// Test: `orphaned_vectors_over_an_empty_corpus_fail_the_semantic_stage`,
+/// `create_index_vectors_over_an_empty_corpus_is_not_ready`.
+pub fn fail_semantic_over_empty_corpus(
+    stages: &mut IndexStages,
+    chunk_count: usize,
+    vector_count: usize,
+) -> bool {
+    if chunk_count > 0 || vector_count == 0 || stages.semantic.status != StageStatus::Ready {
+        return false;
+    }
+    stages.semantic = StageState::failed(format!(
+        "the vector store holds {vector_count} vectors but the durable corpus holds 0 \
+         chunks, so no search hit can be materialised; the corpus was lost or never \
+         migrated — reindex to rebuild it (#8134)"
+    ));
+    true
+}

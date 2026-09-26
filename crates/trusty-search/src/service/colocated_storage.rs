@@ -82,6 +82,23 @@ pub fn colocated_schema_version_path(root_path: &Path) -> Result<PathBuf> {
     Ok(colocated_storage_dir(root_path)?.join("schema_version.json"))
 }
 
+/// Path to the legacy `chunks.json` snapshot inside the colocated storage dir
+/// (#8134).
+///
+/// Why: the `chunks.json → index.redb` migration resolved its source through
+/// `persistence::chunks_path`, which only ever names the GLOBAL data dir. A
+/// colocated artifact keeps its snapshot under the project tree, so the
+/// migration read a location that held nothing, called that a first boot,
+/// and let the runner stamp the schema as migrated — after which the populated
+/// snapshot beside `index.redb` was never read again.
+/// What: returns `<root_path>/.trusty-search/chunks.json`. Unlike its siblings
+/// above this does NOT create the directory: it is a probe for an artifact a
+/// legacy build wrote, and a probe must never manufacture the tree it looks in.
+/// Test: `colocated_chunks_path_is_a_probe_and_creates_nothing`.
+pub fn colocated_chunks_path(root_path: &Path) -> PathBuf {
+    root_path.join(COLOCATED_DIR_NAME).join("chunks.json")
+}
+
 /// Path to the staging redb corpus inside the colocated storage dir.
 ///
 /// Why: mirrors `persistence::corpus_redb_tmp_path` but under the project tree.
@@ -255,6 +272,23 @@ mod tests {
         assert!(dir.starts_with(root), "dir must be inside root");
         assert_eq!(dir.file_name().unwrap(), ".trusty-search");
         assert!(dir.exists() && dir.is_dir());
+    }
+
+    /// Why (#8134): the migration probes this path to decide whether a legacy
+    /// snapshot exists. A probe that created `.trusty-search/` would leave the
+    /// directory behind on every index that never had one.
+    /// What: asserts the path is under the root and that nothing was created.
+    /// Test: this test.
+    #[test]
+    fn colocated_chunks_path_is_a_probe_and_creates_nothing() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("never-touched");
+        let path = colocated_chunks_path(&root);
+        assert_eq!(path, root.join(".trusty-search").join("chunks.json"));
+        assert!(
+            !root.exists(),
+            "probing for a legacy snapshot must not create the root or its storage dir"
+        );
     }
 
     #[test]
