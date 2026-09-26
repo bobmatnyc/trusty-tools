@@ -37,6 +37,28 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
 
+## The agent resident-budget tests gate merge through the drift check
+
+🔴 **The required `tm-capabilities generated-skill drift check` job also runs
+the step `Agent resident-budget tests (reuse the build above)`** (#8700). It
+runs the three `*_stays_within_its_resident_budget` tests in
+`crates/trusty-mpm/src/core/bundle_tests.rs`, named in full under `--exact`.
+The step fails unless exactly those three run, so renaming one fails it;
+`scripts/check_test_count.sh` also refuses a zero-test run, and an edit to that
+script makes the step run. Before
+this, they ran only in the non-required pre-publish shards, and PR #8695 grew
+`BASE-AGENT.md` past two budgets and still merged. A PR that pushes a bundled
+agent body or the default output style over its budget now fails a required
+context. The job's relevance step decides whether the step runs: any change in
+trusty-mpm's dependency closure, which includes `trusty-agents-common` and its
+agent assets, runs it.
+
+The job builds once. `cargo test -p trusty-mpm --lib --test config_mount
+--no-run` builds the lib test harness and the `tm` binary from one dependency
+graph; the drift check runs that `tm`, and the budget step compiles nothing.
+This replaced a release `cargo install`: the lib tests need trusty-mpm's
+dev-dependency features, so a release `tm` shared no build units with them.
+
 ## A documentation change owes content gates, never a code test suite
 
 🔴 **Two rules, owner ruling 2026-09-18.** R1: the website's code unit suite

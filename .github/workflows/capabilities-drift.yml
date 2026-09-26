@@ -5,6 +5,10 @@
 # exactly what `tm generate capabilities` produces right now — a stale
 # generated file fails the job instead of silently rotting.
 #
+# Since #8700 the same job also runs trusty-mpm's agent resident-budget tests
+# off the same build, so a bundled-asset edit that overruns a budget cannot
+# merge through this required context.
+#
 # REQUIRED CONTEXT since 2026-09-11 (owner ruling, decision a). Before that
 # date this job carried `paths:` filters on both triggers and was NOT a
 # required branch-protection context, so a PR outside those paths simply
@@ -23,7 +27,8 @@
 # gates the four required Tauri UI clippy jobs the same way — see that job's
 # `agents-ui` sibling for the identical shape). When the diff cannot affect
 # `tm generate capabilities` — nothing under crates/trusty-mpm/**, no change
-# to `scripts/check_capabilities.sh` or to this workflow file itself, and no
+# to `scripts/check_capabilities.sh`, `scripts/check_test_count.sh` or this
+# workflow file itself, and no
 # change reachable through trusty-mpm's own dependency closure (via
 # `scripts/ci-crate-relevance.sh`, issue #7063's shared detector, which also
 # treats Cargo.toml/Cargo.lock as workspace-wide) — the later steps are
@@ -142,10 +147,13 @@ jobs:
           # the shared closure detector.
           changed_nl="${RUNNER_TEMP}/capabilities-drift-changed.lines"
           tr '\0' '\n' < "$changed" > "$changed_nl"
+          # #8700: check_test_count.sh wraps the budget-test step, so an edit
+          # to it must run that step too.
           if grep -qxF "scripts/check_capabilities.sh" "$changed_nl" ||
+             grep -qxF "scripts/check_test_count.sh" "$changed_nl" ||
              grep -qxF ".github/workflows/capabilities-drift.yml" "$changed_nl"; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "capabilities-drift: running — the check script or this workflow changed"
+            echo "capabilities-drift: running — a check script or this workflow changed"
             exit 0
           fi
 
@@ -186,15 +194,68 @@ jobs:
           # repo was over it — see the note on the test-shard cache in ci.yml.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # scripts/lib/run_or_cargo.sh (used by check_capabilities.sh) prefers an
-      # already-installed `tm` on PATH over `cargo run`, so installing it from
-      # THIS checkout here means the check step below takes that fast path
-      # against the same source it is meant to verify, instead of invoking
-      # `cargo run` itself.
-      - name: Install tm
+      # #8700: ONE cargo build serves both checks below. The resident-budget
+      # tests are unit tests in trusty-mpm's lib, and a lib test build resolves
+      # trusty-mpm's dev-dependency features (trusty-common gains memory-core,
+      # embedder-test-support, axum-server), which re-features ~185 units and
+      # adds ~100 crates. A separate `cargo install` (release, production
+      # features) therefore shared nothing with the test build. Asking cargo
+      # for one integration-test target makes it also build the normal `tm`
+      # executable inside that same resolve, so `tm` and the lib test harness
+      # come from one dependency graph. `config_mount` is only the smallest
+      # integration target; it is built, never run here.
+      #
+      # scripts/lib/run_or_cargo.sh (used by check_capabilities.sh) prefers a
+      # `tm` on PATH over `cargo run`, so putting this build's output dir on
+      # PATH makes the drift check run the binary built from THIS checkout.
+      #
+      # CARGO_TARGET_DIR stays outside ./target, as `cargo install`'s temp dir
+      # did, so rust-cache saves the same footprint as before (see the quota
+      # note on ci.yml's test-shard cache).
+      - name: Build tm and the trusty-mpm lib test harness (one dependency graph)
+        id: build
         if: steps.relevance.outputs.relevant != 'false'
-        run: cargo install --path crates/trusty-mpm --bin tm --locked --force
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          cargo test -p trusty-mpm --lib --test config_mount --locked --no-run
+          echo "${CARGO_TARGET_DIR}/debug" >> "$GITHUB_PATH"
 
       - name: Check tm-capabilities generated skill for drift
         if: steps.relevance.outputs.relevant != 'false'
         run: bash scripts/check_capabilities.sh
+
+      # #8700: the agent resident-budget tests (bundle_tests.rs) ran only in
+      # the non-required pre-publish shards, so PR #8695 grew BASE-AGENT.md
+      # past the rust-engineer and ticketing budgets and merged green. The
+      # step names the three budget tests in full under `--exact` and then
+      # requires `running 3 tests`, so renaming or deleting any one of them
+      # fails the step; check_test_count.sh still refuses a zero-test run.
+      # Same env as the build step, so nothing recompiles. Runs even when the
+      # drift check failed, so one push reports both verdicts.
+      - name: Agent resident-budget tests (reuse the build above)
+        if: >-
+          !cancelled() && steps.relevance.outputs.relevant != 'false'
+          && steps.build.outcome == 'success'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/budget-tests.log"
+          status=0
+          bash scripts/check_test_count.sh -- \
+            cargo test -p trusty-mpm --lib --locked --no-fail-fast -- --exact \
+            core::bundle::tests::the_default_output_style_stays_within_its_resident_budget \
+            core::bundle::tests::rust_engineer_composed_body_stays_within_its_resident_budget \
+            core::bundle::tests::every_deployed_agent_composed_body_stays_within_its_resident_budget \
+            > "$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qx "running 3 tests" "$log"; then
+            echo "::error::expected exactly the 3 resident-budget tests to run; a name above no longer matches a test (#8700)"
+            exit 1
+          fi
