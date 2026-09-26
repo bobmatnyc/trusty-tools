@@ -125,17 +125,17 @@ pub(super) fn strip_comments_and_heredocs(text: &str, heredocs: &mut Vec<Heredoc
                 }
                 b'(' | b')' => word_start = paren(b, top, &mut stack),
                 b'\n' if !pending.is_empty() => {
-                    let (next, kept, bodies) = consume_bodies(text, i + 1, &mut pending, heredocs);
+                    let done = consume_bodies(text, i + 1, &mut pending, heredocs);
                     // Latest first, so an earlier operator's range stays valid.
-                    for (p, index) in kept.into_iter().rev() {
-                        out.replace_range(p.out.0..p.out.1, &format!(" {HEREDOC_MARK}{index}__ "));
+                    for ((from, to), index) in done.stripped.into_iter().rev() {
+                        out.replace_range(from..to, &format!(" {HEREDOC_MARK}{index}__ "));
                     }
                     out.push_str(&text[copied..=i]);
-                    for (start, end) in bodies {
+                    for (start, end) in done.bodies {
                         out.push_str(&text[start..end]);
                     }
-                    copied = next;
-                    i = next;
+                    copied = done.next;
+                    i = done.next;
                     word_start = true;
                     continue;
                 }
@@ -320,12 +320,20 @@ fn read_operator(text: &str, at: usize) -> Option<Pending> {
     })
 }
 
+/// What [`consume_bodies`] took from the text after one operator line.
+struct Consumed {
+    /// Where scanning resumes.
+    next: usize,
+    /// Each stripped operator's output range and its `heredocs` index.
+    stripped: Vec<((usize, usize), usize)>,
+    /// Byte ranges of the unquoted bodies, terminator line included.
+    bodies: Vec<(usize, usize)>,
+}
+
 /// Consume the bodies of `pending` from byte `from`.
 ///
-/// What: returns where scanning resumes, the stripped operators with their
-/// `heredocs` index, and the byte ranges of the unquoted bodies (terminator
-/// line included), which stay in the text verbatim — the walk never reads
-/// them as code, so a `#` or apostrophe in one changes nothing. A delimiter
+/// What: an unquoted body stays in the text verbatim — the walk never reads
+/// it as code, so a `#` or apostrophe in one changes nothing. A delimiter
 /// with no terminator line abandons the rest, keeping the text as-is from
 /// that body on (the conservative pre-strip reading).
 fn consume_bodies(
@@ -333,26 +341,28 @@ fn consume_bodies(
     from: usize,
     pending: &mut Vec<Pending>,
     heredocs: &mut Vec<Heredoc>,
-) -> (usize, Vec<(Pending, usize)>, Vec<(usize, usize)>) {
-    let mut kept = Vec::new();
-    let mut bodies = Vec::new();
-    let mut cursor = from;
+) -> Consumed {
+    let mut done = Consumed {
+        next: from,
+        stripped: Vec::new(),
+        bodies: Vec::new(),
+    };
     for p in pending.drain(..) {
-        let Some((body_end, next)) = find_terminator(text, cursor, &p) else {
-            return (cursor, kept, bodies);
+        let Some((body_end, next)) = find_terminator(text, done.next, &p) else {
+            return done;
         };
         if p.quoted {
             heredocs.push(Heredoc {
-                program_text: input_is_program_text(&text[cursor..body_end]),
+                program_text: input_is_program_text(&text[done.next..body_end]),
             });
-            kept.push((p, heredocs.len() - 1));
+            done.stripped.push((p.out, heredocs.len() - 1));
         } else {
             // An unquoted body expands `$(…)`: the ordinary scan reads it.
-            bodies.push((cursor, next));
+            done.bodies.push((done.next, next));
         }
-        cursor = next;
+        done.next = next;
     }
-    (cursor, kept, bodies)
+    done
 }
 
 /// The end of the body and the byte after the terminator line's newline.
