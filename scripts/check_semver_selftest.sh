@@ -1103,7 +1103,10 @@ rm -rf "$STUB_DIR"
 #
 # SEMVER_SELFTEST_TREE points at another checkout's files. Against a tree
 # without the #8372 step every case below fails on its asserted message, and
-# against a tree without the base rule the last five cases fail.
+# against a tree without the base rule the five base-rule cases fail:
+# "declaration only on the PR head", "declaration on base, unchanged by the PR",
+# "declaration the PR modifies", "no PR context, on main" and "no PR context,
+# not on main".
 # ===========================================================================
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 TREE="${SEMVER_SELFTEST_TREE:-$REPO_ROOT}"
