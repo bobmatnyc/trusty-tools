@@ -117,11 +117,17 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
      The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
 
      **This is not optional for `trusty-search`/`trusty-console`** (verified via `cargo package --list`): their `Cargo.toml` `include` list ships only the pre-built `ui-dist/`/`ui/dist/` bundle, never `ui/src` — so `cargo publish`, with or without `SKIP_UI_BUILD`, can never rebuild the UI from source during packaging. Before running step 8 for any UI-embedding crate, confirm the committed bundle is actually current: `bash scripts/check-ui-bundle-freshness.sh <crate>` compares a digest of the source against the stamp recorded in the bundle (issue #3606) — no rebuild needed. `.github/workflows/ui-bundle-freshness.yml` runs the same check on every push to `main`, and `preflight-publish.sh` CHECK 7 runs it again immediately before publishing. If it reports `BUNDLE-STALE`, regenerate: `cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build`, then `bash scripts/stamp-ui-bundle.sh <crate>` to record the new source digest (for `trusty-search`, `make release-prep` runs the build, the `ui-dist/` mirror, and the stamp together) — and commit before publishing. Do not rely on `cargo publish --dry-run` to catch this — see the `publish-dry-run` job's header comment in `release.yml` for why it structurally cannot.
-9. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
-10. Install the binary locally with `cargo install --path crates/<dir> --locked`
-   (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
-   binary on PATH is always the version that was just released.
-11. Close the release's milestone the same day it publishes, and move any
+9. 🔴 Install the binary from the registry, run from OUTSIDE the workspace
+   directory: `cargo install <crate-name> --version <version> --locked` (for
+   crates with binaries, e.g. trusty-search, trusty-mpm). **Never `cargo
+   install --path`** — per [ADR-0043](../adr/0043-cargo-bin-policy.md), a
+   path install carries no provenance once its source worktree is reclaimed,
+   which is exactly what happens after this release's PR merges and the
+   worktree gets cleaned up; `tm doctor binary_provenance` FAILs on that
+   binary from then on ([#8561](https://github.com/bobmatnyc/trusty-tools/issues/8561)).
+   No local build step is needed first — the registry install builds from the
+   published source.
+10. Close the release's milestone the same day it publishes, and move any
    issue still open in it to the next milestone of the same kind (bugfix or
    feature) — the release report names the moved issues (owner ruling
    2026-09-25). An issue whose fix shipped in this release and only awaits
@@ -1047,7 +1053,7 @@ reconnects automatically with exponential backoff when the daemon restarts (the
 ```bash
 # Graceful stop → install → restart
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-cargo install --path crates/<dir> --locked
+cargo install <crate> --version <version> --locked   # registry only — never --path (ADR-0043)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 # Re-grant Full Disk Access only for trusty-search (and other external-volume
 # daemons) — see the TCC Scope Summary above. trusty-mpm never needs FDA.

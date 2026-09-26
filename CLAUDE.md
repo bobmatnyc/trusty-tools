@@ -152,8 +152,10 @@ checkout → remove worktree, then delete branch. Full eight-step rule:
 [worktree-discipline.md](docs/reference/worktree-discipline.md#the-delivery-sequence).
 Dispatch mechanics: `Skill(skill="tm-workflow")`.
 
-- `cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked`
-  — never `cp` — only from a checkout with empty `git status --porcelain`.
+- `cargo install <crate> --version <version> --locked` — never `cp`, and
+  never `--path` from a worktree, which loses provenance once that worktree
+  is reclaimed ([ADR-0043](docs/adr/0043-cargo-bin-policy.md)); run from
+  outside the workspace directory so no local `[patch]` resolution applies.
 - **Stage by name, never `-A`:** `git add <file>` or `git add -p` — `-A`
   stages untracked build directories like `target-worktree/`.
 - Docs/config stay writable in the main checkout; commits never land on

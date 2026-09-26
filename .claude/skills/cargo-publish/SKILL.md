@@ -35,7 +35,8 @@ Every publish follows this exact sequence:
     tag names the commit cargo actually recorded
 7. Wait 60-120s for propagation
 8. Verify with curl to crates.io API
-9. cargo install --path crates/<dir> --locked (binaries only)
+9. cargo install <crate> --version <version> --locked (binaries only — from
+   the registry, run OUTSIDE this workspace; never --path, per ADR-0043)
 10. Verify <binary> --version
 ```
 
@@ -298,11 +299,14 @@ zsh: killed (no output — looks exactly like OOM kill)
 
 **ALWAYS do this instead**:
 ```bash
-cargo install --path crates/<dir> --locked
+cargo install <crate> --version <version> --locked   # registry only — never --path (ADR-0043)
 ```
 
 `cargo install` writes to a temp file and renames atomically, keeping the
-kernel cache consistent. If a manual copy is ever unavoidable:
+kernel cache consistent, regardless of whether it reads from the registry or
+a path — but only the registry form is a sanctioned release install; a path
+install carries no provenance once its source worktree is reclaimed
+(ADR-0043, #8561). If a manual copy is ever unavoidable:
 ```bash
 cp target/release/<binary> ~/.cargo/bin/<binary>
 codesign --force --sign - ~/.cargo/bin/<binary>  # Regenerate signature
@@ -711,8 +715,8 @@ SKIP_UI_BUILD=1 cargo publish -p <crate>
 sleep 100
 curl -s https://crates.io/api/v1/crates/<crate>/<version> | head -c 200
 
-# 13. For binaries: install locally
-cargo install --path crates/<crate> --locked
+# 13. For binaries: install from the registry — never --path (ADR-0043)
+cargo install <crate> --version <version> --locked
 
 # 14. Verify binary version
 <binary> --version
@@ -777,8 +781,8 @@ cargo publish -p trusty-search
 sleep 100
 curl -s https://crates.io/api/v1/crates/trusty-search/0.13.1 | head -c 200
 
-# Install
-cargo install --path crates/trusty-search --locked
+# Install — from the registry, never --path (ADR-0043)
+cargo install trusty-search --version 0.13.1 --locked
 trusty-search --version
 ```
 
@@ -816,7 +820,8 @@ Release flow:
 4. Create tag: `git tag <crate-name>-v<version>`
 5. Push tag: `git push origin <crate-name>-v<version>`
 6. Publish: `cargo publish -p <crate>`
-7. Install binary (if applicable): `cargo install --path crates/<dir> --locked`
+7. Install binary (if applicable), from the registry, never `--path`
+   (ADR-0043): `cargo install <crate> --version <version> --locked`
 
 ## Cleanup After Publishing
 
@@ -851,7 +856,8 @@ Before declaring a publish complete:
       the tag exists — this is what binds the tag to the commit (CHECK 6)
 - [ ] `cargo publish` succeeded (status 200 OK)
 - [ ] Waited 100s and verified on crates.io API
-- [ ] Binary installed with `cargo install --path … --locked` (if applicable)
+- [ ] Binary installed with `cargo install <crate> --version <version>
+      --locked` from the registry (if applicable) — never `--path` (ADR-0043)
 - [ ] `<binary> --version` shows correct version
 - [ ] Worktree path and branch reported to the PM for its prune verb (#5791 — never removed by the agent)
 - [ ] Remote branch cleaned up
@@ -888,8 +894,8 @@ socket close.
 # 1. Stop the daemon gracefully (SIGTERM → drain → exit)
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 
-# 2. Rebuild and install the new binary
-cargo install --path crates/<crate-dir> --locked
+# 2. Install the newly-published binary — from the registry, never --path (ADR-0043)
+cargo install <crate-dir> --version <version> --locked
 
 # 3. Restart the daemon
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
