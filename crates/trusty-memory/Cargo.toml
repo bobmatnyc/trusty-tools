@@ -134,6 +134,10 @@ anyhow = { workspace = true }
 # #4891: the backfill report reads a private COPY of each palace's redb store so
 # that opening it can never write to the live file (see commands/backfill_report).
 tempfile = { workspace = true }
+# #8434: `palace legacy-kg` reads the pre-redb SQLite `kg.db` read-only to
+# recover the drawers the #45 migration never imported (it compiled only under
+# a feature this binary never enabled).
+rusqlite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why axum and tower-http are gone (#6286): they were here for the HTTP/SSE

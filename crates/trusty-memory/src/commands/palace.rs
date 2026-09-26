@@ -34,6 +34,7 @@ use trusty_common::memory_core::PalaceRegistry;
 /// existing vector-only `palace_compact` MCP tool would have widened that
 /// tool's blast radius with nothing in its name to warn a caller.
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
+/// `LegacyKg` writes only with `--apply` (#8434).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -68,6 +69,30 @@ pub enum PalaceAction {
         #[arg(long, value_name = "DAYS", default_value_t = 90)]
         history_days: i64,
     },
+    /// Report, and with `--apply` import, drawers stranded in a pre-redb
+    /// SQLite `kg.db` (#8434).
+    ///
+    /// Dry run by default: reads private copies of `kg.db` and kg.redb, so it
+    /// is safe with the daemon up. `--apply` needs the write lock (stop the
+    /// daemon first) and refuses a store it would have to recreate. A missing
+    /// drawer whose content a live drawer already holds under another id is
+    /// skipped and counted as `content_duplicates` unless
+    /// `--include-content-duplicates` is passed. Nothing is ever deleted or
+    /// renamed.
+    LegacyKg {
+        /// Palace id.
+        name: String,
+        /// Import the missing drawers (default: report only).
+        #[arg(long)]
+        apply: bool,
+        /// With `--apply`, skip embedding the imported drawers.
+        #[arg(long)]
+        no_embed: bool,
+        /// With `--apply`, also import missing drawers whose content a live
+        /// drawer already holds under another id (default: skip them).
+        #[arg(long, requires = "apply")]
+        include_content_duplicates: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -89,6 +114,26 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             dry_run,
             history_days,
         } => handle_palace_compact(name, dry_run, history_days).await,
+        PalaceAction::LegacyKg {
+            name,
+            apply,
+            no_embed,
+            include_content_duplicates,
+        } => {
+            let palace = resolve(&name)?;
+            let report = if apply {
+                super::legacy_kg::apply_report(&palace, !no_embed, include_content_duplicates)
+                    .await?
+            } else {
+                super::legacy_kg::scan_report(&palace)?
+            };
+            print!("{}", report.render());
+            // #8434: the import committed; print it before failing on embed.
+            match report.embed_error {
+                Some(e) => anyhow::bail!("embed imported drawers: {e}"),
+                None => Ok(()),
+            }
+        }
     }
 }
 

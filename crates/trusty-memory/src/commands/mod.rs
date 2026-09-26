@@ -27,6 +27,7 @@ pub mod kg_twin_merge;
 pub mod kuzu_import;
 // #277: deprecated `migrate kuzu-data`, now a forwarder to `kuzu_import`.
 pub mod kuzu_migrate;
+pub mod legacy_kg;
 pub mod link;
 pub mod migrate;
 pub mod migrations;
