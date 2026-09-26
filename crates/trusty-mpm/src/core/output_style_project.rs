@@ -271,6 +271,10 @@ fn style_chain(
     config: &MpmConfig,
     manifest: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
+    // #8453: a supervisor session's style is its profile's, above every tier.
+    if crate::core::session_profile::resolve(project_dir).is_supervisor() {
+        return Some(crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID.to_string());
+    }
     explicit
         .map(str::to_string)
         .or_else(|| project_selected_style(project_dir))
@@ -328,8 +332,11 @@ pub struct SelectedStyle {
 /// What: the [`effective_style_id`] chain (flag > `.trusty-mpm.toml` > host
 /// config > manifest; `manifest` is called only when no higher tier sets a
 /// style), then [`resolve_or_default`] (unknown or unreadable → the default
-/// plus a warning).
-/// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`.
+/// plus a warning). #8453: a supervisor project always selects the supervisor
+/// style; any other project that names it gets the default plus a warning,
+/// because the supervisor style carries no delegation floor.
+/// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`,
+/// `a_pm_project_cannot_select_the_supervisor_style`.
 pub fn select_style(
     project_dir: &Path,
     explicit: Option<&str>,
@@ -337,6 +344,22 @@ pub fn select_style(
     manifest: impl FnOnce() -> Option<String>,
 ) -> SelectedStyle {
     let id = style_chain(project_dir, explicit, config, manifest);
+    let supervisor_id = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
+    if id.as_deref() == Some(supervisor_id)
+        && !crate::core::session_profile::resolve(project_dir).is_supervisor()
+    {
+        let warning = format!(
+            "output style '{supervisor_id}' is for the supervisor profile only (set \
+             `profile = \"supervisor\"` in .trusty-mpm.toml); using `{DEFAULT_OUTPUT_STYLE_ID}` instead"
+        );
+        tracing::warn!("{warning}");
+        let (style, _) = resolve_or_default(project_dir, None);
+        return SelectedStyle {
+            id,
+            style,
+            warning: Some(warning),
+        };
+    }
     let (style, warning) = resolve_or_default(project_dir, id.as_deref());
     SelectedStyle { id, style, warning }
 }

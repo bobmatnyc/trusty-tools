@@ -308,7 +308,8 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 /// operator a log line saying which model produced their prompt.
 /// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
 /// [`PromptSource::Legacy`] for the two override configurations and for the
-/// compose-error degradation.
+/// compose-error degradation, [`PromptSource::Supervisor`] for a supervisor
+/// project (#8453).
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +318,8 @@ pub(crate) enum PromptSource {
     Package,
     /// Assembled by the legacy string concatenation.
     Legacy,
+    /// The supervisor profile's instructions, in place of the PM prompt (#8453).
+    Supervisor,
 }
 
 /// [`resolve_pm_prompt`], additionally reporting which composer ran.
@@ -362,6 +365,24 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     project_dir: &Path,
     roster_source: impl FnOnce() -> Option<String>,
 ) -> (String, PromptSource) {
+    // #8453: a supervisor session receives the supervisor profile INSTEAD of
+    // the PM prompt. CLAUDE.md named sections are PM-section overrides, so none
+    // applies; `resolve` fails open to the PM path below.
+    if crate::core::session_profile::resolve(project_dir).is_supervisor() {
+        let named = crate::core::claude_md_sections::scan_project(project_dir);
+        if !named.overrides.is_empty() {
+            tracing::warn!(
+                count = named.overrides.len(),
+                "CLAUDE.md named-section overrides are PM sections; the supervisor \
+                 profile ignores them"
+            );
+        }
+        return (
+            crate::core::session_profile::supervisor_prompt(),
+            PromptSource::Supervisor,
+        );
+    }
+
     // #4286: named sections in `CLAUDE.md` are now the ONLY project override
     // surface. Scanned first because every branch below consumes the result.
     let named = crate::core::claude_md_sections::scan_project(project_dir);
