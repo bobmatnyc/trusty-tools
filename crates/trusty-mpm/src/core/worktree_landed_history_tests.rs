@@ -388,6 +388,25 @@ fn a_post_squash_deletion_at_the_unmoved_tip_is_not_landed() {
     assert_undone_at(&wt, &squash, "added.txt");
 }
 
+/// #8633 round 3, the conservative direction of the branch-scoped reverse
+/// check: the squash carried a sibling's edit to a file THIS branch also
+/// edited. `HEAD` never had that line, but the file is one its commits
+/// touched, so the probe cannot tell it from a revert and refuses.
+#[test]
+fn extra_content_on_a_touched_path_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("touched-extra");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "line 1");
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("b", "d"))], "squash (#1)");
+    let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_undone_at(&wt, &squash, "f.txt");
+}
+
 /// #8633 round 3: a clean squash-merge with `main` unmoved since is landed,
 /// and the tip — the squash — is named as the landing commit.
 #[test]

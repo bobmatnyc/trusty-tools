@@ -26,13 +26,17 @@
 //! applying `M`'s own patch (against its first parent) onto `HEAD` must change
 //! nothing. The tip gets no shortcut: before #8633 round 3 an empty merge into
 //! the tip admitted on its own, so a revert made while `main` had not moved
-//! since the squash was admitted and lost (ADR-0057, amended by #8633). A
+//! since the squash was admitted and lost (ADR-0057, amended by #8633). The
+//! reverse check counts a clean residue only on paths the branch's own
+//! commits touched: a landing commit that also carried a sibling's files (the
+//! #7889 donor squash) holds more than `HEAD`, which loses nothing. A
 //! branch that differs from every version the base ever held, or that took
 //! back part of the landed change, fails one of the two checks at every
 //! candidate and is reported not landed. Missing a candidate (the walk is
 //! capped) under-reports "landed", which refuses.
 //! Test: `worktree_landed_history_tests`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::session_manager::worktree_safety::{git_command, git_stdout};
@@ -134,8 +138,8 @@ impl ContentOnBase {
             } => format!(
                 "merging HEAD into {base} changes no file, but HEAD is not on {base} and no \
                  longer holds all of what landed at `{at}` — applying that commit's own change \
-                 onto HEAD would change {} file(s) ({}), so HEAD reverted or deleted part of it \
-                 after it landed; {}",
+                 onto HEAD would change {} file(s) HEAD's own commits touched ({}): a revert or \
+                 deletion made after it landed, or a change on those files HEAD never had; {}",
                 paths.len(),
                 name_paths(paths),
                 history_clause(base, *searched, *candidates)
@@ -289,13 +293,6 @@ impl MergeProbe {
     fn is_noop(&self) -> bool {
         matches!(self, Self::Clean(paths) if paths.is_empty())
     }
-
-    /// The changed or conflicted paths, whichever this merge produced.
-    fn into_paths(self) -> Vec<String> {
-        match self {
-            Self::Clean(paths) | Self::Conflicted(paths) => paths,
-        }
-    }
 }
 
 /// Merge `HEAD` into `base` in memory and report what that would change.
@@ -312,7 +309,7 @@ fn merge_probe(dir: &Path, base: &str) -> Result<MergeProbe, String> {
 /// exit as a failure is what produced the empty "failed (exit status: 1): "
 /// refusal. A conflict writes a tree id as its first stdout line; an error
 /// does not, so that line is the discriminator.
-/// What: exit 0 — `git diff --name-only --ignore-submodules=none <ours>
+/// What: exit 0 — `git diff --name-only --no-renames --ignore-submodules=none <ours>
 /// <tree>` names the residue (`--ignore-submodules=none` keeps a config
 /// setting from hiding a gitlink bump, #7889). Exit 1 with a tree id — the
 /// conflicted paths `--name-only` listed. Anything else is `Err` quoting
@@ -348,6 +345,9 @@ fn merge_in_memory(
                 &[
                     "diff",
                     "--name-only",
+                    // #8633 round 3: both sides of a rename, so a
+                    // branch-scoped reverse check sees the path it touched.
+                    "--no-renames",
                     "--ignore-submodules=none",
                     ours,
                     tree,
@@ -399,13 +399,13 @@ struct HistoryWalk {
 /// content is too — provided `HEAD` has not since taken part of it back. The
 /// tip is a candidate like any other (#8633 round 3): when `main` has not
 /// moved since the squash, the tip IS the squash, and it gets no shortcut.
-/// What: the tip's forward check is the caller's tip merge
-/// (`tip_forward_noop`); on a forward hit it runs [`patch_check`]. Then
-/// `git merge-base <base> HEAD`; the paths `HEAD` changed since then; the
+/// What: `git merge-base <base> HEAD` is the fork. The tip's forward check is
+/// the caller's tip merge (`tip_forward_noop`); on a forward hit it runs
+/// [`lacked_patch`]. Then the paths `HEAD` changed since the fork; the
 /// first-parent commits in `<fork>..<base>` that touch any of them, of which
 /// the oldest [`MAX_CANDIDATES`] are tried, oldest first, the tip skipped as
 /// already tried. A candidate wins when merging `HEAD` into it changes
-/// nothing AND [`patch_check`] changes nothing. Pathspecs are literal, so a
+/// nothing AND [`lacked_patch`] finds nothing lacked. Pathspecs are literal, so a
 /// file name is never read as magic. `undone` prefers the oldest history
 /// forward hit over the tip, since that is where the content landed.
 /// Test: `a_squash_merged_branch_edited_over_on_main_is_landed`,
@@ -432,18 +432,20 @@ fn landed_in_history(
         candidates: 0,
         undone: None,
     };
-    let mut tip_undone = None;
-    if tip_forward_noop {
-        let reverse = patch_check(dir, &tip)?;
-        if reverse.is_noop() {
-            walk.at = Some(tip);
-            return Ok(walk);
-        }
-        tip_undone = Some((tip.clone(), reverse.into_paths()));
-    }
     let fork = git_stdout(dir, &["merge-base", base, "HEAD"])
         .map_err(|e| format!("the fork point of HEAD and {base} could not be found: {e}"))?;
     let fork = fork.trim();
+    let mut touched = None;
+    let mut tip_undone = None;
+    if tip_forward_noop {
+        match lacked_patch(dir, &tip, fork, &mut touched)? {
+            None => {
+                walk.at = Some(tip);
+                return Ok(walk);
+            }
+            Some(lacked) => tip_undone = Some((tip.clone(), lacked)),
+        }
+    }
     let changed = git_stdout(
         dir,
         &[
@@ -491,13 +493,13 @@ fn landed_in_history(
         if !merge_probe(dir, &candidate)?.is_noop() {
             continue;
         }
-        let reverse = patch_check(dir, &candidate)?;
-        if reverse.is_noop() {
-            walk.at = Some(candidate);
-            return Ok(walk);
-        }
-        if walk.undone.is_none() {
-            walk.undone = Some((candidate, reverse.into_paths()));
+        match lacked_patch(dir, &candidate, fork, &mut touched)? {
+            None => {
+                walk.at = Some(candidate);
+                return Ok(walk);
+            }
+            Some(lacked) if walk.undone.is_none() => walk.undone = Some((candidate, lacked)),
+            Some(_) => {}
         }
     }
     walk.undone = walk.undone.take().or(tip_undone);
@@ -531,6 +533,70 @@ fn patch_check(dir: &Path, commit: &str) -> Result<MergeProbe, String> {
         return Err(format!("`{commit}` has no first parent to diff it against"));
     }
     merge_in_memory(dir, Some(parent), "HEAD", commit)
+}
+
+/// What `HEAD` lacks of `commit`'s own patch on paths the branch worked on,
+/// or `None` when it lacks nothing there (#8633 round 3).
+///
+/// Why: a landing commit may carry MORE than this branch — the #7889 donor
+/// shape squashes a parked branch together with its `-r2` sibling's work, so
+/// the squash adds files the parked branch never had. `HEAD` lacking those is
+/// not `HEAD` undoing them, and refusing on it strands every donor tree. A
+/// branch that undid part of the landing — a revert, a deletion — did so in
+/// a commit of its own, which touched the path.
+/// What: [`patch_check`]. A conflict lacks all its paths. A clean residue
+/// lacks only the paths some commit in `<fork>..HEAD` touched
+/// ([`branch_touched_paths`], computed once per walk into `touched`); a
+/// residue wholly on paths the branch never touched is `None`. Any git error
+/// is `Err` and refuses.
+/// Test: `a_partial_revert_while_main_is_unmoved_is_not_landed`,
+/// `a_post_squash_deletion_at_the_unmoved_tip_is_not_landed`,
+/// `worktree_7889_the_sweep_admits_a_real_donor_branch`,
+/// `extra_content_on_a_touched_path_is_not_landed`.
+fn lacked_patch(
+    dir: &Path,
+    commit: &str,
+    fork: &str,
+    touched: &mut Option<HashSet<String>>,
+) -> Result<Option<Vec<String>>, String> {
+    let residue = match patch_check(dir, commit)? {
+        MergeProbe::Conflicted(paths) => return Ok(Some(paths)),
+        MergeProbe::Clean(paths) if paths.is_empty() => return Ok(None),
+        MergeProbe::Clean(paths) => paths,
+    };
+    if touched.is_none() {
+        *touched = Some(branch_touched_paths(dir, fork)?);
+    }
+    let lacked: Vec<String> = residue
+        .into_iter()
+        .filter(|p| touched.as_ref().is_some_and(|t| t.contains(p)))
+        .collect();
+    Ok((!lacked.is_empty()).then_some(lacked))
+}
+
+/// Every path any commit in `<fork>..HEAD` touched, merges included (#8633
+/// round 3).
+///
+/// What: `git log --format= --name-only --no-renames -m <fork>..HEAD`. `-m`
+/// lists a merge commit's paths against each parent and `--no-renames` lists
+/// both sides of a rename, so the set only ever errs larger, which refuses
+/// more. Paths are quoted exactly as `git diff --name-only` quotes them.
+/// Test: `a_partial_revert_while_main_is_unmoved_is_not_landed`.
+fn branch_touched_paths(dir: &Path, fork: &str) -> Result<HashSet<String>, String> {
+    let range = format!("{fork}..HEAD");
+    let out = git_stdout(
+        dir,
+        &[
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "-m",
+            &range,
+        ],
+    )
+    .map_err(|e| format!("the paths the commits in {range} touched could not be listed: {e}"))?;
+    Ok(non_empty_lines(&out).into_iter().collect())
 }
 
 /// Trimmed, non-empty lines of `text`.

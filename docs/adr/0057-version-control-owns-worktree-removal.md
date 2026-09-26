@@ -293,7 +293,12 @@ the guard will establish every precondition itself.
      the fork are all in `M`; it cannot see a later branch commit that takes
      part of `M` back — a revert to the fork's version, or the deletion of a
      file `M` added — because relative to the fork that commit changes
-     nothing. The second catches exactly that. The tip gets no shortcut: an
+     nothing. The second catches exactly that, and counts a clean residue
+     only on paths some commit in `<fork>..HEAD` touched (merges included,
+     renames split): a revert or deletion is a commit of the branch's own,
+     while a squash that also carried a sibling's files — the #7889 donor
+     shape — holds more than HEAD without HEAD having undone anything. A
+     conflict in that direction always refuses. The tip gets no shortcut: an
      empty merge into the tip no longer admits a non-ancestor on its own,
      because when the base has not moved since the squash, the tip IS the
      squash and the same blind spot applies there. A rebase-merged branch is
