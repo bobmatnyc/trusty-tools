@@ -1,0 +1,2 @@
+Fixed
+- The `SessionEnd` agent-worktree reap no longer deletes gitignored run output. `git worktree remove --force` deleted gitignored files the dirt check never counted, so a zero-commit agent tree holding results in a gitignored directory read as clean and lost them. A gitignored file now keeps the tree unless it is build or tool output (`target/`, `node_modules/`, `__pycache__/`, `dist/`, `build/`, and similar). The refusal names the path and the file count. If the check fails, the tree is kept (#8534).

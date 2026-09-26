@@ -66,6 +66,8 @@ pub mod workspace_guard;
 pub(crate) mod worktree_adopt;
 // #8318: frees an adopted tree's branch and a dead agent's harness lock.
 pub(crate) mod worktree_adopt_release;
+// #8534: gitignored run output that `git worktree remove --force` would delete.
+pub(crate) mod worktree_ignored_output;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
