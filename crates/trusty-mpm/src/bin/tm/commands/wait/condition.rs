@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 // #8638: one rollup entry shape and one latest-run rule, shared with queue-check.
-use crate::commands::pr::rollup::{RollupEntry, latest_per_name};
+use crate::commands::pr::rollup::{RollupEntry, deciding_per_check};
 
 /// One poll's verdict.
 ///
@@ -352,7 +352,7 @@ pub(crate) struct PrView {
 /// eventual-consistency guard testable against canned JSON.
 /// What: MERGED/CLOSED short-circuits to `Met`; an absent or empty rollup is
 /// `Pending` unless `allow_empty`; otherwise the deciding run of every check
-/// name (see [`latest_per_name`]) must be [`RollupEntry::settled`], and only
+/// name (see [`deciding_per_check`]) must be [`RollupEntry::settled`], and only
 /// those runs are counted.
 /// Test: the `check_condition_*` family, including
 /// `check_condition_duplicate_run_uses_latest`,
@@ -380,7 +380,7 @@ fn settle(view: &PrView, allow_empty: bool) -> Poll {
     }
 
     // #8638: a superseded run of the same check is neither pending nor failing.
-    let entries = latest_per_name(entries);
+    let entries = deciding_per_check(entries);
     let unsettled: Vec<String> = entries
         .iter()
         .filter(|e| !e.settled())

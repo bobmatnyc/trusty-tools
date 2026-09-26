@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 
 // #8638: one rollup entry shape and one latest-run rule, shared with `tm wait`.
-use super::rollup::{RollupEntry, latest_named};
+use super::rollup::{RollupEntry, deciding_runs};
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -113,7 +113,8 @@ struct PrView {
 /// `queue_duplicate_cancelled_then_success_is_mergeable`,
 /// `queue_duplicate_success_then_failure_is_blocked`,
 /// `queue_duplicate_success_then_running_is_pending`,
-/// `queue_duplicate_success_then_queued_is_pending`.
+/// `queue_duplicate_success_then_queued_is_pending`,
+/// `queue_check_and_status_same_name_both_required`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -132,22 +133,22 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
         return Some("unresolved code-critic BLOCK in the PR comments".to_string());
     }
     for context in required {
-        // #8638: the latest run of the context decides, never the first listed.
-        match latest_named(&view.rollup, context) {
-            None => {
-                return Some(format!(
-                    "required context `{context}` is missing on the head SHA"
-                ));
-            }
-            Some(e) if e.is_unfinished() => {
-                return Some(format!(
-                    "required context `{context}` is pending: a run has no result yet"
-                ));
-            }
-            Some(e) if !e.is_success() => {
-                return Some(format!("required context `{context}` is not SUCCESS"));
-            }
-            Some(_) => {}
+        // #8638: the latest run decides, never the first listed, and a
+        // CheckRun and a StatusContext sharing the name must BOTH pass.
+        let runs = deciding_runs(&view.rollup, context);
+        if runs.is_empty() {
+            return Some(format!(
+                "required context `{context}` is missing on the head SHA"
+            ));
+        }
+        if runs.iter().any(|e| e.settled() && !e.is_success()) {
+            return Some(format!("required context `{context}` is not SUCCESS"));
+        }
+        if let Some(e) = runs.iter().find(|e| e.is_unfinished()) {
+            return Some(format!(
+                "required context `{context}` is pending: a run has no result yet {}",
+                e.run_summary()
+            ));
         }
     }
     None

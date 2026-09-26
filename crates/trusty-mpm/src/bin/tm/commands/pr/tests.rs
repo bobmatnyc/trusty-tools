@@ -2354,7 +2354,7 @@ fn queue_stop_order_prefers_draft() {
     // Draft AND a hold label AND changes requested AND a red check: draft wins.
     let json = r#"{"isDraft":true,"labels":[{"name":"do-not-merge"}],
         "reviewDecision":"CHANGES_REQUESTED",
-        "statusCheckRollup":[{"name":"Clippy","conclusion":"FAILURE"}],"comments":[]}"#;
+        "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"FAILURE"}],"comments":[]}"#;
     assert_eq!(first_reason(json), Some("draft".to_string()));
 }
 
@@ -2389,8 +2389,8 @@ fn queue_stop_order_prefers_critic_block() {
 fn queue_critic_block_then_approve_is_clear() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
-          {"name":"Rust tests","conclusion":"SUCCESS"}],
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
         "comments":[{"body":"code-critic: BLOCK"},{"body":"code-critic: APPROVE"}]}"#;
     assert_eq!(first_reason(json), None);
 }
@@ -2399,8 +2399,8 @@ fn queue_critic_block_then_approve_is_clear() {
 fn queue_critic_ignores_unrelated_comments() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
-          {"name":"Rust tests","conclusion":"SUCCESS"}],
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
         "comments":[{"body":"we should BLOCK bad merges in general"}]}"#;
     assert_eq!(first_reason(json), None);
 }
@@ -2408,7 +2408,7 @@ fn queue_critic_ignores_unrelated_comments() {
 #[test]
 fn queue_required_context_missing() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
-        "statusCheckRollup":[{"name":"Clippy","conclusion":"SUCCESS"}],"comments":[]}"#;
+        "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}],"comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
     assert!(reason.contains("`Rust tests` is missing"), "{reason}");
 }
@@ -2417,7 +2417,7 @@ fn queue_required_context_missing() {
 fn queue_required_context_not_success() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
           {"name":"Rust tests","status":"COMPLETED","conclusion":"SKIPPED"}],
         "comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
@@ -2486,6 +2486,10 @@ fn queue_duplicate_success_then_running_is_pending() {
     );
     let reason = first_reason(&json).expect("a running latest run blocks");
     assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+    assert!(
+        reason.ends_with("(IN_PROGRESS, started 2026-09-25T22:52:00+00:00)"),
+        "{reason}"
+    );
 }
 
 /// REGRESSION (#8638): a rerun still QUEUED carries no timestamps at all.
@@ -2500,6 +2504,22 @@ fn queue_duplicate_success_then_queued_is_pending() {
     );
     let reason = first_reason(&json).expect("a queued rerun blocks");
     assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+    assert!(reason.ends_with("(QUEUED, no startedAt)"), "{reason}");
+}
+
+/// REGRESSION (#8638): a CheckRun and a StatusContext that share a name are
+/// two requirements, and GitHub gates on both. A green CheckRun must not
+/// hide a red StatusContext of the same name.
+#[test]
+fn queue_check_and_status_same_name_both_required() {
+    let json = duplicate_run_view(
+        r#"{"__typename":"StatusContext","context":"Rust tests","state":"FAILURE",
+            "startedAt":"2026-09-25T22:50:00Z"},
+          {"__typename":"CheckRun","name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:51:00Z","completedAt":"2026-09-25T22:53:26Z"}"#,
+    );
+    let reason = first_reason(&json).expect("the red StatusContext blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
 }
 
 /// #8638: a context that ran once is judged exactly as before.
