@@ -432,6 +432,36 @@ pub trait WorktreeRemovalProbe {
     /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
     fn local_only_commits(&self, dir: &Path) -> Result<usize, String>;
 
+    /// Commits reachable from `HEAD` that neither the merged pull request's
+    /// head `pr_head` nor any `origin` remote-tracking ref has (#8665).
+    ///
+    /// Why: a branch whose own pull request merged had its remote branch
+    /// deleted by the merge, so a commit made in the worktree AFTER that merge
+    /// is on no remote at all — and "own PR merged, no upstream" granted the
+    /// removal without asking. This names those commits, so the guard can
+    /// require their content to be proven landed.
+    /// What: `git rev-list --abbrev-commit HEAD --not <pr_head> --remotes=origin`,
+    /// one abbreviated id per commit, newest first. `Ok(vec![])` means nothing
+    /// here post-dates the merged head or is off `origin`. `pr_head` must be a
+    /// hex object id; anything else, a head git does not have, or a failed
+    /// `rev-list` is `Err`. It does NOT refresh `origin`: the caller asks only
+    /// after [`local_only_commits`](Self::local_only_commits) answered, which
+    /// the production probe does only after its own fetch succeeded. Defaulted,
+    /// with the fail-closed default, for the reason [`head_sha`](Self::head_sha)
+    /// is.
+    /// Test: `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
+    /// `worktree_8665_the_merged_head_itself_is_still_reclaimable` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove_rechecks_tests`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`,
+    /// `commits_after_merged_head_refuses_a_head_that_is_not_hex`.
+    fn commits_after_merged_head(
+        &self,
+        _dir: &Path,
+        _pr_head: &str,
+    ) -> Result<Vec<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
+
     /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
     /// repository the question was asked (#7057).
     ///
@@ -658,6 +688,33 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
                 out.trim()
             )
         })
+    }
+
+    fn commits_after_merged_head(&self, dir: &Path, pr_head: &str) -> Result<Vec<String>, String> {
+        // #8665: the id comes from GitHub and lands in argv, so only a bare hex
+        // object id is passed — never something git could read as an option.
+        let pr_head = pr_head.trim();
+        if pr_head.is_empty() || !pr_head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "the merged pull request's head `{pr_head}` is not a commit id git can be asked \
+                 about"
+            ));
+        }
+        let args = [
+            "rev-list",
+            "--abbrev-commit",
+            "HEAD",
+            "--not",
+            pr_head,
+            "--remotes=origin",
+        ];
+        let out = git_stdout(dir, &args)?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
@@ -974,6 +1031,26 @@ mod tests {
         assert!(!UnoverriddenProbe.landing_admission(dir).admits());
         // #7889 critic round 2: an unoverridden nested scan is unanswerable.
         assert!(UnoverriddenProbe.nested_dirt(dir).is_err());
+        // #8665: so is the post-merge commit list, which then never admits.
+        assert!(
+            UnoverriddenProbe
+                .commits_after_merged_head(dir, "deadbeef")
+                .is_err()
+        );
+    }
+
+    /// 🔴 #8665: the merged head comes from GitHub and lands in argv, so a
+    /// value git would read as an option is refused before git runs. Unguarded,
+    /// `--all` turns the query into `HEAD --not --all`, which lists nothing and
+    /// would read as "no commit after the merge".
+    #[test]
+    fn commits_after_merged_head_refuses_a_head_that_is_not_hex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        let err = GitAndGhProbe
+            .commits_after_merged_head(&repo, "--all")
+            .expect_err("an option-shaped head must never reach git");
+        assert!(err.contains("--all"), "{err}");
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
