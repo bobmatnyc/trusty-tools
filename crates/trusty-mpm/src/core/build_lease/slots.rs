@@ -19,11 +19,19 @@
 //! The lock files are opened close-on-exec (Rust's default), so a build's own
 //! children never inherit the lock: a daemon a build starts (an `sccache`
 //! server, a `cargo run` service) cannot pin the slot after the build ends.
+//! The other side of that choice: when the `tm build-lease` holder is
+//! SIGKILLed, its build keeps running while the slot reads free. The lease
+//! therefore also checks cargo's own `.cargo-lock` in the slot's target
+//! directory before it uses the directory (see `stale_guard::cargo_lock_held`).
+//!
+//! Slot and admission files are created mode `0600`: a record names the
+//! holder's command and checkout, and only the store's owner reads it.
 //! Test: the `#[cfg(test)]` suite below uses real files and real `flock`s.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -37,8 +45,8 @@ pub const SLOT_DIR_NAME: &str = "build-slots";
 /// Why: a refusal has to name who holds the machine, and a census has to know
 /// which compiler processes belong to a lease. Both read this.
 /// What: the `tm build-lease` pid, the build's own pid once spawned, the
-/// command, the checkout, the start time and the target directory it was
-/// given.
+/// command summary ([`summarize_command`] — never the full argv), the
+/// checkout, the start time and the target directory it was given.
 /// Test: `a_held_slot_is_reported_with_its_record`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -49,7 +57,7 @@ pub struct HolderRecord {
     pub pid: u32,
     /// The build it spawned, once spawned.
     pub child_pid: Option<u32>,
-    /// The command, as one line.
+    /// The command's summary: program, subcommand and `-p` packages.
     pub command: String,
     /// The working directory it ran in.
     pub cwd: String,
@@ -76,7 +84,11 @@ impl HolderRecord {
 
     /// `slot 1: cargo test -p x (pid 4412, 12m, /repo)`.
     ///
-    /// Test: `a_held_slot_is_reported_with_its_record`.
+    /// What: the command is summarized again here, so a record an older
+    /// binary wrote with the full argv never prints its arguments (#8261
+    /// round 3: a `--token` value must not reach another session's stderr).
+    /// Test: `a_held_slot_is_reported_with_its_record`,
+    /// `a_render_never_shows_an_argument_value`.
     #[must_use]
     pub fn render(&self) -> String {
         let age = chrono::DateTime::parse_from_rfc3339(&self.started_at)
@@ -85,11 +97,67 @@ impl HolderRecord {
                 format!("{}m", secs.max(0) / 60)
             })
             .unwrap_or_else(|_| "?m".to_string());
+        let argv = shlex::split(&self.command).unwrap_or_else(|| {
+            self.command
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        });
         format!(
             "slot {}: {} (pid {}, {age}, {})",
-            self.slot, self.command, self.pid, self.cwd
+            self.slot,
+            summarize_command(&argv),
+            self.pid,
+            self.cwd
         )
     }
+}
+
+/// The part of a build command that is safe to show another session.
+///
+/// Why: holder records are read by every waiter and logged by the daemon, and
+/// a command line can carry a credential (`cargo publish --token …`, #8261
+/// round 3).
+/// What: the program's basename, the word after it (past `+toolchain`) when
+/// that word is a plain lowercase name, and every `-p`/`--package` value before
+/// `--`. Nothing else from the argv is kept.
+/// Test: `a_render_never_shows_an_argument_value`.
+#[must_use]
+pub fn summarize_command(argv: &[String]) -> String {
+    let Some((program, rest)) = argv.split_first() else {
+        return String::new();
+    };
+    let mut out = vec![program.rsplit('/').next().unwrap_or(program).to_string()];
+    let mut rest = rest.iter().skip_while(|w| w.starts_with('+')).peekable();
+    if let Some(word) = rest.peek()
+        && is_plain_name(word)
+    {
+        out.push((*word).clone());
+        rest.next();
+    }
+    let rest: Vec<&String> = rest.take_while(|w| *w != "--").collect();
+    for (i, word) in rest.iter().enumerate() {
+        let package = match word.as_str() {
+            "-p" | "--package" => rest.get(i + 1).map(|v| v.as_str()),
+            w => w
+                .strip_prefix("--package=")
+                .or_else(|| w.strip_prefix("-p").filter(|v| !v.is_empty())),
+        };
+        if let Some(package) = package.filter(|p| is_plain_name(p)) {
+            out.push(format!("-p {package}"));
+        }
+    }
+    out.join(" ")
+}
+
+/// A lowercase name: `test`, `trusty-mpm`, `llvm-cov`, `30`.
+fn is_plain_name(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= 64
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+        && !word.starts_with(['-', '.'])
 }
 
 /// One slot as a probe found it.
@@ -113,6 +181,8 @@ pub enum SlotState {
 #[derive(Debug, Clone)]
 pub struct SlotDir {
     root: PathBuf,
+    /// Why the canonical store was not used, when this is the fallback.
+    fallback: Option<String>,
 }
 
 /// Why no slot directory could be used.
@@ -146,32 +216,26 @@ impl SlotDir {
             path: root.clone(),
             source,
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            fallback: None,
+        })
     }
 
-    /// `<home>/.trusty-mpm/build-slots`, else a per-user temp fallback.
+    /// This directory, marked as the fallback store because of `why`.
+    #[must_use]
+    pub(super) fn into_fallback(mut self, why: String) -> Self {
+        self.fallback = Some(why);
+        self
+    }
+
+    /// Why the canonical `~/.trusty-mpm/build-slots` is not in use, when this
+    /// is the per-uid fallback store. `tm doctor` warns on it.
     ///
-    /// Why: the fail-open table in [`crate::core::build_lease`] — a home
-    /// directory whose `.trusty-mpm` cannot be written must not stop every
-    /// build, and a temp directory keyed by uid still coordinates every build
-    /// this user runs.
-    /// What: the home path first; on failure, `$TMPDIR/trusty-mpm-build-slots-<uid>`.
-    ///
-    /// # Errors
-    ///
-    /// Both attempts' failures, the home one first.
-    ///
-    /// Test: `the_temp_fallback_is_used_when_home_is_unwritable`.
-    pub fn resolve(home: &Path) -> Result<Self, (SlotDirError, SlotDirError)> {
-        let primary = home.join(".trusty-mpm").join(SLOT_DIR_NAME);
-        match Self::at(&primary) {
-            Ok(dir) => Ok(dir),
-            Err(first) => {
-                let fallback = std::env::temp_dir()
-                    .join(format!("trusty-mpm-{SLOT_DIR_NAME}-{}", current_uid()));
-                Self::at(fallback).map_err(|second| (first, second))
-            }
-        }
+    /// Test: `a_broken_home_falls_back_to_the_fixed_per_uid_store`.
+    #[must_use]
+    pub fn fallback_reason(&self) -> Option<&str> {
+        self.fallback.as_deref()
     }
 
     /// The directory itself.
@@ -201,13 +265,10 @@ impl SlotDir {
     /// Test: `a_slot_is_exclusive_across_open_file_descriptions`.
     pub fn try_acquire(&self, slot: u32) -> std::io::Result<Option<SlotGuard>> {
         let path = self.lock_path(slot);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        let file = open_private(&path)?;
         if try_flock(&file)? {
+            // A file an older binary created 0644 is narrowed on first use.
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
             Ok(Some(SlotGuard { file, slot, path }))
         } else {
             Ok(None)
@@ -254,15 +315,10 @@ impl SlotDir {
     ///
     /// The open error, rendered with the path.
     ///
-    /// Test: `an_unopenable_admission_lock_is_bounded`.
+    /// Test: `doctor_fails_on_a_broken_slot_file`.
     pub fn check_admission_lock(&self) -> Result<(), String> {
         let path = self.root.join("admission.lock");
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
+        open_private(&path)
             .map(drop)
             .map_err(|err| format!("{}: {err}", path.display()))
     }
@@ -279,7 +335,7 @@ impl SlotDir {
                     slot,
                     pid: 0,
                     child_pid: None,
-                    command: "unknown (record not yet written)".to_string(),
+                    command: "unknown".to_string(),
                     cwd: String::new(),
                     started_at: String::new(),
                     target_dir: None,
@@ -355,12 +411,7 @@ impl SlotDir {
     ///
     /// Test: `the_admission_lock_serialises_two_takers`.
     pub fn lock_admission(&self, deadline: Instant) -> std::io::Result<Option<File>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.root.join("admission.lock"))?;
+        let file = open_private(&self.root.join("admission.lock"))?;
         loop {
             if try_flock(&file)? {
                 return Ok(Some(file));
@@ -420,6 +471,17 @@ impl Drop for SlotGuard {
     }
 }
 
+/// Open (creating, mode `0600`) a lock file for reading and writing.
+fn open_private(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+}
+
 /// Read a slot file's record, if it holds one.
 fn read_record(path: &Path) -> Option<HolderRecord> {
     let mut body = String::new();
@@ -442,8 +504,8 @@ fn try_flock(file: &File) -> std::io::Result<bool> {
     }
 }
 
-/// This process's real uid, for the temp fallback's name.
-fn current_uid() -> u32 {
+/// This process's real uid.
+pub(super) fn current_uid() -> u32 {
     // SAFETY: getuid(2) cannot fail and touches no memory.
     unsafe { libc::getuid() }
 }
@@ -546,16 +608,51 @@ mod tests {
         assert!(err.to_string().contains("not-a-dir"), "{err}");
     }
 
+    /// #8261 round 3: a waiter must never see a holder's argument values.
     #[test]
-    fn the_temp_fallback_is_used_when_home_is_unwritable() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // `.trusty-mpm` is a FILE, so `.trusty-mpm/build-slots` cannot exist.
-        std::fs::write(tmp.path().join(".trusty-mpm"), "x").expect("write");
-        let slots = SlotDir::resolve(tmp.path()).expect("the temp fallback works");
-        assert!(
-            slots.path().starts_with(std::env::temp_dir()),
-            "{:?}",
-            slots.path()
+    fn a_render_never_shows_an_argument_value() {
+        let argv: Vec<String> = [
+            "/usr/bin/cargo",
+            "+1.94",
+            "publish",
+            "--token",
+            "s3cr3t",
+            "-p",
+            "trusty-mpm",
+            "--package=tc",
+            "--",
+            "-p",
+            "hidden",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(
+            summarize_command(&argv),
+            "cargo publish -p trusty-mpm -p tc"
         );
+        let mut rec = record(0);
+        rec.command = "sh -c 'curl -H \"Authorization: x\"' --token s3cr3t".into();
+        let line = rec.render();
+        assert!(!line.contains("s3cr3t"), "{line}");
+        assert!(!line.contains("Authorization"), "{line}");
+        assert!(line.starts_with("slot 0: sh (pid "), "{line}");
+    }
+
+    #[test]
+    fn slot_files_are_private_to_their_owner() {
+        let (_tmp, slots) = dir();
+        let held = slots.try_acquire(0).expect("io").expect("free");
+        let mode = std::fs::metadata(held.path())
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        slots.check_admission_lock().expect("admission");
+        let mode = std::fs::metadata(slots.path().join("admission.lock"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
     }
 }

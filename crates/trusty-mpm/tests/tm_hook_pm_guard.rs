@@ -976,7 +976,7 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
     let stdout = run_pm_guard(payload, &[]);
     assert!(!stdout.contains("\"deny\""), "{stdout}");
     assert!(
-        stdout.contains("build-lease -- cargo build --target-dir /tmp/build-cache"),
+        stdout.contains("build-lease --wait-secs 60 -- cargo build --target-dir /tmp/build-cache"),
         "{stdout}"
     );
 }
@@ -2974,7 +2974,7 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
     );
     assert!(!stdout.contains("\"deny\""), "{stdout}");
     assert!(
-        stdout.contains("build-lease -- cargo build 2>&1 | grep error"),
+        stdout.contains("build-lease --wait-secs 60 -- cargo build 2>&1 | grep error"),
         "{stdout}"
     );
     let readme = format!(r#"{{"file_path":"{}"}}"#, repo.join("README.md").display());
@@ -5097,7 +5097,7 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
     let stdout = run_pm_guard(&subagent_bash_payload("sh -c 'cargo build'"), &[]);
     assert!(!stdout.contains("\"deny\""), "{stdout}");
     assert!(
-        stdout.contains("build-lease -- sh -c 'cargo build'"),
+        stdout.contains("build-lease --wait-secs 60 -- sh -c 'cargo build'"),
         "{stdout}"
     );
 }

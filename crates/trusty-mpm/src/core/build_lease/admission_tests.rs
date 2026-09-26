@@ -91,25 +91,46 @@ fn low_available_memory_refuses_even_at_normal_pressure() {
     assert!(dec.withheld[0].contains("min_available_pct"), "{dec:?}");
 }
 
+/// Owner ruling "Load only" (#8261 round 3): a loaded machine with nothing
+/// held admits exactly one leased build.
 #[test]
-fn a_loaded_machine_admits_only_when_nothing_is_held() {
+fn a_loaded_machine_admits_exactly_one_when_nothing_is_held() {
     let mut r = quiet();
     r.load_avg_1min = Ok(40.0);
-    assert!(d(&dflt(), 4, 0, &r).admit);
+    assert!(d(&dflt(), 4, 0, &r).admit, "the load floor admits one");
     let dec = d(&dflt(), 4, 1, &r);
-    assert!(!dec.admit);
+    assert!(!dec.admit, "…and only one");
     assert!(dec.withheld[0].contains("1-minute load 40.00"), "{dec:?}");
 }
 
+/// Owner ruling "Load only" (#8261 round 3): the floor never reaches memory —
+/// low available memory or high pressure refuses with nothing held.
 #[test]
-fn foreign_builds_reduce_the_slots_but_never_below_one() {
+fn low_memory_refuses_even_when_nothing_is_held() {
+    let mut r = quiet();
+    r.pressure = Ok(pressure(PressureLevel::Normal, 5.0));
+    let low = d(&dflt(), 4, 0, &r);
+    assert!(!low.admit, "{low:?}");
+    assert!(low.withheld[0].contains("min_available_pct"), "{low:?}");
+    r.pressure = Ok(pressure(PressureLevel::Warn, 50.0));
+    assert!(!d(&dflt(), 4, 0, &r).admit, "pressure over its threshold");
+}
+
+/// Owner ruling "Load only" (#8261 round 3): the census has no floor — at or
+/// over the ceiling it leaves zero slots, so even the first build waits.
+#[test]
+fn foreign_builds_can_reduce_the_slots_to_zero() {
     let mut r = quiet();
     r.foreign = Ok(vec![group(10), group(11)]);
     let dec = d(&dflt(), 4, 2, &r);
     assert_eq!(dec.n_effective, 2);
     assert!(!dec.admit);
     r.foreign = Ok((0..9).map(group).collect());
-    assert_eq!(d(&dflt(), 4, 0, &r).n_effective, 1);
+    let full = d(&dflt(), 4, 0, &r);
+    assert_eq!(full.n_effective, 0);
+    assert!(!full.admit, "no floor: {full:?}");
+    r.foreign = Ok((0..4).map(group).collect());
+    assert!(!d(&dflt(), 4, 0, &r).admit, "exactly the ceiling refuses");
     let off = BuildLeaseConfig {
         count_foreign_builds: Some(false),
         ..dflt()

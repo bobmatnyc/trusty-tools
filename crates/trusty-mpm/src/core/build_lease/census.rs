@@ -11,7 +11,8 @@
 //! rest — every process a leased build starts descends from the `tm
 //! build-lease` that holds the lock, so the holder pid in the slot file
 //! identifies the whole tree. What remains is foreign. [`Sampler`] is the seam
-//! the acquire loop reads through; [`LiveSampler`] reads this machine.
+//! the acquire loop reads through; [`LiveSampler`] reads this machine and
+//! [`FixedSampler`] replays one set of readings.
 //! Test: the unit suite below.
 
 use std::collections::HashMap;
@@ -78,15 +79,25 @@ fn foreign_groups_excluding(rows: &[ProcessSnapshot], leased: &[u32]) -> Vec<Bui
     build_groups(&kept)
 }
 
+/// Keeps [`Sampler`] implementable only inside this crate.
+mod sealed {
+    /// The supertrait no other crate can name.
+    pub trait Sealed {}
+    impl Sealed for super::FixedSampler {}
+    impl Sealed for super::LiveSampler {}
+}
+
 /// Where the acquire loop gets its readings from.
 ///
 /// Why: the loop polls; a test must be able to script what each poll sees.
+/// Sealed, so a required method can be added without breaking a caller: the
+/// implementations are [`LiveSampler`] and [`FixedSampler`].
 /// Test: the `acquire` module's suite.
-pub trait Sampler {
+pub trait Sampler: sealed::Sealed {
     /// Take every reading now, excluding `holders`' own builds from the census.
     fn sample(&mut self, holders: &[HolderRecord]) -> Readings;
 
-    /// The readings for a build that could take no lease (#8261 critic round 1).
+    /// The readings for a build that could take no lease (#8261).
     ///
     /// What: `foreign` must count every build running WITHOUT a lease,
     /// including other `tm build-lease` processes started earlier than this
@@ -95,6 +106,47 @@ pub trait Sampler {
     /// [`Self::sample`] with no holders.
     fn sample_unleased(&mut self) -> Readings {
         self.sample(&[])
+    }
+}
+
+/// A sampler that returns the same readings on every poll.
+///
+/// Why: tests drive the lease and the `builder_cap` row with scripted
+/// readings, and [`Sampler`] is sealed.
+/// Test: `a_fixed_sampler_replays_its_readings`.
+#[derive(Debug, Clone)]
+pub struct FixedSampler {
+    readings: Readings,
+    unleased: Option<Readings>,
+}
+
+impl FixedSampler {
+    /// A sampler that always returns `readings`.
+    #[must_use]
+    pub fn new(readings: Readings) -> Self {
+        Self {
+            readings,
+            unleased: None,
+        }
+    }
+
+    /// The same sampler, answering [`Sampler::sample_unleased`] with `unleased`.
+    #[must_use]
+    pub fn with_unleased(mut self, unleased: Readings) -> Self {
+        self.unleased = Some(unleased);
+        self
+    }
+}
+
+impl Sampler for FixedSampler {
+    fn sample(&mut self, _holders: &[HolderRecord]) -> Readings {
+        self.readings.clone()
+    }
+
+    fn sample_unleased(&mut self) -> Readings {
+        self.unleased
+            .clone()
+            .unwrap_or_else(|| self.readings.clone())
     }
 }
 
@@ -365,5 +417,22 @@ mod tests {
         assert!(r.foreign.is_ok(), "{:?}", r.foreign);
         let u = sampler.sample_unleased();
         assert!(u.foreign.is_ok(), "{:?}", u.foreign);
+    }
+
+    #[test]
+    fn a_fixed_sampler_replays_its_readings() {
+        let readings = Readings::new(
+            Err("no pressure".into()),
+            Ok(1.5),
+            4,
+            Ok(Vec::new()),
+            "fixed-host",
+        );
+        let mut sampler = FixedSampler::new(readings);
+        for _ in 0..2 {
+            let r = sampler.sample(&[]);
+            assert_eq!(r.host, "fixed-host");
+            assert_eq!(r.load_avg_1min, Ok(1.5));
+        }
     }
 }

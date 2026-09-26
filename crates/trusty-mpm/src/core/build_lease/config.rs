@@ -62,6 +62,7 @@ pub const DEFAULT_HEAVY_BUILD_COMMANDS: &[&str] = &[
     "cargo nextest",
     "cargo llvm-cov",
     "cargo miri",
+    "cargo watch",
 ];
 
 /// The dotted config paths this struct reads, for `core::config_keys`.

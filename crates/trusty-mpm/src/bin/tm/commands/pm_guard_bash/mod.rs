@@ -50,6 +50,7 @@
 // splitting that disagreed with the shell four different ways.
 mod bash_tokens;
 // #8261: heavy builds rewritten to run under `tm build-lease`.
+mod build_lease_program;
 pub(crate) mod build_lease_rewrite;
 // #8596, #8248: a credential CLI whose printed value would reach tool output.
 mod credential_print;

@@ -51,7 +51,7 @@ fn without_the_lease_insertion(command: &serde_json::Value) -> String {
     let Some(rest) = command.strip_prefix("{ ") else {
         panic!("the compression wrapper comes first: {command}");
     };
-    let Some((_program, build)) = rest.split_once(" build-lease -- ") else {
+    let Some((_program, build)) = rest.split_once(" build-lease --wait-secs 60 -- ") else {
         panic!("a heavy build must be leased: {command}");
     };
     format!("{{ {build}")
@@ -140,7 +140,10 @@ fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
     let command = parsed["hookSpecificOutput"]["updatedInput"]["command"]
         .as_str()
         .unwrap_or_default();
-    assert!(command.ends_with(" build-lease -- cargo test"), "{command}");
+    assert!(
+        command.ends_with(" build-lease --wait-secs 60 -- cargo test"),
+        "{command}"
+    );
     assert!(!command.contains("tm compress"), "{command}");
 }
 

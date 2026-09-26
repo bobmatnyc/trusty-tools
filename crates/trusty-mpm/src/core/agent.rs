@@ -275,39 +275,19 @@ pub struct Delegation {
     /// Working directory the dispatch was issued from, when known.
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
-    /// Which builder slot this delegation leases, when it is a builder (#8261).
-    ///
-    /// Why: the lease IS this record (see `daemon::state::builder_slots`), so
-    /// the slot index belongs on it too — a parallel map would be a second
-    /// lifecycle to keep in sync, and the reason #6892 put the lease here in the
-    /// first place. Recording the INDEX rather than the path keeps the record
-    /// independent of where the operator moved `builders.slot_pool_root`.
-    /// What: `Some(n)` for a builder admitted since #8261; `None` for every
-    /// non-builder, and for a record written by a daemon predating it.
-    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
-    /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
+    /// Retired with the daemon's builder-slot allocator (#8261 round 3): no
+    /// writer remains, so it is always `None` in a new record. Kept so records
+    /// a 1.7 daemon persisted still parse.
     #[serde(default)]
     pub builder_slot: Option<u32>,
-    /// The private `CARGO_TARGET_DIR` this builder's slot resolved to (#8261).
-    ///
-    /// Why: the INDEX alone cannot be handed to an engineer — the path depends on
-    /// `builders.slot_pool_root` and on the repo identity, both of which the
-    /// daemon resolves and the hook does not. Recording the resolved path is what
-    /// lets the guard put it in the dispatch brief without re-deriving it.
-    /// What: `Some(dir)` once [`SlotPool::reserve_path`] has found the slot
-    /// seeded; `None` for a non-builder, for a builder admitted by a daemon
-    /// predating this field, and for one admitted onto a slot whose seed had not
-    /// run yet (#8261 critic round).
-    ///
-    /// [`SlotPool::reserve_path`]: crate::core::builder_slot_pool::SlotPool::reserve_path
-    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    /// Retired with the daemon's builder-slot allocator (#8261 round 3): no
+    /// writer remains, so it is always `None` in a new record. Kept so records
+    /// a 1.7 daemon persisted still parse.
     #[serde(default)]
     pub builder_slot_dir: Option<std::path::PathBuf>,
-    /// How [`Self::builder_slot_dir`] came to exist, rendered (#8261).
-    ///
-    /// Why: a cold slot and a clone-seeded one build at very different speeds, so
-    /// the operator surface has to be able to say which happened.
-    /// Test: `an_admitted_builder_records_the_slot_directory_it_was_given`.
+    /// Retired with the daemon's builder-slot allocator (#8261 round 3): no
+    /// writer remains, so it is always `None` in a new record. Kept so records
+    /// a 1.7 daemon persisted still parse.
     #[serde(default)]
     pub builder_slot_seed: Option<String>,
     /// The working tree the subagent is actually running in, when it differs

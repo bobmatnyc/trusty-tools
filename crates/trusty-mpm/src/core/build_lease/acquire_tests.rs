@@ -3,56 +3,47 @@
 
 use super::*;
 use crate::core::build_lease::admission::Readings;
-use crate::core::build_probe::BuildGroup;
+use crate::core::build_lease::census::FixedSampler;
 use trusty_common::memory_pressure::{
     MemoryPressure, PressureLevel, PressureSignal, PressureSource,
 };
 
-/// Scripted readings: a pressure level, and how many builds run with no lease.
-struct Scripted {
-    level: PressureLevel,
-    unleased: usize,
+/// Readings at `level` with an empty census.
+fn scripted(level: PressureLevel) -> FixedSampler {
+    let unleased = readings(level, 0);
+    FixedSampler::new(readings(level, 0)).with_unleased(unleased)
 }
 
-fn scripted(level: PressureLevel) -> Scripted {
-    Scripted { level, unleased: 0 }
+/// A normal machine on which `unleased` builds already run without a lease.
+fn with_unleased(unleased: usize) -> FixedSampler {
+    FixedSampler::new(readings(PressureLevel::Normal, 0))
+        .with_unleased(readings(PressureLevel::Normal, unleased))
 }
 
-impl Scripted {
-    fn readings(&self, foreign: usize) -> Readings {
-        Readings::new(
-            Ok(MemoryPressure::new(
-                self.level,
-                Some(50.0),
-                PressureSource::MacosSysctl,
-                vec![PressureSignal::new(
-                    "kern.memorystatus_vm_pressure_level",
-                    self.level.to_string(),
-                )],
-            )),
-            Ok(1.0),
-            8,
-            Ok((0..foreign)
-                .map(|i| BuildGroup {
-                    root_pid: 100 + u32::try_from(i).unwrap_or(0),
-                    root_name: "tm build-lease (no lease)".into(),
-                    compilers: vec!["rustc".into()],
-                    cpu_pct: 0.0,
-                    ancestry: Vec::new(),
-                })
-                .collect()),
-            "test-host",
-        )
-    }
-}
-
-impl Sampler for Scripted {
-    fn sample(&mut self, _holders: &[HolderRecord]) -> Readings {
-        self.readings(0)
-    }
-    fn sample_unleased(&mut self) -> Readings {
-        self.readings(self.unleased)
-    }
+fn readings(level: PressureLevel, foreign: usize) -> Readings {
+    Readings::new(
+        Ok(MemoryPressure::new(
+            level,
+            Some(50.0),
+            PressureSource::MacosSysctl,
+            vec![PressureSignal::new(
+                "kern.memorystatus_vm_pressure_level",
+                level.to_string(),
+            )],
+        )),
+        Ok(1.0),
+        8,
+        Ok((0..foreign)
+            .map(|i| crate::core::build_probe::BuildGroup {
+                root_pid: 100 + u32::try_from(i).unwrap_or(0),
+                root_name: "tm build-lease (no lease)".into(),
+                compilers: vec!["rustc".into()],
+                cpu_pct: 0.0,
+                ancestry: Vec::new(),
+            })
+            .collect()),
+        "test-host",
+    )
 }
 
 fn configs() -> (BuildersConfig, BuildLeaseConfig) {
@@ -188,42 +179,79 @@ fn a_broken_lowest_slot_is_skipped() {
     drop(first);
 }
 
-/// Critic round 1 (HIGH 1b): an unopenable `admission.lock` no longer runs
-/// unleased unconditionally — the census bounds it.
+/// Owner ruling "allow up to the cap" (#8261 round 3): an unopenable
+/// `admission.lock` runs the build unleased only while the census has room,
+/// and the outcome names the store, the error and the repair.
 #[test]
-fn an_unopenable_admission_lock_is_bounded() {
+fn an_unopenable_admission_lock_is_bounded_by_the_census() {
     let (_tmp, slots) = slot_dir();
     std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
-    assert!(slots.check_admission_lock().is_err());
     let c = configs();
-    let p = params(&c, 1, 200);
-    let mut busy = Scripted {
-        level: PressureLevel::Normal,
-        unleased: 1,
-    };
-    match acquire(&slots, &p, &mut busy, &mut |_, _| {}) {
-        Outcome::TimedOut { decision, .. } => {
+    match acquire(
+        &slots,
+        &params(&c, 1, 200),
+        &mut with_unleased(0),
+        &mut |_, _| {},
+    ) {
+        Outcome::Unleased { fault, decision } => {
+            assert!(fault.store.ends_with("admission.lock"), "{fault:?}");
+            assert!(fault.repair.contains("rm -rf"), "{fault:?}");
             assert!(
-                decision.withheld[0].contains("fill the ceiling 1"),
+                decision.degraded[0].contains("UNKNOWN lease state"),
                 "{decision:?}"
             );
         }
-        other => panic!("one unleased build already fills a ceiling of 1: {other:?}"),
+        other => panic!("an idle machine runs it unleased: {other:?}"),
     }
+}
+
+/// "Allow up to the cap": admitted while fewer than `ceiling` builds run
+/// without a lease.
+#[test]
+fn unleased_is_admitted_while_the_count_is_below_the_ceiling() {
+    let (_tmp, slots) = slot_dir();
+    std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
+    let c = configs();
+    assert!(matches!(
+        acquire(
+            &slots,
+            &params(&c, 2, 200),
+            &mut with_unleased(1),
+            &mut |_, _| {}
+        ),
+        Outcome::Unleased { .. }
+    ));
+}
+
+/// "Allow up to the cap": refused once `ceiling` builds run without a lease.
+#[test]
+fn unleased_is_refused_when_the_count_reaches_the_ceiling() {
+    let (_tmp, slots) = slot_dir();
+    std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
+    let c = configs();
     match acquire(
         &slots,
-        &p,
-        &mut scripted(PressureLevel::Normal),
+        &params(&c, 2, 200),
+        &mut with_unleased(2),
         &mut |_, _| {},
     ) {
-        Outcome::Unleased { why, .. } => assert!(why.contains("admission lock"), "{why}"),
-        other => panic!("an idle machine runs it unleased: {other:?}"),
+        Outcome::TimedOut { decision, .. } => {
+            assert!(
+                decision.withheld[0].contains("fill the ceiling 2"),
+                "{decision:?}"
+            );
+            assert!(
+                decision.degraded[0].contains("admission.lock"),
+                "{decision:?}"
+            );
+        }
+        other => panic!("the census is full: {other:?}"),
     }
 }
 
 /// Every slot file broken: the census bound applies, not a free pass.
 #[test]
-fn unusable_slot_files_fall_back_to_the_census_bound() {
+fn unlockable_slot_files_fall_back_to_the_census_bound() {
     use std::os::unix::fs::PermissionsExt;
     let (_tmp, slots) = slot_dir();
     slots
@@ -234,25 +262,57 @@ fn unusable_slot_files_fall_back_to_the_census_bound() {
     // created, so no candidate index is lockable.
     std::fs::set_permissions(slots.path(), std::fs::Permissions::from_mode(0o555)).expect("chmod");
     let c = configs();
-    let p = params(&c, 1, 200);
-    let mut busy = Scripted {
-        level: PressureLevel::Normal,
-        unleased: 1,
-    };
-    assert!(matches!(
-        acquire(&slots, &p, &mut busy, &mut |_, _| {}),
-        Outcome::TimedOut { .. }
-    ));
+    let full = acquire(
+        &slots,
+        &params(&c, 1, 200),
+        &mut with_unleased(1),
+        &mut |_, _| {},
+    );
     let idle = acquire(
         &slots,
-        &p,
-        &mut scripted(PressureLevel::Normal),
+        &params(&c, 1, 200),
+        &mut with_unleased(0),
         &mut |_, _| {},
     );
     std::fs::set_permissions(slots.path(), std::fs::Permissions::from_mode(0o755))
         .expect("restore");
+    assert!(matches!(full, Outcome::TimedOut { .. }), "{full:?}");
     match idle {
-        Outcome::Unleased { why, .. } => assert!(why.contains("could be locked"), "{why}"),
+        Outcome::Unleased { fault, .. } => {
+            assert_eq!(fault.store, slots.path());
+            assert!(fault.error.contains("could be locked"), "{fault:?}");
+        }
         other => panic!("expected an unleased run: {other:?}"),
     }
+}
+
+/// #8261 round 3: a free slot whose directory an orphaned build still uses is
+/// skipped; a slot freed that way is never handed to a new lease.
+#[test]
+fn a_slot_whose_directory_is_busy_is_skipped() {
+    let (_tmp, slots) = slot_dir();
+    let c = configs();
+    let busy = |slot: u32| slot == 0;
+    let p = params(&c, 2, 200).with_slot_busy(&busy);
+    let guard = leased(acquire(
+        &slots,
+        &p,
+        &mut scripted(PressureLevel::Normal),
+        &mut |_, _| {},
+    ));
+    assert_eq!(guard.slot(), 1, "slot 0's directory is in use");
+    let one = params(&c, 1, 200).with_slot_busy(&busy);
+    drop(guard);
+    assert!(
+        matches!(
+            acquire(
+                &slots,
+                &one,
+                &mut scripted(PressureLevel::Normal),
+                &mut |_, _| {}
+            ),
+            Outcome::TimedOut { .. }
+        ),
+        "a ceiling of one with slot 0 busy waits"
+    );
 }

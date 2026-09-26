@@ -441,12 +441,12 @@ fn pretooluse_bash_rewrite(
     use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
     let cwd = cwd.unwrap_or(std::path::Path::new(""));
     match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
-        LeaseRewrite::Rewrite(new) => Some(super::pm_guard_build_lease::rewrite_response(
-            tool_input, &new,
-        )),
-        LeaseRewrite::Refuse(_) => None,
+        (LeaseRewrite::Rewrite(new), permission) => Some(
+            super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
+        ),
+        (LeaseRewrite::Refuse(_), _) => None,
         // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
-        LeaseRewrite::None => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
+        (LeaseRewrite::None, _) => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
             .map(|rewritten| build_pretooluse_rewrite_response(&rewritten).to_string()),
     }
 }

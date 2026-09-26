@@ -12,8 +12,6 @@
 //! Test: `cargo test -p trusty-mpm-daemon` exercises registration, the hook
 //! ring-buffer bound, and memory-pressure classification.
 
-// #6892: machine-wide builder-slot leases — claim, release, TTL, PID liveness.
-pub mod builder_slots;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;
@@ -26,10 +24,6 @@ mod tree_membership;
 #[cfg(test)]
 mod tests;
 
-pub use builder_slots::{
-    BUILDER_LEASE_TTL_SECS, BuilderHolder, BuilderLease, BuilderSlotCensus, BuilderSlotGrant,
-    builder_lease,
-};
 pub use core::{
     DaemonState, EVENT_CHANNEL_CAPACITY, HOOK_HISTORY_LIMIT, PAIR_CODE_TTL, ReapResult,
 };

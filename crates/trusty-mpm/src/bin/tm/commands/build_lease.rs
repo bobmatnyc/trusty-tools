@@ -6,32 +6,44 @@
 //! subagent. See `trusty_mpm::core::build_lease` for the design and its
 //! fail-open table.
 //!
-//! What: wait (bounded by `--wait-secs`, else `builders.lease_wait_secs`, both
-//! clamped to 1..=600 s) for a slot. On admission, replace `CARGO_TARGET_DIR`
-//! with the slot's pool directory only when it names the machine's SHARED
-//! target directory; run the command with inherited stdio, forward
-//! SIGINT/SIGTERM/SIGHUP to it, and exit with its status. The slot's `flock`
-//! is held by this process until the command exits; if this process dies the
-//! kernel releases it. When no lease can be taken at all, the build runs only
-//! while the census admits it. On timeout, exit [`EXIT_LEASE_TIMEOUT`] naming
-//! the holders and every reading. Every decision is POSTed to the daemon log.
+//! What: refuse (exit [`EXIT_NOT_A_HEAVY_BUILD`]) any command the heavy-build
+//! classifier would not have leased. Otherwise wait (bounded by `--wait-secs`,
+//! else `builders.lease_wait_secs`, both clamped to 1..=600 s) for a slot. On
+//! admission, replace `CARGO_TARGET_DIR` with the slot's pool directory when it
+//! names a SHARED target directory; run the command with inherited stdio,
+//! forward SIGINT/SIGTERM/SIGHUP to it, and exit with its status. The slot's
+//! `flock` is held by this process until the command exits; if this process
+//! dies the kernel releases it. When no lease can be taken, the build runs
+//! UNLEASED only while the census counts fewer than the ceiling (owner ruling
+//! "allow up to the cap", #8261 round 3), with a degraded warning naming the
+//! store, the OS error and the repair; an unreadable census refuses. On
+//! timeout, exit [`EXIT_LEASE_TIMEOUT`] naming the holders and every reading. Every decision is POSTed to the daemon log with the
+//! command summarized, never its full argv.
 //! Test: `tests/tm_build_lease.rs` (real processes and flocks).
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use trusty_mpm::core::build_lease::EXIT_LEASE_TIMEOUT;
-use trusty_mpm::core::build_lease::acquire::{AcquireParams, Outcome, acquire, acquire_unleased};
+use trusty_mpm::core::build_lease::acquire::{
+    AcquireParams, LeaseFault, Outcome, acquire, acquire_unleased,
+};
 use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
-use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard};
+use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
-    Invalidation, checkout_root, invalidate_if_checkout_changed, workspace_packages,
+    Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
+    workspace_packages,
 };
-use trusty_mpm::core::build_lease::target_dir::{TargetDirChoice, choose, resolve_pool};
+use trusty_mpm::core::build_lease::target_dir::{SharedDirs, TargetPlan, plan, resolve_pool};
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
+
+use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
+
+/// The exit code for a command that is not a heavy build (`EX_USAGE`).
+const EXIT_NOT_A_HEAVY_BUILD: i32 = 64;
 
 /// `tm build-lease` arguments.
 ///
@@ -41,7 +53,7 @@ pub(crate) struct BuildLeaseArgs {
     /// Seconds to wait for a slot; defaults to `builders.lease_wait_secs`.
     #[arg(long)]
     wait_secs: Option<u64>,
-    /// The command to run, after `--`.
+    /// The heavy build to run, after `--`; anything else is refused.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
     command: Vec<String>,
 }
@@ -54,22 +66,59 @@ pub(crate) struct BuildLeaseArgs {
 pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
+    let command_line = summarize_command(&args.command);
+    // #8261 round 3 (critic finding 4): the lease program never runs anything
+    // the hook's classifier would not have leased.
+    if !is_heavy_build(&args.command, &lease.effective_heavy_build_commands()) {
+        eprintln!(
+            "tm build-lease: refusing `{command_line}` — it is not a heavy build \
+             (`builders.heavy_build_commands`), and the lease runs heavy builds only. Run it \
+             without `tm build-lease`."
+        );
+        std::process::exit(EXIT_NOT_A_HEAVY_BUILD)
+    }
     for warning in builders.deprecation_warnings() {
         eprintln!("tm build-lease: {warning}");
     }
     let url = trusty_mpm::core::discovery::resolve_daemon_url(url);
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = dirs::home_dir();
+    let home_or_root = home.clone().unwrap_or_else(|| PathBuf::from("/"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // The checkout ROOT keys slot affinity and the stale-build guard.
     let checkout = checkout_root(&cwd).display().to_string();
-    let command_line = shlex::try_join(args.command.iter().map(String::as_str))
-        .unwrap_or_else(|_| args.command.join(" "));
     // Critic round 1: an explicit `--wait-secs` is clamped like the config key.
     let wait = args.wait_secs.map_or_else(
         || lease.effective_lease_wait(),
         |s| Duration::from_secs(clamp_wait(s)),
     );
-    let params = AcquireParams::new(&builders, &lease, resolve_max_concurrent(), wait, &checkout);
+    let ambient = std::env::var("CARGO_TARGET_DIR").ok();
+    let target_plan = plan(
+        ambient.as_deref(),
+        &SharedDirs::resolve(&builders, &home_or_root),
+        resolve_pool(&builders, &home_or_root, &cwd),
+    );
+    if let TargetPlan::Refuse(why) = &target_plan {
+        refuse(&format!("not running the build (#8261) — {why}"))
+    }
+    let slots = SlotDir::resolve(home.as_deref());
+    if let Ok(Some(why)) = slots.as_ref().map(SlotDir::fallback_reason) {
+        eprintln!(
+            "tm build-lease: WARNING using the fallback lease store {} because {why}; \
+             `tm doctor` names the repair",
+            slots
+                .as_ref()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
+        );
+    }
+    // #8261 round 3: a free slot whose directory an orphaned build still uses
+    // (cargo's `.cargo-lock` held) is skipped.
+    let busy = |slot: u32| match &target_plan {
+        TargetPlan::Slot { pool, .. } => cargo_lock_held(&pool.slot_path(slot)),
+        _ => false,
+    };
+    let params = AcquireParams::new(&builders, &lease, resolve_max_concurrent(), wait, &checkout)
+        .with_slot_busy(&busy);
     let mut sampler = LiveSampler::new(&lease);
     let mut announced = false;
     let mut on_wait = |decision: &Decision, holders: &[HolderRecord]| {
@@ -81,12 +130,21 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             );
         }
     };
-    let outcome = tokio::task::block_in_place(|| match SlotDir::resolve(&home) {
-        Ok(slots) => acquire(&slots, &params, &mut sampler, &mut on_wait),
-        Err((first, second)) => acquire_unleased(
+    let outcome = tokio::task::block_in_place(|| match &slots {
+        Ok(slots) => acquire(slots, &params, &mut sampler, &mut on_wait),
+        Err(err) => acquire_unleased(
             &params,
-            Instant::now() + wait,
-            format!("no build-slot directory could be created ({first}; fallback: {second})"),
+            std::time::Instant::now() + wait,
+            LeaseFault::new(
+                err.canonical.clone(),
+                format!(
+                    "{}; fallback {}: {}",
+                    err.canonical_error,
+                    err.fallback.display(),
+                    err.fallback_error
+                ),
+                err.repair(),
+            ),
             &mut sampler,
             &mut on_wait,
         ),
@@ -97,14 +155,13 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             decision,
         } => {
             warn_degraded(&decision);
-            let target = match target_dir(&builders, &home, &cwd, guard.slot()) {
+            let target = match target_dir(&target_plan, guard.slot(), &cwd) {
                 Ok(target) => target,
                 Err(why) => {
                     // #8261 (owner ruling 2026-09-21): an unsafe target never admits.
                     drop(guard);
                     post_decision(&url, "refused-target", &command_line, &decision, &[]).await;
-                    eprintln!("tm build-lease: not running the build (#8261) — {why}");
-                    std::process::exit(EXIT_LEASE_TIMEOUT)
+                    refuse(&format!("not running the build (#8261) — {why}"))
                 }
             };
             let mut record =
@@ -121,12 +178,23 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             drop(guard);
             exit_with(status)
         }
-        Outcome::Unleased { why, decision } => {
-            warn_degraded(&decision);
+        Outcome::Unleased { fault, decision } => {
+            if let TargetPlan::Slot { .. } = target_plan {
+                // #8261 (owner ruling 2026-09-21): no slot, so no private
+                // directory can replace the shared one — never build there.
+                refuse(&format!(
+                    "not running the build (#8261) — no build lease can be taken ({}), and \
+                     the inherited CARGO_TARGET_DIR is a shared target directory that only a \
+                     leased slot can replace",
+                    fault.render()
+                ))
+            }
             eprintln!(
-                "tm build-lease: WARNING running UNLEASED — {why}. The census admitted it \
-                 ({} build(s) of ceiling {} already run without a lease); every other lease \
-                 still sees it as a foreign build (#8261). `tm doctor` reports the fault.",
+                "tm build-lease: WARNING DEGRADED — running UNLEASED: no build lease can be \
+                 taken in {}. The census admitted it ({} build(s) of ceiling {} already run \
+                 without a lease); every other lease still counts it as a foreign build \
+                 (#8261). `tm doctor` shows the builder_cap row.",
+                fault.render(),
                 decision.ceiling.saturating_sub(decision.n_effective),
                 decision.ceiling
             );
@@ -143,13 +211,16 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             );
             std::process::exit(EXIT_LEASE_TIMEOUT)
         }
-        other => {
-            eprintln!(
-                "tm build-lease: unrecognised lease outcome {other:?}; not running the build"
-            );
-            std::process::exit(EXIT_LEASE_TIMEOUT)
-        }
+        other => refuse(&format!(
+            "unrecognised lease outcome {other:?}; not running the build"
+        )),
     }
+}
+
+/// Print `tm build-lease: <why>` and exit [`EXIT_LEASE_TIMEOUT`].
+fn refuse(why: &str) -> ! {
+    eprintln!("tm build-lease: {why}");
+    std::process::exit(EXIT_LEASE_TIMEOUT)
 }
 
 fn warn_degraded(decision: &Decision) {
@@ -189,58 +260,41 @@ fn render(decision: &Decision, holders: &[HolderRecord]) -> String {
 /// The `CARGO_TARGET_DIR` for this build, seeding the slot directory if new.
 ///
 /// What: `Ok(None)` leaves cargo's own choice; `Ok(Some(dir))` sets `dir`.
-/// `Err` when the build would otherwise run in the machine's SHARED target
-/// directory because its slot directory cannot be made — the cross-worktree
-/// clobbering this lease exists to stop, so the caller refuses instead
-/// (#8261, owner ruling 2026-09-21: an unsafe target never admits).
-/// Test: `an_unusable_slot_directory_refuses_instead_of_sharing` in
-/// `tests/tm_build_lease.rs`.
-fn target_dir(
-    builders: &BuildersConfig,
-    home: &Path,
-    cwd: &Path,
-    slot: u32,
-) -> Result<Option<String>, String> {
-    let ambient = std::env::var("CARGO_TARGET_DIR").ok();
-    let pool = resolve_pool(builders, home, cwd);
-    let shared = pool.as_ref().ok().and_then(|(_, shared)| shared.clone());
-    let slot_path = pool
-        .as_ref()
-        .map(|(p, _)| p.slot_path(slot))
-        .map_err(Clone::clone);
-    match choose(ambient.as_deref(), shared.as_deref(), slot_path) {
-        TargetDirChoice::Keep(dir) => Ok(Some(dir)),
-        TargetDirChoice::Slot(path) => {
-            // `Slot` implies a resolved pool; see `choose`.
-            let Ok((pool, shared)) = pool else {
-                return Err(format!("the pool for {} vanished", path.display()));
-            };
-            let seeded = tokio::task::block_in_place(|| pool.seed(slot, shared.as_deref()));
-            match seeded {
-                Ok((dir, _)) => {
-                    guard_against_stale_builds(&dir, cwd);
-                    Ok(Some(dir.display().to_string()))
-                }
-                Err(err) => Err(format!(
-                    "slot directory {} is unusable ({err}), and the inherited CARGO_TARGET_DIR \
-                     is the machine's shared target directory, which concurrent worktrees \
-                     overwrite. Repair the slot pool root (`builders.slot_pool_root`, see \
-                     `tm doctor`) or set a private CARGO_TARGET_DIR for this build",
-                    path.display()
-                )),
-            }
-        }
-        // Unset: cargo's own `./target` or a repo's `build.target-dir` stands.
-        _ => Ok(ambient),
-    }
+/// `Err` when the build would otherwise run in a SHARED target directory
+/// because its slot directory cannot be made or its stale fingerprints cannot
+/// be cleared — the caller refuses instead (#8261, owner ruling 2026-09-21: an
+/// unsafe target never admits).
+/// Test: `an_unusable_slot_directory_refuses_instead_of_sharing`,
+/// `a_busy_orphan_slot_is_not_reused` in `tests/tm_build_lease.rs`.
+fn target_dir(plan: &TargetPlan, slot: u32, cwd: &Path) -> Result<Option<String>, String> {
+    let (pool, clone_from) = match plan {
+        TargetPlan::Keep(dir) => return Ok(Some(dir.clone())),
+        TargetPlan::Slot { pool, clone_from } => (pool, clone_from),
+        TargetPlan::Refuse(why) => return Err(why.clone()),
+        _ => return Ok(None),
+    };
+    let path = pool.slot_path(slot);
+    let seeded = tokio::task::block_in_place(|| pool.seed(slot, clone_from.as_deref()));
+    let dir = seeded.map(|(dir, _)| dir).map_err(|err| {
+        format!(
+            "slot directory {} is unusable ({err}), and the inherited CARGO_TARGET_DIR is a \
+             shared target directory, which concurrent worktrees overwrite. Repair the slot \
+             pool root (`builders.slot_pool_root`, see `tm doctor`) or set a private \
+             CARGO_TARGET_DIR for this build",
+            path.display()
+        )
+    })?;
+    guard_against_stale_builds(&dir, cwd)?;
+    Ok(Some(dir.display().to_string()))
 }
 
 /// Clear the slot's workspace fingerprints when it last built another checkout.
 ///
 /// Why: see `trusty_mpm::core::build_lease::stale_guard` — without this a
 /// slot shared in turn by two worktrees can report the second one "Fresh" and
-/// hand back the first one's binary.
-fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) {
+/// hand back the first one's binary. A fingerprint that cannot be cleared is
+/// an `Err`: the slot is not used (#8261 round 3).
+fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) -> Result<(), String> {
     let root = checkout_root(cwd);
     let result = tokio::task::block_in_place(|| {
         invalidate_if_checkout_changed(slot_dir, &root, || workspace_packages(&root))
@@ -262,8 +316,9 @@ fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) {
             },
         ),
         Ok(_) => {}
-        Err(err) => eprintln!("tm build-lease: WARNING {err}"),
+        Err(err) => return Err(err),
     }
+    Ok(())
 }
 
 fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {
@@ -276,6 +331,10 @@ fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {
 }
 
 /// Spawn the build, record its pid, forward termination signals, and wait.
+///
+/// What: the signal handlers are installed BEFORE the spawn (#8261 round 3),
+/// so a SIGTERM that lands between the spawn and the handler cannot kill this
+/// holder with the default action and orphan the build.
 async fn spawn_and_wait(
     command: &[String],
     target_dir: Option<&str>,
@@ -284,6 +343,10 @@ async fn spawn_and_wait(
     let Some((program, rest)) = command.split_first() else {
         return Err(std::io::Error::other("no command given after `--`"));
     };
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    let mut hup = signal(SignalKind::hangup())?;
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(rest);
     if let Some(dir) = target_dir {
@@ -295,10 +358,6 @@ async fn spawn_and_wait(
         record.child_pid = Some(pid);
         write_record(guard, record);
     }
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    let mut hup = signal(SignalKind::hangup())?;
     loop {
         let sig = tokio::select! {
             status = child.wait() => return status,
