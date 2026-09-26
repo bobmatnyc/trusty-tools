@@ -4,8 +4,8 @@
 //! root-owned root answered `500 corpus open failed …` and could never be
 //! registered. The caller now chooses the layout, and a colocated request the
 //! daemon cannot write is refused before anything is built or recorded.
-//! What: [`resolve_layout`] reads `CreateIndexRequest::colocated`, deferring
-//! to the layout an existing id already records; [`refuse_live_layout_change`]
+//! What: [`resolve_layout_from_registry`] reads `CreateIndexRequest::colocated`,
+//! deferring to the layout the id's `indexes.toml` row records; [`refuse_live_layout_change`]
 //! does the same for a resident id; [`preflight_colocated_root`] proves
 //! `<root>/.trusty-search/` is writable; [`registry_write_refusal`] makes a
 //! failed `indexes.toml` write fatal for a data-dir index, which no
@@ -26,35 +26,82 @@ use crate::service::storage_layout::{layout_of, StorageLayout};
 /// The handler's error shape: a status and a JSON body.
 pub(super) type Refusal = (StatusCode, serde_json::Value);
 
+/// Resolve a non-resident id's layout from its `indexes.toml` row (#8147).
+///
+/// Why: the row is the authority for an existing id. The cold store is not: a
+/// lazy load between a live-registry miss and a cold-store read removes the
+/// cold entry, both lookups miss, and the request picked the layout. The row
+/// survives a cold→live load and also covers an id held in no in-memory store.
+/// What: reads the row, then [`resolve_layout`]. A registry that cannot be
+/// read refuses the create with a `500`; it never falls back to the request.
+/// Test: `create_index_row_only_id_inherits_its_recorded_layout`,
+/// `create_index_refuses_when_the_registry_cannot_be_read`.
+pub(super) fn resolve_layout_from_registry(req: &CreateIndexRequest) -> Result<bool, Refusal> {
+    let recorded = find_registry_entry(&req.id).map_err(|e| registry_read_refusal(&req.id, &e))?;
+    resolve_layout(req, recorded.as_ref())
+}
+
 /// Resolve the storage layout a registration gets: `true` is colocated.
 ///
 /// Why: `None` must keep the #403 default byte-identical for a new id. An
 /// existing `<root>/.trusty-search/` is no reason to refuse `false`: since
 /// #8438 every write path, and the reindex hash-cache decision, follows the
 /// registry layout (the `403` below says to retry with `colocated=false`).
-/// For an id the daemon already records, that record decides: a cold-parked
-/// id misses the live-handle early return, and taking the layout from the
-/// request built an empty corpus in the other layout and orphaned the real one.
-/// What: `recorded` is the id's cold-store entry. When it names the same tree,
-/// its `colocated` wins, and an explicit request that differs is the `409`
-/// from [`layout_mismatch`]. An entry at another tree is the #3993
-/// recreate-after-move path, which registers a new tree, so there the request
-/// decides as for a new id: `None`/`true` → colocated, `false` → data dir.
-/// Test: `create_index_omitted_colocated_keeps_the_colocated_default`,
+/// For an id the daemon already records, that record decides; taking the
+/// layout from the request built an empty corpus in the other layout and
+/// orphaned the real one.
+/// What: `recorded` is the id's `indexes.toml` row. An omitted `colocated`
+/// inherits its layout, even at another tree, as relocation does (#1089). At
+/// the same tree an explicit value that differs is the `409` from
+/// [`layout_mismatch`]; at another tree (#3993 recreate-after-move) an
+/// explicit value decides. With no row: `None`/`true` → colocated.
+/// Test: `resolve_layout_inherits_or_decides_per_request_and_record`,
+/// `create_index_omitted_colocated_keeps_the_colocated_default`,
 /// `create_index_cold_data_dir_index_keeps_its_layout_when_colocated_is_omitted`,
 /// `create_index_cold_index_refuses_an_explicit_layout_change`.
 pub(super) fn resolve_layout(
     req: &CreateIndexRequest,
     recorded: Option<&PersistedIndex>,
 ) -> Result<bool, Refusal> {
-    let recorded = recorded
-        .filter(|entry| super::helpers::identifies_same_root(&entry.root_path, &req.root_path))
-        .map(|entry| entry.colocated);
-    match (req.colocated, recorded) {
-        (Some(asked), Some(have)) if asked != have => Err(layout_mismatch(&req.id, have, asked)),
-        (_, Some(have)) => Ok(have),
-        (asked, None) => Ok(asked.unwrap_or(true)),
+    let Some(entry) = recorded else {
+        return Ok(req.colocated.unwrap_or(true));
+    };
+    let Some(asked) = req.colocated else {
+        return Ok(entry.colocated);
+    };
+    let same_tree = super::helpers::identifies_same_root(&entry.root_path, &req.root_path);
+    if same_tree && asked != entry.colocated {
+        return Err(layout_mismatch(&req.id, entry.colocated, asked));
     }
+    Ok(asked)
+}
+
+/// The `500` for a create whose `indexes.toml` could not be read (#8147).
+fn registry_read_refusal(id: &str, e: &anyhow::Error) -> Refusal {
+    tracing::error!(
+        "create_index: refusing '{id}' — indexes.toml could not be read ({e:#}), so the \
+         recorded storage layout is unknown (issue #8147)"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({
+            "error": format!(
+                "could not read indexes.toml to find the recorded storage layout of '{id}' \
+                 ({e:#}); nothing was registered. Fix or restore the registry file and retry"
+            ),
+            "id": id,
+        }),
+    )
+}
+
+/// Read `id`'s `indexes.toml` row; in test builds an id armed through
+/// [`registry_fault::RegistryFault::arm_read`] fails instead.
+fn find_registry_entry(id: &str) -> anyhow::Result<Option<PersistedIndex>> {
+    #[cfg(test)]
+    if registry_fault::is_read_armed(id) {
+        anyhow::bail!("injected indexes.toml read failure for '{id}'");
+    }
+    crate::service::persistence::find_index_registry_entry(id)
 }
 
 /// Refuse a same-id, same-tree create whose explicit `colocated` differs from
@@ -212,7 +259,8 @@ pub(super) fn upsert_registry_entry(entry: PersistedIndex) -> anyhow::Result<()>
     crate::service::persistence::upsert_index_registry_entry(entry)
 }
 
-/// Per-id fault seam for [`upsert_registry_entry`], test builds only.
+/// Per-id fault seam for [`upsert_registry_entry`] and [`find_registry_entry`],
+/// test builds only.
 #[cfg(test)]
 pub(super) mod registry_fault {
     use std::collections::BTreeSet;
@@ -226,18 +274,32 @@ pub(super) mod registry_fault {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Key for an armed read fault; a NUL cannot occur in an index id.
+    fn read_key(id: &str) -> String {
+        format!("read\0{id}")
+    }
+
     pub(in crate::service::server) fn is_armed(id: &str) -> bool {
         armed().contains(id)
     }
 
-    /// Fails every registry write for one id until dropped. Keyed by id, so a
-    /// concurrent test registering another id is unaffected.
+    pub(in crate::service::server) fn is_read_armed(id: &str) -> bool {
+        armed().contains(&read_key(id))
+    }
+
+    /// Fails every registry write (or, via `arm_read`, read) for one id until
+    /// dropped. Keyed by id, so a concurrent test on another id is unaffected.
     pub(in crate::service::server) struct RegistryFault(String);
 
     impl RegistryFault {
         pub(in crate::service::server) fn arm(id: &str) -> Self {
             armed().insert(id.to_string());
             Self(id.to_string())
+        }
+
+        pub(in crate::service::server) fn arm_read(id: &str) -> Self {
+            armed().insert(read_key(id));
+            Self(read_key(id))
         }
     }
 

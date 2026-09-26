@@ -476,6 +476,9 @@ pub(crate) async fn create_index_report(
             return Err(super::root_overlap::overlap_check_failed_response(&failure));
         }
     }
+    // #8147: the `indexes.toml` row decides an existing id's layout. Resolved
+    // before the embedder check, so a layout `409` is never masked by a `503`.
+    let colocated = super::create_layout::resolve_layout_from_registry(&req)?;
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -532,11 +535,8 @@ pub(crate) async fn create_index_report(
     // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
     // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
-    // #8147: the layout is the caller's to choose for a new id, and the
-    // record's for a cold-parked one; a colocated root the daemon cannot write
-    // is refused here, before anything is built or registered.
-    let recorded = state.cold_store.get_persisted(&id);
-    let colocated = super::create_layout::resolve_layout(&req, recorded.as_ref())?;
+    // #8147: a colocated root the daemon cannot write is refused here, before
+    // anything is built or registered.
     if colocated {
         super::create_layout::preflight_colocated_root(&req.id, &req.root_path)?;
     }
