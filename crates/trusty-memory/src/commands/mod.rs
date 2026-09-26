@@ -12,6 +12,8 @@
 //! in PR3 of the #914 epic.
 //! Test: Each submodule carries its own unit tests.
 
+// #8645: `audit secrets --count-only` — read-only re-screen of stored drawers.
+pub mod audit_secrets;
 // #4891: ADR-0028 Migration step 3 — the read-only backfill triage report.
 pub mod backfill_report;
 pub mod daemon_guard;
@@ -44,6 +46,8 @@ pub mod setup;
 pub mod single_instance;
 pub mod start;
 pub mod stop;
+// #8645: private-copy store reads shared by the read-only reports.
+pub(crate) mod store_snapshot;
 pub mod upgrade;
 
 /// Process-wide lock for tests that mutate `TRUSTY_DATA_DIR_OVERRIDE` and
