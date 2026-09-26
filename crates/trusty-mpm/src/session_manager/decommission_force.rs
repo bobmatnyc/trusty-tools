@@ -164,6 +164,17 @@ fn is_provisioning_gitignore_line(line: &str) -> bool {
 /// Test: `gitignore_body_line_shaped_like_a_header_is_not_excused`,
 /// `force_decommission_keeps_the_tree_when_the_gitignore_diff_cannot_be_read`.
 fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
+    gitignore_diff_only_adds(ws, &is_provisioning_gitignore_line)
+}
+
+/// Whether `ws`'s unstaged `.gitignore` diff adds at least one line, removes
+/// none, and every added line passes `accept` (#7660, #8663).
+///
+/// What: the parser behind [`gitignore_diff_is_provisioning`], shared with the
+/// provisioning ledger, which accepts only the lines tm recorded appending.
+/// Test: `gitignore_body_line_shaped_like_a_header_is_not_excused`,
+/// `ledger_keeps_a_clone_whose_gitignore_gained_a_user_line`.
+pub(super) fn gitignore_diff_only_adds(ws: &Path, accept: &dyn Fn(&str) -> bool) -> bool {
     let args = [
         "diff",
         "--no-color",
@@ -199,7 +210,7 @@ fn gitignore_diff_is_provisioning(ws: &Path) -> bool {
             continue;
         }
         match line.strip_prefix('+') {
-            Some(body) if is_provisioning_gitignore_line(body) => added += 1,
+            Some(body) if accept(body) => added += 1,
             _ => return false,
         }
     }
@@ -318,7 +329,7 @@ const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"
 /// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
 /// `decommission_refusal_warning_names_a_single_untracked_file`,
 /// `decommission_refusal_omits_the_warning_without_untracked_claude_files`.
-fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
+pub(super) fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
     let files = PROVISIONING_FILES.join(", ");
     let entries = dirty_entries(ws);
     // #7660: name what blocked the removal, not only how many entries did.
@@ -374,7 +385,7 @@ fn blocking_entries(ws: &Path, entries: &[String], policy: ProvisioningDirt) -> 
 /// `ws`'s per-file `git status --porcelain` lines, without the ownership
 /// sentinel and `.trusty-mpm/`, which the dirty-tree guard accounts for
 /// itself; empty when status cannot be read (display only, #7660).
-fn dirty_entries(ws: &Path) -> Vec<String> {
+pub(super) fn dirty_entries(ws: &Path) -> Vec<String> {
     let args = [
         "status",
         "--porcelain",
@@ -508,16 +519,45 @@ fn ownership_blocker(ws: &Path, id: &ManagedSessionId) -> Option<String> {
     }
 }
 
+/// What `git rev-parse` positively established a worktree root to be (#8663).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WorktreeKind {
+    /// A linked worktree, with its git dir.
+    Linked(PathBuf),
+    /// A repository's main checkout: its git dir is the common dir.
+    MainCheckout,
+}
+
 /// The git dir of `ws` when `ws` is the root of a LINKED worktree (#7660).
 ///
-/// What: one `git rev-parse --path-format=absolute --show-toplevel --git-dir
-/// --git-common-dir` through the hardened [`super::worktree_safety::git_stdout`].
-/// A failed or malformed answer, a toplevel other than `ws`, and a git dir
-/// equal to the common dir (a main checkout) are each an `Err` naming why.
+/// What: [`worktree_kind`], with a main checkout as an `Err` naming why.
 /// Test: `force_decommission_keeps_a_main_checkout_under_the_worktrees_dir`,
 /// `force_decommission_keeps_a_worktree_git_cannot_resolve`,
 /// `force_blocker_refuses_a_directory_that_is_not_a_worktree_root`.
-fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
+pub(super) fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
+    match worktree_kind(ws)? {
+        WorktreeKind::Linked(git_dir) => Ok(git_dir),
+        WorktreeKind::MainCheckout => Err(
+            "it is a repository's main checkout, not a linked worktree tm created; a main \
+             checkout is never removed"
+                .to_string(),
+        ),
+    }
+}
+
+/// Whether the worktree root `ws` is a linked worktree or a main checkout
+/// (#7660, #8663 critic round 2).
+///
+/// Why: a caller that treats every probe failure as "not linked" skips the
+/// lock and `--force` gates on a linked worktree it merely failed to read.
+/// Only a positive answer may select a branch.
+/// What: one `git rev-parse --path-format=absolute --show-toplevel --git-dir
+/// --git-common-dir` through the hardened [`super::worktree_safety::git_stdout`].
+/// A failed or malformed answer, a path that cannot be canonicalized, and a
+/// toplevel other than `ws` are each an `Err` naming why.
+/// Test: `owned_worktree_whose_probe_fails_is_kept`,
+/// `force_decommission_keeps_a_worktree_git_cannot_resolve`.
+pub(super) fn worktree_kind(ws: &Path) -> Result<WorktreeKind, String> {
     let args = [
         "rev-parse",
         "--path-format=absolute",
@@ -549,13 +589,9 @@ fn linked_worktree_git_dir(ws: &Path) -> Result<PathBuf, String> {
     }
     let git_dir = resolve(Path::new(git_dir))?;
     if git_dir == resolve(Path::new(common))? {
-        return Err(
-            "it is a repository's main checkout, not a linked worktree tm created; a main \
-             checkout is never removed"
-                .to_string(),
-        );
+        return Ok(WorktreeKind::MainCheckout);
     }
-    Ok(git_dir)
+    Ok(WorktreeKind::Linked(git_dir))
 }
 
 /// Why a worktree whose git dir is `git_dir` is locked, or `None` when it is

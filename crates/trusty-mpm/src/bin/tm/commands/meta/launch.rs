@@ -309,8 +309,17 @@ pub(crate) async fn launch_and_wait(
         .capture_pane(&record.id, TRANSCRIPT_LINES)
         .await
         .unwrap_or_default();
-    if let Err(e) = mgr.decommission(&record.id, None).await {
-        warn!(tmux = %record.tmux_name, "meta run: decommission failed (best-effort): {e}");
+    let policy = trusty_mpm::session_manager::decommission_force::ProvisioningDirt::Refuse;
+    match mgr.decommission_reporting(&record.id, None, policy).await {
+        // #8663: a workspace kept for its content is named, not dropped.
+        Ok(report) => {
+            if let Some(reason) = report.workspace_kept_reason {
+                warn!(tmux = %record.tmux_name, "meta run: workspace kept: {reason}");
+            }
+        }
+        Err(e) => {
+            warn!(tmux = %record.tmux_name, "meta run: decommission failed (best-effort): {e}");
+        }
     }
 
     Ok(LaunchReport {
