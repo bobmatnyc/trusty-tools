@@ -438,7 +438,7 @@ mod tests {
     /// The repository the fake probe reports having searched (#7057).
     const FAKE_REPO: &str = "1m-consulting/adaptive-crm";
 
-    /// #8633: merging HEAD into the base tip changes no file.
+    /// #8633: HEAD is an ancestor of the base.
     fn tip_landed() -> ContentOnBase {
         ContentOnBase::Landed { at: None }
     }
@@ -1023,6 +1023,31 @@ mod tests {
         assert!(reason.contains("conflicts in 1 file(s)"), "{reason}");
         assert!(reason.contains("`src/main.rs`"), "{reason}");
         assert!(reason.contains("none of the 3 commit(s)"), "{reason}");
+    }
+
+    /// 🔴 #8633 round 3: an empty tip merge whose branch undid part of what
+    /// landed denies, and says so instead of claiming the merge still changes
+    /// files.
+    #[test]
+    fn an_undone_landing_denies_and_names_what_was_taken_back() {
+        let probe = FakeProbe {
+            on_base: Ok(ContentOnBase::Undone {
+                at: MERGED_PR_HEAD.to_string(),
+                paths: vec!["added.txt".into()],
+                searched: 1,
+                candidates: 1,
+            }),
+            ..FakeProbe::round_sibling()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an undone landing must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(
+            reason.contains("no longer holds all of what landed"),
+            "{reason}"
+        );
+        assert!(reason.contains("`added.txt`"), "{reason}");
+        assert!(!reason.contains("would still change files"), "{reason}");
     }
 
     /// 🔴 #8633 critic round: a history walk cut short by `MAX_CANDIDATES`

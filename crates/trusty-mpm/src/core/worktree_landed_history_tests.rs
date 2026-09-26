@@ -6,7 +6,9 @@
 //!
 //! What: the grant (a squash-merged branch whose files `main` edited later),
 //! the two fail-open checks (a different version of the change on `main`, and
-//! a branch only partly landed), and a `merge-tree` git error.
+//! a branch only partly landed), and a `merge-tree` git error. Round 3: the
+//! same revert and deletion with the squash still `main`'s tip, a clean
+//! squash and a rebase-merge landed at a named commit, and an ancestor `HEAD`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -316,4 +318,176 @@ fn content_landed_by_a_merge_commit_edited_over_on_main_is_landed() {
         content_on_base(&wt, "origin/main"),
         Ok(ContentOnBase::Landed { at: Some(merge) })
     );
+}
+
+/// Assert `wt` is NOT landed on `origin/main`: the probe refuses, names the
+/// landing commit `at` and the file `HEAD` took back, and the landed-content
+/// verdict refuses too. Written against `describe` and `is_landed` so the
+/// same assertion compiles — and fails — against the pre-round-3 probe.
+fn assert_undone_at(wt: &Path, at: &str, taken_back: &str) {
+    let found = content_on_base(wt, "origin/main").expect("the probe must answer");
+    assert!(
+        !found.is_landed(),
+        "undone content read as landed: {found:?}"
+    );
+    let text = found.describe("origin/main");
+    assert!(
+        text.contains(&format!("no longer holds all of what landed at `{at}`")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("`{taken_back}`")), "{text}");
+    let verdict = landed_content_verdict(wt, BOUND);
+    assert!(!verdict.is_landed(), "{verdict:?}");
+    assert!(
+        verdict.note().contains("no longer holds"),
+        "{}",
+        verdict.note()
+    );
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 round 3): the partial-revert shape with `main`
+/// NOT moved since the squash, so the squash IS the tip. Merging `HEAD` into
+/// the tip comes out empty, and the old tip-only admission granted without
+/// the reverse check — the unpushed revert would be lost. Not landed.
+///
+/// Fails against a probe that admits an empty tip merge on its own.
+#[test]
+fn a_partial_revert_while_main_is_unmoved_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("revert-at-tip");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "d"))], "S");
+    let squash = squash_onto_main(&fx, "session/revert-at-tip");
+    git(&fx.repo, &["push", "origin", "main"]);
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "T: revert line 10");
+    git(&wt, &["fetch", "origin"]);
+
+    assert_undone_at(&wt, &squash, "f.txt");
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 round 3): an unpushed deletion of a file the
+/// squash added, with the squash still `main`'s tip. Not landed.
+///
+/// Fails against a probe that admits an empty tip merge on its own.
+#[test]
+fn a_post_squash_deletion_at_the_unmoved_tip_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("delete-at-tip");
+    commit_files(
+        &wt,
+        &[("README.md", "branch\n"), ("added.txt", "new\n")],
+        "S",
+    );
+    let squash = squash_onto_main(&fx, "session/delete-at-tip");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["rm", "-q", "added.txt"]);
+    git(&wt, &["commit", "-m", "T: delete added.txt"]);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_undone_at(&wt, &squash, "added.txt");
+}
+
+/// #8633 round 3: a clean squash-merge with `main` unmoved since is landed,
+/// and the tip — the squash — is named as the landing commit.
+#[test]
+fn a_clean_squash_merge_with_main_unmoved_is_landed_at_the_tip() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("clean-squash");
+    commit_files(&wt, &[("README.md", "one\n")], "one");
+    commit_files(&wt, &[("two.txt", "two\n")], "two");
+    let squash = squash_onto_main(&fx, "session/clean-squash");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed { at: Some(squash) })
+    );
+    assert!(landed_content_verdict(&wt, BOUND).is_landed());
+}
+
+/// Rebase-merge `branch` onto `main` in the owning checkout, as
+/// `gh pr merge --rebase` does — each branch commit replayed with a new id
+/// after other work on `main` — push it, and return the last replayed commit.
+fn rebase_merge_onto_main(fx: &GitWorktreeFixture, branch: &str) -> String {
+    commit_files(&fx.repo, &[("main.txt", "main work\n")], "main work first");
+    let range = format!("main..{branch}");
+    git(&fx.repo, &["cherry-pick", &range]);
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&fx.repo, &["rev-parse", "HEAD"])
+}
+
+/// A branch of three commits over one ten-line file and one new file.
+fn three_commit_branch(fx: &GitWorktreeFixture, name: &str) -> std::path::PathBuf {
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree(name);
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "one");
+    commit_files(&wt, &[("new.txt", "new\n")], "two");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "d"))], "three");
+    wt
+}
+
+/// #8633 round 3: a REBASE-merged branch — three commits replayed onto
+/// `main` after other work there — is landed at its last replayed commit,
+/// which carries all of its content and whose own patch `HEAD` holds. Once
+/// with `main` unmoved since (the tip is that commit), once with `main`
+/// having edited the same file afterwards (found in history).
+#[test]
+fn a_rebase_merged_branch_is_landed_at_its_last_replayed_commit() {
+    let fx = GitWorktreeFixture::new();
+    let wt = three_commit_branch(&fx, "rebased");
+    let last = rebase_merge_onto_main(&fx, "session/rebased");
+    git(&wt, &["fetch", "origin"]);
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed {
+            at: Some(last.clone())
+        }),
+        "main unmoved since the rebase-merge"
+    );
+
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("e", "d"))], "later edit");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed { at: Some(last) }),
+        "main moved on after the rebase-merge"
+    );
+    assert!(landed_content_verdict(&wt, BOUND).is_landed());
+}
+
+/// #8633 round 3, unchanged behaviour: a `HEAD` that is an ancestor of `main`
+/// — fast-forwarded, or merged by a merge commit — is landed with no landing
+/// commit named, even after `main` edited the same file.
+#[test]
+fn a_head_that_is_an_ancestor_of_main_is_landed() {
+    let fx = GitWorktreeFixture::new();
+    let ff = fx.add_worktree("fast-forward");
+    commit_files(&ff, &[("ff.txt", "ff\n")], "ff work");
+    git(&fx.repo, &["merge", "--ff-only", "session/fast-forward"]);
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&ff, &["fetch", "origin"]);
+    assert_eq!(
+        content_on_base(&ff, "origin/main"),
+        Ok(ContentOnBase::Landed { at: None })
+    );
+
+    let merged = fx.add_worktree("merge-commit");
+    commit_files(&merged, &[("m.txt", "branch\n")], "branch work");
+    commit_files(&fx.repo, &[("other.txt", "main\n")], "main work");
+    git(
+        &fx.repo,
+        &["merge", "--no-ff", "-m", "merge", "session/merge-commit"],
+    );
+    commit_files(&fx.repo, &[("m.txt", "edited on main\n")], "later edit");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&merged, &["fetch", "origin"]);
+    assert_eq!(
+        content_on_base(&merged, "origin/main"),
+        Ok(ContentOnBase::Landed { at: None })
+    );
+    assert!(landed_content_verdict(&merged, BOUND).is_landed());
 }

@@ -24,7 +24,10 @@
 //!
 //! #8633: the comparison is [`content_on_base`], which also accepts an
 //! earlier commit on the base's own history when later commits there edited
-//! the same files — the squash-merged shape a tip-only merge misread.
+//! the same files — the squash-merged shape a tip-only merge misread. Ancestry
+//! is sufficient there, never necessary: a `HEAD` that is not an ancestor of
+//! the base needs a base commit, the tip included, that holds its content in
+//! both directions, so a revert made after the squash is never admitted.
 //!
 //! **Every failure arm refuses**, per
 //! [ADR-0045](../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
@@ -80,8 +83,8 @@ pub enum LandedContent {
         base: String,
         /// That ref's own commit, so a refusal or a grant is reproducible.
         base_sha: String,
-        /// #8633: the earlier commit on `base` that holds the content, when
-        /// later commits edited it over so the tip merge is no longer empty.
+        /// #8633: the commit on `base`, possibly its tip, that holds the
+        /// content in both directions; `None` when `HEAD` is an ancestor.
         landed_at: Option<String>,
     },
     /// Merging `HEAD` into `base` would still change files.
@@ -92,7 +95,8 @@ pub enum LandedContent {
         first_path: String,
     },
     /// Merging `HEAD` into `base` conflicts, and no earlier commit on `base`
-    /// holds the content either (#8633).
+    /// holds the content either (#8633); or the merge is empty but `HEAD`
+    /// undid part of what landed (`ContentOnBase::Undone`, #8633 round 3).
     Conflicted {
         /// The ref the comparison was made against.
         base: String,
@@ -137,9 +141,9 @@ impl LandedContent {
                 base_sha,
                 landed_at: None,
             } => format!(
-                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission applies: merging HEAD into \
-                 {base} (`{base_sha}`) would change no file, so this tree holds nothing the \
-                 remote does not already have"
+                "ADR-0057's `{LANDED_CONTENT_CHECK}` admission applies: HEAD is an ancestor of \
+                 {base} (`{base_sha}`), so this tree holds nothing the remote does not already \
+                 have"
             ),
             Self::Landed {
                 base,
@@ -331,10 +335,14 @@ fn landed_content_on_fetched_refs(dir: &Path) -> LandedContent {
             base_sha,
             landed_at: at,
         },
-        Ok(c @ ContentOnBase::Conflicted { .. }) => LandedContent::Conflicted {
-            detail: c.describe(&base),
-            base,
-        },
+        // #8633 round 3: `Undone` carries no merge residue to name, so it
+        // reports through the probe's own description, as a conflict does.
+        Ok(c @ (ContentOnBase::Conflicted { .. } | ContentOnBase::Undone { .. })) => {
+            LandedContent::Conflicted {
+                detail: c.describe(&base),
+                base,
+            }
+        }
         Ok(ContentOnBase::Residual { paths, .. }) => LandedContent::Residual {
             base,
             first_path: paths.into_iter().next().unwrap_or_default(),

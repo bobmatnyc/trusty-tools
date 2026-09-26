@@ -282,20 +282,27 @@ the guard will establish every precondition itself.
      reason, because `merge-tree` reports a conflict on stdout with exit 1.
      PR #8655's worktree was refused that way on 2026-09-26. Both the
      `landed-content` admission and the merged-pull-request residue check now
-     ask `core::worktree_landed_history::content_on_base`: when the tip merge
-     conflicts or leaves residue, it merges HEAD into each first-parent base
-     commit since the fork point that touches a file HEAD changed (oldest
-     first, capped). A candidate `M` admits only when BOTH directions are
-     empty: merging HEAD into `M` changes no file, and applying `M`'s own
-     patch (against its first parent) onto HEAD changes no file. The first
-     proves HEAD's changes since the fork are all in `M`; it cannot see a
-     later branch commit that takes part of `M` back — a revert to the fork's
-     version, or the deletion of a file `M` added — because relative to the
-     fork that commit changes nothing. The second catches exactly that. This
-     is still content, never ancestry, judged only against commits already on
-     the remote. A branch holding a different version of the change, a later
+     ask `core::worktree_landed_history::content_on_base`. A HEAD that is an
+     ancestor of the base — a plain merge or a fast-forward — is landed. Any
+     other HEAD needs a two-way landing commit `M` on the base: the base's
+     tip is tried first, then each first-parent base commit since the fork
+     point that touches a file HEAD changed (oldest first, capped). `M`
+     admits only when BOTH directions are empty: merging HEAD into `M`
+     changes no file, and applying `M`'s own patch (against its first
+     parent) onto HEAD changes no file. The first proves HEAD's changes since
+     the fork are all in `M`; it cannot see a later branch commit that takes
+     part of `M` back — a revert to the fork's version, or the deletion of a
+     file `M` added — because relative to the fork that commit changes
+     nothing. The second catches exactly that. The tip gets no shortcut: an
+     empty merge into the tip no longer admits a non-ancestor on its own,
+     because when the base has not moved since the squash, the tip IS the
+     squash and the same blind spot applies there. A rebase-merged branch is
+     landed at its last replayed commit, which carries all of its content and
+     whose own patch HEAD holds. Ancestry is sufficient, never necessary; the
+     test is still content, judged only against commits already on the
+     remote. A branch holding a different version of the change, a later
      commit the squash never carried, or a later commit that undid part of
-     the squash is not admitted. A conflict is told apart from a git error by
+     the squash is not admitted, whether or not the base has moved since. A conflict is told apart from a git error by
      the tree id `merge-tree` prints first; a git error (it also exits 1 for a
      ref it cannot merge) stays undeterminable and quotes git's stderr, and
      any error in either direction refuses. Every refusal names the
