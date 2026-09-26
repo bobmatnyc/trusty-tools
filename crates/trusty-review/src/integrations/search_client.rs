@@ -111,6 +111,8 @@ pub struct IndexInfo {
 /// literal in a downstream crate.
 /// What: `repo_identity` is the daemon's canonical `owner/repo` (or
 /// `content:<sha>`); `None` when the daemon did not report one.
+/// `last_used_unix` is the later of the index's last query and last index,
+/// the tiebreak among several indexes of one repo.
 /// Test: `list_index_identities_parses_repo_identity`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IndexIdentity {
@@ -122,6 +124,9 @@ pub struct IndexIdentity {
     /// Canonical repository identity, when the daemon recorded one.
     #[serde(default)]
     pub repo_identity: Option<String>,
+    /// Unix seconds of the index's last use; `None` when never used.
+    #[serde(default)]
+    pub last_used_unix: Option<u64>,
 }
 
 /// Envelope wrapper for `GET /indexes?details=true`.
@@ -233,21 +238,22 @@ pub trait SearchClient: Send + Sync {
     /// Why: `review_pr` names a repo, not a directory; trusty-search records
     /// each index's canonical `owner/repo` (`repo_identity`, DOC-37), which is
     /// the only registry-side mapping from a repo to its index.
-    /// What: the default adapts `list_indexes` with every `repo_identity` unset,
-    /// so an implementor that predates this method still compiles and simply
-    /// reports no identities. `HttpSearchClient` overrides it to read the field.
-    /// Test: `list_index_identities_parses_repo_identity`.
-    async fn list_index_identities(&self) -> Result<Vec<IndexIdentity>, SearchClientError> {
-        Ok(self
-            .list_indexes()
-            .await?
-            .into_iter()
-            .map(|info| IndexIdentity {
-                id: info.id,
-                root_path: info.root_path,
-                repo_identity: None,
-            })
-            .collect())
+    /// What: `repo_identity = Some(r)` asks the daemon for only the indexes
+    /// recorded for `r`; `None` lists every index. The default body fails with
+    /// [`SearchClientError::Unavailable`]: a client that cannot report
+    /// identities must not look like one whose indexes have none, or a
+    /// same-named index of another repo could be picked by name.
+    /// `HttpSearchClient` overrides it.
+    /// Test: `list_index_identities_parses_repo_identity`,
+    /// `default_list_index_identities_fails_closed`.
+    async fn list_index_identities(
+        &self,
+        repo_identity: Option<&str>,
+    ) -> Result<Vec<IndexIdentity>, SearchClientError> {
+        let _ = repo_identity;
+        Err(SearchClientError::Unavailable(
+            "repo identities not supported by this search client".to_string(),
+        ))
     }
 
     /// Read the status of ONE index (#6686).
@@ -344,14 +350,22 @@ impl HttpSearchClient {
     ///
     /// `?details=true` is REQUIRED: without it the daemon omits `root_path` and
     /// `repo_identity` from each entry. #8649 made this generic so
-    /// `list_indexes` and `list_index_identities` share one request.
+    /// `list_indexes` and `list_index_identities` share one request; an
+    /// optional `?repo_identity=` filter is applied by the daemon before its
+    /// per-index disk walk.
     async fn get_index_list<T: serde::de::DeserializeOwned>(
         &self,
+        repo_identity: Option<&str>,
     ) -> Result<Vec<T>, SearchClientError> {
-        let url = format!("{}/indexes?details=true", self.base_url);
+        let url = format!("{}/indexes", self.base_url);
+        let mut query = vec![("details", "true")];
+        if let Some(identity) = repo_identity {
+            query.push(("repo_identity", identity));
+        }
         let resp = self
             .http
             .get(&url)
+            .query(&query)
             .send()
             .await
             .map_err(|e| SearchClientError::Transport(format!("GET {url}: {e}")))?;
@@ -403,12 +417,15 @@ impl SearchClient for HttpSearchClient {
     }
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-        self.get_index_list().await
+        self.get_index_list(None).await
     }
 
     // #8649: same request, read with each entry's `repo_identity` kept.
-    async fn list_index_identities(&self) -> Result<Vec<IndexIdentity>, SearchClientError> {
-        self.get_index_list().await
+    async fn list_index_identities(
+        &self,
+        repo_identity: Option<&str>,
+    ) -> Result<Vec<IndexIdentity>, SearchClientError> {
+        self.get_index_list(repo_identity).await
     }
 
     // #6686: the per-index probe the required-context gate decides on.

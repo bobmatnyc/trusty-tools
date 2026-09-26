@@ -17,8 +17,9 @@ pub mod constants;
 pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
-// #8649: per-call owner/repo -> index resolution for `review_pr`.
-pub mod repo_index;
+// #8649: per-call owner/repo -> index resolution for `review_pr`; crate-only
+// so the published API does not grow.
+pub(crate) mod repo_index;
 pub mod role_models;
 pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the

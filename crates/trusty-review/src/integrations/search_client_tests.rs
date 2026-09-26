@@ -175,8 +175,8 @@ fn list_indexes_bare_array_is_rejected() {
 #[test]
 fn list_index_identities_parses_repo_identity() {
     let body = r#"{"indexes":[
-        {"id":"ci-4e2cf878","root_path":"/src/ci","repo_identity":"duettoresearch/code-intelligence","size_bytes":1},
-        {"id":"legacy","root_path":"/src/legacy"}
+        {"id":"ci-4e2cf878","root_path":"/src/ci","repo_identity":"duettoresearch/code-intelligence","size_bytes":1,"last_used_unix":1700000000},
+        {"id":"legacy","root_path":"/src/legacy","repo_identity":null}
     ]}"#;
     let envelope: ListIndexesResponse<super::IndexIdentity> =
         serde_json::from_str(body).expect("must parse the daemon envelope");
@@ -184,7 +184,56 @@ fn list_index_identities_parses_repo_identity() {
         envelope.indexes[0].repo_identity.as_deref(),
         Some("duettoresearch/code-intelligence")
     );
+    assert_eq!(envelope.indexes[0].last_used_unix, Some(1_700_000_000));
     assert_eq!(envelope.indexes[1].repo_identity, None);
+    assert_eq!(envelope.indexes[1].last_used_unix, None);
+}
+
+/// A client with only the required methods, so `list_index_identities` is
+/// the trait's default body.
+struct NoIdentityClient;
+
+#[async_trait::async_trait]
+impl SearchClient for NoIdentityClient {
+    async fn health(&self) -> Result<super::HealthResponse, SearchClientError> {
+        Err(SearchClientError::Unavailable("unused".into()))
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![IndexInfo {
+            id: "widget".into(),
+            name: None,
+            root_path: None,
+        }])
+    }
+
+    async fn index_status(
+        &self,
+        id: &str,
+    ) -> Result<super::IndexStatusResponse, SearchClientError> {
+        Ok(super::IndexStatusResponse::ready(id))
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// #8649: a client that does not report identities fails the listing rather
+/// than reporting its indexes as identity-less, which the bare-name fallback
+/// would accept for any owner.
+#[tokio::test]
+async fn default_list_index_identities_fails_closed() {
+    let err = NoIdentityClient
+        .list_index_identities(Some("acme/widget"))
+        .await
+        .expect_err("the default body must not list anything");
+    assert!(err.to_string().contains("not supported"), "{err}");
 }
 
 #[test]

@@ -9,13 +9,16 @@
 //! What: [`resolve_repo_index`] maps `owner/repo` to an index id through the
 //! `repo_identity` trusty-search records for each index (DOC-37). The session's
 //! pinned index wins when it belongs to the repo. With no identity match, an
-//! index whose id is the bare repo name and that carries no identity is used.
-//! Anything else is a [`RepoIndexError`] naming the repo and the index id it
-//! looked up — never a default index.
+//! index whose id is the bare repo name and that has no recorded identity is
+//! used, with a warning. Anything else is a [`RepoIndexError`] naming the repo
+//! and the index id it looked up — never a default index.
 //!
 //! Test: `src/mcp/tools_pr_index_tests.rs` (it drives this module through the
 //! `review_pr` tool's per-call config as well as directly).
 
+use std::cmp::Reverse;
+
+use tracing::warn;
 use trusty_common::github_path::parse_owner_repo;
 use trusty_common::repo_identity::RepoIdentity;
 
@@ -25,9 +28,10 @@ use crate::integrations::search_client::{IndexIdentity, SearchClient, SearchClie
 ///
 /// Why: a missing index is a caller-fixable condition, not an outage; the
 /// message must say which repo and which index id were looked up.
-/// What: one variant per failure; each `Display` names the repo.
+/// What: one variant per failure; each `Display` names the repo. `Registry`
+/// is the only variant `review_pr` may degrade on (search not required).
 /// Test: `missing_index_error_names_the_repo_and_the_index_id`,
-/// `registry_failure_is_an_error_not_a_default`.
+/// `registry_failure_is_an_error_when_search_is_required`.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoIndexError {
     /// `owner` or `repo` is empty or not a repository name.
@@ -73,20 +77,23 @@ pub enum RepoIndexError {
 ///
 /// Why: `review_pr` must query the PR repo's index, not the index the MCP
 /// server resolved from its own CWD at startup (#8649).
-/// What: lists indexes with their `repo_identity` and delegates the choice to
-/// [`select_repo_index`]; `pinned` is the session's configured index, used only
-/// when it belongs to this repo. Fails closed: every miss is an error.
+/// What: asks the daemon for the indexes recorded for this repo
+/// (`?repo_identity=`, filtered server-side) and re-checks each identity
+/// locally; only on no match does it list every index for the bare-name
+/// fallback in [`select_repo_index`]. `pinned` is the session's configured
+/// index, used only when it belongs to this repo. Every miss is an error.
 ///
 /// # Errors
 ///
 /// [`RepoIndexError::InvalidRepo`] for an empty or unparseable name,
-/// [`RepoIndexError::Registry`] when the list cannot be read, and
+/// [`RepoIndexError::Registry`] when a list cannot be read, and
 /// [`RepoIndexError::NoIndex`] when no index belongs to the repo.
 ///
 /// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
 /// `missing_index_error_names_the_repo_and_the_index_id`,
-/// `registry_failure_is_an_error_not_a_default`.
-pub async fn resolve_repo_index(
+/// `registry_failure_is_an_error_when_search_is_required`,
+/// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`.
+pub(crate) async fn resolve_repo_index(
     client: &dyn SearchClient,
     owner: &str,
     repo: &str,
@@ -104,16 +111,21 @@ pub async fn resolve_repo_index(
         .map(|gp| RepoIdentity::GitHub(gp).canonical())
         .ok_or_else(invalid)?;
     let index_id = repo_t.to_string();
+    let registry = |source| RepoIndexError::Registry {
+        repo: repo_key.clone(),
+        index_id: index_id.clone(),
+        source,
+    };
 
-    let indexes =
-        client
-            .list_index_identities()
-            .await
-            .map_err(|source| RepoIndexError::Registry {
-                repo: repo_key.clone(),
-                index_id: index_id.clone(),
-                source,
-            })?;
+    // #8649: the daemon filters by identity before its per-index disk walk.
+    let scoped = client
+        .list_index_identities(Some(&repo_key))
+        .await
+        .map_err(registry)?;
+    if let Some(id) = pick_identity_match(&scoped, &repo_key, pinned) {
+        return Ok(id);
+    }
+    let indexes = client.list_index_identities(None).await.map_err(registry)?;
     select_repo_index(&indexes, &repo_key, &index_id, pinned).map_err(|detail| {
         RepoIndexError::NoIndex {
             repo: repo_key.clone(),
@@ -124,52 +136,110 @@ pub async fn resolve_repo_index(
     })
 }
 
+/// The canonical identity an index records, or `None` when absent/unparseable.
+fn canonical_identity(index: &IndexIdentity) -> Option<String> {
+    index
+        .repo_identity
+        .as_deref()
+        .and_then(RepoIdentity::parse)
+        .map(|r| r.canonical())
+}
+
+/// Among indexes recorded for `repo_key`: the pin, else the most recently
+/// used, then the shortest `root_path`, then the smallest id (#8649).
+///
+/// Why: one repo can own several indexes (live checkout, `.base` clone,
+/// session worktrees); the choice must be deterministic and favour the one in
+/// use. The live checkout's path is usually the shortest.
+/// What: `None` when no index's identity parses to `repo_key`.
+/// Test: `pinned_index_wins_only_when_it_belongs_to_the_repo`,
+/// `identity_tiebreak_prefers_recent_use_then_short_root_then_id`.
+fn pick_identity_match(
+    indexes: &[IndexIdentity],
+    repo_key: &str,
+    pinned: Option<&str>,
+) -> Option<String> {
+    let matching: Vec<&IndexIdentity> = indexes
+        .iter()
+        .filter(|i| canonical_identity(i).as_deref() == Some(repo_key))
+        .collect();
+    if let Some(pin) = pinned
+        && matching.iter().any(|i| i.id == pin)
+    {
+        return Some(pin.to_string());
+    }
+    matching
+        .into_iter()
+        .min_by_key(|i| {
+            let root_len = i.root_path.as_ref().map_or(usize::MAX, String::len);
+            (Reverse(i.last_used_unix), root_len, i.id.as_str())
+        })
+        .map(|i| i.id.clone())
+}
+
 /// Pick the index for `repo_key` from a listed registry, or explain the miss.
 ///
 /// Why: kept pure so the selection rules are testable without a client.
-/// What: among indexes whose normalised `repo_identity` equals `repo_key`, the
-/// `pinned` id wins; otherwise the shortest `root_path` (the live checkout
-/// sorts before its `.base` clone and session worktrees), then the smallest
-/// id. With no identity match, an index whose id is `index_id` and that has
-/// no identity is accepted. `Err` carries the reason the lookup missed.
+/// What: an identity match per [`pick_identity_match`]; otherwise the index
+/// whose id is `index_id`, only when it has NO recorded identity (logged at
+/// `warn`). A recorded identity that is unparseable or names another repo is
+/// refused. `Err` carries the reason, and names the pinned index and its
+/// recorded identity when the pin exists but was not used (a fork's index).
 /// Test: `pinned_index_wins_only_when_it_belongs_to_the_repo`,
-/// `same_named_index_of_another_repo_is_refused`.
+/// `same_named_index_of_another_repo_is_refused`,
+/// `unreadable_identity_is_refused_by_the_name_fallback`,
+/// `foreign_pin_is_named_in_the_miss`.
 pub(crate) fn select_repo_index(
     indexes: &[IndexIdentity],
     repo_key: &str,
     index_id: &str,
     pinned: Option<&str>,
 ) -> Result<String, String> {
-    let identity_of = |i: &IndexIdentity| {
-        i.repo_identity
-            .as_deref()
-            .and_then(RepoIdentity::parse)
-            .map(|r| r.canonical())
+    if let Some(id) = pick_identity_match(indexes, repo_key, pinned) {
+        return Ok(id);
+    }
+    // #8649: a fork user must see why their session's index was not used.
+    let pin_note = pinned
+        .filter(|pin| *pin != index_id)
+        .and_then(|pin| indexes.iter().find(|i| i.id == pin))
+        .map(|pin| {
+            let recorded = pin
+                .repo_identity
+                .as_deref()
+                .map_or_else(|| "no recorded repo_identity".to_string(), str::to_string);
+            format!(
+                "; the session's index {:?} is registered for {recorded}, not {repo_key}, \
+                 so it is not used (an index recorded for another repo or owner, such as a \
+                 fork's, never is)",
+                pin.id
+            )
+        })
+        .unwrap_or_default();
+    let Some(named) = indexes.iter().find(|i| i.id == index_id) else {
+        return Err(format!(
+            "index {index_id:?} is not registered and no index carries that repo_identity{pin_note}"
+        ));
     };
-    let matching: Vec<&IndexIdentity> = indexes
-        .iter()
-        .filter(|i| identity_of(i).as_deref() == Some(repo_key))
-        .collect();
-    if let Some(pin) = pinned
-        && matching.iter().any(|i| i.id == pin)
-    {
-        return Ok(pin.to_string());
-    }
-    if let Some(best) = matching.iter().min_by_key(|i| {
-        let len = i.root_path.as_ref().map_or(usize::MAX, String::len);
-        (len, i.id.as_str())
-    }) {
-        return Ok(best.id.clone());
-    }
-    match indexes.iter().find(|i| i.id == index_id) {
-        Some(i) => match identity_of(i) {
-            None => Ok(i.id.clone()),
+    match named.repo_identity.as_deref() {
+        None => {
+            warn!(
+                index = %named.id,
+                repo = %repo_key,
+                "review_pr: using index {:?} by name; it has no recorded repo_identity, so it \
+                 cannot be verified to belong to {repo_key} (#8649)",
+                named.id
+            );
+            Ok(named.id.clone())
+        }
+        Some(raw) => match RepoIdentity::parse(raw) {
             Some(other) => Err(format!(
-                "index {index_id:?} is registered but belongs to {other}"
+                "index {index_id:?} is registered but belongs to {}{pin_note}",
+                other.canonical()
+            )),
+            None => Err(format!(
+                "index {index_id:?} is registered with an unreadable repo_identity {raw:?}, so \
+                 it cannot be verified to belong to {repo_key}{pin_note}"
             )),
         },
-        None => Err(format!(
-            "index {index_id:?} is not registered and no index carries that repo_identity"
-        )),
     }
 }
