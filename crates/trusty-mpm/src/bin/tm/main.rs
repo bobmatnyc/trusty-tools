@@ -249,6 +249,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Config(cmd)) = cli.command {
         return cmd.run().await;
     }
+    // #8261: `tm build-lease` wraps every heavy build the hook rewrites, so it
+    // runs before any tracing, migration or gateway probe — its latency is paid
+    // by every build on the machine.
+    if let Some(Command::BuildLease(args)) = cli.command {
+        commands::build_lease::run(args, cli.url.as_deref()).await
+    }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
     // tmux pane routes `claude` through so it is spawned with macOS TCC
@@ -520,6 +526,9 @@ async fn main() -> anyhow::Result<()> {
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
+        // #8261: normally dispatched before daemon resolution above; kept so
+        // the match stays exhaustive without a panic arm.
+        Some(Command::BuildLease(args)) => commands::build_lease::run(args, Some(&url)).await,
         Some(Command::Daemon {
             addr,
             tailscale,

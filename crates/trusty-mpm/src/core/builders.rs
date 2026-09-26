@@ -173,6 +173,12 @@ pub struct BuildersConfig {
     ///
     /// `None` → [`DEFAULT_FREE_MEMORY_FLOOR_MB`]. Read against the OS
     /// "available" figure, which counts reclaimable pages.
+    ///
+    /// DEPRECATED since #8261 increment two: `tm build-lease` reads memory
+    /// PRESSURE (`builders.memory_pressure_max`, `builders.min_available_pct`,
+    /// see [`crate::core::build_lease::config`]) and ignores this key; only the
+    /// retired dispatch-time formula in [`crate::core::builder_capacity`] reads
+    /// it. Still parsed so an operator config carrying it loads unchanged.
     pub free_memory_floor_mb: Option<u64>,
 
     /// Where the per-slot build directories live.
@@ -241,6 +247,27 @@ impl BuildersConfig {
             .as_deref()
             .unwrap_or(DEFAULT_SLOT_POOL_ROOT);
         trusty_common::workspace_layout::expand_tilde(template, home)
+    }
+
+    /// One line per deprecated key this section still carries (#8261).
+    ///
+    /// Why: an old config must load, and an operator who set the retired key
+    /// must be told it no longer does anything rather than find out from a
+    /// build admitted under pressure.
+    /// Test: `an_old_free_memory_floor_loads_and_warns`.
+    #[must_use]
+    pub fn deprecation_warnings(&self) -> Vec<String> {
+        self.free_memory_floor_mb
+            .map(|mb| {
+                format!(
+                    "builders.free_memory_floor_mb = {mb} in ~/.trusty-mpm/config.toml is ignored \
+                     since #8261: build leases read memory pressure. Use \
+                     builders.memory_pressure_max (normal|warn|critical) and \
+                     builders.min_available_pct instead."
+                )
+            })
+            .into_iter()
+            .collect()
     }
 
     /// Refuse a value this harness will not act on (#8261).
@@ -602,5 +629,24 @@ mod tests {
         )
         .expect_err("a project file must not be able to set the machine's builder cap");
         assert!(format!("{err}").contains(".trusty-mpm.toml"), "{err}");
+    }
+
+    /// #8261: a config written for the free-MB floor still loads, keeps every
+    /// other key, and says the retired key is ignored.
+    #[test]
+    fn an_old_free_memory_floor_loads_and_warns() {
+        let cfg: MpmConfig =
+            toml::from_str("[builders]\nmax_concurrent = 12\nfree_memory_floor_mb = 8192\n")
+                .expect("an old [builders] section must still parse");
+        assert_eq!(cfg.builders.max_concurrent, Some(12));
+        assert!(cfg.builders.validate().is_ok());
+        let warnings = cfg.builders.deprecation_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("free_memory_floor_mb = 8192"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("memory_pressure_max"), "{warnings:?}");
+        assert!(BuildersConfig::default().deprecation_warnings().is_empty());
     }
 }

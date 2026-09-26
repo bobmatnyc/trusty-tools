@@ -40,6 +40,23 @@ use std::io::Write;
 /// spelling is repeated here — the unit tests build theirs from the producer,
 /// which is what keeps the two from drifting apart unnoticed.
 const EXPECTED_CARGO_TEST_REWRITE: &str = "{ cargo test; printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; } | tm compress --tool \"cargo test\"";
+
+/// #8261: `cargo test` is a heavy build, so `tm hook` also leases it — the
+/// same `<hook binary> build-lease -- ` insertion `tm hook --pm-guard` emits,
+/// inside the compression wrapper. Returns the command with that one insertion
+/// removed, for comparison with [`EXPECTED_CARGO_TEST_REWRITE`], and panics if
+/// the insertion is missing.
+fn without_the_lease_insertion(command: &serde_json::Value) -> String {
+    let command = command.as_str().expect("the rewritten command is a string");
+    let Some(rest) = command.strip_prefix("{ ") else {
+        panic!("the compression wrapper comes first: {command}");
+    };
+    let Some((_program, build)) = rest.split_once(" build-lease -- ") else {
+        panic!("a heavy build must be leased: {command}");
+    };
+    format!("{{ {build}")
+}
+
 use std::process::Stdio;
 
 /// Spawn `tm hook` with the given `CLAUDE_HOOK_EVENT` and stdin JSON,
@@ -91,7 +108,7 @@ fn hook_rewrites_plain_bash_command_on_pretooluse() {
         serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON when rewriting");
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(
-        parsed["hookSpecificOutput"]["updatedInput"]["command"],
+        without_the_lease_insertion(&parsed["hookSpecificOutput"]["updatedInput"]["command"]),
         EXPECTED_CARGO_TEST_REWRITE
     );
 }
@@ -101,15 +118,30 @@ fn hook_stays_silent_for_a_bash_call_in_an_isolation_worktree() {
     // #7477: the harness classifier refuses the wrapped shape inside an
     // isolation worktree, so the hook must print nothing and let the command
     // run as written. The payload `cwd` is what Claude Code reports.
-    for command in ["git diff", "ls -la", "cargo test"] {
+    let cwd = "/repo/.claude/worktrees/agent-a/crates/trusty-mpm";
+    for command in ["git diff", "ls -la"] {
         let payload = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": command },
-            "cwd": "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+            "cwd": cwd,
         });
         let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
         assert_eq!(stdout.trim(), "", "{command} must not be rewritten");
     }
+    // #8261: a heavy build there is still leased — the builds run in isolation
+    // worktrees — but never compression-wrapped (#7477).
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test" },
+        "cwd": cwd,
+    });
+    let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    let command = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(command.ends_with(" build-lease -- cargo test"), "{command}");
+    assert!(!command.contains("tm compress"), "{command}");
 }
 
 #[test]
@@ -216,7 +248,7 @@ fn hook_rewrites_using_stdin_hook_event_name_without_env_var() {
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON when rewriting");
     assert_eq!(
-        parsed["hookSpecificOutput"]["updatedInput"]["command"],
+        without_the_lease_insertion(&parsed["hookSpecificOutput"]["updatedInput"]["command"]),
         EXPECTED_CARGO_TEST_REWRITE
     );
 }

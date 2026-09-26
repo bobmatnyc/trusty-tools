@@ -180,6 +180,9 @@ lanes = [
         # machine-tier — all three read the machine, and the lane that owns two
         # of them is the one whose editor must see the third.
         "load-average",
+        # #8261: memory-pressure joins the machine-reading lane beside
+        # load-average — both are builder-admission inputs.
+        "memory-pressure",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -925,6 +928,13 @@ host-metrics = ["sysinfo/disk", "sysinfo/network"]
 # in this crate, and the module's error enum uses it per the workspace's
 # libraries-use-thiserror rule.
 load-average = ["dep:thiserror"]
+# #8261: `memory_pressure::read_memory_pressure` — the kernel's own memory
+# pressure verdict (macOS `kern.memorystatus_*`, Linux PSI / cgroup PSI /
+# `/proc/meminfo`) that builder admission reads instead of a free-MB floor.
+# Adds no crate to the lockfile: `libc` is already a `cfg(unix)` dependency and
+# the Linux path is plain file reads; a feature only because `thiserror` is
+# optional here.
+memory-pressure = ["dep:thiserror"]
 # #6820: machine-tier detection + proportional memory budget, hoisted out of
 # trusty-search so trusty-memory reads the same numbers. Zero new dependencies —
 # the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
