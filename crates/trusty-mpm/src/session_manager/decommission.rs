@@ -27,9 +27,10 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
 use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
+use super::worktree_ignored_output::ignored_output_blocks_removal;
 use super::worktree_protection;
 use super::worktree_registry;
-use super::worktree_safety::worktree_remove_command;
+use super::worktree_safety::{DirtyWorktreePolicy, worktree_remove_command};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
 /// per-session git worktree (#1845 item 5).
@@ -312,8 +313,13 @@ impl WorktreeRemoval {
 /// either path or session, so the mechanism could not be identified even after
 /// the fact. It is a required argument rather than a defaulted one because a
 /// route that cannot say why it is deleting is the case that went unrecorded.
-pub(super) fn remove_session_worktree(path: &Path, reason: &str) -> WorktreeRemoval {
-    remove_session_worktree_guarded(path, reason, &|| None)
+/// #8534: `ignored` — see [`remove_session_worktree_guarded`].
+pub(super) fn remove_session_worktree(
+    path: &Path,
+    reason: &str,
+    ignored: DirtyWorktreePolicy,
+) -> WorktreeRemoval {
+    remove_session_worktree_guarded(path, reason, &|| None, ignored)
 }
 
 /// [`remove_session_worktree`] with one last refusal asked inside the audit
@@ -323,12 +329,16 @@ pub(super) fn remove_session_worktree(path: &Path, reason: &str) -> WorktreeRemo
 /// dirt probe, which takes seconds on a large tree, and `--force` follows.
 /// What: `guard` runs after the ownership gate and the audit attempt line, and
 /// immediately before `git worktree remove --force`. `Some(reason)` keeps the
-/// tree, and the audit outcome line records that refusal.
-/// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`.
+/// tree, and the audit outcome line records that refusal. `ignored` is the
+/// caller's answer for gitignored output (#8534): only an explicit
+/// `--discard-dirty` prune passes [`DirtyWorktreePolicy::ForceDiscard`].
+/// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`,
+/// `decommission_keeps_gitignored_run_output`.
 pub(super) fn remove_session_worktree_guarded(
     path: &Path,
     reason: &str,
     guard: &dyn Fn() -> Option<String>,
+    ignored: DirtyWorktreePolicy,
 ) -> WorktreeRemoval {
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
@@ -380,7 +390,7 @@ pub(super) fn remove_session_worktree_guarded(
         if let Some(refusal) = guard() {
             return WorktreeRemoval::Kept(format!("refused immediately before removal: {refusal}"));
         }
-        remove_registered_worktree(path)
+        remove_registered_worktree(path, ignored)
     })
 }
 
@@ -390,11 +400,12 @@ pub(super) fn remove_session_worktree_guarded(
 /// Why: split from [`remove_session_worktree`] so the removal audit wraps ONE
 /// call rather than being repeated on each of this function's five return arms
 /// (#7885).
-/// What: registry resolution, `git worktree remove --force`, and the two
-/// [`worktree_protection`]-gated fallbacks, unchanged by the split.
+/// What: registry resolution, the #8534 gitignored-output gate, `git worktree
+/// remove --force`, and the two [`worktree_protection`]-gated fallbacks.
 /// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
-/// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`.
-fn remove_registered_worktree(path: &Path) -> WorktreeRemoval {
+/// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`,
+/// `decommission_keeps_gitignored_run_output`.
+fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> WorktreeRemoval {
     // #4207: ask git which checkout owns this worktree's registry instead of
     // guessing that it is the grandparent directory. The grandparent rule held
     // only for the two shapes it was written against; a worktree registered to
@@ -426,6 +437,15 @@ fn remove_registered_worktree(path: &Path) -> WorktreeRemoval {
         }
     };
     let repo_root = repo_root.as_path();
+    // #8534: `--force` deletes gitignored files the callers' dirt gates never
+    // count. Here, not per caller, so every `git worktree remove` route through
+    // this function runs it; after registry resolution, because only a
+    // registered tree has a status to read. Two deletions never reach it:
+    // `remove_unclaimed_directory` above, when no repository claims the path,
+    // and effect 3's `remove_dir_all` of an SM-owned workspace (#8663).
+    if let Some(refusal) = ignored_output_blocks_removal(path, ignored) {
+        return WorktreeRemoval::Kept(refusal);
+    }
     // Step 1: git worktree remove --force <path> (run from repo root).
     // #6391: through the hardened builder, which keeps the #1840 OsStr-safe
     // Path args and additionally strips the env vars that would point

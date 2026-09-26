@@ -195,7 +195,11 @@ fn is_session_worktree_absent_path_is_noop() {
     // is_session_worktree: true (immediate parent is `.worktrees`)
     assert!(is_session_worktree(absent));
     // remove_session_worktree: reports Removed idempotently (path already absent)
-    let result = remove_session_worktree(absent, "test");
+    let result = remove_session_worktree(
+        absent,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         result.removed(),
         "absent path should report Removed (idempotently removed)"
@@ -220,7 +224,11 @@ fn sentinel_gates_worktree_removal_refuses_non_worktrees_dir_without_sentinel() 
         !is_session_worktree(&wt_path),
         "test invariant: parent must NOT be .worktrees for this branch"
     );
-    let result = remove_session_worktree(&wt_path, "test");
+    let result = remove_session_worktree(
+        &wt_path,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         !result.removed(),
         "remove_session_worktree must refuse a non-worktrees dir without a sentinel"
@@ -257,7 +265,11 @@ fn sentinel_present_passes_safety_gate() {
     // The sentinel check must pass (not return false early). The git call will fail
     // because this is not a git worktree, but remove_session_worktree falls back
     // to remove_dir_all. Assert the observable outcome: the directory is gone.
-    remove_session_worktree(&wt_path, "test");
+    remove_session_worktree(
+        &wt_path,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         !wt_path.exists(),
         "sentinel present: safety gate must pass and directory must be removed"

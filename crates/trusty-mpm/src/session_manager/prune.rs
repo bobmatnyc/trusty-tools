@@ -1183,9 +1183,11 @@ impl SessionManager {
             // #7885: name the route in the audit line, so an operator reading it
             // after the fact can tell the orphan sweep from the merged-PR pass.
             let outcome = tokio::task::spawn_blocking(move || {
+                // #8534: `--discard-dirty` discards gitignored output too.
                 super::decommission::remove_session_worktree(
                     &candidate_clone,
                     "prune-worktrees orphan sweep: no live session claims this worktree",
+                    policy,
                 )
             })
             .await

@@ -1826,7 +1826,11 @@ fn remove_session_worktree_refuses_a_git_locked_worktree() {
     std::fs::write(path.join("precious.txt"), "operator work\n").expect("write precious file");
     fx.lock_worktree(&path);
 
-    let outcome = crate::session_manager::decommission::remove_session_worktree(&path, "test");
+    let outcome = crate::session_manager::decommission::remove_session_worktree(
+        &path,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         path.exists() && path.join("precious.txt").exists(),
         "a locked worktree must survive — git declined, and declining is a \

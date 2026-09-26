@@ -931,3 +931,98 @@ async fn await_gone(path: &std::path::Path) {
         }
     );
 }
+
+/// Ignore `target/` and `results/` in every worktree of `fx`'s repository.
+fn ignore_target_and_results(fx: &GitWorktreeFixture) {
+    std::fs::write(fx.repo.join(".git/info/exclude"), "target/\nresults/\n")
+        .expect("write info/exclude");
+}
+
+/// 🔴 #8534 REGRESSION: a zero-commit tree whose run wrote gitignored results
+/// is kept, and the refusal names the path and the file count.
+///
+/// Why: the dirt gate never counts gitignored files and `--force` deletes
+/// them, so this tree read as clean and its results were destroyed.
+#[test]
+fn reap_keeps_gitignored_run_output_in_a_zero_commit_tree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-ignored-results");
+    ignore_target_and_results(&fx);
+    std::fs::create_dir_all(wt.join("results")).expect("mkdir");
+    std::fs::write(wt.join("results/run-1.json"), "{}").expect("write");
+    std::fs::write(wt.join("results/run-2.json"), "{}").expect("write");
+
+    let outcome = reap_worktree(&wt, AGENT, &[]);
+
+    let reason = outcome.refusal().expect("gitignored results must be kept");
+    assert!(reason.contains(&wt.display().to_string()), "{reason}");
+    assert!(reason.contains("2 gitignored file(s)"), "{reason}");
+    assert!(
+        wt.join("results/run-1.json").exists(),
+        "the results survive"
+    );
+}
+
+/// #8534: an untracked (not ignored) output file keeps a zero-commit tree.
+/// Modified tracked files: `reap_refuses_a_dirty_worktree`.
+#[test]
+fn reap_keeps_untracked_run_output_in_a_zero_commit_tree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-untracked-output");
+    std::fs::write(wt.join("run-output.json"), "{}\n").expect("write");
+
+    let outcome = reap_worktree(&wt, AGENT, &[]);
+
+    let reason = outcome.refusal().expect("untracked output must be kept");
+    assert!(reason.contains(&wt.display().to_string()), "{reason}");
+    assert!(reason.contains("1 dirty file(s)"), "{reason}");
+    assert!(wt.join("run-output.json").exists(), "the output survives");
+}
+
+/// #8534: a truly clean zero-commit tree, and one holding only gitignored build
+/// output, are still removed — cleanup keeps working.
+#[test]
+fn reap_removes_a_zero_commit_tree_holding_only_build_output() {
+    let fx = GitWorktreeFixture::new();
+    let clean = harness_worktree(&fx, "agent-clean-zero");
+    let built = harness_worktree(&fx, "agent-built-zero");
+    ignore_target_and_results(&fx);
+    std::fs::create_dir_all(built.join("target/debug")).expect("mkdir");
+    std::fs::write(built.join("target/debug/app"), "elf").expect("write");
+
+    assert_eq!(reap_worktree(&clean, AGENT, &[]), ReapOutcome::Removed);
+    assert_eq!(reap_worktree(&built, AGENT, &[]), ReapOutcome::Removed);
+    assert!(
+        !clean.exists() && !built.exists(),
+        "both trees must be gone"
+    );
+}
+
+/// #8534: the `SessionEnd` sweep keeps a tree holding gitignored run output.
+#[tokio::test]
+async fn session_end_keeps_gitignored_run_output() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-results-at-exit", "a8534", session);
+    ignore_target_and_results(&fx);
+    std::fs::create_dir_all(wt.join("results")).expect("mkdir");
+    std::fs::write(wt.join("results/run.json"), "{}").expect("write");
+
+    let swept = settle(super::spawn_on_session_end(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        &serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    ))
+    .await;
+
+    assert_eq!(
+        swept,
+        Some(super::SweepSummary {
+            removed: 0,
+            already_gone: 0,
+            kept: 1,
+        })
+    );
+    assert!(wt.join("results/run.json").exists(), "the results survive");
+}
