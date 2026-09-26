@@ -20,8 +20,14 @@
 //!
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
-//! [`MAX_DEPTH`], an unlexable wrapper string, a panic — denies. A command
-//! naming none of [`TRIGGERS`] is never parsed at all.
+//! [`MAX_DEPTH`], an unlexable wrapper string, a descriptor chosen at run
+//! time, a panic — denies. A command naming none of [`TRIGGERS`] is never
+//! parsed at all.
+//!
+//! Known residual (unscored default): a program the rule has no fact for is
+//! treated as non-printing when a credential is its argument. `awk -v t=… '…'`,
+//! `jq --arg t …`, and a shell function or alias can each print the value and
+//! are allowed; only [`ARG_PRINTERS`] are known to print their arguments.
 //! Test: `credential_print_tests` (sibling module).
 
 #[path = "credential_print_heredoc.rs"]
@@ -35,12 +41,12 @@ use super::bash_tokens::tokenize;
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
-use credential_print_heredoc::strip_quoted_heredocs;
+use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
-    KEYWORDS, basename, consumes_stdin, credential_fds, enables_xtrace, first_credential_program,
-    is_evaluator,
+    KEYWORDS, basename, code_operands, consumes_stdin, credential_fds, enables_xtrace,
+    first_credential_program, is_evaluator,
 };
-use credential_print_redirect::apply_redirections;
+use credential_print_redirect::{apply_redirections, terminal_name_sink};
 
 /// Subcommand names whose presence makes the command worth parsing.
 const TRIGGERS: &[&str] = &[
@@ -184,10 +190,11 @@ fn input_is_program_text(text: &str) -> bool {
 /// Scan `text` run with `stdout`/`stderr` as its sinks; `Ok(true)` when a
 /// credential value flows into a [`Sink::Captured`] stdout.
 ///
-/// What: strips quoted here-document bodies, lifts every substitution
-/// ([`lift_substitutions`]), splits the rest into stages ([`split_stages`])
-/// and judges each ([`judge_stage`]), carrying "stdin holds a credential" and
-/// "stdin holds program text" from a stage piped into the next.
+/// What: strips comments and quoted here-document bodies, lifts every
+/// substitution ([`lift_substitutions`]), splits the rest into stages
+/// ([`split_stages`]) and judges each ([`judge_stage`]), carrying "stdin holds
+/// a credential" and "stdin holds program text" from a stage piped into the
+/// next; program text passes through any stage that is not a stdin consumer.
 fn scan(
     text: &str,
     stdout: Sink,
@@ -199,7 +206,7 @@ fn scan(
         return Err(Refusal::Unreadable("nesting this deep"));
     }
     let mut lifted = outer.clone();
-    let text = strip_quoted_heredocs(text, &mut lifted.heredocs);
+    let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
     let flat = lift_substitutions(&text, stdout, stderr, depth, &mut lifted)?;
     let stages = split_stages(&flat);
     let mut yields = false;
@@ -282,6 +289,9 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     let program_word = argv.get(start).map(String::as_str).unwrap_or_default();
     let program = basename(program_word);
     let args = argv.get(start + 1..).unwrap_or_default();
+    let consumer = consumes_stdin(&program, args);
+    // #8596 round 3: program text piped through a filter (`| cat | sh`).
+    emitted.text |= ctx.stdin_text && !consumer;
     if enables_xtrace(&program, argv, args) {
         return Err(Refusal::Prints);
     }
@@ -319,12 +329,11 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     };
     if let Some(at) = evaluator_at.filter(|&at| at != start || wrapped == WrappedCommand::None) {
         let evaluator = basename(&argv[at]);
+        // #8596 round 3: only code operands; `python3 up.py --token "$T"` is data.
         let fed = matches!(evaluator.as_str(), "eval" | "source" | ".")
-            || argv
-                .get(at + 1..)
-                .unwrap_or_default()
-                .iter()
-                .any(|a| input_is_program_text(a))
+            || code_operands(&evaluator, argv.get(at + 1..).unwrap_or_default())
+                .into_iter()
+                .any(input_is_program_text)
             || routed.here_program_text
             || ctx.stdin_text;
         if fed {
@@ -371,8 +380,16 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if ARG_PRINTERS.contains(&program.as_str()) && args.iter().any(|a| carries(a, lifted)) {
         fd1 = true;
     }
-    if stdin_carries && !consumes_stdin(&program, args) {
+    if stdin_carries && !consumer {
         fd1 = true;
+        // #8596 round 3: a file operand naming a descriptor or the terminal
+        // (`tee /dev/stderr`, `dd of=/dev/tty`, `tee >(cat)`).
+        for a in args {
+            let path = a.strip_prefix("of=").unwrap_or(a);
+            if let Some(sink) = terminal_name_sink(path, &routed.fds, lifted, ctx.out) {
+                route(sink, &mut emitted)?;
+            }
+        }
     }
     if fd1 {
         route(out, &mut emitted)?;
@@ -547,7 +564,7 @@ fn lift_substitutions(
 /// Split `text` into stages: `(stage, stdout piped on, stderr piped on)`.
 ///
 /// What: cuts at unquoted `|`, `|&`, `||`, `&&`, `;`, newline and a bare `&`
-/// (never at a `>&`/`&>` redirection), leaving unquoted here-document bodies
+/// (never at a `>&`/`<&`/`&>` redirection), leaving unquoted here-document bodies
 /// whole the way `super::split_shell_segments_raw` does.
 fn split_stages(text: &str) -> Vec<(String, bool, bool)> {
     let quotes = QuoteScan::new(text);
@@ -567,7 +584,7 @@ fn split_stages(text: &str) -> Vec<(String, bool, bool)> {
             (b'|', Some(b'&')) => (2, true, true),
             (b'|', _) => (1, true, false),
             (b';' | b'\n', _) => (1, false, false),
-            (b'&', _) if i > 0 && bytes[i - 1] == b'>' => (0, false, false),
+            (b'&', _) if i > 0 && matches!(bytes[i - 1], b'>' | b'<') => (0, false, false),
             (b'&', Some(b'>')) => (0, false, false),
             (b'&', _) => (1, false, false),
             _ => (0, false, false),

@@ -211,6 +211,63 @@ fn allows_quoted_heredoc_bodies() {
     );
 }
 
+/// #8596 round 3: every bypass the second code-critic round found. Each row
+/// was allowed at 99bc6da75.
+#[test]
+fn denies_the_round_three_bypasses() {
+    check(
+        true,
+        &[
+            // 1: a comment hid a heredoc operator or held an apostrophe.
+            "true # <<'X'\ngcloud auth print-access-token\nX",
+            "# don't print it\ngcloud auth print-access-token\n# that's all",
+            "# don't\ngcloud auth print-access-token >/dev/null; gcloud auth print-access-token\n# that's all",
+            "echo ${X:-<<'E'}\ngcloud auth print-access-token\nE",
+            "echo ${X:-<<'E' }\ngcloud auth print-access-token\nE",
+            // 2: a file-name argument that names the terminal.
+            "gcloud auth print-access-token | tee /dev/stderr | docker login -u x --password-stdin r.test",
+            "gcloud auth print-access-token | tee /dev/tty >/dev/null",
+            "gcloud auth print-access-token | tee >(cat) >/dev/null",
+            "cp <(gcloud auth print-access-token) /dev/stderr >/dev/null",
+            "gcloud auth print-access-token | dd of=/dev/stderr status=none >/dev/null",
+            "gcloud auth print-access-token | tee /dev/fd/2 >/dev/null",
+            // 3: program text flowing through a filter into an evaluator.
+            "echo 'gcloud auth print-access-token' | cat | sh",
+            "cat <<'EOF' | tee /dev/null | bash\ngcloud auth print-access-token\nEOF",
+            // 4: input-side copies, read-write opens, a run-time descriptor.
+            "security find-generic-password -s x -w >/dev/null 1<&2",
+            "security find-generic-password -s x -w >/dev/null 1<>/dev/tty",
+            "exec {fd}>&1; gcloud auth print-access-token >&$fd",
+            // 5: `-o` at the end of a cluster, and option-name spelling.
+            "set -eo xtrace; T=$(gcloud auth print-access-token)",
+            "set -o XTRACE; T=$(gcloud auth print-access-token)",
+            "set -o x_trace; T=$(gcloud auth print-access-token)",
+        ],
+    );
+}
+
+/// #8596 round 3, finding 6: only an evaluator's code operand is judged, so a
+/// script-path operand is an ordinary argument; a comment, or a `#` inside a
+/// word, changes nothing that was allowed.
+#[test]
+fn allows_script_operands_and_comments() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+            "gcloud auth print-access-token > /tmp/fake-token # keep it out of the log",
+            "cat <<'EOF' > notes.md # a note\n# don't run gcloud auth print-access-token\nEOF",
+            "T=$(gcloud auth print-access-token); echo ${#T} a#b '# not a comment'",
+            "gcloud auth print-access-token | tee /tmp/fake-token >/dev/null",
+            "security find-generic-password -s x -w 1<>/tmp/fake-out",
+        ],
+    );
+    check(
+        true,
+        &["python3 -c \"print('$(gcloud auth print-access-token)')\""],
+    );
+}
+
 /// No prefix of a credential command panics, and each gets a verdict: a panic
 /// would exit the hook 101 and fail open.
 #[test]
@@ -219,6 +276,8 @@ fn no_prefix_of_a_command_panics() {
         "gh pr create --body \"$(cat <<'EOF'\nsecurity find-generic-password -s é -w\nEOF\n)\" 3>&1 1>&3- 2>& 1",
         "bash -c \"echo $(gcloud auth print-access-token)\" | xargs -I{} sh -c '{}' <<< `x` >(cat) <(y)",
         "(set -o xtrace; eval \"$(security dump-keychain -d)\") <<-\\EOF\n\tbody ünï\n\tEOF\n",
+        // Round 3: comments, `${…}`, backticks and ANSI-C quotes around heredocs.
+        "true # <<'X' é\n`echo # c` ${X:-<<'E'} $'it\\'s' 1<&2 1<>/dev/tty >&$fd | tee /dev/fd/3 >(cat)\ncat <<E # d\n# b ü\nE\n",
     ];
     for command in commands {
         for (end, _) in command.char_indices().chain([(command.len(), ' ')]) {

@@ -239,38 +239,90 @@ pub(super) fn enables_xtrace(program: &str, argv: &[String], args: &[String]) ->
     }
     match program {
         "set" => options_enable_xtrace(args),
-        "setopt" => args
-            .iter()
-            .any(|a| a.to_ascii_lowercase().replace('_', "") == "xtrace"),
+        "setopt" => args.iter().any(|a| is_xtrace_name(a)),
         p if DASH_C_SHELLS.contains(&p) || p == "fish" => options_enable_xtrace(args),
         _ => false,
     }
 }
 
+/// An option name that means xtrace: case and underscores ignored, as zsh
+/// reads `XTRACE` and `x_trace` (#8596 round 3).
+fn is_xtrace_name(name: &str) -> bool {
+    name.to_ascii_lowercase().replace('_', "") == "xtrace"
+}
+
 /// Leading `-x`-style clusters or `-o xtrace`, up to the first operand or `-c`
-/// string.
+/// string. A cluster ending in `o` (`-eo xtrace`) takes the next word as its
+/// option name.
 fn options_enable_xtrace(args: &[String]) -> bool {
     let mut i = 0;
     while let Some(a) = args.get(i) {
         i += 1;
-        if a == "-o" {
-            if args.get(i).is_some_and(|v| v == "xtrace") {
-                return true;
-            }
-            i += 1;
-            continue;
-        }
         let Some(cluster) = a.strip_prefix('-').filter(|c| !c.starts_with('-')) else {
             return false;
         };
         if cluster.contains('x') {
             return true;
         }
+        if cluster.ends_with('o') {
+            if args.get(i).is_some_and(|v| is_xtrace_name(v)) {
+                return true;
+            }
+            i += 1;
+            continue;
+        }
         if cluster.ends_with('c') {
             return false;
         }
     }
     false
+}
+
+/// The operands an evaluator runs as code (#8596 round 3, finding 6).
+///
+/// What: every operand of `eval`, `source`, `.` and `ssh`; the `deno eval`
+/// operands; otherwise the value of each inline-code flag — `-c` for
+/// `python`/shells/`fish`, `-e`/`-E` for `perl`, `-e` for `ruby` and
+/// `osascript`, `-e`/`-p` and `--eval`/`--print` for `node`, `-r` for `php` —
+/// attached (`-cCODE`) or the next word, found anywhere in `args`. A script
+/// path and its arguments are not code: they are judged like any program's.
+pub(super) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a str> {
+    let all = || args.iter().map(String::as_str).collect();
+    let (short, long): (&[char], &[&str]) = match program {
+        "eval" | "source" | "." | "ssh" => return all(),
+        "deno" if args.first().is_some_and(|a| a == "eval") => return all(),
+        "deno" => return Vec::new(),
+        "perl" => (&['e', 'E'], &[]),
+        "ruby" | "osascript" => (&['e'], &[]),
+        "node" => (&['e', 'p'], &["--eval", "--print"]),
+        "php" => (&['r'], &[]),
+        _ => (&['c'], &["--command"]),
+    };
+    let mut code = Vec::new();
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        i += 1;
+        if let Some((_, value)) = a.split_once('=').filter(|(n, _)| long.contains(n)) {
+            code.push(value);
+            continue;
+        }
+        let cluster = a.strip_prefix('-').filter(|c| !c.starts_with('-'));
+        let at = cluster.and_then(|c| c.find(|ch| short.contains(&ch)).map(|at| &c[at + 1..]));
+        match at {
+            Some("") => {}
+            Some(attached) => {
+                code.push(attached);
+                continue;
+            }
+            None if long.contains(&a.as_str()) => {}
+            None => continue,
+        }
+        if let Some(value) = args.get(i) {
+            code.push(value);
+            i += 1;
+        }
+    }
+    code
 }
 
 /// Whether `program` runs text it is handed as code: an [`EVALUATORS`] entry,
