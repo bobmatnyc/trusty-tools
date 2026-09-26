@@ -43,6 +43,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::finish_report::FinishReport;
+
 /// Stderr line prefix used to relay events from a workflow subprocess to its
 /// parent API server. The parent reads stderr line-by-line; lines starting
 /// with this prefix are parsed as `Event` JSON and re-published on the
@@ -989,6 +991,30 @@ pub enum Event {
         todos: Vec<TodoItem>,
     },
 
+    /// One agent's `finish_task` call was accepted, with its structured
+    /// report (#8204, #8289).
+    ///
+    /// Why: `ToolFinished` already fires for the same call, but carries only
+    /// `tools::render_finish_summary`'s prose — a client wanting the changed
+    /// files, the test counts, or the captured test output had to re-parse
+    /// it, the client-side derivation DOC-39 §2.1 C-1 forbids. This carries
+    /// the typed value, so the TUI renders dedicated slots and #8182's
+    /// subagent panel can attribute a completion to its row by `agent_id`.
+    /// What: emitted by `SessionRegistry::record_task_finished`, which
+    /// `task::SessionToolEventSink` calls from `agent_loop`'s
+    /// `ToolEventSink::task_finished` hook — so it fires ONLY for a finish
+    /// that survived the verify gate (#2279/#8206) and the evidence check
+    /// (#8289). `report.verified` reflects the captured test output, never
+    /// the model's own claim.
+    /// Test: `events_tests::task_finished_round_trips_through_json`,
+    /// `session::registry_finish::tests::*`.
+    TaskFinished {
+        session_id: String,
+        agent: String,
+        agent_id: String,
+        report: FinishReport,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -1218,7 +1244,8 @@ impl Event {
             | Event::SessionActivityUpdate { session_id, .. }
             | Event::PermissionRequested { session_id, .. }
             | Event::PermissionResolved { session_id, .. }
-            | Event::TodosChanged { session_id, .. } => Some(session_id),
+            | Event::TodosChanged { session_id, .. }
+            | Event::TaskFinished { session_id, .. } => Some(session_id),
             Event::WorkstreamActivationChanged { .. }
             | Event::WorkstreamStateInferred { .. }
             | Event::Ping => None,
@@ -1280,6 +1307,7 @@ impl Event {
             Event::PermissionRequested { .. } => "permission_requested",
             Event::PermissionResolved { .. } => "permission_resolved",
             Event::TodosChanged { .. } => "todos_changed",
+            Event::TaskFinished { .. } => "task_finished",
             Event::Ping => "ping",
         }
     }

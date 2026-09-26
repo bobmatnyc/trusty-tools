@@ -107,8 +107,12 @@
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): `ReplApp` state.
 
 mod reduce;
+/// #8204's structured-completion slots, in their own file so `reduce.rs`
+/// stays under the crate's production-file cap.
+pub mod task_result;
 
 pub use reduce::apply;
+pub use task_result::FinishedTask;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -396,6 +400,14 @@ pub struct ReplApp {
     /// `DelegationFinished`. The last entry names the agent the status line
     /// shows — see [`Self::active_agent`].
     pub delegations: Vec<Delegation>,
+    /// The latest completion report per agent (#8204), newest last, one
+    /// entry per `agent_id`. Written by
+    /// [`crate::event::ReplEvent::TaskResult`]; unlike
+    /// [`Self::delegations`] these SURVIVE the delegation closing, because a
+    /// finished task's report is what a standing panel shows. #8182's
+    /// subagent panel reads this; nothing renders it today beyond the
+    /// scrollback slots `task_result::slot_lines` pushes.
+    pub finished_tasks: Vec<FinishedTask>,
     /// Index into `chat` of the in-progress bubble for one `(agent_id,
     /// turn_id)` stream (#7940). Separate from [`Self::streaming_idx`] —
     /// which is the single unkeyed slot
@@ -494,6 +506,7 @@ impl ReplApp {
             cancelling: false,
             streaming_idx: None,
             delegations: Vec::new(),
+            finished_tasks: Vec::new(),
             agent_streams: HashMap::new(),
             tool_cards: HashMap::new(),
             statusline: Vec::new(),

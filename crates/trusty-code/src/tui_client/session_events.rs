@@ -18,7 +18,7 @@
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_code_tui::{DelegationOutcome, ReplEvent};
+use trusty_code_tui::{DelegationOutcome, ReplEvent, TaskChange, TaskEvidence, TaskReport};
 
 use crate::events::{Event, SessionEventEnvelope};
 
@@ -91,6 +91,7 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `engine_tests::forward_agent_failed_closes_with_the_error`,
 /// `engine_tests::forward_permission_requested_opens_the_prompt`,
 /// `engine_tests::forward_permission_resolved_closes_the_prompt`,
+/// `engine_tests::forward_task_finished_carries_the_typed_report`,
 /// `engine_tests::every_agent_attributed_event_maps_or_is_explicitly_ignored`.
 pub(super) fn forward_session_event(
     envelope: SessionEventEnvelope,
@@ -286,6 +287,48 @@ pub(super) fn forward_session_event(
                 agent_id,
                 decision,
                 source,
+            });
+            false
+        }
+        // #8204: the structured completion crosses as DATA. Every field is
+        // copied across; nothing here re-parses `render_finish_summary`'s
+        // prose, which is the whole point of the issue.
+        Event::TaskFinished {
+            agent,
+            agent_id,
+            report,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::TaskResult {
+                agent,
+                agent_id,
+                report: TaskReport {
+                    status: report.status,
+                    summary: report.summary,
+                    changes: report
+                        .changes
+                        .into_iter()
+                        .map(|c| TaskChange {
+                            file: c.file,
+                            lines_added: c.lines_added,
+                            lines_removed: c.lines_removed,
+                        })
+                        .collect(),
+                    tests_run: report.tests_run,
+                    tests_passed: report.tests_passed,
+                    evidence: report.evidence.map(|e| TaskEvidence {
+                        command: e.command,
+                        lines: e.lines,
+                        truncated: e.truncated,
+                        // The producer's own classification, as its wire
+                        // word — this client renders it and derives nothing.
+                        outcome: serde_json::to_value(e.outcome)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "unverified".to_string()),
+                    }),
+                    verified: report.verified,
+                },
             });
             false
         }

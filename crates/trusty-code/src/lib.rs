@@ -72,6 +72,17 @@
 /// Test: `events::tests::publish_round_trips_through_subscribe`.
 pub mod events;
 
+/// The structured completion report a `finish_task` call produces (#8204,
+/// #8289).
+///
+/// Why: one wire shape shared by the daemon's event stream, the loop's own
+/// output, and the TUI's dedicated result slots, so none of them re-parses
+/// prose another produced.
+/// What: `FinishReport`, `FinishChange`, `TestEvidence`, `EvidenceOutcome`,
+/// and the two evidence caps.
+/// Test: `finish_report::tests::*`.
+pub mod finish_report;
+
 /// NDJSON IPC protocol for PM ↔ sub-agent communication.
 ///
 /// Why: Provides a framing-safe wire protocol over stdin/stdout pipes so the

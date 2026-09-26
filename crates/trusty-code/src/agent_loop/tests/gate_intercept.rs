@@ -117,8 +117,17 @@ async fn finish_gate_trips_and_recovers() {
     // The premature finish's summary must NEVER surface as the run's output —
     // the block discarded it in favour of the later verified finish.
     assert_ne!(out.summary.as_deref(), Some("done (premature)"));
-    assert_eq!(out.summary.as_deref(), Some("done (verified)"));
-    assert_eq!(out.content, "Task completed: done (verified)");
+    // #8289: the fixture's `bash` stub prints no test-result line, so the
+    // accepted finish now also carries the UNVERIFIED note. The gate's own
+    // behaviour — which summary survives — is unchanged.
+    let summary = out.summary.as_deref().expect("a summary");
+    assert!(summary.starts_with("done (verified)"), "{summary}");
+    assert!(summary.contains("UNVERIFIED"), "{summary}");
+    assert!(
+        out.content.starts_with("Task completed: done (verified)"),
+        "{}",
+        out.content
+    );
 }
 
 /// The gate's rejection (#2279) fires a WARN-level log naming the rejection
@@ -245,7 +254,15 @@ async fn finish_gate_passes_first_attempt_when_named_tests_already_ran() {
         2,
         "tests ran on turn 1, so turn 2's first finish must succeed with no extra turn"
     );
-    assert_eq!(out.summary.as_deref(), Some("done (verified first try)"));
+    // #8289: the fixture's `bash` stub prints no test-result line, so the
+    // accepted finish now also carries the UNVERIFIED note.
+    assert!(
+        out.summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("done (verified first try)")),
+        "{:?}",
+        out.summary
+    );
 
     // No request may EVER carry a rejection nudge — the gate stayed satisfied
     // the whole run, so the block→retry path must not have fired.
