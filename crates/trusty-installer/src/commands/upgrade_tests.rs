@@ -31,6 +31,9 @@ fn outcome(member: &str, ok: bool, detail: &str) -> UpgradeOutcome {
         detail: detail.to_owned(),
         shadow_ok: true,
         shadow_detail: String::new(),
+        installed: None,
+        applied: None,
+        size_bytes: 0,
     }
 }
 
@@ -80,6 +83,9 @@ fn applied_report_all_ok_reflects_shadow_failure() {
                             /x/.local/bin/tm, but the shell resolves `tm` to \
                             /x/.cargo/bin/tm (0.19.26)"
                 .to_owned(),
+            installed: Some("0.19.26".to_owned()),
+            applied: Some("0.19.29".to_owned()),
+            size_bytes: 0,
         }],
     );
     assert!(
@@ -410,4 +416,121 @@ fn evict_result_success_is_a_note() {
     )
     .expect("an absent unit must not fail the upgrade");
     assert!(!note.is_empty());
+}
+
+/// A tga candidate at `installed`, with crates.io reporting `latest`.
+fn tga_candidate(installed: &str, latest: &str) -> UpdateCandidate {
+    UpdateCandidate {
+        crate_name: "tga".to_owned(),
+        binary: "tga".to_owned(),
+        installed: Some(installed.to_owned()),
+        latest: latest.to_owned(),
+        daemon: false,
+        is_install: false,
+    }
+}
+
+/// Why (#8642 Fail-Open Check): a placed prebuilt whose `--version` is not the
+/// tag it was downloaded as is not the release the operator was promised.
+/// What: tag 10.0.0, binary reports 8.0.0 → `Err` naming both versions.
+/// Test: This is the test.
+#[test]
+fn verify_applied_rejects_a_version_that_does_not_match_the_tag() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    let err = verify_applied(&c, Some("10.0.0"), "tga 8.0.0").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("8.0.0") && msg.contains("10.0.0"), "{msg}");
+}
+
+/// Why (#8642 Fail-Open Check): the reported defect — tga 8.0.0 placed over
+/// 8.0.0 was reported upgraded. A non-advancing result must be an error that
+/// reaches `ok: false` and a non-zero exit, on either install branch.
+/// What: installed 8.0.0; tag 8.0.0 (prebuilt) and no tag (cargo) both `Err`;
+/// the resulting failed outcome makes the applied report exit 2.
+/// Test: This is the test.
+#[test]
+fn verify_applied_rejects_a_non_advancing_upgrade() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    let prebuilt = verify_applied(&c, Some("8.0.0"), "tga 8.0.0").unwrap_err();
+    assert!(
+        prebuilt.to_string().contains("did not advance"),
+        "{prebuilt}"
+    );
+    let cargo = verify_applied(&c, None, "tga 7.9.0").unwrap_err();
+    assert!(cargo.to_string().contains("installed 8.0.0"), "{cargo}");
+
+    let report =
+        UpgradeReport::applied(vec![c], vec![outcome("tga", false, &prebuilt.to_string())]);
+    assert!(!report.all_ok);
+    assert_eq!(report.exit_code(), 2);
+}
+
+/// Why (#8642): prebuilts lag crates.io (#6164). A release newer than
+/// installed but older than latest is a real upgrade, not a failure.
+/// What: installed 8.0.0, latest 10.0.0, binary reports 9.0.1 → `Ok("9.0.1")`;
+/// a fresh install (no installed version) accepts any version.
+/// Test: This is the test.
+#[test]
+fn verify_applied_accepts_an_advance_that_lags_latest() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    assert_eq!(
+        verify_applied(&c, Some("9.0.1"), "tga 9.0.1").unwrap(),
+        "9.0.1"
+    );
+    let fresh = UpdateCandidate {
+        installed: None,
+        ..tga_candidate("0.0.0", "10.0.0")
+    };
+    assert_eq!(
+        verify_applied(&fresh, None, "tga 10.0.0").unwrap(),
+        "10.0.0"
+    );
+}
+
+/// Why (#8642): the detail must name both the applied version and crates.io's
+/// latest when the prebuilt lags it.
+/// What: lagging → both numbers; at latest → no latest suffix.
+/// Test: This is the test.
+#[test]
+fn upgrade_summary_names_installed_applied_and_latest() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    assert_eq!(
+        upgrade_summary(&c, "9.0.1"),
+        "upgraded 8.0.0 → 9.0.1 (crates.io latest 10.0.0)"
+    );
+    assert_eq!(upgrade_summary(&c, "10.0.0"), "upgraded 8.0.0 → 10.0.0");
+}
+
+/// Why (#8642): the human summary printed `0.00 MiB` and no versions.
+/// What: a member with versions and a 2 MiB binary renders all three.
+/// Test: This is the test.
+#[test]
+fn member_line_shows_versions_and_size() {
+    let m = UpgradeOutcome {
+        installed: Some("8.0.0".to_owned()),
+        applied: Some("10.0.0".to_owned()),
+        size_bytes: 2 * 1024 * 1024,
+        ..outcome("tga", true, "")
+    };
+    assert_eq!(member_line(&m), "tga: 8.0.0 → 10.0.0 (2.00 MiB)");
+}
+
+/// Why (#8642 review): the binary is replaced before verification, so a
+/// failed check must say what is on disk now, not imply nothing changed.
+/// What: a tag mismatch (tag 10.0.0, binary reports 8.0.0) wrapped by
+/// `placed_state_error` names the verification failure, the replaced path,
+/// and the version it now holds.
+/// Test: This is the test.
+#[test]
+fn placed_state_error_names_the_replaced_path_and_version() {
+    let c = tga_candidate("8.0.0", "10.0.0");
+    let path = std::path::Path::new("/x/.cargo/bin/tga");
+    let err = verify_applied(&c, Some("10.0.0"), "tga 8.0.0").unwrap_err();
+    let msg = placed_state_error(err, path, "tga 8.0.0").to_string();
+    assert!(msg.contains("release tag is 10.0.0"), "{msg}");
+    assert!(
+        msg.contains("/x/.cargo/bin/tga was already replaced and now holds 8.0.0"),
+        "{msg}"
+    );
+    assert!(msg.contains("previous binary was not kept"), "{msg}");
 }

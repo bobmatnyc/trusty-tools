@@ -108,7 +108,7 @@ async fn run(
     // the client the out-of-crate caller gets, not a lookalike built here.
     install_pinned_set_at(
         &crate::download::http_client(),
-        &endpoints,
+        EndpointSource::Fixed(endpoints),
         tools,
         install_dir,
     )
@@ -741,7 +741,12 @@ async fn preflight(base: &str, tools: &[PinnedTool]) -> Vec<PinnedPreflight> {
         releases_url: &releases_url,
         download_base: &download_base,
     };
-    preflight::preflight_pinned_set_at(&crate::download::http_client(), &endpoints, tools).await
+    preflight::preflight_pinned_set_at(
+        &crate::download::http_client(),
+        EndpointSource::Fixed(endpoints),
+        tools,
+    )
+    .await
 }
 
 /// Why: #5970's whole point — a caller can ask "could this be installed" and get
