@@ -73,6 +73,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (closes [#8391](https://github.com/bobmatnyc/trusty-tools/issues/8391))
 - `cleanup_deferred_report`'s message now names the remote branch as possibly
   stranded too, not only the local one, matching the head-held failure mode
+- Four doc comments that linked to test-only items (`build_prompt_file` in `ClaudeCodeAdapter`, `BannerEnv::new` in the `tm` banner source) name them as plain code instead, so `cargo doc` for trusty-mpm builds clean under `-D rustdoc::broken_intra_doc_links` again ([#8545](https://github.com/bobmatnyc/trusty-tools/issues/8545))
 
 ## [1.7.7] — 2026-09-26
 
