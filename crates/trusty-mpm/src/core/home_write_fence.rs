@@ -24,6 +24,11 @@ const FENCED_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".trusty-mpm",
 
 static FENCED_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
+/// The `$CLAUDE_CONFIG_DIR` root [`arm_for_this_process`] fenced, recorded when
+/// that call armed the fence. #8545: a test asserts against this record, not a
+/// re-read of the variable a `#[serial]` test may repoint mid-run.
+static ARMED_CLAUDE_CONFIG_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
 /// The fenced roots under one home directory.
 pub fn fenced_roots_under(home: &Path) -> Vec<PathBuf> {
     FENCED_HOME_ENTRIES.iter().map(|e| home.join(e)).collect()
@@ -70,9 +75,11 @@ fn claude_config_dir_root(value: Option<std::ffi::OsString>) -> Option<PathBuf> 
 /// Why: `$HOME` is where a home-resolving writer goes; the password-database
 /// home is the operator's real one even when `$HOME` was repointed (#5784).
 /// #8545: `$CLAUDE_CONFIG_DIR` is the operator's live Claude config when set.
-/// What: arms [`fence_roots`] over whichever of the three resolve.
+/// What: arms [`fence_roots`] over whichever of the three resolve, and records
+/// the `$CLAUDE_CONFIG_DIR` root it read when this call armed the fence.
 /// Test: `the_home_write_fence_is_armed_for_this_binary` (tm bin target),
-/// `tests::a_claude_config_dir_outside_home_is_fenced`.
+/// `tests::a_claude_config_dir_outside_home_is_fenced`,
+/// `tests::the_startup_claude_config_dir_is_an_armed_root_of_this_process`.
 pub fn arm_for_this_process() -> bool {
     let env_home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
@@ -84,9 +91,21 @@ pub fn arm_for_this_process() -> bool {
         .map(PathBuf::as_path)
         .collect();
     let claude_config_dir = claude_config_dir_root(std::env::var_os("CLAUDE_CONFIG_DIR"));
-    FENCED_ROOTS
+    let armed = FENCED_ROOTS
         .set(fence_roots(&homes, claude_config_dir.as_deref()))
-        .is_ok()
+        .is_ok();
+    if armed {
+        let _ = ARMED_CLAUDE_CONFIG_DIR.set(claude_config_dir);
+    }
+    armed
+}
+
+/// The `$CLAUDE_CONFIG_DIR` root [`arm_for_this_process`] read when it armed the
+/// fence: outer `None` when that call never armed it, inner `None` when the
+/// variable was unset or empty.
+#[cfg(test)]
+fn armed_claude_config_dir() -> Option<Option<&'static Path>> {
+    ARMED_CLAUDE_CONFIG_DIR.get().map(Option::as_deref)
 }
 
 /// The roots this process fences; empty when the fence is not armed.

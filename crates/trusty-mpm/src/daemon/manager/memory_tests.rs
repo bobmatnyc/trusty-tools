@@ -146,6 +146,11 @@ fn portfolio_ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_p
 /// the registry creates any directory. The mock embedder is seeded so that,
 /// were the fence missing, the test fails on the absent panic instead of
 /// loading the ONNX model.
+///
+/// The probe targets the real armed root because the fence roots are a
+/// process-wide `OnceLock` set before `main`; a temp root cannot stand in
+/// without a production seam. A regression that drops the fence check leaves
+/// `~/.trusty-mpm/tm-8545-fence-probe/` behind; delete it after fixing.
 #[cfg(feature = "manager-memory")]
 #[test]
 #[should_panic(expected = "#8545")]

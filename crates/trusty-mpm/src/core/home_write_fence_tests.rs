@@ -72,13 +72,17 @@ fn a_claude_config_dir_outside_home_is_fenced() {
     check_against(Path::new("/elsewhere/project/.claude"), &roots);
 }
 
-/// #8545: when this process has a `$CLAUDE_CONFIG_DIR`, the pre-`main` arming
-/// fenced it. Reads the environment only; vacuous where the variable is unset.
+/// #8545: the lib binary's pre-`main` arming recorded the `$CLAUDE_CONFIG_DIR`
+/// it read, and fenced it when set. Asserts against that record, not the live
+/// variable: `RosterTiers::new` repoints it mid-run under `#[serial]`, and this
+/// test must not depend on every such writer holding the same lock.
 #[test]
-fn a_set_claude_config_dir_is_an_armed_root_of_this_process() {
-    if let Some(dir) = claude_config_dir_root(std::env::var_os("CLAUDE_CONFIG_DIR")) {
+fn the_startup_claude_config_dir_is_an_armed_root_of_this_process() {
+    let recorded = armed_claude_config_dir()
+        .expect("the lib binary's `arm_for_this_process` armed the fence and recorded its read");
+    if let Some(dir) = recorded {
         assert!(
-            armed_roots().contains(&dir),
+            armed_roots().iter().any(|root| root == dir),
             "{} is not fenced; armed roots: {:?}",
             dir.display(),
             armed_roots()
