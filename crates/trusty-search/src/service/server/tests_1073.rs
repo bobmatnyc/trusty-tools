@@ -99,6 +99,7 @@ async fn relocate_index_updates_root_path() {
             skip_kg: None,
             skip_vector: None,
             defer_embed: None,
+            colocated: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,

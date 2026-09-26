@@ -221,6 +221,34 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     pub defer_embed: Option<bool>,
 
+    /// Storage layout for this registration (issue #403 chose colocated;
+    /// #8147 makes it selectable). `None`/missing/`true` ⇒ the corpus lives at
+    /// `<root_path>/.trusty-search/` exactly as before. `false` ⇒ it lives at
+    /// `<data_dir>/indexes/<id>/`, and nothing is created under `root_path`.
+    ///
+    /// Why: registration unconditionally opened (and created)
+    /// `<root>/.trusty-search/`, so a read-only or root-owned root answered
+    /// `500 corpus open failed … refusing to register a broken index handle`
+    /// — an index deliberately built into the data-dir store could be DELETEd
+    /// but never re-registered without a daemon restart. The persistence layer
+    /// has always routed on `PersistedIndex::colocated`; only this door
+    /// hardcoded `true`.
+    /// What: `Option<bool>`; persisted to `indexes.toml` so warm boot restores
+    /// the same layout, and for `false` that write is fatal (`500`), since no
+    /// `roots.toml` scan rediscovers a data-dir index. A colocated request
+    /// whose `.trusty-search/` the daemon cannot write is refused with `403`.
+    /// For an id already registered at the same root, resident or cold, the
+    /// recorded layout wins and an explicit mismatch is a `409`. All of this
+    /// lives in `create_layout`.
+    /// Test: `create_index_honours_colocated_false`,
+    /// `create_index_cold_index_refuses_an_explicit_layout_change`,
+    /// `create_index_live_index_refuses_an_explicit_layout_change`,
+    /// `create_index_colocated_false_over_a_read_only_colocated_dir_registers`,
+    /// `create_index_colocated_on_read_only_root_names_the_permission_problem`,
+    /// `create_index_colocated_false_with_an_unwritable_registry_is_a_500`.
+    #[serde(default)]
+    pub colocated: Option<bool>,
+
     /// Issue #1372: extra directory basenames pruned during the reindex walk on
     /// top of the built-in `SKIP_DIRS`. `None`/missing ⇒ the targeted default
     /// set (`data`/`exports`/`output`/`reports`/`snapshots`/`results`); an

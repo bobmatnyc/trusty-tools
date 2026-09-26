@@ -1,0 +1,5 @@
+Fixed
+
+- `POST /indexes` on a root whose `.trusty-search/` the daemon cannot write now answers 403 `permission denied: …`, naming the directory and the `colocated: false` alternative, instead of 500 `corpus open failed`. The refusal happens before anything is built or recorded, so no registry entry or directory is left behind and a retry with `colocated: false` succeeds ([#8147](https://github.com/bobmatnyc/trusty-tools/issues/8147))
+- A `colocated: false` registration whose `indexes.toml` row cannot be written now answers 500 and registers nothing, instead of answering 200 for an index that disappeared on the next restart. It no longer adds a `roots.toml` row, which lists colocated roots only ([#8147](https://github.com/bobmatnyc/trusty-tools/issues/8147))
+- A reindex after a root move now keeps or clears the file-hash cache by the index's registered layout, not by whether `<root>/.trusty-search/` exists, so a `colocated: false` index whose root holds that directory re-relativizes its keys ([#8147](https://github.com/bobmatnyc/trusty-tools/issues/8147))

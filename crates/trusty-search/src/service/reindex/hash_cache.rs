@@ -158,6 +158,24 @@ pub(super) async fn persist_batch(
     }
 }
 
+/// Whether this index's hash keys survive a root move (#1073).
+///
+/// Why: colocated keys are root-relative (#402) and stay valid after a move.
+/// The answer used to come from probing `<root>/.trusty-search/`, so a
+/// `colocated=false` index whose root holds that directory kept a cache it
+/// should have cleared. #8147 lets such an index register, so the answer now
+/// follows the registry layout, like every write path since #8438.
+/// What: `true` iff the indexer carries [`StorageLayout::Colocated`]. Callers
+/// must not already hold an indexer guard.
+/// Test: `hash_keys_follow_the_registry_layout_not_the_repo_dir`,
+/// `root_move_clears_the_hash_table_of_a_data_dir_index_over_a_repo_dir`.
+///
+/// [`StorageLayout::Colocated`]: crate::service::storage_layout::StorageLayout::Colocated
+pub(super) async fn keys_survive_root_move(handle: &IndexHandle) -> bool {
+    crate::service::storage_layout::layout_of(handle).await
+        == crate::service::storage_layout::StorageLayout::Colocated
+}
+
 /// Clear the persisted file-hash table from the current corpus store (issue #662).
 ///
 /// Why: called when `force=true` or a root move is detected.  The in-process

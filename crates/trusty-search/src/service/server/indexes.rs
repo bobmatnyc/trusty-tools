@@ -379,8 +379,8 @@ pub(crate) async fn create_index_report(
     // that tree, so there is no wrong answer to prevent — see
     // `create_index_reaps_stale_cold_entry_for_recreated_id`. A resident handle
     // IS serving, which is the whole difference.
-    let registered_root = state.registry.get(&id).map(|h| h.root_path.clone());
-    if let Some(registered_root) = registered_root {
+    if let Some(registered) = state.registry.get(&id) {
+        let registered_root = registered.root_path.clone();
         if !identifies_same_root(&registered_root, &req.root_path) {
             tracing::warn!(
                 "create_index: refusing to re-register '{}' at {} — that id already \
@@ -395,6 +395,8 @@ pub(crate) async fn create_index_report(
                 &req.root_path,
             ));
         }
+        // #8147: an explicit `colocated` never changes a resident id's layout.
+        super::create_layout::refuse_live_layout_change(&req, &registered).await?;
         return Ok(serde_json::json!({
             "id": req.id,
             "created": false,
@@ -474,6 +476,9 @@ pub(crate) async fn create_index_report(
             return Err(super::root_overlap::overlap_check_failed_response(&failure));
         }
     }
+    // #8147: the `indexes.toml` row decides an existing id's layout. Resolved
+    // before the embedder check, so a layout `409` is never masked by a `503`.
+    let colocated = super::create_layout::resolve_layout_from_registry(&req)?;
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -530,10 +535,15 @@ pub(crate) async fn create_index_report(
     // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
     // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
+    // #8147: a colocated root the daemon cannot write is refused here, before
+    // anything is built or registered.
+    if colocated {
+        super::create_layout::preflight_colocated_root(&req.id, &req.root_path)?;
+    }
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
-        colocated: true,
+        colocated,
         skip_kg,
         skip_vector,
         ..Default::default()
@@ -674,15 +684,20 @@ pub(crate) async fn create_index_report(
     // Issue #403: new indexes use colocated storage (`<root>/.trusty-search/`).
     // Register the root in `roots.toml` so the startup scanner can find it on
     // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
-    let colocated = true;
-    if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
-        tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
-    }
-    if let Err(e) = crate::service::colocated_storage::ensure_gitignored(&req.root_path) {
-        tracing::warn!(
-            "could not add .trusty-search/ to .gitignore for {}: {e}",
-            req.id
-        );
+    // #8147: `colocated` is resolved above from the request; a non-colocated
+    // index writes nothing under `root_path`, so it has no `.gitignore` entry
+    // to owe, and no `roots.toml` row: that file lists colocated roots for the
+    // startup scanner.
+    if colocated {
+        if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
+            tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
+        }
+        if let Err(e) = crate::service::colocated_storage::ensure_gitignored(&req.root_path) {
+            tracing::warn!(
+                "could not add .trusty-search/ to .gitignore for {}: {e}",
+                req.id
+            );
+        }
     }
     // DOC-37 (issue #2611): derive the canonical repo identity from the
     // (already-canonical) root and store it alongside `id` so this index can
@@ -691,8 +706,8 @@ pub(crate) async fn create_index_report(
     // with no git remote and no commits keeps the flat-index behaviour intact.
     let repo_identity =
         trusty_common::repo_identity::RepoIdentity::derive(&req.root_path).map(|r| r.canonical());
-    if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
-        crate::service::persistence::PersistedIndex {
+    if let Err(e) =
+        super::create_layout::upsert_registry_entry(crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
             root_path: req.root_path.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
@@ -724,8 +739,13 @@ pub(crate) async fn create_index_report(
             indexed_head_sha: None,
             // #4390: no deferred-embed pass has been queued for a new index.
             deferred_embed_pending: false,
-        },
-    ) {
+        })
+    {
+        // #8147: fatal for a data-dir index — `indexes.toml` is its only record.
+        if let Some(refusal) = super::create_layout::registry_write_refusal(&req.id, colocated, &e)
+        {
+            return Err(refusal);
+        }
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
     }
 
