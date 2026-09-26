@@ -7,6 +7,8 @@ Fixed
   failed or timed-out `gh` lookup now keeps the tree, and the refusal names
   why. A no-PR tree reclaimed on landed content logs that as its reason.
 - A worktree the merged-PR sweep reclaims now has its local branch deleted
-  too, only when its content is proven landed, its tip is still the proven
-  HEAD, and no other worktree (the main checkout included) has it checked
-  out. Each deletion or kept branch is logged.
+  too, only when its content is proven landed, its tip is still the exact
+  commit that proof judged, and no other worktree (the main checkout
+  included) has it checked out. A commit made after the proof keeps the
+  branch. Each deletion or kept branch is logged. The landed-content proof
+  (up to 40 s) now runs once per candidate before deletion, not twice.

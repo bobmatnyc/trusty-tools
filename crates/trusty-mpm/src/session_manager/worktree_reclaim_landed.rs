@@ -214,28 +214,63 @@ fn commits_only(dirt: &DirtyWorktree) -> bool {
 /// `worktree_7889_a_session_branch_commit_head_cannot_reach_refuses`,
 /// `worktree_7889_dirt_that_appears_during_the_admission_refuses`.
 pub(crate) fn reclaim_landed_content(path: &Path) -> LandingAdmission {
+    reclaim_landed_proof(path).admission
+}
+
+/// [`reclaim_landed_content`], keeping the `HEAD` its grant judged (#8109).
+pub(crate) fn reclaim_landed_proof(path: &Path) -> ReclaimProof {
     reclaim_landed_content_with(path, &|p| {
         landing_admission(p, FETCH_TIMEOUT, &GhLandingProbe)
     })
 }
 
-/// [`reclaim_landed_content`], with the admission itself injected (#7889).
+/// The sweep's landing admission, and the `HEAD` it judged (#8109).
+///
+/// Why: the branch deletion after a reclaim compares the branch tip against a
+/// proven SHA. Re-reading `HEAD` after the proof returned would hand it a SHA
+/// the proof never judged, so a commit made in that window would be deleted.
+/// What: `head` is `Some` only on a grant, and is the SHA read before AND after
+/// the admission ran — see [`reclaim_landed_content_with`].
+/// Test: `worktree_8109_a_commit_after_the_proof_keeps_the_branch`.
+#[derive(Debug, Clone)]
+pub(crate) struct ReclaimProof {
+    /// Both routes' answer.
+    pub admission: LandingAdmission,
+    /// The `HEAD` the grant judged; `None` when there was no grant.
+    pub head: Option<String>,
+}
+
+impl From<LandedContent> for ReclaimProof {
+    fn from(content: LandedContent) -> Self {
+        Self {
+            admission: content.into(),
+            head: None,
+        }
+    }
+}
+
+/// [`reclaim_landed_proof`], with the admission itself injected (#7889).
 ///
 /// Why: a test must be able to change the tree WHILE the admission runs.
 /// What: refuses on [`dirt_outside_head`], records `HEAD`, runs `admit`, and on
-/// a grant re-reads both: new dirt or a moved `HEAD` refuses.
-/// Test: `worktree_7889_dirt_that_appears_during_the_admission_refuses`.
+/// a grant re-reads both: new dirt or a moved `HEAD` refuses. A grant carries
+/// that unmoved `HEAD` (#8109).
+/// Test: `worktree_7889_dirt_that_appears_during_the_admission_refuses`,
+/// `worktree_8109_a_commit_after_the_proof_keeps_the_branch`.
 pub(super) fn reclaim_landed_content_with(
     path: &Path,
     admit: &dyn Fn(&Path) -> LandingAdmission,
-) -> LandingAdmission {
+) -> ReclaimProof {
     if let Some(dirt) = dirt_outside_head(path) {
         return LandedContent::unavailable(dirt).into();
     }
     let head_before = git_stdout(path, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string());
     let admission = admit(path);
     if !admission.admits() {
-        return admission;
+        return ReclaimProof {
+            admission,
+            head: None,
+        };
     }
     // #7889 critic: nothing ties the grant to the tree as it is NOW.
     if let Some(dirt) = dirt_outside_head(path) {
@@ -246,7 +281,10 @@ pub(super) fn reclaim_landed_content_with(
     }
     let head_after = git_stdout(path, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string());
     match (head_before, head_after) {
-        (Ok(before), Ok(after)) if before == after => admission,
+        (Ok(before), Ok(after)) if before == after => ReclaimProof {
+            admission,
+            head: Some(before),
+        },
         (before, after) => LandedContent::unavailable(format!(
             "HEAD moved or could not be read while the admission ran ({before:?} → {after:?})"
         ))

@@ -18,13 +18,14 @@
 //! tree's branch under the same proof.
 //! Test: `worktree_reclaim_branch_tests`.
 
+use std::cell::OnceCell;
 use std::path::Path;
 
 use crate::core::pr_cleanup::plan::{holder_of, kept_branch, parse_worktree_list};
-use crate::core::worktree_landed_content::LandedContent;
+use crate::core::worktree_landed_content::{LandedContent, LandingAdmission};
 
 use super::worktree_reclaim::BranchPrState;
-use super::worktree_reclaim_landed::{LandedContentProbe, PUBLISHED_BASE};
+use super::worktree_reclaim_landed::{LandedContentProbe, PUBLISHED_BASE, ReclaimProof};
 use super::worktree_reclaim_verdict::{ReclaimGate, ReclaimVerdict};
 use super::worktree_safety::git_stdout;
 
@@ -133,7 +134,8 @@ pub(crate) enum BranchCleanup {
 /// Why: the 2026-09-16 reclaim removed the tree and left `…-wt` behind. `-D`
 /// is needed because a squash merge leaves the branch looking unmerged to git,
 /// so `-d` proves nothing; it is safe only on the `merge-tree` proof, which the
-/// caller took before the removal and hands in as `proven_head`.
+/// caller took before the removal and whose judged `HEAD` it hands in as
+/// `proven_head` ([`ReclaimProof::head`]).
 /// What: keeps the branch when the worktree listing cannot be read or names no
 /// tree, when any tree — the main checkout included — has it checked out
 /// ([`holder_of`]), or when its tip is no longer `proven_head`. Otherwise
@@ -175,28 +177,88 @@ pub(crate) fn delete_reclaimed_branch(
     }
 }
 
+/// One candidate's landed proof, taken at most once in its pre-delete pass
+/// (#8109).
+///
+/// Why: the admission can take 40 s (a 30 s fetch and a 10 s `gh` search). The
+/// pre-delete re-check asks it for a no-PR candidate, and the branch deletion
+/// needs it for every candidate; asking twice doubled that cost and let the two
+/// readers judge different trees.
+/// What: `prove` runs on the first [`OnceProof::get`] and never again; the
+/// re-check reads the admission through [`OnceProof::admission`].
+/// Test: `worktree_8109_a_commit_after_the_proof_keeps_the_branch`,
+/// `worktree_8109_a_reclaimed_landed_worktree_loses_its_branch`.
+pub(super) struct OnceProof<'a> {
+    path: &'a Path,
+    prove: &'a dyn Fn(&Path) -> ReclaimProof,
+    taken: OnceCell<ReclaimProof>,
+}
+
+impl<'a> OnceProof<'a> {
+    /// A proof of `path` not yet taken.
+    pub(super) fn new(path: &'a Path, prove: &'a dyn Fn(&Path) -> ReclaimProof) -> Self {
+        Self {
+            path,
+            prove,
+            taken: OnceCell::new(),
+        }
+    }
+
+    /// The proof, taken now if nothing has asked yet.
+    pub(super) fn get(&self) -> &ReclaimProof {
+        self.taken.get_or_init(|| (self.prove)(self.path))
+    }
+
+    /// The admission, in the shape a [`LandedContentProbe`] returns.
+    pub(super) fn admission(&self, asked: &Path) -> LandingAdmission {
+        debug_assert_eq!(asked, self.path, "one OnceProof judges one tree");
+        self.get().admission.clone()
+    }
+}
+
+/// The proof a candidate's removal and branch deletion rest on, or the refusal
+/// (#8109).
+///
+/// Why: the branch deletion must compare the tip against the SHA the proof
+/// judged, never a `HEAD` re-read after it returned.
+/// What: [`own_pr_refusal`] against the proof's content; `Ok` hands back the
+/// same proof, whose `head` is what [`cleanup_reclaimed_branch`] deletes at.
+/// Test: `worktree_8109_a_commit_after_the_proof_keeps_the_branch`.
+pub(super) fn deletion_proof(
+    by_name: &BranchPrState,
+    proof: &OnceProof<'_>,
+) -> Result<ReclaimProof, String> {
+    let taken = proof.get();
+    match own_pr_refusal(by_name, &taken.admission.content) {
+        Some(reason) => Err(reason),
+        None => Ok(taken.clone()),
+    }
+}
+
 /// [`delete_reclaimed_branch`] for one reclaimed tree, logged (#8109).
 ///
-/// What: nothing without a branch; the branch kept, and logged, without a
-/// proven HEAD and a `Landed` proof; otherwise the deletion and one line
-/// naming its outcome.
-/// Test: `worktree_8109_a_reclaimed_landed_worktree_loses_its_branch`.
+/// What: nothing without a branch; the branch kept, and logged, unless the
+/// proof is `Landed` and carries the `HEAD` it judged; otherwise the deletion
+/// at that `HEAD` and one line naming its outcome.
+/// Test: `worktree_8109_a_reclaimed_landed_worktree_loses_its_branch`,
+/// `worktree_8109_an_own_pr_reclaim_without_landed_proof_keeps_the_branch`.
 pub(super) fn cleanup_reclaimed_branch(
     repo_root: &Path,
     path: &Path,
     branch: Option<&str>,
-    proven_head: Option<&str>,
-    proof: &LandedContent,
+    proof: &ReclaimProof,
 ) {
     let Some(branch) = branch else {
         return;
     };
-    let (Some(head), LandedContent::Landed { base, .. }) = (proven_head, proof) else {
+    let (Some(head), LandedContent::Landed { base, .. }) =
+        (proof.head.as_deref(), &proof.admission.content)
+    else {
         tracing::info!(
             path = %path.display(),
             branch,
             "worktree-reclaim: kept the reclaimed worktree's branch — {} (#8109)",
-            proof.note()
+            proof.admission.content.note()
         );
         return;
     };

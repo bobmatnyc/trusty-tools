@@ -41,7 +41,9 @@ use std::time::{Duration, Instant};
 // current before anything is classified against them, and the landed-content
 // admission gate 5 asks when no pull request carries the branch's name.
 use super::worktree_landing_refresh::refresh_landing_refs;
-use super::worktree_reclaim_landed::{landing_recheck, reclaim_landed_content};
+use super::worktree_reclaim_landed::{
+    landing_recheck, reclaim_landed_content, reclaim_landed_proof,
+};
 
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims, NOT_INSPECTED_REASON,
@@ -56,9 +58,11 @@ use super::worktree_reclaim_launch::launch_refusal;
 // branch name alone.
 use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
 // #8109: the own-pull-request proof rule and the reclaimed branch's deletion.
-use super::worktree_reclaim_branch::{cleanup_reclaimed_branch, own_pr_gate, own_pr_refusal};
+use super::worktree_reclaim_branch::{
+    OnceProof, cleanup_reclaimed_branch, deletion_proof, own_pr_gate,
+};
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
-use super::worktree_safety::{git_stdout, inspect_dirt};
+use super::worktree_safety::inspect_dirt;
 
 /// How long a survey may spend measuring bytes, and classifying (#2919).
 ///
@@ -715,6 +719,11 @@ pub(crate) fn reclaim_with_probes(
         let in_use_now = (probes.in_use_now)();
         // #6927: re-read, not reused — see `FreshProbes::keep_list`.
         let keep_list_now = (probes.keep_list)();
+        // #8109: the `merge-tree` proof, taken once per candidate. The re-check
+        // asks it for a no-PR candidate; the own-PR rule and the branch
+        // deletion read that same answer, and the SHA it judged.
+        let once = OnceProof::new(&path, &reclaim_landed_proof);
+        let ask = |p: &Path| once.admission(p);
         // #7889: the survey offered gate 5's landed-content admission, so the
         // re-check re-asks it for a candidate no pull request carries.
         if let Some(reason) = recheck_before_delete(
@@ -723,7 +732,7 @@ pub(crate) fn reclaim_with_probes(
             in_use_now.as_ref(),
             &pr_now,
             probes.agent_state,
-            Some(&reclaim_landed_content),
+            Some(&ask),
         ) {
             tracing::warn!(
                 path = %path.display(),
@@ -733,23 +742,18 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
-        // #8109: the `merge-tree` proof, taken once. It admits a tree with no
-        // merged pull request of its own, and it is what the branch deletion
-        // after the removal rests on.
-        let proof = reclaim_landed_content(&path).content;
-        if let Some(reason) = own_pr_refusal(&by_name, &proof) {
-            tracing::warn!(
-                path = %path.display(),
-                "worktree-reclaim: re-check refused a surveyed candidate — {reason}"
-            );
-            out.refused_at_recheck
-                .push(format!("{}: {reason}", path.display()));
-            continue;
-        }
-        let proven_head = proof
-            .is_landed()
-            .then(|| git_stdout(&path, &["rev-parse", "HEAD"]).ok())
-            .flatten();
+        let proof = match deletion_proof(&by_name, &once) {
+            Ok(proof) => proof,
+            Err(reason) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "worktree-reclaim: re-check refused a surveyed candidate — {reason}"
+                );
+                out.refused_at_recheck
+                    .push(format!("{}: {reason}", path.display()));
+                continue;
+            }
+        };
         // #7885: the route names itself in the audit line the remover emits
         // before it deletes — an operator reading the log after the fact could
         // not otherwise tell this pass from the orphan sweep.
@@ -804,12 +808,12 @@ pub(crate) fn reclaim_with_probes(
                 bytes_freed = candidate.bytes,
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
             );
-            // #8109: the tree is gone, so its branch goes too — on the proof.
+            // #8109: the tree is gone, so its branch goes too — on the proof,
+            // at the SHA the proof judged.
             cleanup_reclaimed_branch(
                 &candidate.registry_root,
                 &path,
                 candidate.branch.as_deref(),
-                proven_head.as_deref().map(str::trim),
                 &proof,
             );
             out.removed_bytes = out

@@ -17,6 +17,7 @@ use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWork
 use crate::session_manager::worktree_reclaim::{
     KeepList, LiveClaims, PrIndex, ReclaimMode, ReclaimOutcome,
 };
+use crate::session_manager::worktree_reclaim_landed::reclaim_landed_content_with;
 use crate::session_manager::worktree_reclaim_pr_match::worktree_reclaim_pr_match_tests::FakeProbe;
 use crate::session_manager::worktree_reclaim_pr_match::{MergedPrHead, resolve_with_index};
 use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_with_probes};
@@ -269,5 +270,77 @@ fn worktree_8109_a_head_commit_match_is_not_the_branchs_own_pr() {
     assert_eq!(
         own_pr_gate(path, granted.clone(), &own, Some(&residual)),
         granted
+    );
+}
+
+/// A complete index in which `branch` has its own merged pull request.
+fn merged_own_pr(branch: &'static str) -> impl Fn(&Path) -> PrIndex {
+    move |_: &Path| {
+        PrIndex::from_json(
+            &format!(r#"[{{"number": 8109, "headRefName": "{branch}", "state": "MERGED"}}]"#),
+            400,
+        )
+    }
+}
+
+/// 🔴 REGRESSION (#8109, critic HIGH): the branch is deleted only at the SHA
+/// the landed proof judged. A commit made after the proof returned is not
+/// proven, so the branch holding it is kept.
+///
+/// Fails when the deletion's SHA is re-read from `HEAD` after the proof, as at
+/// b5e2e1c77: the tip then equals the unproven commit and `-D` deletes it.
+#[test]
+fn worktree_8109_a_commit_after_the_proof_keeps_the_branch() {
+    let fx = GitWorktreeFixture::new();
+    let wt = landed(&fx, "late-8109");
+    let judged = git(&wt, &["rev-parse", "HEAD"]);
+    let on_base = |_: &Path| -> LandingAdmission {
+        LandedContent::Landed {
+            base: "origin/main".to_string(),
+            base_sha: "d".repeat(40),
+            landed_at: None,
+        }
+        .into()
+    };
+    // The proof returns, THEN a commit lands in the tree.
+    let taken = std::cell::Cell::new(0);
+    let prove = |p: &Path| {
+        taken.set(taken.get() + 1);
+        let proof = reclaim_landed_content_with(p, &on_base);
+        GitWorktreeFixture::commit_unpushed(p);
+        proof
+    };
+    let once = OnceProof::new(&wt, &prove);
+    // The re-check's ask and the deletion's read share one proof.
+    assert!(once.admission(&wt).admits());
+    let proof = deletion_proof(&BranchPrState::NoPr, &once).expect("a landed proof admits");
+    assert_eq!(taken.get(), 1, "the proof was taken more than once");
+    let late = git(&wt, &["rev-parse", "HEAD"]);
+    assert_ne!(late, judged, "premise: a commit landed after the proof");
+    assert_eq!(proof.head.as_deref(), Some(judged.as_str()));
+    // The sweep removes the tree before it deletes the branch.
+    let wt_arg = wt.to_str().expect("utf8");
+    git(&fx.repo, &["worktree", "remove", "--force", wt_arg]);
+    cleanup_reclaimed_branch(&fx.repo, &wt, Some("wt/late-8109"), &proof);
+    assert!(
+        branch_exists(&fx.repo, "wt/late-8109"),
+        "a branch holding a commit the proof never judged was deleted"
+    );
+    assert_eq!(git(&fx.repo, &["rev-parse", "wt/late-8109"]), late);
+}
+
+/// #8109: a tree whose OWN-name pull request merged is reclaimed without the
+/// landed proof, but its branch is deleted only on that proof. Content still
+/// off the base (`Residual`) removes the tree and keeps the branch.
+#[test]
+fn worktree_8109_an_own_pr_reclaim_without_landed_proof_keeps_the_branch() {
+    let fx = GitWorktreeFixture::new();
+    let wt = published_unlanded(&fx, "ownpr-8109");
+    let out = reclaim(&fx, &merged_own_pr("wt/ownpr-8109"));
+    assert_eq!(out.removed, vec![wt.clone()], "{out:?}");
+    assert!(!wt.exists());
+    assert!(
+        branch_exists(&fx.repo, "wt/ownpr-8109"),
+        "a branch was deleted without a landed proof"
     );
 }
