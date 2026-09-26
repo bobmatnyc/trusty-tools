@@ -28,6 +28,8 @@ pub(super) struct Routed {
     pub(super) here_carries: bool,
     /// A here-string or here-document holds text an evaluator would run.
     pub(super) here_program_text: bool,
+    /// #8676: stdin is any here-string or here-document.
+    pub(super) here_any: bool,
 }
 
 /// Split a stage's words into argv and its output routing.
@@ -57,6 +59,7 @@ pub(super) fn apply_redirections(
         fds,
         here_carries: false,
         here_program_text: false,
+        here_any: false,
     };
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
@@ -64,6 +67,7 @@ pub(super) fn apply_redirections(
         if let Some(index) = heredoc_index(tok) {
             let text = lifted.heredocs.get(index).is_none_or(|h| h.program_text);
             routed.here_program_text |= text;
+            routed.here_any = true;
             continue;
         }
         if let Some(word) = tok.strip_prefix("<<<") {
@@ -75,6 +79,7 @@ pub(super) fn apply_redirections(
             };
             routed.here_carries |= carries(word, lifted);
             routed.here_program_text |= input_is_program_text(word);
+            routed.here_any = true;
             continue;
         }
         if tok.starts_with("<<") {
@@ -82,6 +87,7 @@ pub(super) fn apply_redirections(
             // words follow the operator.
             let rest = tokens.get(i..).unwrap_or_default();
             routed.here_program_text |= rest.iter().any(|w| input_is_program_text(w));
+            routed.here_any = true;
             // #8676: a body word expanding a credential feeds it on stdin.
             routed.here_carries |= rest.iter().any(|w| carries(w, lifted));
         }

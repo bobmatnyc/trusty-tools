@@ -102,6 +102,25 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
     }
 }
 
+/// #8676 round 2, row 4: a word nested ~100k `${` deep once overflowed the
+/// hook's stack, which aborts past `catch_unwind` and fails open.
+#[test]
+fn pm_guard_denies_a_deeply_nested_expansion_without_crashing() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let depth = 100_000;
+    let command = format!(
+        "T=$(gcloud auth print-access-token); echo {}T{}",
+        "${a".repeat(depth),
+        "}".repeat(depth)
+    );
+    let stdout = run_pm_guard("gcp-ops", &command, cwd.path());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("deny is JSON");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{stdout}"
+    );
+}
+
 #[test]
 fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
     let cwd = tempfile::tempdir().expect("cwd");

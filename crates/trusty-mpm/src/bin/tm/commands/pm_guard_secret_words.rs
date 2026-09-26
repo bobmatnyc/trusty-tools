@@ -278,6 +278,19 @@ pub(crate) fn rewrite_parameter_expansions(text: &str) -> String {
 /// ` <name> <operand> `. `names` is untouched by the separated walk.
 /// Test: `splices_an_operand_against_the_bytes_beside_it`.
 pub(crate) fn walk_parameter_expansions(text: &str, splice: bool, names: &mut String) -> String {
+    walk_at(text, splice, names, 0)
+}
+
+/// `${…}` nesting [`walk_parameter_expansions`] rewrites; deeper text stays as
+/// written, the unrewritten shape that fails closed (#8676: a ~100k-deep word
+/// overflowed the hook's stack, which aborts and allows the command).
+const MAX_EXPANSION_DEPTH: usize = 32;
+
+/// [`walk_parameter_expansions`] at nesting `depth`.
+fn walk_at(text: &str, splice: bool, names: &mut String, depth: usize) -> String {
+    if depth > MAX_EXPANSION_DEPTH {
+        return text.to_string();
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -296,7 +309,7 @@ pub(crate) fn walk_parameter_expansions(text: &str, splice: bool, names: &mut St
                 out.push_str(name);
                 out.push(' ');
             }
-            out.push_str(&walk_parameter_expansions(operand, splice, names));
+            out.push_str(&walk_at(operand, splice, names, depth + 1));
             if !splice {
                 out.push(' ');
             }
