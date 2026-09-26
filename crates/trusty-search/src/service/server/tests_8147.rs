@@ -53,6 +53,18 @@ fn create_req_with_colocated(
     }
 }
 
+/// Whether `roots.toml` lists `root`, compared canonically.
+///
+/// Why: `TRUSTY_DATA_DIR` is process-global, so a concurrent non-serial test
+/// can add its own rows to this test's file; only this root's row is ours.
+fn roots_toml_lists(root: &std::path::Path) -> bool {
+    let want = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    crate::service::roots_registry::load_roots()
+        .expect("roots.toml readable")
+        .iter()
+        .any(|r| std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()) == want)
+}
+
 /// Fresh registry with a mock embedder — enough for `create_index_handler`.
 async fn mock_state() -> Arc<SearchAppState> {
     let state = SearchAppState::new(IndexRegistry::new());
@@ -115,9 +127,7 @@ async fn create_index_honours_colocated_false() {
         data_dir_corpus.display(),
     );
     assert!(
-        crate::service::roots_registry::load_roots()
-            .expect("roots.toml readable")
-            .is_empty(),
+        !roots_toml_lists(&root),
         "#8147: roots.toml lists colocated roots for the scanner; a data-dir index \
          must add none"
     );
@@ -280,11 +290,8 @@ async fn create_index_omitted_colocated_keeps_the_colocated_default() {
         root.join(".trusty-search").join("index.redb").exists(),
         "the corpus must be colocated under the root"
     );
-    assert_eq!(
-        crate::service::roots_registry::load_roots()
-            .expect("roots.toml readable")
-            .len(),
-        1,
+    assert!(
+        roots_toml_lists(&root),
         "a colocated root is listed in roots.toml for the startup scanner"
     );
 
@@ -404,12 +411,7 @@ async fn create_index_colocated_false_with_an_unwritable_registry_is_a_500() {
         garbage,
         "the refused write left the registry untouched"
     );
-    assert!(
-        crate::service::roots_registry::load_roots()
-            .expect("roots.toml readable")
-            .is_empty(),
-        "no roots.toml row either"
-    );
+    assert!(!roots_toml_lists(&root), "no roots.toml row either");
 
     std::fs::remove_file(&registry).expect("clear the fault");
     let retried = super::indexes::create_index_handler(
