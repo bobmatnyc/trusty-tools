@@ -1604,13 +1604,21 @@ async fn gratuitous_redelegation_after_finish_is_refused_and_run_succeeds() {
 /// can detect a runnable suite). Script [PM delegates naming `pytest tests/
 /// -v`, engineer calls `finish_task` prematurely (no test run — REJECTED),
 /// engineer stops without finishing again, PM re-delegates (must NOT be
-/// refused by the #2683 completion latch), engineer runs the named test then
-/// finishes for real (gate now satisfied), PM finishes (its own
-/// `pm_finish_gate` sees the engineer's recorded test run)]. Asserts
-/// `exit == Success`, all seven scripted turns are consumed (proving the
+/// refused by the #2683 completion latch), engineer writes `parser.py`, runs
+/// the named test, then finishes for real (gate now satisfied), PM finishes
+/// (its own `pm_finish_gate` sees the engineer's recorded test run)]. Asserts
+/// `exit == Success`, all eight scripted turns are consumed (proving the
 /// second delegation actually reached the engineer rather than being refused
-/// outright), and the engineer was invoked across both delegations (four
+/// outright), and the engineer was invoked across both delegations (five
 /// `python-engineer` transcript turns, not two).
+///
+/// Hermeticity (#8157, PR #8691 CI): the scripted `bash` call really executes.
+/// A bare `pytest tests/ -v` ran the host's pytest wherever one was on `PATH`,
+/// and its `.pytest_cache/` was the run's only diff — `Success` locally,
+/// `NoChanges` on a runner without pytest. The command now points `PATH` at a
+/// dead directory so no host pytest ever runs, the gate still matches it
+/// (`is_test_command`), and the scripted `parser.py` write is the deliverable
+/// on every host.
 /// Test: this test.
 #[tokio::test]
 async fn gate_refused_finish_task_never_latches_completion() {
@@ -1630,11 +1638,15 @@ async fn gate_refused_finish_task_never_latches_completion() {
         // 4. PM re-delegates. This MUST NOT be refused: the completion signal
         //    never latched, because step 2's finish was rejected, not accepted.
         delegate_response("re-verify: run `pytest tests/ -v` and finish"),
-        // 5. Engineer runs the named test for real.
-        bash_response("pytest tests/ -v"),
-        // 6. Engineer finishes — the gate is now satisfied, so this ACCEPTS.
+        // 5. Engineer writes the deliverable — the run's only diff.
+        write_file_response("parser.py", "def parse(s):\n    return s\n"),
+        // 6. Engineer runs the named test. A dead `PATH` keeps any host
+        //    pytest from running (its `.pytest_cache/` would enter the diff);
+        //    the gate matches on the command text alone.
+        bash_response("PATH=/nonexistent pytest tests/ -v"),
+        // 7. Engineer finishes — the gate is now satisfied, so this ACCEPTS.
         finish_task_response("completed", "ran pytest, all good"),
-        // 7. PM finishes — its own `pm_finish_gate` sees the shared
+        // 8. PM finishes — its own `pm_finish_gate` sees the shared
         //    transcript's recorded test run and accepts on the first attempt.
         finish_task_response("completed", "confirmed complete"),
     ]));
@@ -1651,12 +1663,18 @@ async fn gate_refused_finish_task_never_latches_completion() {
          the run complete Success, not strand as NoChanges; task: {}",
         report.task
     );
+    assert!(
+        report.diff.contains("parser.py") && !report.diff.contains(".pytest_cache"),
+        "the diff must be exactly the scripted deliverable, never a host \
+         pytest's cache; got: {}",
+        report.diff
+    );
     assert_eq!(
         llm.models_seen().len(),
-        7,
+        8,
         "every scripted turn must be consumed — a wrongly-latched completion \
          signal would refuse the second delegate_to_agent and strand the run \
-         well short of all seven turns"
+         well short of all eight turns"
     );
 
     let engineer_turns = report
@@ -1665,8 +1683,8 @@ async fn gate_refused_finish_task_never_latches_completion() {
         .filter(|t| t.role == "python-engineer")
         .count();
     assert_eq!(
-        engineer_turns, 4,
-        "the second delegation must actually reach the engineer (2 more turns \
+        engineer_turns, 5,
+        "the second delegation must actually reach the engineer (3 more turns \
          on top of the first delegation's 2), proving it was not refused by a \
          stray completion latch; got {engineer_turns} engineer turns"
     );
