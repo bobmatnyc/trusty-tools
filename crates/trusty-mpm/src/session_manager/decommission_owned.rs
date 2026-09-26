@@ -37,16 +37,18 @@ use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_work
 /// What: a directory that is its own git worktree root gets the worktree
 /// guard. [`worktree_kind`] must prove it a linked worktree or a main
 /// checkout; a probe error keeps it under either policy. A linked worktree
-/// that `git worktree lock` protects is kept under
-/// either policy ([`lock_blocker`]). Then [`inspect_dirt_excusing`] (dirty files,
-/// unpushed commits, nested repositories), excusing only entries that match
-/// the [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
+/// that `git worktree lock` protects is kept under either policy
+/// ([`lock_blocker`]). Then [`inspect_dirt_excusing`] (dirty files, unpushed
+/// commits, nested repositories), excusing only entries that match the
+/// [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
 /// [`ProvisioningDirt::Discard`] (`--force`), when that check still finds
 /// dirt, a linked worktree must pass [`force_blocker`] for `id`, and the dirt
 /// check then also excuses tm's provisioning files as the in-project route
-/// does, `TASK.md` only while it equals `task`, the record's task (#8688). Last, [`ignored_output_refusal`]. A `.git` entry git cannot resolve
-/// keeps it. Any other directory must hold only harness files and regenerable
-/// output ([`unversioned_content_refusal`]). Every reason names the path.
+/// does: `TASK.md` only while it holds what tm wrote from `task`, the
+/// record's task (#8688). Last, [`ignored_output_refusal`]. A `.git` entry
+/// git cannot resolve keeps it. Any other directory must hold only harness
+/// files and regenerable output ([`unversioned_content_refusal`]). Every
+/// reason names the path.
 /// Test: `owned_worktree_with_an_unpushed_commit_is_kept`,
 /// `owned_worktree_with_untracked_results_is_kept`,
 /// `owned_non_git_workspace_with_user_files_is_kept`,

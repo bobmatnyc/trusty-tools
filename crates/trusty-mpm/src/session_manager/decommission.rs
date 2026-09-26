@@ -1232,3 +1232,7 @@ impl SessionManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "decommission_force_wire_tests.rs"]
+mod decommission_force_wire_tests;

@@ -367,6 +367,126 @@ async fn force_decommission_keeps_a_task_md_without_a_session_task() {
     }
 }
 
+/// `task` as `mark_errored` leaves the record's task after failing with `msg`
+/// (#8688). The manager-level wire test drives the real `mark_errored`.
+fn errored(task: &str, msg: &str) -> String {
+    format!("{task} [error: {msg}]")
+}
+
+/// `--force` on `wt` as a session whose record's task is `task`.
+async fn force_with_task(wt: &Path, task: &str) -> WorkspaceVerdict {
+    remove_in_project_worktree(
+        &ManagedSessionId::new(),
+        Some(task),
+        wt,
+        ProvisioningDirt::Discard,
+    )
+    .await
+}
+
+/// #8688 round 3: `mark_errored` appends its note to the record's task after
+/// `TASK.md` was written, so an errored session's unedited `TASK.md` never
+/// equalled the task and kept the tree. Fails at 9465af6d2.
+#[tokio::test]
+async fn force_decommission_removes_a_once_errored_session_s_unedited_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-errored-8688");
+
+    // A message holding `]` is still one note.
+    let verdict = force_with_task(&wt, &errored(TASK, "launch spec [tm-x] unreadable")).await;
+
+    assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688 round 3: an errored session's `TASK.md` edited after spawn keeps the
+/// tree. Passes at 9465af6d2, which kept every errored tree; it pins that the
+/// errored candidate excuses only the bytes tm wrote.
+#[tokio::test]
+async fn force_decommission_keeps_a_once_errored_session_s_edited_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-errored-edit-8688");
+    let edited = format!("{TASK}\n## Notes\n- the spawn failed on a stale spec\n");
+    std::fs::write(wt.join("TASK.md"), &edited).expect("edit TASK.md");
+
+    let verdict = force_with_task(&wt, &errored(TASK, "boom")).await;
+
+    assert!(!verdict.removed, "an edited TASK.md must keep the worktree");
+    let body = std::fs::read_to_string(wt.join("TASK.md")).expect("TASK.md survives");
+    assert_eq!(body, edited, "the notes survive untouched");
+    let reason = verdict.kept_reason.expect("reason");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? TASK.md".to_string()]),
+        "reason: {reason}"
+    );
+}
+
+/// #8688 round 3: without exactly one error marker, no prefix of the task is
+/// known to be what tm wrote, so `TASK.md` keeps the tree. The rows pass at
+/// 9465af6d2, which kept every errored tree. A `strip_error_notes` candidate
+/// loses `strip-twice`, `strip-own-marker` and `straddle`; a cut at the first
+/// marker loses `strip-twice`, `first-marker` and `straddle`; counting
+/// markers without overlaps loses `straddle`.
+#[tokio::test]
+async fn force_decommission_keeps_a_repeatedly_errored_session_s_task_md() {
+    use crate::session_manager::setters::strip_error_notes;
+    let fx = GitWorktreeFixture::new();
+    let noted = "Fix the parser [error: x]\n";
+    let straddle = "Fix the bug [error:";
+    let rows: [(&str, String, String); 5] = [
+        // Two `mark_errored` calls; `TASK.md` unedited.
+        (
+            "strip-twice",
+            errored(&errored(TASK, "a"), "b"),
+            TASK.into(),
+        ),
+        // The task's own text holds a marker, errored once; unedited.
+        ("own-marker", errored(noted, "boom"), noted.into()),
+        // Edited to what `strip_error_notes` yields, which tm never wrote.
+        (
+            "strip-own-marker",
+            errored(noted, "boom"),
+            strip_error_notes(&errored(noted, "boom")),
+        ),
+        // Edited to the text before the first of two markers.
+        (
+            "first-marker",
+            errored(noted, "boom"),
+            "Fix the parser".into(),
+        ),
+        // The task ends in ` [error:`, whose space the note shares.
+        ("straddle", errored(straddle, "boom"), "Fix the bug".into()),
+    ];
+    // Every row runs, so a failure names each row that lost its `TASK.md`.
+    let mut removed = Vec::new();
+    for (name, task, task_md) in rows {
+        let wt = provisioned_tree(&fx, &format!("decom-force-errored-{name}-8688"));
+        std::fs::write(wt.join("TASK.md"), &task_md).expect("write TASK.md");
+
+        let verdict = force_with_task(&wt, &task).await;
+
+        let Some(reason) = verdict.kept_reason.filter(|_| !verdict.removed) else {
+            removed.push(name);
+            continue;
+        };
+        assert_eq!(
+            std::fs::read_to_string(wt.join("TASK.md")).expect("TASK.md survives"),
+            task_md,
+            "{name}"
+        );
+        assert_eq!(
+            count_and_list(&reason),
+            (1, vec!["?? TASK.md".to_string()]),
+            "{name}: {reason}"
+        );
+    }
+    assert!(
+        removed.is_empty(),
+        "TASK.md must keep the tree: {removed:?}"
+    );
+}
+
 /// #8688: user work beside the tm-written files still blocks `--force`, and
 /// the reason counts and names only that work.
 #[tokio::test]

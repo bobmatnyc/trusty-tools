@@ -13,9 +13,10 @@
 //! ([`is_provisioning_entry`]): `.gitignore`, `.claude/settings.json`,
 //! `.claude/settings.json.bak`, `CLAUDE.md`, a timestamped
 //! `.claude/settings.json.<timestamp>.bak` snapshot, and a `TASK.md` whose
-//! bytes still equal the session's task (#8688). Unpushed commits, any other modified or
-//! untracked file, an edit to a tracked provisioning path, nested-repository
-//! work, and every check that cannot complete still keep the workspace.
+//! bytes still equal the task tm wrote (#8688). Unpushed commits, any other
+//! modified or untracked file, an edit to a tracked provisioning path,
+//! nested-repository work, and every check that cannot complete still keep
+//! the workspace.
 //! When its excuse is needed, `--force` acts only on a linked worktree tm
 //! provably created that nothing locks ([`force_blocker`]); on a clean tree it
 //! is never stricter than no flag. A workspace tm never removes — the shared
@@ -166,21 +167,73 @@ const TASK_MD: &str = "TASK.md";
 ///
 /// Why: PMs and agents are told they may write to `TASK.md`, and `--force`
 /// deletes whatever it excuses, so excusing it by path lost their notes.
-/// What: `task` is the session record's task, which `write_task_md` writes
-/// verbatim. True only when `task` is non-empty, `TASK.md` is a regular file,
-/// and its bytes equal `task`. No record, an empty task, an unreadable file or
-/// any byte difference is `false`, so the file keeps the worktree.
+/// What: `task` is the session record's task. `write_task_md` wrote the task
+/// verbatim at spawn, so the file must equal `task` or, for a session errored
+/// once, [`task_before_single_error_note`]. True only when a non-empty
+/// candidate has the file's exact length and bytes, and `TASK.md` is a regular
+/// file. The length is checked first and the read is bounded by it, so a large
+/// file is never loaded. No record, an empty task, an unreadable file or any
+/// byte difference is `false`, so the file keeps the worktree.
 /// Test: `provisioning_entry_excuses_task_md_only_when_it_equals_the_session_task`,
 /// `force_decommission_keeps_a_task_md_edited_after_spawn`,
 /// `force_decommission_keeps_a_task_md_without_a_session_task`,
-/// `force_decommission_removes_a_worktree_holding_task_md_and_a_settings_snapshot`.
+/// `force_decommission_removes_a_worktree_holding_task_md_and_a_settings_snapshot`,
+/// `force_decommission_removes_a_once_errored_session_s_unedited_task_md`,
+/// `force_decommission_keeps_a_repeatedly_errored_session_s_task_md`.
 fn task_md_is_unedited(ws: &Path, task: Option<&str>) -> bool {
-    let Some(task) = task.filter(|task| !task.is_empty()) else {
+    use std::io::Read;
+    let Some(task) = task else {
         return false;
     };
     let path = ws.join(TASK_MD);
-    std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
-        && std::fs::read(&path).is_ok_and(|bytes| bytes == task.as_bytes())
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    // #8688: the two candidates differ in length, so at most one can match.
+    let Some(want) = [Some(task), task_before_single_error_note(task)]
+        .into_iter()
+        .flatten()
+        .find(|c| !c.is_empty() && meta.is_file() && meta.len() == c.len() as u64)
+    else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(want.len());
+    std::fs::File::open(&path)
+        .and_then(|file| file.take(meta.len() + 1).read_to_end(&mut bytes))
+        .is_ok()
+        && bytes == want.as_bytes()
+}
+
+/// The note `mark_errored` appends to a record's task: `" [error: {msg}]"`.
+const ERROR_NOTE_OPEN: &str = " [error: ";
+
+/// The task `write_task_md` wrote, recovered from a record `mark_errored`
+/// changed exactly once (#8688).
+///
+/// Why: `mark_errored` appends a note to `record.task` after `TASK.md` was
+/// written, so an errored session's unedited `TASK.md` never equals its task.
+/// `strip_error_notes` is not an exact inverse: a task or message holding
+/// note-shaped text strips to a string tm never wrote.
+/// What: when `task` holds exactly one [`ERROR_NOTE_OPEN`] and ends with `]`,
+/// the text before that marker. One marker means one `mark_errored` call, and
+/// neither the original task nor the message held a marker, so the prefix is
+/// exactly what was written. Markers are counted with overlaps: a task ending
+/// in ` [error:` shares its space with the appended note, and non-overlapping
+/// counting would see one marker and cut the task short. Two or more markers,
+/// or none, give `None` and the tree is kept. A task `clear_error_note`
+/// rewrote gets no candidate either.
+/// Test: `force_decommission_removes_a_once_errored_session_s_unedited_task_md`,
+/// `force_decommission_keeps_a_repeatedly_errored_session_s_task_md`.
+fn task_before_single_error_note(task: &str) -> Option<&str> {
+    // #8688: only the single-error case is exact; anything else fails closed.
+    let mut markers = task.char_indices().map(|(pos, _)| pos).filter(|&pos| {
+        task.get(pos..)
+            .is_some_and(|s| s.starts_with(ERROR_NOTE_OPEN))
+    });
+    match (markers.next(), markers.next()) {
+        (Some(pos), None) if task.ends_with(']') => task.get(..pos),
+        _ => None,
+    }
 }
 
 /// Whether the repo-relative `path` is a `.claude/settings.json` snapshot the
