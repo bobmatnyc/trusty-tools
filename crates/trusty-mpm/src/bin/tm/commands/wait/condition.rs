@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use crate::commands::pr::rollup::{RollupRun, latest_per_name};
+// #8638: one rollup entry shape and one latest-run rule, shared with queue-check.
+use crate::commands::pr::rollup::{RollupEntry, latest_per_name};
 
 /// One poll's verdict.
 ///
@@ -345,117 +346,17 @@ pub(crate) struct PrView {
     status_check_rollup: Option<Vec<RollupEntry>>,
 }
 
-/// One entry in a PR's check rollup.
-///
-/// Why: GitHub returns two shapes in one array — `CheckRun` (Actions, carrying
-/// `status`/`conclusion`) and `StatusContext` (legacy commit statuses, carrying
-/// `state`). Both must be judged on their own terminal field.
-/// What: the identifying name plus every field that can prove terminality.
-/// `bucket` is NOT deserialised at all: not reading it is a stronger guarantee
-/// than reading it and remembering not to trust it.
-/// Test: `check_condition_ignores_bucket` feeds a bucketed-complete entry that
-/// is not actually settled.
-#[derive(Debug, Deserialize)]
-struct RollupEntry {
-    /// `CheckRun` or `StatusContext`.
-    #[serde(default, rename = "__typename")]
-    typename: Option<String>,
-    /// `CheckRun` display name.
-    #[serde(default)]
-    name: Option<String>,
-    /// `StatusContext` display name.
-    #[serde(default)]
-    context: Option<String>,
-    /// `CheckRun` lifecycle: `QUEUED` / `IN_PROGRESS` / `COMPLETED`.
-    #[serde(default)]
-    status: Option<String>,
-    /// `CheckRun` result, present only once it has completed.
-    #[serde(default)]
-    conclusion: Option<String>,
-    /// `StatusContext` result: `PENDING` / `EXPECTED` / `SUCCESS` / `FAILURE` / `ERROR`.
-    #[serde(default)]
-    state: Option<String>,
-    /// #8638: recency key that picks the latest of duplicate runs.
-    #[serde(default, rename = "completedAt")]
-    completed_at: Option<String>,
-    /// #8638: fallback recency key.
-    #[serde(default, rename = "startedAt")]
-    started_at: Option<String>,
-}
-
-impl RollupRun for RollupEntry {
-    fn run_name(&self) -> Option<&str> {
-        self.name
-            .as_deref()
-            .or(self.context.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    }
-    fn completed_at(&self) -> Option<&str> {
-        self.completed_at.as_deref()
-    }
-    fn started_at(&self) -> Option<&str> {
-        self.started_at.as_deref()
-    }
-}
-
-impl RollupEntry {
-    /// The name to show for this entry.
-    fn label(&self) -> String {
-        self.name
-            .clone()
-            .or_else(|| self.context.clone())
-            .or_else(|| self.typename.clone())
-            .unwrap_or_else(|| "<unnamed check>".to_string())
-    }
-
-    /// Whether this entry has genuinely finished.
-    ///
-    /// Why: fails CLOSED. An entry carrying neither a completed `status` nor a
-    /// terminal `state` — an unrecognised shape, or a truncated response — is
-    /// unsettled, so a wait keeps waiting rather than declaring a false DONE.
-    /// What: `CheckRun` needs `COMPLETED` plus a non-empty `conclusion`;
-    /// anything else needs a terminal `state`.
-    /// Test: `check_condition_pending_until_all_settled`.
-    fn settled(&self) -> bool {
-        let completed = self
-            .status
-            .as_deref()
-            .is_some_and(|s| s.eq_ignore_ascii_case("COMPLETED"))
-            && self
-                .conclusion
-                .as_deref()
-                .is_some_and(|c| !c.trim().is_empty());
-        let terminal_state = self.state.as_deref().is_some_and(|s| {
-            ["SUCCESS", "FAILURE", "ERROR"]
-                .iter()
-                .any(|t| s.eq_ignore_ascii_case(t))
-        });
-        completed || terminal_state
-    }
-
-    /// Whether this settled entry reports a failure.
-    fn failed(&self) -> bool {
-        let bad = |v: &str| ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"].contains(&v);
-        self.conclusion
-            .as_deref()
-            .is_some_and(|c| bad(&c.to_ascii_uppercase()))
-            || self
-                .state
-                .as_deref()
-                .is_some_and(|s| bad(&s.to_ascii_uppercase()))
-    }
-}
-
 /// Decide whether a parsed PR view counts as settled.
 ///
 /// Why: separating the decision from the `gh` call is what makes the
 /// eventual-consistency guard testable against canned JSON.
 /// What: MERGED/CLOSED short-circuits to `Met`; an absent or empty rollup is
-/// `Pending` unless `allow_empty`; otherwise the latest run of every check
-/// name must be [`RollupEntry::settled`], and only those runs are counted.
+/// `Pending` unless `allow_empty`; otherwise the deciding run of every check
+/// name (see [`latest_per_name`]) must be [`RollupEntry::settled`], and only
+/// those runs are counted.
 /// Test: the `check_condition_*` family, including
-/// `check_condition_duplicate_run_uses_latest`.
+/// `check_condition_duplicate_run_uses_latest`,
+/// `check_condition_duplicate_queued_rerun_is_pending`.
 fn settle(view: &PrView, allow_empty: bool) -> Poll {
     let pr_state = view.state.as_deref().unwrap_or("UNKNOWN");
     if pr_state.eq_ignore_ascii_case("MERGED") || pr_state.eq_ignore_ascii_case("CLOSED") {
@@ -483,7 +384,7 @@ fn settle(view: &PrView, allow_empty: bool) -> Poll {
     let unsettled: Vec<String> = entries
         .iter()
         .filter(|e| !e.settled())
-        .map(|e| e.label())
+        .map(|e| e.display_label())
         .collect();
     if unsettled.is_empty() {
         let failed = entries.iter().filter(|e| e.failed()).count();

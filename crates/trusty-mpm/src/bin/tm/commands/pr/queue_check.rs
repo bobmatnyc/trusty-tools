@@ -15,7 +15,8 @@
 //!   3. `reviewDecision: CHANGES_REQUESTED`
 //!   4. an unresolved `code-critic` BLOCK in the PR comments
 //!   5. a required status context missing, pending, or not `SUCCESS` on the
-//!      head SHA — judged on its latest run when it ran more than once (#8638)
+//!      head SHA — pending while any run has no result, else judged on its
+//!      latest run (#8638)
 //!
 //! Order matters: the required contexts are the LAST gate, not the first, so a
 //! draft PR reports "draft" rather than "checks pending". Required contexts
@@ -27,7 +28,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::rollup::{RollupRun, latest_named};
+// #8638: one rollup entry shape and one latest-run rule, shared with `tm wait`.
+use super::rollup::{RollupEntry, latest_named};
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -73,85 +75,6 @@ struct Label {
     name: String,
 }
 
-/// One entry of `statusCheckRollup`.
-///
-/// Why: the rollup mixes two GraphQL types. A `CheckRun` carries `name` +
-/// `status` + `conclusion`; a `StatusContext` carries `context` + `state`.
-/// Deserializing both permissively into one struct keeps the matcher single.
-/// What: every field optional; [`RollupEntry::label`] and
-/// [`RollupEntry::is_success`] normalize across the two shapes.
-/// Test: `queue_required_context_not_success`, `queue_accepts_status_context`.
-#[derive(Debug, Deserialize)]
-struct RollupEntry {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    context: Option<String>,
-    #[serde(default)]
-    conclusion: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-    // #8638: the recency keys that pick the latest of duplicate runs.
-    #[serde(default, rename = "completedAt")]
-    completed_at: Option<String>,
-    #[serde(default, rename = "startedAt")]
-    started_at: Option<String>,
-}
-
-impl RollupRun for RollupEntry {
-    fn run_name(&self) -> Option<&str> {
-        self.label()
-    }
-    fn completed_at(&self) -> Option<&str> {
-        self.completed_at.as_deref()
-    }
-    fn started_at(&self) -> Option<&str> {
-        self.started_at.as_deref()
-    }
-}
-
-impl RollupEntry {
-    /// The context name this entry reports under.
-    fn label(&self) -> Option<&str> {
-        self.name
-            .as_deref()
-            .or(self.context.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Did this check pass?
-    ///
-    /// Why: `SUCCESS` only. `NEUTRAL` and `SKIPPED` are not success, and a
-    /// required context that skipped has not proven anything.
-    /// What: `conclusion == SUCCESS` (CheckRun) or `state == SUCCESS`
-    /// (StatusContext).
-    /// Test: `queue_required_context_not_success`.
-    fn is_success(&self) -> bool {
-        let v = self.conclusion.as_deref().or(self.state.as_deref());
-        v.is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
-    }
-
-    /// Is this run still going?
-    ///
-    /// Why (#8638): a newer run with no result yet supersedes an older
-    /// result, so it must read as pending, not as the older verdict.
-    /// What: no non-empty `conclusion` and no terminal `state`.
-    /// Test: `queue_duplicate_success_then_running_is_pending`.
-    fn is_pending(&self) -> bool {
-        let concluded = self
-            .conclusion
-            .as_deref()
-            .is_some_and(|c| !c.trim().is_empty());
-        let terminal = self.state.as_deref().is_some_and(|s| {
-            ["SUCCESS", "FAILURE", "ERROR"]
-                .iter()
-                .any(|t| s.eq_ignore_ascii_case(t))
-        });
-        !concluded && !terminal
-    }
-}
-
 /// One PR comment.
 #[derive(Debug, Deserialize)]
 struct Comment {
@@ -189,7 +112,8 @@ struct PrView {
 /// `queue_required_context_missing`, `queue_required_context_not_success`,
 /// `queue_duplicate_cancelled_then_success_is_mergeable`,
 /// `queue_duplicate_success_then_failure_is_blocked`,
-/// `queue_duplicate_success_then_running_is_pending`.
+/// `queue_duplicate_success_then_running_is_pending`,
+/// `queue_duplicate_success_then_queued_is_pending`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -215,9 +139,9 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
                     "required context `{context}` is missing on the head SHA"
                 ));
             }
-            Some(e) if e.is_pending() => {
+            Some(e) if e.is_unfinished() => {
                 return Some(format!(
-                    "required context `{context}` is pending: its latest run has no result yet"
+                    "required context `{context}` is pending: a run has no result yet"
                 ));
             }
             Some(e) if !e.is_success() => {

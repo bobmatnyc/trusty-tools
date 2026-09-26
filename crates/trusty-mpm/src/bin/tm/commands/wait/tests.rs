@@ -336,6 +336,18 @@ fn check_condition_duplicate_run_uses_latest() {
     assert!(matches!(check_with(running, false), Poll::Pending(_)));
 }
 
+/// REGRESSION (#8638): a queued rerun with no timestamps keeps the wait
+/// pending; an older SUCCESS of the same check must not read as settled.
+#[test]
+fn check_condition_duplicate_queued_rerun_is_pending() {
+    let json = r#"{"state":"OPEN","statusCheckRollup":[
+        {"__typename":"CheckRun","name":"Tests","status":"COMPLETED","conclusion":"SUCCESS",
+         "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+        {"__typename":"CheckRun","name":"Tests","status":"QUEUED","conclusion":""}
+    ]}"#;
+    assert!(matches!(check_with(json, false), Poll::Pending(_)));
+}
+
 /// Why: a legacy commit status carries `state`, not `status`/`conclusion`.
 #[test]
 fn check_condition_settles_status_contexts() {

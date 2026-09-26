@@ -2488,6 +2488,20 @@ fn queue_duplicate_success_then_running_is_pending() {
     assert!(reason.contains("`Rust tests` is pending"), "{reason}");
 }
 
+/// REGRESSION (#8638): a rerun still QUEUED carries no timestamps at all.
+/// Any run without a conclusion makes the context pending, so the older
+/// SUCCESS must not pass the PR.
+#[test]
+fn queue_duplicate_success_then_queued_is_pending() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"QUEUED","conclusion":""}"#,
+    );
+    let reason = first_reason(&json).expect("a queued rerun blocks");
+    assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+}
+
 /// #8638: a context that ran once is judged exactly as before.
 #[test]
 fn queue_single_run_is_unchanged() {
