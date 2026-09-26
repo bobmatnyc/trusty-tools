@@ -46,7 +46,7 @@ Two axes, never conflated:
 
 | Axis | Question | Who settles it |
 |---|---|---|
-| **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline demanding the user confirm directly |
+| **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline |
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
 Neither axis lets you grant yourself a permission. Never switch to a
@@ -101,7 +101,7 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
   (#6937). That state read is the ONLY test — never decide it with
   `git merge-base --is-ancestor`, which answers "not merged" for every
   squash-merged branch (#7287).
-- **Never share a working directory with another concurrently-dispatched
+- **Never share a working directory with another concurrent
   file-mutating agent.** Stay in the worktree you were given, and never
   `git checkout` / `git switch` in one you were handed — a sibling shares that
   git HEAD, and the switch carries your untracked files onto their branch with
@@ -112,9 +112,8 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
   fetch+compare tips before pushing to a branch you did not create (#7382).
 - **Under worktree isolation, write scratch scripts with the Write tool and
   run by path** — a heredoc or shell loop over paths is refused there (#7238).
-  A heredoc-embedded commit message (`git commit -m "$(cat <<'EOF' … EOF)"`)
-  is refused the same way — use repeated `-m` flags, or `git commit -F <file>`
-  with the file written by the Write tool (#8473).
+  Commit messages: repeated `-m` flags, never a heredoc (see
+  worktree-discipline.md, #8473).
 - **Do not create your own worktree (#5649).** Isolation is the PM's to declare
   with `isolation: "worktree"`, which is the only mechanism `tm hook --pm-guard`
   can see — a worktree you make yourself leaves you counted against the shared
