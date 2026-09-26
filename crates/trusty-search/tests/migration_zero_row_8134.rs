@@ -311,10 +311,177 @@ async fn a_v1_stamp_over_an_unreadable_snapshot_is_a_migration_fault() {
     .expect("build indexer");
 
     assert_eq!(indexer.chunk_count(), 0, "nothing could be imported");
-    let stages: Vec<&str> = indexer.migration_faults().iter().map(|f| f.stage).collect();
+    let faults = indexer.migration_faults();
+    let stages: Vec<&str> = faults.iter().map(|f| f.stage).collect();
     assert_eq!(
         stages,
         vec![MIGRATION_STAGE_JSON_TO_REDB],
         "#8134: an unreadable snapshot under a v1 stamp must be a recorded fault"
+    );
+    // A corrupt snapshot beside a legitimately empty index faults on every
+    // boot, so the fault text must tell the operator how to clear it.
+    let snapshot = colocated_dir(&root).join("chunks.json");
+    let detail = &faults[0].detail;
+    assert!(
+        detail.contains(&snapshot.display().to_string()),
+        "#8134: the fault must name the snapshot file, got: {detail}"
+    );
+    assert!(
+        detail.contains("remove or rename it to clear this fault"),
+        "#8134: the fault must say how to clear it, got: {detail}"
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).expect("snapshot still on disk"),
+        br#"{"version":1,"chunks":[{"id":"#,
+        "#7923: a failed import leaves the snapshot byte-identical"
+    );
+}
+
+/// The chunks table as `CorpusStore` defines it (`core::corpus::tables`).
+const CHUNKS_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("chunks");
+
+/// Plant a colocated `index.redb` whose only chunk row is `id` → `bytes`.
+///
+/// Why: `CorpusStore::load_all_chunks` skips a row it cannot decode, so a
+/// corpus written by a build whose `RawChunk` this one cannot read loads as
+/// `Ok(0)` while the durable table still holds rows (#5917).
+fn plant_undecodable_row(root: &Path, id: &str, bytes: &[u8]) {
+    let db = redb::Database::create(colocated_dir(root).join("index.redb")).expect("create redb");
+    let txn = db.begin_write().expect("begin write");
+    {
+        let mut table = txn.open_table(CHUNKS_TABLE).expect("open chunks table");
+        table.insert(id, bytes).expect("insert row");
+    }
+    txn.commit().expect("commit");
+}
+
+/// Read the raw bytes of chunk row `id` and the chunks-table row count.
+fn raw_row(root: &Path, id: &str) -> (Option<Vec<u8>>, u64) {
+    use redb::{ReadableDatabase, ReadableTableMetadata};
+    let db = redb::Database::open(colocated_dir(root).join("index.redb")).expect("open redb");
+    let txn = db.begin_read().expect("begin read");
+    let table = txn.open_table(CHUNKS_TABLE).expect("open chunks table");
+    let bytes = table.get(id).expect("read row").map(|v| v.value().to_vec());
+    (bytes, table.len().expect("count rows"))
+}
+
+/// #8134 round 3, finding 1: the recovery never writes over rows it could not
+/// load.
+///
+/// Why: the recovery keyed on the in-memory count. A populated redb whose rows
+/// this build cannot decode loads as 0 chunks, so the recovery imported the
+/// stale snapshot and `upsert_batch` overwrote the current rows that share its
+/// `path:start:end` ids — with no fault, since `stored >= total` passed.
+/// What: a v1-stamped colocated index whose redb holds one undecodable `alpha`
+/// row and whose snapshot also carries `alpha`. After boot the row's bytes and
+/// the row count are unchanged, nothing stale is live in memory, the snapshot
+/// is untouched, and a `json_to_redb` fault names the refusal.
+/// Test: this IS the test. Against 2e3cc97c5 the row is overwritten and no
+/// fault is recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn a_v1_stamp_never_imports_over_rows_the_load_could_not_decode() {
+    let _pin = DataDirPin::new();
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let current: &[u8] = b"a row written by a build whose RawChunk this one cannot decode";
+    plant_undecodable_row(&root, "alpha", current);
+    write_colocated_snapshot(&root, &["alpha"]);
+    let snapshot = colocated_dir(&root).join("chunks.json");
+    let snapshot_before = std::fs::read(&snapshot).expect("read snapshot");
+    stamp_colocated_v1(&root);
+
+    let indexer =
+        build_indexer_from_entry(&entry_at("undecodable-8134", &root, true), &mock_embedder())
+            .await
+            .expect("build indexer");
+
+    assert!(!indexer.corpus_open_failed, "the corpus must open cleanly");
+    assert_eq!(
+        indexer.chunk_count(),
+        0,
+        "#8134: the stale snapshot must not be served from memory"
+    );
+    let faults = indexer.migration_faults();
+    let stages: Vec<&str> = faults.iter().map(|f| f.stage).collect();
+    assert_eq!(
+        stages,
+        vec![MIGRATION_STAGE_JSON_TO_REDB],
+        "#8134: a refused import must be a recorded fault"
+    );
+    assert!(
+        faults[0].detail.contains("refusing to import"),
+        "the fault must say the import was refused, got: {}",
+        faults[0].detail
+    );
+    drop(indexer);
+
+    assert_eq!(
+        raw_row(&root, "alpha"),
+        (Some(current.to_vec()), 1),
+        "#8134: the current row must be left exactly as it was"
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).expect("snapshot still on disk"),
+        snapshot_before,
+        "#7923: a refused import leaves the snapshot byte-identical"
+    );
+}
+
+/// #8134 round 3, finding 2: a seeded snapshot is not imported a second time.
+///
+/// Why: nothing refreshes a colocated `chunks.json`. Once an index was seeded
+/// from it, deleting every file and reindexing empties redb, and every restart
+/// then re-imported the old snapshot over the empty corpus.
+/// What: seeds a colocated index from its snapshot, deletes every row from the
+/// durable corpus, and reboots. The index stays empty with no fault, and the
+/// snapshot sits retired at `chunks.json.migrated`.
+/// Test: this IS the test. Against 2e3cc97c5 the reboot restores all three rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty() {
+    let _pin = DataDirPin::new();
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    write_colocated_snapshot(&root, &["alpha", "beta", "gamma"]);
+    let entry = entry_at("retired-8134", &root, true);
+
+    let seeded = build_indexer_from_entry(&entry, &mock_embedder())
+        .await
+        .expect("first boot");
+    assert_eq!(
+        durable_rows(&seeded),
+        3,
+        "precondition: the first boot seeds"
+    );
+    let corpus = seeded.corpus_store().expect("corpus store");
+    let ids: Vec<String> = ["alpha", "beta", "gamma"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    corpus.delete_chunks(&ids).expect("delete every row");
+    assert_eq!(corpus.chunk_count().expect("count"), 0);
+    drop(corpus);
+    drop(seeded);
+
+    let rebooted = build_indexer_from_entry(&entry, &mock_embedder())
+        .await
+        .expect("second boot");
+    assert_eq!(
+        rebooted.chunk_count(),
+        0,
+        "#8134: deleted content must not come back from the old snapshot"
+    );
+    assert_eq!(durable_rows(&rebooted), 0, "nor reach redb");
+    assert!(
+        rebooted.migration_faults().is_empty(),
+        "an emptied index is not a fault, got: {:?}",
+        rebooted.migration_faults()
+    );
+    let colocated = colocated_dir(&root);
+    assert!(!colocated.join("chunks.json").exists(), "snapshot retired");
+    assert!(
+        colocated.join("chunks.json.migrated").is_file(),
+        "the retired snapshot is kept, renamed"
     );
 }
