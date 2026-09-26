@@ -47,10 +47,14 @@ impl LlmProvider for UnusedLlm {
 
 /// Search fake: a healthy daemon whose registry reports each index's
 /// `repo_identity`, or fails to list at all when `indexes` is `None`. Each
-/// listing's `repo_identity` filter is recorded, and applied as the daemon does.
+/// listing's `repo_identity` filter is recorded, and applied as the daemon
+/// does — unless `ignore_filter` is set, modelling a daemon whose
+/// `?repo_identity=` filtering is broken and returns the full list regardless
+/// (#8649: proves `resolve_repo_index`'s local re-check is not dead code).
 struct Registry {
     indexes: Option<Vec<IndexIdentity>>,
     listings: Mutex<Vec<Option<String>>>,
+    ignore_filter: bool,
 }
 
 impl Registry {
@@ -58,6 +62,16 @@ impl Registry {
         Self {
             indexes,
             listings: Mutex::new(Vec::new()),
+            ignore_filter: false,
+        }
+    }
+
+    /// A daemon that ignores the `repo_identity=` filter argument entirely.
+    fn new_ignoring_filter(indexes: Vec<IndexIdentity>) -> Self {
+        Self {
+            indexes: Some(indexes),
+            listings: Mutex::new(Vec::new()),
+            ignore_filter: true,
         }
     }
 }
@@ -87,6 +101,9 @@ impl SearchClient for Registry {
             .indexes
             .clone()
             .ok_or_else(|| SearchClientError::Transport("connection refused".into()))?;
+        if self.ignore_filter {
+            return Ok(all);
+        }
         Ok(match repo_identity {
             Some(filter) => all
                 .into_iter()
@@ -275,6 +292,23 @@ async fn unreadable_registry_degrades_to_diff_only_when_search_is_not_required()
     );
 }
 
+/// The operator's own default — no `require_search` override at all
+/// (`config.context.require_search = None`) — still degrades an unreadable
+/// registry on the MCP tool's `Interactive` surface, rather than erroring.
+/// Regression: swapping `resolve_pr_index`'s `InvocationSurface::Interactive`
+/// for `Hosted` fails this test, because `Hosted` requires search by default
+/// and the registry failure would surface as a bare `RepoIndexError` instead
+/// of a `PrIndex::DiffOnly` degrade (#8649).
+#[tokio::test]
+async fn default_require_search_degrades_review_pr_on_unreadable_registry() {
+    let mut state = state_with(None, false);
+    state.config.context.require_search = None;
+    let index = resolve_pr_index(&state, "acme", "widget")
+        .await
+        .expect("an unreadable registry must degrade under the operator's default");
+    assert!(matches!(index, PrIndex::DiffOnly(_)), "{index:?}");
+}
+
 /// With search required, an unreadable registry stays the named error.
 #[tokio::test]
 async fn registry_failure_is_an_error_when_search_is_required() {
@@ -337,6 +371,35 @@ async fn identity_filter_is_queried_first_and_the_full_list_only_on_a_miss() {
             None,
         ]
     );
+}
+
+/// A daemon that ignores the `?repo_identity=` filter and returns its full
+/// index list regardless still gets the right answer, because
+/// `resolve_repo_index` re-verifies each identity locally against the
+/// "scoped" list rather than trusting the daemon's filtering blindly (#8649).
+#[tokio::test]
+async fn filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one() {
+    let search = Registry::new_ignoring_filter(two_repo_registry());
+    let acme = resolve_repo_index(&search, "acme", "widget", None).await;
+    assert!(
+        matches!(acme, Err(RepoIndexError::NoIndex { .. })),
+        "{acme:?}"
+    );
+    let tt = resolve_repo_index(&search, "bobmatnyc", "trusty-tools", None).await;
+    assert_eq!(tt.ok().as_deref(), Some("trusty-tools-4e2cf878"));
+}
+
+/// A GitHub owner literally named `unknown-owner` must be refused, not treated
+/// as a real owner — that string is also what an owner-less local index's
+/// identity canonicalises to, so accepting it would let one owner's PR review
+/// silently resolve to an unrelated, ownerless index (#8649).
+#[tokio::test]
+async fn owner_named_unknown_owner_sentinel_is_invalid() {
+    let search = Registry::new(Some(vec![entry("widget", "/src/widget", None)]));
+    let err = resolve_repo_index(&search, "unknown-owner", "widget", None)
+        .await
+        .expect_err("the unknown-owner sentinel must not resolve as a real owner");
+    assert!(matches!(err, RepoIndexError::InvalidRepo { .. }), "{err}");
 }
 
 /// The session pin is honoured when it belongs to the repo, and ignored when

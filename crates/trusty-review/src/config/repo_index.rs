@@ -19,7 +19,7 @@
 use std::cmp::Reverse;
 
 use tracing::warn;
-use trusty_common::github_path::parse_owner_repo;
+use trusty_common::github_path::{UNKNOWN_OWNER, parse_owner_repo};
 use trusty_common::repo_identity::RepoIdentity;
 
 use crate::integrations::search_client::{IndexIdentity, SearchClient, SearchClientError};
@@ -81,18 +81,24 @@ pub enum RepoIndexError {
 /// (`?repo_identity=`, filtered server-side) and re-checks each identity
 /// locally; only on no match does it list every index for the bare-name
 /// fallback in [`select_repo_index`]. `pinned` is the session's configured
-/// index, used only when it belongs to this repo. Every miss is an error.
+/// index, used only when it belongs to this repo. Every miss is an error. An
+/// owner literally named [`trusty_common::github_path::UNKNOWN_OWNER`] is
+/// refused, since that string is also what an owner-less index's identity
+/// canonicalises to (#8649).
 ///
 /// # Errors
 ///
-/// [`RepoIndexError::InvalidRepo`] for an empty or unparseable name,
-/// [`RepoIndexError::Registry`] when a list cannot be read, and
-/// [`RepoIndexError::NoIndex`] when no index belongs to the repo.
+/// [`RepoIndexError::InvalidRepo`] for an empty, unparseable, or
+/// `UNKNOWN_OWNER`-sentinel name, [`RepoIndexError::Registry`] when a list
+/// cannot be read, and [`RepoIndexError::NoIndex`] when no index belongs to
+/// the repo.
 ///
 /// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
 /// `missing_index_error_names_the_repo_and_the_index_id`,
 /// `registry_failure_is_an_error_when_search_is_required`,
-/// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`.
+/// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
+/// `owner_named_unknown_owner_sentinel_is_invalid`,
+/// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`.
 pub(crate) async fn resolve_repo_index(
     client: &dyn SearchClient,
     owner: &str,
@@ -107,9 +113,14 @@ pub(crate) async fn resolve_repo_index(
     if owner_t.is_empty() || repo_t.is_empty() || owner_t.contains('/') || repo_t.contains('/') {
         return Err(invalid());
     }
-    let repo_key = parse_owner_repo(&format!("{owner_t}/{repo_t}"))
-        .map(|gp| RepoIdentity::GitHub(gp).canonical())
-        .ok_or_else(invalid)?;
+    let gp = parse_owner_repo(&format!("{owner_t}/{repo_t}")).ok_or_else(invalid)?;
+    // #8649: `UNKNOWN_OWNER` is also what an owner-less local index's identity
+    // canonicalises to; a real GitHub owner literally named that would
+    // otherwise collide with — and silently resolve to — that unrelated index.
+    if gp.owner == UNKNOWN_OWNER {
+        return Err(invalid());
+    }
+    let repo_key = RepoIdentity::GitHub(gp).canonical();
     let index_id = repo_t.to_string();
     let registry = |source| RepoIndexError::Registry {
         repo: repo_key.clone(),

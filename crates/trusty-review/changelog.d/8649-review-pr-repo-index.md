@@ -16,3 +16,6 @@ Fixed
 - An index found only by its bare repo name is used only when it has no
   recorded `repo_identity` (with a warning); one whose identity is unreadable
   or names another repo is refused (#8649).
+- A GitHub owner literally named `unknown-owner` is refused instead of being
+  resolved, since that string is also what an owner-less index's identity
+  canonicalises to (#8649).
