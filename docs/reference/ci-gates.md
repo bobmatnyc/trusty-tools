@@ -42,8 +42,10 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
 🔴 **The required `tm-capabilities generated-skill drift check` job also runs
 the step `Agent resident-budget tests (reuse the build above)`** (#8700). It
 runs the three `*_stays_within_its_resident_budget` tests in
-`crates/trusty-mpm/src/core/bundle_tests.rs`, wrapped in
-`scripts/check_test_count.sh` so a filter that matches nothing fails. Before
+`crates/trusty-mpm/src/core/bundle_tests.rs`, named in full under `--exact`.
+The step fails unless exactly those three run, so renaming one fails it;
+`scripts/check_test_count.sh` also refuses a zero-test run, and an edit to that
+script makes the step run. Before
 this, they ran only in the non-required pre-publish shards, and PR #8695 grew
 `BASE-AGENT.md` past two budgets and still merged. A PR that pushes a bundled
 agent body or the default output style over its budget now fails a required
