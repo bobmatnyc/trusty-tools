@@ -131,63 +131,35 @@ section, cross-referenced from the "Worktree Discipline" section of the
 
 ## Installing a Freshly Built Binary
 
-Install from a checkout with an empty `git status --porcelain`, at a known
-commit — `cargo install --path` bakes in whatever is actually on disk, so a
-dirty or unverified checkout ships whatever it happens to be holding:
+🔴 **A release install always uses the registry, never `cargo install
+--path`.** Per [ADR-0043](../adr/0043-cargo-bin-policy.md), `~/.cargo/bin`
+holds only registry installs; a path install is a prohibited class even from
+a clean checkout — it just downgrades the violation from a hard failure to a
+tolerated `Warn` in `tm doctor binary_provenance`, right up until the source
+worktree is reclaimed, at which point the same install reports `Fail` because
+its recorded source directory no longer exists
+([#8561](https://github.com/bobmatnyc/trusty-tools/issues/8561)). Once
+`cargo publish` succeeds, install with:
 
 ```bash
-git -C <checkout> status --porcelain   # must print nothing
-git -C <checkout> log -1 --oneline     # is this the commit you meant to ship?
-cargo install --path <checkout>/crates/<name> --locked
+cargo install <crate> --version <version> --locked
 ```
 
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
-which keeps the macOS kernel's cdhash cache consistent — see
-[release-workflow.md](release-workflow.md) for the full cdhash hazard (why a
-bare `cp` over an on-PATH binary SIGKILLs the next exec, and the TCC-grant
-consequences). That property holds for `cargo install --path` from any clean
-checkout; it says nothing about which checkout to pick.
+Run this from OUTSIDE the workspace directory, so no local `[patch]` table or
+relative path can shadow the registry resolution. No checkout, clean or
+otherwise, is needed for this step — see
+[release-workflow.md](release-workflow.md#release-steps) for the full
+release-install step and the macOS cdhash hazard (why a bare `cp` over an
+on-PATH binary SIGKILLs the next exec, and the TCC-grant consequences); that
+hazard is unchanged by which source `cargo install` reads from.
 
-A freshly-provisioned worktree off `origin/main` satisfies the clean-tree
-requirement by construction, which is why it stays the default:
-
-```bash
-cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
-```
-
-The main checkout is not automatically disqualified, but it is not
-automatically clean either. The write boundary
-([ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
-[ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0061](../adr/0061-commits-never-land-on-local-main.md)) denies source
-edits and every commit aimed at local `main`, which rules out the worst
-case, but it classifies a write by file EXTENSION, not by directory:
-documents and configuration stay writable directly in the main checkout,
-and reach origin only through the fast-path branch — never a commit onto
-local `main` itself, per ADR-0061.
-`crates/trusty-mpm/src/assets/skills/*.md` falls on the
-writable side of that line even though it lives under `src/` and is compiled
-into the `trusty-mpm` binary at build time via `include_str!` — so a
-locally-edited, uncommitted skill file in the main checkout can still be
-baked into a binary installed from there. The `git status --porcelain` check
-above is what catches that; running it costs one command.
-
-If the checkout you need to install from is not clean and you cannot switch to
-one that is, provision a throwaway worktree off `origin/main` and install from
-there:
-
-```bash
-git worktree add .claude/worktrees/baseline-$$ origin/main
-cargo install --path .claude/worktrees/baseline-$$/crates/<name> --locked
-git worktree remove .claude/worktrees/baseline-$$
-```
-
-This reaches the clean tree the install needs without disturbing the dirty
-checkout at all: nothing another session can observe changes, and a failure
-partway through leaves that session's uncommitted work exactly where it was.
-The old form of this recipe stashed the dirty checkout instead, which meant an
-interrupted run left the work in a stash entry someone had to find and restore
-by hand (#4730).
+**A path install is never a substitute for the step above, not even for
+local, unreleased testing.** ADR-0043's own escape valve for trying an
+unreleased fix immediately is to skip installing it at all: build once
+(`cargo build --release -p <crate>`) and run the binary directly out of
+`target/{debug,release}/` for that session. That satisfies "run what I just
+built" without ever writing to `~/.cargo/bin` from a worktree or checkout that
+can later be reclaimed out from under the install.
 
 ## Git Staging in Worktrees
 
