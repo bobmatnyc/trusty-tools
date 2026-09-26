@@ -474,7 +474,7 @@ impl PalaceHandle {
             kg.store(),
             expired_ids,
             &palace.id,
-            super::open_sweep::OPEN_SWEEP_BUDGET,
+            super::open_sweep::OPEN_WRITE_BUDGET,
         );
         if pruned > 0 {
             tracing::info!(palace = %palace.id, count = pruned, "purged expired drawers at open");

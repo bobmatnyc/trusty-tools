@@ -1,3 +1,5 @@
 Fixed
 - A palace reopen no longer waits on a write transaction that never finishes (#8314). The vector store's open is write-free once the file is initialised, and the open-time expired-drawer sweep waits at most 2 s for its deletes before the open proceeds, logging an error that names the palace and the operation. A read that has to reopen an evicted palace now answers with the last committed data instead of hanging.
+- The registry's reopen path no longer waits on a stuck write either (#8314). Room backfill and default-wing seeding at open begin no write when every row already exists, and otherwise run under the same 2 s bound; a skipped row is written on a later open.
+- Repeated reopens behind a stuck write no longer park one more helper thread each (#8314). At most one open-time write per database is outstanding; later opens skip their maintenance writes and log a warning until it finishes.
 - A write that exceeds its pipeline budget now logs an ERROR naming the palace and the `remember` operation, not only an error returned to a client that may already have given up (#8314).
