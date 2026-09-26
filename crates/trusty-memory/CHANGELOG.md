@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.28.0] — 2026-09-26
+
+### Added
+
+- `trusty-memory palace legacy-kg <palace>` reports the drawers a pre-redb SQLite `kg.db` still holds that `kg.redb` lacks, plus unreadable rows, legacy triples, missing drawers whose content a live drawer already holds, and `.v2-incompatible` files. It reads a private copy of `kg.db` and its WAL, so rows only in `kg.db-wal` count; a copy taken while either file changed is retried once, then refused. It is a dry run by default; `--apply` imports the missing drawers with their original id, room and timestamps, then embeds them so recall finds them. A missing drawer whose content a live drawer already holds under another id is skipped and reported as `content_duplicates`; `--include-content-duplicates` imports it anyway. A drawer held only in the L1 snapshot counts as missing and is imported, and the imported copy replaces the L1 entry in memory. `--apply` refuses a `kg.redb` or vector index it cannot open read-only rather than let the write open recreate it, and prints its report before failing on an embed error. It never deletes or rewrites `kg.db`, and a re-run imports nothing ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+
+### Fixed
+
+- A write parked in redb no longer keeps `trusty-memory` alive after a graceful shutdown (#8314). The binary tears its runtime down within what the termination grace window (launchd's `ExitTimeOut`) has left since the shutdown signal, less 1 s, instead of waiting for every blocking task. A slow but finite KG commit that fits in that window finishes and closes the store cleanly; a stuck one is abandoned and logged, and the process exits so the palace's file locks are released. redb commits are atomic, so the next start opens the last committed state.
+- `palace_delete` without `force` now refuses a palace whose legacy `kg.db` holds drawers `kg.redb` lacks, holds legacy triples, or cannot be read, or which still has a `.v2-incompatible` file. This check runs before the has-drawers check, so a palace with live drawers and unimported legacy data gets the legacy-data refusal, which carries no hint to pass `force`. It also refuses a palace it cannot open or whose drawer table loaded degraded, instead of deleting it unchecked. Before, it deleted that data with no copy left. The `palace_delete` tool schema now states that `force` also destroys unimported `kg.db` data ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- `palace legacy-kg` now screens every drawer it would import with the same secret check and quality gates a live `memory_remember` write runs, including the 8-token minimum. A refused drawer is not imported; the report counts refusals as `rejected_secret` and `rejected_noise=N (too_short=M)` and lists each refused id with its reason, never its content. The dry run prints the same counts, so they are visible before `--apply` ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- New `palace legacy-kg --allow-short` flag skips the 8-token minimum alone, as `memory_note` does, so short drawers can be imported on purpose. The secret check, blocklist, word-count and noise-pattern gates still apply; no flag bypasses the secret check. The flag works on a dry run too, and a dry run without it says how many `too_short` drawers `--allow-short` would import ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- `palace legacy-kg --apply` now copies `kg.redb`, `index.usearch.redb`, `kg.db` and its `-wal`/`-journal` sidecars into `<palace>/legacy-kg-backup-<timestamp>/` before it writes, and checks each copy's size and SHA-256 against the original. It writes a `MANIFEST.sha256` and prints the backup path and each verified file. If any copy fails or does not verify, `--apply` writes nothing and exits non-zero ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+
 ## [0.27.2] — 2026-09-26
 
 ### Added
