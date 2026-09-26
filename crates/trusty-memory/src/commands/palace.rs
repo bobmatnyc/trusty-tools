@@ -74,8 +74,11 @@ pub enum PalaceAction {
     ///
     /// Dry run by default: reads private copies of `kg.db` and kg.redb, so it
     /// is safe with the daemon up. `--apply` needs the write lock (stop the
-    /// daemon first) and refuses a store it would have to recreate. Nothing
-    /// is ever deleted or renamed.
+    /// daemon first) and refuses a store it would have to recreate. A missing
+    /// drawer whose content a live drawer already holds under another id is
+    /// skipped and counted as `content_duplicates` unless
+    /// `--include-content-duplicates` is passed. Nothing is ever deleted or
+    /// renamed.
     LegacyKg {
         /// Palace id.
         name: String,
@@ -85,6 +88,10 @@ pub enum PalaceAction {
         /// With `--apply`, skip embedding the imported drawers.
         #[arg(long)]
         no_embed: bool,
+        /// With `--apply`, also import missing drawers whose content a live
+        /// drawer already holds under another id (default: skip them).
+        #[arg(long, requires = "apply")]
+        include_content_duplicates: bool,
     },
 }
 
@@ -111,10 +118,12 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             name,
             apply,
             no_embed,
+            include_content_duplicates,
         } => {
             let palace = resolve(&name)?;
             let report = if apply {
-                super::legacy_kg::apply_report(&palace, !no_embed).await?
+                super::legacy_kg::apply_report(&palace, !no_embed, include_content_duplicates)
+                    .await?
             } else {
                 super::legacy_kg::scan_report(&palace)?
             };

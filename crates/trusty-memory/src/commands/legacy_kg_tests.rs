@@ -156,7 +156,7 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
     let (_root, palace) = fixture();
     let legacy_before = bytes(&palace.data_dir.join("kg.db"));
 
-    let r = apply_report(&palace, true).await.expect("apply");
+    let r = apply_report(&palace, true, false).await.expect("apply");
     assert!(!r.dry_run);
     assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
     let (_, still_missing) = r.vectors.expect("vectors ran");
@@ -181,7 +181,7 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
         assert!(hits.iter().any(|h| h.drawer.id == a), "A recalled");
     }
 
-    let again = apply_report(&palace, true).await.expect("re-run");
+    let again = apply_report(&palace, true, false).await.expect("re-run");
     assert_eq!(
         (again.already_live, again.missing, again.imported),
         (3, 0, 0)
@@ -224,7 +224,7 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     let scan = scan_report(&palace).expect("scan");
     assert_eq!((scan.already_live, scan.missing), (1, 2), "L1 is not live");
 
-    let r = apply_report(&palace, false).await.expect("apply");
+    let r = apply_report(&palace, false, false).await.expect("apply");
     assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
     let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
         .expect("reopen kg.redb")
@@ -250,7 +250,7 @@ async fn apply_refuses_a_store_the_writer_open_would_rename_aside() {
         let quarantined = list_incompatible_files(dir).expect("list").len();
 
         assert!(
-            apply_report(&palace, false).await.is_err(),
+            apply_report(&palace, false, false).await.is_err(),
             "{file}: apply must refuse"
         );
 
@@ -354,7 +354,7 @@ async fn wal_only_legacy_rows_are_counted_and_imported() {
 
     let scan = scan_report(&palace).expect("scan");
     assert_eq!((scan.legacy_rows, scan.missing), (2, 2));
-    let r = apply_report(&palace, false).await.expect("apply");
+    let r = apply_report(&palace, false, false).await.expect("apply");
     assert_eq!(r.imported, 2);
 
     assert!(
@@ -362,4 +362,123 @@ async fn wal_only_legacy_rows_are_counted_and_imported() {
         "reading changed kg.db or its WAL"
     );
     assert!(!data_dir.join("kg.db-shm").exists(), "a -shm was created");
+}
+
+/// Why (#8434): a missing legacy drawer whose content a live drawer already
+/// holds under another id is present already; importing it by default would
+/// duplicate it. The apply skips and reports it; the flag imports it.
+/// Test: itself.
+#[tokio::test]
+async fn apply_skips_content_duplicates_unless_included() {
+    let (_root, palace) = fixture();
+    let dir = &palace.data_dir;
+    KgStoreRedb::open(&dir.join("kg.redb"))
+        .expect("open kg.redb")
+        .upsert_drawer(&Drawer::new(
+            Uuid::new_v4(),
+            "release notes live in docs/releases",
+        ))
+        .expect("seed B's content under another id");
+    let (a, b) = (
+        Uuid::parse_str(MISSING_A).expect("id"),
+        Uuid::parse_str(MISSING_B).expect("id"),
+    );
+    let redb_ids = || {
+        KgStoreRedb::open(&dir.join("kg.redb"))
+            .expect("reopen kg.redb")
+            .load_drawer_ids()
+            .expect("ids")
+    };
+
+    let r = apply_report(&palace, false, false).await.expect("apply");
+    assert_eq!(
+        (r.missing, r.content_duplicates, r.imported),
+        (2, Some(1), 1)
+    );
+    assert!(
+        r.render().contains("content_duplicates=1"),
+        "{}",
+        r.render()
+    );
+    assert!(r.render().contains("skipped;"), "{}", r.render());
+    let ids = redb_ids();
+    assert!(ids.contains(&a), "the distinct drawer is imported");
+    assert!(!ids.contains(&b), "the content duplicate is skipped");
+
+    let again = apply_report(&palace, false, false).await.expect("re-run");
+    assert_eq!((again.content_duplicates, again.imported), (Some(1), 0));
+
+    let r = apply_report(&palace, false, true).await.expect("include");
+    assert_eq!((r.content_duplicates, r.imported), (Some(1), 1));
+    assert!(
+        r.render().contains("imported by --include"),
+        "{}",
+        r.render()
+    );
+    assert!(redb_ids().contains(&b), "the flag imports the duplicate");
+}
+
+/// Why (#8434): an in-memory entry for an imported id came from the L1
+/// snapshot; after the import, memory must hold what `kg.redb` holds.
+/// Test: itself.
+#[test]
+fn merge_imported_replaces_l1_entries_and_appends_the_rest() {
+    let room = Uuid::parse_str(ROOM).expect("room");
+    let mut stale = Drawer::new(room, "stale L1 text");
+    stale.id = Uuid::parse_str(MISSING_A).expect("id");
+    let other = Drawer::new(room, "an unrelated live drawer");
+    let mut fresh_a = Drawer::new(room, "the deploy key rotates every ninety days");
+    fresh_a.id = stale.id;
+    let fresh_b = Drawer::new(room, "release notes live in docs/releases");
+    let mut in_memory = vec![stale, other.clone()];
+
+    merge_imported(&mut in_memory, vec![fresh_a.clone(), fresh_b.clone()]);
+
+    assert_eq!(in_memory.len(), 3);
+    assert_eq!(in_memory[0].id, fresh_a.id);
+    assert_eq!(in_memory[0].content(), fresh_a.content());
+    assert_eq!(in_memory[1].id, other.id);
+    assert_eq!(in_memory[2].id, fresh_b.id);
+}
+
+/// Why (#8434): the files are copied one after another, so a writer that
+/// changes one mid-copy leaves a torn copy. One change is retried; a change
+/// on both attempts is an error, which the delete guard turns into a refusal.
+/// Test: itself.
+#[test]
+fn copy_stable_retries_once_then_refuses_a_changing_kg_db() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src = root.path().join("src");
+    write_legacy_kg(&src, &[]);
+    let dest = root.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let grow = |p: &Path| {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(p)
+            .expect("open for append");
+        std::io::Write::write_all(&mut f, b"x").expect("append");
+    };
+
+    let mut calls = 0;
+    copy_stable(&src, &dest, |from, to| {
+        calls += 1;
+        if calls == 1 {
+            grow(from);
+        }
+        std::fs::copy(from, to)
+    })
+    .expect("a single change is retried");
+    assert_eq!(calls, 2, "one retry");
+    assert_eq!(
+        bytes(&dest.join(LEGACY_KG_FILE)),
+        bytes(&src.join(LEGACY_KG_FILE))
+    );
+
+    let err = copy_stable(&src, &dest, |from, to| {
+        grow(from);
+        std::fs::copy(from, to)
+    })
+    .expect_err("a file changing on both attempts must refuse");
+    assert!(err.to_string().contains("changed during both"), "{err:#}");
 }

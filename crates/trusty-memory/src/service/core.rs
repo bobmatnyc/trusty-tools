@@ -350,9 +350,10 @@ impl MemoryService {
     /// palaces; `force=true` is the explicit opt-in to the destructive path.
     /// What: 1) confirms the palace exists on disk (else `NotFound`),
     /// 2) when `!force`, opens the palace and returns `Conflict` if the open
-    /// fails, if its drawer table loaded degraded, if it has drawers, or while
-    /// a legacy `kg.db` holds drawers or triples or a `.v2-incompatible` file
-    /// remains (#8434), 3) drops the in-memory registry entry so
+    /// fails, if its drawer table loaded degraded, while a legacy `kg.db` holds
+    /// drawers `kg.redb` lacks or triples or a `.v2-incompatible` file remains
+    /// (#8434; checked first, and its message carries no force hint), or if it
+    /// has drawers, 3) drops the in-memory registry entry so
     /// future opens hit the (now-missing) disk state, 4) removes
     /// `<data_root>/<palace_id>/` recursively via `tokio::fs::remove_dir_all`,
     /// and 5) emits an aggregate `StatusChanged` so dashboards refresh.
@@ -392,22 +393,21 @@ impl MemoryService {
                      refusing to delete",
                 ));
             }
-            if !handle.drawers.read().is_empty() {
-                return Err(ServiceError::conflict(
-                    "Palace has drawers; pass force=true to delete",
-                ));
-            }
+            let has_drawers = !handle.drawers.read().is_empty();
+            // #8434: dedupe legacy rows against kg.redb, the persisted store.
+            let live = handle.kg.load_drawer_ids().map_err(|e| {
+                ServiceError::conflict(format!(
+                    "Palace drawer ids could not be read ({e:#}); refusing to delete"
+                ))
+            })?;
             drop(handle);
             // #8434: "0 live drawers" is not "empty" while a legacy kg.db or a
             // quarantined redb 2.x store holds data the live store never saw.
-            // Reached only after a clean open found no drawers, so the live
-            // set is empty.
+            // Checked before the has-drawers conflict, whose force hint would
+            // steer a caller into destroying that data unimported.
             let dir = self.state.data_root.join(palace_id);
             let unaccounted = tokio::task::spawn_blocking(move || {
-                crate::commands::legacy_kg::unaccounted_legacy_data(
-                    &dir,
-                    &std::collections::HashSet::new(),
-                )
+                crate::commands::legacy_kg::unaccounted_legacy_data(&dir, &live)
             })
             .await
             .map_err(|e| ServiceError::internal(format!("legacy data check: {e}")))?;
@@ -417,6 +417,11 @@ impl MemoryService {
                     "Palace holds legacy data ({reason}); run `trusty-memory palace legacy-kg \
                      {palace_id}` to review it"
                 )));
+            }
+            if has_drawers {
+                return Err(ServiceError::conflict(
+                    "Palace has drawers; pass force=true to delete",
+                ));
             }
         }
         // Drop the cached `Arc<PalaceHandle>` and gap cache before unlinking

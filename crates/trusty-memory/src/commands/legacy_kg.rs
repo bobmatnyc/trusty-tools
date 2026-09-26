@@ -18,27 +18,28 @@
 //! content duplicated under other ids, and any `.v2-incompatible` quarantine
 //! files. [`apply_report`] imports the missing drawers verbatim (same id,
 //! room, timestamps) into `kg.redb` in one transaction and embeds them so
-//! recall can reach them. Nothing is ever deleted, renamed or rewritten in
-//! `kg.db`; a re-run imports nothing because every legacy id is then in
-//! `kg.redb`. [`unaccounted_legacy_data`] is the check `palace_delete` makes
+//! recall can reach them; content duplicates are skipped unless
+//! `--include-content-duplicates` is passed. Nothing is ever deleted, renamed
+//! or rewritten in `kg.db`; a re-run imports nothing because every imported id
+//! is then in `kg.redb` and a skipped duplicate is skipped again. [`unaccounted_legacy_data`] is the check `palace_delete` makes
 //! before it removes a palace directory.
 //!
 //! Test: `dry_run_counts_legacy_drawers_and_writes_nothing`,
 //! `apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop`,
 //! `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
-use trusty_common::memory_core::memory_content_hash;
 use trusty_common::memory_core::palace::{Drawer, Palace};
 use trusty_common::memory_core::retrieval::{PalaceHandle, VectorBackfillOptions};
 use trusty_common::memory_core::store::concurrent_open::try_open_or_snapshot;
 use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
+use trusty_common::memory_core::{memory_content_hash, ContentHash};
 use uuid::Uuid;
 
 use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
@@ -46,9 +47,10 @@ use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
 /// Filename of the pre-redb SQLite knowledge graph inside a palace directory.
 pub(crate) const LEGACY_KG_FILE: &str = "kg.db";
 
-/// SQLite sidecars that can hold committed (`-wal`) or to-be-rolled-back
-/// (`-journal`) state for `kg.db`; copied with it so the copy reads the same.
-const SQLITE_SIDECARS: [&str; 2] = ["-wal", "-journal"];
+/// Suffixes of the files copied together: `kg.db` itself, then the SQLite
+/// sidecars that can hold committed (`-wal`) or to-be-rolled-back (`-journal`)
+/// state for it, so the copy reads the same.
+const COPIED_SUFFIXES: [&str; 3] = ["", "-wal", "-journal"];
 
 /// The vector store's redb file (`index.usearch` + `.redb`, see `vector.rs`).
 const INDEX_FILE: &str = "index.usearch.redb";
@@ -78,8 +80,9 @@ pub struct LegacyDrawers {
 /// byte of it.
 /// What: `Ok(None)` when `kg.db` is genuinely absent. A file that is present
 /// but not SQLite is an `Err`, not "no legacy data". Otherwise copies `kg.db`
-/// and its `-wal`/`-journal` sidecars into a private temp dir, opens the copy
-/// (never the original), and decodes every `drawers` row the way the removed
+/// and its `-wal`/`-journal` sidecars into a private temp dir — an `Err` when
+/// they keep changing mid-copy ([`copy_stable`]) — opens the copy (never the
+/// original), and decodes every `drawers` row the way the removed
 /// #45 reader did — except a row it cannot decode lands in
 /// [`LegacyDrawers::unreadable`] instead of vanishing. Reading a copy means
 /// rows only in a `-wal` are seen and SQLite creates no `-shm` in the palace.
@@ -107,20 +110,7 @@ pub fn read_legacy_kg(data_dir: &Path) -> Result<Option<LegacyDrawers>> {
     let scratch = tempfile::TempDir::with_prefix_in(SCRATCH_PREFIX, std::env::temp_dir())
         .context("create scratch dir for the legacy kg.db copy")?;
     let copy = scratch.path().join(LEGACY_KG_FILE);
-    std::fs::copy(&path, &copy).with_context(|| format!("copy {}", path.display()))?;
-    for suffix in SQLITE_SIDECARS {
-        let side = data_dir.join(format!("{LEGACY_KG_FILE}{suffix}"));
-        if side
-            .try_exists()
-            .with_context(|| format!("cannot stat {}", side.display()))?
-        {
-            std::fs::copy(
-                &side,
-                scratch.path().join(format!("{LEGACY_KG_FILE}{suffix}")),
-            )
-            .with_context(|| format!("copy {}", side.display()))?;
-        }
-    }
+    copy_stable(data_dir, scratch.path(), |from, to| std::fs::copy(from, to))?;
     // Read-write on the private copy only: a read-only connection cannot roll
     // back a hot journal, so it would refuse exactly the crash-left file.
     let conn = Connection::open_with_flags(
@@ -169,6 +159,63 @@ pub fn read_legacy_kg(data_dir: &Path) -> Result<Option<LegacyDrawers>> {
         }
     }
     Ok(Some(out))
+}
+
+/// `(len, mtime)` of `kg.db` and each sidecar, `None` for an absent file.
+type Fingerprint = Vec<Option<(u64, Option<std::time::SystemTime>)>>;
+
+fn fingerprint(data_dir: &Path) -> Result<Fingerprint> {
+    COPIED_SUFFIXES
+        .iter()
+        .map(|suffix| {
+            let p = data_dir.join(format!("{LEGACY_KG_FILE}{suffix}"));
+            match std::fs::metadata(&p) {
+                Ok(m) => Ok(Some((m.len(), m.modified().ok()))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e).with_context(|| format!("cannot stat {}", p.display())),
+            }
+        })
+        .collect()
+}
+
+/// Copy `kg.db` and its sidecars into `dest`, refusing a copy that may be torn.
+///
+/// Why: #8434 — the files are copied one after another, so a writer that
+/// touches `kg.db` or its WAL mid-copy leaves a copy that matches neither
+/// state, and the counts drawn from it would be wrong.
+/// What: stats every file (size and mtime) before and after one copy pass. A
+/// change means the pass is retried once; a second change is an `Err`, which
+/// the delete guard turns into a refusal. `copy` is the per-file copy, a
+/// seam for the test. A retry first removes the previous pass's files.
+/// Test: `copy_stable_retries_once_then_refuses_a_changing_kg_db`.
+pub(crate) fn copy_stable(
+    data_dir: &Path,
+    dest: &Path,
+    mut copy: impl FnMut(&Path, &Path) -> std::io::Result<u64>,
+) -> Result<()> {
+    for _ in 0..2 {
+        let before = fingerprint(data_dir)?;
+        for (suffix, stat) in COPIED_SUFFIXES.iter().zip(&before) {
+            let name = format!("{LEGACY_KG_FILE}{suffix}");
+            let (src, dst) = (data_dir.join(&name), dest.join(&name));
+            match std::fs::remove_file(&dst) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("clear {}", dst.display()));
+                }
+                _ => {}
+            }
+            if stat.is_some() {
+                copy(&src, &dst).with_context(|| format!("copy {}", src.display()))?;
+            }
+        }
+        if fingerprint(data_dir)? == before {
+            return Ok(());
+        }
+    }
+    bail!(
+        "{} changed during both copy attempts; refusing to read a possibly torn copy",
+        data_dir.join(LEGACY_KG_FILE).display()
+    )
 }
 
 /// Whether the SQLite database has a table named `name`.
@@ -285,9 +332,12 @@ pub struct LegacyReport {
     pub already_live: usize,
     /// Legacy drawers `kg.redb` lacks (before this run's import).
     pub missing: usize,
-    /// Dry run only: how many `missing` drawers repeat the content of a live
-    /// drawer under another id. Counted, never deduplicated.
+    /// How many `missing` drawers repeat the content of a `kg.redb` drawer
+    /// under another id; `None` without a `kg.db`. An apply skips them unless
+    /// `include_content_duplicates` is set.
     pub content_duplicates: Option<usize>,
+    /// Apply only: `--include-content-duplicates` imported the duplicates.
+    pub include_content_duplicates: bool,
     /// Drawers this run wrote to `kg.redb`. Always 0 on a dry run.
     pub imported: usize,
     /// `(repaired, still_missing)` from the vector backfill, when it ran.
@@ -321,9 +371,14 @@ impl LegacyReport {
                 out.push_str(&format!("    unreadable row {u}\n"));
             }
             if let Some(dups) = self.content_duplicates {
+                let fate = match (self.dry_run, self.include_content_duplicates) {
+                    (true, _) => "--apply skips them unless --include-content-duplicates",
+                    (false, false) => "skipped; --include-content-duplicates imports them",
+                    (false, true) => "imported by --include-content-duplicates",
+                };
                 out.push_str(&format!(
                     "  content_duplicates={dups} (missing drawers whose content a live drawer \
-                     already holds under another id; --apply imports them anyway)\n"
+                     already holds under another id; {fate})\n"
                 ));
             }
         } else {
@@ -379,15 +434,39 @@ pub fn scan_report(palace: &Palace) -> Result<LegacyReport> {
     })?
     .unwrap_or_default();
     fill_legacy_counts(&mut report, &legacy, &live);
-    report.content_duplicates = Some(
-        legacy
-            .drawers
-            .iter()
-            .filter(|d| !live.contains(&d.id))
-            .filter(|d| live_hashes.contains(&memory_content_hash(d.content())))
-            .count(),
-    );
+    let (_, duplicates) = split_missing(legacy.drawers, &live, &live_hashes);
+    report.content_duplicates = Some(duplicates.len());
     Ok(report)
+}
+
+/// Split the legacy drawers `live` lacks into `(distinct, duplicates)`, where
+/// a duplicate repeats the content of a `kg.redb` drawer under another id.
+fn split_missing(
+    drawers: Vec<Drawer>,
+    live: &HashSet<Uuid>,
+    live_hashes: &HashSet<ContentHash>,
+) -> (Vec<Drawer>, Vec<Drawer>) {
+    drawers
+        .into_iter()
+        .filter(|d| !live.contains(&d.id))
+        .partition(|d| !live_hashes.contains(&memory_content_hash(d.content())))
+}
+
+/// Put the drawers just written to `kg.redb` into the in-memory table.
+///
+/// Why: #8434 — an entry already in memory for an imported id came from the
+/// L1 snapshot, not from `kg.redb`; keeping it would leave memory and redb
+/// disagreeing about that drawer.
+/// What: replaces an entry with a matching id in place and appends the rest.
+/// Test: `merge_imported_replaces_l1_entries_and_appends_the_rest`.
+fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
+    let mut fresh: HashMap<Uuid, Drawer> = imported.into_iter().map(|d| (d.id, d)).collect();
+    for slot in in_memory.iter_mut() {
+        if let Some(d) = fresh.remove(&slot.id) {
+            *slot = d;
+        }
+    }
+    in_memory.extend(fresh.into_values());
 }
 
 /// Apply: import every missing legacy drawer, then embed the palace's
@@ -400,15 +479,23 @@ pub fn scan_report(palace: &Palace) -> Result<LegacyReport> {
 /// aside and recreate it empty (#702). Then opens the palace `Writer`; refuses
 /// a handle whose drawer table loaded degraded (a partial live set would
 /// re-import rows it merely failed to read, overwriting them with their legacy
-/// text). Dedupes against the ids in `kg.redb` only, never the L1 snapshot.
-/// Upserts the missing drawers in one redb transaction, adds the ones not
-/// already in memory to the in-memory table, and — unless `embed` is false —
-/// runs the palace's own missing-vector backfill. An embed failure after the
-/// commit lands in [`LegacyReport::embed_error`]. Never writes `kg.db`.
+/// text). Dedupes against the ids in `kg.redb` only, never the L1 snapshot,
+/// and skips missing drawers whose content a `kg.redb` drawer already holds
+/// under another id unless `include_content_duplicates` is set; the skipped
+/// count lands in [`LegacyReport::content_duplicates`]. Upserts the rest in
+/// one redb transaction, puts them in the in-memory table (replacing an
+/// L1-only entry for the same id), and — unless `embed` is false — runs the
+/// palace's own missing-vector backfill. An embed failure after the commit
+/// lands in [`LegacyReport::embed_error`]. Never writes `kg.db`.
 /// Test: `apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop`,
 /// `l1_only_legacy_drawer_is_imported_to_redb`,
+/// `apply_skips_content_duplicates_unless_included`,
 /// `apply_refuses_a_store_the_writer_open_would_rename_aside`.
-pub async fn apply_report(palace: &Palace, embed: bool) -> Result<LegacyReport> {
+pub async fn apply_report(
+    palace: &Palace,
+    embed: bool,
+    include_content_duplicates: bool,
+) -> Result<LegacyReport> {
     let mut report = base_report(palace, false)?;
     let Some(legacy) = read_legacy_kg(&palace.data_dir)? else {
         return Ok(report);
@@ -428,22 +515,29 @@ pub async fn apply_report(palace: &Palace, embed: bool) -> Result<LegacyReport> 
         .kg
         .load_drawer_ids()
         .context("load the drawer ids in kg.redb")?;
-    fill_legacy_counts(&mut report, &legacy, &live);
-    let missing: Vec<Drawer> = legacy
-        .drawers
-        .into_iter()
-        .filter(|d| !live.contains(&d.id))
+    let live_hashes: HashSet<ContentHash> = handle
+        .kg
+        .load_drawers()
+        .context("load the drawers in kg.redb")?
+        .iter()
+        .map(|d| memory_content_hash(d.content()))
         .collect();
-    if !missing.is_empty() {
+    fill_legacy_counts(&mut report, &legacy, &live);
+    let (mut to_import, duplicates) = split_missing(legacy.drawers, &live, &live_hashes);
+    report.content_duplicates = Some(duplicates.len());
+    report.include_content_duplicates = include_content_duplicates;
+    // #8434: a content duplicate is already present under another id.
+    if include_content_duplicates {
+        to_import.extend(duplicates);
+    }
+    if !to_import.is_empty() {
         handle
             .kg
-            .upsert_drawers_atomic(missing.clone())
+            .upsert_drawers_atomic(to_import.clone())
             .await
             .context("import legacy drawers into kg.redb")?;
-        report.imported = missing.len();
-        let mut in_memory = handle.drawers.write();
-        let held: HashSet<Uuid> = in_memory.iter().map(|d| d.id).collect();
-        in_memory.extend(missing.into_iter().filter(|d| !held.contains(&d.id)));
+        report.imported = to_import.len();
+        merge_imported(&mut handle.drawers.write(), to_import);
     }
     if embed {
         match handle

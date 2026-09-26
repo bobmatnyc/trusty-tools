@@ -235,16 +235,32 @@ async fn delete_palace_refuses_when_drawers_present() {
 /// Why (#8434): a palace whose live store is empty can still hold the only
 /// copy of drawers in a legacy SQLite `kg.db`, or a quarantined redb 2.x
 /// store. A non-force delete must refuse both and leave the files in place;
-/// `force` still deletes.
+/// `force` still deletes. The legacy refusal wins over the has-drawers one
+/// even when live drawers exist, since that one's force hint would steer a
+/// caller into destroying the legacy data.
 /// Test: itself.
 #[tokio::test]
 async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
     use crate::commands::legacy_kg::tests::write_legacy_kg;
     let (svc, state) = service();
-    for (name, quarantine_only) in [("stranded-kg", false), ("stranded-v2", true)] {
+    for (name, quarantine_only, with_live) in [
+        ("stranded-kg", false, false),
+        ("stranded-v2", true, false),
+        ("stranded-kg-live", false, true),
+    ] {
         svc.create_palace(palace_body(name), ActivitySource::Http)
             .await
             .expect("create");
+        if with_live {
+            svc.create_drawer(
+                name,
+                drawer_body("A live fact beside the legacy kg.db."),
+                default_creator(),
+                ActivitySource::Http,
+            )
+            .await
+            .expect("seed a live drawer");
+        }
         let dir = state.data_root.join(name);
         let marker = if quarantine_only {
             std::fs::write(dir.join("kg.redb.v2-incompatible"), b"redb2").expect("write");
@@ -263,8 +279,11 @@ async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
 
         match svc.delete_palace(name, false).await {
             Err(ServiceError::Conflict(msg)) => {
-                assert!(msg.contains("legacy"), "{msg}");
-                assert!(!msg.contains("force"), "must not steer to force: {msg}");
+                assert!(msg.contains("Palace holds legacy data"), "{name}: {msg}");
+                assert!(
+                    !msg.contains("force"),
+                    "{name}: must not steer to force: {msg}"
+                );
             }
             other => panic!("{name}: expected a legacy-data conflict, got {other:?}"),
         }
@@ -321,8 +340,14 @@ async fn delete_palace_refuses_when_open_fails_or_load_is_degraded() {
             std::fs::create_dir_all(dir.join("identity.txt")).expect("mkdir");
         }
 
+        // Distinct texts, so each case proves its own refusal.
+        let expected = if degraded {
+            "drawer table loaded degraded"
+        } else {
+            "could not be opened"
+        };
         match svc.delete_palace(name, false).await {
-            Err(ServiceError::Conflict(msg)) => assert!(msg.contains("refusing"), "{msg}"),
+            Err(ServiceError::Conflict(msg)) => assert!(msg.contains(expected), "{name}: {msg}"),
             other => panic!("{name}: expected a conflict, got {other:?}"),
         }
         assert!(dir.exists(), "{name}: a refused delete removed the palace");
