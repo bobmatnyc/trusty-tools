@@ -485,3 +485,70 @@ async fn a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty() {
         "the retired snapshot is kept, renamed"
     );
 }
+
+/// #8134 round 4: a snapshot left beside a populated redb is retired at boot.
+///
+/// Why: only a snapshot that seeded redb was retired. One left beside a
+/// populated redb by an earlier migration stayed live, and once that index
+/// reached 0 durable rows the v1-stamp recovery brought the old content back
+/// with no fault.
+/// What: populates a colocated index's redb directly, plants a stale own-layout
+/// snapshot (a stale `alpha` and an unknown `gamma`), and reboots. The
+/// snapshot is renamed to `chunks.json.migrated`, redb keeps exactly its own
+/// two rows, and no fault is recorded.
+/// Test: this IS the test. Against 44ae78992 the snapshot stays in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn a_stale_snapshot_beside_a_populated_corpus_is_retired() {
+    let _pin = DataDirPin::new();
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let entry = entry_at("superseded-8134", &root, true);
+
+    let first = build_indexer_from_entry(&entry, &mock_embedder())
+        .await
+        .expect("first boot");
+    let mut current = chunk("alpha");
+    current.content = "pub fn alpha() { /* current */ }".to_string();
+    first
+        .corpus_store()
+        .expect("corpus store")
+        .upsert_batch(&[current, chunk("beta")], &[])
+        .expect("populate redb");
+    drop(first);
+    write_colocated_snapshot(&root, &["alpha", "gamma"]);
+
+    let rebooted = build_indexer_from_entry(&entry, &mock_embedder())
+        .await
+        .expect("second boot");
+    assert!(
+        rebooted.migration_faults().is_empty(),
+        "a retired snapshot is not a fault, got: {:?}",
+        rebooted.migration_faults()
+    );
+    assert_eq!(
+        durable_rows(&rebooted),
+        2,
+        "redb keeps exactly its own rows"
+    );
+    let rows = rebooted
+        .corpus_store()
+        .expect("corpus store")
+        .get_chunks(&["alpha", "gamma"])
+        .expect("read rows");
+    let contents: Vec<&str> = rows.iter().map(|c| c.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec!["pub fn alpha() { /* current */ }"],
+        "#8134: redb is unchanged: no stale `alpha`, no imported `gamma`"
+    );
+    let colocated = colocated_dir(&root);
+    assert!(
+        !colocated.join("chunks.json").exists(),
+        "#8134: a superseded snapshot must be retired"
+    );
+    assert!(
+        colocated.join("chunks.json.migrated").is_file(),
+        "the retired snapshot is kept, renamed"
+    );
+}

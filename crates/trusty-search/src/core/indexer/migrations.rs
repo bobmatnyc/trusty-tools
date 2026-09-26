@@ -115,21 +115,25 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
     }
 }
 
-/// Rename a snapshot that seeded redb to `<name>.migrated` (#8134).
+/// Rename a snapshot that redb supersedes to `<name>.migrated` (#8134).
 ///
 /// Why: nothing refreshes a colocated `chunks.json`. Left in place, an index
 /// emptied later by a reindex re-imported the old snapshot on every restart.
-/// What: renames in place. A failed rename is `Err` naming both paths, so the
-/// caller records a fault instead of leaving a live snapshot unreported.
-/// Test: `a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty`.
-fn retire_snapshot(chunks_path: &std::path::Path) -> Result<()> {
+/// What: renames in place. Called after the snapshot seeded redb, and at warm
+/// boot for a snapshot left beside an already-populated redb. A failed rename
+/// is `Err` naming both paths, so the caller records a fault instead of
+/// leaving a live snapshot unreported.
+/// Test: `a_seeded_snapshot_is_retired_so_an_emptied_corpus_stays_empty`,
+/// `a_stale_snapshot_beside_a_populated_corpus_is_retired`,
+/// `a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing`.
+pub(crate) fn retire_snapshot(chunks_path: &std::path::Path) -> Result<()> {
     let mut name = chunks_path.file_name().unwrap_or_default().to_os_string();
     name.push(".migrated");
     let retired = chunks_path.with_file_name(name);
     std::fs::rename(chunks_path, &retired).with_context(|| {
         format!(
-            "legacy snapshot {} seeded redb but could not be renamed to {}; while it \
-             stays, an emptied corpus re-imports it — remove or rename it to clear this \
+            "legacy snapshot {} is superseded by redb but could not be renamed to {}; \
+             while it stays, an emptied corpus re-imports it — remove or rename it to clear this \
              fault (#8134)",
             chunks_path.display(),
             retired.display()

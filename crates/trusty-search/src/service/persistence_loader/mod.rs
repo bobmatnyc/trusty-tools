@@ -23,7 +23,7 @@ use crate::core::{
     corpus::{open_serialized, CorpusOpenFailure, CorpusStore},
     embed::Embedder,
     indexer::{
-        migrations::{legacy_snapshot_source, JsonCorpusToRedbMigration},
+        migrations::{legacy_snapshot_source, retire_snapshot, JsonCorpusToRedbMigration},
         CodeIndexer,
     },
     store::{UsearchStore, VectorStore},
@@ -234,13 +234,16 @@ async fn restore_corpus_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIn
 /// Why (#8134): only an empty corpus may be seeded from a legacy snapshot. A
 /// failed load says nothing about what the durable store holds, and importing
 /// over it overwrote the rows that share the snapshot's ids.
-/// What: a populated load stamps the schema (so a stray `chunks.json` stays
-/// inert) and returns. `Ok(0)` runs the [`MigrationRunner`] with
+/// What: a populated load stamps the schema and retires any own-layout
+/// snapshot beside it to `chunks.json.migrated`, since redb supersedes it; a
+/// failed rename records a `json_to_redb` fault and changes nothing else. `Ok(0)` runs the [`MigrationRunner`] with
 /// [`JsonCorpusToRedbMigration`], which seeds redb from the snapshot and
 /// writes the stamp after each successful step. `Err` runs no migration and
 /// writes nothing; when a snapshot is present it records a `json_to_redb`
 /// fault naming the snapshot and the load error, so status reads `degraded`.
-/// Test: `a_failed_redb_load_never_imports_and_records_a_fault`.
+/// Test: `a_failed_redb_load_never_imports_and_records_a_fault`,
+/// `a_stale_snapshot_beside_a_populated_corpus_is_retired`,
+/// `a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing`.
 fn migrate_after_redb_load(
     indexer: &mut CodeIndexer,
     entry: &PersistedIndex,
@@ -251,6 +254,16 @@ fn migrate_after_redb_load(
         Ok(n) if n > 0 => {
             tracing::info!("warm-boot: restored {n} chunks for index '{index_id}' from redb");
             stamp_if_unversioned_for_entry(entry);
+            // #8134: redb is authoritative here, so an own-layout snapshot
+            // left beside it is superseded. Retire it now; otherwise an index
+            // emptied later re-imports it through the v1-stamp recovery.
+            let retired = legacy_snapshot_source(indexer).map(|s| retire_snapshot(&s));
+            if let Some(Err(e)) = retired {
+                indexer.record_migration_failure(
+                    crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+                    format!("{e:#}"),
+                );
+            }
         }
         // Migration runner path (issue #179).
         Ok(_) => run_migrations_for_entry(indexer, entry),
