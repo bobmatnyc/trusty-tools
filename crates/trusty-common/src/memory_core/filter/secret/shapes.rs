@@ -9,12 +9,16 @@
 //! `name@version`, and a ticket key leading a CamelCase title.
 //! What: one narrow predicate per shape, consulted by
 //! `is_readable_path_segment` and `is_structural_token` in the parent module.
-//! Test: the `_after_277` tests in `filter_tests.rs`.
+//! #8589 adds `is_short_stem_file_at`, which judges a short file name by the
+//! path around it, and `segments_read_as_path`, which every `/`-path caller
+//! uses.
+//! Test: the `_after_277` and `short_stem_*_after_8589` tests in
+//! `filter_tests.rs`.
 
 use super::{
     IDENTIFIER_DELIMITERS, MAX_ACRONYM_LEN, MIN_MEAN_CAMEL_WORD_LEN, MIN_VOWEL_PERCENT,
-    camel_words, digit_run_count, is_ordinary_url, is_provider_key, looks_like_secret,
-    meets_vowel_floor,
+    SECRET_MIN_LEN, camel_word_stats, camel_words, digit_run_count, is_ordinary_url,
+    is_provider_key, looks_like_secret, meets_vowel_floor,
 };
 
 /// Longest file extension [`is_identifier_file_segment`] accepts (`java`,
@@ -42,6 +46,8 @@ pub(crate) const GITHUB_NOREPLY_DOMAIN: &str = "users.noreply.github.com";
 /// rose from 15 to 18. A lowercase word is refused for the same reason: it
 /// doubled the random admits at 16 characters. A refused memory is
 /// recoverable by re-import; an admitted secret is not.
+// #8589: a stem under 20 characters no longer needs these floors when its
+// path passes `is_short_stem_file_at`; they still decide every other stem.
 /// What: splits with `camel_words`; every word opens with a capital, has at
 /// least two letters, and carries at most [`MAX_ACRONYM_LEN`] leading
 /// capitals; the mean word length is at least [`MIN_MEAN_CAMEL_WORD_LEN`]
@@ -78,31 +84,18 @@ pub(crate) fn is_identifier_word_run(run: &str) -> bool {
 /// used as a file stem, is admitted (same class as FN-2, #1484) —
 /// `vault/CorrectHorseBatteryStaple7.txt`, pinned in
 /// `known_accepted_bounds_after_277`.
-/// What: the extension (after the last `.`) is 1 to [`MAX_FILE_EXTENSION_LEN`]
-/// lowercase letters or digits, opening with a letter. The stem is
-/// alphanumeric plus [`IDENTIFIER_DELIMITERS`] and carries no
-/// [`super::SECRET_PREFIXES`] entry. Each delimiter-separated piece holds at
-/// most one digit run, at most one single-letter run, no AWS key id, and only
-/// alphabetic runs of two or more letters that pass [`is_identifier_word_run`].
+/// What: `seg` passes [`file_name_stem`]. Each delimiter-separated piece of
+/// the stem holds at most one digit run, at most one single-letter run, no AWS
+/// key id, and only alphabetic runs of two or more letters that pass
+/// [`is_identifier_word_run`].
 /// Test: `identifier_file_names_are_not_flagged_after_277`,
 /// `identifier_file_name_clause_boundaries_after_277`,
 /// `random_stems_as_file_names_stay_flagged_after_277`.
 pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
-    let Some((stem, ext)) = seg.rsplit_once('.') else {
+    // #8589: the file-name grammar is shared with `is_short_stem_file_at`.
+    let Some(stem) = file_name_stem(seg) else {
         return false;
     };
-    let ext_ok = (1..=MAX_FILE_EXTENSION_LEN).contains(&ext.len())
-        && ext.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-        && ext
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    let stem_charset_ok = !stem.is_empty()
-        && stem
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || IDENTIFIER_DELIMITERS.contains(&c));
-    if !ext_ok || !stem_charset_ok || is_provider_key(seg) {
-        return false;
-    }
     stem.split(IDENTIFIER_DELIMITERS)
         .filter(|p| !p.is_empty())
         .all(|piece| {
@@ -116,6 +109,107 @@ pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
                 });
             runs_ok && strays <= 1 && digit_run_count(piece) <= 1 && !is_provider_key(piece)
         })
+}
+
+/// The stem of `seg` when `seg` is a `<stem>.<ext>` file name that carries no
+/// provider key.
+///
+/// Why: [`is_identifier_file_segment`] and [`is_short_stem_file_at`] (#8589)
+/// accept the same file-name grammar and differ only in how they judge the
+/// stem.
+/// What: the extension (after the last `.`) is 1 to [`MAX_FILE_EXTENSION_LEN`]
+/// lowercase letters or digits, opening with a letter; the stem is non-empty,
+/// alphanumeric plus [`IDENTIFIER_DELIMITERS`]; `seg` carries no
+/// [`super::SECRET_PREFIXES`] entry or AWS key id ([`is_provider_key`]).
+/// Test: `identifier_file_name_clause_boundaries_after_277`.
+fn file_name_stem(seg: &str) -> Option<&str> {
+    let (stem, ext) = seg.rsplit_once('.')?;
+    let ext_ok = (1..=MAX_FILE_EXTENSION_LEN).contains(&ext.len())
+        && ext.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let stem_ok = !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || IDENTIFIER_DELIMITERS.contains(&c));
+    (ext_ok && stem_ok && !is_provider_key(seg)).then_some(stem)
+}
+
+/// Longest stem, plus the length of every other mixed-case path segment,
+/// that [`is_short_stem_file_at`] admits whatever its word shape: one under
+/// [`SECRET_MIN_LEN`], the length below which this module says a token cannot
+/// be a credential. See #8589.
+pub(crate) const MAX_SHORT_STEM_RUN: usize = SECRET_MIN_LEN - 1;
+
+/// True when `seg` is a plain directory name: non-empty, lowercase ASCII
+/// letters, `-`, `_` and `.` only (`src`, `main`, `com`, `node_modules`).
+/// See [`is_short_stem_file_at`] (#8589).
+pub(crate) fn is_plain_path_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// True when `segments[i]` is a file name whose stem is too short to be a
+/// credential, so it is read as a path segment whatever its word shape.
+///
+/// Why (issue #8589, owner ruling 2026-09-25): after #277, 2,237 of the 3,057
+/// memories the kuzu import still refused failed only on a file name of 20 or
+/// fewer stem characters that misses the [`is_identifier_word_run`] floors
+/// (`GTSBejm.java`, `getUserId.java`, `Http2ClientPool.java`). The owner ruled
+/// that such a stem is no longer refused for its shape alone. A stem under
+/// [`SECRET_MIN_LEN`] passes `check_secret` standing alone, so wrapping it in
+/// a path should not make it a credential. The bound is the path around it: a
+/// `/` inside a standard-base64 blob splits the blob into a short "stem" and a
+/// random directory before it, and admitting the stem alone raised the
+/// `path_wrapped_encoder_blobs_stay_flagged_after_8589` base64 row from 15 to
+/// 347. Counting every other mixed-case segment toward the stem's length keeps
+/// that row at 15 and five other seeds at their pre-change counts; the
+/// #5043 digit-run and stray-letter caps keep random 16-character stems to
+/// about one admit in seven.
+/// Known accepted bound: a random stem of up to 19 characters under
+/// lowercase directories is admitted when each piece has at most one digit
+/// group and one single letter; `random_stems_as_file_names_stay_flagged_after_277`
+/// pins the count.
+/// What: `segments[i]` passes [`file_name_stem`]; every `-`/`_`/`.` piece of
+/// its stem holds at most one digit run and at most one single-letter CamelCase
+/// word; and the stem length plus the lengths of every other segment, before
+/// or after it, that is not [`is_plain_path_segment`] is at most
+/// [`MAX_SHORT_STEM_RUN`].
+/// Test: `short_stem_file_names_are_not_flagged_after_8589`,
+/// `short_stem_rule_boundaries_after_8589`,
+/// `path_wrapped_encoder_blobs_stay_flagged_after_8589`,
+/// `random_stems_as_file_names_stay_flagged_after_277`.
+pub(crate) fn is_short_stem_file_at(segments: &[&str], i: usize) -> bool {
+    let Some(stem) = segments.get(i).and_then(|seg| file_name_stem(seg)) else {
+        return false;
+    };
+    let pieces_ok = stem
+        .split(IDENTIFIER_DELIMITERS)
+        .filter(|p| !p.is_empty())
+        .all(|p| digit_run_count(p) <= 1 && camel_word_stats(p).1 <= 1);
+    // #8589 review: every other segment counts, before or after the file, so
+    // encoded material cannot be spread past the file name.
+    let mixed_dirs: usize = segments
+        .iter()
+        .enumerate()
+        .filter(|&(j, s)| j != i && !is_plain_path_segment(s))
+        .map(|(_, s)| s.len())
+        .sum();
+    pieces_ok && stem.len() + mixed_dirs <= MAX_SHORT_STEM_RUN
+}
+
+/// True when every `/`-separated segment in `segments` reads as a path
+/// segment, by [`super::is_readable_path_segment`] or, for a short file name,
+/// by its position ([`is_short_stem_file_at`], #8589).
+/// Test: `short_stem_file_names_are_not_flagged_after_8589`.
+pub(crate) fn segments_read_as_path(segments: &[&str]) -> bool {
+    segments
+        .iter()
+        .enumerate()
+        .all(|(i, seg)| super::is_readable_path_segment(seg) || is_short_stem_file_at(segments, i))
 }
 
 /// True when `token` is a GitHub noreply commit email,
