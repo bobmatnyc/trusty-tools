@@ -112,6 +112,9 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
   fetch+compare tips before pushing to a branch you did not create (#7382).
 - **Under worktree isolation, write scratch scripts with the Write tool and
   run by path** — a heredoc or shell loop over paths is refused there (#7238).
+  A heredoc-embedded commit message (`git commit -m "$(cat <<'EOF' … EOF)"`)
+  is refused the same way — use repeated `-m` flags, or `git commit -F <file>`
+  with the file written by the Write tool (#8473).
 - **Do not create your own worktree (#5649).** Isolation is the PM's to declare
   with `isolation: "worktree"`, which is the only mechanism `tm hook --pm-guard`
   can see — a worktree you make yourself leaves you counted against the shared
