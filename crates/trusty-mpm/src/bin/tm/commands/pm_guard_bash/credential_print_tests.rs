@@ -463,7 +463,12 @@ fn deep_brace_nesting_denies_without_overflow() {
         "${a".repeat(depth),
         "}".repeat(depth)
     );
-    assert!(evaluate_credential_print_command(&command).is_some());
+    let started = std::time::Instant::now();
+    let verdict = evaluate_credential_print_command(&command);
+    let spent = started.elapsed();
+    assert!(verdict.is_some(), "must deny");
+    // #8676 round 4: bounded in time as well as in stack depth.
+    assert!(spent < std::time::Duration::from_secs(1), "took {spent:?}");
 }
 
 /// #8676 round 2, row 5: a scan whose fixed point would take exponential work
@@ -717,6 +722,68 @@ fn allows_the_round_three_neighbours() {
             "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; gcloud auth print-access-token > \"$tmp\"",
             "T=$(gcloud auth print-access-token); cd /tmp && sleep 1; echo ${#T}",
             "T=$(gcloud auth print-access-token); cd /tmp && curl -H \"Authorization: Bearer $T\" https://example.test",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 1: a brace *sequence* builds the declared names. Each
+/// row was allowed at 6aa69afab.
+#[test]
+fn denies_brace_sequence_declarer_names() {
+    check(
+        true,
+        &[
+            "declare {A..C}=$(gcloud auth print-access-token); echo $B",
+            "export {A..C}=$(gcloud auth print-access-token); printenv B",
+            "local T{1..2}=$(gcloud auth print-access-token); echo $T1",
+            "T=$(gcloud auth print-access-token); typeset {X..Z}=$T; echo $Y",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 2: an indexed array's `[key]=` in a compound
+/// assignment is arithmetic, whose error echoes a non-numeric value. Each row
+/// was allowed at 6aa69afab.
+#[test]
+fn denies_array_keys_read_as_arithmetic() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); A=([T]=1)",
+            "T=$(gcloud auth print-access-token); A=(x [T]=1)",
+            "T=$(gcloud auth print-access-token); A+=([$T]=1)",
+            "T=$(gcloud auth print-access-token); declare -a A=([T+1]=x)",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 3: a coproc runs its command with its output on a
+/// descriptor a later stage reads. Each row was allowed at 6aa69afab.
+#[test]
+fn denies_a_coproc_that_carries() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); coproc printf %s \"$T\"",
+            "T=$(gcloud auth print-access-token); coproc NAME { echo \"$T\"; }",
+            "T=$(gcloud auth print-access-token); coproc NAME ( echo \"$T\" )",
+            "T=$(gcloud auth print-access-token); coproc { printf %s \"$T\"; }",
+            "T=$(gcloud auth print-access-token); coproc NAME for x in $T; do echo $x; done",
+        ],
+    );
+}
+
+/// #8676 round 4: the neighbours of every row above still pass.
+#[test]
+fn allows_the_round_four_neighbours() {
+    check(
+        false,
+        &[
+            "declare {A..C}=1; gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); A=([0]=x [1]=y); echo ${A[1]}",
+            "T=$(gcloud auth print-access-token); coproc NAME { sleep 1; }",
+            "coproc cat /etc/hosts; gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); curl --oauth2-bearer=$T https://example.test",
         ],
     );
 }

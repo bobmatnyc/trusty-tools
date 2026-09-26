@@ -9,6 +9,7 @@
 //! arithmetic context, whose error message echoes a non-numeric value;
 //! [`function_header_words`] counts the words of a leading function header.
 //! Test: `credential_print_tests::denies_array_assignment_copies`,
+//! `credential_print_tests::denies_array_keys_read_as_arithmetic`,
 //! `credential_print_tests::denies_arithmetic_reads`,
 //! `credential_print_tests::denies_arithmetic_reads_in_offsets_and_integer_declarations`,
 //! `credential_print_tests::denies_after_a_function_header`.
@@ -20,7 +21,7 @@ use super::super::shell_lex::QuoteScan;
 use super::credential_print_taint::{
     ANY, INTEGER, declares_integer, expands_tainted, is_identifier, is_tainted, leading_name,
 };
-use super::{Lifted, carries};
+use super::{Lifted, Refusal, carries};
 
 /// `test`/`[[` operators that evaluate both operands as arithmetic.
 const ARITH_TESTS: &[&str] = &["-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
@@ -36,7 +37,10 @@ fn ident_byte(b: u8) -> bool {
 /// What: finds each unquoted `=(` whose left side is an identifier at a word
 /// start, tokenizes the list up to the matching `)`, and binds `NAME` when any
 /// element carries. Fail-closed: an unclosed or unlexable list binds [`ANY`].
-pub(super) fn array_bindings(stage: &str, lifted: &Lifted) -> Vec<String> {
+/// #8676 round 4: an indexed array evaluates an element's `[key]` as
+/// arithmetic, so a key reading a tainted name refuses as [`Refusal::Prints`];
+/// an unlexable list refuses when its text reads one.
+pub(super) fn array_bindings(stage: &str, lifted: &Lifted) -> Result<Vec<String>, Refusal> {
     let quotes = QuoteScan::new(stage);
     let bytes = stage.as_bytes();
     let mut bound = Vec::new();
@@ -60,12 +64,26 @@ pub(super) fn array_bindings(stage: &str, lifted: &Lifted) -> Vec<String> {
         let at_word = name_start == 0 || bytes[name_start - 1].is_ascii_whitespace();
         let name = &stage[name_start..name_end];
         let Some(close) = matching_close(bytes, i + 2, 1) else {
+            // #8676 round 4: the unclosed list's keys cannot be told apart.
+            if reads_tainted(&stage[i + 2..], &lifted.names) {
+                return Err(Refusal::Prints);
+            }
             bound.push(ANY.to_string());
-            return bound;
+            return Ok(bound);
         };
         let list = &stage[i + 2..close];
         match tokenize(list) {
+            Err(_) if reads_tainted(list, &lifted.names) => return Err(Refusal::Prints),
             Err(_) => bound.push(ANY.to_string()),
+            // #8676 round 4: `A=([T]=1)` evaluates `T`.
+            Ok(words)
+                if words
+                    .iter()
+                    .filter_map(|w| element_key(w))
+                    .any(|key| reads_tainted(key, &lifted.names)) =>
+            {
+                return Err(Refusal::Prints);
+            }
             Ok(words) if words.iter().any(|w| carries(w, lifted)) => {
                 if at_word && is_identifier(name) {
                     bound.push(name.to_string());
@@ -77,7 +95,18 @@ pub(super) fn array_bindings(stage: &str, lifted: &Lifted) -> Vec<String> {
         }
         i = close + 1;
     }
-    bound
+    Ok(bound)
+}
+
+/// The `key` of a compound-assignment element `[key]=value` or
+/// `[key]+=value` (#8676 round 4): the text before the first `]=`/`]+=`.
+fn element_key(word: &str) -> Option<&str> {
+    let body = word.strip_prefix('[')?;
+    let end = [body.find("]="), body.find("]+=")]
+        .into_iter()
+        .flatten()
+        .min()?;
+    Some(&body[..end])
 }
 
 /// The index of the `)` closing a paren run opened `level` deep before `from`.

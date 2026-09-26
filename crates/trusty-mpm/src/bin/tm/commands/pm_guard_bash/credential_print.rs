@@ -27,15 +27,26 @@
 //! time, a panic — denies. A command naming none of [`TRIGGERS`] is never
 //! parsed at all.
 //!
-//! Known residual (unscored default): a program the rule has no fact for is
-//! treated as non-printing when a credential is its argument. `awk -v t=… '…'`,
-//! `jq --arg t …`, a shell function or alias, `[ x "$T" y ]`, and an external
-//! program that repeats a bad operand in its error (`ls "$T"`, `timeout 5
-//! sleep "$T"`) can each print the value and are allowed; only
-//! [`ARG_PRINTERS`] and the echoing builtins (#8676, `credential_print_taint_sinks`)
-//! are known to print their arguments. A script file an evaluator runs by
-//! name (`bash deploy.sh`) is not read. Why a denylist and not an allowlist:
-//! see #8676 round 3.
+//! Documented residual classes (#8676 exit criterion): each can print a value
+//! and is allowed.
+//! 1. Environment reads by arbitrary programs: a child reads an exported
+//!    tainted variable without naming it on the command line. No argv-level
+//!    guard can see this.
+//! 2. Unlisted external programs given a tainted argument: the program echoes
+//!    or logs its operand (`ls "$T"`, `timeout 5 sleep "$T"`, `[ x "$T" y ]`,
+//!    a shell function or alias), or takes the value through its own flags
+//!    (`awk -v t=…`, `jq --arg t …`). Only [`ARG_PRINTERS`] and the echoing
+//!    builtins (`credential_print_taint_sinks`) are known to print their
+//!    arguments. The #8697 follow-up replaces this class with a consumer
+//!    allowlist.
+//! 3. Script files run by name (`bash deploy.sh`): the guard does not read
+//!    the script.
+//! 4. Shell history: `history -s …; history`, and `fc`, where history is on.
+//! 5. Descriptors read across stages: a descriptor opened in one stage and
+//!    read in a later one (`exec N< <(…)`). The `coproc` form refuses (#8676
+//!    round 4); the general form stays residual.
+//!
+//! Why a denylist and not an allowlist: see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
 
 #[path = "credential_print_heredoc.rs"]
@@ -58,8 +69,8 @@ use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
-    KEYWORDS, basename, code_operands, consumes_stdin, credential_fds, enables_xtrace,
-    evaluator_name, first_credential_program, is_evaluator,
+    basename, code_operands, consumes_stdin, credential_fds, enables_xtrace, evaluator_name,
+    first_credential_program, is_evaluator, keyword_words,
 };
 use credential_print_redirect::{apply_redirections, terminal_name_sink};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
@@ -170,6 +181,8 @@ struct Lifted {
 /// `credential_print_tests::denies_the_round_two_bypasses`,
 /// `credential_print_tests::denies_a_credential_carried_by_a_variable`,
 /// `credential_print_tests::denies_inline_code_reading_a_tainted_name`,
+/// `credential_print_tests::denies_a_coproc_that_carries`,
+/// `credential_print_tests::allows_the_round_four_neighbours`,
 /// `credential_print_tests::scan_work_is_bounded`,
 /// `credential_print_tests::deny_reason_never_echoes_the_command`,
 /// `credential_print_tests::no_prefix_of_a_command_panics`.
@@ -350,7 +363,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         return Ok(emitted);
     }
     // #8676: forms `ungroup` erases, read from the text as written.
-    let arrays = array_bindings(stage, lifted);
+    let arrays = array_bindings(stage, lifted)?;
     let header = function_header_words(stage);
     let raw = stage;
     let stage = ungroup(stage);
@@ -362,12 +375,8 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         .any(|w| carries_kind(w, lifted, Some(SubKind::Input)));
     let stdin_carries = ctx.stdin_carries || routed.here_carries || reads_input;
     emitted.text = argv.iter().any(|w| input_is_program_text(w)) || routed.here_program_text;
-    let kw = header
-        + argv
-            .iter()
-            .skip(header)
-            .take_while(|w| KEYWORDS.contains(&w.as_str()))
-            .count();
+    let (keywords, coproc) = keyword_words(argv, header);
+    let kw = header + keywords;
     let resolved = argv.get(kw..).and_then(strip_wrapper_prefix);
     let start = kw + resolved.unwrap_or(0);
     let program_word = argv.get(start).map(String::as_str).unwrap_or_default();
@@ -383,6 +392,11 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     emitted.bound = bound_names(argv, kw, &program, args, lifted);
     emitted.bound.extend(arrays);
     if reads_in_arithmetic(raw, argv, &program, &lifted.names) {
+        return Err(Refusal::Prints);
+    }
+    // #8676 round 4: a coproc's output is a descriptor a later stage reads,
+    // and `coproc NAME ( … )` hides its program, so any carrying word refuses.
+    if coproc && argv.iter().any(|w| carries(w, lifted)) {
         return Err(Refusal::Prints);
     }
     if dumps_variables(argv, &program, args, &lifted.names) {

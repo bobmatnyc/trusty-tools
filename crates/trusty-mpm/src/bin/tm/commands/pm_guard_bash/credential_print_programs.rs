@@ -9,6 +9,7 @@
 //! Test: `credential_print_tests` (sibling module).
 
 use super::super::shell_lex::DASH_C_SHELLS;
+use super::credential_print_taint::is_identifier;
 
 /// `security find-*-password` options that take a value (BSD getopt).
 const SECURITY_OPTS_WITH_ARG: &[char] = &[
@@ -353,6 +354,36 @@ pub(super) fn evaluator_name(program: &str) -> Option<&str> {
 }
 
 /// Shell keywords that can precede the program word.
-pub(super) const KEYWORDS: &[&str] = &[
-    "!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time",
+const KEYWORDS: &[&str] = &[
+    "!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time", "coproc",
 ];
+
+/// The compound-command openers a `coproc NAME` can precede.
+const COMPOUND_OPENERS: &[&str] = &["{", "while", "until", "if", "for", "select", "case", "[["];
+
+/// How many words of `argv` from `from` are leading keywords, and whether one
+/// is `coproc` (#8676 round 4).
+///
+/// What: counts [`KEYWORDS`] entries; after `coproc`, an identifier followed
+/// by a [`COMPOUND_OPENERS`] word is its NAME and is counted too, so the
+/// coproc's own command is the one judged. `coproc NAME ( … )` loses its
+/// parens to `ungroup` and keeps NAME as the program; the caller's carrying
+/// refusal covers that shape.
+pub(super) fn keyword_words(argv: &[String], from: usize) -> (usize, bool) {
+    let mut at = from;
+    let mut coproc = false;
+    while let Some(word) = argv.get(at).map(String::as_str)
+        && KEYWORDS.contains(&word)
+    {
+        at += 1;
+        if word == "coproc" {
+            coproc = true;
+            let named = argv.get(at).is_some_and(|n| is_identifier(n))
+                && argv
+                    .get(at + 1)
+                    .is_some_and(|o| COMPOUND_OPENERS.contains(&o.as_str()));
+            at += usize::from(named);
+        }
+    }
+    (at - from, coproc)
+}

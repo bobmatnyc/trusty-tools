@@ -13,6 +13,7 @@
 //! `credential_print_tests::allows_a_carried_variable_that_is_never_printed`,
 //! `credential_print_tests::denies_zsh_expansion_forms`,
 //! `credential_print_tests::denies_brace_expanded_declarer_names`,
+//! `credential_print_tests::denies_brace_sequence_declarer_names`,
 //! `credential_print_tests::denies_nameref_loops_and_subscripted_namerefs`,
 //! `credential_print_tests::deep_brace_nesting_denies_without_overflow`.
 
@@ -20,7 +21,7 @@ use std::collections::BTreeSet;
 
 use super::credential_print_programs::basename;
 use super::credential_print_taint_forms::reads_tainted;
-use super::{Lifted, MARK, carries};
+use super::{Lifted, carries};
 use crate::commands::hook_rewrite::is_env_assignment;
 
 /// The name recorded when the positional parameters hold a credential.
@@ -45,7 +46,7 @@ const REMATCH: &[&str] = &["BASH_REMATCH", "match", "MATCH"];
 /// What: every `NAME=`/`NAME+=`/`NAME[i]=` word whose value carries or names
 /// a tainted name bare, wherever it stands — a prefix assignment, an
 /// `export`/`local`/`declare`/`readonly` operand, a word inside a `{ …; }`
-/// body; a run-time, brace-expanded or globbed name binds [`ANY`];
+/// body; any left side that is not an identifier binds [`ANY`];
 /// `for`/`select NAME in WORDS` when a listed word carries or names one, or
 /// with no `in` list when the positional parameters do; `set …` with a
 /// carrying operand binds [`POSITIONAL`]; `=~` against a carrying word binds
@@ -75,13 +76,12 @@ pub(super) fn bound_names(
         if !carried {
             continue;
         }
+        // #8676 round 4: every other name — `$N=`, a brace list or sequence
+        // (`{T,U}=`, `{A..C}=`), a glob — is picked at run time, so it binds
+        // ANY; no byte whitelist can list every expanding form.
         if is_identifier(name) {
             bound.push(name.to_string());
-        } else if name.contains('$') || name.contains('`') || name.contains(MARK) {
-            bound.push(ANY.to_string());
-        } else if expands_to_names(name) {
-            // #8676 round 3: brace expansion or a glob (`{T,U}=`, `T{,}=`)
-            // builds the name at run time, as `$N=` does.
+        } else {
             bound.push(ANY.to_string());
         }
     }
@@ -129,15 +129,6 @@ pub(super) fn declares_integer(program: &str, args: &[String]) -> bool {
             && args
                 .iter()
                 .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('i')))
-}
-
-/// Whether an assignment's left side is a brace expansion or a glob built
-/// from name characters (`{T,U}`, `T{,}`, `T*`), so the shell picks the name.
-fn expands_to_names(name: &str) -> bool {
-    name.contains(['{', '*', '?'])
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_{},*?".contains(&b))
 }
 
 /// `${…}` nesting followed before a word counts as carrying (#8676): the
