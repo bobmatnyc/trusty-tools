@@ -31,11 +31,23 @@
 //! round 3). The reverse check ignores residue on paths no branch commit
 //! touched, the basis being the 2026-09-22 owner ruling that the #7889 donor
 //! squash — which also carried a sibling's files — is admitted (ADR-0057).
-//! **Known residual:** a later base commit whose patch `HEAD` holds, on the
-//! same files, stands in as `M` — a second pull request from the same branch,
-//! or a cherry-pick of a branch commit onto the base. An unpushed undo of an
-//! EARLIER landing's lines on those files is then not seen. Missing a
-//! candidate (the walk is capped) under-reports "landed", which refuses.
+//! **Known residual, which predates #8633** (the old tip-only forward merge
+//! admitted it too): a later base commit whose own patch `HEAD` holds, on the
+//! same files, stands in as `M`, and an unpushed undo of an EARLIER landing's
+//! lines on those files is then not seen. Two one-PR shapes reach it.
+//! (A) Rebase-merge: branch commits one (f line 1 a→b), two (adds `new.txt`)
+//! and three (f line 10 c→d) are replayed as one', two', three', and an
+//! unpushed commit then reverts f line 1 to a. That reads Landed at three',
+//! which changes f, so it covers f, and whose own patch touches only line 10,
+//! which `HEAD` holds. (B) A later revert commit R on the base that touches
+//! the same file: an unpushed undo of a landed line reads Landed at R. A
+//! second pull request from the same branch, or a cherry-pick of a branch
+//! commit onto the base, reaches it the same way. The repository allows
+//! rebase merges today (`allow_rebase_merge=true`); disabling them is the
+//! owner's pending decision. Shape A is pinned by
+//! `known_residual_rebase_merge_then_unpushed_undo_on_a_file_the_last_replay_touches_reads_landed`.
+//! Missing a candidate (the walk is capped) under-reports "landed", which
+//! refuses.
 //! Test: `worktree_landed_history_tests`.
 
 use std::collections::HashSet;
@@ -76,8 +88,8 @@ const MAX_PATHSPEC: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentOnBase {
     /// `HEAD` is an ancestor of the base (`at: None`); or merging `HEAD` into
-    /// `at` changes no file AND applying `at`'s own patch onto `HEAD` changes
-    /// none.
+    /// `at` changes no file AND `HEAD` holds `at`'s own change on every file
+    /// `HEAD`'s commits touched.
     Landed {
         /// The base commit that holds the content; `None` for an ancestor.
         at: Option<String>,
@@ -130,7 +142,8 @@ impl ContentOnBase {
             Self::Landed { at: None } => format!("HEAD is an ancestor of {base}"),
             Self::Landed { at: Some(at) } => format!(
                 "HEAD's content landed on {base} at `{at}`: merging HEAD into that commit \
-                 changes no file, and HEAD still holds all of that commit's own change"
+                 changes no file, and HEAD holds that commit's own change on every file \
+                 HEAD's commits touched"
             ),
             Self::Undone {
                 at,

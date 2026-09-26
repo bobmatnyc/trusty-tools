@@ -318,11 +318,24 @@ the guard will establish every precondition itself.
      holding a different version of the change, or a later commit the squash
      never carried, is not admitted, and neither is a later commit that
      undid part of the squash, whether or not the base has moved since —
-     except in one known residual. A later base commit whose own patch HEAD
-     holds, on the same files, can stand in as `M`: a second pull request
-     from the same branch, or a cherry-pick of a branch commit onto the base.
-     An unpushed undo of lines an EARLIER landing carried on those files is
-     then not seen. A conflict is told apart from a git error by the tree
+     except in one known residual, which predates #8633: the pre-#8633
+     tip-only forward merge admitted it too. A later base commit whose own
+     patch HEAD holds, on the same files, can stand in as `M`, and an
+     unpushed undo of lines an EARLIER landing carried on those files is then
+     not seen. Two one-PR shapes reach it. (A) Rebase-merge: branch commits
+     one (`f.txt` line 1 a→b), two (adds `new.txt`) and three (`f.txt` line
+     10 c→d) are replayed as one', two', three', and an unpushed branch
+     commit then reverts line 1 to a. That is admitted as landed at three',
+     because three' changes `f.txt`, so it covers the file, and its own
+     patch touches only line 10, which HEAD holds. (B) A later revert commit
+     R on the base that touches the same file: an unpushed undo of a landed
+     line is admitted at R. A second pull request from the same branch, or a
+     cherry-pick of a branch commit onto the base, reaches it the same way.
+     The repository allows rebase merges today (`allow_rebase_merge=true`);
+     disabling rebase-merge is the owner's pending decision. Shape A is
+     pinned as current behaviour by
+     `known_residual_rebase_merge_then_unpushed_undo_on_a_file_the_last_replay_touches_reads_landed`,
+     so a fix shows up as a deliberate change. A conflict is told apart from a git error by the tree
      id `merge-tree` prints first; a git error (it also exits 1 for a ref it
      cannot merge) stays undeterminable and quotes git's stderr, and
      any error in either direction refuses. Every refusal names the

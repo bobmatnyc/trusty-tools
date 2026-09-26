@@ -481,6 +481,63 @@ fn a_rebase_merged_branch_is_landed_at_its_last_replayed_commit() {
     assert!(landed_content_verdict(&wt, BOUND).is_landed());
 }
 
+/// KNOWN RESIDUAL (#8633, predates it — the tip-only forward merge admitted
+/// it too): the branch is rebase-merged as one', two', three', and an
+/// UNPUSHED commit then reverts `f.txt` line 1 to `a`. The probe reads it as
+/// Landed at three': three' changes `f.txt`, so it covers the file, and its
+/// own patch touches only line 10, which `HEAD` holds. The revert is on no
+/// remote. This pins today's behaviour so that a fix is a deliberate change
+/// to this assertion; see the residual in ADR-0057.
+#[test]
+fn known_residual_rebase_merge_then_unpushed_undo_on_a_file_the_last_replay_touches_reads_landed() {
+    let fx = GitWorktreeFixture::new();
+    let wt = three_commit_branch(&fx, "rebased-undo");
+    let last = rebase_merge_onto_main(&fx, "session/rebased-undo");
+    commit_files(&wt, &[("f.txt", &ten_lines("a", "d"))], "T: undo line 1");
+    git(&wt, &["fetch", "origin"]);
+
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed { at: Some(last) }),
+        "known residual: the unpushed undo of line 1 is not seen"
+    );
+    assert!(landed_content_verdict(&wt, BOUND).is_landed());
+}
+
+/// #8633: a branch behind `main` is squash-merged after `main` edited the
+/// same file first. The fork holds `f.txt` = (a, z); `main` commits z→Z
+/// before the squash; the branch changes a→A; the squash gives (A, Z) and
+/// `HEAD` holds (A, z). The squash's own patch is line 1 only, which `HEAD`
+/// holds, and `HEAD`'s older line 10 is `main`'s earlier history, not an
+/// undo. Landed at the squash.
+#[test]
+fn a_squash_of_a_behind_branch_whose_file_main_edited_first_is_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "z"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("behind");
+    commit_files(
+        &fx.repo,
+        &[("f.txt", &ten_lines("a", "Z"))],
+        "main edits line 10 first",
+    );
+    commit_files(&wt, &[("f.txt", &ten_lines("A", "z"))], "branch line 1");
+    let squash = squash_onto_main(&fx, "session/behind");
+    git(&fx.repo, &["push", "origin", "main"]);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_eq!(
+        git(&fx.repo, &["show", "HEAD:f.txt"]),
+        ten_lines("A", "Z").trim_end(),
+        "the squash holds both edits"
+    );
+    assert_eq!(
+        content_on_base(&wt, "origin/main"),
+        Ok(ContentOnBase::Landed { at: Some(squash) })
+    );
+    assert!(landed_content_verdict(&wt, BOUND).is_landed());
+}
+
 /// #8633 round 3, unchanged behaviour: a `HEAD` that is an ancestor of `main`
 /// — fast-forwarded, or merged by a merge commit — is landed with no landing
 /// commit named, even after `main` edited the same file.
