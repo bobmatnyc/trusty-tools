@@ -194,7 +194,11 @@ fn golden_supervisor_prompt() {
         "profile = \"supervisor\"\n",
     )
     .expect("write config");
-    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let (prompt, _) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
+        tmp.path(),
+        crate::core::session_profile::SessionProfile::Supervisor,
+        || Some(FIXED_ROSTER.to_string()),
+    );
     assert_eq!(prompt, crate::core::session_profile::supervisor_prompt());
     assert_golden("supervisor-prompt.md", &prompt);
 }

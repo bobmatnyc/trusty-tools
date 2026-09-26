@@ -463,6 +463,12 @@ pub struct MpmConfig {
     /// `refs/tm/sessions/**` ref and lease-pushes it. Set `enabled = false` to
     /// restore the pre-ADR-0062 behaviour exactly.
     pub session_refs: SessionRefsConfig,
+
+    /// `[supervisor]` — projects allowed to run the supervisor profile (#8453).
+    ///
+    /// Absent section → no project may. See
+    /// [`crate::core::session_profile::SupervisorConfig`].
+    pub supervisor: crate::core::session_profile::SupervisorConfig,
 }
 
 // ──────────────────────────────────────────────

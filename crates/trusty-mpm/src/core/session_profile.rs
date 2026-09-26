@@ -7,20 +7,27 @@
 //! delegation" floor reached the supervisor anyway. The owner ruling
 //! (2026-09-23) is a separate supervisor profile with its own instructions,
 //! output style, guard behaviour and model.
-//! What: [`resolve`] reads the committed `.trusty-mpm.toml` `profile` key.
-//! [`supervisor_prompt`] composes the bundled supervisor sections,
-//! [`SUPERVISOR_OUTPUT_STYLE_ID`] names its style and [`SUPERVISOR_MODEL`] its
-//! model. The prompt composer, the style selector, the launch model and
-//! `tm hook --pm-guard` each branch on [`resolve`].
 //!
-//! FAIL-OPEN: anything that prevents a positive "supervisor" answer — an
+//! What: a session is a supervisor only when the operator allow-listed the
+//! project in the USER-level `~/.trusty-mpm/config.toml` (`[supervisor]
+//! projects`) AND the project's committed `.trusty-mpm.toml` says
+//! `profile = "supervisor"` ([`resolve`]). A project can write its own
+//! `.trusty-mpm.toml`, so the file alone never exempts it (#3981). A launch
+//! resolves the profile once and stamps it into the spawned `claude`'s
+//! environment as [`SESSION_PROFILE_ENV`] ([`launch_env`]); `tm hook
+//! --pm-guard` lifts the PM delegation rules only when the stamp AND both
+//! conditions still say supervisor ([`hook_profile`]).
+//!
+//! FAIL-CLOSED: anything that prevents a positive "supervisor" answer — an
 //! absent file, an unreadable or malformed file, an absent key, an unknown
-//! value — resolves to [`SessionProfile::Pm`], the full PM profile with every
-//! PM guard. The supervisor profile is never partial: its prompt is compiled
-//! in and a non-empty composition is asserted by test.
+//! value, a project missing from the allowlist, a missing or different stamp —
+//! resolves to [`SessionProfile::Pm`], the full PM profile with every PM
+//! guard. The supervisor profile is never partial: its prompt is compiled in
+//! and a non-empty composition is asserted by test.
 //!
 //! Test: `session_profile_tests.rs`.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::core::config::MpmConfig;
@@ -34,6 +41,21 @@ pub const SUPERVISOR_PROFILE_ID: &str = "supervisor";
 
 /// Output-style id a supervisor session runs on.
 pub const SUPERVISOR_OUTPUT_STYLE_ID: &str = "trusty-mpm-supervisor";
+
+/// The launch stamp: the profile a session was launched as (#8453).
+///
+/// Why: the guard used to re-read `.trusty-mpm.toml` on every tool call, and
+/// a session can write that file, so a PM could promote itself mid-session.
+/// What: set on the spawned `claude` by every tm launch path that composes
+/// the prompt; Claude Code passes it on to its hooks. Value: a profile id.
+pub const SESSION_PROFILE_ENV: &str = "TRUSTY_MPM_SESSION_PROFILE";
+
+/// The launch directory Claude Code exports to every hook.
+pub const PROJECT_DIR_ENV: &str = "CLAUDE_PROJECT_DIR";
+
+/// Why a project that asks for the supervisor profile did not get it.
+pub const NOT_ALLOW_LISTED: &str = "project requests the supervisor profile but is not \
+     allow-listed in ~/.trusty-mpm/config.toml (`[supervisor] projects`); running the PM profile";
 
 /// Model a supervisor session launches on: the Opus tier alias.
 ///
@@ -60,6 +82,28 @@ impl SessionProfile {
     pub fn is_supervisor(self) -> bool {
         self == SessionProfile::Supervisor
     }
+
+    /// The profile id, as written in `.trusty-mpm.toml` and the launch stamp.
+    pub fn id(self) -> &'static str {
+        match self {
+            SessionProfile::Pm => PM_PROFILE_ID,
+            SessionProfile::Supervisor => SUPERVISOR_PROFILE_ID,
+        }
+    }
+}
+
+/// `[supervisor]` in the user-level `~/.trusty-mpm/config.toml` (#8453).
+///
+/// Why: the operator's grant, kept outside every project's write boundary so
+/// a project cannot exempt itself from the PM rules (#3981 won't-do ruling).
+/// What: `projects` — absolute project paths allowed to run the supervisor
+/// profile, matched after canonicalization. A relative entry matches nothing.
+/// Test: `an_allowlist_entry_for_another_path_does_not_match`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SupervisorConfig {
+    /// Absolute paths of the projects allowed to run the supervisor profile.
+    pub projects: Vec<PathBuf>,
 }
 
 /// The supervisor profile's sections, in composition order.
@@ -120,9 +164,9 @@ pub fn supervisor_prompt() -> String {
         .join("\n\n")
 }
 
-/// The profile a parsed project config selects.
+/// The profile a parsed project config asks for.
 ///
-/// Why: separates the decision from the file read so the fail-open rule is
+/// Why: separates the decision from the file read so the fail-closed rule is
 /// testable without a filesystem.
 /// What: `Some(cfg)` with `profile = "supervisor"` (case and surrounding
 /// whitespace ignored) → [`SessionProfile::Supervisor`]. Everything else →
@@ -147,46 +191,138 @@ pub fn profile_from_config(config: Option<&ProjectLevelConfig>) -> SessionProfil
     }
 }
 
-/// The profile a session launched in `project_dir` runs.
+/// The profile `project_dir`'s committed `.trusty-mpm.toml` asks for.
 ///
-/// Why: the one selector the prompt composer, the style selector, the launch
-/// model and the guard all call, so they cannot disagree.
+/// Why: condition (b) of [`resolve`], on its own, for the doctor and the
+/// style warning.
 /// What: [`crate::core::project_config::load_or_report`] (absent → silent,
-/// unreadable or malformed → logged at `error`), then
-/// [`profile_from_config`]. Fails open to [`SessionProfile::Pm`].
-/// Test: `a_malformed_config_falls_back_to_the_pm_profile`,
-/// `a_supervisor_config_selects_the_supervisor_profile`.
-pub fn resolve(project_dir: &Path) -> SessionProfile {
+/// unreadable or malformed → logged at `error`), then [`profile_from_config`].
+/// Test: `a_malformed_config_falls_back_to_the_pm_profile`.
+pub fn requested(project_dir: &Path) -> SessionProfile {
     profile_from_config(crate::core::project_config::load_or_report(project_dir).as_ref())
 }
 
-/// The model a session launched in `project_dir` runs on.
+/// Whether the operator allow-listed `project_dir` for the supervisor profile.
+///
+/// Why: condition (a) of [`resolve`]. Canonical paths, so a symlink, a
+/// trailing slash or `/var` versus `/private/var` cannot decide the answer.
+/// What: `true` when some absolute `allowed.projects` entry canonicalizes to
+/// the canonical `project_dir`. A path that cannot be canonicalized matches
+/// nothing.
+/// Test: `an_allowlist_entry_for_another_path_does_not_match`,
+/// `a_symlinked_allowlist_entry_is_canonicalized`.
+pub fn is_allow_listed(project_dir: &Path, allowed: &SupervisorConfig) -> bool {
+    let Ok(project) = std::fs::canonicalize(project_dir) else {
+        return false;
+    };
+    allowed
+        .projects
+        .iter()
+        .filter(|entry| entry.is_absolute())
+        .filter_map(|entry| std::fs::canonicalize(entry).ok())
+        .any(|entry| entry == project)
+}
+
+/// The refusal reason when `project_dir` asks for the supervisor profile and
+/// does not get it; `None` otherwise.
+///
+/// Why: `tm doctor` names the reason; the launch logs it.
+/// What: [`NOT_ALLOW_LISTED`] when (b) holds and (a) does not.
+/// Test: `the_doctor_reason_names_the_missing_allowlist_entry`.
+pub fn refusal(project_dir: &Path, config: &MpmConfig) -> Option<&'static str> {
+    (requested(project_dir).is_supervisor() && !is_allow_listed(project_dir, &config.supervisor))
+        .then_some(NOT_ALLOW_LISTED)
+}
+
+/// The profile a session launched in `project_dir` runs.
+///
+/// Why: the one launch-time selector, so a project cannot promote itself.
+/// What: [`SessionProfile::Supervisor`] only when `project_dir` is
+/// allow-listed in `config` (the user-level config) AND [`requested`] says
+/// supervisor. Otherwise [`SessionProfile::Pm`]; a refused request is logged
+/// at `warn` with [`NOT_ALLOW_LISTED`].
+/// Test: `a_supervisor_config_selects_the_supervisor_profile`,
+/// `a_project_only_switch_stays_pm`.
+pub fn resolve(project_dir: &Path, config: &MpmConfig) -> SessionProfile {
+    if !requested(project_dir).is_supervisor() {
+        return SessionProfile::Pm;
+    }
+    if is_allow_listed(project_dir, &config.supervisor) {
+        return SessionProfile::Supervisor;
+    }
+    tracing::warn!(project = %project_dir.display(), "{NOT_ALLOW_LISTED}");
+    SessionProfile::Pm
+}
+
+/// [`resolve`] against the operator's `~/.trusty-mpm/config.toml`.
+///
+/// Why: the prompt composer and the style report have no config in hand.
+/// What: [`MpmConfig::load_default`], then [`resolve`].
+/// Test: `a_project_only_switch_stays_pm`.
+pub fn resolve_ambient(project_dir: &Path) -> SessionProfile {
+    resolve(project_dir, &MpmConfig::load_default())
+}
+
+/// The launch stamp for `profile`: `(SESSION_PROFILE_ENV, id)`.
+///
+/// Why: the PM stamp is written too, so an inherited supervisor stamp can
+/// never reach a session launched as a PM.
+/// Test: `the_launch_stamp_names_the_profile`.
+pub fn launch_env(profile: SessionProfile) -> (String, String) {
+    (SESSION_PROFILE_ENV.to_owned(), profile.id().to_owned())
+}
+
+/// The model a session of `profile` launches on.
 ///
 /// Why: `tm launch` passes `--model`, which outranks the project settings, so
 /// it must name the supervisor's model too.
 /// What: [`SUPERVISOR_MODEL`] for a supervisor; otherwise the PM model from
 /// [`crate::core::model_inject::resolve_pm_model`], unchanged.
 /// Test: `the_supervisor_model_is_the_opus_tier_alias`.
-pub fn launch_model(project_dir: &Path, config: &MpmConfig) -> String {
-    match resolve(project_dir) {
+pub fn launch_model(profile: SessionProfile, config: &MpmConfig) -> String {
+    match profile {
         SessionProfile::Supervisor => SUPERVISOR_MODEL.to_string(),
         SessionProfile::Pm => crate::core::model_inject::resolve_pm_model(config, None),
     }
 }
 
-/// The project directory a `PreToolUse` hook call belongs to.
+/// The directory a `PreToolUse` hook call's session was launched in.
 ///
 /// Why: the hook's `cwd` follows the session's `cd`, so a supervisor that
-/// changes into a watched project would be judged by that project's profile.
-/// Claude Code exports `CLAUDE_PROJECT_DIR` — the directory the session was
-/// launched in — to every hook.
-/// What: `project_dir_env` when set and non-empty, else `hook_cwd`.
-/// Test: `the_hook_reads_the_launch_directory_before_the_cwd`.
-pub fn hook_project_dir(project_dir_env: Option<std::ffi::OsString>, hook_cwd: &Path) -> PathBuf {
+/// changes into a watched project would be judged by that project's file.
+/// Claude Code exports `CLAUDE_PROJECT_DIR` — the launch directory — to every
+/// hook.
+/// What: `project_dir_env` when set and non-empty; otherwise `None`, which
+/// the caller treats as the PM profile. The payload `cwd` is never used.
+/// Test: `the_hook_reads_only_the_launch_directory`.
+pub fn hook_project_dir(project_dir_env: Option<OsString>) -> Option<PathBuf> {
     project_dir_env
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| hook_cwd.to_path_buf())
+}
+
+/// The profile `tm hook --pm-guard` applies to a tool call.
+///
+/// Why: a stamp alone could come from an older file state, and the files
+/// alone can be edited by the session; only all three together are the
+/// operator's current grant.
+/// What: [`SessionProfile::Supervisor`] only when `stamp` is exactly
+/// [`SUPERVISOR_PROFILE_ID`], `project_dir_env` names a directory, and
+/// [`resolve`] over `config()` says supervisor. `config` is called only after
+/// the stamp matches, so a PM session reads no file.
+/// Test: `the_hook_needs_the_stamp_the_allowlist_and_the_file`.
+pub fn hook_profile(
+    stamp: Option<OsString>,
+    project_dir_env: Option<OsString>,
+    config: impl FnOnce() -> MpmConfig,
+) -> SessionProfile {
+    if stamp.as_deref() != Some(std::ffi::OsStr::new(SUPERVISOR_PROFILE_ID)) {
+        return SessionProfile::Pm;
+    }
+    let Some(project_dir) = hook_project_dir(project_dir_env) else {
+        return SessionProfile::Pm;
+    };
+    resolve(&project_dir, &config())
 }
 
 #[cfg(test)]

@@ -7,35 +7,40 @@
 //! destructive-command and worktree-discipline guards still do.
 //! What: [`verdict`] is the last rule `tm hook --pm-guard` asks. It
 //! runs after every absolute guard, so exempting a supervisor here exempts it
-//! from the delegation rules only.
+//! from the delegation rules only. The exemption needs the launch stamp, the
+//! user-level allowlist and the project file to agree
+//! ([`session_profile::hook_profile`]); a session cannot grant it to itself
+//! by editing `.trusty-mpm.toml`.
 //! Test: `a_supervisor_session_is_not_bound_by_the_pm_delegation_rules`,
-//! `a_pm_session_is_still_bound_by_the_pm_delegation_rules`,
-//! `an_undecidable_profile_keeps_the_pm_guards`,
-//! `a_supervisor_session_is_still_refused_a_destructive_delete`
+//! `a_project_only_switch_keeps_the_pm_delegation_rules`,
+//! `a_stamp_without_the_file_keeps_the_pm_delegation_rules`,
+//! `every_absolute_guard_still_binds_a_supervisor`
 //! (`tests/tm_hook_pm_guard_supervisor_8453.rs`).
 
-use std::path::Path;
-
+use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
 
 /// The PM delegation verdict for a tool call, or `None` for a supervisor.
 ///
 /// Why: see the module doc.
-/// What: resolves the session's profile from `CLAUDE_PROJECT_DIR` (the
-/// launch directory Claude Code exports to hooks), falling back to
-/// `hook_cwd`. A supervisor → `None` (allow). Otherwise, including every case
-/// where the profile cannot be read, the unchanged
-/// [`crate::commands::pm_guard::evaluate_tool`] verdict.
+/// What: [`session_profile::hook_profile`] over the launch stamp
+/// (`TRUSTY_MPM_SESSION_PROFILE`), `CLAUDE_PROJECT_DIR` and the user-level
+/// config, read only when the stamp says supervisor. A supervisor → `None`
+/// (allow). Otherwise — including every case where any input is missing or
+/// unreadable — the unchanged [`crate::commands::pm_guard::evaluate_tool`]
+/// verdict.
 /// Test: `a_supervisor_session_is_not_bound_by_the_pm_delegation_rules`,
-/// `an_undecidable_profile_keeps_the_pm_guards`.
+/// `a_project_only_switch_keeps_the_pm_delegation_rules`.
 pub(crate) fn verdict(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
-    hook_cwd: &Path,
 ) -> Option<&'static str> {
-    let project_dir =
-        session_profile::hook_project_dir(std::env::var_os("CLAUDE_PROJECT_DIR"), hook_cwd);
-    if session_profile::resolve(&project_dir).is_supervisor() {
+    let profile = session_profile::hook_profile(
+        std::env::var_os(session_profile::SESSION_PROFILE_ENV),
+        std::env::var_os(session_profile::PROJECT_DIR_ENV),
+        MpmConfig::load_default,
+    );
+    if profile.is_supervisor() {
         return None;
     }
     crate::commands::pm_guard::evaluate_tool(tool_name, tool_input)

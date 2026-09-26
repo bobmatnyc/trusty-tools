@@ -104,6 +104,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "The project carries none of the five RETIRED `.trusty-mpm/` instruction override files. They are no longer read, so a leftover one means the project's instructions are not reaching the PM — migrate the content to `CLAUDE.md` named sections (issue #4286).",
     ),
     (
+        "session_profile",
+        "Which instruction profile a launch in this project resolves. `Warn` when the project's committed `.trusty-mpm.toml` asks for `profile = \"supervisor\"` but the operator has not allow-listed it under `[supervisor] projects` in the user-level `~/.trusty-mpm/config.toml` — the session then runs the full PM profile. A project cannot exempt itself from the PM rules by editing its own file (issue #8453).",
+    ),
+    (
         "instruction_fold",
         "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a daemon-log line only, so nothing an operator reads said whether the fold was doing anything (issue #7616). Named `instruction_compression` until issue #7867 reserved \"compression\" for tool-output compression; this row claims nothing about the `💸` segment, which measures that instead.",
     ),

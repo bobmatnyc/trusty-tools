@@ -748,6 +748,9 @@ pub(crate) fn build_inplace_exec_command(
     for (name, value) in &resume.mcp_env {
         cmd.env(name, value);
     }
+    // #8453: the launch stamp for the profile the relaunched prompt carries.
+    let (name, value) = trusty_mpm::core::session_profile::launch_env(resume.profile);
+    cmd.env(name, value);
     // #6495/#8405: the config-decided renderer, whatever this pane exports.
     trusty_mpm::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd

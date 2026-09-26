@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::core::bundle::{DEFAULT_OUTPUT_STYLE_ID, OUTPUT_STYLE, OUTPUT_STYLE_SUPERVISOR};
+use crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for;
 use crate::core::instruction_overrides::{PromptSource, resolve_pm_prompt_with_roster};
+use std::ffi::OsString;
 use tempfile::TempDir;
 
 /// A fixed roster, so the PM side of a comparison is machine-independent.
@@ -18,6 +20,13 @@ fn project_with(toml: &str) -> TempDir {
 /// A supervisor project.
 fn supervisor_project() -> TempDir {
     project_with("profile = \"supervisor\"\n")
+}
+
+/// A user-level config that allow-lists exactly `dirs`.
+fn allowing(dirs: &[&Path]) -> MpmConfig {
+    let mut config = MpmConfig::default();
+    config.supervisor.projects = dirs.iter().map(|d| d.to_path_buf()).collect();
+    config
 }
 
 /// The first heading line of a PM section file.
@@ -65,12 +74,85 @@ fn leaked<'a>(text: &str, markers: &[&'a str]) -> Vec<&'a str> {
 
 #[test]
 fn a_supervisor_config_selects_the_supervisor_profile() {
+    // All conditions met: allow-listed AND the file asks.
     let tmp = supervisor_project();
-    assert_eq!(resolve(tmp.path()), SessionProfile::Supervisor);
+    assert_eq!(
+        resolve(tmp.path(), &allowing(&[tmp.path()])),
+        SessionProfile::Supervisor
+    );
     let pm = project_with("profile = \"pm\"\n");
-    assert_eq!(resolve(pm.path()), SessionProfile::Pm);
+    assert_eq!(
+        resolve(pm.path(), &allowing(&[pm.path()])),
+        SessionProfile::Pm
+    );
     let absent = TempDir::new().expect("tempdir");
-    assert_eq!(resolve(absent.path()), SessionProfile::Pm);
+    assert_eq!(
+        resolve(absent.path(), &allowing(&[absent.path()])),
+        SessionProfile::Pm
+    );
+}
+
+#[test]
+fn a_project_only_switch_stays_pm() {
+    // #3981: the project file alone never exempts a project — not for the
+    // profile, the prompt, the style or the model.
+    let tmp = supervisor_project();
+    let config = MpmConfig::default();
+    assert_eq!(resolve(tmp.path(), &config), SessionProfile::Pm);
+    assert_eq!(resolve_ambient(tmp.path()), SessionProfile::Pm);
+    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(ROSTER.into()));
+    assert_eq!(source, PromptSource::Package);
+    let root = TempDir::new().expect("framework root");
+    let style = crate::core::output_style::select_style_under(root.path(), tmp.path(), None);
+    assert_eq!(style.style.id(), DEFAULT_OUTPUT_STYLE_ID);
+    assert_eq!(
+        launch_model(resolve(tmp.path(), &config), &config),
+        crate::core::model_inject::resolve_pm_model(&config, None)
+    );
+}
+
+#[test]
+fn an_allowlist_entry_for_another_path_does_not_match() {
+    let tmp = supervisor_project();
+    let other = TempDir::new().expect("tempdir");
+    assert_eq!(
+        resolve(tmp.path(), &allowing(&[other.path()])),
+        SessionProfile::Pm
+    );
+    // A relative entry matches nothing, whatever the process cwd is.
+    let relative = allowing(&[Path::new(".")]);
+    assert!(!is_allow_listed(tmp.path(), &relative.supervisor));
+}
+
+#[test]
+fn a_symlinked_allowlist_entry_is_canonicalized() {
+    let tmp = supervisor_project();
+    let links = TempDir::new().expect("tempdir");
+    let link = links.path().join("fleet");
+    std::os::unix::fs::symlink(tmp.path(), &link).expect("symlink");
+    // The entry names the link; the session runs in the real directory.
+    assert_eq!(
+        resolve(tmp.path(), &allowing(&[&link])),
+        SessionProfile::Supervisor
+    );
+    // The entry names the real directory; the session runs through the link.
+    assert_eq!(
+        resolve(&link, &allowing(&[tmp.path()])),
+        SessionProfile::Supervisor
+    );
+}
+
+#[test]
+fn the_doctor_reason_names_the_missing_allowlist_entry() {
+    let tmp = supervisor_project();
+    assert_eq!(
+        refusal(tmp.path(), &MpmConfig::default()),
+        Some(NOT_ALLOW_LISTED)
+    );
+    assert!(NOT_ALLOW_LISTED.contains("not allow-listed in ~/.trusty-mpm/config.toml"));
+    assert_eq!(refusal(tmp.path(), &allowing(&[tmp.path()])), None);
+    let pm = TempDir::new().expect("tempdir");
+    assert_eq!(refusal(pm.path(), &MpmConfig::default()), None);
 }
 
 #[test]
@@ -95,8 +177,9 @@ fn an_unknown_profile_value_falls_back_to_the_pm_profile() {
 
 #[test]
 fn a_malformed_config_falls_back_to_the_pm_profile() {
-    // Fail-open: when the selector cannot tell, the session gets the FULL PM
-    // prompt — never the supervisor text, never a partial or empty prompt.
+    // Fail-closed: when the selector cannot tell, the session gets the FULL PM
+    // prompt — never the supervisor text, never a partial or empty prompt —
+    // even for an allow-listed project.
     let clean = TempDir::new().expect("tempdir");
     let (pm_prompt, _) = resolve_pm_prompt_with_roster(clean.path(), || Some(ROSTER.into()));
 
@@ -109,8 +192,10 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
         ("unknown key", &unknown_key),
         ("unreadable", &unreadable),
     ] {
-        assert_eq!(resolve(dir.path()), SessionProfile::Pm, "{label}");
-        let (prompt, source) = resolve_pm_prompt_with_roster(dir.path(), || Some(ROSTER.into()));
+        let profile = resolve(dir.path(), &allowing(&[dir.path()]));
+        assert_eq!(profile, SessionProfile::Pm, "{label}");
+        let (prompt, source) =
+            resolve_pm_prompt_with_roster_for(dir.path(), profile, || Some(ROSTER.into()));
         assert_eq!(source, PromptSource::Package, "{label}");
         assert_eq!(prompt, pm_prompt, "{label}: the full PM prompt");
     }
@@ -156,10 +241,11 @@ fn no_pm_delegation_text_reaches_a_supervisor_session() {
     let tmp = supervisor_project();
     let markers = dropped_pm_markers();
     for native in [true, false] {
-        let delivered = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
+        let delivered = crate::core::session_launch::build_system_prompt_for_profile(
             tmp.path(),
             None,
             native,
+            SessionProfile::Supervisor,
         );
         assert!(
             delivered.contains("# Trusty Fleet Supervisor"),
@@ -193,7 +279,8 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
         "# Fleet\n\nWatch set: tm-api.\n",
     )
     .unwrap();
-    let (plain, source) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let supervisor = SessionProfile::Supervisor;
+    let (plain, source) = resolve_pm_prompt_with_roster_for(tmp.path(), supervisor, || None);
     assert_eq!(source, PromptSource::Supervisor);
     assert_eq!(plain, supervisor_prompt());
 
@@ -203,7 +290,7 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
          <!-- TRUSTY-MPM: IDENTITY END -->\n",
     )
     .unwrap();
-    let (with_block, _) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (with_block, _) = resolve_pm_prompt_with_roster_for(tmp.path(), supervisor, || None);
     assert_eq!(with_block, supervisor_prompt());
 }
 
@@ -216,6 +303,7 @@ fn a_supervisor_project_selects_the_supervisor_style_over_every_tier() {
         Some("trusty-mpm-teacher"),
         &config,
         || Some("trusty-mpm-research".into()),
+        SessionProfile::Supervisor,
     );
     assert_eq!(selected.style.id(), SUPERVISOR_OUTPUT_STYLE_ID);
     assert!(selected.warning.is_none());
@@ -229,6 +317,7 @@ fn a_pm_project_cannot_select_the_supervisor_style() {
         Some(SUPERVISOR_OUTPUT_STYLE_ID),
         &MpmConfig::default(),
         || None,
+        SessionProfile::Pm,
     );
     assert_eq!(selected.style.id(), DEFAULT_OUTPUT_STYLE_ID);
     let warning = selected.warning.expect("a warning");
@@ -261,23 +350,91 @@ fn the_supervisor_model_is_the_opus_tier_alias() {
     let mut config = MpmConfig::default();
     config.models.default = Some("claude-sonnet-4-5".into());
     config.models.tiers.opus = Some("claude-opus-4-1".into());
-    let tmp = supervisor_project();
-    assert_eq!(launch_model(tmp.path(), &config), SUPERVISOR_MODEL);
-
-    let pm = TempDir::new().expect("tempdir");
     assert_eq!(
-        launch_model(pm.path(), &config),
+        launch_model(SessionProfile::Supervisor, &config),
+        SUPERVISOR_MODEL
+    );
+    assert_eq!(
+        launch_model(SessionProfile::Pm, &config),
         crate::core::model_inject::resolve_pm_model(&config, None)
     );
 }
 
 #[test]
-fn the_hook_reads_the_launch_directory_before_the_cwd() {
-    let cwd = Path::new("/work/watched-project");
+fn the_hook_reads_only_the_launch_directory() {
+    // #8453 row 4: an unset or empty `CLAUDE_PROJECT_DIR` is the PM profile;
+    // the payload `cwd` follows `cd` and is never consulted.
     assert_eq!(
-        hook_project_dir(Some("/work/supervisor".into()), cwd),
-        PathBuf::from("/work/supervisor")
+        hook_project_dir(Some("/work/supervisor".into())),
+        Some(PathBuf::from("/work/supervisor"))
     );
-    assert_eq!(hook_project_dir(Some("".into()), cwd), cwd);
-    assert_eq!(hook_project_dir(None, cwd), cwd);
+    assert_eq!(hook_project_dir(Some("".into())), None);
+    assert_eq!(hook_project_dir(None), None);
+}
+
+#[test]
+fn the_hook_needs_the_stamp_the_allowlist_and_the_file() {
+    let supervisor = supervisor_project();
+    let pm = project_with("profile = \"pm\"\n");
+    let missing = TempDir::new().expect("tempdir");
+    let stamp = || Some(OsString::from(SUPERVISOR_PROFILE_ID));
+    let dir = |d: &TempDir| Some(d.path().as_os_str().to_owned());
+    let all = |d: &TempDir| allowing(&[d.path()]);
+    let cases = [
+        (
+            "all three",
+            stamp(),
+            dir(&supervisor),
+            all(&supervisor),
+            true,
+        ),
+        ("no stamp", None, dir(&supervisor), all(&supervisor), false),
+        (
+            "pm stamp",
+            Some("pm".into()),
+            dir(&supervisor),
+            all(&supervisor),
+            false,
+        ),
+        (
+            "no allowlist",
+            stamp(),
+            dir(&supervisor),
+            MpmConfig::default(),
+            false,
+        ),
+        ("file says pm", stamp(), dir(&pm), all(&pm), false),
+        ("file missing", stamp(), dir(&missing), all(&missing), false),
+        ("no project dir", stamp(), None, all(&supervisor), false),
+    ];
+    for (label, stamp, dir, config, supervisor) in cases {
+        let got = hook_profile(stamp, dir, || config);
+        assert_eq!(got.is_supervisor(), supervisor, "{label}");
+    }
+    // A PM stamp never reads the config.
+    let got = hook_profile(None, dir(&supervisor), || panic!("config read for a PM"));
+    assert_eq!(got, SessionProfile::Pm);
+}
+
+#[test]
+fn the_launch_stamp_names_the_profile() {
+    assert_eq!(
+        launch_env(SessionProfile::Supervisor),
+        (SESSION_PROFILE_ENV.to_owned(), "supervisor".to_owned())
+    );
+    assert_eq!(launch_env(SessionProfile::Pm).1, "pm");
+}
+
+#[test]
+fn cli_launch_stamps_the_profile_its_prompt_was_composed_for() {
+    // A temp project is on no operator's allowlist: a PM prompt and a PM stamp.
+    let tmp = supervisor_project();
+    let cli = crate::core::session_launch::cli_launch(tmp.path(), None);
+    assert_eq!(cli.profile, SessionProfile::Pm);
+    assert!(
+        cli.env.contains(&launch_env(SessionProfile::Pm)),
+        "{:?}",
+        cli.env
+    );
+    assert!(!cli.prompt.contains("# Trusty Fleet Supervisor"));
 }

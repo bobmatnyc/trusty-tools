@@ -250,6 +250,10 @@ use doctor_log_drain::check_log_drain;
 #[path = "doctor_legacy_overrides.rs"]
 mod doctor_legacy_overrides;
 use doctor_legacy_overrides::check_legacy_overrides;
+// #8453: which instruction profile a launch here resolves, and why not.
+#[path = "doctor_session_profile.rs"]
+mod doctor_session_profile;
+use doctor_session_profile::check_session_profile;
 
 // #7616: the fold's decline was reported only as a one-time daemon-log line, so
 // nothing an operator reads said whether the instruction fold saves anything.
@@ -423,7 +427,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_one_checks`,
+/// Test: `run_doctor_produces_sixty_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -546,6 +550,9 @@ pub(crate) async fn run_doctor_with_claims(
         // leftover file means the project's instructions stopped reaching the
         // PM, so this Fails loudly and names the CLAUDE.md migration.
         check_legacy_overrides(project_dir),
+        // #8453: a project asking for the supervisor profile without the
+        // operator's `[supervisor] projects` entry runs as a PM; say why.
+        check_session_profile(project_dir, &home),
         // #7616: states whether the instruction fold is saving anything for this
         // project, so a daemon-log line stops being the only evidence.
         check_instruction_fold(project_dir),
@@ -803,7 +810,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_one_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_two_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

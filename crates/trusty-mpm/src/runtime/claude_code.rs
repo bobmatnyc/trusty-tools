@@ -407,6 +407,9 @@ pub struct InPlaceResumeCommand {
     /// could be derived — the servers then fall back to their own cwd
     /// derivation, which is what the unpinned stub used to do.
     pub mcp_env: Vec<(String, String)>,
+    /// #8453: the profile the relaunched prompt was composed for; the exec
+    /// stamps it as `TRUSTY_MPM_SESSION_PROFILE`.
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
@@ -521,7 +524,7 @@ pub fn build_inplace_resume_command(
     })?;
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
-    let prompt_file = build_prompt_file(cwd, None);
+    let (prompt_file, profile) = build_prompt_file(cwd, None);
     let args = compose_inplace_args(
         cwd,
         Some(&config_dir),
@@ -537,6 +540,7 @@ pub fn build_inplace_resume_command(
         config_dir: Some(config_dir),
         oauth_token,
         mcp_env,
+        profile,
     })
 }
 
@@ -750,7 +754,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
         // out a CLAUDE.md-carrier fallback, so there is no other carrier).
         // #8233: the compiled-prompt ledger under the NAMED framework root.
-        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -791,6 +795,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_config: mcp_config.as_deref(),
             memory_reachable,
             alternate_screen,
+            profile,
         };
         // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
         // here, which makes every pane-directed step — the interrupt that
@@ -889,7 +894,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // resumed/guided-resume/crash-recovery session silently ran vanilla
         // Claude Code. Non-fatal: a write failure omits the flag.
         // #8233: named framework root, exactly as `spawn` uses.
-        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to
@@ -961,6 +966,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             // lose auto memory while trusty-memory is down either.
             memory_reachable: resolve_memory_reachable(self.memory_reachable),
             alternate_screen,
+            profile,
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its

@@ -120,6 +120,7 @@ fn inputs(cwd: &Path) -> ManagedLaunch<'_> {
         // #8233: `config_dir: None`, so the launch provisioned no scoped file.
         mcp_config: None,
         alternate_screen: false,
+        profile: Default::default(),
     }
 }
 

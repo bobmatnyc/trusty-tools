@@ -163,6 +163,8 @@ pub(super) struct ManagedLaunch<'a> {
     pub memory_reachable: bool,
     /// #8405: config `tmux.alternate_screen`, read by the caller at launch.
     pub alternate_screen: bool,
+    /// #8453: the profile this launch's prompt was composed for — the stamp.
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 impl ManagedLaunch<'_> {
@@ -190,6 +192,9 @@ impl ManagedLaunch<'_> {
         env_set.extend(crate::core::alt_screen::configured_env(
             self.alternate_screen,
         ));
+        // #8453: the launch stamp `tm hook --pm-guard` reads; written for a PM
+        // too, so an inherited supervisor stamp never survives.
+        env_set.push(crate::core::session_profile::launch_env(self.profile));
         LaunchSpec {
             session_id: self.session_id.to_owned(),
             // #8233 review round 2 (finding 3): one id per LAUNCH, minted here

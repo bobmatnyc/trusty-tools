@@ -193,7 +193,9 @@ fn build_prompt_file_writes_resolved_prompt_for_project() {
     // developer's real `~/.trusty-mpm` (the #2459/#2460/#2461 hazard class).
     let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
         content.contains("# PM Agent -- Trusty MPM"),
@@ -223,7 +225,9 @@ fn build_prompt_file_refreshes_the_compiled_prompt() {
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     std::fs::write(&compiled, STALE).expect("seed stale compiled prompt");
 
-    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
 
     let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt readable");
     assert_ne!(
@@ -258,6 +262,7 @@ fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
     std::fs::create_dir_all(&compiled).expect("plant a directory at the compiled path");
 
     let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
         .expect("spawn must still get its prompt file (non-fatal)");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
@@ -302,6 +307,7 @@ fn build_prompt_file_records_under_the_named_framework_root() {
     let project = tempfile::tempdir().expect("project");
 
     let path = build_prompt_file_in(root.path(), project.path(), Some("sess-1"))
+        .0
         .expect("prompt file written");
     std::fs::remove_file(&path).ok();
 
@@ -336,7 +342,9 @@ fn an_ambient_build_prompt_file_records_under_whatever_home_it_inherits() {
     let home = HomeGuard::set();
     let project = tempfile::tempdir().expect("project");
 
-    let path = build_prompt_file(project.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(project.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
     std::fs::remove_file(&path).ok();
 
     assert!(

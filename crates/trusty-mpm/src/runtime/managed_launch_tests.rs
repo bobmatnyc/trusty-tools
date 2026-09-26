@@ -93,6 +93,7 @@ impl Worst {
             memory_reachable: true,
             // #8405: the worst case carries the configured renderer too.
             alternate_screen: true,
+            profile: Default::default(),
         }
     }
 }
@@ -112,6 +113,7 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         mcp_config: None,
         memory_reachable: false,
         alternate_screen: false,
+        profile: Default::default(),
     }
 }
 

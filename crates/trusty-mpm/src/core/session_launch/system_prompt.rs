@@ -85,12 +85,27 @@ pub fn build_system_prompt_for_with_style_and_native(
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> String {
-    let prompt = crate::core::instruction_overrides::resolve_pm_prompt(project_dir);
-    let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    build_system_prompt_for_profile(project_dir, explicit_style, native_supported, profile)
+}
+
+/// [`build_system_prompt_for_with_style_and_native`] for a profile the caller
+/// already resolved (#8453), so the prompt, the style and the launch stamp
+/// all come from one resolution.
+/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+pub fn build_system_prompt_for_profile(
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+    profile: crate::core::session_profile::SessionProfile,
+) -> String {
+    let prompt = crate::core::instruction_overrides::resolve_pm_prompt_for(project_dir, profile);
+    let styled = crate::core::output_style::apply_output_style_to_prompt_for(
         project_dir,
         explicit_style,
         prompt,
         native_supported,
+        profile,
     );
     // #7688: the flag-gated addendum; a no-op when the flag is off.
     crate::core::prompt_self_improvement::append_to_pm_prompt(project_dir, styled)
@@ -130,4 +145,37 @@ pub fn build_system_prompt_for_with_roster(project_dir: &Path, roster: Option<St
     // same addendum — otherwise `tm session instructions` would print a prompt
     // the session did not receive.
     crate::core::prompt_self_improvement::append_to_pm_prompt(project_dir, styled)
+}
+
+/// What a CLI launch (`tm launch`, `tm connect`) needs from the profile.
+///
+/// Why (#8453): the prompt and the launch stamp must come from ONE profile
+/// resolution, or a session could run the supervisor prompt under PM rules or
+/// the reverse.
+/// What: the resolved profile, the prompt composed for it, and the launch
+/// environment — the per-project MCP pins plus the
+/// [`crate::core::session_profile::SESSION_PROFILE_ENV`] stamp.
+/// Test: `cli_launch_stamps_the_profile_its_prompt_was_composed_for`.
+#[derive(Debug, Clone)]
+pub struct CliLaunch {
+    /// The profile resolved for this launch.
+    pub profile: crate::core::session_profile::SessionProfile,
+    /// The `--append-system-prompt-file` text, composed for `profile`.
+    pub prompt: String,
+    /// `NAME=VALUE` pairs for the spawned `claude`, stamp included.
+    pub env: Vec<(String, String)>,
+}
+
+/// Resolve the profile once for a CLI launch in `project_dir`; see [`CliLaunch`].
+pub fn cli_launch(project_dir: &Path, git_remote: Option<&str>) -> CliLaunch {
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    let prompt = build_system_prompt_for_profile(project_dir, None, native, profile);
+    let mut env = crate::core::mcp_session_env::session_mcp_env(project_dir, git_remote);
+    env.push(crate::core::session_profile::launch_env(profile));
+    CliLaunch {
+        profile,
+        prompt,
+        env,
+    }
 }

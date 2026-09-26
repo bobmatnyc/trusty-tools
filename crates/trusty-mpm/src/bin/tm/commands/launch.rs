@@ -340,15 +340,15 @@ pub(crate) async fn launch(
     // paths' default constructor at all, and matches on source text, so even a
     // comment spelling that symbol out would trip it.
     let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
-    // #8453: a supervisor project launches on the Opus tier alias.
-    let pm_model = trusty_mpm::core::session_profile::launch_model(&managed_path, &mpm_cfg);
+    // #8453: one profile resolution for the prompt, the stamp and the model; a
+    // supervisor launches on the Opus tier alias.
+    let cli = trusty_mpm::core::session_launch::cli_launch(&managed_path, Some(&origin_url));
+    let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
     // framework was deployed at session prep). Style is not supported in managed
     // mode so we always pass `None` here.
-    let prompt =
-        trusty_mpm::core::session_launch::build_system_prompt_for_with_style(&managed_path, None);
-    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt);
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; launching without prompt");
     }
@@ -375,8 +375,8 @@ pub(crate) async fn launch(
             prompt_path.as_deref(),
             config_dir.as_deref(),
             // #4181: the per-project MCP pins the shared user-scope declarations
-            // cannot carry as arguments.
-            &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
+            // cannot carry as arguments; #8453: plus the profile stamp.
+            &cli.env,
             scoped_mcp.as_deref(),
         ),
     );
@@ -480,7 +480,7 @@ pub(crate) async fn launch(
 /// (best-effort — logs and continues on any failure, never aborts the
 /// connect), registers the session via `POST /api/v1/sessions/connect`,
 /// builds the PM system prompt via
-/// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
+/// [`trusty_mpm::core::session_launch::cli_launch`]
 /// and writes it to a temp file, creates the tmux host idempotently
 /// (`tmux new-session -A`), and — only when the session is freshly created —
 /// starts `claude` via [`connect_claude_cmd`] (`--append-system-prompt-file`
@@ -556,11 +556,9 @@ pub(crate) async fn connect(
     //     deployed the framework) and write it to a temp file for
     //     `--append-system-prompt-file` (issue #2230). Non-fatal: a write
     //     failure omits the flag rather than blocking the connect.
-    let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
-    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
-        &path, None, native,
-    );
-    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    // #8453: the prompt and the launch stamp come from one profile resolution.
+    let cli = trusty_mpm::core::session_launch::cli_launch(&path, None);
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt);
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; connecting without prompt");
     }
@@ -650,8 +648,8 @@ pub(crate) async fn connect(
             trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
                 prompt_path.as_deref(),
                 config_dir.as_deref(),
-                // #4181: the per-project MCP pins.
-                &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
+                // #4181: the per-project MCP pins; #8453: plus the profile stamp.
+                &cli.env,
                 scoped_mcp.as_deref(),
                 // #8405: the operator's config decides the renderer.
                 trusty_mpm::core::alt_screen::operator_config_root().as_deref(),

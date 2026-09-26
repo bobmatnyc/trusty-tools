@@ -16,6 +16,8 @@
 
 use std::path::Path;
 
+use crate::core::session_profile::SessionProfile;
+
 /// Build and write the PM system-prompt file for `project_dir`, for injection
 /// into the daemon managed-spawn command via `--append-system-prompt-file`
 /// (issue #2125 item 3 — the daemon-adapter carrier).
@@ -78,7 +80,7 @@ use std::path::Path;
 pub(super) fn build_prompt_file(
     project_dir: &Path,
     session_id: Option<&str>,
-) -> Option<std::path::PathBuf> {
+) -> (Option<std::path::PathBuf>, SessionProfile) {
     // #7514: a real spawn, so the ambient framework root is the right ledger —
     // read once, here, and passed down rather than resolved inside the writer.
     let framework_root = crate::core::paths::FrameworkPaths::default().root;
@@ -106,12 +108,19 @@ pub(super) fn build_prompt_file_in(
     framework_root: &Path,
     project_dir: &Path,
     session_id: Option<&str>,
-) -> Option<std::path::PathBuf> {
+) -> (Option<std::path::PathBuf>, SessionProfile) {
+    // #8453: resolved once, against the named root's user config; the prompt
+    // is composed for it and the caller stamps the same value.
+    let profile = crate::core::session_profile::resolve(
+        project_dir,
+        &crate::core::config::MpmConfig::load(framework_root),
+    );
     let native = crate::core::output_style::claude_supports_native_output_style();
-    let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
+    let prompt = crate::core::session_launch::build_system_prompt_for_profile(
         project_dir,
         None,
         native,
+        profile,
     );
 
     // #4752: refresh this PROJECT's compiled prompt from the very string about
@@ -140,5 +149,5 @@ pub(super) fn build_prompt_file_in(
             "failed to write PM system-prompt file; spawning without --append-system-prompt-file"
         );
     }
-    file
+    (file, profile)
 }

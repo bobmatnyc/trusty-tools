@@ -950,7 +950,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
 
     // #8453: the PM delegation rules bind by session profile; a supervisor is
     // exempt, and every ABSOLUTE guard above has already run for it.
-    let Some(reason) = pm_guard_profile::verdict(tool_name, tool_input, &hook_cwd) else {
+    let Some(reason) = pm_guard_profile::verdict(tool_name, tool_input) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies —
         // unless #8261 admitted this dispatch to a builder slot, which is the
         // one thing an allowed dispatch still has to be TOLD. This is the exit
