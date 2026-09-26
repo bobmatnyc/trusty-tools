@@ -24,7 +24,7 @@ pub(super) struct Routed {
     /// Every descriptor 0-9 after the redirections; an unassigned one is the
     /// terminal.
     pub(super) fds: [Sink; 10],
-    /// A here-string carries a credential value.
+    /// A here-string or unquoted here-document carries a credential value.
     pub(super) here_carries: bool,
     /// A here-string or here-document holds text an evaluator would run.
     pub(super) here_program_text: bool,
@@ -82,6 +82,8 @@ pub(super) fn apply_redirections(
             // words follow the operator.
             let rest = tokens.get(i..).unwrap_or_default();
             routed.here_program_text |= rest.iter().any(|w| input_is_program_text(w));
+            // #8676: a body word expanding a credential feeds it on stdin.
+            routed.here_carries |= rest.iter().any(|w| carries(w, lifted));
         }
         if let Some((fd, src)) = dup_operands(tok, tokens.get(i).map(String::as_str))? {
             if src.consumed_next {

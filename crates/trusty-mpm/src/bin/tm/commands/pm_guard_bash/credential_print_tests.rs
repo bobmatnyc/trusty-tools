@@ -268,6 +268,74 @@ fn allows_script_operands_and_comments() {
     );
 }
 
+/// #8676: a credential captured into a shell variable and printed in a later
+/// stage. The first three rows are the reported shapes; each row was allowed
+/// at 62947a19f.
+#[test]
+fn denies_a_credential_carried_by_a_variable() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); echo \"${T:0:10}\"",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv K",
+            "for t in $(gcloud auth print-access-token); do echo $t; done",
+            // Environment and variable dumps while a name is tainted.
+            "export K=$(security find-generic-password -s fake-svc -w); env",
+            "T=$(gcloud auth print-access-token) printenv T",
+            "T=$(gcloud auth print-access-token); sudo -u fake env",
+            "T=$(gcloud auth print-access-token); set",
+            "T=$(gcloud auth print-access-token); declare -p T",
+            "export T=$(gcloud auth print-access-token); export -p",
+            "T=$(gcloud auth print-access-token); timeout 5 printenv",
+            // Every binding form, and every stage separator.
+            "T=$(gcloud auth print-access-token)\nprintf '%s\\n' \"$T\"",
+            "local T=$(gcloud auth print-access-token) || echo ${T}",
+            "declare -r T=`gcloud auth print-access-token`; echo ${T:-none}",
+            "readonly T=$(gcloud auth print-access-token); echo ${T#ya29}",
+            "f() { T=$(gcloud auth print-access-token); }; f; echo $T",
+            "select t in $(gcloud auth print-access-token); do echo $t; done",
+            "set -- $(gcloud auth print-access-token); echo \"$1\"",
+            "set -- $(gcloud auth print-access-token); for t; do echo $t; done",
+            // A copy, a nameref, a run-time name, and a loop that reprints.
+            "T=$(gcloud auth print-access-token); U=\"Bearer $T\"; echo $U",
+            "T=$(gcloud auth print-access-token); declare -n R=T; echo $R",
+            "declare \"$N=$(gcloud auth print-access-token)\"; echo $OTHER",
+            "T=$(gcloud auth print-access-token); echo ${!T}",
+            "while true; do echo $T; T=$(gcloud auth print-access-token); done",
+            // The value reaching the terminal through another route.
+            "T=$(gcloud auth print-access-token); echo \"$(echo $T)\"",
+            "T=$(gcloud auth print-access-token); echo $T | head -c 5",
+            "T=$(gcloud auth print-access-token); cat <<< \"$T\"",
+            "T=$(gcloud auth print-access-token); head <<EOF\n$T\nEOF",
+            "T=$(gcloud auth print-access-token); bash -c \"echo $T\"",
+            "export T=$(gcloud auth print-access-token); bash -c 'echo $T'",
+            "T=$(gcloud auth print-access-token); echo $T >&2",
+        ],
+    );
+}
+
+/// #8676: a variable that holds a credential but is only measured, tested, or
+/// handed to a program that does not print it.
+#[test]
+fn allows_a_carried_variable_that_is_never_printed() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); echo ${#T}",
+            "T=$(gcloud auth print-access-token); echo \"len=${#T}\"",
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+            "T=$(gcloud auth print-access-token); curl -sS -H \"Authorization: Bearer $T\" https://example.test/v1",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv HOME",
+            "T=$(gcloud auth print-access-token); [ -n \"$T\" ] && echo present",
+            "T=$(gcloud auth print-access-token); printenv T > /tmp/fake-out",
+            "T=$(gcloud auth print-access-token); set -e; echo done",
+            "T=$(gcloud auth print-access-token >/dev/null); echo $T",
+            "for t in a b; do echo $t; done; T=$(gcloud auth print-access-token)",
+            "T=$(gcloud auth print-access-token); printf '%s' \"$T\" | docker login -u x --password-stdin r.test",
+        ],
+    );
+}
+
 /// No prefix of a credential command panics, and each gets a verdict: a panic
 /// would exit the hook 101 and fail open.
 #[test]

@@ -17,6 +17,8 @@
 //! `echo`/`printf`/`cat` argument, or the command-name position; when xtrace is
 //! on; and when credential-command text is handed to an evaluator (`eval`,
 //! `sh` on stdin, `ssh`, `python3 -c`, …) or run through a `$`-named program.
+//! A variable bound from a credential carries it into every stage of the
+//! command (#8676, `credential_print_taint`).
 //!
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
@@ -36,6 +38,8 @@ mod credential_print_heredoc;
 mod credential_print_programs;
 #[path = "credential_print_redirect.rs"]
 mod credential_print_redirect;
+#[path = "credential_print_taint.rs"]
+mod credential_print_taint;
 
 use super::bash_tokens::tokenize;
 use super::heredoc::HeredocBodies;
@@ -47,6 +51,8 @@ use credential_print_programs::{
     first_credential_program, is_evaluator,
 };
 use credential_print_redirect::{apply_redirections, terminal_name_sink};
+use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
+use std::collections::BTreeSet;
 
 /// Subcommand names whose presence makes the command worth parsing.
 const TRIGGERS: &[&str] = &[
@@ -120,6 +126,8 @@ struct Heredoc {
 struct Lifted {
     subs: Vec<Sub>,
     heredocs: Vec<Heredoc>,
+    /// #8676: shell variables that hold a credential.
+    names: BTreeSet<String>,
 }
 
 /// Refuse a Bash command that prints a credential value: `Some(reason)` denies.
@@ -134,6 +142,7 @@ struct Lifted {
 /// `credential_print_tests::allows_the_capturing_forms`,
 /// `credential_print_tests::denies_what_it_cannot_read`,
 /// `credential_print_tests::denies_the_round_two_bypasses`,
+/// `credential_print_tests::denies_a_credential_carried_by_a_variable`,
 /// `credential_print_tests::no_prefix_of_a_command_panics`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
@@ -195,6 +204,8 @@ fn input_is_program_text(text: &str) -> bool {
 /// ([`split_stages`]) and judges each ([`judge_stage`]), carrying "stdin holds
 /// a credential" and "stdin holds program text" from a stage piped into the
 /// next; program text passes through any stage that is not a stdin consumer.
+/// #8676: a pass that binds a new credential-holding name is re-run with it,
+/// so every stage and substitution body sees every name; the set only grows.
 fn scan(
     text: &str,
     stdout: Sink,
@@ -205,11 +216,32 @@ fn scan(
     if depth > MAX_DEPTH {
         return Err(Refusal::Unreadable("nesting this deep"));
     }
-    let mut lifted = outer.clone();
+    let mut names = outer.names.clone();
+    loop {
+        let mut lifted = outer.clone();
+        lifted.names.clone_from(&names);
+        let (yields, bound) = scan_pass(text, stdout, stderr, depth, &mut lifted)?;
+        let known = names.len();
+        names.extend(bound);
+        if names.len() == known {
+            return Ok(yields);
+        }
+    }
+}
+
+/// One [`scan`] pass with a fixed name set: whether a value is captured, and
+/// every name a stage bound.
+fn scan_pass(
+    text: &str,
+    stdout: Sink,
+    stderr: Sink,
+    depth: usize,
+    lifted: &mut Lifted,
+) -> Result<(bool, Vec<String>), Refusal> {
     let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
-    let flat = lift_substitutions(&text, stdout, stderr, depth, &mut lifted)?;
+    let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);
-    let mut yields = false;
+    let (mut yields, mut bound) = (false, Vec::new());
     let (mut stdin_carries, mut stdin_text) = (false, false);
     for (idx, (stage, piped, pipe_stderr)) in stages.iter().enumerate() {
         let next_exists = stages.get(idx + 1).is_some();
@@ -230,12 +262,13 @@ fn scan(
             stdin_text,
             depth,
         };
-        let emitted = judge_stage(stage.trim(), &lifted, ctx)?;
+        let emitted = judge_stage(stage.trim(), lifted, ctx)?;
         yields |= emitted.captured;
         stdin_carries = emitted.piped;
         stdin_text = *piped && emitted.text;
+        bound.extend(emitted.bound);
     }
-    Ok(yields)
+    Ok((yields, bound))
 }
 
 /// The sinks a stage starts with, before its own redirections.
@@ -255,6 +288,8 @@ struct Emitted {
     captured: bool,
     piped: bool,
     text: bool,
+    /// #8676: names this stage bound from a credential.
+    bound: Vec<String>,
 }
 
 /// Judge one pipeline stage.
@@ -294,6 +329,11 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     emitted.text |= ctx.stdin_text && !consumer;
     if enables_xtrace(&program, argv, args) {
         return Err(Refusal::Prints);
+    }
+    // #8676: bind before any early return; `printenv T`/`env`/`set` print them.
+    emitted.bound = bound_names(argv, kw, &program, args, lifted);
+    if dumps_variables(argv, &program, args, &lifted.names) {
+        route(routed.out, &mut emitted)?;
     }
     if program_word.is_empty() {
         // Assignments only (`T=$(…)`): nothing is printed.
@@ -462,9 +502,10 @@ fn route(sink: Sink, emitted: &mut Emitted) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether `word` holds a lifted substitution whose value is a credential.
+/// Whether `word` holds a lifted substitution whose value is a credential, or
+/// expands a variable that holds one (#8676).
 fn carries(word: &str, lifted: &Lifted) -> bool {
-    carries_kind(word, lifted, None)
+    carries_kind(word, lifted, None) || expands_tainted(word, &lifted.names)
 }
 
 /// [`carries`], limited to one substitution kind when `kind` is set.

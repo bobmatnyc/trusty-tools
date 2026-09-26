@@ -76,6 +76,19 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "gcp-ops",
             "gcloud auth application-default print-access-token",
         ),
+        // #8676: a value captured into a variable and printed a stage later.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); echo \"${T:0:10}\"",
+        ),
+        (
+            "local-ops",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv K",
+        ),
+        (
+            "gcp-ops",
+            "for t in $(gcloud auth print-access-token); do echo $t; done",
+        ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();
@@ -100,6 +113,12 @@ fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
         (
             "gcp-ops",
             "curl -sS -H \"Authorization: Bearer $(gcloud auth print-access-token)\" https://example.test/v1",
+        ),
+        // #8676: a carried variable that is only measured or passed on.
+        ("gcp-ops", "T=$(gcloud auth print-access-token); echo ${#T}"),
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
         ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
