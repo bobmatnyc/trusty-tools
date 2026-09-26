@@ -24,7 +24,10 @@ use tracing::info;
 use trusty_common::console_metrics::CONSOLE_METRICS_METHOD;
 
 use crate::{
-    config::{InvocationSurface, ReviewConfig},
+    config::{
+        InvocationSurface, ReviewConfig,
+        repo_index::{RepoIndexError, resolve_repo_index},
+    },
     integrations::github::{AuthStrategy, GithubClient, RunMode},
     mcp::console_metrics,
     models::{ReviewResult, ReviewStatus},
@@ -71,7 +74,9 @@ pub fn tool_descriptors() -> Value {
                            actionable findings.  Requires GITHUB_TOKEN and AWS Bedrock \
                            credentials (or OPENROUTER_API_KEY for OpenRouter provider). \
                            Dry-run by default (PR_INTELLIGENCE_DRY_RUN=true — no GitHub \
-                           comments posted).  trusty-search must be running on :7878.",
+                           comments posted).  trusty-search must be running on :7878 \
+                           with an index registered for owner/repo; without one the \
+                           tool returns an error naming the repo and index id.",
             "inputSchema": {
                 "type": "object",
                 "required": ["owner", "repo", "pr"],
@@ -195,10 +200,13 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
 ///
 /// Why: lets Claude Code trigger a full GitHub PR review via MCP without
 /// requiring the user to invoke the CLI manually.
-/// What: resolves the GitHub token, builds a `DiffSource::Github`, constructs
-/// `ReviewDeps` from the shared `AppState`, runs the pipeline, and returns the
-/// `ReviewResult` as a JSON string in the MCP content envelope.
-/// Test: `review_pr_returns_review_result_envelope`.
+/// What: resolves the PR repo's search index (#8649) — an unresolvable one is
+/// an in-band error naming the repo and index id, returned before any GitHub
+/// call — then resolves the GitHub token, builds a `DiffSource::Github`,
+/// constructs `ReviewDeps` from the shared `AppState`, runs the pipeline under
+/// the per-call config, and returns the `ReviewResult` in the MCP envelope.
+/// Test: `call_tool_review_pr_no_token_returns_error`,
+/// `call_tool_review_pr_missing_index_names_repo_and_index`.
 async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolError> {
     let owner = require_str(args, "owner")?;
     let repo = require_str(args, "repo")?;
@@ -206,6 +214,12 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         .get("pr")
         .and_then(Value::as_u64)
         .ok_or_else(|| ToolError::InvalidParams("missing or non-integer 'pr'".into()))?;
+
+    // #8649: the PR repo's own index, never the server-startup one.
+    let config = match config_for_pr_repo(state, owner, repo).await {
+        Ok(config) => config,
+        Err(e) => return Ok(wrap_tool_error(&e.to_string())),
+    };
 
     let reviewer_model = args
         .get("reviewer_model")
@@ -245,9 +259,37 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         surface: InvocationSurface::Interactive,
     };
 
-    info!(owner, repo, pr, reviewer_model, "mcp: review_pr");
-    let result = run_review(&state.config, input, deps).await;
+    info!(owner, repo, pr, reviewer_model, index = %config.search_index, "mcp: review_pr");
+    let result = run_review(&config, input, deps).await;
     Ok(wrap_result(&result))
+}
+
+/// The server config with `search_index` set to the index serving `owner/repo`.
+///
+/// Why: the startup `search_index` belongs to whatever repo the MCP server was
+/// launched in, or is the `"main"` default; `review_pr` names its own repo
+/// (#8649). The startup index is kept as the session pin, honoured only when
+/// it belongs to this repo.
+/// What: resolves via `repo_index::resolve_repo_index` against `state.search`
+/// and returns a clone of `state.config` carrying the result, marked explicit.
+/// `state.config` itself is untouched, so other tools keep the startup index.
+/// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`.
+pub(crate) async fn config_for_pr_repo(
+    state: &AppState,
+    owner: &str,
+    repo: &str,
+) -> Result<ReviewConfig, RepoIndexError> {
+    let index = resolve_repo_index(
+        state.search.as_ref(),
+        owner,
+        repo,
+        Some(&state.config.search_index),
+    )
+    .await?;
+    let mut config = state.config.clone();
+    config.search_index = index;
+    config.search_index_explicit = true;
+    Ok(config)
 }
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
@@ -630,9 +672,10 @@ pub fn wrap_tool_error(msg: &str) -> Value {
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
-// Split across two test modules to keep each file under the 500-line cap.
+// Split across three test modules to keep each file under the 500-line cap.
 //  - `tools_tests.rs`          — descriptors, helpers, review_health (#719/#722)
 //  - `tools_dispatch_tests.rs` — call_tool dispatch: review_diff / review_pr (#949)
+//  - `tools_pr_index_tests.rs` — review_pr's per-call index resolution (#8649)
 
 #[cfg(test)]
 #[path = "tools_tests.rs"]
@@ -641,3 +684,8 @@ mod tests;
 #[cfg(test)]
 #[path = "tools_dispatch_tests.rs"]
 mod dispatch_tests;
+
+// #8649: per-call search-index resolution for `review_pr`.
+#[cfg(test)]
+#[path = "tools_pr_index_tests.rs"]
+mod pr_index_tests;

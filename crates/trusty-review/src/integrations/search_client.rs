@@ -105,6 +105,25 @@ pub struct IndexInfo {
     pub root_path: Option<String>,
 }
 
+/// A registered index plus the repository trusty-search recorded for it (#8649).
+///
+/// Why: kept apart from [`IndexInfo`] so adding the field breaks no struct
+/// literal in a downstream crate.
+/// What: `repo_identity` is the daemon's canonical `owner/repo` (or
+/// `content:<sha>`); `None` when the daemon did not report one.
+/// Test: `list_index_identities_parses_repo_identity`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct IndexIdentity {
+    /// Unique index identifier.
+    pub id: String,
+    /// Root path of the indexed directory.
+    #[serde(default)]
+    pub root_path: Option<String>,
+    /// Canonical repository identity, when the daemon recorded one.
+    #[serde(default)]
+    pub repo_identity: Option<String>,
+}
+
 /// Envelope wrapper for `GET /indexes?details=true`.
 ///
 /// Why: the trusty-search daemon returns `{"indexes":[...]}`, not a bare array.
@@ -114,9 +133,9 @@ pub struct IndexInfo {
 /// What: single-field struct; `indexes` maps to the daemon's top-level key.
 /// Test: `list_indexes_parses_daemon_envelope`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListIndexesResponse {
+pub(crate) struct ListIndexesResponse<T = IndexInfo> {
     /// The list of registered indexes.
-    pub(crate) indexes: Vec<IndexInfo>,
+    pub(crate) indexes: Vec<T>,
 }
 
 /// A single search result item returned by `POST /indexes/{id}/search`.
@@ -209,6 +228,28 @@ pub trait SearchClient: Send + Sync {
     /// Test: `list_indexes_parses_daemon_envelope`.
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError>;
 
+    /// List registered indexes with the repository each one belongs to (#8649).
+    ///
+    /// Why: `review_pr` names a repo, not a directory; trusty-search records
+    /// each index's canonical `owner/repo` (`repo_identity`, DOC-37), which is
+    /// the only registry-side mapping from a repo to its index.
+    /// What: the default adapts `list_indexes` with every `repo_identity` unset,
+    /// so an implementor that predates this method still compiles and simply
+    /// reports no identities. `HttpSearchClient` overrides it to read the field.
+    /// Test: `list_index_identities_parses_repo_identity`.
+    async fn list_index_identities(&self) -> Result<Vec<IndexIdentity>, SearchClientError> {
+        Ok(self
+            .list_indexes()
+            .await?
+            .into_iter()
+            .map(|info| IndexIdentity {
+                id: info.id,
+                root_path: info.root_path,
+                repo_identity: None,
+            })
+            .collect())
+    }
+
     /// Read the status of ONE index (#6686).
     ///
     /// Why: `/health` counts registry handles and discards index ids, so the
@@ -297,6 +338,41 @@ impl HttpSearchClient {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+
+    /// `GET /indexes?details=true`, unwrapped from its `{"indexes":[...]}`
+    /// envelope into whichever entry shape the caller reads.
+    ///
+    /// `?details=true` is REQUIRED: without it the daemon omits `root_path` and
+    /// `repo_identity` from each entry. #8649 made this generic so
+    /// `list_indexes` and `list_index_identities` share one request.
+    async fn get_index_list<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<Vec<T>, SearchClientError> {
+        let url = format!("{}/indexes?details=true", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("GET {url}: {e}")))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("read body of {url}: {e}")))?;
+
+        if !status.is_success() {
+            return Err(SearchClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let envelope: ListIndexesResponse<T> = serde_json::from_str(&body)
+            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))?;
+        Ok(envelope.indexes)
+    }
 }
 
 #[async_trait]
@@ -327,34 +403,12 @@ impl SearchClient for HttpSearchClient {
     }
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-        // `?details=true` is REQUIRED: without it the daemon omits `root_path`
-        // from each index entry, making auto-derive unable to match any index.
-        let url = format!("{}/indexes?details=true", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| SearchClientError::Transport(format!("GET {url}: {e}")))?;
+        self.get_index_list().await
+    }
 
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchClientError::Transport(format!("read body of {url}: {e}")))?;
-
-        if !status.is_success() {
-            return Err(SearchClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        // The daemon returns `{"indexes":[...]}`, not a bare array.
-        // Unwrap the envelope and return the inner Vec.
-        let envelope: ListIndexesResponse = serde_json::from_str(&body)
-            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))?;
-        Ok(envelope.indexes)
+    // #8649: same request, read with each entry's `repo_identity` kept.
+    async fn list_index_identities(&self) -> Result<Vec<IndexIdentity>, SearchClientError> {
+        self.get_index_list().await
     }
 
     // #6686: the per-index probe the required-context gate decides on.

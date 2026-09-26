@@ -91,8 +91,14 @@ impl SearchClient for FakeSearchDispatch {
         })
     }
 
+    // #8649: `review_pr` resolves its index before auth, so the no-token test's
+    // repo (`test-owner/test-repo`) needs one registered by name.
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-        Ok(vec![])
+        Ok(vec![IndexInfo {
+            id: "test-repo".into(),
+            name: None,
+            root_path: None,
+        }])
     }
 
     async fn search(
@@ -453,6 +459,54 @@ async fn call_tool_review_pr_no_token_returns_error() {
             panic!("review_pr must be a known tool");
         }
     }
+}
+
+/// #8649: `review_pr` for a repo with no registered index returns an in-band
+/// error naming the repo and the index id it looked up, instead of running
+/// against the server-startup `"main"` index.
+///
+/// Why: the reported symptom was an UNKNOWN / `infra_unavailable` skip for
+/// `duettoresearch/code-intelligence#5906` while `review_health` said OK.
+/// What: the registry holds only `test-repo`; App auth is forced with no
+/// credentials so a build that skips index resolution fails at auth instead —
+/// the assertion then sees an auth message and goes red. Serialised because it
+/// mutates `TRUSTY_REVIEW_AUTH_MODE`.
+/// Test: this test itself; no network.
+#[tokio::test]
+#[serial_test::serial]
+async fn call_tool_review_pr_missing_index_names_repo_and_index() {
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "app") };
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".into();
+    config.search_index_explicit = false;
+    config.github_token = String::new();
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    let state = AppState::new(
+        config,
+        Arc::new(ApproveLlm),
+        Arc::new(FakeSearchDispatch),
+        None,
+    );
+
+    let args = json!({ "owner": "duettoresearch", "repo": "code-intelligence", "pr": 5906 });
+    let result = call_tool("review_pr", &args, &state).await;
+
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    let envelope = match result {
+        Ok(envelope) => envelope,
+        Err(ToolError::InvalidParams(msg)) => panic!("expected a named-index error, got: {msg}"),
+        Err(ToolError::UnknownTool) => panic!("review_pr must be a known tool"),
+    };
+    assert_eq!(envelope["isError"], json!(true), "{envelope}");
+    assert!(envelope.get("mcp_status").is_none(), "{envelope}");
+    let text = envelope["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("duettoresearch/code-intelligence"), "{text}");
+    assert!(text.contains("\"code-intelligence\""), "{text}");
 }
 
 // ── reviewer_model provider override (#1233) ───────────────────────────────────

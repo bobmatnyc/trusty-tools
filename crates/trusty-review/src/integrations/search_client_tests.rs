@@ -170,6 +170,23 @@ fn list_indexes_bare_array_is_rejected() {
     );
 }
 
+/// #8649: the `?details=true` envelope keeps each entry's `repo_identity`,
+/// and an entry the daemon reported without one parses as `None`.
+#[test]
+fn list_index_identities_parses_repo_identity() {
+    let body = r#"{"indexes":[
+        {"id":"ci-4e2cf878","root_path":"/src/ci","repo_identity":"duettoresearch/code-intelligence","size_bytes":1},
+        {"id":"legacy","root_path":"/src/legacy"}
+    ]}"#;
+    let envelope: ListIndexesResponse<super::IndexIdentity> =
+        serde_json::from_str(body).expect("must parse the daemon envelope");
+    assert_eq!(
+        envelope.indexes[0].repo_identity.as_deref(),
+        Some("duettoresearch/code-intelligence")
+    );
+    assert_eq!(envelope.indexes[1].repo_identity, None);
+}
+
 #[test]
 fn search_error_display() {
     let err = SearchClientError::Transport("connection refused".to_string());
