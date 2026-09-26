@@ -287,29 +287,44 @@ the guard will establish every precondition itself.
      other HEAD needs a two-way landing commit `M` on the base: the base's
      tip is tried first, then each first-parent base commit since the fork
      point that touches a file HEAD changed (oldest first, capped). `M`
-     admits only when BOTH directions are empty: merging HEAD into `M`
-     changes no file, and applying `M`'s own patch (against its first
-     parent) onto HEAD changes no file. The first proves HEAD's changes since
-     the fork are all in `M`; it cannot see a later branch commit that takes
-     part of `M` back — a revert to the fork's version, or the deletion of a
-     file `M` added — because relative to the fork that commit changes
-     nothing. The second catches exactly that, and counts a clean residue
-     only on paths some commit in `<fork>..HEAD` touched (merges included,
-     renames split): a revert or deletion is a commit of the branch's own,
-     while a squash that also carried a sibling's files — the #7889 donor
-     shape — holds more than HEAD without HEAD having undone anything. A
-     conflict in that direction always refuses. The tip gets no shortcut: an
-     empty merge into the tip no longer admits a non-ancestor on its own,
-     because when the base has not moved since the squash, the tip IS the
-     squash and the same blind spot applies there. A rebase-merged branch is
-     landed at its last replayed commit, which carries all of its content and
-     whose own patch HEAD holds. Ancestry is sufficient, never necessary; the
-     test is still content, judged only against commits already on the
-     remote. A branch holding a different version of the change, a later
-     commit the squash never carried, or a later commit that undid part of
-     the squash is not admitted, whether or not the base has moved since. A conflict is told apart from a git error by
-     the tree id `merge-tree` prints first; a git error (it also exits 1 for a
-     ref it cannot merge) stays undeterminable and quotes git's stderr, and
+     admits only when four checks pass. (1) Merging HEAD into `M` changes no
+     file, so HEAD's changes since the fork are all in `M`. That cannot see a
+     later branch commit that takes part of a landing back — a revert to the
+     fork's version, or the deletion of a file the squash added — because
+     relative to the fork that commit changes nothing. (2) `M`'s own patch
+     (`M^1..M`, first parent) changes at least one file HEAD changed since the
+     fork; a commit that does not proves nothing about HEAD and is skipped,
+     never admitted, the tip included. (3) Every path some commit in
+     `<fork>..HEAD` touched (merges included, renames split) is either in
+     `M`'s patch or byte-identical in HEAD and `M`. (4) Applying `M`'s patch
+     onto HEAD changes no file those commits touched, and conflicts nowhere.
+     Check 4 sees an undo, but only on the paths `M`'s patch changes; checks
+     2 and 3 make sure every branch path is one of those or needs no proof.
+     Without them, `main` pushing an unrelated `u.txt` after the squash made
+     the tip a "landing commit" whose check-4 residue (`u.txt`) was filtered
+     away, and an unpushed revert on `f.txt` was admitted and lost; and a
+     later landing of `f.txt` alone vouched for an undone `g.txt` it never
+     touched. Check 4 ignores residue on paths no branch commit touched —
+     HEAD holds the fork's version there, which is on the remote. The basis
+     for that scoping is the 2026-09-22 owner ruling above: the #7889 donor
+     squash also carries a sibling's files, which HEAD never had, and those
+     trees are admitted. The tip gets no shortcut: an empty merge into the
+     tip no longer admits a non-ancestor on its own, because when the base
+     has not moved since the squash, the tip IS the squash and the same blind
+     spot applies there. A rebase-merged branch is landed at its last
+     replayed commit, which carries all of its content and whose own patch
+     HEAD holds. Ancestry is sufficient, never necessary; the test is still
+     content, judged only against commits already on the remote. A branch
+     holding a different version of the change, or a later commit the squash
+     never carried, is not admitted, and neither is a later commit that
+     undid part of the squash, whether or not the base has moved since —
+     except in one known residual. A later base commit whose own patch HEAD
+     holds, on the same files, can stand in as `M`: a second pull request
+     from the same branch, or a cherry-pick of a branch commit onto the base.
+     An unpushed undo of lines an EARLIER landing carried on those files is
+     then not seen. A conflict is told apart from a git error by the tree
+     id `merge-tree` prints first; a git error (it also exits 1 for a ref it
+     cannot merge) stays undeterminable and quotes git's stderr, and
      any error in either direction refuses. Every refusal names the
      conflicted or residual files and how many base commits were searched —
      "the oldest N of M" when the cap cut the search short.

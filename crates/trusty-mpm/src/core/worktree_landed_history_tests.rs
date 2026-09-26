@@ -9,11 +9,14 @@
 //! a branch only partly landed), and a `merge-tree` git error. Round 3: the
 //! same revert and deletion with the squash still `main`'s tip, a clean
 //! squash and a rebase-merge landed at a named commit, and an ancestor `HEAD`.
+//! Final round: a revert or deletion followed by an unrelated `main` commit,
+//! a later landing whose patch leaves an undone file uncovered, and the git
+//! error arms of the ancestry check and the branch-path listing.
 
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ContentOnBase, content_on_base};
+use super::{ContentOnBase, branch_touched_paths, content_on_base, head_is_ancestor_of};
 use crate::core::worktree_landed_content::{LandedContent, landed_content_verdict};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 
@@ -509,4 +512,147 @@ fn a_head_that_is_an_ancestor_of_main_is_landed() {
         Ok(ContentOnBase::Landed { at: None })
     );
     assert!(landed_content_verdict(&merged, BOUND).is_landed());
+}
+
+/// Commit an unrelated `u.txt` on `main` and push everything `main` holds.
+fn unrelated_main_commit_and_push(fx: &GitWorktreeFixture) {
+    commit_files(&fx.repo, &[("u.txt", "unrelated\n")], "unrelated main work");
+    git(&fx.repo, &["push", "origin", "main"]);
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 final round): after the squash, an UNPUSHED
+/// branch commit reverts line 10, and `main` then pushes an unrelated
+/// `u.txt`. The tip merge is empty and the tip's own patch touches only
+/// `u.txt`, so its reverse check sees nothing of `f.txt`. The tip must not be
+/// the landing commit; the squash is tried and shows the revert. Not landed.
+///
+/// Fails at 15f2e3450, which filtered the tip's `u.txt` residue away and
+/// admitted `Landed { at: tip }`.
+#[test]
+fn an_unpushed_revert_with_an_unrelated_main_commit_after_the_squash_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(&fx.repo, &[("f.txt", &ten_lines("a", "c"))], "seed");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("revert-unrelated");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "d"))], "S");
+    let squash = squash_onto_main(&fx, "session/revert-unrelated");
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "T: revert line 10");
+    unrelated_main_commit_and_push(&fx);
+    git(&wt, &["fetch", "origin"]);
+
+    assert_undone_at(&wt, &squash, "f.txt");
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 final round): an UNPUSHED deletion of a file the
+/// squash added, then an unrelated `u.txt` on `main`. Not landed — once with
+/// another squashed file keeping the squash a candidate, once with the
+/// deleted file the branch's only change, where no commit is eligible.
+///
+/// Fails at 15f2e3450, which admitted both at the tip.
+#[test]
+fn an_unpushed_deletion_with_an_unrelated_main_commit_after_the_squash_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("delete-unrelated");
+    commit_files(
+        &wt,
+        &[("README.md", "branch\n"), ("added.txt", "new\n")],
+        "S",
+    );
+    let squash = squash_onto_main(&fx, "session/delete-unrelated");
+    git(&wt, &["rm", "-q", "added.txt"]);
+    git(&wt, &["commit", "-m", "T: delete added.txt"]);
+    unrelated_main_commit_and_push(&fx);
+    git(&wt, &["fetch", "origin"]);
+    assert_undone_at(&wt, &squash, "added.txt");
+
+    let fx = GitWorktreeFixture::new();
+    let only = fx.add_worktree("delete-only");
+    commit_files(&only, &[("only.txt", "new\n")], "S");
+    squash_onto_main(&fx, "session/delete-only");
+    git(&only, &["rm", "-q", "only.txt"]);
+    git(&only, &["commit", "-m", "T: delete only.txt"]);
+    unrelated_main_commit_and_push(&fx);
+    git(&only, &["fetch", "origin"]);
+    let found = content_on_base(&only, "origin/main");
+    assert!(
+        !matches!(&found, Ok(c) if c.is_landed()),
+        "a deletion no commit covers read as landed: {found:?}"
+    );
+    assert!(!landed_content_verdict(&only, BOUND).is_landed());
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8633 final round), the partial-overlap shape: the
+/// branch lands `g.txt` in one squash and `f.txt` in a second, whose own
+/// patch touches `f.txt` only; then an UNPUSHED commit reverts line 10 of
+/// `g.txt`. The second squash is the tip, the merge into it is empty, and its
+/// reverse check is clean on `f.txt` — but it never reaches `g.txt`, whose
+/// `HEAD` version is on no remote. Coverage requires every branch-touched
+/// path to be in the landing commit's patch or identical in `HEAD` and that
+/// commit, so it is not landed and the refusal names `g.txt`.
+///
+/// Fails against a rule that only asks the landing commit's patch to touch
+/// ONE of the branch's paths, and at 15f2e3450.
+#[test]
+fn a_later_landing_that_leaves_an_undone_file_uncovered_is_not_landed() {
+    let fx = GitWorktreeFixture::new();
+    commit_files(
+        &fx.repo,
+        &[
+            ("f.txt", &ten_lines("a", "c")),
+            ("g.txt", &ten_lines("a", "c")),
+        ],
+        "seed",
+    );
+    git(&fx.repo, &["push", "origin", "main"]);
+    let wt = fx.add_worktree("overlap");
+    commit_files(&wt, &[("g.txt", &ten_lines("b", "d"))], "g work");
+    squash_onto_main(&fx, "session/overlap");
+    git(&fx.repo, &["push", "origin", "main"]);
+    commit_files(&wt, &[("f.txt", &ten_lines("b", "c"))], "f work");
+    let second = squash_onto_main(&fx, "session/overlap");
+    git(&fx.repo, &["push", "origin", "main"]);
+    let second_patch = git(&fx.repo, &["diff", "--name-only", "HEAD^", "HEAD"]);
+    assert_eq!(
+        second_patch, "f.txt",
+        "the second squash carries f.txt only"
+    );
+    commit_files(
+        &wt,
+        &[("g.txt", &ten_lines("b", "c"))],
+        "T: revert g line 10",
+    );
+    git(&wt, &["fetch", "origin"]);
+
+    assert_undone_at(&wt, &second, "g.txt");
+}
+
+/// #8633 final round: `git merge-base --is-ancestor` exiting other than 0 or
+/// 1 — a directory that is no repository, a base that names no commit — is
+/// `Err`, never read as "not an ancestor" or "an ancestor".
+#[test]
+fn an_ancestry_check_git_cannot_answer_refuses() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let err = head_is_ancestor_of(tmp.path(), "main").expect_err("no repository must refuse");
+    assert!(err.contains("could not answer"), "{err}");
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("ancestry");
+    let err = head_is_ancestor_of(&wt, "refs/heads/no-such-branch")
+        .expect_err("a base naming no commit must refuse");
+    assert!(err.contains("could not answer"), "{err}");
+}
+
+/// #8633 final round: a `git log` that fails while listing the paths the
+/// branch touched is `Err`, never an empty set — an empty set would drop every
+/// reverse-check residue and admit.
+#[test]
+fn a_failed_git_log_of_the_branch_paths_refuses() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("broken-log");
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+    let err = branch_touched_paths(&wt, missing).expect_err("an unknown fork must refuse");
+    assert!(err.contains("could not be listed"), "{err}");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(branch_touched_paths(tmp.path(), "HEAD").is_err());
 }
