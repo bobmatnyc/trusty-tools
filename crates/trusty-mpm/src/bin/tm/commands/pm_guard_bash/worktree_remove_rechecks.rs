@@ -158,7 +158,7 @@
 //! in `super::worktree_remove`; `worktree_8665_the_merged_head_itself_is_still_reclaimable`,
 //! `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
 //! `worktree_8665_a_post_merge_commit_whose_content_landed_is_reclaimable`,
-//! `worktree_8665_a_gh_lookup_error_denies_a_post_merge_commit` in
+//! `worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit` in
 //! `worktree_remove_rechecks_tests`.
 
 use std::path::Path;
@@ -452,8 +452,10 @@ fn landing_rechecks(
 /// [`landed_content_admission`] reads it), or when git could not answer: a
 /// stale ref must not vouch for a commit the remote no longer has.
 /// Test: `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
-/// `worktree_8665_an_unanswerable_post_merge_list_never_admits`,
-/// `worktree_8665_stale_origin_refs_are_never_asked`.
+/// `worktree_8665_an_unanswerable_post_merge_list_defers_to_the_content_probe`,
+/// `worktree_8665_a_merged_pr_with_no_head_sha_never_admits_residue`,
+/// `worktree_8665_stale_origin_refs_are_never_asked`,
+/// `worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit`.
 fn commits_after_the_merge(
     target: &Path,
     landed: &Landed,

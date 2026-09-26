@@ -452,7 +452,8 @@ pub trait WorktreeRemovalProbe {
     /// Test: `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
     /// `worktree_8665_the_merged_head_itself_is_still_reclaimable` in
     /// `bin/tm/commands/pm_guard_bash/worktree_remove_rechecks_tests`;
-    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    /// `an_unoverridden_probe_establishes_neither_new_fact`,
+    /// `commits_after_merged_head_refuses_a_head_that_is_not_hex`.
     fn commits_after_merged_head(
         &self,
         _dir: &Path,
@@ -1036,6 +1037,20 @@ mod tests {
                 .commits_after_merged_head(dir, "deadbeef")
                 .is_err()
         );
+    }
+
+    /// 🔴 #8665: the merged head comes from GitHub and lands in argv, so a
+    /// value git would read as an option is refused before git runs. Unguarded,
+    /// `--all` turns the query into `HEAD --not --all`, which lists nothing and
+    /// would read as "no commit after the merge".
+    #[test]
+    fn commits_after_merged_head_refuses_a_head_that_is_not_hex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        let err = GitAndGhProbe
+            .commits_after_merged_head(&repo, "--all")
+            .expect_err("an option-shaped head must never reach git");
+        assert!(err.contains("--all"), "{err}");
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.

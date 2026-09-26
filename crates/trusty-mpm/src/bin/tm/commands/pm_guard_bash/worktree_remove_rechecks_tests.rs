@@ -7,7 +7,7 @@
 //! fabricated; nothing reaches the network.
 //! What: the post-merge cleanup that must keep working, a commit made after
 //! the merge (refused, named), such a commit whose content a later squash
-//! landed (admitted), and a `gh` lookup that did not answer (refused).
+//! landed (admitted), and a merged head git does not have (refused).
 
 use std::path::{Path, PathBuf};
 
@@ -197,14 +197,18 @@ fn worktree_8665_a_post_merge_commit_whose_content_landed_is_reclaimable() {
     assert_eq!(verdict(&fx, fx.merged_pr()), None);
 }
 
-/// 🔴 FAIL-OPEN CHECK (#8665): a `gh` lookup that did not answer refuses a
-/// tree holding post-merge work, and says which lookup failed.
+/// 🔴 FAIL-OPEN CHECK (#8665): GitHub names a head commit this repository does
+/// not have, so the real `git rev-list` fails. That failure is `Err`, never
+/// `Ok(vec![])`: the post-merge commit is refused, not admitted as "nothing
+/// after the merge".
 #[test]
-fn worktree_8665_a_gh_lookup_error_denies_a_post_merge_commit() {
+fn worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit() {
+    const ABSENT: &str = "0123456789abcdef0123456789abcdef01234567";
     let fx = Merged::new();
     commit_file(&fx.wt, "c.txt", "post-merge work\n", "after the merge");
-    let reason =
-        verdict(&fx, Err("gh: HTTP 502".to_string())).expect("an unanswered lookup must not grant");
+    let pr = MergedPrLookup::new(1, "o/r", "main").with_head_sha(ABSENT);
+    let reason = verdict(&fx, Ok(pr)).expect("a failed rev-list must not grant");
     assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
-    assert!(reason.contains("did not answer: gh: HTTP 502"), "{reason}");
+    assert!(reason.contains("could not be established"), "{reason}");
+    assert!(reason.contains(ABSENT), "{reason}");
 }

@@ -1458,19 +1458,51 @@ mod tests {
     }
 
     /// 🔴 FAIL-OPEN CHECK (#8665): a post-merge commit list git could not
-    /// produce never admits on the own-PR route; the content probe decides, and
-    /// the refusal quotes git. Fails at c7f433765, where `!ahead` granted.
+    /// produce is never itself a grant on the own-PR route. It defers to the
+    /// content probe, as the `Ahead` own-PR route does: residue denies and
+    /// quotes git, and only a proven `Landed` admits. The deny half fails at
+    /// c7f433765, where `!ahead` granted.
     #[test]
-    fn worktree_8665_an_unanswerable_post_merge_list_never_admits() {
+    fn worktree_8665_an_unanswerable_post_merge_list_defers_to_the_content_probe() {
+        let unanswerable = || Err("`git rev-list` failed: bad revision".to_string());
         let probe = FakeProbe {
-            after_merge: Err("`git rev-list` failed: bad revision".to_string()),
+            after_merge: unanswerable(),
             ..FakeProbe::upstream_deleted()
         };
         let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
-            .expect("an unanswerable post-merge list must not grant");
+            .expect("an unanswerable post-merge list must not grant over residue");
         assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
         assert!(reason.contains("bad revision"), "{reason}");
         assert!(reason.contains("could not be established"), "{reason}");
+
+        let landed = FakeProbe {
+            after_merge: unanswerable(),
+            on_base: Ok(tip_landed()),
+            ..FakeProbe::upstream_deleted()
+        };
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &landed),
+            None,
+            "content proven on the base admits whatever the post-merge list said"
+        );
+    }
+
+    /// 🔴 FAIL-OPEN CHECK (#8665): a merged pull request GitHub reported with
+    /// no head commit leaves nothing to list post-merge commits against, so the
+    /// own-PR route defers to the content probe and residue denies. Fails if
+    /// that arm of `commits_after_the_merge` answers `Ok(vec![])`.
+    #[test]
+    fn worktree_8665_a_merged_pr_with_no_head_sha_never_admits_residue() {
+        let probe = FakeProbe {
+            merged: Ok(MergedPrLookup::new(1, FAKE_REPO, "main")),
+            on_base: Ok(residual()),
+            ..FakeProbe::upstream_deleted()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a merged pull request with no head must not vouch for residue");
+        assert!(!probe.asked_after_merge.get(), "{reason}");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("named no head commit"), "{reason}");
     }
 
     /// 🔴 FAIL-OPEN CHECK (#8665): with `origin` not refreshed in this
