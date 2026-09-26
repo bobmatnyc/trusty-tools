@@ -40,18 +40,23 @@ use super::worktree_ownership::SentinelOwner;
 use super::worktree_ownership_location::{
     OwnerReadError, admin_sentinel_path, legacy_sentinel_path, read_sentinel_owner_strict,
 };
-use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt, inspect_dirt_excusing};
+use super::worktree_safety::{DirtyWorktreePolicy, ExcuseEntry, inspect_dirt_excusing};
+use crate::core::standalone::hooks::backup;
 
-/// The paths tm's own provisioning writes into a workspace (#7660).
+/// The paths tm's own provisioning writes into a workspace (#7660), as the
+/// kept reason names them.
 ///
-/// Why: these are the four entries the issue's `git status --porcelain` showed
-/// on a workspace no user had touched. Nothing else is excused: a broader list
-/// would let `--force` discard work.
-pub(crate) const PROVISIONING_FILES: [&str; 4] = [
+/// Why: these are the entries `git status --porcelain` shows on a workspace no
+/// user had touched. Nothing else is excused: a broader list would let
+/// `--force` discard work. #8688: a task-bearing spawn also writes `TASK.md`
+/// and a timestamped `.claude/settings.json` snapshot.
+pub(crate) const PROVISIONING_FILES: [&str; 6] = [
     ".gitignore",
     ".claude/settings.json",
     ".claude/settings.json.bak",
+    ".claude/settings.json.<timestamp>.bak",
     "CLAUDE.md",
+    "TASK.md",
 ];
 
 /// Whether decommission may discard tm's own provisioning dirt (#7660).
@@ -106,10 +111,12 @@ pub(super) struct WorkspaceVerdict {
 /// The provisioning paths `--force` excuses only while git does not track them
 /// (#7660). A tracked one showing ` M` is an edit someone made, not a write
 /// provisioning did, so it is never excused.
-const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
+const UNTRACKED_PROVISIONING_FILES: [&str; 4] = [
     ".claude/settings.json",
     ".claude/settings.json.bak",
     "CLAUDE.md",
+    // #8688: the daemon writes the task brief here at spawn.
+    "TASK.md",
 ];
 
 /// Is this `git status --porcelain` line in `ws` one of tm's provisioning
@@ -118,12 +125,14 @@ const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
 /// Why: `--force` is followed by `git worktree remove --force`, which destroys
 /// whatever it excused. A repository that tracks `CLAUDE.md` shows an agent's
 /// edit to it as ` M CLAUDE.md`, and excusing that by path alone discarded it.
-/// What: the three [`UNTRACKED_PROVISIONING_FILES`] are excused only as `??`.
+/// What: the [`UNTRACKED_PROVISIONING_FILES`] and a `.claude/settings.json`
+/// snapshot ([`is_settings_snapshot`]) are excused only as `??`.
 /// `.gitignore` is excused as ` M` only when its unstaged diff adds nothing
 /// but the lines provisioning writes and removes nothing, and as `??` only
 /// when every line of it is such a line. Anything else — staged, deleted,
 /// renamed, conflicted, or an unreadable diff — is not excused.
 /// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`,
+/// `provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked`,
 /// `force_decommission_keeps_an_edited_tracked_claude_md`,
 /// `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
 /// `force_decommission_removes_a_tree_with_an_untracked_scaffold_gitignore`,
@@ -137,9 +146,21 @@ pub(crate) fn is_provisioning_entry(ws: &Path, line: &str) -> bool {
         (" M ", ".gitignore") => gitignore_diff_is_provisioning(ws),
         ("?? ", ".gitignore") => std::fs::read_to_string(ws.join(".gitignore"))
             .is_ok_and(|body| body.lines().all(is_provisioning_gitignore_line)),
-        ("?? ", path) => UNTRACKED_PROVISIONING_FILES.contains(&path),
+        ("?? ", path) => UNTRACKED_PROVISIONING_FILES.contains(&path) || is_settings_snapshot(path),
         _ => false,
     }
+}
+
+/// Whether the repo-relative `path` is a `.claude/settings.json` snapshot the
+/// hooks writers take before a rewrite (#8688).
+///
+/// What: `.claude/<name>` where `name` passes the snapshot pruner's own exact
+/// name rule, [`backup::is_snapshot_of`] — no other file is matched.
+/// Test: `provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked`.
+fn is_settings_snapshot(path: &str) -> bool {
+    // #8688: the pruner's rule, so the excuse and the writer cannot drift.
+    path.strip_prefix(".claude/")
+        .is_some_and(|name| backup::is_snapshot_of("settings.json", name))
 }
 
 /// Whether `line` is one provisioning writes into `.gitignore` (#7660): a
@@ -221,7 +242,7 @@ pub(super) fn gitignore_diff_only_adds(ws: &Path, accept: &dyn Fn(&str) -> bool)
 ///
 /// Why: see the module doc. Moved out of `decommission_with_root_checked`
 /// unchanged except for the `policy` excuse and the returned reason.
-/// What: runs [`keep_reason`] on a blocking thread — [`inspect_dirt`], and
+/// What: runs [`keep_reason`] on a blocking thread — a plain dirt check, and
 /// only when that finds dirt under [`ProvisioningDirt::Discard`],
 /// [`force_blocker`] then [`inspect_dirt_excusing`] with
 /// [`is_provisioning_entry`]. Any dirt, a blocker, a
@@ -307,33 +328,48 @@ pub(super) async fn remove_in_project_worktree(
 /// `policy` does not excuse keeps it, named file by file. `id` is the session
 /// being decommissioned.
 /// Test: `force_decommission_is_never_stricter_than_plain_on_a_clean_tree`,
-/// `force_decommission_keeps_a_worktree_without_the_sentinel`.
+/// `force_decommission_keeps_a_worktree_without_the_sentinel`,
+/// `decommission_refusal_count_matches_the_entries_it_lists`.
 fn keep_reason(ws: &Path, id: &ManagedSessionId, policy: ProvisioningDirt) -> Option<String> {
-    let plain = inspect_dirt(ws)?;
+    // #8688: counted per file, as `kept_for_dirt` lists them — a collapsed
+    // `?? .claude/` counted one entry where the list named three.
+    let nothing = |_: &str| false;
+    let plain = inspect_dirt_excusing(ws, &nothing)?;
     if policy == ProvisioningDirt::Refuse {
-        return Some(kept_for_dirt(ws, &plain.reason, policy));
+        return Some(kept_for_dirt(ws, &plain.reason, policy, &nothing));
     }
     if let Some(blocker) = force_blocker(ws, id) {
         return Some(format!("--force declined: {blocker}; nothing was removed"));
     }
-    inspect_dirt_excusing(ws, &|line| is_provisioning_entry(ws, line))
-        .map(|d| kept_for_dirt(ws, &d.reason, policy))
+    let excuse = |line: &str| is_provisioning_entry(ws, line);
+    inspect_dirt_excusing(ws, &excuse).map(|d| kept_for_dirt(ws, &d.reason, policy, &excuse))
 }
 
 /// The untracked provisioning files `--force` excuses by path alone, never by
 /// content, so an edit to one is lost with the worktree. See #8540.
-const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"];
+// #8688: `TASK.md` joined the path-only excuse, so the warning names it too.
+const CONTENT_UNCHECKED_FILES: [&str; 3] = [".claude/settings.json", "CLAUDE.md", "TASK.md"];
 
 /// The operator-facing reason a dirty worktree was kept (#7660).
 ///
+/// What: `reason` is the dirt check's own summary; the entries it names are
+/// the ones `excuse` — the same excuse that check counted with — does not
+/// accept, so the count and the list agree (#8688).
 /// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
 /// `decommission_refusal_warning_names_a_single_untracked_file`,
-/// `decommission_refusal_omits_the_warning_without_untracked_claude_files`.
-pub(super) fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -> String {
+/// `decommission_refusal_omits_the_warning_without_untracked_claude_files`,
+/// `decommission_refusal_count_matches_the_entries_it_lists`,
+/// `ledger_refusal_lists_only_the_entries_it_counts`.
+pub(super) fn kept_for_dirt(
+    ws: &Path,
+    reason: &str,
+    policy: ProvisioningDirt,
+    excuse: ExcuseEntry,
+) -> String {
     let files = PROVISIONING_FILES.join(", ");
     let entries = dirty_entries(ws);
     // #7660: name what blocked the removal, not only how many entries did.
-    let named = blocking_entries(ws, &entries, policy);
+    let named = blocking_entries(&entries, excuse);
     match policy {
         ProvisioningDirt::Refuse => format!(
             "the dirty-tree guard kept it ({reason}{named}). If the only changes are tm's own \
@@ -351,21 +387,20 @@ pub(super) fn kept_for_dirt(ws: &Path, reason: &str, policy: ProvisioningDirt) -
 /// How many dirty entries [`blocking_entries`] names before it summarises.
 const NAMED_ENTRIES_CAP: usize = 10;
 
-/// `": <entry>, <entry>"` for the [`dirty_entries`] that keep `ws` under
-/// `policy`, or `""` when there are none to name (#7660).
+/// `": <entry>, <entry>"` for the [`dirty_entries`] `excuse` does not accept,
+/// or `""` when there are none to name (#7660).
 ///
 /// Why: "1 uncommitted/untracked file(s)" tells an operator THAT `--force`
 /// refused, not what to look at.
 /// What: display only — the keep/remove decision was already made by
-/// [`keep_reason`], so a failed status read only drops the list. Lists the
-/// entries [`is_provisioning_entry`] does not excuse under `Discard` (every
-/// entry under `Refuse`).
-/// Test: `force_decommission_still_refuses_user_work`.
-fn blocking_entries(ws: &Path, entries: &[String], policy: ProvisioningDirt) -> String {
+/// [`keep_reason`], so a failed status read only drops the list.
+/// Test: `force_decommission_still_refuses_user_work`,
+/// `force_decommission_keeps_user_work_beside_task_md`.
+fn blocking_entries(entries: &[String], excuse: ExcuseEntry) -> String {
     let entries: Vec<&str> = entries
         .iter()
         .map(String::as_str)
-        .filter(|line| policy == ProvisioningDirt::Refuse || !is_provisioning_entry(ws, line))
+        .filter(|line| !excuse(line))
         .collect();
     if entries.is_empty() {
         return String::new();

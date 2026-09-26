@@ -27,9 +27,7 @@ use super::record::ManagedSessionId;
 use super::worktree_ignored_output::{
     ignored_output_refusal, kept_unversioned_content, unversioned_content_refusal,
 };
-use super::worktree_safety::{
-    DirtyWorktreePolicy, inspect_dirt, inspect_dirt_excusing, is_worktree_root,
-};
+use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_worktree_root};
 
 /// Why an SM-owned workspace must be kept, or `None` when it may be deleted
 /// (#8663).
@@ -40,7 +38,7 @@ use super::worktree_safety::{
 /// guard. [`worktree_kind`] must prove it a linked worktree or a main
 /// checkout; a probe error keeps it under either policy. A linked worktree
 /// that `git worktree lock` protects is kept under
-/// either policy ([`lock_blocker`]). Then [`inspect_dirt`] (dirty files,
+/// either policy ([`lock_blocker`]). Then [`inspect_dirt_excusing`] (dirty files,
 /// unpushed commits, nested repositories), excusing only entries that match
 /// the [`provisioning_ledger`] byte for byte; no ledger excuses nothing. Under
 /// [`ProvisioningDirt::Discard`] (`--force`), when that check still finds
@@ -77,26 +75,22 @@ pub(super) fn owned_workspace_keep_reason(
         }
         // #8663 critic round 1: tm's provisioning writes, proven by the ledger.
         let ledger = provisioning_ledger::load(ws);
-        let dirt = match &ledger {
-            Some(ledger) => inspect_dirt_excusing(ws, &|line| ledger.excuses(ws, line)),
-            None => inspect_dirt(ws),
-        };
-        let Some(dirt) = dirt else {
+        // #8688: one excuse for the count and the list; no ledger excuses nothing.
+        let ledgered = |line: &str| ledger.as_ref().is_some_and(|l| l.excuses(ws, line));
+        let Some(dirt) = inspect_dirt_excusing(ws, &ledgered) else {
             return ignored_output_refusal(ws);
         };
         if policy == ProvisioningDirt::Refuse {
-            return named(kept_for_dirt(ws, &dirt.reason, policy));
+            return named(kept_for_dirt(ws, &dirt.reason, policy, &ledgered));
         }
         if linked.is_some()
             && let Some(blocker) = force_blocker(ws, id)
         {
             return named(format!("--force declined: {blocker}; nothing was removed"));
         }
-        let excuse = |line: &str| {
-            is_provisioning_entry(ws, line) || ledger.as_ref().is_some_and(|l| l.excuses(ws, line))
-        };
+        let excuse = |line: &str| is_provisioning_entry(ws, line) || ledgered(line);
         if let Some(dirt) = inspect_dirt_excusing(ws, &excuse) {
-            return named(kept_for_dirt(ws, &dirt.reason, policy));
+            return named(kept_for_dirt(ws, &dirt.reason, policy, &excuse));
         }
         return ignored_output_refusal(ws);
     }

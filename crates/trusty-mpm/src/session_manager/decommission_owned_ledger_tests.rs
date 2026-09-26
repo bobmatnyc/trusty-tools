@@ -130,6 +130,26 @@ async fn ledger_keeps_a_clone_with_an_edited_claude_md() {
     assert!(ws.join("CLAUDE.md").exists());
 }
 
+/// #8688: the refusal names only the entries the ledger did not excuse, so
+/// its count matches its list. Fails before the fix, which counted 2 and
+/// listed all 5 entries, the ledger-excused ones included.
+#[test]
+fn ledger_refusal_lists_only_the_entries_it_counts() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "ledger-count");
+    provision(&ws);
+    std::fs::write(ws.join("TASK.md"), "Fix the bug\n").expect("TASK.md");
+    std::fs::write(ws.join("notes.rs"), "// unsaved\n").expect("user work");
+
+    let reason = kept(&ws);
+    assert!(
+        reason.contains(
+            "(2 uncommitted/untracked file(s), 0 unpushed commit(s): ?? TASK.md, ?? notes.rs)"
+        ),
+        "{reason}"
+    );
+}
+
 /// #8663: a `.gitignore` line tm did not append keeps the clone.
 #[test]
 fn ledger_keeps_a_clone_whose_gitignore_gained_a_user_line() {

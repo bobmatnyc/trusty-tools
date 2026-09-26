@@ -50,6 +50,37 @@ fn provisioned_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     wt
 }
 
+/// A `.claude/settings.json` snapshot named the way `snapshot_then_prune`
+/// names one (#8688).
+const SETTINGS_SNAPSHOT: &str = ".claude/settings.json.20260926T140608Z.bak";
+
+/// [`provisioned_tree`] plus the two files a task-bearing spawn adds (#8688):
+/// `TASK.md` and a timestamped `.claude/settings.json` snapshot.
+fn task_bearing_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
+    let wt = provisioned_tree(fx, name);
+    std::fs::write(wt.join("TASK.md"), "Fix the bug\n").expect("write TASK.md");
+    std::fs::write(wt.join(SETTINGS_SNAPSHOT), "{}\n").expect("write the snapshot");
+    wt
+}
+
+/// The file count a kept reason states and the entries it lists (#8688).
+fn count_and_list(reason: &str) -> (usize, Vec<String>) {
+    let (head, _) = reason
+        .split_once(" uncommitted/untracked file(s)")
+        .expect("the reason states a file count");
+    let count = head
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a numeric count");
+    let listed = reason
+        .split_once("unpushed commit(s): ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(list, _)| list.split(", ").map(str::to_string).collect())
+        .unwrap_or_default();
+    (count, listed)
+}
+
 async fn remove(wt: &Path, policy: ProvisioningDirt) -> WorkspaceVerdict {
     remove_as(&ManagedSessionId::new(), wt, policy).await
 }
@@ -219,6 +250,76 @@ async fn force_decommission_removes_a_provisioning_only_worktree() {
 
     assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
     assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688: `TASK.md` and a timestamped settings snapshot are excused only
+/// untracked, at their exact paths, in the snapshot's exact name shape.
+#[test]
+fn provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-entry-8688");
+    let is = |line: &str| is_provisioning_entry(&wt, line);
+    assert!(is("?? TASK.md"));
+    assert!(is(&format!("?? {SETTINGS_SNAPSHOT}")));
+    assert!(is("?? .claude/settings.json.20260926T140608Z-1.bak"));
+    assert!(!is(" M TASK.md"), "an edit to a tracked TASK.md is work");
+    assert!(!is("?? docs/TASK.md"));
+    assert!(!is("?? .claude/settings.json.mine.bak"));
+    assert!(!is("?? .claude/settings.local.json.20260926T140608Z.bak"));
+    assert!(!is("?? settings.json.20260926T140608Z.bak"));
+    assert!(!is("?? .claude/sub/settings.json.20260926T140608Z.bak"));
+    assert!(!is(&format!(" M {SETTINGS_SNAPSHOT}")));
+}
+
+/// #8688: the live report — a task-bearing managed worktree holding only
+/// tm-written files is removed by `--force`. Fails before the fix, which
+/// kept it for `?? TASK.md` and `?? .claude/settings.json.<ts>.bak`.
+#[tokio::test]
+async fn force_decommission_removes_a_worktree_holding_task_md_and_a_settings_snapshot() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-task-8688");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(verdict.removed, "kept: {:?}", verdict.kept_reason);
+    assert!(!wt.exists(), "the workspace directory must be gone");
+}
+
+/// #8688: user work beside the tm-written files still blocks `--force`, and
+/// the reason counts and names only that work.
+#[tokio::test]
+async fn force_decommission_keeps_user_work_beside_task_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-force-task-work-8688");
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("write user work");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(!verdict.removed && wt.join("notes.rs").exists());
+    assert!(wt.join("TASK.md").exists(), "nothing is removed");
+    let reason = verdict.kept_reason.expect("reason");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? notes.rs".to_string()]),
+        "reason: {reason}"
+    );
+}
+
+/// #8688: the plain refusal's count and its list agree. Fails before the
+/// fix, which counted the untracked `.claude/` as one entry and listed each
+/// of its three files.
+#[tokio::test]
+async fn decommission_refusal_count_matches_the_entries_it_lists() {
+    let fx = GitWorktreeFixture::new();
+    let wt = task_bearing_tree(&fx, "decom-refuse-count-8688");
+
+    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
+
+    assert!(!verdict.removed && wt.exists());
+    let reason = verdict.kept_reason.expect("a kept workspace must say why");
+    let (count, listed) = count_and_list(&reason);
+    assert_eq!(count, listed.len(), "reason: {reason}");
+    assert_eq!(count, 6, "reason: {reason}");
 }
 
 /// `--force` never discards a file provisioning did not write.
