@@ -66,9 +66,17 @@ fn blocks_on(findings_json: &str) -> FakeLlm {
 
 /// One finding on `src/a.rs:1`, which the diff touches.
 fn finding_json(title: &str, body: &str, severity: &str, category: &str) -> String {
-    format!(
-        r#"{{"title":"{title}","body":"{body}","severity":"{severity}","confidence":0.9,"file":"src/a.rs","line":1,"category":"{category}","code_provable":true}}"#
-    )
+    serde_json::json!({
+        "title": title,
+        "body": body,
+        "severity": severity,
+        "confidence": 0.9,
+        "file": "src/a.rs",
+        "line": 1,
+        "category": category,
+        "code_provable": true,
+    })
+    .to_string()
 }
 
 /// The High correctness finding that alone triggers the BLOCK floor, refuted.
@@ -138,6 +146,12 @@ async fn run_review_refuted_sole_blocker_does_not_clamp_to_block() {
         assert!(
             matches!(result.findings[1].verified, Some(VerifyOutcome::Confirmed)),
             "{category}: fixture must confirm the High {category} finding"
+        );
+        // Guards a vacuous pass: the confirmed finding must still be a
+        // per-finding floor trigger after parse and hygiene.
+        assert!(
+            crate::pipeline::grade::drives_block_floor(&result.findings[1]),
+            "{category}: the confirmed finding must pass drives_block_floor"
         );
         assert_eq!(
             result.verdict, want_verdict,

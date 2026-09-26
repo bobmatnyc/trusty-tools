@@ -423,27 +423,20 @@ fn rederive_verdict(
         .collect();
 
     // Do the confirmed findings, on their own, floor to BLOCK?
-    //
-    // #4044: path (a) re-uses `primary_verdict` as a lower bound, and that
-    // verdict was floored BEFORE verification — over findings this round may
-    // have just refuted. A per-finding predicate (`drives_block_floor`, before
-    // this) drifted from the grader: a confirmed High-effort test-coverage or
-    // style finding (informational since #3474/#7036) or conformance divergence
-    // (capped at REQUEST_CHANGES, #1359) opened path (a) and pinned a BLOCK
-    // resting only on the refuted blocker. Asking the grader itself keeps the
-    // two in agreement for every category, now and later.
+    // #4044: ask the grader, not a per-finding predicate — category caps
+    // (#1359/#3474/#7036) must hold here too.
     let confirmed: Vec<Finding> = survivors
         .iter()
         .filter(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed)))
         .cloned()
         .collect();
-    let any_confirmed_high =
+    let confirmed_floor_blocks =
         !confirmed.is_empty() && derive_verdict(Verdict::Approve, &confirmed) == Verdict::Block;
 
     // Four-way baseline selection (see Why above):
     //  a)  the confirmed findings alone floor to BLOCK
     //      → keep primary_verdict as lower bound (grounded critical evidence)
-    //  a2) confirmed, but only Medium/Low confirmed
+    //  a2) confirmed, but the confirmed findings do not floor to BLOCK
     //      → CAP the baseline at APPROVE* via severity-min(primary, APPROVE*); don't
     //         let a floor-driven REQUEST_CHANGES pin the verdict when the confirmed
     //         finding is merely Medium-effort (#1015), and don't let a confirmed
@@ -463,13 +456,13 @@ fn rederive_verdict(
     // judgment at all; nothing may relax the verdict when nothing did.
     let no_judgment_rendered = !any_confirmed && !any_clean_refuted;
 
-    let baseline = if any_confirmed && any_confirmed_high {
+    let baseline = if any_confirmed && confirmed_floor_blocks {
         // Path (a): confirmed BLOCK-grade evidence supports the escalation fully.
         primary_verdict.clone()
     } else if any_confirmed {
-        // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
-        // severity-MIN of the model's own verdict and APPROVE* (the advisory tier)
-        // as the BASELINE (not the final answer — see the Why above for #1876):
+        // Path (a2): confirmed evidence, but the confirmed findings do not
+        // floor to BLOCK.  Take the severity-MIN of the model's own verdict and
+        // APPROVE* (the advisory tier) as the BASELINE (not the final answer — see the Why above for #1876):
         //   - primary=REQUEST_CHANGES/BLOCK → baseline capped down to APPROVE*
         //     (#1015); `derive_verdict` below still re-escalates to REQUEST_CHANGES
         //     when the surviving confirmed Medium clears FLOOR_MIN_CONFIDENCE (#1876).
