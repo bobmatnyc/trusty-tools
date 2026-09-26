@@ -671,7 +671,6 @@ crates/trusty-review/src/mcp/tools.rs	call_unknown_tool_returns_error
 crates/trusty-review/src/mcp/tools.rs	missing_field_returns_invalid_params
 crates/trusty-review/src/mcp/tools.rs	review_diff_returns_review_result_envelope
 crates/trusty-review/src/mcp/tools.rs	review_health_does_not_require_creds
-crates/trusty-review/src/mcp/tools.rs	review_pr_returns_review_result_envelope
 crates/trusty-review/src/mcp/tools.rs	tools_list_has_three_tools
 crates/trusty-review/src/models/mod.rs	findings_count_matches_len_on_completed_review
 crates/trusty-review/src/models/mod.rs	verify_outcome_serde_roundtrip

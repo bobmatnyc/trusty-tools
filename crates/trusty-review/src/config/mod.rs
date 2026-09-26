@@ -17,6 +17,9 @@ pub mod constants;
 pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
+// #8649: per-call owner/repo -> index resolution for `review_pr`; crate-only
+// so the published API does not grow.
+pub(crate) mod repo_index;
 pub mod role_models;
 pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the
@@ -258,6 +261,8 @@ pub struct ReviewConfig {
     ///
     /// When `TRUSTY_SEARCH_INDEX` is not set, this starts as `"main"` and is
     /// overwritten by `ReviewConfig::resolve_index` at startup (issue #661).
+    /// The MCP `review_pr` tool does not use it directly: it resolves the PR
+    /// repo's own index per call (`repo_index::resolve_repo_index`, #8649).
     pub search_index: String,
 
     /// True when `TRUSTY_SEARCH_INDEX` was explicitly set by the operator.
