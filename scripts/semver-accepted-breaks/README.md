@@ -1,18 +1,27 @@
 # Accepted SemVer breaks
 
-One file per release that the owner has allowed to ship a public-API break
-without a breaking version bump. `scripts/preflight-publish.sh` CHECK 5 reads
-`<package>-<version>.txt` here only when the gate computes a BREAK for that
-exact package and version. The rule, and every case where it fails closed, is
-in [semver-gate.md, "Accepted breaks"](../../docs/reference/semver-gate.md#accepted-breaks-owner-ruling-2026-09-22).
+One file per release that ships a public-API break — the crate's durable
+record of a break the trusty-tools internal numbering policy never required a
+version bump for. The policy, and what CHECK 5 does with a computed break, are
+in
+[semver-gate.md](../../docs/reference/semver-gate.md#breaks-are-recorded-outside-the-working-tree-8699).
 
-**Declare first.** A file lands on `main` in its own reviewed PR, before the
-release PR that needs it. The Public API / SemVer PR check accepts it only when
-the release PR's base already holds it byte-identical; a declaration added or
-changed by the release PR itself stays `[FAIL]`. It must be a plain tracked file
-(mode 100644): CHECK 5 reads the content committed at HEAD and refuses a
-symlink, an untracked file, or an edited working copy. Leave it in place after
-the release as the record of what shipped.
+**Generated at release time, landed after it (owner ruling 2026-09-26, #8699).**
+When `scripts/preflight-publish.sh` CHECK 5 computes a break, `semver_record_break`
+prints `<package>-<version>.txt` on stdout and writes it OUTSIDE the working
+tree, under `$PREFLIGHT_SEMVER_RECORD_DIR/<package>-<version>/scripts/semver-accepted-breaks/`.
+It never writes into this directory and never modifies a file already committed
+here; when one exists it only reports whether that file covers the computed
+break. The operator lands the generated file here in the post-release PR. A
+later version's break gets its own file.
+
+**This supersedes the 2026-09-22 declare-first flow for CHECK 5 only.** The
+pull-request-time `Public API / SemVer` check
+(`scripts/semver_ci_accept.sh`) is unchanged and still reads a
+hand-committed declaration through `semver_accept_present` /
+`semver_accept_decide` in `scripts/lib/semver_accepted_breaks.sh` — a PR still
+cannot merge an unbumped break with no declaration on its base. Only the
+release-time gate (CHECK 5) stopped needing one.
 
 ## Format
 

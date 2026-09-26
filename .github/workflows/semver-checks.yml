@@ -21,10 +21,12 @@
 #
 # WHERE THE BLOCKING GATE LIVES — READ THIS BEFORE TREATING THIS JOB AS THE
 # GATE. It is not. `cargo publish` for this workspace is run LOCALLY by a human
-# (`local-ops`), not by any workflow here, so no CI job can stop an upload. The
-# barrier is `scripts/preflight-publish.sh` CHECK 5, which runs the same
-# `scripts/check_semver.sh` immediately before `cargo publish` and whose nonzero
-# exit is the documented absolute stop. This job is the SECOND, INDEPENDENT
+# (`local-ops`), not by any workflow here, so no CI job can stop an upload.
+# `scripts/preflight-publish.sh` CHECK 5 runs the same `scripts/check_semver.sh`
+# immediately before `cargo publish`. It records a computed break and lets the
+# publish continue (owner ruling 2026-09-26); it stops the publish only on a
+# gate fault (no verdict, a malfunction, a record it could not write). See
+# docs/reference/semver-gate.md. This job is the SECOND, INDEPENDENT
 # report: it fires on the tag push, which in this project's sequence happens
 # BEFORE `cargo publish` (see .claude/skills/cargo-publish/SKILL.md steps 4-6),
 # so a red run here is visible while the publish can still be called off. Same

@@ -35,8 +35,10 @@
 #   blind arm stays governed by PREFLIGHT_SEMVER_UNVERIFIED alone, and only
 #   prints semver_accept_blind_note below.
 #
-# Test: scripts/preflight-check5-selftest.sh, the accepted-break cases (a)-(m);
-#   scripts/check_semver_selftest.sh, the `ci-accept/` cases.
+# Test: scripts/check_semver_selftest.sh, the `ci-accept/` cases — including the
+#   crate/version (b), reason (c), symlink/mode (j), committed-content (k) and
+#   two-clause arity (m) rules (#8699); scripts/preflight-check5-selftest.sh (r5)
+#   for the read-only report CHECK 5 makes over a committed declaration.
 #
 # Portability: bash 3.2 and bash 5; BSD and GNU awk/sed. Reads REPO_ROOT and
 #   CHECK_ONLY from the caller; sets SEMVER_ACCEPTED_BREAKS and
@@ -229,7 +231,7 @@ semver_accept_match() {
 #   byte-identical to it (`cmp`). --check-only (CHECK_ONLY=1) alone may instead
 #   preview a regular working-tree file that is untracked or edited, marked NOT
 #   COMMITTED. A symlink or a non-100644 mode is refused in both modes.
-# Test: preflight-check5-selftest.sh cases (j), (k), (l).
+# Test: check_semver_selftest.sh, the `ci-accept/(j)` and `ci-accept/(k)` cases.
 SEMVER_ACCEPT_PROVENANCE=""
 semver_accept_source() {
   local rel="$1" out="$2" err="$3" path tree mode otype obj who at

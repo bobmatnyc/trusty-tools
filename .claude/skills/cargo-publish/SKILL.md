@@ -139,7 +139,9 @@ reaches for the full run as a substitute for the pre-tag one.
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
 🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
-— treat any nonzero exit as an absolute stop.** On 2026-07-08 a crate was
+— treat any nonzero exit as an absolute stop. CHECK 5 (semver) never blocks on
+a computed break; an infrastructure fault still stops it (owner ruling
+2026-09-26; see docs/reference/semver-gate.md).** On 2026-07-08 a crate was
 published to crates.io out-of-band — from an UNMERGED branch, under the
 WRONG gh account — burning crates.io version 0.22.0 with fix-less content
 (a burned version number can never be reused). `check-publish-ready.sh`
@@ -165,19 +167,25 @@ version instead). Runs six checks and fails loud on any of them:
    this is the exact guard that would have caught the 0.22.0 collision.
 5. **semver** (#5149): runs `scripts/check_semver.sh --crate <pkg>`, which
    compares the crate's public API against its latest non-yanked crates.io
-   release and fails when a break is not carried by a breaking version bump
-   (0.x crates break in the MINOR position). This is the ONLY place that can
-   block a bad publish — a crates.io upload is irreversible except by yank, and
-   #4088 is what a gate arriving afterwards costs. Requires
-   `cargo install cargo-semver-checks@0.50.0 --locked`; a missing tool is a
-   failure, not a skip. The fix is to bump the breaking position, which the
-   gate then skips as an already-breaking release. The one exception (owner
-   ruling 2026-09-22) is a committed
-   `scripts/semver-accepted-breaks/<package>-<version>.txt` that lists every
-   break with a reason; it prints `[WARN]` and fails closed on anything else —
-   see `docs/reference/semver-gate.md`, "Accepted breaks".
-   `.github/workflows/semver-checks.yml` runs the same check on the tag push
-   (step 4), so a red run there is visible before you reach step 6.
+   release. Owner ruling 2026-09-26: trusty-tools' internal numbering policy
+   means a public-API break never forces a major version, so this check
+   REPORTS a break rather than blocking on one — it still fails on an
+   INFRASTRUCTURE fault (missing `cargo-semver-checks`, unreachable registry,
+   a run that compared zero crates), which is a different fact from a
+   computed break. Requires `cargo install cargo-semver-checks@0.50.0
+   --locked`; a missing tool is a failure, not a skip. A computed break
+   prints `[WARN] semver: RECORDED BREAK` and a record on stdout, and
+   `semver_record_break` writes that record OUTSIDE the working tree
+   (`$PREFLIGHT_SEMVER_RECORD_DIR`, default
+   `${XDG_STATE_HOME:-~/.local/state}/trusty-tools/semver-breaks`, one
+   `<package>-<version>/` directory per release). Land it
+   in the post-release PR. An exit 1 that is not a readable `VERDICT: BREAK`,
+   or a record that cannot be written, is `[FAIL]`; see
+   `docs/reference/semver-gate.md`. (The pull-request-time `Public API /
+   SemVer` check still follows the 2026-09-22 declare-first rule and blocks a
+   PR on an undeclared break — unchanged, and out of scope for this ruling.)
+   `.github/workflows/semver-checks.yml` runs the same underlying comparison
+   on the tag push (step 4).
 
 6. **tag/publish-commit parity**: the release tag `<crate>-v<version>` must
    name EXACTLY the commit this publish will ship. For `trusty-git-analytics`,

@@ -156,7 +156,10 @@
 #   DECL_REV, or no declaration at all keeps the BREAK. A PR cannot accept its
 #   own break: a declaration only on the PR head, or one the PR modifies, keeps
 #   it; one on the base and unchanged by the PR is accepted. With no PR, the
-#   checked-out commit must be on main.
+#   checked-out commit must be on main. Cases (b), (c), (j), (k) and (m), moved
+#   here from preflight-check5-selftest.sh (#8699), pin the declaration's own
+#   rules: crate and version rows, a non-blank reason, a plain committed 100644
+#   file read as committed, and the two-clause arity entry.
 #
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
@@ -1100,7 +1103,10 @@ rm -rf "$STUB_DIR"
 #
 # SEMVER_SELFTEST_TREE points at another checkout's files. Against a tree
 # without the #8372 step every case below fails on its asserted message, and
-# against a tree without the base rule the last five cases fail.
+# against a tree without the base rule the five base-rule cases fail:
+# "declaration only on the PR head", "declaration on base, unchanged by the PR",
+# "declaration the PR modifies", "no PR context, on main" and "no PR context,
+# not on main".
 # ===========================================================================
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 TREE="${SEMVER_SELFTEST_TREE:-$REPO_ROOT}"
@@ -1328,6 +1334,76 @@ else
   ci_enforce "no PR context, not on main" "$ONE" trusty-mpm - 1 \
     "SemVer: BREAK" "ACCEPTED BREAK" \
     "only once that commit is on refs/remotes/origin/main" "::error title=SemVer break::"
+
+  # --- (b), (c), (j), (k), (m): the declaration rules semver_accepted_breaks.sh
+  #     enforces for this check, ported from preflight-check5-selftest.sh when
+  #     CHECK 5 stopped reading declarations (#8699). Each runs with no PR
+  #     context, the declaration committed at HEAD and HEAD on main.
+  DREL="scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
+  DECL_OK="$(printf 'crate trusty-mpm\nversion 1.6.4\nreason owner ruling 2026-09-22\n%s' "$ACCEPT_ROWS_CI")"
+  # main_decl <body> [mode] — commit exactly this trusty-mpm declaration, then
+  # move main to it. `link` commits a symlink to an outside file; `exec` 100755.
+  main_decl() {
+    rm -rf "${AREPO}/scripts/semver-accepted-breaks"
+    mkdir -p "${AREPO}/scripts/semver-accepted-breaks"
+    case "${2:-}" in
+      link)
+        printf '%s\n' "$1" > "${ACC}/outside-decl.txt"
+        ln -s "${ACC}/outside-decl.txt" "${AREPO}/${DREL}"
+        ;;
+      *) printf '%s\n' "$1" > "${AREPO}/${DREL}" ;;
+    esac
+    [[ "${2:-}" == exec ]] && chmod +x "${AREPO}/${DREL}"
+    agit add -A -- scripts
+    agit commit -q --no-verify --allow-empty -m "selftest: declaration"
+    agit update-ref refs/remotes/origin/main HEAD
+  }
+
+  main_decl "$(printf '%s\n' "$DECL_OK" | sed 's/^crate trusty-mpm$/crate trusty-common/')"
+  ci_enforce "(b) wrong crate inside the file" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "names crate 'trusty-common', but this publish is 'trusty-mpm'"
+  main_decl "$(printf '%s\n' "$DECL_OK" | sed 's/^version 1.6.4$/version 1.6.3/')"
+  ci_enforce "(b) wrong version inside the file" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "names version '1.6.3', but this publish is '1.6.4'"
+
+  main_decl "$(printf '%s\n' "$DECL_OK" | sed 's/^reason .*/reason    /')"
+  ci_enforce "(c) empty reason" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "the 'reason' row is empty"
+  main_decl "$(printf '%s\n' "$DECL_OK" | grep -v '^reason ')"
+  ci_enforce "(c) missing reason" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "needs exactly one 'reason' row, found 0"
+
+  main_decl "$DECL_OK" link
+  ci_enforce "(j) committed symlink" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "as a SYMLINK (git mode 120000)"
+  main_decl "$DECL_OK"
+  rm -f "${AREPO}/${DREL}"
+  ln -s "${ACC}/outside-decl.txt" "${AREPO}/${DREL}"
+  ci_enforce "(j) plain at HEAD, symlink in the working tree" "$ONE" trusty-mpm - 1 "SemVer: BREAK" \
+    "ACCEPTED BREAK" "is a SYMLINK in the working tree"
+  main_decl "$DECL_OK" exec
+  ci_enforce "(j) committed with mode 100755" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "with git mode 100755 (blob), not as a plain file (100644)"
+
+  main_decl "$DECL_OK"
+  printf '%s\n' "$DECL_OK" | sed 's/^reason .*/reason edited after review/' > "${AREPO}/${DREL}"
+  ci_enforce "(k) committed, working copy edited" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "has a working-tree copy that differs from the content committed at"
+  main_decl ""
+  agit rm -q --cached -- "$DREL"
+  agit commit -q --no-verify -m "selftest: untrack the declaration"
+  agit update-ref refs/remotes/origin/main HEAD
+  printf '%s\n' "$DECL_OK" > "${AREPO}/${DREL}"
+  ci_enforce "(k) untracked declaration" "$ONE" trusty-mpm - 1 "SemVer: BREAK" "ACCEPTED BREAK" \
+    "is not tracked at"
+
+  # (m) An arity entry carries two ` in /<path>` suffixes; its second clause,
+  #     `now takes 3 parameters`, is part of the break and must be matchable.
+  main_decl "$(printf '%s\n' "$DECL_OK" \
+    | sed 's/ClaudeCodeAdapter::new$/ClaudeCodeAdapter::new now takes 3 parameters/')"
+  ci_enforce "(m) item only in an entry's second clause" "$ONE" trusty-mpm - 0 \
+    "SemVer: ACCEPTED BREAK" "NOT DECLARED" "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
 fi
 rm -rf "$ACC"
 
