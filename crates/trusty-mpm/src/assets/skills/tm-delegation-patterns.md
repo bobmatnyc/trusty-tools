@@ -162,7 +162,8 @@ back rather than absorbed into the batch (owner ruling 2026-09-16).
 
 1. **`SendMessage` the SAME agent** — never open a new delegation to fix a
    previous one. The agent fixes and re-verifies inside its own context, at zero
-   context-reload cost.
+   context-reload cost. A worktree agent's tree must still exist first — see
+   PM Re-Engagement (#8004).
 2. Only re-delegate once that agent has failed 3+ times on the same issue
    (CB#10).
 
@@ -507,13 +508,15 @@ fresh delegation for work an existing agent already owns: the fresh one reloads
 ~95K tokens of context and knows none of the history. Never nudge an agent back
 into a blocking wait.
 
-**Check the worktree still exists first (#8004).** A subagent dispatched with
-`isolation: "worktree"` that stops to report with a clean tree can have that
-tree reclaimed between turns; `SendMessage` then resumes the agent in the main
-checkout, where it cannot commit (ADR-0061, #5649). Run `git worktree list` and
-look for that agent's tree before re-engaging. Tree present — `SendMessage` it
-as above. Tree gone — re-dispatch fresh with `isolation: "worktree"` and
-restate the context; never `SendMessage` into the main checkout.
+**Check the worktree still exists first (#8004).** This applies to EVERY
+resume of an agent that held an isolated worktree — CI outcome, retry, a
+released HOLD, an owner ruling. Claude Code removes an unchanged worktree the
+moment its agent stops, and a clean tree can be reclaimed between turns;
+`SendMessage` then resumes the agent in the main checkout, where it cannot
+commit (ADR-0061, #5649). Run `git worktree list` and look for that agent's
+tree before re-engaging. Tree present — `SendMessage` it as above. Tree gone —
+do not resume: re-dispatch fresh with `isolation: "worktree"` and restate the
+base commit and branch in the brief; never `SendMessage` into the main checkout.
 
 **Cross-check `state` before calling anything green.** Treat `bucket` as
 advisory: under GitHub API eventual-consistency lag it can report a false DONE
