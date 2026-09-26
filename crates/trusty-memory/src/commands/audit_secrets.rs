@@ -20,9 +20,11 @@
 //! shared lock, and a daemon reopening an idle-evicted palace during the scan
 //! would get `DatabaseAlreadyOpen` and fail its writes loud. The cost of the
 //! copy is a point-in-time read: a copy torn by a concurrent commit fails for
-//! that palace and is reported as an error.
+//! that palace and is reported as an error. Anything the scan could not see —
+//! an unreadable store, an undecodable drawer row — fails the run.
 //! Test: `counts_refusals_per_palace_and_variant`,
 //! `output_and_tracing_carry_no_drawer_content`,
+//! `undecodable_drawer_row_is_counted_and_fails_the_run`,
 //! `scan_leaves_palace_files_byte_identical_under_a_live_writer`.
 
 use std::io::Write;
@@ -34,7 +36,7 @@ use serde::Serialize;
 use trusty_common::memory_core::filter::{check_secret, FilterReject};
 use trusty_common::memory_core::PalaceRegistry;
 
-use super::store_snapshot::with_store_copy;
+use super::store_snapshot::{sweep_stale_copies, with_store_copy, SCRATCH_PREFIX, STALE_COPY_AGE};
 
 /// Arguments of `trusty-memory audit` (#8645).
 ///
@@ -113,23 +115,55 @@ pub struct RejectCounts {
     pub non_alphabetic: usize,
 }
 
+/// What happened to a palace's store during the scan.
+///
+/// Why: #8645 — a palace with no `kg.redb` and a palace whose store was read
+/// and found clean must never render alike.
+/// What: `Read` — the copy was opened and its drawer table read; `Absent` — the
+/// palace has no store file; `Error` — the store could not be read (see
+/// [`PalaceSecretCounts::error`]).
+/// Test: `unstattable_palace_dir_is_an_error_row_not_an_absent_store`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreState {
+    #[default]
+    Read,
+    Absent,
+    Error,
+}
+
+impl StoreState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Absent => "absent",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// One palace's counts. Carries no drawer text, id or token preview.
 ///
 /// Why: the output contract is counts only (#8645).
-/// What: `drawers_refused` is the number of drawers `check_secret` refuses.
-/// `key_value_first` counts refusals whose refusing token — the first flagged
-/// token, the one `check_secret` names — is `KEY=value`-shaped.
-/// `key_value_only` counts refusals where every flagged token is
+/// What: `drawers_unreadable` counts drawer rows present in the table that
+/// could not be decoded, so were never screened; any non-zero value fails the
+/// run (see [`scan_verdict`]). `drawers_refused` is the number of drawers
+/// `check_secret` refuses. `key_value_first` counts refusals whose refusing
+/// token — the first flagged token, the one `check_secret` names — is
+/// `KEY=value`-shaped. `key_value_only` counts refusals where every flagged token is
 /// `KEY=value`-shaped: the best cheap estimate of drawers only the #8589 fix
 /// catches, since a drawer that also holds a bare flagged token was refused
 /// before it too. Both are shape classifications, not a replay of the old
 /// filter. `error` holds only the outermost error message, which this module
 /// writes itself, so a store error can never echo stored bytes.
-/// Test: `counts_refusals_per_palace_and_variant`.
+/// Test: `counts_refusals_per_palace_and_variant`,
+/// `undecodable_drawer_row_is_counted_and_fails_the_run`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PalaceSecretCounts {
     pub palace: String,
+    pub store: StoreState,
     pub drawers_scanned: usize,
+    pub drawers_unreadable: usize,
     pub drawers_refused: usize,
     pub by_variant: RejectCounts,
     pub key_value_first: usize,
@@ -220,11 +254,15 @@ fn screen_drawer(counts: &mut PalaceSecretCounts, content: &str) {
 /// so a test can prove nothing is left behind.
 /// What: lists palaces from disk, skips all but `palace_filter` when set, and
 /// screens each palace's drawers from a private copy of its store. A palace
-/// that cannot be read is recorded with an error and the scan continues. A
-/// `palace_filter` naming no palace is an error, not an empty report.
+/// that cannot be read is recorded with an error and the scan continues; one
+/// with no store is recorded as `Absent`; undecodable drawer rows are counted
+/// in `drawers_unreadable`, never dropped. A `palace_filter` naming no palace
+/// is an error, not an empty report.
 /// Test: `counts_refusals_per_palace_and_variant`,
 /// `palace_filter_scans_one_and_rejects_an_unknown_name`,
-/// `scan_leaves_palace_files_byte_identical_under_a_live_writer`.
+/// `scan_leaves_palace_files_byte_identical_under_a_live_writer`,
+/// `undecodable_drawer_row_is_counted_and_fails_the_run`,
+/// `truncated_store_copy_is_an_error_row`.
 pub fn scan_palaces(
     registry_dir: &Path,
     palace_filter: Option<&str>,
@@ -243,19 +281,28 @@ pub fn scan_palaces(
             ..Default::default()
         };
         let read = with_store_copy(&palace.data_dir, scratch_parent, |store| {
-            for drawer in store.load_drawers().context("load drawers")? {
+            let (drawers, unreadable) =
+                store.load_drawers_with_skipped().context("load drawers")?;
+            // #8645: a skipped row was never screened; count it, never drop it.
+            counts.drawers_unreadable = unreadable;
+            for drawer in drawers {
                 screen_drawer(&mut counts, drawer.content());
             }
             Ok(())
         });
-        if let Err(e) = read {
-            // #8645: outermost message only — the chain below it comes from
-            // the store and could quote stored bytes.
-            counts = PalaceSecretCounts {
-                palace: counts.palace,
-                error: Some(e.to_string()),
-                ..Default::default()
-            };
+        match read {
+            Ok(Some(())) => {}
+            Ok(None) => counts.store = StoreState::Absent,
+            Err(e) => {
+                // #8645: outermost message only — the chain below it comes
+                // from the store and could quote stored bytes.
+                counts = PalaceSecretCounts {
+                    palace: counts.palace,
+                    store: StoreState::Error,
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                };
+            }
         }
         out.push(counts);
     }
@@ -271,7 +318,9 @@ pub fn scan_palaces(
 #[derive(Debug, Default, Serialize)]
 struct Totals {
     palaces: usize,
+    absent: usize,
     drawers_scanned: usize,
+    drawers_unreadable: usize,
     drawers_refused: usize,
     key_value_first: usize,
     key_value_only: usize,
@@ -284,7 +333,9 @@ fn totals(rows: &[PalaceSecretCounts]) -> Totals {
         ..Default::default()
     };
     for r in rows {
+        t.absent += usize::from(r.store == StoreState::Absent);
         t.drawers_scanned += r.drawers_scanned;
+        t.drawers_unreadable += r.drawers_unreadable;
         t.drawers_refused += r.drawers_refused;
         t.key_value_first += r.key_value_first;
         t.key_value_only += r.key_value_only;
@@ -293,9 +344,33 @@ fn totals(rows: &[PalaceSecretCounts]) -> Totals {
     t
 }
 
+/// Decide whether a finished scan may exit zero.
+///
+/// Why: #8645 — a scan that could not see everything must never look like a
+/// clean scan. A palace that errored, or one with undecodable rows, hid drawers
+/// from `check_secret`.
+/// What: `Ok(())` when no row carries an error or an unreadable drawer;
+/// otherwise an `Err` naming both counts. An `Absent` store is not a failure:
+/// the palace has no drawers, and the output says so.
+/// Test: `verdict_fails_on_error_or_unreadable_rows_and_passes_a_clean_set`.
+pub fn scan_verdict(rows: &[PalaceSecretCounts]) -> Result<()> {
+    let t = totals(rows);
+    if t.errors == 0 && t.drawers_unreadable == 0 {
+        return Ok(());
+    }
+    let partial = rows.iter().filter(|r| r.drawers_unreadable > 0).count();
+    anyhow::bail!(
+        "audit secrets: incomplete scan — {} palace(s) could not be read; \
+         {} unreadable drawer row(s) in {partial} palace(s) were not screened",
+        t.errors,
+        t.drawers_unreadable,
+    )
+}
+
 /// Render the counts as text (errors to `err`) or JSON (all to `out`).
 ///
-/// What: text mode prints one `key=value` line per palace and a total line;
+/// What: text mode prints one `key=value` line per palace, carrying its
+/// `store=` state and `unreadable=` count, and a total line;
 /// JSON mode prints `{ "palaces": [...], "totals": {...} }`. Only counts,
 /// palace ids and this module's own error messages are ever written.
 /// Test: `output_and_tracing_carry_no_drawer_content`,
@@ -325,10 +400,13 @@ pub fn render(
         let v = &r.by_variant;
         writeln!(
             out,
-            "palace={} scanned={} refused={} potential_secret={} too_short={} \
-             noise_pattern={} non_alphabetic={} key_value_first={} key_value_only={}",
+            "palace={} store={} scanned={} unreadable={} refused={} potential_secret={} \
+             too_short={} noise_pattern={} non_alphabetic={} key_value_first={} \
+             key_value_only={}",
             r.palace,
+            r.store.as_str(),
             r.drawers_scanned,
+            r.drawers_unreadable,
             r.drawers_refused,
             v.potential_secret,
             v.too_short,
@@ -340,9 +418,12 @@ pub fn render(
     }
     writeln!(
         out,
-        "total: palaces={} scanned={} refused={} key_value_first={} key_value_only={} errors={}",
+        "total: palaces={} absent={} scanned={} unreadable={} refused={} key_value_first={} \
+         key_value_only={} errors={}",
         t.palaces,
+        t.absent,
         t.drawers_scanned,
+        t.drawers_unreadable,
         t.drawers_refused,
         t.key_value_first,
         t.key_value_only,
@@ -355,27 +436,43 @@ pub fn render(
 ///
 /// Why: a thin shim over [`scan_palaces`] and [`render`], matching
 /// `backfill-report`'s shape.
-/// What: resolves the data root, scans with store copies under the system temp
-/// dir, renders, and exits non-zero when any palace could not be read, so a
-/// partial scan never passes as a complete one.
-/// Test: not unit-tested (process-level entry point); `scan_palaces` and
-/// `render` are the testable surfaces.
+/// What: resolves the data root, sweeps store copies a dead run left in the
+/// system temp dir, then scans on a blocking thread with every copy under one
+/// run-level scratch dir. Ctrl-C deletes that dir — and every plaintext copy in
+/// it — before exiting non-zero with no counts. Renders, then exits through
+/// [`scan_verdict`], so a partial scan never passes as a complete one.
+/// Test: not unit-tested (process-level entry point); `scan_palaces`,
+/// `render`, `scan_verdict` and `sweep_stale_copies` are the testable surfaces
+/// (`sweep_removes_only_stale_scratch_dirs`).
 pub async fn handle_audit_secrets(opts: AuditSecretsOptions) -> Result<()> {
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")
         .context("resolve trusty-memory data dir")?;
     let registry_dir = crate::resolve_palace_registry_dir(data_dir);
-    let rows = scan_palaces(&registry_dir, opts.palace.as_deref(), &std::env::temp_dir())?;
+    let tmp = std::env::temp_dir();
+    // #8645: copies hold drawers in plaintext; remove any a killed run left.
+    sweep_stale_copies(&tmp, STALE_COPY_AGE);
+    let run_dir = tempfile::TempDir::with_prefix_in(SCRATCH_PREFIX, &tmp)
+        .context("create scratch dir for the audit run")?;
+    let run_path = run_dir.path().to_path_buf();
+    let palace = opts.palace.clone();
+    let scan = tokio::task::spawn_blocking(move || {
+        scan_palaces(&registry_dir, palace.as_deref(), &run_path)
+    });
+    let rows = tokio::select! {
+        joined = scan => joined.context("audit scan task")??,
+        _ = tokio::signal::ctrl_c() => {
+            // #8645: drop the run dir now; an interrupted exit skips destructors.
+            drop(run_dir);
+            anyhow::bail!("audit secrets: interrupted — store copies deleted, no counts reported");
+        }
+    };
     render(
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
         &rows,
         opts.json,
     )?;
-    let failed = rows.iter().filter(|r| r.error.is_some()).count();
-    if failed > 0 {
-        anyhow::bail!("audit secrets: {failed} palace(s) could not be scanned");
-    }
-    Ok(())
+    scan_verdict(&rows)
 }
 
 #[cfg(test)]

@@ -180,7 +180,9 @@ fn counts_refusals_per_palace_and_variant() {
         alpha,
         &PalaceSecretCounts {
             palace: "alpha".into(),
+            store: StoreState::Read,
             drawers_scanned: 5,
+            drawers_unreadable: 0,
             drawers_refused: 3,
             by_variant: RejectCounts {
                 potential_secret: 3,
@@ -253,7 +255,7 @@ fn output_and_tracing_carry_no_drawer_content() {
         carries_preview(&real_reject, &values),
         "the preview check must recognise check_secret's own message"
     );
-    assert!(stdout.contains("palace=alpha scanned=5 refused=3"));
+    assert!(stdout.contains("palace=alpha store=read scanned=5 unreadable=0 refused=3"));
     for (name, text) in [
         ("stdout", &stdout),
         ("stderr", &stderr),
@@ -375,10 +377,12 @@ fn json_output_is_counts_only() {
             "by_variant",
             "drawers_refused",
             "drawers_scanned",
+            "drawers_unreadable",
             "error",
             "key_value_first",
             "key_value_only",
-            "palace"
+            "palace",
+            "store"
         ]
     );
     assert_eq!(doc["totals"]["drawers_refused"], 4);
@@ -446,4 +450,230 @@ fn count_only_flag_is_required() {
     .expect("full form parses");
     let AuditAction::Secrets { palace, json, .. } = cli.audit.action;
     assert_eq!((palace.as_deref(), json), (Some("p"), true));
+}
+
+/// Why: #8645 review — `load_drawers` drops an undecodable row with only a
+/// warn, so a partly corrupt table read as a smaller, clean palace.
+/// What: inserts one row whose value cannot decode into alpha's drawer table,
+/// then asserts the row is counted as unreadable (not scanned), the text line
+/// shows it, and the verdict fails the run.
+/// Test: This test.
+#[test]
+fn undecodable_drawer_row_is_counted_and_fails_the_run() {
+    use redb::Database;
+    use trusty_common::memory_core::store::kg_store::DRAWERS;
+
+    let root = tempfile::tempdir().expect("root");
+    let scratch = tempfile::tempdir().expect("scratch");
+    seeded_estate(root.path());
+    {
+        let db = Database::create(root.path().join("alpha").join("kg.redb")).expect("reopen");
+        let wtx = db.begin_write().expect("begin write");
+        {
+            let mut table = wtx.open_table(DRAWERS).expect("drawers table");
+            let key = Uuid::new_v4().into_bytes();
+            table
+                .insert(key.as_slice(), [0xFFu8; 4].as_slice())
+                .expect("insert undecodable row");
+        }
+        wtx.commit().expect("commit");
+    }
+
+    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let alpha = row(&rows, "alpha");
+    assert_eq!(
+        (
+            alpha.drawers_unreadable,
+            alpha.drawers_scanned,
+            alpha.error.as_deref()
+        ),
+        (1, 5, None),
+        "the bad row is counted, the good rows still scan"
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    render(&mut out, &mut err, &rows, false).expect("render");
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("palace=alpha store=read scanned=5 unreadable=1 "));
+    assert!(stdout.contains(" unreadable=1 refused=4 "), "total line");
+    assert!(scan_verdict(&rows).is_err(), "unreadable rows fail the run");
+}
+
+/// Why: #8645 review — `exists()` read a denied stat as "no store", so an
+/// unreadable palace rendered like an empty one; a genuinely absent store must
+/// also render distinctly from a scanned, clean one.
+/// What: registers `gamma` whose data dir is mode `0o000`, and `delta` whose
+/// data dir holds no `kg.redb`. Asserts gamma is an error row that fails the
+/// verdict and delta is `store=absent` that does not. Skipped as root, because
+/// root bypasses directory permission bits and the stat would succeed.
+/// Test: This test.
+#[cfg(unix)]
+#[test]
+fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root ignores mode 0o000, so the stat cannot be denied");
+        return;
+    }
+    let root = tempfile::tempdir().expect("root");
+    let scratch = tempfile::tempdir().expect("scratch");
+    // `palace.json` sits in the registry entry; its `data_dir` names a
+    // subdirectory, so the listing still reads while the store stat is denied.
+    let locked = root.path().join("gamma").join("data");
+    fixture_palace(root.path(), "gamma/data", &["a plain note".to_string()]);
+    std::fs::copy(
+        locked.join("palace.json"),
+        root.path().join("gamma/palace.json"),
+    )
+    .expect("register gamma");
+    std::fs::create_dir_all(root.path().join("delta")).expect("delta dir");
+    PalaceStore::save_palace(&Palace {
+        id: PalaceId("delta".to_string()),
+        name: "delta".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: root.path().join("delta"),
+    })
+    .expect("save delta");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let rows = scan_palaces(root.path(), None, scratch.path());
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    let rows = rows.expect("scan");
+
+    let gamma = row(&rows, "gamma/data");
+    assert_eq!(gamma.store, StoreState::Error);
+    assert!(gamma
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("cannot stat")));
+    let delta = row(&rows, "delta");
+    assert_eq!(
+        (delta.store, delta.error.as_deref()),
+        (StoreState::Absent, None)
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    render(&mut out, &mut err, &rows, false).expect("render");
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("palace=delta store=absent "));
+    assert!(String::from_utf8(err)
+        .expect("utf8")
+        .contains("palace=gamma/data"));
+    assert!(
+        scan_verdict(&rows).is_err(),
+        "an unstattable store fails the run"
+    );
+    assert!(
+        scan_verdict(std::slice::from_ref(delta)).is_ok(),
+        "an absent store alone does not"
+    );
+}
+
+/// Why: #8645 review — a torn copy must fail loud, not read as a palace with
+/// fewer drawers.
+/// What: truncates beta's `kg.redb` to half its length and asserts beta is an
+/// error row with no counts, while alpha still scans in full.
+/// Test: This test.
+#[test]
+fn truncated_store_copy_is_an_error_row() {
+    let root = tempfile::tempdir().expect("root");
+    let scratch = tempfile::tempdir().expect("scratch");
+    seeded_estate(root.path());
+    let kg = root.path().join("beta").join("kg.redb");
+    let len = std::fs::metadata(&kg).expect("stat").len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&kg)
+        .expect("open")
+        .set_len(len / 2)
+        .expect("truncate");
+
+    let rows = scan_palaces(root.path(), None, scratch.path()).expect("scan");
+    let beta = row(&rows, "beta");
+    assert_eq!(beta.store, StoreState::Error, "a torn copy is an error row");
+    assert!(beta.error.is_some());
+    assert_eq!(beta.drawers_scanned, 0);
+    assert_eq!(row(&rows, "alpha").drawers_scanned, 5);
+    assert!(scan_verdict(&rows).is_err());
+}
+
+/// Why: #8645 review — the exit decision had no test; a regression there turns
+/// an incomplete scan into exit 0.
+/// What: the verdict fails on an error row and on an unreadable-rows row, and
+/// passes a clean set that includes an absent store.
+/// Test: This test.
+#[test]
+fn verdict_fails_on_error_or_unreadable_rows_and_passes_a_clean_set() {
+    let clean = PalaceSecretCounts {
+        palace: "clean".into(),
+        drawers_scanned: 4,
+        drawers_refused: 1,
+        ..Default::default()
+    };
+    let absent = PalaceSecretCounts {
+        palace: "empty".into(),
+        store: StoreState::Absent,
+        ..Default::default()
+    };
+    let errored = PalaceSecretCounts {
+        palace: "broken".into(),
+        store: StoreState::Error,
+        error: Some("open copy of KG store".into()),
+        ..Default::default()
+    };
+    let partial = PalaceSecretCounts {
+        palace: "partial".into(),
+        drawers_scanned: 3,
+        drawers_unreadable: 2,
+        ..Default::default()
+    };
+
+    assert!(scan_verdict(&[clean.clone(), absent.clone()]).is_ok());
+    let e = scan_verdict(&[clean.clone(), errored]).expect_err("error row fails");
+    assert!(e.to_string().contains("1 palace(s) could not be read"));
+    let e = scan_verdict(&[clean, partial]).expect_err("unreadable rows fail");
+    assert!(e
+        .to_string()
+        .contains("2 unreadable drawer row(s) in 1 palace(s)"));
+}
+
+/// Why: #8645 review — a killed run leaves a plaintext store copy in
+/// `$TMPDIR`; the next run must remove it without touching anything else.
+/// What: backdates a prefixed dir past the age limit, then asserts only it is
+/// removed — a fresh prefixed dir, a stale unprefixed dir, and a prefixed
+/// symlink to a stale dir all survive.
+/// Test: This test.
+#[test]
+fn sweep_removes_only_stale_scratch_dirs() {
+    use crate::commands::store_snapshot::{sweep_stale_copies, SCRATCH_PREFIX, STALE_COPY_AGE};
+
+    let parent = tempfile::tempdir().expect("parent");
+    let outside = tempfile::tempdir().expect("outside");
+    let old = std::time::SystemTime::now() - STALE_COPY_AGE * 2;
+    let backdate = |dir: &Path| {
+        std::fs::File::open(dir)
+            .expect("open dir")
+            .set_modified(old)
+            .expect("backdate");
+    };
+    let stale = parent.path().join(format!("{SCRATCH_PREFIX}dead"));
+    std::fs::create_dir(&stale).expect("stale");
+    std::fs::write(stale.join("kg.redb"), b"copy").expect("copy");
+    backdate(&stale);
+    let fresh = parent.path().join(format!("{SCRATCH_PREFIX}live"));
+    std::fs::create_dir(&fresh).expect("fresh");
+    let unrelated = parent.path().join("someone-else");
+    std::fs::create_dir(&unrelated).expect("unrelated");
+    backdate(&unrelated);
+    let target = outside.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    backdate(&target);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, parent.path().join(format!("{SCRATCH_PREFIX}link")))
+        .expect("symlink");
+
+    assert_eq!(sweep_stale_copies(parent.path(), STALE_COPY_AGE), 1);
+    assert!(!stale.exists(), "the stale copy is removed");
+    assert!(fresh.exists() && unrelated.exists() && target.exists());
 }
