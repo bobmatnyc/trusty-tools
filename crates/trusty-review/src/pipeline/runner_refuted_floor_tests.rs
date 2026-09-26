@@ -4,7 +4,7 @@
 //!
 //! Why: the unit-level guards in `grade_tests.rs` and `verify_tests.rs` each
 //! passed while `review_pr` still returned BLOCK / F on a mixed set whose only
-//! floor-triggering finding the verifier had refuted (bobmatnyc/cto-reports#731).
+//! floor-triggering finding the verifier had refuted (reported on cto-reports#731).
 //! The defect lived in the hand-off between the two stages, so the test has to
 //! drive the whole `run_review` path the review tool uses: parse, grade and
 //! floor, verification, re-derivation, grade reconciliation.
@@ -19,8 +19,12 @@ use crate::models::{ReviewResult, VerifyOutcome};
 /// Text a finding's body carries when the fake verifier should refute it.
 const REFUTE_MARKER: &str = "REFUTE-ME";
 
-/// Verifier that judges each finding by its own text: REFUTED when the prompt
-/// carries [`REFUTE_MARKER`], CONFIRMED otherwise.
+/// Text a finding's body carries when the fake verifier should answer
+/// UNVERIFIABLE (#5309's third judgment).
+const UNSURE_MARKER: &str = "UNSURE-ME";
+
+/// Verifier that judges each finding by its own text: REFUTED for
+/// [`REFUTE_MARKER`], UNVERIFIABLE for [`UNSURE_MARKER`], CONFIRMED otherwise.
 struct MarkerVerifier;
 
 #[async_trait]
@@ -29,11 +33,14 @@ impl LlmProvider for MarkerVerifier {
         "marker-verifier"
     }
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let refute = req
-            .messages
-            .iter()
-            .any(|m| m.content.contains(REFUTE_MARKER));
-        let judgment = if refute { "REFUTED" } else { "CONFIRMED" };
+        let carries = |marker: &str| req.messages.iter().any(|m| m.content.contains(marker));
+        let judgment = if carries(REFUTE_MARKER) {
+            "REFUTED"
+        } else if carries(UNSURE_MARKER) {
+            "UNVERIFIABLE"
+        } else {
+            "CONFIRMED"
+        };
         Ok(LlmResponse {
             text: format!(r#"{{"judgment":"{judgment}","reason":"test"}}"#),
             model: req.model.clone(),
@@ -75,7 +82,11 @@ fn refuted_blocker() -> String {
 }
 
 async fn review(findings_json: &str) -> ReviewResult {
-    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    review_file("src/a.rs", "+fn bad() {}", findings_json).await
+}
+
+async fn review_file(file: &str, added_line: &str, findings_json: &str) -> ReviewResult {
+    let (source, _tmp) = local_diff_source_for_file(file, added_line);
     let input = ReviewInput {
         diff_source: source,
         reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
@@ -159,3 +170,7 @@ async fn run_review_confirmed_blocker_beside_refuted_one_still_blocks() {
     assert_eq!(result.verdict, Verdict::Block);
     assert_eq!(result.grade.as_deref(), Some("F"));
 }
+
+// #4044: the cto-reports#731 finding mix, replayed through the same path.
+#[path = "runner_cto_reports_731_tests.rs"]
+mod cto_reports_731;
