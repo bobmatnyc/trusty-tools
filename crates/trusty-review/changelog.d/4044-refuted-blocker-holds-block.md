@@ -1,3 +1,0 @@
-Fixed
-- A verifier-refuted finding no longer holds the verdict at BLOCK and the grade at F. When the only finding that floored the review to BLOCK was refuted, a confirmed High-effort test-coverage, style or method-conformance finding still sent the verification round down its "confirmed blocker" path, which kept the pre-verification BLOCK. That path now opens only when the confirmed findings floor to BLOCK under the grader itself (#4044).
-- The large-diff synthesis floor no longer forces BLOCK on a High-effort test-coverage, style or method-conformance finding. It now applies the same category-aware BLOCK rule as the grader (#4044).
