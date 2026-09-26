@@ -115,6 +115,9 @@ mod tests_8134;
 // #8147: `POST /indexes` must honour `colocated: false`.
 #[cfg(all(test, unix))]
 mod tests_8147;
+// #8147: the `indexes.toml` row, not the in-memory stores, decides the layout.
+#[cfg(all(test, unix))]
+mod create_layout_8147_tests;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
