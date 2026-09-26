@@ -547,6 +547,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
   returns `200` and degrades to whatever lanes are ready, reporting that via
   the `meta` flags above.
 
+  **Embed-only trigger (#8148).** `PATCH /indexes/{id}/config {"vector": true}`
+  is also how a corpus that was registered with unembedded chunks gets its
+  vectors, with no full reindex: when the lane is ALREADY enabled and the
+  semantic stage is `pending` or `failed`, the PATCH queues the same C2 embed
+  pass a reindex queues and answers `components.catch_up_started: true`. The
+  pass waits for the one background permit, so re-arming many indexes runs
+  their passes one at a time, and it sets the `deferred_embed_pending` marker,
+  so a restart re-arms an interrupted pass. It stays a no-op
+  (`catch_up_started: false`) once the stage is `ready` or a pass is already
+  `in_progress`. A `500` from a failed `indexes.toml` write still starts the
+  requested catch-up, because the in-memory config it serves is live.
+
   **Facet routing (#5069).** Before refusing, the daemon looks for a sibling
   index carrying the same `PersistedIndex::repo_identity` that was built with
   the vector component enabled, loads it, and runs the caller's own query there

@@ -104,6 +104,9 @@ mod tests_6380;
 // #8438: `delete_data` removes the directory the registry names, per source.
 #[cfg(test)]
 mod tests_8438;
+// #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
+#[cfg(test)]
+mod tests_8148;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

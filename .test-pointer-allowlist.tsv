@@ -749,7 +749,6 @@ crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_no_match
 crates/trusty-search/src/commands/index_relocate.rs	handle_index_relocate_rejects_missing_id
 crates/trusty-search/src/commands/index_status.rs	render_stage_row_shows_embed_progress
 crates/trusty-search/src/commands/index_status.rs	render_status_table_formats_correctly
-crates/trusty-search/src/commands/log_rotation.rs	rotation_configured_false_when_nothing_installed
 crates/trusty-search/src/commands/migrate_storage/migrate.rs	migrate_legacy_pointer_file
 crates/trusty-search/src/commands/port.rs	parse_port_from_addr_*
 crates/trusty-search/src/commands/reindex_ui/bars.rs	active_phase_is_embed_returns_true_for_embedding_phases
