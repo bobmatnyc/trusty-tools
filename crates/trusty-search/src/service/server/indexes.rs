@@ -530,35 +530,11 @@ pub(crate) async fn create_index_report(
     // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
     // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
-    // #8147: the storage layout is the caller's to choose. `None` keeps the
-    // #403 default; `false` routes every persistence path at the data-dir
-    // store and touches nothing under `root_path`, which is the only way to
-    // adopt an index whose root is read-only or root-owned.
-    let colocated: bool = req.colocated.unwrap_or(true);
-    if !colocated && crate::service::colocated_storage::has_colocated_storage(&req.root_path) {
-        // The write paths (`reindex::runner`, `corpus_swap`, `hnsw_swap`,
-        // `shutdown_flush`) route on `has_colocated_storage(root)`, not on this
-        // flag, so a non-colocated registration over a root that already has
-        // `.trusty-search/` would write one layout and read the other.
-        tracing::warn!(
-            "create_index: refusing '{}' with colocated=false — {} already carries \
-             .trusty-search/ (issue #8147)",
-            req.id,
-            req.root_path.display(),
-        );
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            serde_json::json!({
-                "error": format!(
-                    "colocated=false was requested but {:?} already contains \
-                     .trusty-search/; the write paths route on that directory's \
-                     presence, so the two layouts would disagree. Remove or move it \
-                     aside, or register with colocated=true.",
-                    req.root_path.display()
-                ),
-                "id": req.id,
-            }),
-        ));
+    // #8147: the layout is the caller's to choose; a colocated root the daemon
+    // cannot write is refused here, before anything is built or registered.
+    let colocated = super::create_layout::resolve_layout(&req)?;
+    if colocated {
+        super::create_layout::preflight_colocated_root(&req.id, &req.root_path)?;
     }
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),

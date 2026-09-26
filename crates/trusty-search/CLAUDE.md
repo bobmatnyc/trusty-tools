@@ -239,10 +239,17 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   only shape the off-box delivery recipe below describes). `false` ⇒ it lives
   at `<data_dir>/indexes/<id>/` and registration creates nothing under
   `root_path` — the way to adopt an index whose root is read-only or
-  root-owned, which otherwise answered `500 corpus open failed for root_path
-  …`. `false` against a root that already contains `.trusty-search/` is
-  refused with `400`: the write paths route on that directory's presence, so
-  the two layouts would disagree.
+  root-owned. `indexes.toml` records the choice, so warm boot restores the
+  same layout. The MCP `create_index` tool does not forward this field.
+- **Response 403** (#8147): a colocated registration (omitted or `true`)
+  whose `<root_path>/.trusty-search/` the daemon cannot create or write.
+  `error` starts `permission denied:` and names the directory and the
+  `colocated=false` alternative. Nothing is registered and nothing is created,
+  so a retry with `colocated: false` succeeds. This used to be a generic
+  `500 corpus open failed for root_path …`.
+- **Response 400** (#8147): `colocated: false` against a root that already
+  contains `.trusty-search/`. The reindex runner still probes that directory,
+  so the two layouts would disagree; move it aside or register colocated.
 
 ###### Off-box per-index delivery (issue #8135)
 

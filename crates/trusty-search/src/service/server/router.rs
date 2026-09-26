@@ -235,12 +235,12 @@ pub struct CreateIndexRequest {
     /// hardcoded `true`.
     /// What: `Option<bool>`; persisted to `indexes.toml` so warm boot restores
     /// the same layout. `false` against a root that ALREADY has
-    /// `.trusty-search/` is refused with `400` — the write paths route on
-    /// `has_colocated_storage(root)`, so honouring it there would split the
-    /// writer and the loader across two layouts (the #483/#485 failure, in
-    /// reverse).
+    /// `.trusty-search/` is refused with `400`; a colocated request whose
+    /// `.trusty-search/` the daemon cannot write is refused with `403`. Both
+    /// live in `create_layout`.
     /// Test: `create_index_honours_colocated_false`,
-    /// `create_index_refuses_colocated_false_over_existing_colocated_storage`.
+    /// `create_index_refuses_colocated_false_over_existing_colocated_storage`,
+    /// `create_index_colocated_on_read_only_root_names_the_permission_problem`.
     #[serde(default)]
     pub colocated: Option<bool>,
 

@@ -14,6 +14,8 @@
 mod admin;
 mod components;
 mod contrib_graph;
+// #8147: storage-layout choice and pre-flight for `POST /indexes`.
+mod create_layout;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
