@@ -164,6 +164,9 @@ mod tests_exact_match_7675;
 // #5917: a search over an index whose corpus cannot be read must be refused.
 #[cfg(test)]
 mod tests_corpus_read_5917;
+// #8266: a cold, narrow grep must not rehydrate the whole corpus.
+#[cfg(test)]
+mod tests_grep_cold_8266;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
