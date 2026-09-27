@@ -258,19 +258,26 @@ const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 /// `missing_group_repair_is_silent_for_a_complete_file`,
 /// `missing_group_repair_closes_a_toggle_driven_gap`.
 pub fn repair_missing_hook_group(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
-    repair_missing_hook_group_with(project_dir, None, mode)
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
+    repair_missing_hook_group_with(&fw, project_dir, None, mode)
 }
 
-/// [`repair_missing_hook_group`] with the hook binary pinned by the caller.
+/// [`repair_missing_hook_group`] with the framework layout and hook binary
+/// supplied by the caller.
 ///
 /// Why (#7244's seam, reused): `resolve_stable_hook_exe` refuses a `cargo test`
 /// harness binary, so a test driving the apply arm through
 /// [`repair_missing_hook_group`] would assert the refusal rather than the
-/// merge on any host without `tm` installed.
-/// What: as [`repair_missing_hook_group`]; `exe_override` is `None` in
-/// production.
+/// merge on any host without `tm` installed. `fw` is taken rather than derived
+/// because `for_managed_workspace` reads the process-global `$HOME`, and the
+/// config under it decides which toggle groups the merge writes — a test
+/// deriving it saw a concurrent `#[serial]` `$HOME` redirect flip
+/// `[hooks] prompt_context` mid-test (the #5040 seam, extended here).
+/// What: as [`repair_missing_hook_group`]; production passes the
+/// `for_managed_workspace` layout and `exe_override = None`.
 /// Test: see [`repair_missing_hook_group`].
 pub(crate) fn repair_missing_hook_group_with(
+    fw: &crate::core::paths::FrameworkPaths,
     project_dir: &Path,
     exe_override: Option<&Path>,
     mode: RepairMode,
@@ -292,9 +299,8 @@ pub(crate) fn repair_missing_hook_group_with(
     // step's own apply arm would refuse for that same reason, and the verdict
     // for an unverifiable hook set belongs to `tm validate`'s
     // `ProjectHookDiagnosticIncomplete`, not to a repair step that cannot act.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
     for (event, _) in
-        crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, exe_override)
+        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, &val, exe_override)
             .unwrap_or_default()
             .missing
     {
@@ -309,7 +315,11 @@ pub(crate) fn repair_missing_hook_group_with(
     let status = match mode {
         RepairMode::DryRun => StepStatus::Planned,
         RepairMode::Apply => {
-            match crate::core::session_launch::ensure_project_hooks(project_dir, exe_override) {
+            match crate::core::session_launch::ensure_project_hooks_with(
+                fw,
+                project_dir,
+                exe_override,
+            ) {
                 Ok(()) => StepStatus::Applied { backup: None },
                 // #7490: an unresolvable installed binary is the fail-closed
                 // rule working (#7244), not a failure — a step that wrote
