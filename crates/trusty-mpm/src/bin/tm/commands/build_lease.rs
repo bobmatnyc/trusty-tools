@@ -43,7 +43,9 @@ use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
     workspace_packages,
 };
-use trusty_mpm::core::build_lease::target_dir::{SharedDirs, TargetPlan, plan, resolve_pool};
+use trusty_mpm::core::build_lease::target_dir::{
+    SharedDirs, TargetPlan, explicit_target_dir_arg, plan, resolve_pool, rewrite_target_dir_arg,
+};
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
@@ -142,7 +144,14 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
         || lease.effective_lease_wait(),
         |s| Duration::from_secs(clamp_wait(s)),
     );
-    let ambient = std::env::var("CARGO_TARGET_DIR").ok();
+    // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv is the
+    // value cargo actually uses — it outranks `CARGO_TARGET_DIR` from the
+    // environment, so `plan` must see that value, not the env var, when both
+    // are present.
+    let explicit_target_dir = explicit_target_dir_arg(&args.command).map(str::to_string);
+    let ambient = explicit_target_dir
+        .clone()
+        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
     let target_plan = plan(
         ambient.as_deref(),
         &SharedDirs::resolve(&builders, &home_or_root),
@@ -221,8 +230,14 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             record.target_dir.clone_from(&target);
             write_record(&mut guard, &record);
             post_decision(&url, "admitted", &command_line, &decision, &[]).await;
+            // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
+            // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
+            let run_argv = match (&explicit_target_dir, &target) {
+                (Some(_), Some(dir)) => rewrite_target_dir_arg(&args.command, dir),
+                _ => args.command.clone(),
+            };
             let status = spawn_and_wait(
-                &args.command,
+                &run_argv,
                 target.as_deref(),
                 Some((&mut guard, &mut record)),
             )
@@ -276,13 +291,18 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
 /// slot path a brief named. Its next `$CARGO_TARGET_DIR/debug/<bin>` would run
 /// another worktree's binary (#8261 round 5).
 /// What: one stderr line, `slot N — CARGO_TARGET_DIR=<dir>`, only when the
-/// plan replaced the directory; a kept or unset one prints nothing.
+/// plan replaced the directory; a kept or unset one prints nothing. Names the
+/// directory as exclusive only while THIS lease holds it (critic MEDIUM,
+/// round 6): another checkout can win the same slot once this build's flock
+/// releases and rebuild `debug/<bin>` there.
 /// Test: `a_subagents_leased_build_runs_in_its_slot_directory`.
 fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
     if let (TargetPlan::Slot { .. }, Some(dir)) = (plan, target) {
         eprintln!(
             "tm build-lease: slot {slot} — CARGO_TARGET_DIR={dir} for this build; its \
-             binaries are under that directory, not the inherited one (#8261)."
+             binaries are under that directory, not the inherited one, and are exclusively \
+             this build's only while the lease is held — once it releases, another checkout \
+             can win the same slot and rebuild debug/<bin> there (#8261)."
         );
     }
 }

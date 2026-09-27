@@ -48,7 +48,7 @@ use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
 
 use super::hook_rewrite::rewrite_bash_command_unless_isolated;
 use super::pm_guard_bash::build_lease_rewrite::{LeaseRewrite, rewrite_for_lease};
-use super::pm_guard_bash::split_shell_segments;
+use super::pm_guard_bash::{split_shell_segments, unclassifiable_command};
 use super::pm_guard_response::{RewriteDecision, build_rewrite_response};
 
 /// What the lease rule decided for one tool call.
@@ -321,12 +321,24 @@ const INERT_ENV_KEYS: &[&str] = &[
 
 /// Whether `text` can run a command its own words do not show.
 ///
-/// What: any [`HIDDEN_COMMAND_MARKERS`] text, quoted or not (a quoted one only
-/// costs an allow), or a first word (past `KEY=value` prefixes) in
-/// [`EVAL_BUILTINS`].
-/// Test: `a_hidden_command_never_gets_an_allow`.
+/// Why (#8261 round 6, critic HIGH): the marker scan alone missed ANSI-C
+/// (`$'…'`) quoting — `cargo test $'\'' ; rm -rf ~ #'` reads, under the naive
+/// quote scan this module and [`unclassifiable_command`] share, as ONE
+/// balanced segment equal to `Bash(cargo test:*)`, so it got an allow while a
+/// live `;` and a `#` comment behind the ANSI-C token made the real shell run
+/// `rm -rf ~` too. Checking [`unclassifiable_command`] FIRST closes that
+/// specific bypass and every other shape it already refuses (an unlexable
+/// wrapper, nesting past its depth cap) — the build-lease allow path must
+/// never grant an allow for text the shared classifier cannot resolve to a
+/// program at all, regardless of which future gap trips it.
+/// What: true when [`unclassifiable_command`] returns `Some`, any
+/// [`HIDDEN_COMMAND_MARKERS`] text, quoted or not (a quoted one only costs an
+/// allow), or a first word (past `KEY=value` prefixes) in [`EVAL_BUILTINS`].
+/// Test: `a_hidden_command_never_gets_an_allow`,
+/// `an_ansi_c_quoted_command_never_gets_an_allow`.
 fn hides_a_command(text: &str) -> bool {
-    HIDDEN_COMMAND_MARKERS.iter().any(|m| text.contains(m))
+    unclassifiable_command(text).is_some()
+        || HIDDEN_COMMAND_MARKERS.iter().any(|m| text.contains(m))
         || text
             .split_whitespace()
             .find(|w| !super::hook_rewrite::is_env_assignment(w))
@@ -589,6 +601,17 @@ mod tests {
     #[test]
     fn a_zsh_equals_process_substitution_never_gets_an_allow() {
         assert_no_allow(&["cargo test =(rm -rf ~)"]);
+    }
+
+    /// #8261 round 6 (critic HIGH): `$'\''` decodes to one literal `'`, so the
+    /// shell reads the rest of the line live — a `;` splits it and `#` starts
+    /// a comment — while the naive marker scan sees only ONE balanced `'…'`
+    /// span covering the whole string and never flags it. Fails against
+    /// `f54f06727` (pre-fix): `hides_a_command` answered `false` and this
+    /// command matched `Bash(cargo test:*)` for an allow.
+    #[test]
+    fn an_ansi_c_quoted_command_never_gets_an_allow() {
+        assert_no_allow(&["cargo test $'\\'' ; rm -rf ~ #'"]);
     }
 
     /// #8261 round 5: the zsh glob qualifier `e` runs its string as shell code,

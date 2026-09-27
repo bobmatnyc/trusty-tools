@@ -88,8 +88,11 @@ pub enum TargetPlan {
 
 /// Decide the target directory before a slot is taken.
 ///
-/// What: `ambient` is `CARGO_TARGET_DIR` as the build would inherit it;
-/// `pool` is the repo's slot pool and warm directory, or why there is none.
+/// What: `ambient` is `CARGO_TARGET_DIR` as the build would inherit it — the
+/// caller passes an explicit `--target-dir` argv value here instead when the
+/// command carries one ([`explicit_target_dir_arg`]), since that is the value
+/// cargo will actually use; `pool` is the repo's slot pool and warm
+/// directory, or why there is none.
 /// Test: `an_explicit_target_dir_is_kept`, `the_shared_dir_is_replaced_by_the_slot`,
 /// `an_unset_target_dir_is_left_to_cargo`, `a_shared_dir_without_a_pool_is_refused`,
 /// `an_ambient_pool_slot_counts_as_shared`.
@@ -114,6 +117,77 @@ pub fn plan(
              CARGO_TARGET_DIR for this build, or add a git `origin` to the checkout"
         )),
     }
+}
+
+/// The `--target-dir` value `argv` sets explicitly, if any (#8261 round 6).
+///
+/// Why: cargo's own `--target-dir` flag outranks `CARGO_TARGET_DIR` from the
+/// environment, so a leased build whose argv carries `--target-dir <shared>`
+/// kept writing into the shared directory even after [`plan`] replaced the
+/// env var — [`plan`] never saw the flag, only `ambient`, which is the env
+/// var alone (critic LOW). Reading the SAME value cargo itself resolves to is
+/// what lets [`plan`] decide against the directory the build will actually
+/// use.
+/// What: the value of a separated `--target-dir <value>` or joined
+/// `--target-dir=<value>` argument, whichever appears LAST — cargo itself
+/// takes the last repeated flag. `None` when `argv` carries no such argument.
+/// Test: `an_explicit_target_dir_flag_is_read_from_argv`.
+#[must_use]
+pub fn explicit_target_dir_arg(argv: &[String]) -> Option<&str> {
+    let mut found = None;
+    let mut i = 0;
+    while i < argv.len() {
+        let tok = argv[i].as_str();
+        if tok == "--target-dir" {
+            if let Some(value) = argv.get(i + 1) {
+                found = Some(value.as_str());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = tok.strip_prefix("--target-dir=") {
+            found = Some(value);
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Replace an explicit `--target-dir` argument in `argv` with `new_dir`.
+///
+/// Why: setting `CARGO_TARGET_DIR` alone is not enough once argv carries its
+/// own `--target-dir` — that flag still wins, so the leased slot directory
+/// must land in the SAME argument cargo will read (#8261 round 6).
+/// What: rewrites the LAST separated or joined `--target-dir` argument found
+/// by [`explicit_target_dir_arg`] to `new_dir`, leaving every other argument
+/// byte-identical. A no-op — returns `argv` unchanged — when it carries no
+/// such flag.
+/// Test: `an_explicit_target_dir_flag_is_rewritten_to_the_slot`.
+#[must_use]
+pub fn rewrite_target_dir_arg(argv: &[String], new_dir: &str) -> Vec<String> {
+    let mut out = argv.to_vec();
+    let mut separated: Option<usize> = None;
+    let mut joined: Option<usize> = None;
+    let mut i = 0;
+    while i < out.len() {
+        if out[i] == "--target-dir" && i + 1 < out.len() {
+            separated = Some(i + 1);
+            joined = None;
+            i += 2;
+            continue;
+        }
+        if out[i].starts_with("--target-dir=") {
+            joined = Some(i);
+            separated = None;
+        }
+        i += 1;
+    }
+    if let Some(idx) = separated {
+        out[idx] = new_dir.to_string();
+    } else if let Some(idx) = joined {
+        out[idx] = format!("--target-dir={new_dir}");
+    }
+    out
 }
 
 /// The `build:` section of `~/.trusty-tools/trusty-mpm` config, if readable.
@@ -242,5 +316,63 @@ mod tests {
         let err = resolve_pool(&BuildersConfig::default(), tmp.path(), tmp.path())
             .expect_err("a bare directory has no origin");
         assert!(err.contains("no git origin identity"), "{err}");
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    /// #8261 round 6 (critic LOW): a separated, a joined, and a repeated flag
+    /// (cargo takes the LAST one) — plus no flag at all.
+    #[test]
+    fn an_explicit_target_dir_flag_is_read_from_argv() {
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&["cargo", "build", "--target-dir", "/shared"])),
+            Some("/shared")
+        );
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&["cargo", "build", "--target-dir=/shared"])),
+            Some("/shared")
+        );
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&[
+                "cargo",
+                "build",
+                "--target-dir",
+                "/first",
+                "--target-dir",
+                "/second"
+            ])),
+            Some("/second")
+        );
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&["cargo", "build", "-p", "x"])),
+            None
+        );
+    }
+
+    /// #8261 round 6 (critic LOW): the flag cargo will actually read is the
+    /// one that must carry the slot, not just the env var.
+    #[test]
+    fn an_explicit_target_dir_flag_is_rewritten_to_the_slot() {
+        assert_eq!(
+            rewrite_target_dir_arg(
+                &argv(&["cargo", "build", "--target-dir", "/shared"]),
+                "/pool/slot-0"
+            ),
+            argv(&["cargo", "build", "--target-dir", "/pool/slot-0"])
+        );
+        assert_eq!(
+            rewrite_target_dir_arg(
+                &argv(&["cargo", "build", "--target-dir=/shared"]),
+                "/pool/slot-0"
+            ),
+            argv(&["cargo", "build", "--target-dir=/pool/slot-0"])
+        );
+        // No flag: unchanged, byte for byte.
+        assert_eq!(
+            rewrite_target_dir_arg(&argv(&["cargo", "build", "-p", "x"]), "/pool/slot-0"),
+            argv(&["cargo", "build", "-p", "x"])
+        );
     }
 }

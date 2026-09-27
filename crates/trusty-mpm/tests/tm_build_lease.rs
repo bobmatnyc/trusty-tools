@@ -567,11 +567,29 @@ fn the_census_view_lists_holders_without_argument_values() {
     assert!(text.contains("1 lease(s) held, ceiling 3"), "{text}");
     assert!(text.contains("  lease slot 0: sh (pid "), "{text}");
     assert!(!text.contains("s3cr3t-census"), "{text}");
-    // #8261 round 5: a `touch` marker proves the refused command never ran.
+    // #8261 round 5: a marker proves the refused command never ran. #8261
+    // round 6 (critic LOW): a stand-in `cargo` on `PATH`, not `touch` — this
+    // test's own config lists `touch` as heavy only for its own convenience,
+    // so a `cargo` marker proves the same thing without depending on that.
+    use std::os::unix::fs::PermissionsExt;
     let ran = home.path().join("census-ran-the-command");
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    std::fs::write(
+        bin.join("cargo"),
+        format!("#!/bin/sh\ntouch '{}'\n", ran.display()),
+    )
+    .expect("stand-in cargo");
+    std::fs::set_permissions(bin.join("cargo"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let both = build_lease(home.path())
-        .args(["--census", "--", "touch"])
-        .arg(&ran)
+        .env("PATH", path)
+        .args(["--census", "--", "cargo", "build"])
         .output()
         .expect("both");
     assert_ne!(
