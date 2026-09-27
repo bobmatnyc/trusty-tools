@@ -391,7 +391,7 @@ use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 /// `denies_a_secret_named_inside_an_inline_program`,
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Scan {
+pub(crate) enum Scan {
     /// A word of the command's argv: it can be a path the command opens.
     Argv,
     /// Source text — a here-document body, or an interpreter's inline program.
@@ -413,7 +413,7 @@ enum Scan {
 /// call, denies.
 /// Test: `allows_only_the_safe_handling_verbs`,
 /// `denies_every_bypass_the_earlier_rounds_missed`.
-const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
+pub(crate) const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
 
 /// `git` subcommands that may name a secret-bearing file.
 ///
@@ -426,7 +426,7 @@ const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
 /// options.
 /// Test: `allows_only_the_safe_handling_verbs`,
 /// `denies_a_git_subcommand_that_prints_file_bytes`.
-const SAFE_GIT_SUBCOMMANDS: &[&str] = &["add", "rm", "mv", "status"];
+pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &["add", "rm", "mv", "status"];
 
 /// git flags that turn a staging call into a call that PRINTS the file.
 ///
@@ -667,7 +667,7 @@ const EXPLICIT_PATTERN_FLAGS: &[&str] = &["-e", "-f", "--regexp", "--file"];
 /// first token after the program that does not start with `-`.
 /// Test: `allows_a_secret_name_written_as_a_search_pattern`,
 /// `denies_a_secret_file_operand_of_a_search_program`.
-fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
+pub(crate) fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return None;
     }
@@ -841,7 +841,7 @@ fn push_program_text_words(text: &str, out: &mut Vec<String>) {
 /// `denies_a_secret_named_inside_an_inline_program`,
 /// `denies_a_secret_operand_beside_an_inline_program`,
 /// `guard_7839_sed_expression_wildcard`.
-fn inline_program_indices(argv: &[String]) -> Vec<usize> {
+pub(crate) fn inline_program_indices(argv: &[String]) -> Vec<usize> {
     let Some(start) = strip_wrapper_prefix(argv) else {
         return Vec::new();
     };
@@ -892,7 +892,7 @@ fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
 /// but not the directory `secrets/`).
 /// Test: `allows_the_ordinary_command_corpus`,
 /// `a_word_family_counts_only_when_it_is_written_as_a_path`.
-fn names_a_secret_file(word: &str, scan: Scan) -> bool {
+pub(crate) fn names_a_secret_file(word: &str, scan: Scan) -> bool {
     // #8523: a pm2 dump, or a glob over the pm2 home, is a file by its name.
     if names_a_process_manager_dump(word) {
         return true;
