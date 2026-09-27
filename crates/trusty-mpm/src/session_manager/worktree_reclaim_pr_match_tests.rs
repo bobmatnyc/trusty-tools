@@ -384,6 +384,25 @@ fn a_failed_ancestry_probe_leaves_the_refusal_standing() {
     assert_eq!(out, BranchPrState::NoPr);
 }
 
+/// 🔴 #8721 (critic HIGH): on a detached HEAD a search that did not answer is
+/// `LookupFailed`, and one that answered with no match stays `Unknown` — the
+/// state gate 5 lets reach the landed-content admission.
+#[test]
+fn worktree_8721_a_detached_head_whose_search_failed_is_a_lookup_failure() {
+    let failed = FakeProbe::default().with_search_error("`gh` exited 4: gh auth login");
+    let out = resolve_landing(worktree(), root(), None, BranchPrState::Unknown, &failed);
+    assert!(
+        matches!(&out, BranchPrState::LookupFailed { reason } if reason.contains("gh auth login")),
+        "{out:?}"
+    );
+    let unread = FakeProbe::default().with_head_commit(Err("exit 128".to_string()));
+    let out = resolve_landing(worktree(), root(), None, BranchPrState::Unknown, &unread);
+    assert!(matches!(out, BranchPrState::LookupFailed { .. }), "{out:?}");
+    let answered = FakeProbe::default().with_search(Vec::new());
+    let out = resolve_landing(worktree(), root(), None, BranchPrState::Unknown, &answered);
+    assert_eq!(out, BranchPrState::Unknown);
+}
+
 /// A HEAD the probe reports as empty is not a commit to search for (#7267).
 #[test]
 fn an_empty_head_commit_reaches_no_search() {
