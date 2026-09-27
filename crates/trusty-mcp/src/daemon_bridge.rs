@@ -272,7 +272,8 @@ pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
 /// Unix a `pre_exec` hook that calls `setsid()`, failing the spawn if that
 /// fails. This mirrors `trusty_common::daemon_guard::start_in_new_session`;
 /// trusty-mcp stays free of a trusty-common dependency (ADR-0040).
-/// Test: `detached_daemon_command_starts_the_daemon_in_its_own_session`.
+/// Test: `detached_daemon_command_starts_the_daemon_in_its_own_session`,
+/// `a_failed_setsid_fails_the_daemon_spawn_with_eperm`.
 fn detached_daemon_command(
     exe: &std::path::Path,
     config: &DaemonBridgeConfig,
@@ -386,6 +387,27 @@ mod tests {
         assert_eq!(
             sid, pid,
             "the auto-started daemon must lead its own session (#8783)"
+        );
+    }
+
+    /// Why (#8783): a `setsid` failure must fail the spawn, never leave the
+    /// daemon in the bridge's group; a discarded result would hide it.
+    /// What: adds `process_group(0)`, which makes the child a group leader
+    /// before the hook runs, so `setsid` fails and `spawn` returns `EPERM`.
+    /// Test: this test.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_setsid_fails_the_daemon_spawn_with_eperm() {
+        use std::os::unix::process::CommandExt as _;
+        let cfg = make_config("http://127.0.0.1:1", "/health");
+        let err = detached_daemon_command(std::path::Path::new("/usr/bin/true"), &cfg)
+            .process_group(0)
+            .spawn()
+            .expect_err("setsid in a group leader must fail the spawn");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EPERM),
+            "expected EPERM from setsid, got {err:?}"
         );
     }
 

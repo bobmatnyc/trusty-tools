@@ -30,8 +30,9 @@
 //!   operate against the wrong repository — nor start a competing daemon on a
 //!   socket that is already bound.
 //! * **Nothing answering** -> spawn `<current_exe> serve --http [--project
-//!   <path>]` as a child and wait for the SOCKET to answer. The child handle is
-//!   dropped once it is up; the daemon outlives this process.
+//!   <path>]` as a child in its own session and wait for the SOCKET to answer.
+//!   The child handle is dropped once it is up; the daemon outlives this
+//!   process, and a terminal hangup to the TUI's group never reaches it.
 //!
 //! **The `TCODE_DAEMON_URL` branch is gone (#6637).** It existed so an operator
 //! could point the TUI at a daemon on another port, and its refuse-to-spawn arm
@@ -373,13 +374,17 @@ enum Outcome {
 /// There is deliberately no `kill_on_drop(true)`: the spawned daemon must
 /// survive this process, so the one thing the `Child` handle must NOT do is
 /// signal it when the TUI's stack unwinds (module docs, owner directive
-/// 2026-08-01).
+/// 2026-08-01). For the same reason it starts in its own session
+/// (`daemon_guard::start_in_new_session`, #8783): otherwise closing the
+/// terminal SIGHUPs the TUI's foreground group and the daemon with it.
+///
+/// Test: `daemon_autospawn_tests::the_spawned_daemon_leads_its_own_session`.
 fn spawn_daemon(
     tcode_exe: &Path,
     project: Option<&Path>,
     log_path: Option<&Path>,
 ) -> Result<Child> {
-    let mut cmd = Command::new(tcode_exe);
+    let mut cmd = std::process::Command::new(tcode_exe);
     cmd.arg("serve").arg("--http");
     if let Some(project) = project {
         cmd.arg("--project").arg(project);
@@ -393,7 +398,8 @@ fn spawn_daemon(
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
-    cmd.spawn().with_context(|| {
+    trusty_common::daemon_guard::start_in_new_session(&mut cmd);
+    Command::from(cmd).spawn().with_context(|| {
         format!(
             "tcode tui: could not start a daemon with `{} serve --http`",
             tcode_exe.display()
