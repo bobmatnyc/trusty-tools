@@ -14,6 +14,10 @@
 
 // #6892: machine-wide builder-slot leases — claim, release, TTL, PID liveness.
 pub mod builder_slots;
+// #8548: a user-stopped builder's slot, released from its stop marker.
+mod builder_slot_release;
+#[cfg(test)]
+mod builder_slot_release_tests;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;

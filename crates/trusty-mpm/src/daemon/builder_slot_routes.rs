@@ -181,8 +181,8 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// `POST /api/v1/sessions/{id}/delegations/builder-slot` (#6892).
 ///
 /// Why: see the module doc.
-/// What: parses the session id, resolves the machine's cap, and hands the
-/// scan-and-claim to [`builder_slot_op`]. A malformed session id is a 400; an
+/// What: releases any user-stopped holder (#8548), resolves the machine's cap,
+/// and hands the scan-and-claim to [`builder_slot_op`]. A malformed session id is a 400; an
 /// unknown session is not an error — a session the daemon has no record of has
 /// no delegations, and a 404 would read to the guard as "the daemon could not
 /// answer", which this guard denies on.
@@ -193,6 +193,9 @@ pub async fn builder_slot_route(
     Path(id): Path<String>,
     Json(req): Json<BuilderSlotRequest>,
 ) -> Result<Json<BuilderSlotResponse>, DaemonError> {
+    // #8548: free a user-stopped holder's slot before anything counts holders,
+    // so the claim that needs the slot does not wait for the 60 s sweep.
+    state.release_user_stopped_builders();
     // The count is resolved HERE, in the counting process — see the module doc.
     // #8261: it is now MEASURED per decision rather than read once from the
     // tier table, with `builders.max_concurrent` as the hard ceiling.
