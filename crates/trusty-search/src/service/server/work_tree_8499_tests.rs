@@ -20,11 +20,13 @@ use std::sync::Arc;
 
 /// #8499 round 3: a root below the top of its git work tree is refused when
 /// the data dir sits anywhere in that work tree, not only under the root. A
-/// data dir outside the repository is accepted, and an index already in
-/// `indexes.toml` keeps registering (the #8438 exemption).
+/// data dir outside the repository is accepted. An `indexes.toml` row keeps
+/// registering only when its store already exists there (the #8438
+/// exemption); a row without one is refused and creates nothing.
 ///
 /// Why: `git clean -fdx` at the repository top deletes `<repo>/data` whatever
-/// root the index was registered at; round 2 compared against the root only.
+/// root the index was registered at; round 2 compared against the root only,
+/// and round 3 exempted a row whose store it then created in the work tree.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
@@ -52,16 +54,32 @@ async fn create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree() {
     assert!(!in_repo.join("indexes").exists(), "no store was written");
     assert_eq!(git(&repo, &["status", "--porcelain"]), "", "#8499");
 
-    // An entry registered before this rule keeps working.
-    crate::service::persistence::upsert_index_registry_entry(PersistedIndex {
-        id: "nested-existing-8499".to_string(),
-        root_path: root.clone(),
-        ..Default::default()
-    })
-    .expect("seed indexes.toml");
+    // #8499: an `indexes.toml` row alone exempts nothing. With no store at the
+    // resolved location, re-registering would create one in the work tree.
+    seed_row("nested-existing-8499", &root);
     let (status, body) = post_create(&state, "nested-existing-8499", &root, true).await;
-    assert_eq!(status, StatusCode::OK, "#8438 existing entry: {body}");
-    unregister(&state, "nested-existing-8499").await;
+    assert!(
+        !in_repo
+            .join("indexes")
+            .join("nested-existing-8499")
+            .exists(),
+        "#8499: a row with no store must not create one in the work tree ({status}): {body}"
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "#8499 row, no store: {body}");
+
+    // The #8438 cold-park case: the row AND its store already exist there, so
+    // the re-registration succeeds and creates no new directory.
+    const PARKED: &str = "nested-parked-8499";
+    std::fs::create_dir_all(in_repo.join("indexes").join(PARKED)).expect("seed the store");
+    seed_row(PARKED, &root);
+    let (status, body) = post_create(&state, PARKED, &root, true).await;
+    assert_eq!(status, StatusCode::OK, "#8438 existing store: {body}");
+    assert_eq!(
+        dir_names(&in_repo.join("indexes")),
+        [PARKED],
+        "no new directory"
+    );
+    unregister(&state, PARKED).await;
 
     // SAFETY: as above.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", data.path()) };
@@ -72,6 +90,67 @@ async fn create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree() {
         "a data dir outside the repo: {body}"
     );
     unregister(&state, "nested-outside-8499").await;
+}
+
+/// Seed an `indexes.toml` row for a non-colocated `id` at `root`.
+fn seed_row(id: &str, root: &Path) {
+    crate::service::persistence::upsert_index_registry_entry(PersistedIndex {
+        id: id.to_string(),
+        root_path: root.to_path_buf(),
+        ..Default::default()
+    })
+    .expect("seed indexes.toml");
+}
+
+/// The sorted names of `dir`'s entries.
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// #8499: an `indexes.toml` that cannot be parsed exempts nothing — the
+/// work-tree guard still runs and refuses, even over an existing store.
+///
+/// Why: the exemption lookup discards a load error (`.ok().flatten()`); this
+/// proves that discarding fails closed rather than reading as "exempt".
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn create_with_a_corrupt_registry_still_refuses_a_store_in_the_work_tree() {
+    let _data = IsolatedDataDir::new();
+    let state = mock_state().await;
+    let (_dir, repo) = clean_repo("corrupt-8499-", None);
+    let root = repo.join("src");
+    let in_repo = repo.join("data");
+    const ID: &str = "corrupt-registry-8499";
+    // An existing store, so only the row lookup could exempt this placement.
+    std::fs::create_dir_all(in_repo.join("indexes").join(ID)).expect("seed the store");
+    let row = format!(
+        "[[indexes]]\nid = \"{ID}\"\nroot_path = {:?}\nthis is not toml [\n",
+        root.display().to_string()
+    );
+    std::fs::write(in_repo.join("indexes.toml"), row).expect("corrupt indexes.toml");
+    // SAFETY: #[serial]; `IsolatedDataDir`'s drop clears the variable.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &in_repo) };
+    assert!(
+        crate::service::persistence::find_index_registry_entry(ID).is_err(),
+        "fixture: the registry must fail to load"
+    );
+
+    let (status, body) = post_create(&state, ID, &root, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "#8499 fail closed: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("#8499"),
+        "the refusal must name the reason: {body}"
+    );
+    assert!(
+        state.registry.get(&IndexId::new(ID)).is_none(),
+        "nothing registered"
+    );
 }
 
 /// #8499 round 3: a `.git` FILE marks the top of a linked worktree (or a
