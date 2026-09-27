@@ -58,8 +58,9 @@ guessed priority is noise someone else re-triages.
 label, never a milestone.
 
 **Other labels in use**, applied when they describe the issue: `blocked`,
-`breaking-change`, `do-not-merge`, `duplicate`, `regression`, `release`,
-`release-cleanup`, `security`, `self-improvement`, `tech-debt`, `wont-do`.
+`breaking-change`, `closed:sweep`, `do-not-merge`, `duplicate`, `regression`,
+`release`, `release-cleanup`, `security`, `self-improvement`, `tech-debt`,
+`wont-do`.
 
 **Not part of this standard, and never applied by the agent:** the
 `unicorn:*` family, `blast:*`, `approval:*`, and `T2`–`T4`. These belong to the
@@ -322,6 +323,10 @@ posts ONE triage comment naming its recommended disposition with evidence:
 
 At **60 days** it closes with a note, unless the issue is pinned to a milestone
 or carries `keep`, `paused`, or `blocked`.
+
+🔴 **A sweep closure carries `closed:sweep`** (owner ruling 2026-09-27) — age,
+staleness, duplicate, or obsolete dispositions all count. A fix closure comes
+from a merged PR and never carries `closed:sweep`.
 
 🔴 **A human decision is requested as a digest, never per issue.** Group the
 recommendations per epic and post them as one comment on that epic's tracker.

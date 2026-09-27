@@ -26,7 +26,7 @@ Three questions, and a finding answers all three:
 
 A symptom with no named cause and no proposed change files nothing.
 
-**The destination is fixed: issues in `bobmatnyc/trusty-tools`.** That holds
+**The destination is fixed: `bobmatnyc/trusty-tools`.** That holds
 whatever project you ran in. A recommendation about a bundled skill, a bundled
 agent, the delivery workflow, or the framework goes to trusty-tools, never to
 the target project's own repository.
@@ -41,13 +41,12 @@ per finding:
 - **Change** — the concrete edit that prevents it.
 - **Evidence** — command output, `file:line`, or elapsed time.
 
-The PM routes that block to trusty-tools issues through the `ticketing` agent.
-An agent running top-level files through `ticketing` directly.
-
-**Search before filing.** Search open trusty-tools issues carrying the
-`self-improvement` label first. A match gets a comment on that issue, never a
-second issue. Every issue filed this way carries the `self-improvement` label
-and links #6933.
+**Never a new issue (owner ruling 2026-09-27).** The PM posts that block to
+the rollup issue #8021, or as a comment on the parent issue when the finding
+traces back to one — whether the reporting agent is a dispatched subagent or
+the PM itself running top-level. Search open trusty-tools issues carrying the
+`self-improvement` label first only to confirm which parent issue applies; a
+match still gets a comment, never a second issue.
 
 **A clean run reports nothing.** No findings means no block and no issue.
 Never emit an empty block, and never file an issue to show that you looked.
@@ -121,9 +120,10 @@ trusty-tools, through the Improvement recommendations block above.
 
 **The post-mortem coalesces; it does not replace this.** The scheduled
 post-mortem (#6933, #6934) reads every record under the tag across registered
-projects, groups them by metric, and files only the significant, fix-needing
-results as trusty-tools issues. Its cadence is unchanged. This loop runs every
-task.
+projects, groups them by metric, and routes only the significant, fix-needing
+results to the rollup issue #8021, or as a comment on the parent issue — never
+a new issue (owner ruling 2026-09-27). Its cadence is unchanged. This loop runs
+every task.
 
 **Worked example — guard denials.** A PM dispatched a read-only agent from a
 main checkout without declaring `isolation: "worktree"` while `version-control`
