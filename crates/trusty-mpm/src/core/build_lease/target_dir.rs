@@ -131,13 +131,21 @@ pub fn plan(
 /// What: the value of a separated `--target-dir <value>` or joined
 /// `--target-dir=<value>` argument, whichever appears LAST — cargo itself
 /// takes the last repeated flag. `None` when `argv` carries no such argument.
-/// Test: `an_explicit_target_dir_flag_is_read_from_argv`.
+/// Scanning stops at the first literal `--`: everything after it belongs to
+/// the test binary (or other forwarded program), not to cargo, so a
+/// `--target-dir` appearing there is never cargo's own flag (#8261 round 7,
+/// critic CRITICAL).
+/// Test: `an_explicit_target_dir_flag_is_read_from_argv`,
+/// `an_explicit_target_dir_flag_stops_at_the_double_dash`.
 #[must_use]
 pub fn explicit_target_dir_arg(argv: &[String]) -> Option<&str> {
     let mut found = None;
     let mut i = 0;
     while i < argv.len() {
         let tok = argv[i].as_str();
+        if tok == "--" {
+            break;
+        }
         if tok == "--target-dir" {
             if let Some(value) = argv.get(i + 1) {
                 found = Some(value.as_str());
@@ -161,8 +169,12 @@ pub fn explicit_target_dir_arg(argv: &[String]) -> Option<&str> {
 /// What: rewrites the LAST separated or joined `--target-dir` argument found
 /// by [`explicit_target_dir_arg`] to `new_dir`, leaving every other argument
 /// byte-identical. A no-op — returns `argv` unchanged — when it carries no
-/// such flag.
-/// Test: `an_explicit_target_dir_flag_is_rewritten_to_the_slot`.
+/// such flag. Scanning stops at the first literal `--`, same rule and same
+/// reason as [`explicit_target_dir_arg`]: every argument at or after it is
+/// the test binary's, never cargo's, and is left untouched (#8261 round 7,
+/// critic CRITICAL).
+/// Test: `an_explicit_target_dir_flag_is_rewritten_to_the_slot`,
+/// `rewriting_the_target_dir_flag_leaves_everything_after_double_dash_untouched`.
 #[must_use]
 pub fn rewrite_target_dir_arg(argv: &[String], new_dir: &str) -> Vec<String> {
     let mut out = argv.to_vec();
@@ -170,6 +182,9 @@ pub fn rewrite_target_dir_arg(argv: &[String], new_dir: &str) -> Vec<String> {
     let mut joined: Option<usize> = None;
     let mut i = 0;
     while i < out.len() {
+        if out[i] == "--" {
+            break;
+        }
         if out[i] == "--target-dir" && i + 1 < out.len() {
             separated = Some(i + 1);
             joined = None;
@@ -373,6 +388,63 @@ mod tests {
         assert_eq!(
             rewrite_target_dir_arg(&argv(&["cargo", "build", "-p", "x"]), "/pool/slot-0"),
             argv(&["cargo", "build", "-p", "x"])
+        );
+    }
+
+    /// #8261 round 7 (critic CRITICAL): everything after a literal `--`
+    /// belongs to the test binary, not cargo — a `--target-dir` there is
+    /// never cargo's own flag, and one before it must still be found.
+    #[test]
+    fn an_explicit_target_dir_flag_stops_at_the_double_dash() {
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&[
+                "cargo",
+                "test",
+                "--target-dir",
+                "/shared",
+                "--",
+                "--target-dir",
+                "x"
+            ])),
+            Some("/shared")
+        );
+        assert_eq!(
+            explicit_target_dir_arg(&argv(&["cargo", "test", "--", "--target-dir", "X"])),
+            None
+        );
+    }
+
+    /// #8261 round 7 (critic CRITICAL): rewriting the pre-`--` flag must
+    /// leave every post-`--` argument byte-identical to the input.
+    #[test]
+    fn rewriting_the_target_dir_flag_leaves_everything_after_double_dash_untouched() {
+        let input = argv(&[
+            "cargo",
+            "test",
+            "--target-dir",
+            "/shared",
+            "--",
+            "--target-dir",
+            "x",
+        ]);
+        assert_eq!(
+            rewrite_target_dir_arg(&input, "/pool/slot-0"),
+            argv(&[
+                "cargo",
+                "test",
+                "--target-dir",
+                "/pool/slot-0",
+                "--",
+                "--target-dir",
+                "x",
+            ])
+        );
+        // No flag before `--`: the whole argv, including the part after
+        // `--`, is unchanged, byte for byte.
+        let no_pre_dash_flag = argv(&["cargo", "test", "--", "--target-dir", "X"]);
+        assert_eq!(
+            rewrite_target_dir_arg(&no_pre_dash_flag, "/pool/slot-0"),
+            no_pre_dash_flag
         );
     }
 }
