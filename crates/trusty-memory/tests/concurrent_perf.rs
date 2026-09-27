@@ -528,7 +528,7 @@ impl std::fmt::Display for LatencyStats {
 /// `GET /health` 20 times. Aggregates per-task and global latency.
 /// Asserts: zero failed requests, p99 < 500 ms.
 /// Test: this test.
-#[ignore]
+#[ignore = "latency measurement: own daemon, 15-70 s, success-rate and p99 bounds that host load skews"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_reads() {
     let (_daemon, client, version) = perf_daemon().await;
@@ -625,7 +625,7 @@ async fn test_concurrent_reads() {
 /// `memory_recall`. Aggregates per-class throughput and error counts.
 /// Asserts: all writes succeed, all reads succeed.
 /// Test: this test.
-#[ignore]
+#[ignore = "latency measurement: own daemon, 15-70 s, success-rate and p99 bounds that host load skews"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_rw() {
     let (_daemon, client, version) = perf_daemon().await;
@@ -808,7 +808,7 @@ async fn test_concurrent_rw() {
 /// #8682: runs under [`run_bounded`], so a wedged runtime fails in
 /// [`BURST_BUDGET`] naming the stuck calls instead of hanging the gate.
 /// Test: this test.
-#[ignore]
+#[ignore = "latency measurement: own daemon, 15-70 s, success-rate and p99 bounds that host load skews"]
 #[test]
 fn test_burst() {
     if let Err(report) = run_bounded("test_burst", BURST_BUDGET, 8, burst_body) {
@@ -945,7 +945,7 @@ async fn burst_body(probe: Probe) {
 /// Asserts: daemon still healthy after 10 s of pressure; error rate
 /// < 1 %.
 /// Test: this test.
-#[ignore]
+#[ignore = "latency measurement: own daemon, 15-70 s, success-rate and p99 bounds that host load skews"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_sustained_load() {
     let (_daemon, client, version) = perf_daemon().await;
