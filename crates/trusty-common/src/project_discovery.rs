@@ -177,7 +177,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn inspect_project_dir_detects_markers() {
         let dir = scratch_dir("markers");
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
@@ -193,7 +192,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn discover_claude_projects_finds_marked_dirs() {
         let home = scratch_dir("home");
 
