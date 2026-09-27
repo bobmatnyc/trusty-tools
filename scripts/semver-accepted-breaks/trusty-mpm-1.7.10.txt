@@ -1,0 +1,30 @@
+crate   trusty-mpm
+version 1.7.10
+reason  PR #8736 (Refs #8261) replaces the dispatch-time builder-slot cap with the build-command lease (tm build-lease): the core::builder_capacity and daemon::state::builder_slots modules are removed, the daemon::builder_slot_routes request/claim surface shrinks to what the lease routes still serve, dispatch_isolation::agent_is_builder is removed, and DaemonState loses its builder-slot methods. Owner ruling 2026-09-26 (Bob): a public-API break never forces a major version; the break is recorded here and the release stays on the 1.7.x line, per the same rationale as the 1.7.0/1.7.2/1.7.3/1.7.5/1.7.7 declarations.
+# release-notes: trusty-mpm 1.7.10 ships a disclosed, accepted API break — the
+# dispatch-time builder-slot API (builder_capacity, builder_slots,
+# builder_slot_routes claim types) is removed in favour of the build-command
+# lease landed by PR #8736 (Refs #8261); no deprecated shims were added.
+accept  enum_missing                    builder_capacity
+accept  enum_missing                    BuilderLease
+accept  function_missing                builder_capacity
+accept  function_missing                builder_slot_routes
+accept  function_missing                builder_lease
+accept  function_missing                agent_is_builder
+accept  inherent_method_missing         DaemonState::builder_capacity
+accept  inherent_method_missing         DaemonState::builder_slot_census
+accept  inherent_method_missing         DaemonState::builder_slot_holders
+accept  inherent_method_missing         DaemonState::claim_builder_slot
+accept  inherent_method_missing         DaemonState::claim_builder_slot_with_pool
+accept  inherent_method_missing         DaemonState::finish_builder_seed
+accept  inherent_method_missing         DaemonState::release_denied_builder_dispatch
+accept  module_missing                  builder_capacity
+accept  module_missing                  builder_slots
+accept  pub_module_level_const_missing  BUILDER_LEASE_TTL_SECS
+accept  pub_module_level_const_missing  MIN_SLOTS
+accept  pub_module_level_const_missing  QUIET_WINDOW_SECS
+accept  struct_missing                  builder_capacity
+accept  struct_missing                  builder_slot_routes
+accept  struct_missing                  BuilderHolder
+accept  struct_missing                  BuilderSlotCensus
+accept  struct_missing                  BuilderSlotGrant
