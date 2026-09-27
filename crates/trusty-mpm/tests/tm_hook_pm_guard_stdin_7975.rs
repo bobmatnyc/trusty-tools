@@ -15,9 +15,9 @@
 //! deadline — its only denied target is its LAST argument, so only a read that
 //! consumed the whole payload reaches it — and a parsed payload naming no
 //! guarded operation still allows.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_stdin_7975`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_stdin_7975::`.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};

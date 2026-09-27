@@ -25,6 +25,7 @@ use std::sync::Arc;
 /// indexes; asserts the response status is `404`.
 /// Test: this test (pure in-memory, no network or embedder required).
 #[tokio::test]
+#[serial_test::serial]
 async fn relocate_index_returns_404_for_unknown_id() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
     use axum::body::to_bytes;
@@ -64,6 +65,7 @@ async fn relocate_index_returns_404_for_unknown_id() {
 /// reflects the new path and the response carries `"relocated": true`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::serial]
 async fn relocate_index_updates_root_path() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
     use super::router::CreateIndexRequest;
@@ -85,7 +87,7 @@ async fn relocate_index_updates_root_path() {
     let create_resp = super::indexes::create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
-            id: "relocate-test".into(),
+            id: "relocate-test-1073".into(),
             root_path: old_root.clone(),
             include_paths: None,
             exclude_globs: None,
@@ -114,7 +116,7 @@ async fn relocate_index_updates_root_path() {
     // Step 2: relocate to new_root.
     let patch_resp = relocate_index_handler(
         State(Arc::clone(&state_arc)),
-        Path("relocate-test".to_string()),
+        Path("relocate-test-1073".to_string()),
         Json(RelocateIndexRequest {
             root_path: new_root.clone(),
         }),
@@ -131,14 +133,14 @@ async fn relocate_index_updates_root_path() {
     );
     assert_eq!(
         v.get("id").and_then(|x| x.as_str()),
-        Some("relocate-test"),
+        Some("relocate-test-1073"),
         "response must echo the index id"
     );
 
     // Step 3: assert the in-memory registry reflects the new root.
     let handle = state_arc
         .registry
-        .get(&crate::core::registry::IndexId::new("relocate-test"))
+        .get(&crate::core::registry::IndexId::new("relocate-test-1073"))
         .expect("handle must still be in registry after relocate");
     assert_eq!(
         handle.root_path, new_root,
@@ -236,7 +238,7 @@ fn colocated_fallback_is_false_when_disk_entry_absent() {
     crate::service::persistence::upsert_index_registry_entry_at(
         &toml_path,
         crate::service::persistence::PersistedIndex {
-            id: "existing-colocated".to_string(),
+            id: "existing-colocated-1073".to_string(),
             root_path: PathBuf::from("/some/root"),
             colocated: true,
             ..crate::service::persistence::PersistedIndex::default()
@@ -245,7 +247,11 @@ fn colocated_fallback_is_false_when_disk_entry_absent() {
     .expect("write entry");
     let found = load_index_registry_at(&toml_path)
         .ok()
-        .and_then(|entries| entries.into_iter().find(|e| e.id == "existing-colocated"))
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|e| e.id == "existing-colocated-1073")
+        })
         .map(|e| e.colocated)
         .unwrap_or(false);
     assert!(
@@ -280,7 +286,7 @@ fn relocate_preserves_lru_timestamps() {
 
     // Write an entry with known timestamps.
     let entry = PersistedIndex {
-        id: "lru-relocate-test".to_string(),
+        id: "lru-relocate-test-1073".to_string(),
         root_path: PathBuf::from("/projects/lru-relocate-test"),
         last_queried_unix: Some(1_700_000_000),
         last_indexed_unix: Some(1_699_000_000),
@@ -289,9 +295,11 @@ fn relocate_preserves_lru_timestamps() {
     upsert_index_registry_entry_at(&toml_path, entry).expect("write entry");
 
     // Simulate the handler's "load once, extract fields" pattern.
-    let on_disk = load_index_registry_at(&toml_path)
-        .ok()
-        .and_then(|entries| entries.into_iter().find(|e| e.id == "lru-relocate-test"));
+    let on_disk = load_index_registry_at(&toml_path).ok().and_then(|entries| {
+        entries
+            .into_iter()
+            .find(|e| e.id == "lru-relocate-test-1073")
+    });
 
     let on_disk_last_queried = on_disk.as_ref().and_then(|e| e.last_queried_unix);
     let on_disk_last_indexed = on_disk.as_ref().and_then(|e| e.last_indexed_unix);
@@ -309,14 +317,14 @@ fn relocate_preserves_lru_timestamps() {
 
     // Also verify None timestamps are handled gracefully.
     let entry_no_ts = PersistedIndex {
-        id: "lru-no-ts-test".to_string(),
+        id: "lru-no-ts-test-1073".to_string(),
         root_path: PathBuf::from("/projects/lru-no-ts"),
         ..PersistedIndex::default()
     };
     upsert_index_registry_entry_at(&toml_path, entry_no_ts).expect("write entry-no-ts");
     let on_disk2 = load_index_registry_at(&toml_path)
         .ok()
-        .and_then(|entries| entries.into_iter().find(|e| e.id == "lru-no-ts-test"));
+        .and_then(|entries| entries.into_iter().find(|e| e.id == "lru-no-ts-test-1073"));
     assert!(
         on_disk2
             .as_ref()
@@ -355,12 +363,12 @@ fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
 
     // Write initial state: index-a (no extra fields) and index-b with exclude_globs.
     let entry_a = PersistedIndex {
-        id: "index-a".to_string(),
+        id: "index-a-1073".to_string(),
         root_path: PathBuf::from("/projects/index-a"),
         ..PersistedIndex::default()
     };
     let entry_b = PersistedIndex {
-        id: "index-b".to_string(),
+        id: "index-b-1073".to_string(),
         root_path: PathBuf::from("/projects/index-b"),
         exclude_globs: vec!["**/vendor/**".to_string(), "*.generated.ts".to_string()],
         ..PersistedIndex::default()
@@ -370,7 +378,7 @@ fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
 
     // PATCH index-a: change its root_path (simulate PATCH /indexes/index-a).
     let patched_a = PersistedIndex {
-        id: "index-a".to_string(),
+        id: "index-a-1073".to_string(),
         root_path: PathBuf::from("/projects/index-a-new"),
         ..PersistedIndex::default()
     };
@@ -380,7 +388,7 @@ fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
     let entries = load_index_registry_at(&toml_path).expect("reload");
     let b = entries
         .iter()
-        .find(|e| e.id == "index-b")
+        .find(|e| e.id == "index-b-1073")
         .expect("index-b must still be present after patching index-a");
     assert_eq!(
         b.exclude_globs,
@@ -391,7 +399,7 @@ fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
     // Also verify index-a's root_path was updated correctly.
     let a = entries
         .iter()
-        .find(|e| e.id == "index-a")
+        .find(|e| e.id == "index-a-1073")
         .expect("index-a must still be present");
     assert_eq!(
         a.root_path,

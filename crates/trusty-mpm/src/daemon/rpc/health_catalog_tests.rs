@@ -23,6 +23,13 @@ const GENEROUS_WAIT: Duration = Duration::from_secs(10);
 /// The latency bound #7965 names for `/health`: half the CLI's 500 ms probe.
 const BOUND: Duration = Duration::from_millis(250);
 
+/// Ceiling on the whole stalled-read test, runtime shutdown included (#8463).
+///
+/// Why 30 s: a clean run takes ~1.5 s (its FIFO stall), so 20x headroom absorbs
+/// a loaded CI runner's delayed thread wakes, while a missed wake fails red in
+/// seconds instead of hanging a shard (#8463 sat 36 min at 0% CPU).
+const STALLED_TEST_BOUND: Duration = Duration::from_secs(30);
+
 fn stale_report() -> StalenessReport {
     StalenessReport {
         stale: true,
@@ -187,10 +194,21 @@ async fn a_refresh_stuck_past_the_bound_is_reported_unknown() {
 /// call pins that a request arriving while the walk is still stalled neither
 /// waits for it nor starts another. Fails against the per-request walk
 /// (measured 1.42 s on the pre-fix `core_ops::health`).
+///
+/// #8463: the body, the writer join and the runtime's shutdown all run on a
+/// worker thread the test waits on for at most [`STALLED_TEST_BOUND`]. A
+/// `tokio::time::timeout` inside the runtime could not bound the shutdown:
+/// dropping a runtime joins a blocking-pool walk still parked on the FIFO.
 #[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn health_answers_while_the_catalog_read_is_stalled() {
+#[test]
+fn health_answers_while_the_catalog_read_is_stalled() {
     const STALL: Duration = Duration::from_millis(1500);
+    const PHASES: [&str; 4] = [
+        "the first /health call",
+        "the second /health call",
+        "joining the FIFO writer",
+        "runtime shutdown (a catalog walk still parked on the FIFO)",
+    ];
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let fifo = crate::core::harness_root::framework_dir(tmp.path())
         .join(crate::core::manifest::MANIFEST_FILE);
@@ -200,27 +218,65 @@ async fn health_answers_while_the_catalog_read_is_stalled() {
         .status()
         .expect("run mkfifo");
     assert!(made.success(), "mkfifo failed: {made}");
-    let writer_path = fifo.clone();
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(STALL);
-        // Opening for write releases the blocked reader; dropping it sends EOF.
-        drop(std::fs::OpenOptions::new().write(true).open(&writer_path));
+    let phase = Arc::new(AtomicUsize::new(0));
+    let (done, finished) = std::sync::mpsc::channel();
+    let (root, writer_path, worker_phase) = (tmp.path().to_path_buf(), fifo.clone(), phase.clone());
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            let writer = std::thread::spawn(move || {
+                std::thread::sleep(STALL);
+                // Opening for write releases the blocked reader; dropping it sends EOF.
+                drop(std::fs::OpenOptions::new().write(true).open(&writer_path));
+            });
+            runtime.block_on(async {
+                let state = Arc::new(DaemonState::with_root(root));
+                for (index, call) in ["first", "second"].into_iter().enumerate() {
+                    worker_phase.store(index, Ordering::SeqCst);
+                    let asked = Instant::now();
+                    let body = crate::daemon::rpc::core_ops::health(&state).await;
+                    let latency = asked.elapsed();
+                    assert!(
+                        latency < BOUND,
+                        "{call} /health took {latency:?} while the catalog read was stalled; \
+                         bound {BOUND:?}"
+                    );
+                    assert_eq!(body.status, "ok");
+                    assert!(
+                        body.catalog_unknown && !body.catalog_stale,
+                        "{call}: an unanswered walk must read unknown, never fresh or stale: \
+                         {body:?}"
+                    );
+                }
+            });
+            worker_phase.store(2, Ordering::SeqCst);
+            writer.join().expect("writer thread");
+            worker_phase.store(3, Ordering::SeqCst);
+            drop(runtime);
+        }));
+        let _ = done.send(outcome);
     });
-    let state = Arc::new(DaemonState::with_root(tmp.path().to_path_buf()));
 
-    for call in ["first", "second"] {
-        let asked = Instant::now();
-        let body = crate::daemon::rpc::core_ops::health(&state).await;
-        let latency = asked.elapsed();
-        assert!(
-            latency < BOUND,
-            "{call} /health took {latency:?} while the catalog read was stalled; bound {BOUND:?}"
-        );
-        assert_eq!(body.status, "ok");
-        assert!(
-            body.catalog_unknown && !body.catalog_stale,
-            "{call}: an unanswered walk must read unknown, never fresh or stale: {body:?}"
-        );
+    match finished.recv_timeout(STALLED_TEST_BOUND) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(wait) => {
+            // Release whichever FIFO end is parked (O_RDWR never blocks) so the
+            // abandoned worker can exit.
+            drop(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&fifo),
+            );
+            panic!(
+                "#8463: the stalled-catalog /health test did not finish within \
+                 {STALLED_TEST_BOUND:?} ({wait}); it was stuck in {}",
+                PHASES[phase.load(Ordering::SeqCst)]
+            );
+        }
     }
-    writer.join().expect("writer thread");
 }

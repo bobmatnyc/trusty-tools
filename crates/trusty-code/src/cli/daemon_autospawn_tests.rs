@@ -770,3 +770,24 @@ async fn reports_a_daemon_that_dies_on_startup() {
         "error must name the early exit: {rendered}"
     );
 }
+
+/// Why (#8783): the daemon outlives the TUI, but a daemon left in the TUI's
+/// session dies with it — closing the terminal SIGHUPs the foreground group.
+/// What: spawns the command [`spawn_daemon`] builds around an `exec sleep`
+/// stub and compares `getsid(child)` with the child's pid while it is alive.
+/// Test: this test.
+#[tokio::test]
+async fn the_spawned_daemon_leads_its_own_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = stub_binary(dir.path(), "tcode-session", "exec sleep 300");
+    let mut child = spawn_daemon(&stub, None, None).expect("spawn the stub daemon");
+    let pid = child.id().expect("a live child has a pid") as libc::pid_t;
+    // SAFETY: `getsid` only reads the session of our own unreaped child.
+    let sid = unsafe { libc::getsid(pid) };
+    child.start_kill().expect("signal the stub daemon");
+    child.wait().await.expect("reap the stub daemon");
+    assert_eq!(
+        sid, pid,
+        "the daemon `tcode tui` starts must lead its own session (#8783)"
+    );
+}

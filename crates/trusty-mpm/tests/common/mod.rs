@@ -43,11 +43,31 @@ use std::sync::OnceLock;
 /// `$HOME`, so the fenced roots are the harness's home and the password-database
 /// home, never the scratch dir.
 /// What: records the fenced roots; an in-process writer that reaches one panics.
+/// Also records [`operator_home`] while `$HOME` is still the harness's own.
 /// A spawned `tm` child is not fenced — [`isolate_spawned_tm`] confines it.
 /// Test: `the_home_write_fence_is_armed_for_integration_targets`.
 #[ctor::ctor]
 fn arm_home_write_fence() {
+    OPERATOR_HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from));
     trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
+/// `$HOME` as the harness started this process, before any test repointed it.
+static OPERATOR_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The operator's own `$HOME`, as it was before `main` (#8345).
+///
+/// Why: a guard that asserts the operator's files stay untouched must name the
+/// real ones. Since #8345 a module shares its process with [`scratch_home`]'s
+/// callers, so reading `$HOME` mid-run can return the scratch dir and turn that
+/// guard vacuous.
+/// What: the value [`arm_home_write_fence`] captured; `None` when the harness
+/// ran with no `$HOME`, which is the stripped-CI case.
+/// Test: `a_spawned_tm_resolves_the_helper_home_and_leaves_the_operators_alone`.
+pub fn operator_home() -> Option<&'static Path> {
+    OPERATOR_HOME
+        .get_or_init(|| std::env::var_os("HOME").map(PathBuf::from))
+        .as_deref()
 }
 
 /// Redirect this test process's `$HOME` to a scratch directory, once (#6671).
@@ -69,8 +89,11 @@ pub fn scratch_home() -> &'static Path {
             .keep();
         // SAFETY: this runs inside `OnceLock::get_or_init`, so exactly one
         // thread ever writes `HOME` in this process and every other thread is
-        // blocked until that write is visible. Nothing else in these targets
-        // mutates `HOME`.
+        // blocked until that write is visible. In the parallel `integration`
+        // target nothing else mutates `HOME` (ratcheted by
+        // `every_integration_target_arms_the_home_write_fence`). `env_serial`
+        // modules do rewrite it, which is safe only because that target runs
+        // one test at a time (#8345).
         unsafe { std::env::set_var("HOME", &dir) };
         dir
     })
@@ -101,8 +124,8 @@ pub fn tm_bin() -> &'static str {
 /// server and session rather than the fixture's.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
-/// environment, so the `#5544` hazard — a `set_var` visible to every parallel
-/// sibling in the same test binary — does not arise.
+/// environment, so the `#5544` hazard — a `set_var` visible to every test
+/// running in parallel in the `integration` target — does not arise.
 /// Test: `the_helper_clears_every_state_pointing_var`.
 const CHILD_STATE_ENV: &[&str] = &[
     "TRUSTY_MPM_ROOT",

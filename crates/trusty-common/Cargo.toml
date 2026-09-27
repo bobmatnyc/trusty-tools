@@ -120,7 +120,8 @@ name = "trusty-common"
 # links, from trusty-mpm's #8767 split) was red, so that version number is
 # burned (tags are immutable, #6178). No source change; republish under the
 # next version.
-version = "0.52.6"
+# 0.52.7 (Refs #8736): patch — release-opening bump, no source change.
+version = "0.52.7"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -969,7 +969,6 @@ crates/trusty-memory/tests/common/mod.rs	codex_stdio_e2e_5265
 crates/trusty-memory/tests/common/mod.rs	serve_stdio_concurrent_e2e
 crates/trusty-memory/tests/common/mod.rs	serve_stdio_e2e
 crates/trusty-mpm/src/bin/tm/commands/compress.rs	tracing_test
-crates/trusty-mpm/src/bin/tm/commands/hook_payload.rs	tm_hook_delegation_payload
 crates/trusty-mpm/src/bin/tm/commands/managed.rs	cli_parses_session_managed_resume_verb
 crates/trusty-mpm/src/bin/tm/commands/managed.rs	cli_parses_session_managed_stop_verb
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/shell_lex.rs	git_output_file_finds_both_spellings
@@ -1002,9 +1001,6 @@ crates/trusty-mpm/src/session_manager/naming_tests.rs	reconcile_flags_unresolvab
 crates/trusty-mpm/src/session_manager/task_inject.rs	inject_when_ready_waits_out_blocking_modal_then_succeeds
 crates/trusty-mpm/src/tui/health/probes.rs	project_index_rows
 crates/trusty-mpm/src/tui/health/probes.rs	project_search_counts
-crates/trusty-mpm/tests/common/mod.rs	manager_cli_client
-crates/trusty-mpm/tests/common/mod.rs	manager_inference
-crates/trusty-mpm/tests/common/mod.rs	manager_routes
 crates/trusty-mpm/tests/session_manager_mvp.rs	session_manager_answer_clears_pending
 crates/trusty-mpm/tests/spawned_tm_home_isolation.rs	the_rules_detect_what_they_are_shown
 crates/trusty-review/src/config/mod.rs	config_github_fields_from_env

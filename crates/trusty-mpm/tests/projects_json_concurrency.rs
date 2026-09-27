@@ -18,9 +18,6 @@
 //! Test: `projects_json_multiprocess_upsert_no_lost_updates`,
 //! `projects_json_survives_killed_writer`.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -69,9 +66,16 @@ fn child_env() -> Option<(PathBuf, String)> {
 }
 
 /// Spawn one child process running the named `#[ignore]`d helper test.
+///
+/// #8345: this file is a module of the shared `integration` target, so libtest
+/// names the helper `<module path>::<helper>`; `--exact` needs that full name.
 fn spawn_child(helper: &str, dir: &Path, tag: &str) -> Child {
+    let exact = match module_path!().split_once("::") {
+        Some((_crate, module)) => format!("{module}::{helper}"),
+        None => helper.to_string(),
+    };
     Command::new(std::env::current_exe().expect("current_exe"))
-        .args(["--ignored", "--exact", "--nocapture", helper])
+        .args(["--ignored", "--exact", "--nocapture", &exact])
         .env(DIR_ENV, dir)
         .env(TAG_ENV, tag)
         .spawn()

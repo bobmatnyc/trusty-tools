@@ -10,9 +10,9 @@
 //! `aggregate_errors_from_paths(store_paths_under(..))` — the body of
 //! `list_recent_errors` for a pinned base. The error arm blocks the store and
 //! checks the deny still goes out and the failure is reported.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_deny_capture`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_deny_capture::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write as _;
 use std::path::Path;

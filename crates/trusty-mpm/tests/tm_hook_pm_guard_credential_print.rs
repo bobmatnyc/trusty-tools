@@ -8,9 +8,9 @@
 //! What: spawns the built `tm` against an unreachable daemon URL and asserts
 //! DENY (one JSON line carrying `permissionDecision: "deny"`) or ALLOW (empty
 //! stdout). Every command uses a fake service name and is never executed.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_credential_print`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_credential_print::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::Path;

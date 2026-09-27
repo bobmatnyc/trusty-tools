@@ -105,6 +105,9 @@ they serve. These are not:
   that gate nothing
 - [test-ladder-baseline.md](test-ladder-baseline.md) — the six rungs, their
   commands, and baseline-red triage
+- [content-release.md](content-release.md) — cutting a `content-vX.Y.Z`
+  release and what the content bundle holds
+  ([ADR-0064](../adr/0064-instructional-content-tracked-separately-from-code.md))
 - [DOC-38](../specs/spec-linked-documentation.md) — SLD policy, enforced by
   `scripts/check_sld.sh`
 - [threat-model.md](threat-model.md) — per-daemon bind/guard/proxy inventory

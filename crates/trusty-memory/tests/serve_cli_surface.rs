@@ -73,7 +73,8 @@ fn bin() -> std::path::PathBuf {
 /// exactly the shape an MCP client presents, which is what the notice tests
 /// assert against.
 /// What: returns `(stdout, stderr)` via [`run_bounded`], so it returns within
-/// [`RUN_DEADLINE`] plus [`DRAIN_GRACE`] and leaves no daemon behind.
+/// [`RUN_DEADLINE`] plus [`DRAIN_GRACE`]; a daemon it auto-starts ends when
+/// this binary does.
 fn run_piped(args: &[&str], data_dir: &std::path::Path) -> (String, String) {
     let mut cmd = Command::new(bin());
     cmd.args(args)
@@ -87,19 +88,20 @@ fn run_piped(args: &[&str], data_dir: &std::path::Path) -> (String, String) {
     run_bounded(cmd, RUN_DEADLINE)
 }
 
-/// Run `cmd` with stdout/stderr captured, bounded in time and leaving none of
-/// its descendants alive. A piped stdin is closed at once.
+/// Run `cmd` with stdout/stderr captured, bounded in time and leaving nothing
+/// in its process group alive. A piped stdin is closed at once.
 ///
 /// Why (#8748): the old shape killed the direct child at the deadline and then
 /// called `wait_with_output`, which blocks until EVERY holder of the pipes
 /// closes them. The daemon a bare `serve` auto-starts is a detached grandchild
 /// that the kill never reached; holding the pipes, it hung the suite for
 /// minutes with five daemons parented to pid 1.
-/// What: spawns `cmd` as the leader of its own process group — the
-/// auto-started daemon calls no `setsid`, so it stays in that group — and
-/// drains both pipes on threads. After the child exits or `deadline` passes,
-/// SIGKILLs the whole group, reaps the child, and collects the output with a
-/// [`DRAIN_GRACE`] bound. The group id is our own child's pid, reserved by its
+/// What: spawns `cmd` as the leader of its own process group and drains both
+/// pipes on threads. An auto-started daemon is NOT in that group — it starts in
+/// its own session (#8783) — so the parent-death stamp [`run_piped`] sets is
+/// what ends it, when this binary exits. After the child exits or `deadline`
+/// passes, SIGKILLs the whole group, reaps the child, and collects the output
+/// with a [`DRAIN_GRACE`] bound. The group id is our own child's pid, reserved by its
 /// unreaped zombie until the kill, so the kill cannot reach a stranger.
 /// Test: `run_bounded_returns_and_reaps_a_grandchild_holding_the_pipes`.
 fn run_bounded(mut cmd: Command, deadline: Duration) -> (String, String) {

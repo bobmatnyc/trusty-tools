@@ -15,7 +15,7 @@
 //! What: binds the router once per test, points a `DaemonClient` at it, and drives
 //! the full verb surface.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test project_registry_routes`.
+//! `cargo test -p trusty-mpm --test integration project_registry_routes::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use trusty_mpm::project::Project;
 
 // #6671: the project registry seeds from the config file under `$HOME`, so this
 // target must own its `$HOME` as well as its framework root.
-mod common;
+use crate::common;
 
 /// Bind the real router on an ephemeral loopback port; return a client plus the
 /// backing [`DaemonState`] (some tests need to seed the store directly, bypassing

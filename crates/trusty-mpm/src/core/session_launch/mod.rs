@@ -142,6 +142,11 @@ mod tests_settings_lock_7762;
 #[path = "tests_style_selection_8533.rs"]
 mod tests_style_selection_8533;
 
+// #8311: the catch-up watermark lands under `fw.root`, never the home.
+#[cfg(test)]
+#[path = "tests_catchup_root_8311.rs"]
+mod tests_catchup_root_8311;
+
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
@@ -1125,8 +1130,9 @@ pub(super) fn prepare_session_inner(
             full: false,
         };
         // Auto-inject advances the watermark so subsequent sessions are incremental.
-        // #8545: the watermark follows the injected home, not the process one.
-        let state_root = home.map(|h| FrameworkPaths::under(h).root);
+        // #8311: the watermark is framework state, so it lives under `fw.root`
+        // — always named, never the process home a `None` home fell back to.
+        let state_root = Some(fw.root.clone());
         let ctx = crate::core::catchup::run_catchup_blocking_in(opts, true, state_root);
         if ctx.is_empty() { None } else { Some(ctx) }
     } else {
