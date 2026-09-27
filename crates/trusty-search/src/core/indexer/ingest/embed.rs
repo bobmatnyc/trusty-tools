@@ -162,13 +162,15 @@ where
     }
 }
 
-/// An embed pass's vectors, plus the no-progress abort that cut it short.
+/// An embed pass's vectors, plus the abort that cut it short.
 ///
 /// Why: #8600 — an abort used to be a bare `Err`, which discarded the waves
 /// that had already completed in the same pass.
-/// What: `embeddings` is 1:1 with the chunks; every completed wave's slots are
-/// `Some`. `stalled` is the no-progress error when a wave hit the deadline.
-/// Test: `a_stalled_wave_commits_the_waves_before_it`.
+/// What: `embeddings` is 1:1 with the chunks; every completed sub-batch's
+/// slots are `Some`. `stalled` is the error that ended the pass: a wave that
+/// hit the no-progress deadline, or a sub-batch that failed.
+/// Test: `a_stalled_wave_commits_the_waves_before_it`,
+/// `a_failed_wave_commits_the_waves_before_it`.
 pub(crate) struct EmbedRun {
     pub(crate) embeddings: Vec<Option<Vec<f32>>>,
     pub(crate) stalled: Option<anyhow::Error>,
@@ -227,7 +229,7 @@ impl CodeIndexer {
 }
 
 impl EmbedContext {
-    /// [`Self::embed_chunks_keeping_prefix`], with a no-progress abort
+    /// [`Self::embed_chunks_keeping_prefix`], with an abort
     /// reported as an `Err` — for callers that cannot use a partial result.
     /// Test: `test_index_files_batch_*`.
     pub(crate) async fn embed_chunks_in_batches(
@@ -260,11 +262,12 @@ impl EmbedContext {
     /// index's teardown guard, so parking would stall every other index's
     /// catch-up and any `DELETE` on this one. The caller commits the embedded
     /// prefix and re-queues the rest. A wave that hits the no-progress
-    /// deadline ends the loop the same way, with the error in
-    /// [`EmbedRun::stalled`] (#8600).
+    /// deadline, or a sub-batch that fails, ends the loop the same way, with
+    /// the error in [`EmbedRun::stalled`] (#8600).
     /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`. The
     /// pause arm: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-    /// The stall arm: `a_stalled_wave_commits_the_waves_before_it`.
+    /// The stall arm: `a_stalled_wave_commits_the_waves_before_it`. The
+    /// error arm: `a_failed_wave_commits_the_waves_before_it`.
     pub(crate) async fn embed_chunks_keeping_prefix(
         &self,
         chunks: &[RawChunk],
@@ -395,17 +398,35 @@ impl EmbedContext {
             };
 
             for (start_pos, expected_n, vecs) in wave_results {
-                let batch_vecs = vecs.context("batch embed_batch failed")?;
-                if batch_vecs.len() != expected_n {
-                    anyhow::bail!(
-                        "embed_batch returned {} vectors, expected {}",
-                        batch_vecs.len(),
-                        expected_n
+                // #8600: a failed sub-batch (e.g. the sidecar's per-call
+                // timeout) ends the pass like a stall. The sub-batches before
+                // it stay filled, so the caller commits a contiguous prefix.
+                let batch_vecs = match vecs.context("batch embed_batch failed").and_then(|v| {
+                    anyhow::ensure!(
+                        v.len() == expected_n,
+                        "embed_batch returned {} vectors, expected {expected_n}",
+                        v.len()
                     );
-                }
+                    Ok(v)
+                }) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            index_id = %self.index_id,
+                            embedded = start_pos,
+                            chunk_total,
+                            "embed pass failed: {err:#}",
+                        );
+                        stalled = Some(err);
+                        break;
+                    }
+                };
                 for (offset, vec) in batch_vecs.into_iter().enumerate() {
                     embeddings[start_pos + offset] = Some(vec);
                 }
+            }
+            if stalled.is_some() {
+                break;
             }
 
             // Fine-grained progress notification: fire once per wave when

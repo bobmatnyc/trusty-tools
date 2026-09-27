@@ -62,13 +62,18 @@ fn chunk(n: usize) -> RawChunk {
     }
 }
 
-/// An embedder that answers its first `answer` batch calls and never answers
-/// the rest — a sidecar that wedges part-way through a pass.
+/// An embedder that answers its first `answer` batch calls and then either
+/// never answers (`fail: false`, a sidecar that wedges part-way through a
+/// pass) or returns an error (`fail: true`, a per-call timeout).
 struct WedgesAfterCalls {
     answer: usize,
+    fail: bool,
     calls: AtomicUsize,
     answered_texts: Arc<AtomicUsize>,
 }
+
+/// The error a failing [`WedgesAfterCalls`] returns.
+const CALL_TIMEOUT_TEXT: &str = "embedder sidecar call timed out after 120s";
 
 #[async_trait::async_trait]
 impl Embedder for WedgesAfterCalls {
@@ -77,6 +82,9 @@ impl Embedder for WedgesAfterCalls {
     }
     async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
         if self.calls.fetch_add(1, Ordering::SeqCst) >= self.answer {
+            if self.fail {
+                anyhow::bail!(CALL_TIMEOUT_TEXT);
+            }
             return std::future::pending().await;
         }
         self.answered_texts.fetch_add(texts.len(), Ordering::SeqCst);
@@ -239,6 +247,7 @@ async fn a_stalled_wave_commits_the_waves_before_it() {
     let answered_texts = Arc::new(AtomicUsize::new(0));
     let embedder = Arc::new(WedgesAfterCalls {
         answer: inflight,
+        fail: false,
         calls: AtomicUsize::new(0),
         answered_texts: Arc::clone(&answered_texts),
     });
@@ -263,6 +272,74 @@ async fn a_stalled_wave_commits_the_waves_before_it() {
         let reason = format!("{:?}", stages.semantic.failure);
         assert!(
             reason.contains("no progress"),
+            "failure names the cause: {reason}"
+        );
+    }
+    let owed = handle.indexer.read().await.pending_embed_count().await;
+    assert_eq!(
+        owed,
+        n - wave_one,
+        "wave 1's {wave_one} vectors must be committed before the pass settles Failed"
+    );
+    let path = crate::service::persistence::indexes_toml_path().expect("indexes.toml path");
+    let kept = crate::service::persistence::load_index_registry_at(&path)
+        .expect("registry must load")
+        .into_iter()
+        .find(|e| e.id == id)
+        .expect("entry must exist");
+    assert!(
+        kept.deferred_embed_pending,
+        "the pending marker must survive so the next boot embeds the remainder"
+    );
+}
+
+/// A pass whose second wave returns an error — a per-call timeout, not a hang
+/// — commits the first wave, settles `Failed` with the error, and keeps the
+/// pending marker.
+///
+/// Pre-fix a sub-batch `Err` returned early from the embed loop with `?`, so
+/// the completed first wave was dropped and `pending_embed_count` still read
+/// the full corpus.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_wave_commits_the_waves_before_it() {
+    let id = "fail-prefix-8600";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let redb_path = tmp.path().join("index.redb");
+    let mut entry = crate::service::persistence::PersistedIndex::new(id, tmp.path());
+    entry.deferred_embed_pending = true;
+    crate::service::persistence::upsert_index_registry_entry(entry).expect("persist entry");
+
+    // Wave 1 is `inflight` sub-batches, all answered; every later call errors.
+    let inflight = crate::core::indexer::resolve_embed_inflight();
+    let n = inflight * 512 + 1;
+    let answered_texts = Arc::new(AtomicUsize::new(0));
+    let embedder = Arc::new(WedgesAfterCalls {
+        answer: inflight,
+        fail: true,
+        calls: AtomicUsize::new(0),
+        answered_texts: Arc::clone(&answered_texts),
+    });
+    let handle = handle_with(id, tmp.path(), &redb_path, embedder, n).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())),
+    )
+    .await
+    .expect("a failed pass must settle, not hang");
+
+    let wave_one = answered_texts.load(Ordering::SeqCst);
+    assert!(
+        wave_one > 0 && wave_one < n,
+        "wave 1 was answered, wave 2 was not"
+    );
+    {
+        let stages = handle.stages.read().await;
+        assert_eq!(stages.semantic.status, StageStatus::Failed);
+        let reason = format!("{:?}", stages.semantic.failure);
+        assert!(
+            reason.contains(CALL_TIMEOUT_TEXT),
             "failure names the cause: {reason}"
         );
     }
