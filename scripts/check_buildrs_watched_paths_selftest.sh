@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The expected-output patterns quote the gate's literal backticks.
+# shellcheck disable=SC2016
 #
 # check_buildrs_watched_paths_selftest.sh — fixture suite for
 #   scripts/check_buildrs_watched_paths.sh (QUICK BUILDS, 2026-09-27).
@@ -23,6 +25,10 @@
 # Test: this file IS the test; CI runs it in .github/workflows/buildrs-sync.yml.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI).
+
+# #7812: `zsh <this script>` has no BASH_SOURCE and 1-based arrays, so re-run
+# under bash before any bash-only line. Plain POSIX, so zsh and sh parse it.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
 set -euo pipefail
 

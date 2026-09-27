@@ -26,6 +26,10 @@
 # .github/workflows/buildrs-sync.yml before scripts/check_buildrs_sync.sh,
 # which calls this script.
 
+# #7812: `zsh <this script>` has no BASH_SOURCE and 1-based arrays, so re-run
+# under bash before any bash-only line. Plain POSIX, so zsh and sh parse it.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 LIST=0
