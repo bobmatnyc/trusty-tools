@@ -228,6 +228,19 @@ pub struct ProjectLevelConfig {
     /// Test: `project_config_parses_style`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<ProjectStyleConfig>,
+
+    /// The instruction profile this project's sessions run (#8453).
+    ///
+    /// Why: a fleet supervisor needs its own instructions, output style, guard
+    /// behaviour and model, and the launch settings a project commits live
+    /// here. A string rather than an enum, so an unknown value degrades to the
+    /// PM profile instead of rejecting every other key in the file.
+    /// What: `"supervisor"` → the supervisor profile. `None`, `"pm"` or any
+    /// other value → the PM profile. Resolution:
+    /// [`crate::core::session_profile::resolve`].
+    /// Test: `project_config_parses_profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// The `[style]` table of `.trusty-mpm.toml` (#8533).

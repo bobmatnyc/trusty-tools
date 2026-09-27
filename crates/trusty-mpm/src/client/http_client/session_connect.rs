@@ -322,4 +322,20 @@ mod renderer_tests {
             }
         }
     }
+
+    /// #8453: `launch_session` / `connect_session` type this line into a pane
+    /// whose environment comes from the tmux server, so a server started by a
+    /// supervisor session carries its `TRUSTY_MPM_SESSION_PROFILE`. The line
+    /// must unset it; both launch paths share it.
+    #[test]
+    fn client_claude_cmd_never_passes_on_the_profile_stamp() {
+        for prompt in [None, Some(std::path::Path::new("/tmp/p.txt"))] {
+            let line = super::client_claude_cmd(None, prompt);
+            let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+            assert!(
+                unset.contains(&"TRUSTY_MPM_SESSION_PROFILE"),
+                "the daemon-client line must unset the profile stamp: {line}"
+            );
+        }
+    }
 }

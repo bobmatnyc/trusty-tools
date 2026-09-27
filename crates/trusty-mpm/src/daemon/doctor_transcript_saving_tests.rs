@@ -42,6 +42,7 @@ fn launch_lines_covers_every_builder() {
         "daemon::spawn_command::relaunch_command",
         "core::standalone::run::build_launch_command",
         "control::backend::stream_json::build_claude_command",
+        "control::backend::tmux::pane_claude_line",
     ] {
         assert!(
             labels.iter().any(|l| l.contains(expected)),
@@ -55,6 +56,12 @@ fn launch_lines_covers_every_builder() {
         assert!(
             unset.iter().any(|n| n == "CLAUDE_CODE_CHILD_SESSION"),
             "{label} must unset CLAUDE_CODE_CHILD_SESSION; unsets: {unset:?}"
+        );
+        // #8453: no child inherits a supervisor's launch stamp; a path that
+        // decides a profile assigns it again after this unset.
+        assert!(
+            unset.iter().any(|n| n == "TRUSTY_MPM_SESSION_PROFILE"),
+            "{label} must unset TRUSTY_MPM_SESSION_PROFILE; unsets: {unset:?}"
         );
         assert!(
             !unset.iter().any(|n| n == "CLAUDE_CONFIG_DIR"),
