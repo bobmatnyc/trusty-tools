@@ -160,17 +160,36 @@ fn tee_targets(segment: &str) -> Result<Vec<String>, UnplaceableWrite> {
             RedirectRole::Target(_) | RedirectRole::FileDescriptor => {}
             RedirectRole::None => match input_redirect(word) {
                 Some(target_follows) => skip_next = target_follows,
-                None => out.push(word.clone()),
+                // #8730: never keep the `)` that closes an enclosing body.
+                None => out.push(before_unmatched_close(word).to_string()),
             },
         }
     }
+    out.retain(|target| !target.is_empty());
     Ok(out)
 }
 
-/// A word's program name: past any `/`, without a leading `\`.
+/// A word's program name: past any `/`, without a leading `\` or the `$(`,
+/// `(` or backtick of an unlifted body it opens (#8730: `$(tee`).
 fn basename(word: &str) -> &str {
+    let word = word.trim_start_matches(['$', '(', '`']);
     let word = word.strip_prefix('\\').unwrap_or(word);
     word.rsplit('/').next().unwrap_or(word)
+}
+
+/// `word` up to its first `)` that closes no `(` opened inside it — the same
+/// paren-aware read `scan_file_write_redirects` gives a redirect target.
+fn before_unmatched_close(word: &str) -> &str {
+    let mut depth = 0usize;
+    for (at, c) in word.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return &word[..at],
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    word
 }
 
 /// `Some(true)` for a bare input redirect (`<`, `<<`, `<<<`, `<<-`) whose
@@ -220,8 +239,9 @@ enum Quote {
 /// One left-to-right pass: copy `command` to the outer text, replacing each
 /// live body with nothing so its delimiters (`$()`, `()`, ``` `` ```) remain.
 ///
-/// What: skips here-document body bytes, `\`-escaped bytes and a `#` comment
-/// to the end of its line. With `quotes`,
+/// What: lifts a here-document body its operator line hands to a shell as one
+/// body, and skips a data body, `\`-escaped bytes and a `#` comment to the
+/// end of its line. With `quotes`,
 /// tracks `'`/`"`: `$(` and a backtick open a body outside single quotes,
 /// `(`, `<(` and `>(` only outside every quote, and an unclosed opener is
 /// [`Lifted::Unbalanced`]. Without `quotes`, every opener is live and an
@@ -233,6 +253,16 @@ fn lift(command: &str, quotes: bool) -> Lifted {
     let (mut quote, mut copied, mut i) = (Quote::None, 0, 0);
     while i < bytes.len() {
         if heredocs.contains(i) {
+            // #8730: a body handed to a shell (`bash <<'EOF'`) is shell source,
+            // so it is lifted whole and judged as a command; a data body is
+            // skipped.
+            if let Some(end) = heredocs.shell_body_starting_at(i) {
+                outer.push_str(&command[copied..i]);
+                bodies.push(command[i..end].to_string());
+                copied = end;
+                i = end;
+                continue;
+            }
             i += 1;
             continue;
         }
@@ -411,6 +441,61 @@ mod tests {
                 "`{command}` -> {got:?}"
             );
         }
+    }
+
+    // #8730 critic, CRITICAL 1: the `|` of `>|` was cut as a pipe and the
+    // target read as empty, so a clobber redirect named no file. zsh (the
+    // host shell) also writes through `>>|`, `>!` and `>>!`.
+    #[test]
+    fn write_targets_read_a_clobber_redirect() {
+        for command in [
+            "echo x >|src/lib.rs",
+            "echo x >| src/lib.rs",
+            "echo x >>| src/lib.rs",
+            "echo x >! src/lib.rs",
+            "echo x >>!src/lib.rs",
+            "echo $(echo x >| src/lib.rs)",
+        ] {
+            assert_eq!(targets(command), vec!["src/lib.rs"], "{command}");
+        }
+    }
+
+    // #8730 critic, CRITICAL 2: a body handed to a shell is shell source, and
+    // its substitutions were skipped with the rest of the here-document. A
+    // data body stays data.
+    #[test]
+    fn write_targets_read_a_shell_heredoc_body() {
+        for command in [
+            "bash <<'EOF'\n$(tee src/lib.rs)\nEOF",
+            "bash <<'EOF'\necho $(echo x | tee src/lib.rs)\nEOF",
+            "sh <<'EOF'\nsh -c \"$(echo x > src/lib.rs)\"\nEOF",
+            "bash <<'EOF'\necho x > src/lib.rs\nEOF",
+            "bash <<'EOF'\necho x | tee src/lib.rs\nEOF",
+            "zsh <<EOF\necho x >| src/lib.rs\nEOF",
+        ] {
+            assert!(
+                targets(command).contains(&"src/lib.rs".to_string()),
+                "`{command}` -> {:?}",
+                targets(command)
+            );
+        }
+        let data = "cat <<'EOF' > notes.md\n$(tee src/lib.rs)\nEOF";
+        assert_eq!(targets(data), vec!["notes.md"]);
+    }
+
+    // #8730 critic, MEDIUM: an operand read without its lifted body keeps no
+    // glued `)`.
+    #[test]
+    fn write_targets_strip_a_glued_close_paren_from_a_tee_operand() {
+        assert_eq!(
+            tee_targets("tee src/lib.rs)"),
+            Ok(vec!["src/lib.rs".to_string()])
+        );
+        assert_eq!(
+            tee_targets("$(tee src/lib.rs)"),
+            Ok(vec!["src/lib.rs".to_string()])
+        );
+        assert_eq!(tee_targets("tee a(1).md"), Ok(vec!["a(1).md".to_string()]));
     }
 
     // #8730: bash opens every redirect of a segment; the first no longer hides

@@ -397,6 +397,12 @@ fn split_shell_segments_raw(command: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
+        // #8730: the `|` of a `>|`/`>>|` clobber redirect is part of the
+        // operator, not a pipe — as a `>&` fd-dup is not a background `&`.
+        if bytes[i] == b'|' && i > 0 && bytes[i - 1] == b'>' {
+            i += 1;
+            continue;
+        }
         let two = command.get(i..i + 2);
         if two == Some("&&") || two == Some("||") {
             segments.push(&command[start..i]);
@@ -675,7 +681,7 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
 /// (`2>&1`, `>&2`) and `/dev/null` as an output discard, and returns the
 /// target token of every real file-write redirect — bash opens each one, so
 /// `> notes.md > src/lib.rs` writes both (#8730). An empty entry when the
-/// redirect is real but names no token (`cmd >|`, a trailing `>`): still a
+/// redirect is real but names no token (a trailing `>` or `>|`): still a
 /// write for the bool caller, no path for the boundary. The target word ends
 /// at an unmatched `)` — the close of the subshell or substitution it sits in
 /// (#8730) — while a `$(…)` inside the word stays part of it.
@@ -703,6 +709,11 @@ fn scan_file_write_redirects(command: &str) -> Vec<String> {
             let mut j = i + 1;
             // `>>` append is still a file write; skip the second `>`.
             if j < bytes.len() && bytes[j] == b'>' {
+                j += 1;
+            }
+            // #8730: `>|` (bash, zsh) and zsh's `>>|`, `>!`, `>>!` force a
+            // clobber; the `|`/`!` belongs to the operator, the file follows.
+            if j < bytes.len() && matches!(bytes[j], b'|' | b'!') {
                 j += 1;
             }
             while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {

@@ -810,6 +810,55 @@ mod tests {
         );
     }
 
+    // #8730 critic, CRITICAL 1: `>|` was cut into a segment ending in `>` and a
+    // segment naming the file as a command, so the clobber write was allowed.
+    #[test]
+    fn denies_a_clobber_redirect_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("echo x >|{target}"),
+                format!("echo x >| {target}"),
+                format!("echo x >>| {target}"),
+                format!("echo x >! {target}"),
+                format!("echo $(echo x >| {target})"),
+            ],
+        );
+    }
+
+    // #8730 critic, CRITICAL 2: a shell-run here-document body is shell
+    // source; its substitutions were skipped with the body. A data body that
+    // quotes the same text, written to the scratchpad, stays allowed.
+    #[test]
+    fn denies_a_substitution_inside_a_shell_heredoc_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("bash <<'EOF'\n$(tee {target})\nEOF"),
+                format!("bash <<'EOF'\necho $(echo x | tee {target})\nEOF"),
+                format!("sh <<'EOF'\nsh -c \"$(echo x > {target})\"\nEOF"),
+                format!("bash <<'EOF'\necho x > {target}\nEOF"),
+                format!("bash <<'EOF'\necho x | tee {target}\nEOF"),
+            ],
+        );
+        let pad = tempfile::tempdir().expect("tempdir");
+        let pad = pad.path().join("scratchpad");
+        std::fs::create_dir_all(&pad).expect("mkdir scratchpad");
+        let data = format!(
+            "cat <<'EOF' > {}\n$(tee {target})\nEOF",
+            pad.join("x.md").display()
+        );
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&data)), dir.path()),
+            None,
+            "a data here-document quoting a write is not a write"
+        );
+    }
+
     // #8730 Fail-Open Check: a write whose body or arguments cannot be parsed
     // has no target to judge, so it denies wherever the hook stands — here a
     // directory that is no checkout at all.

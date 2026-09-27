@@ -148,6 +148,17 @@ impl HeredocBodies {
         }
     }
 
+    /// The end of the body that starts at `idx`, when its operator line hands
+    /// it to a shell (`bash <<'EOF'`), so the body is shell source (#8730).
+    ///
+    /// Test: `write_targets_read_a_shell_heredoc_body`.
+    pub(super) fn shell_body_starting_at(&self, idx: usize) -> Option<usize> {
+        self.spans
+            .iter()
+            .find(|span| span.0 == idx && !self.data_spans.contains(span))
+            .map(|span| span.1)
+    }
+
     /// Whether byte `idx` is here-document body content.
     ///
     /// Test: `heredoc_bodies_exclude_the_operator_line`.
