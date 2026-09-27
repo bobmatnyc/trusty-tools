@@ -397,21 +397,21 @@ may still be filed — search first.
 
    | Label | Area |
    |---|---|
-   | `area:pm-guard` | `tm hook --pm-guard` checks and dispatch gating |
-   | `area:secrets` | Secret-scan heuristics and pm-guard secret refusals |
-   | `area:worktree` | Worktree creation, isolation, and cleanup |
-   | `area:build-lease` | Build-lease locking and concurrent-build coordination |
-   | `area:session-lifecycle` | Session launch, resume, and provisioning |
-   | `area:daemon-launchd` | Daemon process management under launchd |
-   | `area:release` | PR merge, auto-merge, and release gate mechanics |
-   | `area:ci` | CI workflow definitions and gate execution |
-   | `area:test-hermeticity` | Test isolation, fixtures, and flake sources |
-   | `area:memory-daemon` | trusty-memory daemon runtime |
-   | `area:memory-import` | trusty-memory import and ingestion |
-   | `area:search-index` | trusty-search indexing and query |
-   | `area:agent-platform` | Agent runtime and roster mechanics |
-   | `area:agent-prompts` | Agent and skill prompt content |
-   | `area:channels` | trusty-channels messaging integrations |
+   | `area:pm-guard` | Command/write authorization guard allow-deny logic (not secret heuristics) |
+   | `area:secrets` | Credential/secret detection, storage and redaction, wherever it runs |
+   | `area:worktree` | Worktree creation, reclaim, disk usage, provisioning, orphan sweeps |
+   | `area:build-lease` | Build slots, the builder cap, target-dir capacity, build disk budget, test-run concurrency |
+   | `area:session-lifecycle` | Session/tmux launch, resume, pause, pane, statusline, project registry |
+   | `area:daemon-launchd` | Daemon start/stop/restart, launchd plists, orphaned processes, daemon-client deadlines |
+   | `area:release` | Version bumps, publish, changelog gates, version parity, PR merge/auto-merge/gate mechanics |
+   | `area:ci` | GitHub Actions pipeline configuration and health, Dependabot |
+   | `area:test-hermeticity` | Flaky, hanging, non-deterministic or state-polluting tests |
+   | `area:memory-daemon` | trusty-memory internals: dream/consolidation, KG, palace locks, drawer loss |
+   | `area:memory-import` | kuzu-memory import/export review workflow |
+   | `area:search-index` | trusty-search indexing, embedding, reindex, vector integrity, and its own daemon |
+   | `area:agent-platform` | trusty-code / trusty-agents harness and roster |
+   | `area:agent-prompts` | Agent briefs, base-agent rules, skill, doc and PM-instruction wording, prompt-feedback rollups |
+   | `area:channels` | Slack/Telegram front door and channel routing |
    | `area:other` | Fallback when no area above fits |
 
 4. **Tie-break: label the area where the symptom shows**, never where the fix
