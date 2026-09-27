@@ -94,12 +94,14 @@ fn build_claude_command(claude_cmd: &str, prompt_file: Option<&std::path::Path>)
 /// Why: this pane is a tmux pane like any other managed one, so without the
 /// assignment the tmux server's inherited `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`
 /// decided the renderer here too.
-/// What: `env <configured_shell_assignments> <build_claude_command>`, with the
-/// renderer [`crate::core::alt_screen::configured_alternate_screen_in`] reads
-/// from `config_root`. The operand values are `0`/`1` or the pinned
+/// What: `env <env_unset_flags> <configured_shell_assignments>
+/// <build_claude_command>`, with the renderer
+/// [`crate::core::alt_screen::configured_alternate_screen_in`] reads from
+/// `config_root`. The operand values are `0`/`1` or the pinned
 /// `${NAME-default}` form, so nothing caller-supplied enters the prefix.
-/// Test: `pane_claude_line_follows_the_configured_renderer`.
-fn pane_claude_line(
+/// Test: `pane_claude_line_follows_the_configured_renderer`,
+/// `pane_claude_line_never_passes_on_the_profile_stamp`.
+pub(crate) fn pane_claude_line(
     config_root: Option<&std::path::Path>,
     claude_cmd: &str,
     prompt_file: Option<&std::path::Path>,
@@ -107,8 +109,12 @@ fn pane_claude_line(
     let assignments = crate::core::alt_screen::configured_shell_assignments(
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     );
+    // #8453: the shared scrub, so a supervisor's profile stamp in the tmux
+    // server's environment never reaches this child; the `-u` flags must
+    // precede every assignment (POSIX `env`).
     Ok(format!(
-        "env {assignments} {}",
+        "env{} {assignments} {}",
+        crate::core::claude_env_scrub::env_unset_flags(),
         build_claude_command(claude_cmd, prompt_file)?
     ))
 }
@@ -399,8 +405,8 @@ mod tests {
     #[test]
     fn pane_claude_line_follows_the_configured_renderer() {
         for (alternate_screen, want) in [
-            (true, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
-            (false, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
+            (true, " CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
+            (false, " CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
         ] {
             let root = tempfile::tempdir().expect("tempdir");
             std::fs::write(
@@ -410,8 +416,24 @@ mod tests {
             .expect("write config");
             let line =
                 pane_claude_line(Some(root.path()), "claude; rm -rf /", None).expect("quotable");
-            assert!(line.starts_with(want), "want {want:?} leading: {line}");
+            assert!(line.starts_with("env "), "an `env` prefix: {line}");
+            assert!(line.contains(want), "want {want:?}: {line}");
             assert!(line.ends_with("'claude; rm -rf /'"), "still quoted: {line}");
         }
+    }
+
+    /// #8453: the pane inherits the tmux server's environment, which carries a
+    /// supervisor's `TRUSTY_MPM_SESSION_PROFILE` when that session started the
+    /// server. The line must unset it so the child has no launch stamp of its
+    /// own and the guard treats it as a PM. The name is hard-coded so an
+    /// emptied scrub list cannot make this pass.
+    #[test]
+    fn pane_claude_line_never_passes_on_the_profile_stamp() {
+        let line = pane_claude_line(None, "claude", None).expect("quotable");
+        let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+        assert!(
+            unset.contains(&"TRUSTY_MPM_SESSION_PROFILE"),
+            "the control-plane pane line must unset the profile stamp: {line}"
+        );
     }
 }

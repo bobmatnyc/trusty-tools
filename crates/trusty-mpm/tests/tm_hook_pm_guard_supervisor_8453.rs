@@ -11,9 +11,9 @@
 //! daemon. A budget-eligible direct edit (`sed -i`) is denied on its fourth
 //! call for a PM and never for a supervisor; every absolute guard denies both.
 //! Every fixture is fake: the guard only classifies the commands.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_supervisor_8453`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_supervisor_8453::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::PathBuf;

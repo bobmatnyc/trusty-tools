@@ -60,11 +60,8 @@ const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// `env_unset_clears_nothing_without_a_gh_identity_binding`.
 pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
     let mut unset = vec![API_KEY_ENV.to_owned()];
-    unset.extend(
-        crate::core::claude_env_scrub::INHERITED_SESSION_MARKERS
-            .iter()
-            .map(|name| (*name).to_string()),
-    );
+    // #8453: the markers AND tm's profile stamp; `base` re-stamps after this.
+    unset.extend(crate::core::claude_env_scrub::scrubbed_on_spawn().map(str::to_owned));
     unset.extend(crate::core::gh_identity::inherited_identity_to_clear(
         gh_env,
     ));

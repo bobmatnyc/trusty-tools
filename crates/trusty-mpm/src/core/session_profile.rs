@@ -46,8 +46,11 @@ pub const SUPERVISOR_OUTPUT_STYLE_ID: &str = "trusty-mpm-supervisor";
 ///
 /// Why: the guard used to re-read `.trusty-mpm.toml` on every tool call, and
 /// a session can write that file, so a PM could promote itself mid-session.
-/// What: set on the spawned `claude` by every tm launch path that composes
-/// the prompt; Claude Code passes it on to its hooks. Value: a profile id.
+/// What: set on the spawned `claude` by `tm launch` / `tm connect`, the
+/// daemon's managed launch and the in-place relaunch; Claude Code passes it on
+/// to its hooks. Value: a profile id. Every launch path first clears the
+/// inherited value (`claude_env_scrub::INHERITED_TM_STAMPS`, #8453), so a path
+/// that does not stamp leaves the child unstamped, which the guard reads as PM.
 pub const SESSION_PROFILE_ENV: &str = "TRUSTY_MPM_SESSION_PROFILE";
 
 /// The launch directory Claude Code exports to every hook.

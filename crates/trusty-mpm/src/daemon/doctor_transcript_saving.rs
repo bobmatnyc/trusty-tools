@@ -154,6 +154,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         std::path::Path::new("/probe"),
         None,
     );
+    // #8453: the control-plane pane line, scrubbed since the stamp fix. A
+    // `None` config root reads no operator file; only the `-u` flags matter.
+    let control_pane_line =
+        crate::control::backend::tmux::pane_claude_line(None, "claude", None).unwrap_or_default();
 
     vec![
         (
@@ -183,6 +187,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         (
             "control::backend::stream_json::build_claude_command (headless)",
             removed_env_keys(&stream_cmd),
+        ),
+        (
+            "control::backend::tmux::pane_claude_line (control-plane pane)",
+            owned(parse_env_unset_vars(&control_pane_line)),
         ),
     ]
 }
