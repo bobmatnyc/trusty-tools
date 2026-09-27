@@ -34,6 +34,7 @@ use commands::convert::ConvertTarget;
 use commands::explicit_target::index_id_source;
 use commands::index_action::IndexAction;
 use commands::index_remove::handle_index_remove;
+use commands::monitor::MonitorTarget;
 use commands::service::ServiceAction;
 use std::io;
 
@@ -440,6 +441,14 @@ enum Commands {
     ///   trusty-search start --port 7878
     ///   trusty-search start --foreground --port 7878   # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
+    ///
+    /// #8176: an isolated instance started against a data directory that did
+    /// not exist (or was empty) before this start does NOT auto-discover — it
+    /// never walks `scan_paths` and never touches a colocated
+    /// `.trusty-search/` store it has not been given. `--no-auto-discover`
+    /// says the same thing explicitly on any data directory, including the
+    /// machine default; `--auto-discover` is the opt-in that grants the scan
+    /// on a fresh isolated one.
     #[command(display_order = 20)]
     Start {
         /// Port to listen on (default: 7878, auto-selects next if busy)
@@ -476,8 +485,11 @@ enum Commands {
         /// indexes.toml, per-index data).
         ///
         /// Equivalent to setting `TRUSTY_DATA_DIR` in the environment.
-        /// `TRUSTY_DATA_DIR` takes precedence over this flag when both are set.
-        /// The directory is created automatically if it does not exist.
+        /// This flag takes precedence over an inherited `TRUSTY_DATA_DIR` when
+        /// both are set (#8149 — the old precedence was the reverse, so a
+        /// second daemon bound the first daemon's RPC socket). The directory is
+        /// created automatically if it does not exist.
+        /// Must be an absolute path.
         ///
         /// Use this to run an isolated daemon (e.g. for cert/benchmark work)
         /// alongside the production daemon without lockfile conflicts:
@@ -510,6 +522,19 @@ enum Commands {
         // `true`/`false`, which aborted startup from a launchd unit.
         #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = commands::service_unit::parse_truthy_bool)]
         no_auto_discover: bool,
+
+        /// Run the auto-discovery scan even on a fresh isolated data directory.
+        ///
+        /// #8176: a daemon started against a brand-new `--data-dir` (or
+        /// `TRUSTY_DATA_DIR`) no longer auto-discovers. A throwaway instance
+        /// used to walk `scan_paths` and force-reindex the colocated
+        /// `.trusty-search/` stores of every unrelated repository it found,
+        /// which is the opposite of what an isolated data directory asks for.
+        /// Pass this flag to opt that scan back in; it has no effect on the
+        /// machine's default data directory, which still auto-discovers, and
+        /// `--no-auto-discover` still wins over it.
+        #[arg(long, conflicts_with = "no_auto_discover")]
+        auto_discover: bool,
 
         /// Cap on how many per-index searches run concurrently within a single
         /// cross-project (`search_all` / `POST /search`) fan-out (issue #2845).
@@ -1030,48 +1055,6 @@ enum Commands {
     },
 }
 
-/// Target surface for the `monitor` subcommand.
-///
-/// Why: operators want a quick browser link to the daemon's admin panel, the
-/// trusty-search-specific terminal dashboard, OR the same dashboard data as
-/// plain text / JSON so scripts and CI can read it without a TUI (issues #33,
-/// #34).
-/// What: `Web` prints (and opens) the daemon's `/ui` URL; `Tui` launches the
-/// trusty-search-specific `trusty_common::monitor::search_tui` ratatui
-/// dashboard; `Status` and `Indexes` print scriptable health and per-index
-/// stats.
-/// Test: `cargo run -p trusty-search -- monitor --help` lists every variant.
-#[derive(Subcommand)]
-enum MonitorTarget {
-    /// Open the web dashboard URL in the terminal (or browser)
-    Web,
-    /// Launch the trusty-search terminal UI: indexes, reindex, and search monitor
-    Tui,
-    /// Print daemon status: health, version, uptime, and corpus totals
-    ///
-    /// Examples:
-    ///   trusty-search monitor status
-    ///   trusty-search monitor status --json
-    Status {
-        /// Emit the status as a JSON object instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
-    /// List every index, or show one index's detail when an ID is given
-    ///
-    /// Examples:
-    ///   trusty-search monitor indexes
-    ///   trusty-search monitor indexes my-project
-    ///   trusty-search monitor indexes --json
-    Indexes {
-        /// Optional index ID to show detail for (omit to list all)
-        id: Option<String>,
-        /// Emit the result as JSON instead of a plain-text table
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 /// Why: Allow users to override `QueryClassifier`'s automatic intent detection
 /// when they know the intent up-front (e.g. searching for TODO comments).
 /// What: Mirrors `crate::core::QueryIntent` for the CLI surface.
@@ -1367,6 +1350,9 @@ async fn run() -> Result<()> {
             device,
             data_dir,
             no_auto_discover,
+            // #8176: the explicit opt-in that grants auto-discovery on a fresh
+            // isolated data dir, which no longer scans by default.
+            auto_discover,
             fanout_concurrency,
             serial,
         } => {
@@ -1377,6 +1363,7 @@ async fn run() -> Result<()> {
                 data_dir.as_deref(),
                 cli.verbose,
                 no_auto_discover,
+                auto_discover,
                 fanout_concurrency,
                 serial,
             )
