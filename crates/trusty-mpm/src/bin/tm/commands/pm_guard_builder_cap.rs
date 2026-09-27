@@ -401,11 +401,17 @@ pub(crate) async fn claim_builder_slot(
 /// 45-minute lease TTL frees it, and claims time out when the daemon is slow —
 /// when slots are already scarce.
 /// What: POSTs the same projected payload to the `builder-slot/release` route
-/// on a spawned task that nothing awaits, so the deny is not held back. The
-/// task runs while the deny's audit POST does; a release still unsent when the
-/// hook process exits is lost, and the TTL remains the backstop.
-/// Test: `a_timed_out_claim_is_released_without_holding_the_deny_8794`.
-fn spawn_release(url: &str, session_id: &str, cwd: &Path, payload: &Value) {
+/// on a spawned task and returns its handle; [`emit_deny`] awaits it beside
+/// the deny's audit POST, for at most [`RELEASE_WAIT_CAP`]. A release still
+/// unsent at that cap is lost, and the TTL remains the backstop.
+/// Test: `a_timed_out_claim_is_released_without_holding_the_deny_8794`,
+/// `the_hook_exits_only_after_a_release_answered_within_the_cap_8794`.
+fn spawn_release(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+) -> tokio::task::JoinHandle<()> {
     let (url, session_id, cwd, payload) = (
         url.to_string(),
         session_id.to_string(),
@@ -421,7 +427,7 @@ fn spawn_release(url: &str, session_id: &str, cwd: &Path, payload: &Value) {
             BUILDER_SLOT_RELEASE_ROUTE,
         )
         .await;
-    });
+    })
 }
 
 /// Read a non-empty string field out of the daemon's answer.
@@ -547,10 +553,10 @@ pub(crate) async fn evaluate(
             BuilderCapVerdict::Allow(slot_path.map(|dir| slot_notice(&dir)).or(notice))
         }
         BuilderSlotClaim::Full(cap, holders, note) => {
-            BuilderCapVerdict::Deny(deny_reason(agent, cap, &holders, &note))
+            BuilderCapVerdict::Deny(deny_reason(agent, cap, &holders, &note), None)
         }
         BuilderSlotClaim::PoolRefused(detail) => {
-            BuilderCapVerdict::Deny(pool_refused_deny_reason(agent, &detail))
+            BuilderCapVerdict::Deny(pool_refused_deny_reason(agent, &detail), None)
         }
         // ALLOW, and say so on stderr. The daemon ANSWERED here — the machine's
         // count is known, this dispatch simply was not added to it — so unlike
@@ -563,14 +569,51 @@ pub(crate) async fn evaluate(
             BuilderCapVerdict::Allow(None)
         }
         BuilderSlotClaim::Unverifiable(detail) => {
-            BuilderCapVerdict::Deny(unverifiable_deny_reason(agent, &detail))
+            BuilderCapVerdict::Deny(unverifiable_deny_reason(agent, &detail), None)
         }
         // #8794: still a deny, but the daemon may have recorded a lease for it.
         BuilderSlotClaim::Unanswered(detail) => {
-            spawn_release(url, session_id, cwd, payload);
-            BuilderCapVerdict::Deny(unverifiable_deny_reason(agent, &detail))
+            let release = spawn_release(url, session_id, cwd, payload);
+            BuilderCapVerdict::Deny(unverifiable_deny_reason(agent, &detail), Some(release))
         }
     }
+}
+
+/// The longest a deny holds the hook's exit for the release it spawned (#8794).
+const RELEASE_WAIT_CAP: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Audit and print a builder-cap deny, holding the exit for its release (#8794).
+///
+/// Why: the hook process exits right after its deny, and exiting drops the
+/// tokio runtime, which cancels a release task that has not sent yet. Left
+/// unawaited, the release reached the daemon only when the audit POST happened
+/// to take longer than it — and an unsent release is the phantom lease #8794
+/// exists to prevent.
+/// What: runs the audit POST and a wait on `release` concurrently, the wait
+/// capped at [`RELEASE_WAIT_CAP`], then prints the deny. With no release the
+/// wait finishes at once, so the deny costs what it did before #8794; with one
+/// it costs at most the cap beyond the audit's own time, never the sum.
+/// Test: `the_hook_exits_only_after_a_release_answered_within_the_cap_8794`,
+/// `a_release_that_never_answers_holds_the_exit_no_longer_than_the_cap_8794`.
+pub(crate) async fn emit_deny(
+    refused: &super::pm_guard_deny_log::DenyContext<'_>,
+    reason: &str,
+    release: Option<tokio::task::JoinHandle<()>>,
+) {
+    let wait_for_release = async {
+        if let Some(handle) = release {
+            // A timeout detaches the task; the runtime drop then cancels it.
+            let _ = tokio::time::timeout(RELEASE_WAIT_CAP, handle).await;
+        }
+    };
+    tokio::join!(
+        super::pm_guard::audit_denied_tool(refused, "builder-cap", reason),
+        wait_for_release,
+    );
+    println!(
+        "{}",
+        super::pm_guard_response::build_pm_guard_deny_response(reason)
+    );
 }
 
 /// What the builder cap decided, and what the engineer must be told (#8261).
@@ -579,12 +622,14 @@ pub(crate) async fn evaluate(
 /// daemon granted — so `Option<String>` could no longer express the answer: its
 /// `Some` already meant "deny". Two named arms make the allow-with-a-notice case
 /// unmissable at the one call site.
-/// What: [`Self::Deny`] carries the refusal; [`Self::Allow`] carries an optional
-/// notice to merge into the hook's single output object.
+/// What: [`Self::Deny`] carries the refusal and any release to await;
+/// [`Self::Allow`] carries an optional notice to merge into the hook's single
+/// output object.
 /// Test: `an_admitted_builder_allows_with_its_target_dir_notice`.
 pub(crate) enum BuilderCapVerdict {
-    /// The dispatch is refused, for this reason.
-    Deny(String),
+    /// The dispatch is refused, for this reason. #8794: carries the release
+    /// task the deny must await before the hook exits, if one was spawned.
+    Deny(String, Option<tokio::task::JoinHandle<()>>),
     /// The dispatch proceeds, optionally carrying a notice for the engineer.
     Allow(Option<String>),
 }
@@ -618,13 +663,9 @@ pub(crate) async fn emit_builder_cap_or(
     allowed: &str,
 ) {
     match evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd).await {
-        BuilderCapVerdict::Deny(reason) => {
+        BuilderCapVerdict::Deny(reason, release) => {
             let refused = super::pm_guard_deny_log::DenyContext::from_payload(url, payload);
-            super::pm_guard::audit_denied_tool(&refused, "builder-cap", &reason).await;
-            println!(
-                "{}",
-                super::pm_guard_response::build_pm_guard_deny_response(&reason)
-            );
+            emit_deny(&refused, &reason, release).await;
         }
         // #8261: the slot notice merges INTO the grant's own object — a second
         // printed object would be a second `hookSpecificOutput`.
@@ -899,7 +940,7 @@ mod tests {
     /// ask only "was it denied, and why", so they fold the allow arm away here.
     fn deny(verdict: BuilderCapVerdict) -> Option<String> {
         match verdict {
-            BuilderCapVerdict::Deny(reason) => Some(reason),
+            BuilderCapVerdict::Deny(reason, _) => Some(reason),
             BuilderCapVerdict::Allow(_) => None,
         }
     }
@@ -950,7 +991,7 @@ mod tests {
             BuilderCapVerdict::Allow(None) => {
                 panic!("an admitted builder with a slot path must carry a notice")
             }
-            BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
+            BuilderCapVerdict::Deny(reason, _) => panic!("must not deny: {reason}"),
         }
     }
 
@@ -1020,7 +1061,7 @@ mod tests {
             BuilderCapVerdict::Allow(None) => {
                 panic!("an admission with no directory must still explain itself")
             }
-            BuilderCapVerdict::Deny(reason) => panic!("must not deny: {reason}"),
+            BuilderCapVerdict::Deny(reason, _) => panic!("must not deny: {reason}"),
         }
     }
 
@@ -1165,9 +1206,10 @@ mod tests {
     }
 
     /// #8794: the claim timed out, so the hook denies AND releases the lease
-    /// the daemon may have recorded — without waiting on the release. The
-    /// silent daemon never answers the release either; an awaited release would
-    /// hold the deny for its own 2 s timeout on top of the claim's.
+    /// the daemon may have recorded — and `evaluate` returns without waiting on
+    /// the release; only `emit_deny` waits, under its cap. The silent daemon
+    /// never answers the release either; an uncapped wait would hold the deny
+    /// for the release's own 2 s timeout on top of the claim's.
     /// Fails before #8794: no release request is ever sent.
     #[tokio::test]
     async fn a_timed_out_claim_is_released_without_holding_the_deny_8794() {
