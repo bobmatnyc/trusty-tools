@@ -251,3 +251,80 @@ fn the_journal_rotates_and_reads_back_oldest_first() {
     assert_eq!(journal.records, vec![first, second]);
     assert_eq!(journal.malformed, 1);
 }
+
+/// Why (critic HIGH on 1e27c71bd): up to ~16 processes append to one palace's
+/// journal (#8733). Two writers that both saw the full size each renamed the
+/// live file over `.1`, and the second rename threw away the whole previous
+/// generation while both callers reported success.
+/// What: pre-fills the live file to exactly the rotation size, then releases 16
+/// threads at once, each appending one record through its own descriptor (the
+/// lock is a per-descriptor `flock`, so threads contend as processes do). One
+/// rotation is due, so every record must be in the live file or `.1`. Twenty
+/// rounds make the pre-fix race fail on every run, not occasionally.
+#[test]
+fn concurrent_appends_across_the_rotation_boundary_lose_no_record() {
+    const WRITERS: usize = 16;
+    let palace = PalaceId::new("rotate-race");
+    for round in 0..20 {
+        let dir = tempdir().unwrap();
+        let prefill = 40;
+        for _ in 0..prefill {
+            let rec = MaintenanceDeletion::new(&palace, Uuid::new_v4(), DeletionReason::DreamPrune);
+            append(dir.path(), &rec, u64::MAX).unwrap();
+        }
+        let rotate_at = std::fs::metadata(journal_path(dir.path())).unwrap().len();
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                let (barrier, dir, palace) = (
+                    Arc::clone(&barrier),
+                    dir.path().to_path_buf(),
+                    palace.clone(),
+                );
+                std::thread::spawn(move || {
+                    let rec = MaintenanceDeletion::new(
+                        &palace,
+                        Uuid::new_v4(),
+                        DeletionReason::DreamDedup,
+                    );
+                    barrier.wait();
+                    append(&dir, &rec, rotate_at).map_err(|e| format!("{e:#}"))
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let journal = read_journal(dir.path()).unwrap();
+        let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert_eq!(
+            journal.records.len(),
+            prefill + WRITERS,
+            "round {round}: a record was lost; append errors: {errors:?}"
+        );
+        assert!(errors.is_empty(), "round {round}: {errors:?}");
+    }
+}
+
+/// Why (Fail-Open Check): a journal lock that cannot be taken, or a rotation
+/// that fails, must not drop the record. Both fall back to one plain append to
+/// the live file.
+#[test]
+fn a_lock_or_rotation_failure_still_appends_the_record() {
+    let dir = tempdir().unwrap();
+    let palace = PalaceId::new("lock-fail");
+    // A directory at the lock sidecar path makes the lock unobtainable.
+    let sidecar = crate::file_lock::lock_path(&journal_path(dir.path()));
+    std::fs::create_dir_all(&sidecar).unwrap();
+    let first = MaintenanceDeletion::new(&palace, Uuid::new_v4(), DeletionReason::DreamPrune);
+    append(dir.path(), &first, u64::MAX).unwrap();
+    std::fs::remove_dir(&sidecar).unwrap();
+
+    // A non-empty directory at `.1` makes the rotation's rename fail.
+    let rotated = dir.path().join(MAINTENANCE_LOG_ROTATED_FILENAME);
+    std::fs::create_dir_all(rotated.join("occupied")).unwrap();
+    let second = MaintenanceDeletion::new(&palace, Uuid::new_v4(), DeletionReason::ExpiredPurge);
+    append(dir.path(), &second, 1).unwrap();
+
+    let live = std::fs::read_to_string(journal_path(dir.path())).unwrap();
+    assert!(live.contains(&first.drawer_id.to_string()), "{live}");
+    assert!(live.contains(&second.drawer_id.to_string()), "{live}");
+}

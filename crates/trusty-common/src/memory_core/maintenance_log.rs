@@ -130,26 +130,62 @@ pub fn journal_path(data_dir: &Path) -> PathBuf {
     data_dir.join(MAINTENANCE_LOG_FILENAME)
 }
 
+/// How long an append waits for the journal lock before appending unlocked.
+const JOURNAL_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Append `rec` to the journal in `data_dir`, rotating once past `rotate_at`.
 ///
-/// What: one `write_all` of one line on an `O_APPEND` handle, so lines from
-/// concurrent processes do not interleave. Rotation renames the live file over
-/// the single `.1` generation, which bounds the journal at twice `rotate_at`.
+/// Why: up to ~16 processes append to one palace's journal (#8733). Two that
+/// both saw the full size each renamed the live file over `.1`, and the second
+/// rename discarded the whole previous generation.
+/// What: the size check, the rename over the single `.1` generation, and the
+/// append all run under the `file_lock` sidecar lock
+/// (`maintenance_deletions.jsonl.lock`), a cross-process `flock`. The size is
+/// read after the lock is held, so a writer that waited does not rotate a file
+/// another writer just started. Each record is one `write_all` on an
+/// `O_APPEND` handle. A lock that cannot be taken within
+/// [`JOURNAL_LOCK_TIMEOUT`], or a failed rotation, falls back to a plain append
+/// to the live file, so the record is kept and the journal only grows past its
+/// bound.
+/// Test: `maintenance_log_tests::concurrent_appends_across_the_rotation_boundary_lose_no_record`,
+/// `maintenance_log_tests::a_lock_or_rotation_failure_still_appends_the_record`.
 pub(crate) fn append(data_dir: &Path, rec: &MaintenanceDeletion, rotate_at: u64) -> Result<()> {
     let path = journal_path(data_dir);
-    if let Ok(meta) = std::fs::metadata(&path)
+    let mut line = serde_json::to_string(rec).context("serialize maintenance deletion")?;
+    line.push('\n');
+    let locked = crate::file_lock::with_exclusive_lock_timeout(&path, JOURNAL_LOCK_TIMEOUT, || {
+        if let Err(e) = rotate_if_due(data_dir, &path, rotate_at) {
+            tracing::warn!(palace = %rec.palace, "#8732: journal rotation failed; appending to the live file: {e:#}");
+        }
+        append_line(&path, &line)
+    });
+    match locked {
+        Ok(appended) => appended,
+        Err(e) => {
+            tracing::warn!(palace = %rec.palace, "#8732: journal lock unavailable; appending without rotation: {e}");
+            append_line(&path, &line)
+        }
+    }
+}
+
+/// Rename the live journal over `.1` when it has reached `rotate_at`.
+fn rotate_if_due(data_dir: &Path, path: &Path, rotate_at: u64) -> Result<()> {
+    if let Ok(meta) = std::fs::metadata(path)
         && meta.is_file()
         && meta.len() >= rotate_at
     {
-        std::fs::rename(&path, data_dir.join(MAINTENANCE_LOG_ROTATED_FILENAME))
+        std::fs::rename(path, data_dir.join(MAINTENANCE_LOG_ROTATED_FILENAME))
             .with_context(|| format!("rotate {}", path.display()))?;
     }
-    let mut line = serde_json::to_string(rec).context("serialize maintenance deletion")?;
-    line.push('\n');
+    Ok(())
+}
+
+/// Write `line` to `path` in one `O_APPEND` write, creating the file if needed.
+fn append_line(path: &Path, line: &str) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("open {}", path.display()))?;
     file.write_all(line.as_bytes())
         .with_context(|| format!("append {}", path.display()))
