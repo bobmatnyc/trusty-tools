@@ -276,6 +276,8 @@ async fn corrupt_palace_json_fails_the_store_and_is_left_untouched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn walk_refuses_an_env_palace_and_from_reports_its_source() {
+    // #5937: TRUSTY_MEMORY_PALACE is also cleared under env_test_lock (#7995).
+    let _env = crate::commands::env_test_lock().lock().await;
     let tmp = tempfile::tempdir().expect("tmp");
     let data_root = tmp.path().join("data");
     let store = store_on_disk(tmp.path(), "proj");

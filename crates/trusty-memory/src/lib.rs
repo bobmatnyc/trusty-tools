@@ -1540,3 +1540,7 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
 
 #[cfg(test)]
 mod lib_tests;
+
+/// #5937: every env-writing lib test holds `commands::env_test_lock()`.
+#[cfg(test)]
+mod env_lock_ratchet_tests;

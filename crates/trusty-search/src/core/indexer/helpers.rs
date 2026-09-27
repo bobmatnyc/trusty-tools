@@ -609,6 +609,8 @@ mod tests {
     /// Watcher idle-suspend: `watch_idle_suspend_secs` honours the default and
     /// the `TRUSTY_WATCH_IDLE_SUSPEND_SECS` override, including `0` (disabled)
     /// and an unparseable value (falls back to default).
+    // #5937: mutates TRUSTY_WATCH_IDLE_SUSPEND_SECS; join the #[serial] env group.
+    #[serial_test::serial]
     #[test]
     fn watch_idle_suspend_secs_default_and_env_override() {
         let prior = std::env::var("TRUSTY_WATCH_IDLE_SUSPEND_SECS").ok();

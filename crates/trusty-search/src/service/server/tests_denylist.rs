@@ -24,6 +24,8 @@ use std::sync::Arc;
 /// What: calls `create_index_handler` with root_path = ~/.ssh; asserts 400 and
 /// an error body containing "indexing refused".
 /// Test: this test.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[tokio::test]
 async fn validate_root_path_denylist_rejects_ssh() {
     let home = dirs::home_dir().expect("home dir required for this test");
@@ -88,6 +90,8 @@ async fn validate_root_path_denylist_rejects_ssh() {
 /// What: calls `validate_root_path` directly with the home directory and
 /// asserts an `Err` response.
 /// Test: this test.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[tokio::test]
 async fn validate_root_path_denylist_rejects_home() {
     let home = dirs::home_dir().expect("home dir required");
@@ -351,6 +355,8 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
 /// What: creates a symlink at a temp path pointing at ~/.ssh; calls
 /// `validate_root_path` with the symlink path; asserts `Err`.
 /// Test: this test (Unix-only).
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[cfg(unix)]
 #[tokio::test]
 async fn validate_root_path_denylist_blocks_symlink_to_ssh() {

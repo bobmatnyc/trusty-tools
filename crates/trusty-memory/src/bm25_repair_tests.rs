@@ -39,6 +39,8 @@ async fn mark_dirty_is_idempotent() {
 /// Test: this test itself.
 #[test]
 fn repair_interval_honours_env_override() {
+    // #5937: mutates TRUSTY_BM25_REPAIR_INTERVAL_SECS; serialise on the crate-wide env lock.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let prev = std::env::var(ENV_REPAIR_INTERVAL_SECS).ok();
     let cases: [(&str, Option<Duration>); 3] = [
         ("30", Some(Duration::from_secs(30))),

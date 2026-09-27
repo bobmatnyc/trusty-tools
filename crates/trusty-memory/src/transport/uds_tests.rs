@@ -1502,6 +1502,8 @@ async fn rpc_unlinks_its_socket_on_shutdown() {
 /// Test: itself.
 #[test]
 fn socket_path_is_named_for_this_daemon() {
+    // #5937: resolves the data dir, which sibling tests redirect.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let path = socket_path().expect("the data directory must resolve");
     assert!(
         path.ends_with("trusty-memory.sock"),

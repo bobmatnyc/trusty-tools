@@ -312,9 +312,11 @@ mod tests {
     /// adapter pointed at the default base URL and the placeholder key.
     /// Test: itself.
     #[test]
-    #[serial(local_provider_env)]
+    // #5937: OLLAMA_HOST is also written under this key by `local_probe`,
+    // `semantic_consolidation` and the dream tests; one key excludes them all.
+    #[serial(dotenv_credential_env)]
     fn factory_builds_named_adapter_with_defaults() {
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::remove_var(LOCAL_HOST_ENV);
             std::env::remove_var(LOCAL_API_KEY_ENV);
@@ -329,9 +331,9 @@ mod tests {
     /// no auth override when neither env var is set.
     /// Test: itself.
     #[test]
-    #[serial(local_provider_env)]
+    #[serial(dotenv_credential_env)]
     fn from_env_defaults_when_unset() {
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::remove_var(LOCAL_HOST_ENV);
             std::env::remove_var(LOCAL_API_KEY_ENV);
@@ -346,9 +348,9 @@ mod tests {
     /// once affects both dispatch paths identically.
     /// Test: itself.
     #[test]
-    #[serial(local_provider_env)]
+    #[serial(dotenv_credential_env)]
     fn host_env_override_appends_v1_suffix() {
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::set_var(LOCAL_HOST_ENV, "http://192.168.1.50:11434/");
             std::env::remove_var(LOCAL_API_KEY_ENV);
@@ -357,7 +359,7 @@ mod tests {
         assert_eq!(config.base_url, "http://192.168.1.50:11434/v1");
         let adapter = build(&resolved(), config).expect("built");
         assert_eq!(adapter.capabilities().id.credential_name(), None);
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::remove_var(LOCAL_HOST_ENV);
         }
@@ -367,9 +369,9 @@ mod tests {
     /// of the placeholder, for the rare local server that enforces auth.
     /// Test: itself.
     #[test]
-    #[serial(local_provider_env)]
+    #[serial(dotenv_credential_env)]
     fn api_key_env_override_is_used() {
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::remove_var(LOCAL_HOST_ENV);
             std::env::set_var(LOCAL_API_KEY_ENV, "sk-local-test"); // pragma: allowlist secret
@@ -379,7 +381,7 @@ mod tests {
             config.auth.as_ref().map(SecretString::expose),
             Some("sk-local-test")
         );
-        // SAFETY: guarded by `#[serial(local_provider_env)]`.
+        // SAFETY: guarded by `#[serial(dotenv_credential_env)]`.
         unsafe {
             std::env::remove_var(LOCAL_API_KEY_ENV);
         }
