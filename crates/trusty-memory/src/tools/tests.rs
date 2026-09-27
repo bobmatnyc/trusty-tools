@@ -564,6 +564,8 @@ mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
 mod last_used_tests;
+// #8733: the maintenance tools refuse without the maintenance lease.
+mod lease_refusal_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.
 mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.

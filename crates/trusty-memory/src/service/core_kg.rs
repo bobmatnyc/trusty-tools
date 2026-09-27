@@ -75,6 +75,13 @@ pub(crate) const DEFAULT_KG_LIST_LIMIT: usize = 50;
 /// thousands of rows in one go; matches the spec's max=200.
 pub(crate) const MAX_KG_LIST_LIMIT: usize = 200;
 
+/// #8733: why every maintenance entry point (`dream_run`, the MCP dream and
+/// compact tools) refuses in a process that does not hold the lease.
+pub(crate) const MAINTENANCE_LEASE_NOT_HELD: &str =
+    "this process does not hold this data root's maintenance lease (another \
+     process holds it, or maintenance.lock could not be opened); see the pid in \
+     maintenance.lock (#8733)";
+
 impl MemoryService {
     // -----------------------------------------------------------------
     // Knowledge graph
@@ -416,10 +423,7 @@ impl MemoryService {
     pub async fn dream_run(&self) -> ServiceResult<DreamStatusPayload> {
         // #8733: a dream run is maintenance; only the lease holder runs it.
         if !self.state.registry.may_run_maintenance() {
-            return Err(ServiceError::conflict(
-                "another process holds this data root's maintenance lease; \
-                 see the pid in maintenance.lock (#8733)",
-            ));
+            return Err(ServiceError::conflict(MAINTENANCE_LEASE_NOT_HELD));
         }
         let palaces = list_palaces_blocking(&self.state)
             .await
