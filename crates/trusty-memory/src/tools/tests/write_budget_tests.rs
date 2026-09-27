@@ -11,12 +11,13 @@
 //! parallel test harness.
 //! Test: this IS the test module.
 //!
-//! No test here sleeps to make an assertion true. The contended cases hold a
-//! lock for the whole test and assert an UPPER bound that sits ~30x below the
-//! pre-fix value, so a slow host cannot flip the verdict (#5943).
+//! No assertion here reads a clock (#5943). The contended cases hold a lock
+//! for the whole test and assert on the wait the handler's own error REPORTS
+//! ([`reported_wait`]), so a slow host lengthens the run but cannot flip the
+//! verdict. [`hang_guard`] only stops a handler that never returns.
 
 use super::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use trusty_common::memory_core::timeouts;
 
 /// Budget short enough that an exhausted-budget error lands promptly, and far
@@ -24,10 +25,62 @@ use trusty_common::memory_core::timeouts;
 /// the budget — not the per-leg timeout — decided the wait.
 const TEST_BUDGET: Duration = Duration::from_millis(300);
 
-/// Ceiling the contended handlers must finish under. Pre-fix the same setup
-/// waited `write_lock_timeout()` = 60 s, so this is a ~30x margin over the
-/// budget and a ~30x margin under the pre-fix value.
-const CEILING: Duration = Duration::from_secs(2);
+/// Hang guard for one contended handler call: the pre-fix additive worst case
+/// plus 30 s of slack.
+///
+/// Why: it sits ABOVE the pre-fix wait on purpose. A regressed handler then
+/// returns its 60 s error inside the guard and fails on [`reported_wait`], so
+/// no verdict depends on this value; it only stops a call that never returns.
+fn hang_guard() -> Duration {
+    timeouts::write_lock_timeout() + timeouts::open_queue_timeout() + Duration::from_secs(30)
+}
+
+/// Await `call`, failing the test if it outlives [`hang_guard`].
+async fn within_hang_guard<T>(what: &str, call: impl std::future::Future<Output = T>) -> T {
+    let guard = hang_guard();
+    tokio::time::timeout(guard, call)
+        .await
+        .unwrap_or_else(|_| panic!("{what} never returned (hang guard {guard:?})"))
+}
+
+/// The wait a write-lock timeout error reports, parsed from the
+/// `timed out after {:?}` text `timeouts::lock_with_timeout` writes.
+///
+/// Why: the budget's observable outcome is which wait the handler chose. The
+/// error states it, so the tests read it there instead of timing the call.
+fn reported_wait(msg: &str) -> Duration {
+    let token = msg
+        .split("timed out after ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("the error must report the wait it gave up after; got: {msg}"));
+    let unit_at = token
+        .find(char::is_alphabetic)
+        .unwrap_or_else(|| panic!("no unit on reported wait {token:?}"));
+    let (value, unit) = token.split_at(unit_at);
+    let value: f64 = value
+        .parse()
+        .unwrap_or_else(|_| panic!("non-numeric reported wait {token:?}"));
+    let per_unit = match unit {
+        "s" => 1.0,
+        "ms" => 1e-3,
+        "\u{b5}s" => 1e-6,
+        "ns" => 1e-9,
+        other => panic!("unknown unit {other:?} on reported wait {token:?}"),
+    };
+    Duration::from_secs_f64(value * per_unit)
+}
+
+/// Assert the handler's error reports a wait inside [`TEST_BUDGET`].
+fn assert_waited_within_budget(tool: &str, msg: &str) {
+    let waited = reported_wait(msg);
+    assert!(
+        waited <= TEST_BUDGET,
+        "{tool} must give up inside its {TEST_BUDGET:?} budget; it reported waiting {waited:?} \
+         (pre-fix the write-lock leg alone waited {:?} — issue #4002); error: {msg}",
+        timeouts::write_lock_timeout()
+    );
+}
 
 /// Build a Ready `AppState` with an injected short write budget and one palace.
 fn budgeted_state() -> (AppState, tempfile::TempDir) {
@@ -45,12 +98,13 @@ fn budgeted_state() -> (AppState, tempfile::TempDir) {
 /// first leg alone cannot outlast the budget, so a permanently-held write mutex
 /// surfaces an error in ~`TEST_BUDGET` instead of `write_lock_timeout()`.
 ///
-/// Pre-fix this test fails by TIMING OUT the assertion below: the handler hands
-/// `write_lock_timeout()` (60 s) straight to the mutex, so `elapsed` is ~60 s
-/// against a 2 s ceiling.
+/// Pre-fix this test fails on the reported wait: the handler hands
+/// `write_lock_timeout()` (60 s) straight to the mutex, so its error reports
+/// 60 s against a 300 ms budget.
 ///
 /// What: holds the palace's write mutex for the whole test, calls the real
-/// `memory_remember` handler, and asserts it errors inside `CEILING`. Also
+/// `memory_remember` handler, and asserts its error reports a wait inside
+/// `TEST_BUDGET`. Also
 /// asserts the pre-fix additive worst case was genuinely larger than the
 /// budget, so the test cannot pass vacuously if someone raises the budget past
 /// the sum it replaced.
@@ -76,26 +130,22 @@ async fn memory_remember_gives_up_within_one_budget_not_the_leg_sum() {
     let write_lock = state.palace_write_lock("budget");
     let _held = write_lock.lock().await;
 
-    let started = Instant::now();
-    let err = handle_memory_remember(
-        &state,
-        json!({"palace": "budget", "text": "a sufficiently long fact to clear the content gate"}),
+    let err = within_hang_guard(
+        "memory_remember",
+        handle_memory_remember(
+            &state,
+            json!({"palace": "budget", "text": "a sufficiently long fact to clear the content gate"}),
+        ),
     )
     .await
     .expect_err("a permanently held write mutex must surface an error, never block forever");
-    let elapsed = started.elapsed();
 
-    assert!(
-        elapsed < CEILING,
-        "memory_remember must give up inside its {TEST_BUDGET:?} budget; got {elapsed:?} \
-         (pre-fix this leg alone waited {:?} — issue #4002)",
-        timeouts::write_lock_timeout()
-    );
     let msg = format!("{err:#}");
     assert!(
         msg.contains("memory_remember") && msg.contains("write-lock acquisition timed out"),
         "the error must name the tool and the leg that expired; got: {msg}"
     );
+    assert_waited_within_budget("memory_remember", &msg);
 }
 
 /// Why (issue #4002): `memory_note` runs the identical two-leg sequence, and a
@@ -112,28 +162,27 @@ async fn memory_note_gives_up_within_one_budget_not_the_leg_sum() {
     let write_lock = state.palace_write_lock("budget");
     let _held = write_lock.lock().await;
 
-    let started = Instant::now();
-    let err = handle_memory_note(
-        &state,
-        json!({
-            "palace": "budget",
-            // Long enough to clear the content gate, which runs BEFORE the
-            // write-lock leg this test is measuring.
-            "content": "Masa prefers snake_case for every identifier in this workspace",
-        }),
+    let err = within_hang_guard(
+        "memory_note",
+        handle_memory_note(
+            &state,
+            json!({
+                "palace": "budget",
+                // Long enough to clear the content gate, which runs BEFORE the
+                // write-lock leg this test is measuring.
+                "content": "Masa prefers snake_case for every identifier in this workspace",
+            }),
+        ),
     )
     .await
     .expect_err("a permanently held write mutex must surface an error");
-    let elapsed = started.elapsed();
 
+    let msg = format!("{err:#}");
     assert!(
-        elapsed < CEILING,
-        "memory_note must give up inside its {TEST_BUDGET:?} budget; got {elapsed:?} (issue #4002)"
+        msg.contains("memory_note"),
+        "the error must name the tool that gave up; got: {msg}"
     );
-    assert!(
-        format!("{err:#}").contains("memory_note"),
-        "the error must name the tool that gave up"
-    );
+    assert_waited_within_budget("memory_note", &msg);
 }
 
 /// Why (issue #4002): a budget that shortens the UNCONTENDED path would be a
@@ -183,24 +232,23 @@ async fn task_add_gives_up_within_one_budget_not_the_leg_sum() {
     let write_lock = state.palace_write_lock("budget");
     let _held = write_lock.lock().await;
 
-    let started = Instant::now();
-    let err = dispatch_tool(
-        &state,
+    let err = within_hang_guard(
         "task_add",
-        json!({"palace": "budget", "content": "ship the joint budget"}),
+        dispatch_tool(
+            &state,
+            "task_add",
+            json!({"palace": "budget", "content": "ship the joint budget"}),
+        ),
     )
     .await
     .expect_err("a permanently held write mutex must surface an error");
-    let elapsed = started.elapsed();
 
+    let msg = format!("{err:#}");
     assert!(
-        elapsed < CEILING,
-        "task_add must give up inside its {TEST_BUDGET:?} budget; got {elapsed:?} (issue #4002)"
+        msg.contains("task_add"),
+        "the error must name the tool that gave up; got: {msg}"
     );
-    assert!(
-        format!("{err:#}").contains("task_add"),
-        "the error must name the tool that gave up"
-    );
+    assert_waited_within_budget("task_add", &msg);
 }
 
 /// Why (issue #4002): the budget's whole point is that the SECOND leg spends
@@ -259,19 +307,16 @@ async fn pipeline_capped_state() -> (AppState, tempfile::TempDir) {
 async fn memory_note_surfaces_the_pipeline_ceiling() {
     let (state, _tmp) = pipeline_capped_state().await;
 
-    let started = Instant::now();
-    let err = handle_memory_note(
-        &state,
-        json!({"palace": "pipeline", "content": "a curated fact that clears the content gate"}),
+    let err = within_hang_guard(
+        "memory_note",
+        handle_memory_note(
+            &state,
+            json!({"palace": "pipeline", "content": "a curated fact that clears the content gate"}),
+        ),
     )
     .await
     .expect_err("a write that cannot fit its pipeline ceiling must error, not stall");
-    let elapsed = started.elapsed();
 
-    assert!(
-        elapsed < CEILING,
-        "the ceiling must be enforced promptly; got {elapsed:?}"
-    );
     let msg = format!("{err:#}");
     assert!(
         msg.contains("#6366") && msg.contains("write pipeline exceeded"),
