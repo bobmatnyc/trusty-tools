@@ -146,6 +146,8 @@ pub(crate) mod pm_guard_secret_words;
 pub(crate) mod pm_guard_secret_positions;
 // #8523: a pm2 dump and a credential-carrying launchd plist hold a process env.
 pub(crate) mod pm_guard_secret_env_files;
+// #8756: the secret rules read every command substitution's body.
+pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
