@@ -88,8 +88,9 @@ pub(crate) struct RelocateIndexRequest {
 /// non-colocated legacy indexes). Emits `IndexRegistered` so connected UIs
 /// refresh.
 ///
-/// Returns 404 when `id` is not in the registry, 400 for an invalid path, 500
-/// on internal rebuild failure. On success returns
+/// Returns 404 when `id` is not in the registry, 400 for an invalid path, 409
+/// while a reindex holds the index's permit or when the new root would contain
+/// a data-dir store (#8499), 500 on internal rebuild failure. On success returns
 /// `{ "id": "…", "relocated": true, "new_root_path": "…" }`.
 ///
 /// Test: `relocate_index_updates_root_path` in `tests_index.rs`.
@@ -163,6 +164,17 @@ pub(crate) async fn relocate_index_report(
         }));
     }
 
+    // #8499: a reindex, deferred-embed pass or component catch-up holds this
+    // permit for its whole run and reads the root as it goes. Rebinding under
+    // it splits the handle root from the indexer root (#4951) mid-walk, so
+    // refuse instead; the permit is held to the end, so no reindex can start
+    // against a half-applied relocate either.
+    let Ok(_index_permit) = crate::service::reindex::index_semaphore(&index_id).try_acquire_owned()
+    else {
+        tracing::warn!("relocate[{id}]: refused — a reindex is running on this index (#8499)");
+        return Err(relocate_busy_response(id));
+    };
+
     // Issue #2336: reject relocating onto a root_path already owned by a
     // DIFFERENT registered index. Same hazard as `create_index_handler`: two
     // live registrations sharing one colocated root resolve to the SAME
@@ -217,6 +229,21 @@ pub(crate) async fn relocate_index_report(
         .and_then(|entries| entries.into_iter().find(|e| e.id == id));
 
     let on_disk_colocated = on_disk.as_ref().map(|e| e.colocated).unwrap_or(false);
+    // #8499: a data-dir store stays put while the root moves; refuse a new
+    // root whose work tree would then contain it.
+    if !on_disk_colocated {
+        if let Err(e) =
+            crate::service::storage_layout::refuse_data_dir_store_in_work_tree(id, &new_root)
+        {
+            let status = if crate::service::storage_layout::is_write_refusal(&e) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::error!("relocate[{id}]: {e:#}");
+            return Err((status, serde_json::json!({ "error": format!("{e:#}") })));
+        }
+    }
     let on_disk_last_queried = on_disk.as_ref().and_then(|e| e.last_queried_unix);
     let on_disk_last_indexed = on_disk.as_ref().and_then(|e| e.last_indexed_unix);
 
@@ -445,4 +472,23 @@ pub(crate) async fn relocate_index_report(
         "relocated": true,
         "new_root_path": new_root.to_string_lossy(),
     }))
+}
+
+/// `409` for a relocate refused because a reindex holds the per-index permit.
+///
+/// Why (#8499): relocate must not rebind a root a running reindex is walking.
+/// What: `409 { error, index_id }`; the error names the running reindex and
+/// says to retry — mirrors `PATCH /indexes/:id/config`'s busy answer.
+/// Test: `relocate_is_refused_while_a_reindex_is_in_flight`.
+fn relocate_busy_response(id: &str) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": format!(
+                "a reindex, deferred-embed pass or component catch-up is running on index \
+                 '{id}' — relocate refused; retry once it completes (#8499)"
+            ),
+            "index_id": id,
+        }),
+    )
 }

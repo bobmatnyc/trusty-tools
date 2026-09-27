@@ -243,9 +243,14 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
-- **Response 409** (#8499): the index store would land inside the repository
-  (for example `TRUSTY_DATA_DIR` under `<root_path>/.trusty-search`). Nothing
-  is registered and no repository file is written.
+- **Response 409** (#8499): the index store would land inside the index root —
+  `TRUSTY_DATA_DIR` at or under `<root_path>`, or the default data dir under a
+  root such as `$HOME`. Nothing is registered and no store is written.
+  `PATCH /indexes/:id` refuses a new root the same way, and also answers
+  `409` while a reindex holds that index.
+
+Concurrent registrations wait for each other only when they share an id or
+their roots are equal or nested; unrelated roots register in parallel.
 
 **Storage placement (#8499).** A new index keeps its store in the data dir
 (`<data_dir>/indexes/<id>/`), outside the work tree, so `git reset --hard` plus

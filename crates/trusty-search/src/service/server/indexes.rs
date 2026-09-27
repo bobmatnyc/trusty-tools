@@ -379,6 +379,11 @@ pub(crate) async fn create_index_report(
     // readiness check further down so even a `503` answer is not issued about an
     // id whose fate is still being decided.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
+    // #8499: held to the registry insert — per-id stores no longer collide in
+    // redb, so this claim, not a failed corpus open, closes the #2336 race.
+    // Taken before the id check below so a same-id racer sees the winner's
+    // handle; it serializes only against the same id or an equal/nested root.
+    let _create_claim = super::create_layout::claim_registration(&req.id, &req.root_path).await;
     // The id is already taken. Registration was ASYMMETRIC here: a request for a
     // registered TREE under a new id was refused (#2336, #3993), but a request
     // for a registered ID over a different tree was accepted with
@@ -445,9 +450,6 @@ pub(crate) async fn create_index_report(
     // which every session launch performs — returns without reading either.
     // Reading them here also keeps the snapshot→use window as narrow as it
     // can be, which is what #2336/#3993 hardened.
-    // #8499: held to the registry insert — per-id stores no longer collide in
-    // redb, so the lock, not a failed corpus open, closes the #2336 race.
-    let _create_guard = super::create_layout::CREATE_REGISTRATION_LOCK.lock().await;
     let handles = state.registry.list_handles();
     let cold_entries = state.cold_store.snapshot();
     if let Some(existing_id) =

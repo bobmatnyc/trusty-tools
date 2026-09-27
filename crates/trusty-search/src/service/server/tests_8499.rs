@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Identifier only the fixture source file defines, so a hit proves the index.
 const MARKER: &str = "onboarding_handler_8499";
 
-fn create_req(id: &str, root_path: PathBuf) -> super::router::CreateIndexRequest {
+pub(super) fn create_req(id: &str, root_path: PathBuf) -> super::router::CreateIndexRequest {
     super::router::CreateIndexRequest {
         id: id.to_string(),
         root_path,
@@ -49,7 +49,7 @@ fn create_req(id: &str, root_path: PathBuf) -> super::router::CreateIndexRequest
     }
 }
 
-async fn mock_state() -> Arc<SearchAppState> {
+pub(super) async fn mock_state() -> Arc<SearchAppState> {
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
@@ -57,7 +57,7 @@ async fn mock_state() -> Arc<SearchAppState> {
 }
 
 /// Run `git` in `root` with a fixed identity; panics with stderr on failure.
-fn git(root: &Path, args: &[&str]) -> String {
+pub(super) fn git(root: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -84,7 +84,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 
 /// A committed git repo holding one source file and, optionally, a tracked
 /// root `.gitignore` with `gitignore` as its exact bytes.
-fn clean_repo(prefix: &str, gitignore: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+pub(super) fn clean_repo(prefix: &str, gitignore: Option<&str>) -> (tempfile::TempDir, PathBuf) {
     let (dir, root) = super::test_support::allowlisted_index_root(prefix);
     std::fs::create_dir_all(root.join("src")).expect("src dir");
     std::fs::write(
@@ -151,7 +151,7 @@ async fn marker_hits(handle: &IndexHandle) -> usize {
 
 /// Stop the watcher and drop the live handle, releasing the redb file lock —
 /// the in-process stand-in for a daemon restart.
-async fn unregister(state: &Arc<SearchAppState>, id: &str) {
+pub(super) async fn unregister(state: &Arc<SearchAppState>, id: &str) {
     let id = IndexId::new(id);
     state.watcher_manager.stop_for_index(&id).await;
     assert!(state.registry.unregister(&id), "was registered");

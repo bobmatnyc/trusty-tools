@@ -91,11 +91,34 @@ pub(crate) struct ColocatedRootMissing {
     pub(crate) root: PathBuf,
 }
 
-/// True when `e` is (or wraps) a resolver refusal — [`WriteUnderRootRefused`]
-/// or [`ColocatedRootMissing`]. Callers log a refusal at error and skip.
+/// A new data-dir store would sit inside the index root's work tree (#8499).
+///
+/// Why: `git clean -fdx` deletes everything under the root, ignored or not, so
+/// a store there dies with the next clean — whatever the data dir is set to.
+/// What: carried inside the `anyhow::Error`; [`is_write_refusal`] matches it.
+/// Test: `create_refuses_a_data_dir_inside_the_work_tree`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to place a new store for index '{index_id}' at {}: the data dir {} lies \
+     inside the index root {}, where git clean -fdx deletes it (#8499)",
+    target.display(),
+    data_base.display(),
+    root.display()
+)]
+pub(crate) struct StoreInWorkTreeRefused {
+    pub(crate) index_id: String,
+    pub(crate) target: PathBuf,
+    pub(crate) data_base: PathBuf,
+    pub(crate) root: PathBuf,
+}
+
+/// True when `e` is (or wraps) a resolver refusal — [`WriteUnderRootRefused`],
+/// [`ColocatedRootMissing`] or [`StoreInWorkTreeRefused`]. Callers log a
+/// refusal at error and skip.
 pub(crate) fn is_write_refusal(e: &anyhow::Error) -> bool {
     e.downcast_ref::<WriteUnderRootRefused>().is_some()
         || e.downcast_ref::<ColocatedRootMissing>().is_some()
+        || e.downcast_ref::<StoreInWorkTreeRefused>().is_some()
 }
 
 impl StorageLayout {
@@ -119,15 +142,18 @@ impl StorageLayout {
     /// `git clean -fd` via its own `.gitignore`.
     /// What: `Colocated` when `<root>/.trusty-search/` holds an own index file;
     /// otherwise `DataDir`, after resolving (and creating) the data-dir store.
-    /// Fails closed: a store the #8438 guard refuses — one that would land in
-    /// the repository — is returned as the refusal, never redirected.
+    /// Fails closed: a store anywhere inside the root
+    /// ([`refuse_data_dir_store_in_work_tree`]) or one the #8438 guard refuses
+    /// is returned as the refusal, never redirected.
     /// Test: `index_survives_git_reset_hard_and_clean_fdx`,
     /// `create_refuses_when_the_store_would_land_in_the_work_tree`,
+    /// `create_refuses_a_data_dir_inside_the_work_tree`,
     /// `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
     pub(crate) fn for_new_registration(index_id: &str, root_path: &Path) -> Result<Self> {
         if holds_colocated_artifact(root_path) {
             return Ok(Self::Colocated);
         }
+        refuse_data_dir_store_in_work_tree(index_id, root_path)?;
         Self::DataDir.storage_dir(index_id, root_path)?;
         Ok(Self::DataDir)
     }
@@ -300,6 +326,43 @@ fn holds_colocated_artifact(root: &Path) -> bool {
         entry.file_name().to_str().is_some_and(is_own_index_file)
             && entry.file_type().is_ok_and(|t| t.is_file())
     })
+}
+
+/// Refuse a `DataDir` store for `index_id` that would sit inside `root` (#8499).
+///
+/// Why: [`refuse_write_under_root`] exempts a data dir that itself sits under
+/// the root, so an existing `$HOME`-rooted index keeps its writes. A NEW
+/// placement gets no such exemption: `TRUSTY_DATA_DIR` inside the repo, or a
+/// dotfiles repo at `$HOME` over the default data dir, would put the whole
+/// store where `git clean -fdx` deletes it.
+/// What: resolves the configured data dir and refuses with
+/// [`StoreInWorkTreeRefused`] when it, or any ancestor of it, is the same
+/// directory as `root` — compared by `(dev, ino)`, so a symlink or a
+/// case-variant spelling cannot slip past. Registration and relocate call it;
+/// the existing-entry write path does not. Creates only the data dir itself,
+/// exactly as [`persistence::data_dir`] always does.
+/// Test: `create_refuses_a_data_dir_inside_the_work_tree`,
+/// `relocate_refuses_a_new_root_that_encloses_the_store`.
+pub(crate) fn refuse_data_dir_store_in_work_tree(index_id: &str, root: &Path) -> Result<()> {
+    if root.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let base = persistence::data_dir()?;
+    if !base
+        .ancestors()
+        .any(|a| trusty_common::index_id::identifies_same_path(a, root))
+    {
+        return Ok(());
+    }
+    Err(StoreInWorkTreeRefused {
+        index_id: index_id.to_string(),
+        target: base
+            .join("indexes")
+            .join(persistence::sanitize_id_for_path(index_id)),
+        data_base: base,
+        root: root.to_path_buf(),
+    }
+    .into())
 }
 
 /// The write guard: refuse a `DataDir` target that lands under the root.

@@ -110,6 +110,9 @@ mod tests_8438;
 // #8499: indexing never modifies a tracked file; the index survives git clean.
 #[cfg(test)]
 mod tests_8499;
+// #8499 round 2: store placement, registration claims, relocate vs reindex.
+#[cfg(test)]
+mod registration_8499_tests;
 // #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
 #[cfg(test)]
 mod tests_8148;
