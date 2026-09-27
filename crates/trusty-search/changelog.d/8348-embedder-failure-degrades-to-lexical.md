@@ -1,0 +1,3 @@
+Fixed
+- A search whose query embed fails, for example because the embedder sidecar cannot spawn, now answers `200` with lexical results instead of `500 internal search error`. The response sets `meta.vector_unavailable: true` and carries the embedder's error in `meta.embedder_error`. A query that pinned `"stage": "semantic"` gets `503 vector_unavailable` with `reason: "embedder_unavailable"` and `retryable: true` (#8348).
+- `/health` now reports `embedder: "stalled"` after a failed query embed, including for a lazily spawned sidecar that was never flagged ready, and the `search_health` MCP tool reports `embedder_unavailable` with `healthy: false` instead of `ok` (#8348).
