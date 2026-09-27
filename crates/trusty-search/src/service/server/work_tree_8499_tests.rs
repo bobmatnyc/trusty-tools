@@ -8,13 +8,12 @@
 //! repos, reusing the fixtures in `tests_8499` and `registration_8499_tests`.
 //! Test: this module. Run with `cargo test -p trusty-search work_tree_8499`.
 
-use super::registration_8499_tests::{post_create, wait_until};
+use super::registration_8499_tests::post_create;
 use super::tests_8499::{clean_repo, git, mock_state, unregister};
 use super::tests_components::IsolatedDataDir;
 use super::*;
 use crate::core::registry::IndexId;
 use crate::service::persistence::PersistedIndex;
-use crate::service::reindex::{spawn_reindex_awaitable, ReindexProgress, ReindexStatus};
 use axum::http::StatusCode;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,8 +115,11 @@ fn a_git_file_marks_the_top_of_a_linked_worktree() {
 /// `POST /indexes` then failed its corpus open with a bare `500`. This is also
 /// how round 1's `index_survives_git_reset_hard_and_clean_fdx` flaked under
 /// full-suite load.
-/// What: holds the background permit (another index's embed pass), indexes
-/// with the default `defer_embed`, parks the index cold, and re-registers.
+/// What: a held clone of the registered handle stands in for the parked
+/// embed job, which holds exactly that — waiting on the real, process-wide
+/// queue made the release depend on every other test's jobs. The index is
+/// parked cold as the residency sweep parks it, then re-registered; dropping
+/// the clone releases the store and the retry registers.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
@@ -127,21 +129,10 @@ async fn re_register_while_an_earlier_handle_holds_the_store_is_retryable() {
     let (_dir, root) = clean_repo("busy-8499-", None);
     const ID: &str = "busy-store-8499";
     let id = IndexId::new(ID);
-    let background = crate::service::reindex::background_reindex_semaphore()
-        .acquire()
-        .await
-        .expect("background permit");
 
-    let (status, body) = post_create(&state, ID, &root, false).await;
+    let (status, body) = post_create(&state, ID, &root, true).await;
     assert_eq!(status, StatusCode::OK, "create: {body}");
-    let handle = state.registry.get(&id).expect("registered");
-    let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex_awaitable(Arc::clone(&handle), Arc::clone(&progress), false)
-        .await
-        .expect("reindex task must not panic");
-    assert_eq!(progress.status.load(), ReindexStatus::Complete, "reindex");
-    let earlier = Arc::downgrade(&handle);
-    drop(handle);
+    let earlier = state.registry.get(&id).expect("registered");
     let entry = crate::service::persistence::find_index_registry_entry(ID)
         .expect("read indexes.toml")
         .expect("persisted");
@@ -156,12 +147,8 @@ async fn re_register_while_an_earlier_handle_holds_the_store_is_retryable() {
     assert!(parked, "parked");
     // As `residency_sweep` does after a park.
     state.watcher_manager.stop_for_index(&id).await;
-    assert!(
-        earlier.upgrade().is_some(),
-        "fixture: the parked embed job still holds the earlier handle"
-    );
 
-    let (status, body) = post_create(&state, ID, &root, false).await;
+    let (status, body) = post_create(&state, ID, &root, true).await;
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -171,12 +158,8 @@ async fn re_register_while_an_earlier_handle_holds_the_store_is_retryable() {
     assert_eq!(body["retryable"], true, "{body}");
     assert!(state.registry.get(&id).is_none(), "nothing registered");
 
-    drop(background);
-    wait_until("the embed job releases the earlier handle", || {
-        earlier.upgrade().is_none()
-    })
-    .await;
-    let (status, body) = post_create(&state, ID, &root, false).await;
+    drop(earlier);
+    let (status, body) = post_create(&state, ID, &root, true).await;
     assert_eq!(status, StatusCode::OK, "retry after release: {body}");
     unregister(&state, ID).await;
 }

@@ -140,7 +140,7 @@ async fn relocate_refuses_a_new_root_that_encloses_the_store() {
 }
 
 /// Poll `cond` every 20 ms for up to 10 s; panic naming `what` on timeout.
-pub(super) async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+async fn wait_until(what: &str, cond: impl Fn() -> bool) {
     for _ in 0..500 {
         if cond() {
             return;
