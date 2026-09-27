@@ -6,7 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.52.5] — 2026-09-27
+## [0.52.6] — 2026-09-27
+
+0.52.5 was tagged but never published.
 
 ### Added
 

@@ -115,7 +115,12 @@ name = "trusty-common"
 # 0.52.5 (#8732, issue #4421): patch — 0.52.4 is already live on crates.io
 # and this PR changes `src/**`, so the "PR version bump vs crates.io" gate
 # requires a bump. No public item added, removed, or changed shape.
-version = "0.52.5"
+# 0.52.6: 0.52.5 was tagged but never published — its tag `trusty-common-v0.52.5`
+# is bound to a commit whose pre-publish.yml Gate 1 (rustdoc broken intra-doc
+# links, from trusty-mpm's #8767 split) was red, so that version number is
+# burned (tags are immutable, #6178). No source change; republish under the
+# next version.
+version = "0.52.6"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
