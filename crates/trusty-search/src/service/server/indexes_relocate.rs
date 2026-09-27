@@ -185,6 +185,11 @@ pub(crate) async fn relocate_index_report(
     // `state.cold_store` — relocating onto a cold entry's parked root is the
     // same root-theft as `create_index_handler`'s cold blind spot, just via
     // the PATCH path instead. One shared primitive, one shared fix.
+    //
+    // #8499: held to the registry swap, so a create or relocate into an equal
+    // or nested root waits here and then sees this one's handle — the same
+    // claim `POST /indexes` holds (#2336 check-then-act).
+    let _claim = super::create_layout::claim_registration(id, &new_root).await;
     let handles = state.registry.list_handles();
     let cold_entries = state.cold_store.snapshot();
     if let Some(existing_id) =
@@ -197,6 +202,26 @@ pub(crate) async fn relocate_index_report(
             existing_id,
         );
         return Err(root_path_collision_response(&existing_id, &new_root));
+    }
+    // #8499: nested roots, as `POST /indexes` checks them (#4289).
+    match super::root_overlap::find_root_overlap(
+        &handles,
+        &cold_entries,
+        &new_root,
+        Some(&index_id),
+    ) {
+        Ok(None) => {}
+        Ok(Some(conflict)) => {
+            tracing::warn!(
+                "relocate[{id}]: refusing to relocate to {} — overlaps index '{}' (#4289)",
+                new_root.display(),
+                conflict.index_id,
+            );
+            return Err(super::root_overlap::root_overlap_response(
+                &conflict, &new_root,
+            ));
+        }
+        Err(failure) => return Err(super::root_overlap::overlap_check_failed_response(&failure)),
     }
 
     // Require an embedder so we can rebuild the indexer (it needs to open

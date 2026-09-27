@@ -108,16 +108,19 @@ pub(super) fn clean_repo(prefix: &str, gitignore: Option<&str>) -> (tempfile::Te
 
 /// Register `id` at `root` through the real handler, then run a full reindex
 /// to completion. Returns the live handle.
+///
+/// #8499 round 3: embeds inline (`defer_embed: false`). A deferred embed job
+/// holds the handle, and with it the redb file, while it waits for the one
+/// process-wide background permit — under full-suite load another test holds
+/// that permit, so a re-registration lost the open and flaked with `500`.
 async fn register_and_index(
     state: &Arc<SearchAppState>,
     id: &str,
     root: &Path,
 ) -> Arc<IndexHandle> {
-    let resp = super::indexes::create_index_handler(
-        State(Arc::clone(state)),
-        Json(create_req(id, root.to_path_buf())),
-    )
-    .await;
+    let mut req = create_req(id, root.to_path_buf());
+    req.defer_embed = Some(false);
+    let resp = super::indexes::create_index_handler(State(Arc::clone(state)), Json(req)).await;
     let status = resp.status();
     let body = super::tests_components::body_json(resp).await;
     assert_eq!(status, StatusCode::OK, "create must succeed: {body}");
@@ -183,8 +186,13 @@ async fn index_survives_git_reset_hard_and_clean_fdx() {
         marker_hits(&handle).await > 0,
         "#8499: the live index must stay queryable after git clean -fdx"
     );
+    let earlier = Arc::downgrade(&handle);
     drop(handle);
     unregister(&state, ID).await;
+    assert!(
+        earlier.upgrade().is_none(),
+        "#8499: nothing may still hold the store the re-registration opens"
+    );
 
     let restarted = register_and_index_no_reindex(&state, ID, &root).await;
     assert!(

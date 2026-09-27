@@ -100,15 +100,19 @@ pub(crate) struct ColocatedRootMissing {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "refusing to place a new store for index '{index_id}' at {}: the data dir {} lies \
-     inside the index root {}, where git clean -fdx deletes it (#8499)",
+     inside {}, the work tree holding the index root {}, where git clean -fdx deletes it \
+     (#8499)",
     target.display(),
     data_base.display(),
+    work_tree.display(),
     root.display()
 )]
 pub(crate) struct StoreInWorkTreeRefused {
     pub(crate) index_id: String,
     pub(crate) target: PathBuf,
     pub(crate) data_base: PathBuf,
+    /// The root itself, or the top of the git work tree holding it (#8499).
+    pub(crate) work_tree: PathBuf,
     pub(crate) root: PathBuf,
 }
 
@@ -148,12 +152,25 @@ impl StorageLayout {
     /// Test: `index_survives_git_reset_hard_and_clean_fdx`,
     /// `create_refuses_when_the_store_would_land_in_the_work_tree`,
     /// `create_refuses_a_data_dir_inside_the_work_tree`,
+    /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
     /// `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
     pub(crate) fn for_new_registration(index_id: &str, root_path: &Path) -> Result<Self> {
         if holds_colocated_artifact(root_path) {
             return Ok(Self::Colocated);
         }
-        refuse_data_dir_store_in_work_tree(index_id, root_path)?;
+        // #8499: an entry `indexes.toml` already holds at this root keeps the
+        // #8438 exemption; only a new placement is refused. An unreadable
+        // registry exempts nothing.
+        let existing = persistence::find_index_registry_entry(index_id)
+            .ok()
+            .flatten()
+            .is_some_and(|e| {
+                !e.colocated
+                    && trusty_common::index_id::identifies_same_path(&e.root_path, root_path)
+            });
+        if !existing {
+            refuse_data_dir_store_in_work_tree(index_id, root_path)?;
+        }
         Self::DataDir.storage_dir(index_id, root_path)?;
         Ok(Self::DataDir)
     }
@@ -328,38 +345,67 @@ fn holds_colocated_artifact(root: &Path) -> bool {
     })
 }
 
-/// Refuse a `DataDir` store for `index_id` that would sit inside `root` (#8499).
+/// The top of the git work tree that holds `root`, or `None` outside any repo.
+///
+/// Why (#8499): `git clean -fdx` run at the top deletes every untracked file
+/// in the work tree, not only those under the index root.
+/// What: the nearest of `root` and its ancestors holding a `.git` entry, as
+/// `git rev-parse --show-toplevel` answers. A `.git` directory is a plain
+/// repository; a `.git` file is a linked worktree or a submodule, whose top is
+/// that directory — an outer repository's clean does not descend into it.
+/// Test: `a_git_file_marks_the_top_of_a_linked_worktree`.
+pub(crate) fn enclosing_work_tree(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .map(Path::to_path_buf)
+}
+
+/// Refuse a `DataDir` store for `index_id` that would sit inside the work tree
+/// holding `root` (#8499).
 ///
 /// Why: [`refuse_write_under_root`] exempts a data dir that itself sits under
 /// the root, so an existing `$HOME`-rooted index keeps its writes. A NEW
 /// placement gets no such exemption: `TRUSTY_DATA_DIR` inside the repo, or a
 /// dotfiles repo at `$HOME` over the default data dir, would put the whole
-/// store where `git clean -fdx` deletes it.
+/// store where `git clean -fdx` deletes it — and that clean runs from the
+/// repository top, so a root at `<repo>/sub` does not shield `<repo>/data`.
 /// What: resolves the configured data dir and refuses with
 /// [`StoreInWorkTreeRefused`] when it, or any ancestor of it, is the same
-/// directory as `root` — compared by `(dev, ino)`, so a symlink or a
-/// case-variant spelling cannot slip past. Registration and relocate call it;
-/// the existing-entry write path does not. Creates only the data dir itself,
+/// directory as `root` or as [`enclosing_work_tree`]`(root)` — compared by
+/// `(dev, ino)` over both the configured and the canonical spelling, so a
+/// symlink or a case variant cannot slip past. A root in no repository is
+/// checked against itself only. Registration and relocate call it; the
+/// existing-entry write path does not. Creates only the data dir itself,
 /// exactly as [`persistence::data_dir`] always does.
 /// Test: `create_refuses_a_data_dir_inside_the_work_tree`,
+/// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
 /// `relocate_refuses_a_new_root_that_encloses_the_store`.
 pub(crate) fn refuse_data_dir_store_in_work_tree(index_id: &str, root: &Path) -> Result<()> {
     if root.as_os_str().is_empty() {
         return Ok(());
     }
     let base = persistence::data_dir()?;
-    if !base
-        .ancestors()
-        .any(|a| trusty_common::index_id::identifies_same_path(a, root))
-    {
+    // #8499: the work tree top, not only the root, bounds what a clean deletes.
+    let guards: Vec<PathBuf> = std::iter::once(root.to_path_buf())
+        .chain(enclosing_work_tree(root))
+        .collect();
+    let spellings = [Some(base.clone()), std::fs::canonicalize(&base).ok()];
+    let Some(work_tree) = guards.into_iter().find(|guard| {
+        spellings.iter().flatten().any(|spelling| {
+            spelling
+                .ancestors()
+                .any(|a| trusty_common::index_id::identifies_same_path(a, guard))
+        })
+    }) else {
         return Ok(());
-    }
+    };
     Err(StoreInWorkTreeRefused {
         index_id: index_id.to_string(),
         target: base
             .join("indexes")
             .join(persistence::sanitize_id_for_path(index_id)),
         data_base: base,
+        work_tree,
         root: root.to_path_buf(),
     }
     .into())

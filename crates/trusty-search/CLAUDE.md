@@ -243,14 +243,22 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
-- **Response 409** (#8499): the index store would land inside the index root —
-  `TRUSTY_DATA_DIR` at or under `<root_path>`, or the default data dir under a
-  root such as `$HOME`. Nothing is registered and no store is written.
-  `PATCH /indexes/:id` refuses a new root the same way, and also answers
-  `409` while a reindex holds that index.
+- **Response 409** (#8499): the index store would land inside the git work
+  tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
+  repository (not only under `<root_path>`), or the default data dir under a
+  root such as `$HOME`. Outside any repository the root itself is the bound.
+  A linked worktree or submodule is its own work tree. An id already in
+  `indexes.toml` at the same root is exempt. Nothing is registered and no
+  store is written. `PATCH /indexes/:id` refuses a new root the same way, and
+  also answers `409` while a reindex holds that index.
+- **Response 503** `index_corpus_unavailable` (#8499): the store is still
+  open under an earlier registration of the same index (a deferred embed job
+  or an unfinished delete close). Carries `index_id`, `failure_kind`, and
+  `retryable: true`; nothing is registered. Retry.
 
-Concurrent registrations wait for each other only when they share an id or
-their roots are equal or nested; unrelated roots register in parallel.
+Concurrent registrations and relocates wait for each other only when they
+share an id or their roots are equal or nested; unrelated roots register in
+parallel.
 
 **Storage placement (#8499).** A new index keeps its store in the data dir
 (`<data_dir>/indexes/<id>/`), outside the work tree, so `git reset --hard` plus

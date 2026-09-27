@@ -4,8 +4,10 @@
 //! Why: #8499 moved new indexes out of the work tree into the per-id data dir.
 //! Two registrations over one root no longer share a redb file, so redb's
 //! single-open no longer catches the #2336 check-then-act race; a claim does.
+//! Relocate takes the same claim for its new root (#8499 round 3).
 //! Test: `service::server::tests_8499`,
-//! `create_index_concurrent_same_root_only_one_wins`.
+//! `create_index_concurrent_same_root_only_one_wins`,
+//! `relocate_races_into_one_root_register_exactly_once`.
 
 use crate::service::storage_layout::{is_write_refusal, StorageLayout};
 use axum::http::StatusCode;
@@ -103,6 +105,58 @@ pub(super) async fn claim_registration(id: &str, root: &Path) -> RegistrationCla
             .push((token, id.to_string(), root.to_path_buf()));
         return RegistrationClaim { token };
     }
+}
+
+/// The refusal for a registration whose freshly built indexer could not open
+/// its redb corpus.
+///
+/// Why (#8499): a deferred embed job, or a delete whose close has not run,
+/// can keep an earlier generation of the same index — and its redb file —
+/// alive after the registration is gone. The re-registration then loses the
+/// single open. That is transient, so answering `500` told a caller to give up
+/// on something a retry fixes.
+/// What: a transient kind (#4333 `Contention` or `OpenTimeout`) → `503
+/// index_corpus_unavailable` with `index_id`, `failure_kind`, `transient` and
+/// `retryable: true`, the index-scoped contract's shape. Any other kind keeps
+/// the #2336 `500`. Nothing is registered either way.
+/// Test: `re_register_while_an_earlier_handle_holds_the_store_is_retryable`.
+pub(super) fn corpus_open_refusal(
+    id: &str,
+    root: &Path,
+    kind: Option<crate::core::corpus::CorpusOpenFailure>,
+) -> (StatusCode, serde_json::Value) {
+    tracing::error!(
+        "create_index: corpus open failed for '{id}' at {} ({kind:?}) — refusing to register \
+         a broken index handle (#2336, #8499)",
+        root.display()
+    );
+    let Some(kind) = kind.filter(|k| k.is_transient()) else {
+        let error = format!(
+            "corpus open failed for root_path {:?}; refusing to register a broken index handle",
+            root.display()
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "error": error }),
+        );
+    };
+    let message = format!(
+        "the store of index '{id}' is still open under an earlier registration of that index \
+         (a background embed pass, or a delete whose close has not finished); nothing was \
+         registered — retry once it is released (#8499). {}",
+        kind.stage_reason()
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "index_corpus_unavailable",
+            "index_id": id,
+            "failure_kind": kind.label(),
+            "transient": true,
+            "retryable": true,
+            "message": message,
+        }),
+    )
 }
 
 /// The layout for a new registration, or the HTTP refusal.

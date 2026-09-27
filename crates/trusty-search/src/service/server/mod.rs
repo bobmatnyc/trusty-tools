@@ -113,6 +113,9 @@ mod tests_8499;
 // #8499 round 2: store placement, registration claims, relocate vs reindex.
 #[cfg(test)]
 mod registration_8499_tests;
+// #8499 round 3: enclosing work tree, busy store, relocate under the claim.
+#[cfg(test)]
+mod work_tree_8499_tests;
 // #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
 #[cfg(test)]
 mod tests_8148;

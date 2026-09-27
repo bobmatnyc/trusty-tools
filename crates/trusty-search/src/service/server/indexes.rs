@@ -606,21 +606,11 @@ pub(crate) async fn create_index_report(
     // failure was swallowed: `indexer.corpus_open_failed` was set but never
     // checked here.
     if indexer.corpus_open_failed {
-        tracing::error!(
-            "create_index: corpus open failed for '{}' at {} — refusing to register a \
-             broken index handle (issue #2336)",
-            req.id,
-            req.root_path.display()
-        );
-        return Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "corpus open failed for root_path {:?}; refusing to register a broken \
-                     index handle",
-                    req.root_path.display()
-                )
-            }),
+        // #8499: a store an earlier generation still holds is a retryable 503.
+        return Err(super::create_layout::corpus_open_refusal(
+            &req.id,
+            &req.root_path,
+            indexer.corpus_open_failure,
         ));
     }
 

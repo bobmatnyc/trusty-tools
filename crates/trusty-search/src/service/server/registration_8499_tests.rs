@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 /// POST `create_req(id, root)` (optionally lexical-only) through the real
 /// handler; returns the status and JSON body.
-async fn post_create(
+pub(super) async fn post_create(
     state: &Arc<SearchAppState>,
     id: &str,
     root: &Path,
@@ -140,7 +140,7 @@ async fn relocate_refuses_a_new_root_that_encloses_the_store() {
 }
 
 /// Poll `cond` every 20 ms for up to 10 s; panic naming `what` on timeout.
-async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+pub(super) async fn wait_until(what: &str, cond: impl Fn() -> bool) {
     for _ in 0..500 {
         if cond() {
             return;
