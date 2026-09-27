@@ -10,7 +10,9 @@
 //! tree holding an uncommitted file; the pre-delete re-check admits a landed
 //! tree with no pull request and refuses one that stopped being landed. The
 //! #7771 (f) route counts a tree landed only when every commit is on some
-//! origin ref, and refuses when that count fails.
+//! origin ref, and refuses when that count fails. #8721: a detached HEAD
+//! whose content landed is admitted by the survey and the re-check; residue,
+//! and `Unknown` on a branch, still refuse.
 
 use std::path::Path;
 
@@ -354,4 +356,115 @@ fn worktree_7771_a_failed_origin_count_refuses() {
 
     let plain = tempfile::tempdir().expect("tempdir");
     assert!(published_verdict(plain.path(), &|_| None).is_none());
+}
+
+/// The #8721 shape: a donor tree detached on its landed commit, its branch
+/// deleted, so the survey resolves it to `BranchPrState::Unknown`.
+fn detached_donor(name: &str) -> (GitWorktreeFixture, std::path::PathBuf) {
+    let (fx, wt) = donor(name);
+    git(&wt, &["checkout", "-q", "--detach"]);
+    git(&wt, &["branch", "-q", "-D", &format!("session/{name}")]);
+    (fx, wt)
+}
+
+/// The survey's verdict for `wt` under `index`, with `probe` offered.
+fn survey_verdict(
+    fx: &GitWorktreeFixture,
+    wt: &Path,
+    index: &dyn Fn(&Path) -> PrIndex,
+    probe: &dyn Fn(&Path) -> crate::core::worktree_landed_content::LandingAdmission,
+) -> (BranchPrState, ReclaimVerdict) {
+    let s = survey_with_landed_content(
+        &fx.repos_root,
+        &LiveClaims::default(),
+        index,
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+        &KeepList::default(),
+        &[],
+        Some(probe),
+    );
+    let found = s
+        .candidates
+        .into_iter()
+        .find(|c| c.path == wt)
+        .unwrap_or_else(|| panic!("survey missed {}", wt.display()));
+    (found.pr, found.verdict)
+}
+
+/// 🔴 REGRESSION (#8721): a clean detached tree whose content is on
+/// `origin/main` is reclaimable. Fails at 62b6f29e1, where gate 5 refused
+/// every `Unknown` state without asking the admission.
+#[test]
+fn worktree_8721_the_sweep_admits_a_detached_head_whose_content_landed() {
+    let (fx, wt) = detached_donor("detached-8721");
+    let (pr, verdict) = survey_verdict(&fx, &wt, &unrelated_index, &reclaim_landed_content);
+    assert_eq!(pr, BranchPrState::Unknown, "fixture: detached");
+    assert!(
+        matches!(verdict, ReclaimVerdict::ReclaimableLandedContent { .. }),
+        "{verdict:?}"
+    );
+}
+
+/// 🔴 #8721 error arm: a detached tree holding a commit `origin/main` lacks is
+/// refused, and the refusal names the admission. Fails at 62b6f29e1, whose
+/// refusal never asked it.
+#[test]
+fn worktree_8721_the_sweep_refuses_a_detached_head_holding_residue() {
+    let (fx, wt) = detached_donor("detached-residue-8721");
+    GitWorktreeFixture::commit_unpushed(&wt);
+    let (_, verdict) = survey_verdict(&fx, &wt, &unrelated_index, &reclaim_landed_content);
+    assert!(!verdict.is_reclaimable(), "{verdict:?}");
+    let shown = format!("{verdict:?}");
+    assert!(shown.contains("landed-content"), "{shown}");
+    assert!(shown.contains("unpushed.txt"), "{shown}");
+}
+
+/// 🔴 #8721: `Unknown` on a BRANCH — a truncated index — never reaches the
+/// admission, even when the probe would admit.
+#[test]
+fn worktree_8721_an_unknown_state_on_a_branch_is_still_refused() {
+    let (fx, wt) = donor("truncated-8721");
+    // A full page (one row, limit one) is read as truncated.
+    let truncated = |_: &Path| {
+        PrIndex::from_json(
+            r#"[{"number": 72, "headRefName": "session/somebody-else", "state": "MERGED"}]"#,
+            1,
+        )
+    };
+    let landed = |_: &Path| -> crate::core::worktree_landed_content::LandingAdmission {
+        LandedContent::Landed {
+            base: "origin/main".into(),
+            base_sha: "0".repeat(40),
+            landed_at: None,
+        }
+        .into()
+    };
+    let (pr, verdict) = survey_verdict(&fx, &wt, &truncated, &landed);
+    assert_eq!(pr, BranchPrState::Unknown, "fixture: truncated index");
+    assert!(!verdict.is_reclaimable(), "{verdict:?}");
+}
+
+/// 🔴 #8721: the pre-delete re-check admits the detached tree the survey did.
+#[test]
+fn worktree_8721_the_recheck_admits_a_detached_head_whose_content_landed() {
+    let (_fx, wt) = detached_donor("detached-recheck-8721");
+    let recheck = |probe| {
+        let unknown = BranchPrState::Unknown;
+        let claims = LiveClaims::default();
+        recheck_before_delete(
+            &wt,
+            &KeepList::default(),
+            Some(&claims),
+            &unknown,
+            &no_agents,
+            probe,
+        )
+    };
+    assert_eq!(recheck(Some(&reclaim_landed_content)), None);
+    assert!(
+        recheck(None).is_some(),
+        "no probe offered keeps the refusal"
+    );
 }

@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 // #7889: gate 5's landed-content admission lives next door so this file stays
 // under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
 pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
-use super::worktree_reclaim_landed::{merged_pr_verdict, no_pr_verdict, published_verdict};
+use super::worktree_reclaim_landed::{
+    merged_pr_verdict, no_pr_verdict, published_verdict, unknown_pr_verdict,
+};
 
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
 // the re-import keeps every call site (and `super::*` in the tests) unchanged.
@@ -868,13 +870,9 @@ pub(crate) fn classify_with_landed_content(
         }
         // #7771: `Unknown` is a detached HEAD or a truncated index, never a
         // failed lookup (that is `LookupFailed`), so it does not blame `gh`.
+        // #8721: a detached HEAD reaches the landing admission.
         BranchPrState::Unknown => {
-            return ReclaimVerdict::blocked(
-                ReclaimGate::PrState,
-                "pull-request state could not be determined — a detached HEAD no merged \
-                 pull request's commit search matched, or a branch past the index's page \
-                 limit",
-            );
+            return unknown_pr_verdict(path, probe_dirt, landed_content);
         }
         // #6561: the lookup broke. Same refusal, but naming the cause — the
         // operator can act on `gh exited 4: … gh auth login`; they cannot act

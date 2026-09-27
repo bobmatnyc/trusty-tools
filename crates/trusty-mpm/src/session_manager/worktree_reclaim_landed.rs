@@ -77,11 +77,53 @@ pub(super) fn no_pr_verdict(
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
     landed_content: LandedContentProbe<'_>,
 ) -> ReclaimVerdict {
+    admit_or_refuse(
+        path,
+        probe_dirt,
+        landed_content,
+        "no pull request found for this branch",
+    )
+}
+
+/// Gate 5's refusal for [`BranchPrState::Unknown`].
+pub(super) const UNKNOWN_PR_STATE: &str = "pull-request state could not be determined — a \
+     detached HEAD no merged pull request's commit search matched, or a branch past the \
+     index's page limit";
+
+/// Gate 5's verdict for [`BranchPrState::Unknown`] (#8721).
+///
+/// Why: a detached HEAD has no branch for GitHub to vouch for, so it resolves
+/// to `Unknown`, and gate 5 refused it even when its content was already on
+/// `origin/main`. The landing admission judges `HEAD` and needs no branch.
+/// What: a detached HEAD gets [`no_pr_verdict`]'s dirt check and admission
+/// under [`UNKNOWN_PR_STATE`]. A branch (a truncated index) and a HEAD git
+/// cannot read keep the refusal, as does a caller offering no probe.
+/// Test: `worktree_8721_the_sweep_admits_a_detached_head_whose_content_landed`,
+/// `worktree_8721_the_sweep_refuses_a_detached_head_holding_residue`,
+/// `worktree_8721_an_unknown_state_on_a_branch_is_still_refused`.
+pub(super) fn unknown_pr_verdict(
+    path: &Path,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimVerdict {
+    let offered = landed_content.filter(|_| head_is_detached(path));
+    admit_or_refuse(path, probe_dirt, offered, UNKNOWN_PR_STATE)
+}
+
+/// Is `path`'s HEAD detached (#8721)? `false` when git cannot say.
+fn head_is_detached(path: &Path) -> bool {
+    git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"]).is_ok_and(|name| name.trim() == "HEAD")
+}
+
+/// [`no_pr_verdict`]'s body, refusing with `refusal` (#8721).
+fn admit_or_refuse(
+    path: &Path,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    landed_content: LandedContentProbe<'_>,
+    refusal: &str,
+) -> ReclaimVerdict {
     let Some(ask) = landed_content else {
-        return ReclaimVerdict::blocked(
-            ReclaimGate::PrState,
-            "no pull request found for this branch",
-        );
+        return ReclaimVerdict::blocked(ReclaimGate::PrState, refusal);
     };
     // Gate 6, brought forward: it runs before the fetch, which also spares a
     // dirty tree the cost.
@@ -99,10 +141,7 @@ pub(super) fn no_pr_verdict(
         Some(pr) => ReclaimVerdict::Reclaimable { pr },
         None => ReclaimVerdict::blocked(
             ReclaimGate::PrState,
-            format!(
-                "no pull request found for this branch, and {}",
-                admission.note()
-            ),
+            format!("{refusal}, and {}", admission.note()),
         ),
     }
 }
@@ -368,9 +407,11 @@ fn first_unreachable_session_commit(path: &Path) -> Option<(String, String)> {
 /// What: a merge re-runs [`inspect_dirt`]; clean permits, and commits-only
 /// dirt re-asks the offered probe, as [`merged_pr_verdict`] did. No pull
 /// request re-asks the offered probe, which covers both dirt outside `HEAD` and
-/// both routes. No probe offered, or any other pull-request state, refuses.
+/// both routes. #8721: `Unknown` on a detached HEAD re-asks it too. No probe
+/// offered, or any other pull-request state, refuses.
 /// `Some(reason)` refuses; `None` permits.
 /// Test: `recheck_refuses_when_the_pr_is_no_longer_merged`,
+/// `worktree_8721_the_recheck_admits_a_detached_head_whose_content_landed`,
 /// `worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request`,
 /// `worktree_7889_the_recheck_refuses_a_tree_no_longer_landed`,
 /// `worktree_7889_the_recheck_admits_a_merged_donor_with_commits_only_dirt`.
@@ -402,6 +443,10 @@ pub(super) fn landing_recheck(
         },
         BranchPrState::NoPr if landed_content.is_some() => {
             ask_or("no pull request carries this branch".to_string())
+        }
+        // #8721: the survey admitted this detached HEAD on the same probe.
+        BranchPrState::Unknown if landed_content.is_some() && head_is_detached(path) => {
+            ask_or(UNKNOWN_PR_STATE.to_string())
         }
         _ => Some(format!(
             "pull-request state is no longer a merge ({pr_now:?})"
