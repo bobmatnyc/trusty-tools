@@ -152,6 +152,39 @@ fn apply_writes_the_planned_rooms() {
     let _ = palace;
 }
 
+/// #8733: registering rooms is not maintenance, so `--apply` still writes
+/// while another process holds the data root's maintenance lease, but its
+/// Writer open deletes no expired row. Pre-fix that open purged the row.
+#[test]
+fn apply_under_a_lease_held_elsewhere_deletes_no_expired_row() {
+    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let rooms = [RoomType::Planning];
+    let palace = seed_palace(tmp.path(), "leased", &rooms);
+    let kg_path = palace.data_dir.join("kg.redb");
+    let mut expired = Drawer::new(room_to_uuid(&RoomType::Planning), "an expired drawer");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    KgStoreRedb::open(&kg_path)
+        .expect("open kg")
+        .upsert_drawer(&expired)
+        .expect("seed expired drawer");
+    let holder = MaintenanceLease::new(tmp.path());
+    assert!(holder.try_hold().is_held());
+
+    let applied = audit_palaces(tmp.path(), None, true).expect("apply");
+    assert!(applied[0].error.is_none(), "{:?}", applied[0].error);
+    assert_eq!(
+        applied[0].inserted,
+        Some(rooms.len()),
+        "the apply still ran"
+    );
+    let ids = KgStoreRedb::open(&kg_path)
+        .expect("reopen kg")
+        .load_drawer_ids()
+        .expect("ids");
+    assert!(ids.contains(&expired.id), "the expired row was deleted");
+}
+
 #[test]
 fn audit_can_be_scoped_to_one_palace() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -40,10 +40,12 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use trusty_common::memory_core::palace::{Drawer, Palace};
-use trusty_common::memory_core::retrieval::{PalaceHandle, VectorBackfillOptions};
+use trusty_common::memory_core::retrieval::VectorBackfillOptions;
 use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
-use trusty_common::memory_core::{memory_content_hash, ContentHash};
+use trusty_common::memory_core::{memory_content_hash, ContentHash, MaintenanceLease};
 use uuid::Uuid;
+
+use super::maintenance_gate::open_purging_under_lease;
 
 use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
 
@@ -507,7 +509,8 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// aside and recreate it empty (#702). Then backs up every store file into
 /// `<palace>/legacy-kg-backup-<timestamp>/` and bails, writing nothing, when a
 /// copy fails verification ([`guard::backup_stores`]). Then opens the palace
-/// `Writer` (whose open may already sweep expired rows); refuses
+/// `Writer` (whose open sweeps expired rows only while this process holds
+/// `data_root`'s maintenance lease, #8733); refuses
 /// a handle whose drawer table loaded degraded (a partial live set would
 /// re-import rows it merely failed to read, overwriting them with their legacy
 /// text). Dedupes against the ids in `kg.redb` only, never the L1 snapshot,
@@ -527,22 +530,25 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// `apply_with_a_failing_backup_writes_nothing`,
 /// `credential_row_is_rejected_in_dry_run_and_apply`,
 /// `short_secret_row_is_rejected_even_with_allow_short`,
-/// `apply_error_after_backup_names_the_kept_backup`.
+/// `apply_error_after_backup_names_the_kept_backup`,
+/// `import_under_a_lease_held_elsewhere_deletes_no_expired_row`.
 pub async fn apply_report(
     palace: &Palace,
+    data_root: &Path,
     embed: bool,
     include_content_duplicates: bool,
     allow_short: bool,
 ) -> Result<LegacyReport> {
     let copy: CopyFn = |from, to| std::fs::copy(from, to);
     let flags = (embed, include_content_duplicates, allow_short);
-    apply_report_with(palace, flags, &palace.data_dir, copy).await
+    apply_report_with(palace, data_root, flags, &palace.data_dir, copy).await
 }
 
 /// [`apply_report`] with the backup parent dir and per-file copy injected;
 /// `flags` is `(embed, include_content_duplicates, allow_short)`.
 pub(crate) async fn apply_report_with(
     palace: &Palace,
+    data_root: &Path,
     (embed, include_content_duplicates, allow_short): (bool, bool, bool),
     backup_parent: &Path,
     copy: CopyFn,
@@ -558,7 +564,7 @@ pub(crate) async fn apply_report_with(
     let kept = format!("backup kept at {}", backup.dir.display());
     report.backup = Some(backup);
     report.include_content_duplicates = include_content_duplicates;
-    import_legacy(palace, legacy, report, embed)
+    import_legacy(palace, data_root, legacy, report, embed)
         .await
         .context(kept)
 }
@@ -566,11 +572,15 @@ pub(crate) async fn apply_report_with(
 /// The writes of [`apply_report_with`], run only after a verified backup.
 async fn import_legacy(
     palace: &Palace,
+    data_root: &Path,
     legacy: LegacyDrawers,
     mut report: LegacyReport,
     embed: bool,
 ) -> Result<LegacyReport> {
-    let handle = PalaceHandle::open_with_intent(palace, OpenIntent::Writer)
+    // #8733: the import is user data, not maintenance, so it goes ahead when
+    // another process holds the lease and only the open-time purge is skipped.
+    let lease = MaintenanceLease::new(data_root);
+    let handle = open_purging_under_lease(palace, OpenIntent::Writer, &lease)
         .with_context(|| format!("open palace {} for writing", palace.id))?;
     if handle.drawer_load_degraded {
         bail!(
