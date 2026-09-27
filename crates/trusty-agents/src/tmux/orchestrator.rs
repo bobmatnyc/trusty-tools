@@ -491,7 +491,7 @@ mod tests {
 
     // Integration tests — require a real tmux server.
     #[test]
-    #[ignore]
+    #[ignore = "needs a real tmux server on the default socket"]
     fn test_create_and_destroy_session() {
         let tmux = TmuxOrchestrator::new().unwrap();
         let name = "test-trusty-agents-create";
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs a real tmux server on the default socket"]
     fn test_send_line_and_capture() {
         let tmux = TmuxOrchestrator::new().unwrap();
         let name = "test-trusty-agents-io";

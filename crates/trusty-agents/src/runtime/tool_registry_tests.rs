@@ -979,7 +979,7 @@ fn assistant_delegate_to_engineer_path_is_scoped() {
 /// network or credentials required either way.
 /// Test: itself (manual verification only).
 #[tokio::test]
-#[ignore]
+#[ignore = "reads the real agent roster under $HOME; without one it passes without reaching the role gate"]
 async fn live_assistant_registry_rejects_pm_role() {
     let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard, None);
     assert!(
