@@ -8,6 +8,14 @@ operator interfaces in one Cargo workspace. The live package inventory comes
 from `cargo metadata`; the human-readable map is
 [docs/reference/crate-map.md](docs/reference/crate-map.md).
 
+| Crate | What it is | Install / run |
+|---|---|---|
+| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked && tm start` |
+| [trusty-memory](#trusty-memory--memory-palace-storage-engine) | Long-term memory storage with semantic search and an embedded UI | `cargo run -p trusty-memory -- serve` |
+| [trusty-search](#trusty-search--hybrid-code-search) | Machine-wide hybrid code search — BM25 + vector + KG fusion, MCP server | `cargo install trusty-search && trusty-search start` |
+| [trusty-review](#trusty-review--llm-backed-pr-review) | LLM-backed review of GitHub PRs and diffs via AWS Bedrock or OpenRouter | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked && trusty-review run owner repo 123` |
+| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start` |
+
 ## Flagship Crates
 
 ### trusty-mpm — Meta-Harness Multi-Agent Orchestration
@@ -17,13 +25,10 @@ sessions, relays hooks, and exposes an MCP server to Claude Code sessions,
 delegating coding tasks to `trusty-code`.
 
 **What you get:**
-- The formerly separate `trusty-mpm-{core,client,mcp,daemon,cli,tui,telegram}`
-  crates unified into one package with a single `[[bin]]` target (`tm` /
-  `trusty-mpm`)
-- Multi-project session management, hook relaying, and an MCP server for
-  Claude Code sessions
-- Feature-gated modules (`cli`, `daemon`, `mcp`, `tui`, `telegram`, `gui`) so a
-  build pulls in only what it needs
+- PM-style orchestration of Claude Code sessions, delegating coding tasks to
+  specialist agents such as `trusty-code` (`tcode`)
+- Multi-project session management with hook relaying
+- An MCP server exposed to Claude Code sessions
 - A TUI dashboard (`tm tui`) and a Telegram bot (`tm telegram pair`)
 
 **Quick start:**
@@ -47,7 +52,6 @@ Long-term memory storage with semantic search, persistent embedding index, and e
 - Collection organization (notes, snippets, code patterns, decisions)
 - Svelte UI for browsing and editing
 - MCP server for Claude Code integration
-- MIT license (memory preservation is for everyone)
 
 **Quick start:**
 ```bash
