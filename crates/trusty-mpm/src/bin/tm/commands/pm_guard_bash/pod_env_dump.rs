@@ -5,20 +5,42 @@
 //! on 2026-09-20. A pod's environment is where Kubernetes injects its Secrets,
 //! so a dump of it is a credential print that names no file — the #7266 rule
 //! never sees it.
-//! What: [`evaluate_pod_env_dump_command`] refuses a `kubectl`/`oc` `exec`
-//! whose remote command dumps the environment: `env` with no command to run,
+//! What: [`evaluate_pod_env_dump_command`] refuses a `kubectl`/`oc` `exec`, or
+//! an `oc rsh`, whose remote command dumps the environment: `env` with no command to run,
 //! `printenv` with no variable name, a bare `export`/`set`/`declare`, or a
 //! `/proc/<pid>/environ` read — directly or inside `sh -c '…'`. Naming a
 //! variable (`printenv LOG_LEVEL`) allows. A segment naming `kubectl exec`
 //! that does not lex, or nesting past [`MAX_DEPTH`], fails CLOSED.
 //! Test: `refuses_an_unscoped_pod_env_dump`, `allows_a_scoped_pod_command`,
-//! `refuses_what_it_cannot_read`.
+//! `refuses_an_oc_rsh_env_dump`, `refuses_what_it_cannot_read`.
 
 use super::bash_tokens::tokenize;
 use super::split_shell_segments;
 
 /// Programs whose `exec` subcommand runs a command inside a pod.
 const POD_CLIS: &[&str] = &["kubectl", "oc"];
+
+/// Pod-CLI subcommands that run a command inside a pod (#7648; `rsh` is
+/// `oc`'s remote shell, critic HIGH 1).
+const REMOTE_VERBS: &[&str] = &["exec", "rsh"];
+
+/// `oc rsh` options whose value is the next token when written without `=`.
+const RSH_VALUE_FLAGS: &[&str] = &[
+    "-c",
+    "--container",
+    "-n",
+    "--namespace",
+    "--shell",
+    "--timeout",
+    "-f",
+    "--filename",
+    "--context",
+    "--kubeconfig",
+    "--server",
+    "--token",
+    "--user",
+    "--cluster",
+];
 
 /// Shells whose `-c` operand is a script to judge in turn.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ash", "ksh"];
@@ -34,7 +56,7 @@ const MAX_DEPTH: usize = 4;
 /// Test: `refuses_an_unscoped_pod_env_dump`, `allows_a_scoped_pod_command`,
 /// `refuses_what_it_cannot_read`.
 pub(crate) fn evaluate_pod_env_dump_command(command: &str) -> Option<String> {
-    if !command.contains("exec") {
+    if !REMOTE_VERBS.iter().any(|verb| command.contains(verb)) {
         return None;
     }
     split_shell_segments(command)
@@ -49,7 +71,7 @@ fn segment_dumps_pod_env(segment: &str) -> bool {
         // #7648: fail closed on a segment we cannot read that names the shape.
         let words: Vec<&str> = segment.split(|c: char| !is_word_byte(c)).collect();
         return words.iter().any(|w| POD_CLIS.contains(w))
-            && words.contains(&"exec")
+            && words.iter().any(|w| REMOTE_VERBS.contains(w))
             && words
                 .iter()
                 .any(|w| matches!(*w, "env" | "printenv" | "environ"));
@@ -60,17 +82,44 @@ fn segment_dumps_pod_env(segment: &str) -> bool {
     let rest = &argv[cli + 1..];
     let separator = rest.iter().position(|t| t == "--");
     let options = &rest[..separator.unwrap_or(rest.len())];
-    let Some(exec_at) = options.iter().position(|t| t == "exec") else {
+    let Some(exec_at) = options
+        .iter()
+        .position(|t| REMOTE_VERBS.contains(&t.as_str()))
+    else {
         return false;
     };
     match separator {
         Some(at) => dumps_environment(&rest[at + 1..], 0),
+        // #7648 critic HIGH 1: `oc rsh <pod> <command…>` needs no `--`; the
+        // words after the pod name are the remote command.
+        None if options[exec_at] == "rsh" => rsh_remote_command(&options[exec_at + 1..])
+            .is_some_and(|argv| dumps_environment(argv, 0)),
         // The deprecated `kubectl exec <pod> env` form has no `--`, so the
         // remote command cannot be told from the options; its last word decides.
         None => options[exec_at + 1..]
             .last()
             .is_some_and(|last| matches!(basename(last), "env" | "printenv")),
     }
+}
+
+/// The remote command of `oc rsh [options] <pod> <command…>`, if one follows.
+///
+/// What: skips options, and the value of each [`RSH_VALUE_FLAGS`] spelling
+/// written without `=`; the first other word is the pod, and every word after
+/// it is the command. `None` for an interactive shell (no command).
+/// Test: `refuses_an_oc_rsh_env_dump`.
+fn rsh_remote_command(args: &[String]) -> Option<&[String]> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        if RSH_VALUE_FLAGS.contains(&arg.as_str()) {
+            i += 2;
+        } else if arg.starts_with('-') {
+            i += 1;
+        } else {
+            return args.get(i + 1..).filter(|command| !command.is_empty());
+        }
+    }
+    None
 }
 
 /// Whether the remote `argv` prints the whole environment.
@@ -202,6 +251,34 @@ mod tests {
             assert!(
                 evaluate_pod_env_dump_command(command).is_some(),
                 "`{command}` must deny"
+            );
+        }
+    }
+
+    /// 🔴 REGRESSION (#7648 critic HIGH 1): `oc rsh` runs a remote command
+    /// with no `exec` and no `--`. Both deny rows ALLOWED on `8dfcf2e1e`.
+    #[test]
+    fn refuses_an_oc_rsh_env_dump() {
+        for command in [
+            "oc rsh mypod env",
+            "oc rsh mypod -- env",
+            "oc -n prod rsh -c app mypod printenv",
+            "oc rsh --shell=/bin/bash mypod sh -c 'env | sort'",
+        ] {
+            assert!(
+                evaluate_pod_env_dump_command(command).is_some(),
+                "`{command}` must deny"
+            );
+        }
+        for command in [
+            "oc rsh mypod ls",
+            "oc rsh mypod",
+            "oc rsh mypod printenv HOME",
+        ] {
+            assert_eq!(
+                evaluate_pod_env_dump_command(command),
+                None,
+                "`{command}` must allow"
             );
         }
     }

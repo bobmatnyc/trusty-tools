@@ -42,14 +42,19 @@ const NON_PRINTING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
 ///
 /// Why: `~/.pm2/dump.pm2` (and its `.bak`) is pm2's `save` file — the full
 /// `env` of every process it supervises (#8523).
-/// What: a basename starting `dump.pm2`, case-insensitively, or a wildcard
-/// basename directly under a `.pm2` directory.
-/// Test: `names_a_pm2_dump_and_a_glob_over_its_home`.
+/// What: a basename starting `dump.pm2`, case-insensitively, a wildcard
+/// basename directly under a `.pm2` directory, or the `.pm2` directory itself
+/// (#8523 critic CRITICAL 2: a content `Grep` over it recurses into the dump).
+/// Test: `names_a_pm2_dump_and_a_glob_over_its_home`,
+/// `denies_a_grep_over_the_pm2_home_8523`.
 pub(crate) fn names_a_process_manager_dump(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    let lower = lower.trim_end_matches('/');
     let mut parts = lower.rsplit('/');
     let base = parts.next().unwrap_or_default();
-    base.starts_with("dump.pm2") || (parts.next() == Some(".pm2") && base.contains(['*', '?', '[']))
+    base == ".pm2"
+        || base.starts_with("dump.pm2")
+        || (parts.next() == Some(".pm2") && base.contains(['*', '?', '[']))
 }
 
 /// Refuse a tool call that would print a credential-bearing launchd plist
@@ -78,9 +83,12 @@ pub(crate) fn evaluate_env_plist_read(
         "Grep" => (vec![field("path")?.to_string()], false),
         _ => return None,
     };
+    // #8523 critic CRITICAL 1: a `Grep` prints the lines of every file under a
+    // directory, so a directory it names is judged, not waved through.
+    let searches_directories = tool_name == "Grep";
     candidates
         .iter()
-        .find_map(|word| judge_plist(word, cwd, has_cd).err())
+        .find_map(|word| judge_plist(word, cwd, has_cd, searches_directories).err())
 }
 
 /// Candidate plist words in a Bash command, and whether it changes directory.
@@ -129,9 +137,16 @@ fn push_candidates(text: &str, out: &mut Vec<String>) {
 ///
 /// What: a word naming no existing plist allows, unless it is relative and
 /// unverifiable (missing, or the command `cd`s first) or sits in a launchd
-/// directory behind a glob — both fail closed. An existing file is read and
-/// handed to [`judge_plist_bytes`].
-fn judge_plist(word: &str, cwd: &Path, has_cd: bool) -> Result<(), String> {
+/// directory behind a glob — both fail closed. A launchd directory, or one
+/// under it, is refused to a content search (`searches_directories`) and
+/// allowed otherwise. An existing file is read and handed to
+/// [`judge_plist_bytes`].
+fn judge_plist(
+    word: &str,
+    cwd: &Path,
+    has_cd: bool,
+    searches_directories: bool,
+) -> Result<(), String> {
     let lower = word.to_ascii_lowercase();
     let in_launchd_dir = lower.contains("launchagents") || lower.contains("launchdaemons");
     let is_plist = lower.ends_with(".plist");
@@ -147,6 +162,14 @@ fn judge_plist(word: &str, cwd: &Path, has_cd: bool) -> Result<(), String> {
     }
     let (mut path, relative) = resolve(word, cwd);
     if path.is_dir() {
+        // #8523 critic CRITICAL 1: a content search over a launchd directory
+        // prints every plist under it, as the glob arm above already refuses.
+        if searches_directories && in_launchd_dir {
+            return Err(deny_reason(
+                word,
+                "is a launchd directory a content search would print every plist of",
+            ));
+        }
         return Ok(());
     }
     // #8523: `defaults read ~/Library/LaunchAgents/com.x` reads `com.x.plist`.
@@ -214,13 +237,44 @@ fn resolve(word: &str, cwd: &Path) -> (PathBuf, bool) {
     }
 }
 
-/// Read at most [`MAX_PLIST_BYTES`]; a larger or unreadable file is an error.
+/// Read at most [`MAX_PLIST_BYTES`]; a larger, unreadable or non-regular file
+/// is an error.
+///
+/// Why: #8523 critic HIGH 2 — a FIFO or device reports length 0, so a size
+/// check alone passed it and the read blocked the PreToolUse hook forever.
+/// What: refuses anything whose (symlink-followed) type is not a regular file,
+/// opens with `O_NONBLOCK` so a FIFO swapped in afterwards cannot block the
+/// open, re-checks the OPENED handle's type, and reads through
+/// `take(MAX_PLIST_BYTES + 1)` so no size report is trusted.
+/// Test: `refuses_a_non_regular_plist_without_blocking`,
+/// `fails_closed_on_a_plist_it_cannot_judge`.
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let not_regular = || "is not a regular file".to_string();
     let meta = std::fs::metadata(path).map_err(|e| format!("could not be inspected ({e})"))?;
-    if meta.len() > MAX_PLIST_BYTES {
+    if !meta.file_type().is_file() {
+        return Err(not_regular());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| format!("could not be opened to check ({e})"))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| format!("could not be inspected ({e})"))?;
+    if !opened.file_type().is_file() {
+        return Err(not_regular());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PLIST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("could not be read to check ({e})"))?;
+    if bytes.len() as u64 > MAX_PLIST_BYTES {
         return Err(format!("is larger than {MAX_PLIST_BYTES} bytes"));
     }
-    std::fs::read(path).map_err(|e| format!("could not be read to check ({e})"))
+    Ok(bytes)
 }
 
 /// The refusal, naming the plist and why it could not be allowed.

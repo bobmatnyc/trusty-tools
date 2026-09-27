@@ -2574,6 +2574,22 @@ mod tests {
         }
     }
 
+    /// 🔴 REGRESSION (#8523 critic CRITICAL 2): a content `Grep` over the pm2
+    /// home recurses into `dump.pm2`. ALLOWED on `8dfcf2e1e`.
+    #[test]
+    fn denies_a_grep_over_the_pm2_home_8523() {
+        for path in ["/Users/x/.pm2", "/Users/x/.pm2/", "~/.pm2", ".pm2"] {
+            let grep = serde_json::json!({"pattern": ".", "path": path, "output_mode": "content"});
+            assert!(
+                evaluate_secret_file_read_tool("Grep", Some(&grep)).is_some(),
+                "Grep over `{path}` must deny"
+            );
+        }
+        for command in ["ls -la ~/.pm2", "tail -n 5 ~/.pm2/logs/api-out.log"] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+    }
+
     /// 🔴 REGRESSION (#8483): an `Edit`, `MultiEdit` or `Write` on a
     /// secret-bearing file is judged by the same predicate as `cat` of it, and
     /// allowed by the same exemptions. All three ALLOWED on `c3c63e72f`.

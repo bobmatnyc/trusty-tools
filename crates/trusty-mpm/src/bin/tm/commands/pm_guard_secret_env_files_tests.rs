@@ -161,3 +161,54 @@ fn fails_closed_on_a_plist_it_cannot_judge() {
     let (dir, path) = fixture("com.example.big.plist", big.as_bytes());
     assert!(tool("Read", &path, dir.path()).is_some());
 }
+
+/// 🔴 REGRESSION (#8523 critic CRITICAL 1): a content `Grep` over a launchd
+/// directory prints every plist's `EnvironmentVariables` values. ALLOWED on
+/// `8dfcf2e1e`. A listing of the same directory stays allowed.
+#[test]
+fn refuses_a_content_grep_over_a_launchd_directory() {
+    let (dir, path) = fixture("com.example.fake.plist", WITH_CREDENTIAL.as_bytes());
+    let agents = path.parent().expect("dir").to_path_buf();
+    for target in [agents.clone(), agents.join("sub")] {
+        std::fs::create_dir_all(&target).expect("mkdir");
+        let grep = serde_json::json!({
+            "pattern": ".",
+            "path": target.display().to_string(),
+            "output_mode": "content",
+        });
+        assert!(
+            evaluate_env_plist_read("Grep", Some(&grep), dir.path()).is_some(),
+            "Grep over {} must deny",
+            target.display()
+        );
+    }
+    assert_eq!(
+        bash(&format!("ls -la {}", agents.display()), dir.path()),
+        None
+    );
+    assert_eq!(bash("ls -la ~/Library/LaunchAgents", dir.path()), None);
+}
+
+/// 🔴 REGRESSION (#8523 critic HIGH 2): a FIFO or device reports length 0, so
+/// the size check passed and `fs::read` blocked the hook forever. On
+/// `8dfcf2e1e` this test times out. It must deny, and promptly.
+#[cfg(unix)]
+#[test]
+fn refuses_a_non_regular_plist_without_blocking() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fifo = dir.path().join("x.plist");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cwd, target) = (dir.path().to_path_buf(), fifo.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(tool("Read", &target, &cwd));
+    });
+    let verdict = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the guard must answer a FIFO without blocking");
+    assert!(verdict.is_some(), "a FIFO plist must deny");
+}
