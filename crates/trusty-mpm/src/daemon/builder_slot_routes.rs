@@ -241,26 +241,29 @@ fn spawn_seed(
     index: u32,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let _guard = SeedGuard { state, index };
+        let _guard = SeedGuard {
+            state,
+            slot: pool.slot_path(index),
+        };
         if let Err(err) = pool.seed(index, clone_from.as_deref()) {
             tracing::warn!("builder slot {index} could not be seeded: {err}");
         }
     })
 }
 
-/// Holds one slot index's seed claim for as long as the seed runs (#8261).
+/// Holds one slot's seed claim for as long as the seed runs (#8261).
 ///
 /// Why: see [`spawn_seed`] — the release must survive a panic, and only `Drop`
 /// runs during an unwind.
 /// Test: `a_panicking_seed_still_releases_its_index`.
 struct SeedGuard {
     state: Arc<DaemonState>,
-    index: u32,
+    slot: std::path::PathBuf,
 }
 
 impl Drop for SeedGuard {
     fn drop(&mut self) {
-        self.state.finish_builder_seed(self.index);
+        self.state.finish_builder_seed(&self.slot);
     }
 }
 
@@ -351,10 +354,12 @@ fn resolve_slot_pool(
     .ok()
     .map(|env| env.cargo_target_dir);
     ResolvedPool {
-        pool: Some(SlotPool::new(
-            config.effective_slot_pool_root(&home),
-            identity,
-        )),
+        // #8794: the checkout's Cargo.lock names the packages a handover
+        // invalidates.
+        pool: Some(
+            SlotPool::new(config.effective_slot_pool_root(&home), identity)
+                .with_checkout(project_dir.to_path_buf()),
+        ),
         clone_from,
         notice: None,
     }
@@ -855,7 +860,7 @@ mod tests {
         // The seed task's own release is what makes the index seedable again —
         // without it slot 0 could never be warmed by anyone.
         state.release_denied_builder_dispatch(session, Some("toolu_B"));
-        state.finish_builder_seed(0);
+        state.finish_builder_seed(&pool.slot_path(0));
         let third = builder_slot_op_with_pool(
             &state,
             &session.0.to_string(),
@@ -985,7 +990,7 @@ mod tests {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = SeedGuard {
                 state: Arc::clone(&state),
-                index: 0,
+                slot: pool.slot_path(0),
             };
             panic!("the clone died mid-copy");
         }));

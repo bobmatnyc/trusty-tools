@@ -47,6 +47,8 @@ use std::path::{Path, PathBuf};
 
 use trusty_common::github_path::GithubPath;
 
+mod handover;
+
 /// The marker file that records a slot directory has been seeded.
 ///
 /// Why: seeding must happen ONCE per slot, not on every daemon restart and not
@@ -160,6 +162,15 @@ pub enum SlotPoolError {
         /// Why the seed failed.
         detail: String,
     },
+    /// #8794: a seeded slot could not be handed to a new holder, so it is not
+    /// handed out.
+    #[error("could not hand builder slot {path} to a new holder: {detail}")]
+    HandOver {
+        /// The slot directory that was not handed out.
+        path: PathBuf,
+        /// Why the handover failed.
+        detail: String,
+    },
 }
 
 /// One repo's slot pool, rooted at the operator's `builders.slot_pool_root`.
@@ -177,6 +188,8 @@ pub enum SlotPoolError {
 pub struct SlotPool {
     root: PathBuf,
     identity: GithubPath,
+    /// Where the dispatch was issued from; see [`Self::with_checkout`].
+    checkout: Option<PathBuf>,
 }
 
 impl SlotPool {
@@ -185,7 +198,11 @@ impl SlotPool {
     /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
     #[must_use]
     pub fn new(root: PathBuf, identity: GithubPath) -> Self {
-        Self { root, identity }
+        Self {
+            root,
+            identity,
+            checkout: None,
+        }
     }
 
     /// Where slot `index` lives, whether or not it exists yet.
@@ -296,8 +313,11 @@ impl SlotPool {
             Ok(kind) => {
                 tracing::info!(slot = %path.display(), %repo, outcome = "seeded", seed = ?kind, "builder slot seed: outcome");
             }
-            Err(SlotPoolError::ActiveBuild { lock, .. }) => {
+            Err(err @ SlotPoolError::ActiveBuild { lock, .. }) => {
                 tracing::warn!(slot = %path.display(), %repo, outcome = "refused-active-build", lock = %lock.display(), "builder slot seed: outcome");
+                // #8794: recorded so the next admission can say why the slot is
+                // still unseeded.
+                record_seed_failure(&path, &err.to_string());
             }
             Err(err) => {
                 tracing::warn!(slot = %path.display(), %repo, outcome = "failed", error = %err, "builder slot seed: outcome");
