@@ -1,0 +1,3 @@
+Fixed
+- A builder-slot claim that `tm hook --pm-guard` stops waiting for no longer holds a slot for 45 minutes. When the claim times out or the daemon's answer is unusable, the hook still denies the dispatch, and it now also posts a release for that dispatch's `tool_use_id` to the new `builder-slot/release` route. The release runs on a background task, so the deny does not wait for it. A daemon that is not listening gets no release, as before (#8794).
+- The release frees the lease even when it reaches the daemon before the slow claim finishes. It marks the dispatch cancelled, and the claim then admits nothing and skips the slot handover. It never releases a builder whose agent has started, or a dispatch with a different `tool_use_id` (#8794).
