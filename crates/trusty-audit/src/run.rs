@@ -2788,37 +2788,100 @@ exit 0
         );
     }
 
+    /// A `tga` stub that hangs in a GRANDCHILD which inherits its output pipes,
+    /// and records that grandchild's pid in its output directory (#8783).
+    ///
+    /// The shape a real `tga audit` has: it forks `trusty-search` and
+    /// `trusty-review`, and those hold the same stdout and stderr.
+    const HANGS_IN_A_GRANDCHILD: &str = "#!/bin/sh\nout=\"\"\n\
+        while [ $# -gt 0 ]; do\n  case \"$1\" in --output) out=\"$2\"; shift;; esac\n  \
+        shift\ndone\nmkdir -p \"$out\"\nsleep 600 &\necho $! > \"$out/grandchild.pid\"\n\
+        wait\n";
+
+    /// Is `pid` still a live process?
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks that the pid exists; nothing is sent.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
     /// A hung child must cost its repository, not the whole run — and the
     /// progress record must still be written.
+    ///
+    /// #8783: against the pre-fix spawn this hits the hang guard. The kill
+    /// reached the direct child only, the grandchild kept the pipes open, and
+    /// the sweep waited out the grandchild's `sleep 600` — 600 s in CI. The
+    /// guard is a hang bound, not a timing assertion.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hung_child_is_killed_and_recorded() {
+        const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(&work, "#!/bin/sh\nsleep 600\n");
+        install_stubs(&work, HANGS_IN_A_GRANDCHILD);
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep_with_budget(
+        let (config, options, progress) = (config(), RunOptions::default(), Progress::none());
+        // A budget long enough for the stub to record its grandchild first.
+        let sweep = sweep_with_budget(
             &work,
-            &config(),
-            &RunOptions::default(),
+            &config,
+            &options,
             None,
-            std::time::Duration::from_millis(200),
-            &Progress::none(),
-        )
-        .await
-        .expect("the sweep completes rather than hanging");
+            std::time::Duration::from_secs(2),
+            &progress,
+        );
+        let report = tokio::time::timeout(HANG_GUARD, sweep)
+            .await
+            .expect("the kill must reach the child's whole tree, not wait on its grandchild")
+            .expect("the sweep completes rather than hanging");
         assert_eq!(report.status, RunStatus::AllFailed);
         let reason = match &report.repos[0].result {
             RepoResult::Failed { reason } => reason.clone(),
             other => panic!("a hung child must not succeed: {other:?}"),
         };
         assert!(reason.contains("timed out"), "{reason}");
+        assert!(reason.contains("was killed;"), "{reason}");
         assert!(
             read_progress(&work).expect("record reads").is_some(),
             "an unattended run must leave a record of how far it got"
         );
+        let pid: u32 = std::fs::read_to_string(report.repos[0].output.join("grandchild.pid"))
+            .expect("the stub recorded its grandchild")
+            .trim()
+            .parse()
+            .expect("a pid");
+        // Reaped by init once orphaned, so allow it a moment to disappear.
+        let started = std::time::Instant::now();
+        while alive(pid) && started.elapsed() < std::time::Duration::from_secs(10) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "grandchild {pid} outlived the timeout kill");
+    }
+
+    /// #8783: a pump still running at the grace is aborted, and a success
+    /// resting on its incomplete log is downgraded rather than awaited forever.
+    #[tokio::test]
+    async fn a_pump_held_open_past_the_grace_downgrades_a_success() {
+        let held = tokio::spawn(std::future::pending::<std::io::Result<()>>());
+        let verdict = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            child::join_pumps(
+                vec![held],
+                Path::new("tga.log"),
+                RepoResult::Succeeded,
+                std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("join_pumps honours its grace");
+        match verdict {
+            RepoResult::Failed { reason } => {
+                assert!(reason.contains("still held its output open"), "{reason}");
+            }
+            other => panic!("an undrained log must not read as a success: {other:?}"),
+        }
     }
 
     /// Every path this run writes stays inside the root that `rm -rf` cleans.

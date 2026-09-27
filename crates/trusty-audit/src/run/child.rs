@@ -122,6 +122,10 @@ pub(super) async fn spawn_tga(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // #8783: a group of its own, so the timeout kill reaches every process
+        // the child forked — a grandchild holding the piped streams open kept
+        // the pumps below from ever seeing EOF, and a 200 ms budget took 600 s.
+        .process_group(0)
         .kill_on_drop(true);
     // #5671: the credential alone never reached OpenRouter — trusty-review
     // defaults to Bedrock, so the provider and the three role models must be
@@ -183,6 +187,9 @@ pub(super) async fn spawn_tga(
             });
         }
     };
+    // #8783: `process_group(0)` took this tree out of the terminal's foreground
+    // group, so record it for `stop_clones_on_interrupt` to forward a Ctrl-C to.
+    let _detached = child.id().map(crate::clone::Detached::register);
 
     // #5823: both streams are pumped concurrently with the wait. Reading them
     // is not optional now that they are pipes — a child that fills a pipe
@@ -225,7 +232,8 @@ pub(super) async fn spawn_tga(
         Err(_elapsed) => {
             // Kill before returning: `kill_on_drop` would do it, but only once
             // the handle drops, and the reason must name a child that is gone.
-            let killed = child.kill().await;
+            // #8783: the whole group, not the direct child alone.
+            let killed = crate::clone::kill_tree(&mut child).await;
             RepoResult::Failed {
                 reason: format!(
                     "`tga audit` timed out after {}s and was killed{}; see {}",
@@ -243,8 +251,18 @@ pub(super) async fn spawn_tga(
     // The child has exited or been killed, so both pipes are at EOF and the
     // pumps end on their own. Awaiting them is what guarantees the log holds
     // everything the child said before this function reports on it.
-    Ok(join_pumps(pumps, log, verdict).await)
+    // #8783: under a deadline — a descendant that left the group (`setsid`)
+    // still holds the pipes, and its EOF would come only when it exits.
+    Ok(join_pumps(pumps, log, verdict, DRAIN_GRACE).await)
 }
+
+/// How long the output pumps may run on after the child has exited or been
+/// killed (#8783).
+///
+/// Their EOF normally follows the exit in milliseconds; only a process that
+/// escaped the group kill can hold it back, and waiting for that process would
+/// make the budget meaningless.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Wait for the output pumps, downgrading a success whose log is incomplete.
 ///
@@ -255,20 +273,32 @@ pub(super) async fn spawn_tga(
 /// rather than reported. A verdict that was already a failure keeps its own
 /// reason — the pump error is the less useful of the two.
 /// What: awaits each pump; on the first error, replaces a `Succeeded` verdict.
-/// A pump task that panicked is treated the same way.
+/// A pump task that panicked is treated the same way, and so is one still
+/// running once `grace` has elapsed — it is aborted rather than awaited (#8783).
 /// Test: `crate::run::run_tests::a_childs_stage_events_reach_the_progress_sink`
-/// covers the whole-log obligation this protects.
-async fn join_pumps(
+/// covers the whole-log obligation this protects;
+/// `crate::run::run_tests::a_pump_held_open_past_the_grace_downgrades_a_success`
+/// covers the deadline.
+pub(super) async fn join_pumps(
     pumps: Vec<tokio::task::JoinHandle<std::io::Result<()>>>,
     log: &Path,
     verdict: RepoResult,
+    grace: std::time::Duration,
 ) -> RepoResult {
+    let deadline = tokio::time::Instant::now() + grace;
     let mut broken: Option<String> = None;
-    for pump in pumps {
-        let failure = match pump.await {
-            Ok(Ok(())) => None,
+    for mut pump in pumps {
+        let failure = match tokio::time::timeout_at(deadline, &mut pump).await {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(e))) => Some(e.to_string()),
             Ok(Err(e)) => Some(e.to_string()),
-            Err(e) => Some(e.to_string()),
+            Err(_elapsed) => {
+                pump.abort();
+                Some(format!(
+                    "a process the child left behind still held its output open {}s after it ended",
+                    grace.as_secs()
+                ))
+            }
         };
         broken = broken.or(failure);
     }

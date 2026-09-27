@@ -78,6 +78,7 @@ const INTERRUPT_GRACE: Duration = Duration::from_millis(250);
 /// removed once it has been waited on. The sweep clones one repository at a
 /// time, so there is at most one entry in practice — a list rather than a slot
 /// because a second caller must not be able to displace the first's group.
+/// #8783: `crate::run::child` registers each `tga audit` group here too.
 /// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`,
 /// `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
 static DETACHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -87,11 +88,12 @@ static DETACHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// A panic between the spawn and the wait would otherwise leave a pid behind
 /// that a later interrupt would signal, and pids are reused.
 /// Test: `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
-struct Detached(u32);
+/// #8783: also held by `crate::run::child` for the `tga audit` group.
+pub(crate) struct Detached(u32);
 
 impl Detached {
     /// Record a child that now leads a process group of its own.
-    fn register(pid: u32) -> Self {
+    pub(crate) fn register(pid: u32) -> Self {
         // A poisoned lock must not disarm the one record of what is still
         // running: this guards against orphaned clones, so it recovers the
         // inner value rather than skipping the write.
@@ -341,10 +343,31 @@ pub(super) async fn watch_child(
     });
     let verdict = supervise(&mut child, staged, watch).await;
     let stderr = match drain {
-        Some(handle) => handle.await.unwrap_or_default(),
+        Some(handle) => drain_within(handle, DRAIN_GRACE).await,
         None => Vec::new(),
     };
     report(spec, verdict, &stderr, watch)
+}
+
+/// How long the stderr drain may run on after the child is gone (#8783).
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// The drained stderr, or nothing once `grace` elapses.
+///
+/// Why: the pipe's EOF waits for EVERY holder, and a descendant that left the
+/// group (`setsid`) is beyond [`kill_tree`]'s reach — awaiting it unbounded
+/// turns a stopped clone back into a hang (#8783, the sweep's twin of this).
+/// What: awaits the drain task under `grace`; on expiry aborts it and returns an
+/// empty buffer, since the verdict is already decided and only its wording lost.
+/// Test: `super::watchdog::watchdog_tests::a_drain_held_open_past_the_grace_is_abandoned`.
+async fn drain_within(mut handle: tokio::task::JoinHandle<Vec<u8>>, grace: Duration) -> Vec<u8> {
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(joined) => joined.unwrap_or_default(),
+        Err(_elapsed) => {
+            handle.abort();
+            Vec::new()
+        }
+    }
 }
 
 /// What the supervision loop observed, before it is worded for a report.
@@ -431,10 +454,28 @@ async fn terminate(child: &mut Child, grace: Duration) {
         if let Ok(Ok(_)) = tokio::time::timeout(grace, child.wait()).await {
             return;
         }
+    }
+    let _ = kill_tree(child).await;
+}
+
+/// `SIGKILL` the child's whole process group, then reap the child.
+///
+/// Why: `Child::kill` signals the direct child alone, and a grandchild that
+/// inherited its pipes keeps them open — so a caller draining those pipes waits
+/// for the grandchild, not for the kill (#8783: a 200 ms budget took 600 s).
+/// What: [`signal_tree`] with `SIGKILL`, then `Child::kill`, which reaps and
+/// covers a child whose pid is already gone.
+/// Test: `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`,
+/// `crate::run::run_tests::a_hung_child_is_killed_and_recorded`.
+///
+/// # Errors
+///
+/// Whatever `Child::kill` reports.
+pub(crate) async fn kill_tree(child: &mut Child) -> std::io::Result<()> {
+    if let Some(pid) = child.id() {
         signal_tree(pid, libc::SIGKILL);
     }
-    // Reaps, and covers the child whose pid is already gone.
-    let _ = child.kill().await;
+    child.kill().await
 }
 
 /// Signal the child and every process it forked.
@@ -473,8 +514,9 @@ fn signal_tree(pid: u32, signal: libc::c_int) {
 /// then reaps — after which `getpgid` on that pid answers `ESRCH` and
 /// [`signal_tree`] can no longer recognise the group, so the follow-up `SIGKILL`
 /// would land on nothing and the grandchildren would keep fetching (#5669).
-/// Every pid in [`DETACHED`] is a leader by construction — [`run`] is the only
-/// registrar and it always sets `process_group(0)` — so the group can be named
+/// Every pid in [`DETACHED`] is a leader by construction — both registrars,
+/// [`run`] and `crate::run::child::spawn_tga` (#8783), always set
+/// `process_group(0)` — so the group can be named
 /// directly there rather than probed for.
 /// What: `kill(-pgid)`. A group id is not reused while any member survives,
 /// which is exactly the case this is called in; an already-empty group answers
@@ -1167,5 +1209,17 @@ done
             !registered().contains(&SENTINEL),
             "the entry is gone once the guard drops"
         );
+    }
+
+    /// #8783: a drain whose pipe a stray holder keeps open is abandoned at the
+    /// grace rather than awaited until that holder exits.
+    #[tokio::test]
+    async fn a_drain_held_open_past_the_grace_is_abandoned() {
+        let held = tokio::spawn(std::future::pending::<Vec<u8>>());
+        let drained =
+            tokio::time::timeout(STOP_DEADLINE, drain_within(held, Duration::from_millis(50)))
+                .await
+                .expect("drain_within honours its grace");
+        assert!(drained.is_empty(), "{drained:?}");
     }
 }

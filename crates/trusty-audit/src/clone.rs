@@ -70,6 +70,9 @@ use disk::{finish_one, measure_tree};
 
 /// The Ctrl-C path a binary running this module's clones must install (#5669).
 pub use watchdog::stop_clones_on_interrupt;
+// #8783: the sweep's `tga audit` child is a process tree too, so it reuses the
+// group kill and the Ctrl-C registration rather than a second copy of either.
+pub(crate) use watchdog::{Detached, kill_tree};
 
 /// Directory under [`Area::State`] where in-progress clones are built.
 ///

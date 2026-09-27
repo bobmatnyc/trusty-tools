@@ -1,0 +1,3 @@
+Fixed
+- A `tga audit` child that outlives its per-repository timeout is now killed with every process it forked, so the sweep records the timeout and moves on instead of waiting for a grandchild still holding the child's output open ([#8783](https://github.com/bobmatnyc/trusty-tools/issues/8783)). The child runs in a process group of its own, and Ctrl-C is still forwarded to it.
+- Draining a stopped child's output — the sweep's `tga audit` log and a clone's stderr — is now bounded to 5 seconds, so a process that escaped the kill cannot hold the run open ([#8783](https://github.com/bobmatnyc/trusty-tools/issues/8783)).
