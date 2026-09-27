@@ -14,11 +14,16 @@
 //! (`trusty_common::launchd_secrets::plist_credential_env_keys`). A plist it
 //! cannot read, parse or even locate fails CLOSED when it could hold that
 //! dict. `ls`, `stat`, `file`, `test` and `rm` never print bytes and are
-//! skipped.
+//! skipped; `mkdir`, `touch`, `cp` and `mv` write into or copy a path without
+//! reading an EXISTING file, so naming a launchd directory as their target is
+//! not a content search (#8523 round 4) — `cp`/`mv` still judge their SOURCE
+//! argument by content, as any other candidate word would be.
 //! Test: `names_a_pm2_dump_and_a_glob_over_its_home`,
 //! `refuses_a_plist_whose_environment_carries_a_credential`,
 //! `allows_a_plist_with_no_credential_and_a_safe_verb`,
-//! `fails_closed_on_a_plist_it_cannot_judge`.
+//! `fails_closed_on_a_plist_it_cannot_judge`,
+//! `mkdir_touch_and_cp_into_a_launchd_directory_are_allowed`,
+//! `cp_or_mv_of_a_credential_plist_into_a_launchd_directory_is_still_denied`.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +42,24 @@ const MAX_PLIST_BYTES: u64 = 1 << 20;
 
 /// Programs that report on or delete a file without printing its bytes.
 const NON_PRINTING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
+
+/// Programs that create, touch, or copy into a path without printing an
+/// EXISTING file's bytes.
+///
+/// Why: #8523 round 4 MEDIUM — `mkdir -p ~/Library/LaunchAgents
+/// ~/.trusty-mpm/logs` (the documented supervisor install step) was refused
+/// whenever the LaunchAgents directory already existed, because Bash treats
+/// any word naming a launchd directory as a content search. `mkdir`/`touch`
+/// never read a file; `cp`/`mv` read only their SOURCE argument, which is
+/// judged as its own candidate word regardless of this list.
+/// What: a segment whose program is one of these, and that carries no
+/// [`NESTED_COMMAND_MARKERS`], names its launchd-directory operand as a
+/// write target rather than a search — see [`bash_candidates`]. `grep`,
+/// `rg`, `cat` and `tar` are deliberately absent and stay denied over a
+/// launchd directory.
+/// Test: `mkdir_touch_and_cp_into_a_launchd_directory_are_allowed`,
+/// `cp_or_mv_of_a_credential_plist_into_a_launchd_directory_is_still_denied`.
+const DIRECTORY_WRITE_VERBS: &[&str] = &["mkdir", "touch", "cp", "mv"];
 
 /// Whether `path` names a pm2 process dump, or a glob that can select one.
 ///
@@ -62,12 +85,15 @@ pub(crate) fn names_a_process_manager_dump(path: &str) -> bool {
 ///
 /// Why: see the module doc. The plist's CONTENT decides, so relative paths
 /// resolve against `cwd`, the hook's working directory.
-/// What: collects every candidate path the call names, then asks
+/// What: collects every candidate path the call names, paired with whether
+/// naming a launchd DIRECTORY there is a content search, then asks
 /// [`judge_plist`] of each; the first refusal wins. A launchd directory named
-/// by a `Grep` or by a printing Bash command is refused.
+/// by a `Grep`, or by a Bash command whose verb is not a
+/// [`DIRECTORY_WRITE_VERBS`] entry, is refused.
 /// Test: `refuses_a_plist_whose_environment_carries_a_credential`,
 /// `fails_closed_on_a_plist_it_cannot_judge`,
-/// `refuses_a_bash_content_search_over_a_launchd_directory`.
+/// `refuses_a_bash_content_search_over_a_launchd_directory`,
+/// `mkdir_touch_and_cp_into_a_launchd_directory_are_allowed`.
 pub(crate) fn evaluate_env_plist_read(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
@@ -79,25 +105,24 @@ pub(crate) fn evaluate_env_plist_read(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
     };
-    let (candidates, has_cd) = match tool_name {
-        "Bash" => bash_candidates(field("command")?),
-        "Read" | "Edit" | "MultiEdit" | "Write" => (vec![field("file_path")?.to_string()], false),
-        "Grep" => (vec![field("path")?.to_string()], false),
-        _ => return None,
-    };
     // #8523 critic CRITICAL 1: a `Grep` prints the lines of every file under a
     // directory, so a directory it names is judged, not waved through.
-    // #8523 round 3: so does `grep -r`/`rg`/`find -exec cat` through Bash, and
-    // `bash_candidates` already dropped every non-printing verb (`ls`, `stat`,
-    // …), so every Bash candidate left is judged the same way.
-    let searches_directories = matches!(tool_name, "Grep" | "Bash");
-    candidates
-        .iter()
-        .find_map(|word| judge_plist(word, cwd, has_cd, searches_directories).err())
+    let (candidates, has_cd): (Vec<(String, bool)>, bool) = match tool_name {
+        "Bash" => bash_candidates(field("command")?),
+        "Read" | "Edit" | "MultiEdit" | "Write" => {
+            (vec![(field("file_path")?.to_string(), false)], false)
+        }
+        "Grep" => (vec![(field("path")?.to_string(), true)], false),
+        _ => return None,
+    };
+    candidates.iter().find_map(|(word, searches_directories)| {
+        judge_plist(word, cwd, has_cd, *searches_directories).err()
+    })
 }
 
-/// Candidate plist words in a Bash command, and whether it changes directory.
-fn bash_candidates(command: &str) -> (Vec<String>, bool) {
+/// Candidate plist words in a Bash command — each paired with whether naming
+/// a launchd directory there is a content search — and whether it `cd`s.
+fn bash_candidates(command: &str) -> (Vec<(String, bool)>, bool) {
     let home = dirs::home_dir().map(|h| h.display().to_string());
     let command = match &home {
         Some(h) => command.replace("${HOME}", h).replace("$HOME", h),
@@ -114,26 +139,40 @@ fn bash_candidates(command: &str) -> (Vec<String>, bool) {
         });
         has_cd |= matches!(program.as_deref(), Some("cd" | "pushd"));
         let nested = NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m));
-        if !nested && program.is_some_and(|p| NON_PRINTING_VERBS.contains(&p.as_str())) {
+        if !nested
+            && program
+                .as_deref()
+                .is_some_and(|p| NON_PRINTING_VERBS.contains(&p))
+        {
             continue;
         }
-        push_candidates(&segment, &mut out);
+        // #8523: a nested command (`$(…)`, `` ` ``, …) can smuggle a search
+        // in behind a write verb, so only trust the allowlist unnested.
+        let writes_only = !nested
+            && program
+                .as_deref()
+                .is_some_and(|p| DIRECTORY_WRITE_VERBS.contains(&p));
+        push_candidates(&segment, !writes_only, &mut out);
         lexed
             .iter()
             .flatten()
-            .for_each(|t| push_candidates(t, &mut out));
+            .for_each(|t| push_candidates(t, !writes_only, &mut out));
     }
-    bodies.iter().for_each(|b| push_candidates(b, &mut out));
+    bodies
+        .iter()
+        .for_each(|b| push_candidates(b, true, &mut out));
     (out, has_cd)
 }
 
-/// Append every path word of `text` that could name a launchd plist.
-fn push_candidates(text: &str, out: &mut Vec<String>) {
+/// Append every path word of `text` that could name a launchd plist, paired
+/// with `searches`: whether naming a launchd DIRECTORY here is a content
+/// search rather than a write target.
+fn push_candidates(text: &str, searches: bool, out: &mut Vec<(String, bool)>) {
     for word in text.split(|c: char| !is_path_byte(c)) {
         let lower = word.to_ascii_lowercase();
         let in_launchd_dir = lower.contains("launchagents") || lower.contains("launchdaemons");
-        if (lower.ends_with(".plist") || in_launchd_dir) && !out.iter().any(|w| w == word) {
-            out.push(word.to_string());
+        if (lower.ends_with(".plist") || in_launchd_dir) && !out.iter().any(|(w, _)| w == word) {
+            out.push((word.to_string(), searches));
         }
     }
 }

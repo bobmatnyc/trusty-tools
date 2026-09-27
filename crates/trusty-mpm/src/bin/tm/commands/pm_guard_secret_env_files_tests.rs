@@ -224,6 +224,71 @@ fn refuses_a_bash_content_search_over_a_launchd_directory() {
     }
 }
 
+/// 🔴 REGRESSION (#8523 round 4 MEDIUM): `mkdir -p ~/Library/LaunchAgents
+/// ~/.trusty-mpm/logs` — the documented supervisor install step
+/// (`crates/trusty-mpm/deploy/supervisor/README.md`) — was refused whenever
+/// the directory already existed, because round 3 made Bash a
+/// directory-searching caller for every verb. `touch`ing a new plist and
+/// `cp`/`mv`ing a clean plist into the directory must allow too; judging the
+/// destination DIRECTORY is what changes, not the source FILE. DENIED on
+/// `1ff961175`.
+#[test]
+fn mkdir_touch_and_cp_into_a_launchd_directory_are_allowed() {
+    let (dir, path) = fixture("com.example.fake.plist", WITH_CREDENTIAL.as_bytes());
+    let agents = path.parent().expect("dir").to_path_buf();
+    let cwd = dir.path();
+    let template = cwd.join("template.plist");
+    std::fs::write(&template, WITHOUT_CREDENTIAL).expect("write");
+    for command in [
+        format!(
+            "mkdir -p {} {}",
+            agents.display(),
+            cwd.join(".trusty-mpm/logs").display()
+        ),
+        format!("touch {}/new.plist", agents.display()),
+        format!("cp {} {}/", template.display(), agents.display()),
+        format!(
+            "mv {} {}/renamed.plist",
+            template.display(),
+            agents.display()
+        ),
+    ] {
+        assert_eq!(bash(&command, cwd), None, "`{command}` must allow");
+    }
+}
+
+/// 🔴 REGRESSION (#8523 round 4): a `cp`/`mv` into a launchd directory must
+/// still judge its SOURCE by content — the write-verb allowance in
+/// [`mkdir_touch_and_cp_into_a_launchd_directory_are_allowed`] covers the
+/// destination directory only.
+#[test]
+fn cp_or_mv_of_a_credential_plist_into_a_launchd_directory_is_still_denied() {
+    let (dir, secret) = fixture("com.example.other.plist", WITH_CREDENTIAL.as_bytes());
+    let cwd = dir.path();
+    let agents = secret.parent().expect("dir").to_path_buf();
+    // A source outside the launchd directory that still carries a credential.
+    let outside = cwd.join("template.plist");
+    std::fs::write(&outside, WITH_CREDENTIAL).expect("write");
+    for command in [
+        format!("cp {} {}/", outside.display(), agents.display()),
+        format!("mv {} {}/", outside.display(), agents.display()),
+    ] {
+        let reason = bash(&command, cwd).unwrap_or_else(|| panic!("`{command}` must deny"));
+        assert!(
+            reason.contains("#8523") && reason.contains("FAKE_API_KEY"),
+            "{reason}"
+        );
+    }
+    // A content search over the directory stays denied regardless of #8523
+    // round 4's write-verb allowance.
+    for command in [
+        format!("grep -r . {}", agents.display()),
+        format!("cat {}", secret.display()),
+    ] {
+        assert!(bash(&command, cwd).is_some(), "`{command}` must deny");
+    }
+}
+
 /// 🔴 REGRESSION (#8523 critic HIGH 2): a FIFO or device reports length 0, so
 /// the size check passed and `fs::read` blocked the hook forever. On
 /// `8dfcf2e1e` this test times out. It must deny, and promptly.

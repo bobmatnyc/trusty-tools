@@ -78,6 +78,11 @@ const CONTAINER_VALUE_FLAGS: &[&str] = &[
 ];
 
 /// Container-CLI `exec` options known to take no value.
+///
+/// Why: #8523 round 4 LOW — `--no-TTY` (capital TTY) matches no real flag.
+/// `docker exec`/`podman exec` have no such option at all; `docker compose
+/// exec`/`podman-compose exec` spell it `-T, --no-tty` (lowercase), per
+/// `docker compose exec --help`.
 const CONTAINER_BOOLEAN_FLAGS: &[&str] = &[
     "-d",
     "--detach",
@@ -88,7 +93,7 @@ const CONTAINER_BOOLEAN_FLAGS: &[&str] = &[
     "-it",
     "-ti",
     "-T",
-    "--no-TTY",
+    "--no-tty",
     "--privileged",
 ];
 
@@ -192,8 +197,11 @@ fn any_command_dumps(args: &[String], tables: FlagTables) -> bool {
 /// itself; an UNLISTED option reaches both the next word and the one after,
 /// so the word after it is tried as its value and as the target. `--` ends
 /// the options. The first non-option word reached is a target, and the words
-/// after it (less a leading `--`) are a candidate command. Linear in
-/// `args.len()`.
+/// after it (less a leading `--`) are a candidate command. The walk itself is
+/// linear, but a run of unlisted flag/word pairs doubles the reachable-target
+/// count at each pair, and each extra target's command slice is later walked
+/// again by [`any_command_dumps`] — bounded quadratic in `args.len()`, not
+/// linear (#8523 round 4).
 /// Test: `refuses_an_oc_rsh_dump_behind_an_unlisted_value_flag`,
 /// `refuses_a_container_env_dump`.
 fn target_commands(args: &[String], (value, boolean): FlagTables) -> Vec<&[String]> {

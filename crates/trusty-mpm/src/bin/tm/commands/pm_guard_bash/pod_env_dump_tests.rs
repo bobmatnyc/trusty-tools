@@ -105,6 +105,10 @@ fn refuses_a_container_env_dump() {
         "docker-compose exec api printenv",
         "sudo docker exec c env | grep KEY",
         "docker exec -- c env",
+        // #8523 round 4: `-T, --no-tty` (lowercase) is `docker compose exec`'s
+        // real flag, not `--no-TTY`.
+        "docker compose exec --no-tty api env",
+        "docker compose exec -T api env",
     ]);
     assert_allows(&[
         "docker exec c ls",
@@ -114,6 +118,7 @@ fn refuses_a_container_env_dump() {
         "docker ps",
         "docker logs c | grep env",
         "podman exec c ls /app",
+        "docker compose exec --no-tty api sh",
     ]);
 }
 
