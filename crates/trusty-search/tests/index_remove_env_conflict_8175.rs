@@ -41,7 +41,10 @@ const INDEX_B: &str = "idx-b-8175";
 /// Serve a real daemon router with two independent, resident, bare indexes
 /// registered — no embedder, no walk, no disk corpus, so nothing here can
 /// touch a real operator index. Returns the base URL.
-async fn spawn_daemon_with_two_indexes(root_a: &std::path::Path, root_b: &std::path::Path) -> String {
+async fn spawn_daemon_with_two_indexes(
+    root_a: &std::path::Path,
+    root_b: &std::path::Path,
+) -> String {
     let registry = IndexRegistry::new();
     for (id, root) in [(INDEX_A, root_a), (INDEX_B, root_b)] {
         let indexer = CodeIndexer::new(id, root.to_string_lossy().into_owned());

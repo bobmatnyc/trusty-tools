@@ -69,6 +69,20 @@ pub(crate) enum IndexIdSource {
     EnvVar,
 }
 
+/// `main.rs`'s one-line call to build the `Option<IndexIdSource>`
+/// [`handle_index_remove`] expects, from `cli.index.is_some()` and whether
+/// clap's `ArgMatches::value_source` said a real flag supplied it.
+/// Test: covered indirectly by `classify_remove_target_env_only_refuses` and
+/// `tests/index_remove_env_conflict_8175.rs`, which exercise both sources
+/// this produces end-to-end.
+pub(crate) fn index_id_source(has_value: bool, from_cli_flag: bool) -> Option<IndexIdSource> {
+    has_value.then_some(if from_cli_flag {
+        IndexIdSource::CliFlag
+    } else {
+        IndexIdSource::EnvVar
+    })
+}
+
 /// The decision reached from PATH, `-i`/`--index`, and their source, before
 /// any of it is checked against the daemon (issue #8175).
 ///
@@ -564,8 +578,10 @@ mod tests {
     /// Test: this test.
     #[test]
     fn classify_remove_target_cli_flag_alone_is_used_directly() {
-        let target =
-            classify_remove_target(None, Some(("other-project".to_string(), IndexIdSource::CliFlag)));
+        let target = classify_remove_target(
+            None,
+            Some(("other-project".to_string(), IndexIdSource::CliFlag)),
+        );
         assert_eq!(target, RemoveTarget::Id("other-project".to_string()));
     }
 
@@ -576,7 +592,10 @@ mod tests {
     /// Test: this test.
     #[test]
     fn classify_remove_target_nothing_given_uses_cwd() {
-        assert_eq!(classify_remove_target(None, None), RemoveTarget::CwdAutoDetect);
+        assert_eq!(
+            classify_remove_target(None, None),
+            RemoveTarget::CwdAutoDetect
+        );
     }
 
     /// Why: a bare `remove <PATH>` with no `-i`/`TRUSTY_INDEX` in play must

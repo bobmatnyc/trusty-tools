@@ -32,7 +32,7 @@ use clap_complete::{generate, Shell};
 use colored::Colorize;
 use commands::convert::ConvertTarget;
 use commands::index_action::IndexAction;
-use commands::index_remove::IndexIdSource;
+use commands::index_remove::{handle_index_remove, index_id_source};
 use commands::service::ServiceAction;
 use std::io;
 
@@ -1146,23 +1146,20 @@ async fn run() -> Result<()> {
     // standard error rendering (issue #216) AND read the resulting
     // `ArgMatches` before it is consumed into `Cli`. On success the parsed
     // `Cli` is indistinguishable from the original `Cli::parse()` call.
-    let mut arg_matches = match Cli::command().try_get_matches() {
-        Ok(m) => m,
-        Err(e) => {
-            // Let clap render its own helpful error first so the user sees
-            // the unrecognised-token message in the format they already know.
-            e.print().ok();
-            // Then layer on the workspace-shared "did you mean?" suggestion
-            // when the input looks like an unknown subcommand or argument.
-            if matches!(
-                e.kind(),
-                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
-            ) {
-                trusty_common::help::print_suggestion_hint(&argv, &HELP);
-            }
-            std::process::exit(e.exit_code());
+    let mut arg_matches = Cli::command().try_get_matches().unwrap_or_else(|e| {
+        // Let clap render its own helpful error first so the user sees the
+        // unrecognised-token message in the format they already know, then
+        // layer on the "did you mean?" suggestion for an unknown
+        // subcommand/argument, matching the pre-#8175 `Cli::try_parse` path.
+        e.print().ok();
+        if matches!(
+            e.kind(),
+            clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+        ) {
+            trusty_common::help::print_suggestion_hint(&argv, &HELP);
         }
-    };
+        std::process::exit(e.exit_code());
+    });
     // #8175: clap folds an explicit `-i`/`--index` flag and the `TRUSTY_INDEX`
     // env fallback into the same `Cli::index` field, so a value alone cannot
     // say which one supplied it — and a destructive command (`index remove`)
@@ -1170,17 +1167,12 @@ async fn run() -> Result<()> {
     // `ArgMatches::value_source` is read here, before `Cli::from_arg_matches`
     // consumes the matches, because it is the only place that distinction is
     // still visible.
-    let index_from_cli_flag = matches!(
-        arg_matches.value_source("index"),
-        Some(clap::parser::ValueSource::CommandLine)
-    );
-    let cli = match Cli::from_arg_matches_mut(&mut arg_matches) {
-        Ok(cli) => cli,
-        Err(e) => {
-            e.print().ok();
-            std::process::exit(e.exit_code());
-        }
-    };
+    let index_from_cli_flag =
+        arg_matches.value_source("index") == Some(clap::parser::ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches_mut(&mut arg_matches).unwrap_or_else(|e| {
+        e.print().ok();
+        std::process::exit(e.exit_code());
+    });
 
     // Tracing init + NO_COLOR handling via shared trusty-common helpers.
     //
@@ -1270,8 +1262,7 @@ async fn run() -> Result<()> {
             // through to the cwd-derived default. The positional argument
             // still wins when both are given.
             let target = commands::index_status::resolve_status_target(index_id, cli.index.clone());
-            commands::index_status::handle_index_status(target.as_deref(), watch, cli.json)
-                .await?;
+            commands::index_status::handle_index_status(target.as_deref(), watch, cli.json).await?;
         }
 
         Commands::Init {
@@ -1299,26 +1290,9 @@ async fn run() -> Result<()> {
                 yes,
             }) => {
                 // #8175: a destructive verb must know whether `-i`/`--index`
-                // came from a real flag or only from `TRUSTY_INDEX` — see the
-                // `index_from_cli_flag` computation above `run()`'s match.
-                let index_source = cli
-                    .index
-                    .is_some()
-                    .then(|| {
-                        if index_from_cli_flag {
-                            IndexIdSource::CliFlag
-                        } else {
-                            IndexIdSource::EnvVar
-                        }
-                    });
-                commands::index_remove::handle_index_remove(
-                    rm_path,
-                    cli.index,
-                    index_source,
-                    keep_data,
-                    yes,
-                )
-                .await?;
+                // came from a real flag or only from `TRUSTY_INDEX`.
+                let index_source = index_id_source(cli.index.is_some(), index_from_cli_flag);
+                handle_index_remove(rm_path, cli.index, index_source, keep_data, yes).await?;
             }
             Some(IndexAction::Add {
                 path: add_path,
