@@ -1443,6 +1443,7 @@ async fn a_scanned_path_replaced_by_a_symlink_is_not_removed() {
         &std::collections::HashSet::new(),
         DirtyWorktreePolicy::Skip,
         &WorktreeScope::all(),
+        crate::session_manager::git_ceiling::GIT_CALL_TIMEOUT,
     )
     .await;
     assert!(

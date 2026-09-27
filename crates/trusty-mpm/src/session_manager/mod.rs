@@ -142,6 +142,8 @@ pub(crate) mod ssh_host_alias;
 // #7057: WHICH GitHub repository a directory's pull-request lookups belong to,
 // read from that directory's own `origin` rather than inferred by `gh`.
 pub(crate) mod worktree_repo_slug;
+// #8306: the kill-on-timeout ceiling on every git call the worktree sweeps make.
+pub(crate) mod git_ceiling;
 pub mod worktree_safety;
 // #8782: the project/path bounds of one prune-worktrees pass.
 pub mod worktree_scope;

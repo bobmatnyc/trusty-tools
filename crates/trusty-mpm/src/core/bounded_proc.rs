@@ -30,9 +30,10 @@
 //!
 //! Test: `run_bounded_captures_stdout_and_status`,
 //! `run_bounded_kills_a_hung_child`, `run_bounded_kills_the_whole_process_group`,
-//! `run_bounded_reports_a_spawn_failure` in `bounded_proc_tests.rs`.
+//! `run_bounded_reports_a_spawn_failure`, `run_bounded_with_input_feeds_stdin`,
+//! `run_bounded_reports_a_pipe_held_open_after_exit` in `bounded_proc_tests.rs`.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -77,6 +78,9 @@ pub enum BoundedError {
     TimedOut,
     /// `try_wait` itself failed; the child's fate is unknown.
     Wait(std::io::Error),
+    /// The child exited, but something it left behind still held the named
+    /// pipe open, so its output is incomplete (#8306).
+    PipeHeldOpen(&'static str),
 }
 
 impl std::fmt::Display for BoundedError {
@@ -86,6 +90,12 @@ impl std::fmt::Display for BoundedError {
             Self::NoPipe(which) => write!(f, "exposed no {which} pipe"),
             Self::TimedOut => write!(f, "did not answer within its budget"),
             Self::Wait(e) => write!(f, "could not be waited on: {e}"),
+            Self::PipeHeldOpen(which) => {
+                write!(
+                    f,
+                    "exited, but its {which} pipe stayed open past the drain wait"
+                )
+            }
         }
     }
 }
@@ -169,14 +179,43 @@ fn kill_child_group(child: &mut Child) {
 /// deadline arm's identical, tested call.
 /// Test: `run_bounded_captures_stdout_and_status`, `run_bounded_kills_a_hung_child`,
 /// `run_bounded_kills_the_whole_process_group`, `run_bounded_reports_a_spawn_failure`.
-pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, BoundedError> {
+pub fn run_bounded(cmd: Command, budget: Duration) -> Result<BoundedOutput, BoundedError> {
+    run_bounded_with_input(cmd, None, budget)
+}
+
+/// [`run_bounded`], writing `input` to the child's stdin first (#8306).
+///
+/// Why: `git patch-id` reads its patch on stdin. A blocking `write_all` into a
+/// child that never reads is its own unbounded wait, so the write runs on a
+/// thread the deadline does not wait for.
+/// What: with `Some(input)`, stdin is piped, written and closed on its own
+/// thread; with `None`, stdin is whatever `cmd` already set. The poll starts at
+/// 1 ms and backs off to 25 ms, so a fast git call is not charged a full poll.
+/// A pipe still held open after the exit is [`BoundedError::PipeHeldOpen`],
+/// never an empty `Ok` a caller would read as "no output".
+/// Test: `run_bounded_with_input_feeds_stdin`,
+/// `run_bounded_reports_a_pipe_held_open_after_exit`.
+pub fn run_bounded_with_input(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    budget: Duration,
+) -> Result<BoundedOutput, BoundedError> {
     // #6867: BEFORE the spawn — a group cannot be joined retroactively.
     isolate_process_group(&mut cmd);
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(BoundedError::Spawn)?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A child killed mid-write fails the write with EPIPE; nothing waits on it.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let stdout = child
         .stdout
         .take()
@@ -188,13 +227,19 @@ pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, 
         .ok_or(BoundedError::NoPipe("stderr"))
         .map(drain_pipe)?;
     let deadline = Instant::now() + budget;
+    let mut pause = Duration::from_millis(1);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // #8306: an undrained pipe is an error, never an empty success.
                 return Ok(BoundedOutput {
                     status,
-                    stdout: stdout.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default(),
-                    stderr: stderr.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default(),
+                    stdout: stdout
+                        .recv_timeout(PIPE_DRAIN_WAIT)
+                        .map_err(|_| BoundedError::PipeHeldOpen("stdout"))?,
+                    stderr: stderr
+                        .recv_timeout(PIPE_DRAIN_WAIT)
+                        .map_err(|_| BoundedError::PipeHeldOpen("stderr"))?,
                 });
             }
             Ok(None) if Instant::now() >= deadline => {
@@ -202,7 +247,10 @@ pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, 
                 kill_child_group(&mut child);
                 return Err(BoundedError::TimedOut);
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(25));
+            }
             // #7652 critic round 2: this arm leaves the loop WITHOUT reaching
             // the deadline, so it is the only other exit that can abandon a
             // running child. Kill the group first, exactly as the timeout does.

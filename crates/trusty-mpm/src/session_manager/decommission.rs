@@ -24,6 +24,7 @@ use super::decommission_force::{
     DecommissionReport, ProvisioningDirt, remove_in_project_worktree, unowned_kept_reason,
 };
 use super::decommission_owned::{remove_owned_workspace, unclaimed_directory_blocks_removal};
+use super::git_ceiling::bounded_git_output;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
@@ -399,8 +400,9 @@ pub(super) fn remove_session_worktree_guarded(
         if let Some(refusal) = guard() {
             return WorktreeRemoval::Kept(format!("refused immediately before removal: {refusal}"));
         }
+        // #8306: bounded; a killed removal is classified by the `Err` arm.
         remove_registered_worktree(path, ignored, before, &|root| {
-            worktree_remove_command(root, path).output()
+            bounded_git_output(worktree_remove_command(root, path))
         })
     })
 }
@@ -517,6 +519,11 @@ fn remove_registered_worktree(
             // what it may be protecting. An unanswerable probe is never a
             // licence to delete.
             let reason = format!("git could not be run to remove the worktree: {e}");
+            // #8306: a git killed at its ceiling may have deleted part of it.
+            if let Some(partial) = partial_removal(path, before, &reason) {
+                warn!(path = %path.display(), "decommission: {partial}");
+                return WorktreeRemoval::PartiallyRemoved(partial);
+            }
             warn!(
                 path = %path.display(),
                 "decommission: refusing worktree removal — {reason} (#4732)"
@@ -572,9 +579,10 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // #7171: through the shared entry point — this runs on every session
         // teardown across the fleet, one of the storm-trigger commands named
         // by the incident.
-        let prune_out = trusty_common::git::command_in(repo_root)
-            .args(["worktree", "prune"])
-            .output();
+        let mut prune = trusty_common::git::command_in(repo_root);
+        prune.args(["worktree", "prune"]);
+        // #8306: bounded like every other sweep git call.
+        let prune_out = bounded_git_output(prune);
         if let Err(e) = prune_out {
             warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
         }
@@ -596,12 +604,9 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // this module keeps compiling with the `daemon` feature disabled.
         if let Some(session_name) = path.file_name().and_then(|n| n.to_str()) {
             let branch = crate::core::worktree_naming::worktree_branch_for(session_name);
-            let branch_out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo_root)
-                .args(["branch", "-D"])
-                .arg(&branch)
-                .output();
+            let mut delete = trusty_common::git::command_in(repo_root);
+            delete.args(["branch", "-D"]).arg(&branch);
+            let branch_out = bounded_git_output(delete);
             match branch_out {
                 Ok(o) if o.status.success() => {
                     info!(

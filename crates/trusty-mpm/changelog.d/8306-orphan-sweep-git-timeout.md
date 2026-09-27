@@ -1,0 +1,3 @@
+Fixed
+- The orphan-worktree sweep no longer waits forever on a wedged `git`. Every git call it makes — the registry scan, the `git worktree list` cross-check, the dirty-tree check, the removal and its ref cleanup — now runs under a 60-second ceiling, and a git that outlives it is killed together with its process group and logged. A timed-out check counts as "unknown": the dirty check reports the tree dirty and the `git worktree list` cross-check disagrees, so the worktree is kept, and the sweep moves on to its next candidate (#8306).
+- The shared kill-on-timeout runner reports a child that exits while something it started still holds its output pipe open as an error. It used to return empty output, which a `git status` caller would read as a clean tree (#8306).
