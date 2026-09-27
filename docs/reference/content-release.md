@@ -32,10 +32,11 @@ sha256 and runs `gh release create`, which creates the tag at the packaged
 commit. The release is created with `--latest=false`, so it never replaces a
 crate release as the repository's "Latest".
 
-🔴 **Never push a `content-v*` tag by hand.** `release.yml`,
-`pre-publish.yml` and `semver-checks.yml` all trigger on `*-v*` tags, and
-would treat `content` as a crate name. A tag the workflow creates with
-`GITHUB_TOKEN` starts no other workflow.
+🔴 **Never push a `content-v*` tag by hand anyway.** `release.yml`,
+`pre-publish.yml` and `semver-checks.yml` explicitly exclude `content-v*` from
+their `*-v*` tag triggers (Refs #8389), so a hand-pushed tag starts nothing —
+but crate tags remain the supported release path; this channel has no
+`workflow_dispatch` fallback for a mistaken manual push to recover from.
 
 ## What the bundle holds
 

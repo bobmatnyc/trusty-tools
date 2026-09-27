@@ -24,8 +24,9 @@
 #     until then there is nothing for a push trigger to package.
 #   - Deliberately NOT a `content-v*` tag push: release.yml, pre-publish.yml
 #     and semver-checks.yml all fire on `*-v*`, which a hand-pushed
-#     `content-v*` tag matches. The tag is created here with GITHUB_TOKEN,
-#     and events created by GITHUB_TOKEN start no other workflow.
+#     `content-v*` tag would otherwise match — they now exclude `content-v*`
+#     explicitly (Refs #8389). The tag is created here with GITHUB_TOKEN,
+#     and events created by GITHUB_TOKEN start no other workflow regardless.
 #
 # How to cut and what the bundle holds: docs/reference/content-release.md.
 
