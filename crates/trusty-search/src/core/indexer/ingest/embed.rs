@@ -162,7 +162,59 @@ where
     }
 }
 
+/// What an embed loop needs from its indexer, detached from the indexer lock.
+///
+/// Why: #8600 — a deferred-embed pass held the indexer read guard for the
+/// whole pass, so a queued writer blocked every later reader, including
+/// `GET /indexes/{id}/status`, until the pass ended. Owned clones let the pass
+/// embed with no guard held.
+/// What: `embedder` is `None` when the index has no embedder or no vector
+/// store (BM25-only), matching the old early return.
+/// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+pub(crate) struct EmbedContext {
+    index_id: String,
+    embedder: Option<Arc<dyn crate::core::embed::Embedder>>,
+    embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+}
+
 impl CodeIndexer {
+    /// Snapshot this indexer's embed dependencies (#8600).
+    ///
+    /// Why/What: see [`EmbedContext`]. The pool is resolved only when an
+    /// embedder and a store are both present, as before.
+    /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+    pub(crate) async fn embed_context(&self) -> EmbedContext {
+        let embedder = match (&self.embedder, &self.store) {
+            (Some(embedder), Some(_)) => Some(Arc::clone(embedder)),
+            _ => None,
+        };
+        let embed_pool = match embedder {
+            Some(_) => self.resolve_embed_pool().await,
+            None => None,
+        };
+        EmbedContext {
+            index_id: self.index_id.clone(),
+            embedder,
+            embed_pool,
+        }
+    }
+
+    /// [`EmbedContext::embed_chunks_in_batches`] over this indexer's own context.
+    /// Test: `test_index_files_batch_*`.
+    pub(crate) async fn embed_chunks_in_batches(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        self.embed_context()
+            .await
+            .embed_chunks_in_batches(chunks, progress_tx, pause)
+            .await
+    }
+}
+
+impl EmbedContext {
     /// Batched ONNX embed — multi-flight pipelined (issue #753).
     ///
     /// Why: serial loop left ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2)
@@ -189,7 +241,7 @@ impl CodeIndexer {
         use futures::StreamExt as _;
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
-        let (Some(embedder), Some(_store)) = (&self.embedder, &self.store) else {
+        let Some(embedder) = &self.embedder else {
             return Ok(embeddings);
         };
         let chunk_total = chunks.len();
@@ -224,12 +276,9 @@ impl CodeIndexer {
         // instead of blocking behind the whole catch-up pass. `None` when no
         // pool is installed/resolvable (tests, CLI paths) — falls back to
         // the direct `embedder.embed_batch()` call this loop always used
-        // before. Resolved ONCE via `resolve_embed_pool` (self-healing
-        // boot-race fix, PR #3784 review) rather than per-wave: a hit self-
-        // heals `self.embed_pool`'s lock-free cache for every later call on
-        // this index, so this `.await` only ever costs a real lock read on
-        // the rare index still waiting to self-heal.
-        let embed_pool = self.resolve_embed_pool().await;
+        // before. Resolved ONCE in `CodeIndexer::embed_context` (self-healing
+        // boot-race fix, PR #3784 review) rather than per-wave.
+        let embed_pool = self.embed_pool.clone();
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {

@@ -13,8 +13,8 @@
 //! component re-enable path in `service::server::components`.
 //! 1. Acquires the background reindex semaphore (serialises against concurrent
 //!    reindexes on the same handle) — `spawn_deferred_embed_pass` only.
-//! 2. Calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ lock
-//!    (no write lock held during embedding — the long operation).
+//! 2. Snapshots the owed chunks under the indexer's READ lock, embeds with NO
+//!    indexer lock held, then commits under a fresh READ lock (#8600).
 //! 3. On success: forces an HNSW snapshot and marks semantic `Ready`.
 //! 4. On failure: marks semantic `Failed` with the error reason (issue #928).
 //!
@@ -69,8 +69,8 @@ pub(crate) fn spawn_deferred_embed_pass(
 /// concurrency guard — this function does NOT acquire the background
 /// semaphore itself, so a caller that already holds a permit (the runtime
 /// toggle path) can call this directly without a nested-acquire deadlock.
-/// What: calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ
-/// lock (the embed step holds no write lock), forces an HNSW snapshot, then
+/// What: plans under the indexer READ lock, embeds with no indexer lock held,
+/// commits under a fresh READ lock (#8600), forces an HNSW snapshot, then
 /// marks semantic `Ready` (or `Failed` when embedding errors, issue #928).
 /// Idempotent: re-running after a partial failure re-embeds all not-yet-embedded
 /// chunks (HNSW upsert is idempotent).
@@ -135,15 +135,24 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
         }
     });
 
-    let result = {
-        let indexer = handle.indexer.read().await;
-        // #6524: the pass stops at the next wave boundary while embedding is
-        // paused. It does not park here — this task holds the one background
-        // permit, this index's permit and its teardown read-guard, so a park
-        // would stall every other index's catch-up and any DELETE on this one.
-        indexer
-            .embed_deferred_chunks_gated(Some(&progress_tx), Some(&handle.embedding_pause))
-            .await
+    // #8600: the indexer read guard is held to snapshot and to commit, never
+    // across embedding — a writer queued behind a long-held guard blocked
+    // every later reader, `GET /indexes/{id}/status` included. The per-index
+    // permit and the teardown read-guard still exclude a reindex and a DELETE.
+    let plan = handle.indexer.read().await.plan_deferred_embed().await;
+    // #6524: the pass stops at the next wave boundary while embedding is
+    // paused. It does not park here — this task holds the one background
+    // permit, this index's permit and its teardown read-guard, so a park
+    // would stall every other index's catch-up and any DELETE on this one.
+    let result = match plan
+        .embed(Some(&progress_tx), Some(&handle.embedding_pause))
+        .await
+    {
+        Ok(embeddings) => {
+            let indexer = handle.indexer.read().await;
+            indexer.commit_deferred_embed(plan, embeddings).await
+        }
+        Err(e) => Err(e),
     };
     // Drop the sender so the updater task's recv loop terminates.
     drop(progress_tx);

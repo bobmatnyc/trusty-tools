@@ -32,6 +32,7 @@ save_contrib_graph	persists the contribution graph into redb
 rebuild_symbol_graph_now	rebuilds and persists the symbol graph
 embed_deferred_chunks	embeds deferred chunks and writes vectors into HNSW
 embed_deferred_chunks_gated	same write, stoppable at a wave boundary; commits the embedded prefix (#6524)
+commit_deferred_embed	the commit phase of a deferred-embed pass: writes the embedded prefix into HNSW (#8600)
 set_root_path	repoints the indexer's root; in-memory, but decides where later writes land
 clear_file_hashes	clears the redb-backed content-hash cache
 clear_reindex_checkpoint_sync	clears the redb-backed reindex checkpoint

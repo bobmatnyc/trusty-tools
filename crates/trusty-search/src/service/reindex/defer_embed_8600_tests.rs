@@ -169,3 +169,64 @@ async fn a_never_completing_embedder_aborts_the_pass_within_the_deadline() {
         "failure names the cause: {reason}"
     );
 }
+
+/// Status answers while an embed pass is mid-wave and a writer is queued on
+/// the indexer lock.
+///
+/// Pre-fix the pass held the indexer read guard across embedding. tokio's
+/// `RwLock` is fair, so the queued writer blocked the status read behind it
+/// for the rest of the pass, and the 2 s `timeout` below failed.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_answers_during_an_embed_pass_with_a_writer_queued() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let redb_path = tmp.path().join("index.redb");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handle = handle_over_redb("status-8600", tmp.path(), &redb_path, Arc::clone(&calls)).await;
+
+    let pass = tokio::spawn(run_embed_catch_up(
+        Arc::clone(&handle),
+        Arc::new(ReindexProgress::new()),
+    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pass never embedded"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // A writer — e.g. a PATCH component toggle — queues on the indexer lock.
+    let writer_handle = Arc::clone(&handle);
+    let writer = tokio::spawn(async move {
+        let _guard = writer_handle.indexer.write().await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let registry = crate::core::registry::IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        handle.id.clone(),
+        Arc::clone(&handle.indexer),
+        handle.root_path.clone(),
+    ));
+    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
+    let body = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::service::server::index_status_report(&state, "status-8600"),
+    )
+    .await
+    .expect("status must answer within 2 s while an embed pass runs and a writer is queued")
+    .expect("status 200");
+    assert_eq!(body["index_id"], "status-8600");
+    tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .expect("the writer must not wait out the embed pass")
+        .expect("the writer task must not panic");
+
+    handle.embedding_pause.drain();
+    tokio::time::timeout(Duration::from_secs(5), pass)
+        .await
+        .expect("a drained pass must end")
+        .expect("the pass task must not panic");
+}
