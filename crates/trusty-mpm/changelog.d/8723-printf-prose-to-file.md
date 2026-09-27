@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses a lone `printf` or `echo` that writes issue or PR prose into a file because the prose names a secret-bearing file such as `.env` (#8723). The arguments count as text only when the command is one segment, stdout goes to a file, and nothing nested runs; a pipe, `$(…)`, `printf -v`, a redirect target, and every real read of a secret-bearing file are still refused.
