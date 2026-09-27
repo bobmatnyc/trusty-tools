@@ -889,8 +889,10 @@ pub(crate) async fn search_report(
         ..
     } = outcome;
     // #8348: a failed query embed counts against the embedder on `/health`, so
-    // `search_health` reports it unhealthy instead of `ok`.
-    if vector_lane_error.is_some() {
+    // `search_health` reports it unhealthy instead of `ok`. #8600: a pooled
+    // embed already recorded it in `EmbedPool::embed`; count only the no-pool
+    // fallback (the boot window before the pool installs), never twice.
+    if vector_lane_error.is_some() && !indexer.has_embed_pool() {
         state.embedder_stall_tracker.record_timeout();
     }
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`

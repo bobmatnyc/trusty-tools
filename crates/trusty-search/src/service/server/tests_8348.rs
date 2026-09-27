@@ -152,3 +152,39 @@ async fn a_pinned_semantic_query_with_a_failed_embed_is_503_not_500() {
     assert_eq!(body["reason"], "embedder_unavailable");
     assert_eq!(body["retryable"], true);
 }
+
+/// One failed query embed through the daemon's pool counts as exactly one
+/// embedder failure on `/health`.
+///
+/// Pre-fix the pool recorded the failure and the search handler recorded it
+/// again, so the count read 2.
+/// Test: this test.
+#[tokio::test]
+async fn one_failed_query_embed_counts_once_against_the_embedder() {
+    let id = "fail-embed-count-8348";
+    let (state, _tmp) = state_with_failing_embedder(id).await;
+    let pool = Arc::new(
+        crate::service::embed_pool::EmbedPool::new(1, Arc::new(SpawnFailingEmbedder))
+            .with_stall_tracker(Arc::clone(&state.embedder_stall_tracker)),
+    );
+    let handle = state.registry.get(&IndexId::new(id)).expect("registered");
+    handle.indexer.write().await.set_embed_pool(Some(pool));
+    let before = state.embedder_stall_tracker.recent_timeout_count();
+
+    let axum::Json(body) = super::search::search_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path(id.to_string()),
+        axum::Json(query(
+            serde_json::json!({ "text": "authenticate session token" }),
+        )),
+    )
+    .await
+    .unwrap_or_else(|(status, axum::Json(body))| panic!("expected 200, got {status}: {body}"));
+    assert_eq!(body["meta"]["vector_unavailable"], true, "{body}");
+
+    assert_eq!(
+        state.embedder_stall_tracker.recent_timeout_count() - before,
+        1,
+        "one failed query embed must count exactly once"
+    );
+}
