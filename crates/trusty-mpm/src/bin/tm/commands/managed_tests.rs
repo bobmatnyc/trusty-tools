@@ -36,7 +36,7 @@ use super::super::managed_render::{
 };
 use super::{session_activity, session_decommission, session_resume, session_stop};
 use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
-use trusty_mpm::core::tmux::with_tmux_binary;
+use trusty_mpm::core::tmux::{exact_session_target, with_tmux_binary};
 
 #[test]
 fn truncate_clips_and_appends_ellipsis() {
@@ -533,7 +533,7 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
 /// panics after 60 s naming the server, not the pane, as the cause.
 fn wait_for_server_answer(tmux_bin: &str, session_name: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let target = format!("={}", session_name.trim());
+    let target = exact_session_target(session_name.trim());
     while std::time::Instant::now() < deadline {
         let answered = std::process::Command::new(tmux_bin)
             .args(["has-session", "-t", &target])
