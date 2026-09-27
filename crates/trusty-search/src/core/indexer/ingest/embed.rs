@@ -92,6 +92,76 @@ pub(super) fn current_rss_mb() -> usize {
     }
 }
 
+/// Default for `TRUSTY_EMBED_NO_PROGRESS_SECS`: how long one embed wave may run
+/// without completing before the pass aborts (#8600).
+const DEFAULT_WAVE_NO_PROGRESS_SECS: u64 = 600;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test-only override of [`wave_no_progress_deadline`], scoped to one task
+    /// so a short deadline never leaks into a concurrently running test.
+    pub(crate) static WAVE_DEADLINE_OVERRIDE: std::time::Duration;
+}
+
+/// The no-progress deadline for one embed wave (#8600).
+///
+/// Why: an embedder that never answers held the catch-up pass — and the one
+/// background permit behind it — forever, which is the "no progress" half of
+/// the #8600 livelock. Any per-call timeout lives below this crate and does not
+/// cover an in-process or pooled embedder.
+/// What: `TRUSTY_EMBED_NO_PROGRESS_SECS` (a positive integer), else 600 s.
+/// Test: `a_never_completing_embedder_aborts_the_pass_within_the_deadline`.
+fn wave_no_progress_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(d) = WAVE_DEADLINE_OVERRIDE.try_with(|d| *d) {
+        return d;
+    }
+    let secs = std::env::var("TRUSTY_EMBED_NO_PROGRESS_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_WAVE_NO_PROGRESS_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Await one embed wave under the no-progress deadline and the shutdown drain
+/// (#8600).
+///
+/// Why: see [`wave_no_progress_deadline`] and
+/// [`crate::core::embed_pause::EmbeddingPause::drained`].
+/// What: `Ok(Some(results))` when the wave completes; `Ok(None)` when the gate
+/// drains first (the wave is dropped, cancelling its in-flight calls); `Err`
+/// when the deadline passes first.
+/// Test: `a_never_completing_embedder_aborts_the_pass_within_the_deadline`,
+/// `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`.
+async fn await_wave<F>(
+    wave: F,
+    pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+) -> Result<Option<Vec<WaveResult>>>
+where
+    F: std::future::Future<Output = Vec<WaveResult>>,
+{
+    let deadline = wave_no_progress_deadline();
+    let drained = async {
+        match pause {
+            Some(p) => p.drained().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        results = tokio::time::timeout(deadline, wave) => match results {
+            Ok(r) => Ok(Some(r)),
+            Err(_) => anyhow::bail!(
+                "embed wave made no progress for {}s — aborting the pass so it cannot \
+                 hold the background permit indefinitely (#8600; \
+                 TRUSTY_EMBED_NO_PROGRESS_SECS to adjust)",
+                deadline.as_secs()
+            ),
+        },
+        () = drained => Ok(None),
+    }
+}
+
 impl CodeIndexer {
     /// Batched ONNX embed — multi-flight pipelined (issue #753).
     ///
@@ -164,7 +234,8 @@ impl CodeIndexer {
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
             // #6524: stop at this wave boundary while embedding is paused.
-            if pause.is_some_and(|p| p.is_paused()) {
+            // #8600: and once the daemon is draining for shutdown.
+            if pause.is_some_and(|p| p.is_paused() || p.is_drained()) {
                 tracing::info!(
                     index_id = %self.index_id,
                     embedded = batch_start,
@@ -190,7 +261,7 @@ impl CodeIndexer {
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
             let wave_embed_start = std::time::Instant::now();
             // Dispatch concurrently — `buffered` preserves order.
-            let wave_results: Vec<WaveResult> = {
+            let wave = {
                 let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
                     let emb = Arc::clone(embedder);
                     let pool = embed_pool.clone();
@@ -207,8 +278,19 @@ impl CodeIndexer {
                 });
                 futures::stream::iter(iter)
                     .buffered(inflight)
-                    .collect()
-                    .await
+                    .collect::<Vec<WaveResult>>()
+            };
+            // #8600: a wave is bounded by a no-progress deadline and abandoned
+            // on a shutdown drain. Its slots stay `None`, so the caller commits
+            // only the waves that completed — never a partial one.
+            let Some(wave_results) = await_wave(wave, pause).await? else {
+                tracing::info!(
+                    index_id = %self.index_id,
+                    embedded = batch_start,
+                    chunk_total,
+                    "embed pass abandoned its in-flight wave: the daemon is shutting down (#8600)",
+                );
+                break;
             };
 
             for (start_pos, expected_n, vecs) in wave_results {

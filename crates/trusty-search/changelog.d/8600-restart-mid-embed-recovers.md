@@ -1,0 +1,4 @@
+Fixed
+- A shutdown that lands during a deferred-embed pass now ends the pass. The daemon drains every index's embedding gate when the stop signal arrives, the in-flight embed wave is abandoned, only fully completed waves are committed, and the pass is not re-queued. The semantic stage is never reported `ready` for an abandoned pass, and the pending-embed marker re-arms it on the next boot (#8600).
+- An embed wave that makes no progress for `TRUSTY_EMBED_NO_PROGRESS_SECS` (default 600) now aborts the pass and marks the semantic stage `failed`, instead of holding the background permit indefinitely on an embedder that never answers (#8600).
+- Warm boot now retries a corpus that is still locked (`DatabaseAlreadyOpen`) with backoff for up to 10 seconds instead of once after 50 ms, so a lock the previous process still holds briefly no longer forces a full cold start (#8600).

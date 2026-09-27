@@ -776,6 +776,9 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     let sigterm_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>> =
         std::sync::Arc::new(std::sync::OnceLock::new());
     let sigterm_at_signal = std::sync::Arc::clone(&sigterm_at);
+    // #8600: drained at the signal, not after the HTTP drain below — an embed
+    // pass must stop writing before the flush, not whenever axum finishes.
+    let signal_state = flush_state.clone();
 
     // #6285: the stop condition is awaited ONCE and fanned out to both
     // listeners through a token. Awaiting it separately in each would work on
@@ -794,6 +797,7 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
             }
         }
         let _ = sigterm_at_signal.set(std::time::Instant::now());
+        drain_paused_embedders(&signal_state);
         signal_watcher.cancel();
     });
 

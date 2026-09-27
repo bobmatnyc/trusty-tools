@@ -181,6 +181,9 @@ mod tests_grep_cold_8266;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
+// #8348: a failed query embed degrades to lexical instead of a 500.
+#[cfg(test)]
+mod tests_8348;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]

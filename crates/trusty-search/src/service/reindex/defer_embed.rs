@@ -79,6 +79,16 @@ pub(crate) fn spawn_deferred_embed_pass(
 /// `spawn_deferred_embed_pass`, which is a thin wrapper over this function).
 pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>) {
     let index_id = handle.id.clone();
+    // #8600: a pass that reaches its turn after shutdown began must not start.
+    // The stage and the durable pending marker are left as they are, so the
+    // next boot re-arms the work instead of this process opening new writes.
+    if handle.embedding_pause.is_drained() {
+        tracing::info!(
+            "deferred_embed[{}]: daemon is shutting down — not starting (#8600)",
+            index_id.0
+        );
+        return;
+    }
     let total_chunks = {
         let indexer = handle.indexer.read().await;
         indexer.chunk_count()
@@ -172,6 +182,13 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                     "embedded": embedded,
                 }))
                 .await;
+            // #8600: a drain stops the pass the same way a pause does, but
+            // nothing will resume it in this process. Re-queueing would hand the
+            // queue a job that holds this handle — and its corpus — open through
+            // shutdown; the kept marker re-arms it on the next boot instead.
+            if handle.embedding_pause.is_drained() {
+                return;
+            }
             let pending = handle.indexer.read().await.pending_embed_count().await;
             spawn_deferred_embed_pass(handle, progress, pending);
         }
@@ -609,3 +626,8 @@ mod tests {
         );
     }
 }
+
+// #8600: shutdown drain and no-progress abort of an in-flight pass.
+#[cfg(test)]
+#[path = "defer_embed_8600_tests.rs"]
+mod tests_8600;

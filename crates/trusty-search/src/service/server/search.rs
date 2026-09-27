@@ -859,6 +859,10 @@ pub(crate) async fn search_report(
             );
             return (status, body.0);
         }
+        // #8348: a pinned semantic query whose embed failed is 503, not 500.
+        if let Some((status, body)) = super::degraded::embedder_unavailable_from(&e) {
+            return (status, body.0);
+        }
         if let Some((status, body)) = super::degraded::corpus_read_failure_from(&e) {
             tracing::warn!(
                 index_id = %index_id,
@@ -881,8 +885,14 @@ pub(crate) async fn search_report(
         mut results,
         mut dropped,
         exact_match,
+        vector_lane_error,
         ..
     } = outcome;
+    // #8348: a failed query embed counts against the embedder on `/health`, so
+    // `search_health` reports it unhealthy instead of `ok`.
+    if vector_lane_error.is_some() {
+        state.embedder_stall_tracker.record_timeout();
+    }
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
     // paths relative to the index root, so anything that escapes the root
     // (absolute path pointing elsewhere, `..` traversal, or simply a path
@@ -1007,7 +1017,9 @@ pub(crate) async fn search_report(
             // for the unpinned caller, who legitimately gets whatever lanes are
             // ready but must be able to tell which ones those were without
             // diffing `search_capabilities` against a schema it does not have.
-            "vector_unavailable": !semantic_ready,
+            // #8348: also `true` when the query embed failed and the lane was skipped.
+            "vector_unavailable": !semantic_ready || vector_lane_error.is_some(),
+            "embedder_error": vector_lane_error,
             // #5068: separates "off for this index" from "not built yet" — the
             // same split `vector_unavailable`'s 503 body carries, so a caller
             // handles one contract, not two.
