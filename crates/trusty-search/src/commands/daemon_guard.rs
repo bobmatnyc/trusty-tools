@@ -229,9 +229,6 @@ mod tests {
         );
     }
 
-    use std::sync::Mutex;
-    static INDEX_DEVICE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Why: as of trusty-search 0.3.55 the indexing flow defaults to `auto`
     /// because the embedder now registers CoreML with
     /// `MLComputeUnits=CPUAndNeuralEngine`, eliminating the GPU unified-memory
@@ -240,10 +237,10 @@ mod tests {
     /// asserts it returns `"auto"`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn resolve_indexing_device_defaults_to_auto() {
-        let _guard = INDEX_DEVICE_ENV_LOCK.lock().unwrap();
         let prev = std::env::var("TRUSTY_INDEX_DEVICE").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
+        // SAFETY: serialised by `#[serial]`.
         unsafe { std::env::remove_var("TRUSTY_INDEX_DEVICE") };
         assert_eq!(resolve_indexing_device(), "auto");
         unsafe {
@@ -260,10 +257,10 @@ mod tests {
     /// lowercased value is echoed.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn resolve_indexing_device_honours_env_override() {
-        let _guard = INDEX_DEVICE_ENV_LOCK.lock().unwrap();
         let prev = std::env::var("TRUSTY_INDEX_DEVICE").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
+        // SAFETY: serialised by `#[serial]`.
         unsafe { std::env::set_var("TRUSTY_INDEX_DEVICE", "GPU") };
         assert_eq!(resolve_indexing_device(), "gpu");
         unsafe { std::env::set_var("TRUSTY_INDEX_DEVICE", "auto") };

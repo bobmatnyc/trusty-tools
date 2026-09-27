@@ -506,8 +506,8 @@ mod tests {
     /// union of its dependents' features, and trusty-code / trusty-memory /
     /// trusty-mpm / trusty-search all request `crate-config`.
     /// Test: this test.
-    // #5937: sets HOME, which update/tests.rs also sets under this group.
-    #[serial_test::serial(update_verify_installed_binary_env)]
+    // #5937: sets HOME under `env_lock()`, the lock every HOME reader and
+    // writer in this test target holds.
     #[cfg(feature = "crate-config")]
     #[test]
     fn config_file_drives_both_zero_argument_resolvers() {

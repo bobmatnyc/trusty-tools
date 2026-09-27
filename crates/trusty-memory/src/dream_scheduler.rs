@@ -265,8 +265,9 @@ mod tests {
         let registry = PalaceRegistry::new();
         register_temp_palace(&registry, tmp.path());
 
-        // SAFETY: single-threaded tokio runtime + #[serial] ensures no other
-        // thread reads DREAM_DISABLED_ENV concurrently. Restore on every path.
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by `env_test_lock()`. Restore on every path.
         unsafe {
             std::env::set_var(DREAM_DISABLED_ENV, "1");
         }
@@ -292,8 +293,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn dream_scheduler_spawns_per_palace_loop() {
-        // SAFETY: single-threaded tokio runtime + #[serial] ensures no other
-        // thread reads DREAM_DISABLED_ENV concurrently. Restore on every path.
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by `env_test_lock()`. Restore on every path.
         unsafe {
             std::env::remove_var(DREAM_DISABLED_ENV);
         }
@@ -354,10 +356,13 @@ mod tests {
     /// without panic even when a palace is in a degraded state. We test the
     /// per-loop error isolation at the `Dreamer` level in trusty-common.
     /// Test: itself (smoke test — would panic or deadlock on regression).
-    // #5937: removes TRUSTY_DREAM_DISABLED, which its two siblings set under #[serial].
+    // #5937: removes TRUSTY_DREAM_DISABLED, which its two siblings set.
     #[serial_test::serial]
     #[tokio::test]
     async fn dream_scheduler_no_panic_with_empty_registry() {
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by `env_test_lock()`, held for the whole test.
         unsafe {
             std::env::remove_var(DREAM_DISABLED_ENV);
         }

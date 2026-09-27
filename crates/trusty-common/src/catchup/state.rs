@@ -197,6 +197,10 @@ mod tests {
     /// Path derivation only; nothing is written.
     #[test]
     fn catchup_dir_falls_back_to_home() {
+        // #5937: reads HOME twice; other tests in this binary set it.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(home) = dirs::home_dir() else {
             return; // No home dir resolvable: the `None` arm is unreachable here.
         };

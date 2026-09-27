@@ -206,6 +206,11 @@ fn ensure_project_indexed_none_for_root() {
 /// Test: this test.
 #[test]
 fn ensure_project_indexed_refuses_the_real_home_directory() {
+    // #5937: reads HOME, and so does the guard under test; other tests in
+    // this binary set it.
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(home) = dirs::home_dir() else {
         panic!("this test needs a resolvable home directory");
     };
@@ -237,6 +242,11 @@ fn ensure_project_indexed_refuses_the_real_home_directory() {
 /// an index named after the operator.
 #[test]
 fn index_files_inner_refuses_the_real_home_directory() {
+    // #5937: reads HOME, and so does the guard under test; other tests in
+    // this binary set it.
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(home) = dirs::home_dir() else {
         panic!("this test needs a resolvable home directory");
     };
