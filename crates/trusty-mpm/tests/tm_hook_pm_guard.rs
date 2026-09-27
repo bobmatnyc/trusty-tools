@@ -14,7 +14,7 @@
 //! ALLOW). The daemon URL is pointed at an unreachable address so the
 //! best-effort audit POST on the deny path fails fast without a real daemon —
 //! proving the deny still emits regardless.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 //!
 //! Note: the deny JSON shape asserted below
 //! (`hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason}`)
@@ -34,7 +34,7 @@
 //! share (and race on) the same counter file, and would also pollute the
 //! real developer `$HOME`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};

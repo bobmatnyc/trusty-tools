@@ -15,7 +15,7 @@
 //! spawned `tm` confined by `common::tm_command`.
 //! Test: this file IS the test module.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::Output;

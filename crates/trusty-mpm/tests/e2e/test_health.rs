@@ -1,6 +1,6 @@
 //! E2E: liveness probe + HR-3 catalog-staleness fields.
 
-use crate::harness::TestDaemon;
+use super::harness::TestDaemon;
 
 /// `GET /health` returns `200` with the JSON liveness body, including the HR-3
 /// `catalog_stale` / `catalog_unknown` fields. Against a fresh test daemon with

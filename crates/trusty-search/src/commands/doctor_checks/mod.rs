@@ -515,36 +515,32 @@ pub fn check_python_device_note() -> CheckResult {
 }
 
 /// Remove a stale lock file and report the outcome.
+///
+/// Why: #8760 — deciding by the pid inside the file unlinked a live daemon's
+/// lock during its pid-write window, which let a second daemon start.
+/// What: delegates to [`crate::service::remove_daemon_files_if_unheld`], which
+/// unlinks only while holding the lock itself; a held lock is reported and
+/// left in place.
+/// Test: `fix_stale_lock_leaves_a_held_lock_in_place`.
 pub fn fix_stale_lock(data_dir: &std::path::Path) {
+    use crate::service::StaleLockRemoval;
     let lock_path = data_dir.join("daemon.lock");
-    if lock_path.exists() {
-        let pid_opt = std::fs::read_to_string(&lock_path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
-        let stale = pid_opt
-            .map(|pid| {
-                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_err()
-            })
-            .unwrap_or(true);
-        if stale {
-            match std::fs::remove_file(&lock_path) {
-                Ok(()) => println!(
-                    "  {} Removed stale lock file {}",
-                    "✓".green(),
-                    lock_path.display()
-                ),
-                Err(e) => println!(
-                    "  {} Could not remove lock file {}: {e}",
-                    "✗".red(),
-                    lock_path.display()
-                ),
-            }
-        } else {
-            println!(
-                "  {} Lock file is held by a live process — not removing",
-                "⚠".yellow()
-            );
-        }
+    match crate::service::remove_daemon_files_if_unheld(&lock_path, &[]) {
+        Ok(StaleLockRemoval::Removed) => println!(
+            "  {} Removed stale lock file {}",
+            "✓".green(),
+            lock_path.display()
+        ),
+        Ok(StaleLockRemoval::HeldByLiveDaemon) => println!(
+            "  {} Lock file is held by a live process — not removing",
+            "⚠".yellow()
+        ),
+        Ok(StaleLockRemoval::Absent) => {}
+        Err(e) => println!(
+            "  {} Could not remove lock file {}: {e}",
+            "✗".red(),
+            lock_path.display()
+        ),
     }
 }
 

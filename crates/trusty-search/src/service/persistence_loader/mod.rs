@@ -47,39 +47,58 @@ use crate::service::storage_layout::StorageLayout;
 /// classified `DatabaseError` variants #702/#703 already handle) into a
 /// typed `Err` instead of letting it unwind into the caller.
 /// What: calls `CorpusStore::open` via `open_serialized`; on
-/// `DatabaseError::DatabaseAlreadyOpen` (matched via typed downcast) sleeps
-/// 50 ms and retries once, still under the same per-path serialization. All
-/// other errors (including a converted panic) surface immediately.
+/// `DatabaseError::DatabaseAlreadyOpen` (matched via typed downcast) retries
+/// with doubling backoff from 50 ms for up to [`LOCK_RETRY_BUDGET`], still under
+/// the same per-path serialization. All other errors (including a converted
+/// panic) surface immediately.
+/// #8600: a single 50 ms retry lost the corpus to a full cold start whenever
+/// the previous process's lock outlived it — which a restart landing mid
+/// deferred-embed pass reliably did.
 /// Test: `corpus_recovery::tests::database_already_open_variant_is_stable`
 /// (pinning) + `core::corpus::open_guard::tests` (the #3659 concurrency +
 /// panic-safety regression coverage) + warm-boot tests in this module.
 async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
+    open_corpus_with_retry_within(path, LOCK_RETRY_BUDGET).await
+}
+
+/// How long warm-boot keeps retrying a `DatabaseAlreadyOpen` corpus (#8600).
+const LOCK_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`open_corpus_with_retry`] with the retry budget as a parameter, so a test
+/// can bound it (#8600).
+/// Test: `a_lock_released_after_the_first_retry_still_opens_the_corpus`.
+async fn open_corpus_with_retry_within(
+    path: &Path,
+    budget: std::time::Duration,
+) -> Result<CorpusStore> {
     let owned = path.to_path_buf();
-    let first = {
-        let p = owned.clone();
-        open_serialized(&owned, move || CorpusStore::open(&p)).await
-    };
-    match first {
-        Ok(store) => Ok(store),
-        Err(e) => {
-            // Typed downcast — redb error-message rewording cannot disable retry.
-            let is_already_open = e
-                .downcast_ref::<redb::DatabaseError>()
-                .map(|db_err| matches!(db_err, redb::DatabaseError::DatabaseAlreadyOpen))
-                .unwrap_or(false);
-            if is_already_open {
-                tracing::warn!(
-                    "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
-                     retrying in 50 ms (refs #840)",
-                    path.display()
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let p = owned.clone();
-                open_serialized(&owned, move || CorpusStore::open(&p)).await
-            } else {
-                Err(e)
-            }
+    let started = std::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(50);
+    loop {
+        let attempt = {
+            let p = owned.clone();
+            open_serialized(&owned, move || CorpusStore::open(&p)).await
+        };
+        let e = match attempt {
+            Ok(store) => return Ok(store),
+            Err(e) => e,
+        };
+        // Typed downcast — redb error-message rewording cannot disable retry.
+        let is_already_open = e
+            .downcast_ref::<redb::DatabaseError>()
+            .map(|db_err| matches!(db_err, redb::DatabaseError::DatabaseAlreadyOpen))
+            .unwrap_or(false);
+        if !is_already_open || started.elapsed() + delay > budget {
+            return Err(e);
         }
+        tracing::warn!(
+            "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
+             retrying in {} ms (refs #840, #8600)",
+            path.display(),
+            delay.as_millis()
+        );
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(2));
     }
 }
 
@@ -531,3 +550,6 @@ mod tests;
 // see the module doc on `open_corpus_with_retry` above.
 #[cfg(test)]
 mod tests_3659;
+// #8600: the bounded warm-boot lock retry.
+#[cfg(test)]
+mod tests_8600;
