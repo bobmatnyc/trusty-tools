@@ -22,7 +22,7 @@
 //! locked worktree regardless, so this re-check was the ONLY thing honouring
 //! the lock; it now refuses too, and this pass is the outer of two defences.
 //!
-//! So: [`reclaim_with_probes`] re-reads the live session set, git's own
+//! So: [`reclaim_scoped`] re-reads the live session set, git's own
 //! worktree registry, the ownership marker, the pull-request state, and the
 //! working tree PER CANDIDATE, immediately before that candidate's deletion —
 //! mirroring `prune_orphaned_worktrees`' Phase 2, whose comment warns against
@@ -61,8 +61,13 @@ use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_wit
 use super::worktree_reclaim_branch::{
     OnceProof, cleanup_reclaimed_branch, deletion_proof, own_pr_gate,
 };
-use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
+use super::worktree_registry::{
+    ScannedWorktree, list_registered_worktrees, scan_registered_worktrees,
+    scan_registered_worktrees_in,
+};
+use super::worktree_removal_integrity::identity_refusal;
 use super::worktree_safety::inspect_dirt;
+use super::worktree_scope::WorktreeScope;
 
 /// How long a survey may spend measuring bytes, and classifying (#2919).
 ///
@@ -202,9 +207,38 @@ pub(crate) fn survey_with_landed_content(
     adopted: &[PathBuf],
     landed_content: LandedContentProbe<'_>,
 ) -> ReclaimSurvey {
+    survey_scanned(
+        scan_registered_worktrees(repos_root, adopted),
+        in_use,
+        index_for,
+        agent_state,
+        budget,
+        per_branch_fallback,
+        keep_list,
+        landed_content,
+    )
+}
+
+/// [`survey_with_landed_content`] over an already-scanned worktree list (#8782).
+///
+/// Why: the reclaim loop scans ONCE, bounded by its scope, and hands the same
+/// list to the landing-ref refresh and to this survey, so the two cannot see
+/// different sets.
+/// Test: `a_project_scope_admits_only_that_projects_worktrees`.
+#[allow(clippy::too_many_arguments)]
+fn survey_scanned(
+    scanned: Vec<ScannedWorktree>,
+    in_use: &LiveClaims,
+    index_for: &dyn Fn(&Path) -> PrIndex,
+    agent_state: AgentStateProbe<'_>,
+    budget: SurveyBudget,
+    per_branch_fallback: bool,
+    keep_list: &KeepList,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
-    for scanned in scan_registered_worktrees(repos_root, adopted) {
+    for scanned in scanned {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
             // #2919: fail closed. A candidate we ran out of time to inspect is
             // reported as blocked, never omitted and never approved.
@@ -219,7 +253,7 @@ pub(crate) fn survey_with_landed_content(
             continue;
         }
         // #7889: the landing-ref refresh gate 6 depends on runs in
-        // `reclaim_with_probes`, on the destructive path only — a survey never
+        // `reclaim_scoped`, on the destructive path only — a survey never
         // mutates refs (#7652 critic round).
         let index = indexes
             .entry(scanned.registry_root.clone())
@@ -555,11 +589,8 @@ fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<Strin
 /// commits, which refuses.
 /// Test: `a_refresh_updates_the_stale_landing_ref`,
 /// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`.
-fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
-    let roots: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root, adopted)
-        .into_iter()
-        .map(|scanned| scanned.registry_root)
-        .collect();
+fn refresh_repositories(scanned: &[ScannedWorktree]) {
+    let roots: BTreeSet<PathBuf> = scanned.iter().map(|s| s.registry_root.clone()).collect();
     for root in roots {
         if let Err(e) = refresh_landing_refs(&root) {
             tracing::warn!(
@@ -611,13 +642,26 @@ fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
 /// `reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey`,
 /// `reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey`,
 /// `reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey`,
-/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`.
-pub(crate) fn reclaim_with_probes(
+/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`,
+/// `a_merged_pr_path_replaced_by_a_symlink_is_not_removed`.
+///
+/// # Scope (#8782)
+///
+/// Why: a run typed in one repository must neither survey nor reclaim another
+/// project's worktrees, and a `--force` run carries its preview's paths so it
+/// can remove nothing that preview did not list. `adopted` (#7357) is passed
+/// straight through; [`WorktreeScope::all`] is every project.
+/// What: scans once through [`scan_registered_worktrees_in`]; the landing-ref
+/// refresh and the survey both read that one list.
+/// Test: `a_project_scope_admits_only_that_projects_worktrees`,
+/// `the_preview_lists_exactly_what_force_removes`,
+/// `a_force_run_removes_nothing_its_preview_did_not_list`.
+pub(crate) fn reclaim_scoped(
     repos_root: &Path,
     probes: &FreshProbes<'_>,
     mode: ReclaimMode,
-    // #7357: the caller's adopted anchors, passed straight through.
     adopted: &[PathBuf],
+    scope: &WorktreeScope,
 ) -> ReclaimOutcome {
     // 🔴 #7965: `unwrap_or_default()` stood here, and an empty `LiveClaims` reads
     // as "nothing claims anything" — the exact downgrade the fail-closed contract
@@ -637,18 +681,19 @@ pub(crate) fn reclaim_with_probes(
     // #7889: only a DESTRUCTIVE pass refreshes the landing refs. Read after
     // #7965's demotion rather than before it, so a pass demoted to `Report` by
     // an unanswerable claim probe mutates no refs either.
+    // #8782: one scoped scan feeds both the refresh and the survey.
+    let scanned = scan_registered_worktrees_in(repos_root, adopted, scope);
     if mode == ReclaimMode::Remove {
-        refresh_repositories(repos_root, adopted);
+        refresh_repositories(&scanned);
     }
-    let survey = survey_with_landed_content(
-        repos_root,
+    let survey = survey_scanned(
+        scanned,
         &initial,
         probes.index_for,
         probes.agent_state,
         SurveyBudget::for_reclaim(),
         true,
         &(probes.keep_list)(),
-        adopted,
         // #7889: the operator typed `prune-worktrees --merged-prs`, so the
         // admission is offered in BOTH modes — a report that hid a candidate
         // `--force` would then reclaim is a report of the wrong thing. It is
@@ -664,6 +709,7 @@ pub(crate) fn reclaim_with_probes(
         removed_bytes: 0,
         refused_at_recheck: Vec::new(),
         removal_failed: Vec::new(),
+        partially_removed: Vec::new(),
         survey,
     };
     if mode == ReclaimMode::Report {
@@ -775,7 +821,10 @@ pub(crate) fn reclaim_with_probes(
             &|| {
                 // #7771: a stale harness lock is released only once every
                 // gate has agreed, so a refused tree keeps its lock.
+                // #8782: identity last before the lock release, so a path
+                // replaced by a symlink is refused and nothing is unlocked.
                 let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref())
+                    .or_else(|| identity_refusal(&path))
                     .or_else(|| super::worktree_owner_gate::release_stale_lock(&path).err());
                 late_refusal.set(refusal.clone());
                 refusal
@@ -789,6 +838,13 @@ pub(crate) fn reclaim_with_probes(
                  {reason} (#7652)"
             );
             out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
+        // #8782: git failed after deleting content — reported apart from kept.
+        if let super::decommission::WorktreeRemoval::PartiallyRemoved(reason) = &outcome {
+            tracing::warn!(path = %path.display(), "worktree-reclaim: {reason}");
+            out.partially_removed
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
@@ -845,7 +901,7 @@ pub(crate) fn reclaim_with_probes(
     out
 }
 
-/// [`reclaim_with_probes`] against the real `gh`-backed index and a live
+/// [`reclaim_scoped`] against the real `gh`-backed index and a live
 /// re-read of the session store (#2919).
 ///
 /// Why: the production entry point for the merged-PR reclaim — reached from the
@@ -860,7 +916,8 @@ pub(crate) fn reclaim_with_probes(
 /// when the set cannot be read, which refuses; `keep_list` returns
 /// `KeepList::unreadable` when the config cannot be parsed, which keeps
 /// everything (#6927).
-/// Test: exercised through `reclaim_with_probes`' tests.
+/// Test: exercised through `reclaim_scoped`' tests.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,
     in_use_paths: &dyn Fn() -> Option<LiveClaims>,
@@ -873,8 +930,10 @@ pub(crate) fn reclaim_merged_pr_worktrees(
     // that assembles the probes — never here, so a test can hand in a scratch
     // path without the real process's cwd leaking into the comparison.
     launched_from: &[PathBuf],
+    // #8782: the project and path bounds the route resolved.
+    scope: &WorktreeScope,
 ) -> ReclaimOutcome {
-    reclaim_with_probes(
+    reclaim_scoped(
         repos_root,
         &FreshProbes {
             in_use_now: in_use_paths,
@@ -886,6 +945,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
         },
         mode,
         adopted,
+        scope,
     )
 }
 

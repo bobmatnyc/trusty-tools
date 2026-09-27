@@ -1121,7 +1121,40 @@ pub(crate) fn dirt_blocks_removal(
     policy: DirtyWorktreePolicy,
     phase: &'static str,
 ) -> Option<DirtyWorktree> {
-    let dirt = inspect_dirt(candidate)?;
+    match dirt_verdict(candidate, policy, phase) {
+        DirtVerdict::Blocks(dirt) => Some(dirt),
+        DirtVerdict::Clean | DirtVerdict::Discards(_) => None,
+    }
+}
+
+/// What the #4091 dirty-tree gate decided for one candidate (#8782).
+///
+/// Why: [`dirt_blocks_removal`] answers `None` both for a clean tree and for a
+/// dirty one `--discard-dirty` is about to destroy, so the prune preview told
+/// the operator "no unsaved work" for exactly the trees that would lose it.
+/// What: `Clean`; `Blocks` — keep it and report it; `Discards` — remove it
+/// anyway under [`DirtyWorktreePolicy::ForceDiscard`], carrying what is lost.
+#[derive(Debug)]
+pub(crate) enum DirtVerdict {
+    /// No unsaved work.
+    Clean,
+    /// Unsaved work, and the policy keeps the tree.
+    Blocks(DirtyWorktree),
+    /// Unsaved work the explicit force-discard opt-in destroys.
+    Discards(DirtyWorktree),
+}
+
+/// [`dirt_blocks_removal`], keeping the dirt a force-discard destroys (#8782).
+///
+/// Test: `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+pub(crate) fn dirt_verdict(
+    candidate: &Path,
+    policy: DirtyWorktreePolicy,
+    phase: &'static str,
+) -> DirtVerdict {
+    let Some(dirt) = inspect_dirt(candidate) else {
+        return DirtVerdict::Clean;
+    };
     if policy == DirtyWorktreePolicy::Skip {
         tracing::warn!(
             path = %candidate.display(), reason = %dirt.reason, phase,
@@ -1129,14 +1162,14 @@ pub(crate) fn dirt_blocks_removal(
              re-run with an explicit discard opt-in only if the work is genuinely \
              disposable (#4091)"
         );
-        return Some(dirt);
+        return DirtVerdict::Blocks(dirt);
     }
     tracing::warn!(
         path = %candidate.display(), reason = %dirt.reason, phase,
         "prune-worktrees: DISCARDING unsaved work — explicit force-discard opt-in \
          was supplied (#4091)"
     );
-    None
+    DirtVerdict::Discards(dirt)
 }
 
 /// Best-effort cross-check: does `git worktree list` on the checkout owning

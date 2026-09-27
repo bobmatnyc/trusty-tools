@@ -377,7 +377,7 @@ The signal is tmux's own `#{session_attached}`, not the lifecycle state word.
 tm session prune-idle [--dry-run] [--json]      # idle→stop, done→decommission (locked policy)
 tm session prune --state ephemeral|stopped|decommissioned|all [--dry-run] [--include-active]
 tm session decommission-ephemeral               # tear down all test/throwaway sessions
-tm session prune-worktrees [--force]            # remove orphaned .worktrees/ dirs (default dry-run)
+tm session prune-worktrees [--force] [--all-projects]  # this checkout's orphaned worktrees (default dry-run); --all-projects = every project
 ```
 
 To clear a batch by NAME rather than state, use the picker's `d <glob>` above.

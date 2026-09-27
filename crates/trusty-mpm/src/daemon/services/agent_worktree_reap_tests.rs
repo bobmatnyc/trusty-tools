@@ -635,6 +635,7 @@ async fn session_end_keeps_a_worktree_that_holds_unsaved_work() {
             removed: 0,
             already_gone: 0,
             kept: 1,
+            partially_removed: 0,
         }),
         "the dirt gate must keep this tree, and the summary must count it as kept"
     );
@@ -679,6 +680,7 @@ async fn session_end_spares_another_sessions_agent() {
             removed: 1,
             already_gone: 0,
             kept: 0,
+            partially_removed: 0,
         }),
         "only the ending session's own tree is a candidate"
     );
@@ -734,6 +736,7 @@ async fn session_end_reaps_a_finished_agents_released_worktree() {
             removed: 1,
             already_gone: 0,
             kept: 0,
+            partially_removed: 0,
         }),
         "known + terminal + released is the population this reap exists for"
     );
@@ -783,6 +786,7 @@ async fn session_end_keeps_a_worktree_whose_agent_names_two_directories() {
             removed: 1,
             already_gone: 0,
             kept: 0,
+            partially_removed: 0,
         }),
         "only the unambiguous tree is a candidate; the ambiguous pair is not swept at all"
     );
@@ -1022,6 +1026,7 @@ async fn session_end_keeps_gitignored_run_output() {
             removed: 0,
             already_gone: 0,
             kept: 1,
+            partially_removed: 0,
         })
     );
     assert!(wt.join("results/run.json").exists(), "the results survive");
