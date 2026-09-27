@@ -380,7 +380,6 @@ async fn deferred_dispatch_tool_call_when_ready() {
 /// Run explicitly: `cargo test -p trusty-review -- --include-ignored
 /// deferred_dispatch_tool_call_times_out_warming_up`.
 #[tokio::test(start_paused = true)]
-#[ignore = "paused-clock test — run with --include-ignored"]
 async fn deferred_dispatch_tool_call_times_out_warming_up() {
     use std::time::Duration;
 
