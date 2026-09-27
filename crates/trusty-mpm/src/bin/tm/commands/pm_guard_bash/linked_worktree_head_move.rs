@@ -49,6 +49,7 @@ use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 use super::main_checkout::{git_verb_targets_with_tail, starts_a_head_move};
 use super::{PathEnv, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
+use crate::commands::pm_guard_deny_log::DenyContext;
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
 
 /// A HEAD move whose target is a linked worktree, awaiting the daemon's answer.
@@ -182,7 +183,8 @@ pub(crate) async fn deny_linked_worktree_head_move(
     let Some(reason) = deny.await else {
         return false;
     };
-    audit_denied_tool(url, session_id, "Bash", &reason).await;
+    let refused = DenyContext::from_payload(url, payload);
+    audit_denied_tool(&refused, "linked-worktree-head-move", &reason).await;
     println!("{}", build_pm_guard_deny_response(&reason));
     true
 }
