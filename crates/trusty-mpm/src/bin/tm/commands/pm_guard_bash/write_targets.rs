@@ -460,6 +460,32 @@ mod tests {
         }
     }
 
+    // #8730 round 3: the byte scanner read every `>&` as a descriptor copy, but
+    // `>&word` opens `word` for stdout and stderr (bash), and zsh's `>&|`/`>&!`
+    // always open a file. A real descriptor copy still names nothing.
+    #[test]
+    fn write_targets_read_a_descriptor_redirect_that_names_a_file() {
+        for command in [
+            "echo x >&src/lib.rs",
+            "echo x >& src/lib.rs",
+            "echo x >&!src/lib.rs",
+            "echo x >&| src/lib.rs",
+            "echo x 2>&1 >&src/lib.rs",
+            "(echo x >&src/lib.rs)",
+        ] {
+            assert_eq!(targets(command), vec!["src/lib.rs"], "{command}");
+        }
+        for command in [
+            "cargo test 2>&1",
+            "echo x >&2",
+            "echo x 2>&-",
+            "echo x >& 2",
+            "x 1>&2-",
+        ] {
+            assert_eq!(targets(command), Vec::<String>::new(), "{command}");
+        }
+    }
+
     // #8730 critic, CRITICAL 2: a body handed to a shell is shell source, and
     // its substitutions were skipped with the rest of the here-document. A
     // data body stays data.
@@ -484,7 +510,9 @@ mod tests {
     }
 
     // #8730 critic, MEDIUM: an operand read without its lifted body keeps no
-    // glued `)`.
+    // glued `)`. The `a(1).md` row tests `tee_targets` in isolation: through
+    // the full pipeline `opener_at` lifts `(1)` as a subshell body first, so
+    // the operand reads `a().md` (bash rejects the unquoted shape anyway).
     #[test]
     fn write_targets_strip_a_glued_close_paren_from_a_tee_operand() {
         assert_eq!(

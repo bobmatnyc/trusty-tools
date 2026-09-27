@@ -9,6 +9,7 @@
 //! operators, and [`ungroup`] blanks subshell grouping parens.
 //! Test: `credential_print_tests` (sibling module).
 
+use super::super::bash_tokens::is_clobber_bar;
 use super::super::heredoc::HeredocBodies;
 use super::super::shell_lex::QuoteScan;
 use super::{Lifted, MARK, Refusal, Sink, Sub, SubKind, scan};
@@ -129,7 +130,11 @@ pub(super) fn split_stages(text: &str) -> Vec<(String, bool, bool)> {
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if (quotes.balanced && !quotes.is_unquoted(i)) || bodies.suppresses_separator(i) {
+        // #8730: the `|` of `>|`/`>&|` is the redirect's clobber mark, not a pipe.
+        if (quotes.balanced && !quotes.is_unquoted(i))
+            || bodies.suppresses_separator(i)
+            || is_clobber_bar(bytes, i)
+        {
             i += 1;
             continue;
         }

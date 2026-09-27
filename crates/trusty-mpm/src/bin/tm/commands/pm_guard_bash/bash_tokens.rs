@@ -99,9 +99,11 @@ pub(crate) enum RedirectRole<'a> {
 /// [`super::scan_file_write_redirect`] has skipped `>&` since #5356 — this is
 /// that same rule, stated once, for the callers that work on argv.
 /// What: the token must split at `>` with a descriptor prefix that is empty,
-/// `&`, or all digits. `>>` and `>|` are stripped, then a `&` prefix on the
-/// remainder decides: `&<digits>` and `&-` are descriptor operations, and any
-/// other `&word` is bash's `&>word` spelling, which really does name a file.
+/// `&`, or all digits. A second `>` and one clobber mark ([`strip_clobber`])
+/// are stripped, then a `&` prefix on the remainder decides: a
+/// [`is_descriptor_word`] after it is a descriptor operation, and any other
+/// `&word` is bash's `>&word` spelling, which really does name a file. A
+/// clobber mark after the `&` (zsh `>&|`/`>&!`) always names a file.
 /// Test: `bash_tokens_reads_every_redirect_spelling`,
 /// `guard_7743_ls_with_a_stderr_redirect`.
 pub(crate) fn redirect_role(token: &str) -> RedirectRole<'_> {
@@ -114,25 +116,57 @@ pub(crate) fn redirect_role(token: &str) -> RedirectRole<'_> {
     {
         return RedirectRole::None;
     }
-    let rest = rest.strip_prefix('>').unwrap_or(rest);
-    let rest = rest.strip_prefix('|').unwrap_or(rest);
-    if let Some(after) = rest.strip_prefix('&') {
+    let rest = strip_clobber(rest.strip_prefix('>').unwrap_or(rest));
+    let target = match rest.strip_prefix('&') {
+        // #8730: zsh's `>&|word`/`>&!word` opens `word` even when it is `2`.
+        Some(after) if strip_clobber(after) != after => strip_clobber(after),
         // #7743: `[n]>&<digits>` duplicates a descriptor and `[n]>&-` closes
         // one. Neither opens a file.
-        if after == "-" || (!after.is_empty() && after.chars().all(|c| c.is_ascii_digit())) {
-            return RedirectRole::FileDescriptor;
-        }
-        return if after.is_empty() {
-            RedirectRole::TargetFollows
-        } else {
-            RedirectRole::Target(after)
-        };
-    }
-    if rest.is_empty() {
+        Some(after) if is_descriptor_word(after) => return RedirectRole::FileDescriptor,
+        Some(after) => after,
+        None => rest,
+    };
+    if target.is_empty() {
         RedirectRole::TargetFollows
     } else {
-        RedirectRole::Target(rest)
+        RedirectRole::Target(target)
     }
+}
+
+/// `rest` without the one clobber mark that may open it (#8730).
+///
+/// Why: bash's `>|` and zsh's `>!` (and `>>|`, `>>!`, `>&|`, `>&!`) override
+/// `noclobber`; the mark belongs to the operator. Left on the word, it made
+/// `>!/dev/tty` a file named `!/dev/tty`, which the credential-print rule
+/// read as a discarded write.
+fn strip_clobber(rest: &str) -> &str {
+    rest.strip_prefix(['|', '!']).unwrap_or(rest)
+}
+
+/// Whether the byte at `i` is the `|` of a clobber redirect (`>|`, `>>|`,
+/// `&>|`, zsh `>&|`) rather than a pipe (#8730).
+///
+/// Why: every cutter that splits a command at `|` must agree on this, or one
+/// of them reads `>|/dev/tty` as `>` piped into a command named `/dev/tty`.
+/// Test: `bash_tokens_reads_every_redirect_spelling`,
+/// `allows_a_clobber_redirect_to_a_file_8730`.
+pub(crate) fn is_clobber_bar(bytes: &[u8], i: usize) -> bool {
+    let before = |back: usize| i.checked_sub(back).and_then(|at| bytes.get(at));
+    bytes.get(i) == Some(&b'|')
+        && (before(1) == Some(&b'>') || (before(1) == Some(&b'&') && before(2) == Some(&b'>')))
+}
+
+/// Whether the word after `>&` (or `<&`) names a descriptor rather than a file.
+///
+/// What: `-` (close), or digits with an optional trailing `-` (move). Any
+/// other word — `>&out.txt`, `>&$f` — is a file bash opens for both stdout
+/// and stderr. Shared with the byte scanner [`super::scan_file_write_redirects`]
+/// so the two readers cannot disagree (#8730).
+/// Test: `bash_tokens_reads_every_redirect_spelling`,
+/// `write_targets_read_a_descriptor_redirect_that_names_a_file`.
+pub(crate) fn is_descriptor_word(word: &str) -> bool {
+    let digits = word.strip_suffix('-').unwrap_or(word);
+    word == "-" || (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Programs that take an inline PROGRAM behind [`INLINE_PROGRAM_FLAGS`].
@@ -427,9 +461,29 @@ mod tests {
         assert_eq!(redirect_role("2>"), RedirectRole::TargetFollows);
         assert_eq!(redirect_role(">out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role(">>out.txt"), RedirectRole::Target("out.txt"));
-        assert_eq!(redirect_role(">|out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role("&>out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role(">&out.txt"), RedirectRole::Target("out.txt"));
+        // #8730: every clobber spelling (bash `>|`; zsh `>!`, `>>|`, `>>!`,
+        // `>&|`, `>&!`) reads exactly like its plain operator.
+        for op in [
+            ">|", ">!", ">>|", ">>!", "2>|", "2>!", "&>|", "&>!", ">&|", ">&!",
+        ] {
+            assert_eq!(
+                redirect_role(&format!("{op}/dev/tty")),
+                RedirectRole::Target("/dev/tty"),
+                "{op}"
+            );
+            assert_eq!(redirect_role(op), RedirectRole::TargetFollows, "{op}");
+        }
+        // A clobber `>&` names a file even when the word is all digits.
+        assert_eq!(redirect_role(">&!2"), RedirectRole::Target("2"));
+        assert_eq!(redirect_role("2>&1-"), RedirectRole::FileDescriptor);
+        for (text, at) in [("a >|b", 3), ("a >>|b", 4), ("a >&|b", 4), ("a &>|b", 4)] {
+            assert!(is_clobber_bar(text.as_bytes(), at), "{text}");
+        }
+        for (text, at) in [("a | b", 2), ("a 2>&1|b", 6), ("|b", 0), ("a &|b", 3)] {
+            assert!(!is_clobber_bar(text.as_bytes(), at), "{text}");
+        }
         assert_eq!(redirect_role("-rf"), RedirectRole::None);
         assert_eq!(redirect_role("->"), RedirectRole::None);
     }

@@ -10,6 +10,14 @@ Fixed
     is now refused instead of allowed
   - every redirect in a segment is judged, so `> notes.md > src/lib.rs` no
     longer hides the second file
+  - a `>&word` redirect is read as the file write it is (bash opens `word`
+    for stdout and stderr); only a descriptor word (`2>&1`, `>&-`, `>&2-`)
+    is a copy. zsh's `>&|`/`>&!` always name a file
+- The credential-print rule now refuses a `find-generic-password -w` whose
+  stdout zsh's clobber spellings send to the terminal (`>!/dev/tty`,
+  `>>!/dev/tty`, `>!/dev/stdout`, `>&!/dev/tty`); the `!` stayed on the
+  target, which then read as a file. A `>|` to an ordinary file is no longer
+  refused as unreadable (refs [#8730](https://github.com/bobmatnyc/trusty-tools/issues/8730))
 - A here-document written into the session scratchpad is no longer refused as
   a source write when its body holds an apostrophe (`it's`) beside
   redirect-shaped prose; the body is read as data, as it already was without

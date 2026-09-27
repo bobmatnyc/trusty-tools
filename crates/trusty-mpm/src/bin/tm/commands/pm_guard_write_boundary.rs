@@ -828,6 +828,28 @@ mod tests {
         );
     }
 
+    // #8730 round 3: `>&word` opens `word` (bash), and zsh's `>&!`/`>&|`
+    // always do; the scanner read each as a descriptor copy and allowed it.
+    #[test]
+    fn denies_a_descriptor_redirect_that_names_a_file_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("echo x >&{target}"),
+                format!("echo x >& {target}"),
+                format!("echo x >&!{target}"),
+                format!("echo x >&| {target}"),
+            ],
+        );
+        let benign = "cargo test 2>&1 >&2";
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(benign)), dir.path()),
+            None
+        );
+    }
+
     // #8730 critic, CRITICAL 2: a shell-run here-document body is shell
     // source; its substitutions were skipped with the body. A data body that
     // quotes the same text, written to the scratchpad, stays allowed.

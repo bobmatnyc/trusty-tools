@@ -399,7 +399,7 @@ fn split_shell_segments_raw(command: &str) -> Vec<&str> {
         }
         // #8730: the `|` of a `>|`/`>>|` clobber redirect is part of the
         // operator, not a pipe — as a `>&` fd-dup is not a background `&`.
-        if bytes[i] == b'|' && i > 0 && bytes[i - 1] == b'>' {
+        if bash_tokens::is_clobber_bar(bytes, i) {
             i += 1;
             continue;
         }
@@ -678,7 +678,9 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
 /// What: scans for `>` outside quotes ([`QuoteScan`]) and outside
 /// here-document bodies ([`heredoc::HeredocBodies`]); skips a second `>`
 /// (append) and any spaces, treats a following `&` as an fd-duplication
-/// (`2>&1`, `>&2`) and `/dev/null` as an output discard, and returns the
+/// (`2>&1`, `>&2`) only when [`bash_tokens::is_descriptor_word`] accepts the
+/// word after it (#8730: `>&out.rs` opens `out.rs`), treats `/dev/null` as an
+/// output discard, and returns the
 /// target token of every real file-write redirect — bash opens each one, so
 /// `> notes.md > src/lib.rs` writes both (#8730). An empty entry when the
 /// redirect is real but names no token (a trailing `>` or `>|`): still a
@@ -719,10 +721,17 @@ fn scan_file_write_redirects(command: &str) -> Vec<String> {
             while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
                 j += 1;
             }
-            // `>&fd` / `2>&1` duplicate a descriptor — not a file write.
+            // `>&fd` / `2>&1` duplicate a descriptor — not a file write. #8730:
+            // but `>&word` opens `word` (bash), as zsh's `>&|`/`>&!` always do,
+            // so the word after the `&` decides, via the argv classifier's rule.
+            let mut dup = false;
             if j < bytes.len() && bytes[j] == b'&' {
-                i = j + 1;
-                continue;
+                j += 1;
+                dup = !matches!(bytes.get(j), Some(b'|' | b'!'));
+                j += usize::from(!dup);
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
             }
             // `/dev/null` is an output-discard sink, not a file write
             // (`which cargo 2>/dev/null`) — allow it and keep scanning.
@@ -750,6 +759,10 @@ fn scan_file_write_redirects(command: &str) -> Vec<String> {
                 j += 1;
             }
             let target = &command[start..j];
+            if dup && bash_tokens::is_descriptor_word(target) {
+                i = j;
+                continue;
+            }
             if target != "/dev/null" {
                 targets.push(target.to_string());
             }
