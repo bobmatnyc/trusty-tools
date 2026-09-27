@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.5] — 2026-09-27
+
+### Added
+
+- `memory_core::maintenance_log`: every drawer deleted by dream dedup, content prune, prune, room consolidation, `purge_expired` or the palace-open TTL sweep is appended to `<palace data_dir>/maintenance_deletions.jsonl` with the palace, drawer id, reason, pid and, for dedup, the surviving drawer id and cosine score. The journal rotates once at 4 MiB; the size check, rotation and append run under a cross-process lock, so concurrent writers never discard a generation. If the lock cannot be taken or the rotation fails, the record is appended without rotating. A failed append leaves the deletion in place and logs the full record at `error`. User deletions through `PalaceHandle::forget` are not recorded; maintenance paths call the new `PalaceHandle::forget_for_maintenance` (#8732).
+
+### Fixed
+
+- `memory_core`: a process that loses the maintenance lease now reports the holder's pid. Before, a loser that arrived between the winner's lock and its pid write reported no pid ("pid unknown") or the previous holder's stale pid. The lock attempt and the pid write or read now run under a sidecar `<data_root>/maintenance.lock.gate` lock, polled for at most 500 ms; past that bound the election proceeds ungated and only the reported pid can be missing (#8733).
+- `memory_core`: dream passes and the open-time TTL purge run in at most one process per data root. A new `MaintenanceLease` holds an exclusive `flock` on `<data_root>/maintenance.lock` for the holder's lifetime; `PalaceRegistry::with_maintenance_lease` gates the dream loop and every registry open on it. A non-holder retries each tick and takes over when the holder exits. A lock file that cannot be created fails closed with a warn. The holder logs its pid at warn and writes it into the lock file (#8733).
+
 ## [0.52.4] — 2026-09-26
 
 ### Fixed

@@ -1,2 +1,0 @@
-Fixed
-- `memory_core`: a process that loses the maintenance lease now reports the holder's pid. Before, a loser that arrived between the winner's lock and its pid write reported no pid ("pid unknown") or the previous holder's stale pid. The lock attempt and the pid write or read now run under a sidecar `<data_root>/maintenance.lock.gate` lock, polled for at most 500 ms; past that bound the election proceeds ungated and only the reported pid can be missing (#8733).

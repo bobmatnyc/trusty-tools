@@ -1,2 +1,0 @@
-Fixed
-- `memory_core`: dream passes and the open-time TTL purge run in at most one process per data root. A new `MaintenanceLease` holds an exclusive `flock` on `<data_root>/maintenance.lock` for the holder's lifetime; `PalaceRegistry::with_maintenance_lease` gates the dream loop and every registry open on it. A non-holder retries each tick and takes over when the holder exits. A lock file that cannot be created fails closed with a warn. The holder logs its pid at warn and writes it into the lock file (#8733).

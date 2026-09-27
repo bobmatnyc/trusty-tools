@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.28.1] — 2026-09-27
+
+### Added
+
+- `trusty-memory palace deletions <palace> [--drawer <uuid>] [--limit N] [--json]` lists the drawers the dream and purge passes deleted, with the reason, the pid of the deleting process and, for a dedup, the surviving drawer and its similarity score. It is read-only and safe with the daemon up. A pass that deletes drawers now also logs a one-line summary at `warn`, so it shows at the daemon's default log level (#8732).
+
+### Fixed
+
+- A writer (`serve --foreground`, `kg-rebuild`) runs dream and TTL-purge maintenance only while it holds its data root's maintenance lease; a second writer on the same root keeps serving reads and writes but deletes nothing, and a manual dream run there answers `Conflict`. The holder's pid is logged at warn on acquisition and kept in `maintenance.lock` (#8733).
+- The CLI one-shots respect the same lease. `palace legacy-kg --apply` and `rooms backfill --apply` still import or register while another process holds it, but their open deletes no expired row; `palace compact` refuses and names the holder's pid. A `--dry-run` open never purges (#8733).
+- The MCP tools `palace_dream`, `dream_consolidate_room` and `palace_compact` refuse, with the same message as a refused dream run, in a process that does not hold the maintenance lease, and change nothing (#8733).
+
 ## [0.28.0] — 2026-09-26
 
 ### Added
