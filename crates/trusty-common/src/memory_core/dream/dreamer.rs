@@ -133,6 +133,8 @@ impl Dreamer {
     /// Test: `dreamer_shutdown_terminates_loop` — spawn the loop, flip the
     /// shutdown flag, await the join handle. Stagger:
     /// `concurrency_tests::a_dream_loop_waits_its_stagger_before_the_first_cycle`.
+    /// Maintenance lease (#8733):
+    /// `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
     pub fn start_with_shutdown(
         self: Arc<Self>,
         registry: PalaceRegistry,
@@ -160,7 +162,9 @@ impl Dreamer {
                     tracing::info!(palace = %palace_id, "dreamer shutting down");
                     return;
                 }
-                if !self.is_idle() {
+                // #8733: only the data root's elected maintainer dreams. Asked
+                // every tick, so a non-holder takes over once the holder exits.
+                if !self.is_idle() || !registry.may_run_maintenance() {
                     continue;
                 }
                 // Re-resolve without reopening; skip (do NOT rehydrate) a palace

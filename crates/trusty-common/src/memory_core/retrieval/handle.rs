@@ -384,6 +384,23 @@ impl PalaceHandle {
     /// `writer_intent_open_fails_loud_on_locked_*` in the store tests, and
     /// `registry_tests::open_does_not_reset_idle_clock`.
     pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
+        Self::open_with_intent_purging(palace, intent, true)
+    }
+
+    /// [`Self::open_with_intent`], choosing whether the open-time TTL purge
+    /// deletes expired rows.
+    ///
+    /// Why (#8733): the purge is maintenance, which only the data root's
+    /// elected maintainer may run; `PalaceRegistry` passes `false` when this
+    /// process does not hold the `MaintenanceLease`.
+    /// What: with `purge_expired == false` expired drawers are still left out
+    /// of the in-memory table, but no row is deleted.
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    pub fn open_with_intent_purging(
+        palace: &Palace,
+        intent: OpenIntent,
+        purge_expired: bool,
+    ) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
@@ -470,13 +487,20 @@ impl PalaceHandle {
             }
             !expired
         });
-        let pruned = super::open_sweep::reclaim_expired_rows(
-            kg.store(),
-            expired_ids,
-            &palace.id,
-            Some(data_dir.clone()),
-            super::open_sweep::OPEN_WRITE_BUDGET,
-        );
+        // #8733: only the data root's elected maintainer deletes the rows; a
+        // non-maintainer still hides them from this handle, as reads do, and
+        // writes no #8732 journal record because it deletes nothing.
+        let pruned = if purge_expired {
+            super::open_sweep::reclaim_expired_rows(
+                kg.store(),
+                expired_ids,
+                &palace.id,
+                Some(data_dir.clone()),
+                super::open_sweep::OPEN_WRITE_BUDGET,
+            )
+        } else {
+            0
+        };
         // #8732: `warn`, so the purge shows at the daemon's default filter.
         crate::memory_core::maintenance_log::warn_removed(
             &palace.id,

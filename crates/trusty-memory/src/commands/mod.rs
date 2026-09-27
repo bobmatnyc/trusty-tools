@@ -29,6 +29,7 @@ pub mod kuzu_import;
 pub mod kuzu_migrate;
 pub mod legacy_kg;
 pub mod link;
+pub(crate) mod maintenance_gate;
 pub mod migrate;
 pub mod migrations;
 pub mod monitor;

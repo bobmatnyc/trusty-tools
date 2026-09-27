@@ -908,6 +908,26 @@ async fn dream_run_aggregates_stats() {
     );
 }
 
+/// #8733: two writers on one data root — only the maintenance-lease holder
+/// runs a manual dream; the other answers `Conflict` and dreams nothing.
+/// Test: itself.
+#[tokio::test]
+async fn dream_run_is_refused_without_the_maintenance_lease() {
+    let root = test_state().data_root.clone();
+    let holder = MemoryService::new(AppState::new(root.clone()).with_writer_intent());
+    let other = MemoryService::new(AppState::new(root).with_writer_intent());
+
+    holder
+        .dream_run()
+        .await
+        .expect("the first writer takes the lease and dreams");
+    let err = other
+        .dream_run()
+        .await
+        .expect_err("a writer without the lease must not dream");
+    assert!(matches!(err, ServiceError::Conflict(_)), "got {err:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Activity log
 // ---------------------------------------------------------------------------

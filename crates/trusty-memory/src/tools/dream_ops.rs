@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
 
-use super::helpers::{open_palace_handle, resolve_palace};
+use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
 use trusty_common::memory_core::palace::RoomType;
 
 /// Default age window: only consolidate facts older than this many days.
@@ -44,10 +44,16 @@ const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 /// phase and fills `compaction` with its before/after byte counts; `dry_run:
 /// true` alongside it measures and reports without writing a byte. Absent or
 /// `false`, `compaction` is `null` and nothing else changes.
+/// #8733: consolidation, eviction and compaction are maintenance, so a process
+/// without the data root's maintenance lease refuses before opening anything.
 /// Test: `dream_consolidate_room_returns_shape` (no-op path) and
-/// `palace_dream_response_includes_fading` in `tests/dream_room_mcp.rs`.
+/// `palace_dream_response_includes_fading` in `tests/dream_room_mcp.rs`;
+/// `dream_consolidate_room_is_refused_without_the_maintenance_lease`.
 pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "dream_consolidate_room")?;
+    // #8733: refuse the whole call, as `dream_run` does; skipping only the
+    // compaction would still let the consolidation evict facts.
+    require_maintenance_lease(state)?;
     // Absent / null / empty room => all rooms; otherwise scope to that room.
     let room_arg = args
         .get("room")
@@ -139,7 +145,7 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
 /// What: delegates directly to `handle_dream_consolidate_room` — the args
 /// schema and response shape are identical.
 /// Test: `palace_dream_no_inference_returns_gracefully` in
-/// `tests/dream_room_mcp.rs`.
+/// `tests/dream_room_mcp.rs`, `palace_dream_is_refused_without_the_maintenance_lease`.
 pub(crate) async fn handle_palace_dream(state: &AppState, args: Value) -> Result<Value> {
     handle_dream_consolidate_room(state, args).await
 }
