@@ -27,11 +27,12 @@ mod detect;
 pub(crate) use trusty_search::{allowlist, config, core, mcp, service};
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use commands::convert::ConvertTarget;
 use commands::index_action::IndexAction;
+use commands::index_remove::IndexIdSource;
 use commands::service::ServiceAction;
 use std::io;
 
@@ -1140,12 +1141,13 @@ async fn run() -> Result<()> {
     let argv: Vec<String> = std::env::args().collect();
     trusty_search::service::bootstrap_process_env(&argv);
 
-    // Why: parse via `try_parse` so we can attach the workspace-shared
-    // "did you mean?" suggestion to clap's standard error rendering before
-    // exiting (issue #216). On success the parse is indistinguishable from
-    // the original `Cli::parse()` call.
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
+    // Why: parse via `try_get_matches` (rather than `Cli::try_parse`) so we can
+    // both attach the workspace-shared "did you mean?" suggestion to clap's
+    // standard error rendering (issue #216) AND read the resulting
+    // `ArgMatches` before it is consumed into `Cli`. On success the parsed
+    // `Cli` is indistinguishable from the original `Cli::parse()` call.
+    let mut arg_matches = match Cli::command().try_get_matches() {
+        Ok(m) => m,
         Err(e) => {
             // Let clap render its own helpful error first so the user sees
             // the unrecognised-token message in the format they already know.
@@ -1158,6 +1160,24 @@ async fn run() -> Result<()> {
             ) {
                 trusty_common::help::print_suggestion_hint(&argv, &HELP);
             }
+            std::process::exit(e.exit_code());
+        }
+    };
+    // #8175: clap folds an explicit `-i`/`--index` flag and the `TRUSTY_INDEX`
+    // env fallback into the same `Cli::index` field, so a value alone cannot
+    // say which one supplied it — and a destructive command (`index remove`)
+    // must never treat an env-only value as though the operator typed it.
+    // `ArgMatches::value_source` is read here, before `Cli::from_arg_matches`
+    // consumes the matches, because it is the only place that distinction is
+    // still visible.
+    let index_from_cli_flag = matches!(
+        arg_matches.value_source("index"),
+        Some(clap::parser::ValueSource::CommandLine)
+    );
+    let cli = match Cli::from_arg_matches_mut(&mut arg_matches) {
+        Ok(cli) => cli,
+        Err(e) => {
+            e.print().ok();
             std::process::exit(e.exit_code());
         }
     };
@@ -1215,7 +1235,12 @@ async fn run() -> Result<()> {
         }
 
         Commands::Status { index_id, watch } => {
-            match index_id {
+            // #8175: an explicit positional INDEX wins, but `-i`/`--index`
+            // (or the `TRUSTY_INDEX` it folds in) must not be silently
+            // dropped just because this command's own target is positional
+            // rather than the global flag — same precedence `index-status`
+            // uses below.
+            match commands::index_status::resolve_status_target(index_id, cli.index.clone()) {
                 // Per-index status: delegate to the `index-status` handler so
                 // behaviour (single-index fetch + `--watch` poll loop against
                 // GET /indexes/:id/status) matches `index-status` exactly.
@@ -1239,7 +1264,13 @@ async fn run() -> Result<()> {
         }
 
         Commands::IndexStatus { index_id, watch } => {
-            commands::index_status::handle_index_status(index_id.as_deref(), watch, cli.json)
+            // #8175: `index-status -i <id>` used to ignore `-i`/`TRUSTY_INDEX`
+            // outright — this handler only ever saw the positional INDEX,
+            // which is `None` when the operator passed `-i` instead, and fell
+            // through to the cwd-derived default. The positional argument
+            // still wins when both are given.
+            let target = commands::index_status::resolve_status_target(index_id, cli.index.clone());
+            commands::index_status::handle_index_status(target.as_deref(), watch, cli.json)
                 .await?;
         }
 
@@ -1267,8 +1298,27 @@ async fn run() -> Result<()> {
                 keep_data,
                 yes,
             }) => {
-                commands::index_remove::handle_index_remove(rm_path, cli.index, keep_data, yes)
-                    .await?;
+                // #8175: a destructive verb must know whether `-i`/`--index`
+                // came from a real flag or only from `TRUSTY_INDEX` — see the
+                // `index_from_cli_flag` computation above `run()`'s match.
+                let index_source = cli
+                    .index
+                    .is_some()
+                    .then(|| {
+                        if index_from_cli_flag {
+                            IndexIdSource::CliFlag
+                        } else {
+                            IndexIdSource::EnvVar
+                        }
+                    });
+                commands::index_remove::handle_index_remove(
+                    rm_path,
+                    cli.index,
+                    index_source,
+                    keep_data,
+                    yes,
+                )
+                .await?;
             }
             Some(IndexAction::Add {
                 path: add_path,

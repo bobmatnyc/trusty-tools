@@ -5,16 +5,27 @@
 //!      against a directory they later delete have to either DELETE the index
 //!      manually via curl or hand-edit `indexes.toml` and the global config
 //!      file. The `index remove` subcommand collapses both steps into one.
-//! What: resolves PATH (explicit index id > CLI path arg > project auto-detection
-//!       from CWD), finds the matching daemon-side index id via
-//!       `GET /indexes/:id/status`, calls
-//!       `DELETE /indexes/:id?delete_data=<bool>`, then drops the matching entry
-//!       from `~/.config/trusty-search/config.yaml`.
+//! What: resolves PATH and `-i`/`--index`/`TRUSTY_INDEX` together via
+//!       [`classify_remove_target`], finds the matching daemon-side index id
+//!       via `GET /indexes/:id/status` (and/or `GET /indexes`), calls
+//!       `DELETE /indexes/:id?delete_data=<bool>`, then drops the matching
+//!       entry from `~/.config/trusty-search/config.yaml`.
 //!
 //! Issue #1087: when `-i`/`--index` is given it MUST override CWD auto-detection
-//! and never fall back to CWD detection. The fix passes `explicit_index_id` from
-//! the parent `Commands::Index { index_id }` field and uses it directly (skipping
-//! the path→id lookup entirely) when it is `Some`.
+//! and never fall back to CWD detection.
+//!
+//! Issue #8175: #1087's fix used `explicit_index_id` unconditionally, so a
+//! `TRUSTY_INDEX` value the operator never typed silently outranked an
+//! explicit PATH argument — a live 236k-chunk index was deleted this way
+//! because `TRUSTY_INDEX` was exported for an unrelated `tm` session.
+//! [`classify_remove_target`] is the fix: a destructive verb never resolves
+//! its target from `TRUSTY_INDEX` alone (it refuses and names the id), and a
+//! PATH given alongside `-i`/`TRUSTY_INDEX` is checked for agreement — a
+//! mismatch refuses and names both values rather than picking one silently.
+//! [`IndexIdSource`] is what makes the distinction possible at all: clap folds
+//! a real `-i` flag and the env fallback into one `Cli::index` value, so
+//! `main.rs` reads `ArgMatches::value_source` before that fold happens and
+//! passes the source down explicitly.
 //!
 //! Issue #6422: removing an index deletes its on-disk data by default, and
 //! `--keep-data` is the explicit opt-out that deregisters and keeps the corpus.
@@ -23,10 +34,11 @@
 //! on a default either side might change.
 //!
 //! Test: `index_remove_resolves_path_*` unit tests cover the path resolution;
-//!       `index_remove_explicit_id_bypasses_path_lookup` covers the -i flag fix;
-//!       `delete_index_url_*`, `confirmation_*` and `delete_body_*` cover the
-//!       #6422 default and its failure paths; the HTTP round-trip is exercised
-//!       end-to-end by the daemon integration tests.
+//!       `classify_remove_target_*` cover the #8175 precedence/refusal
+//!       decision; `delete_index_url_*`, `confirmation_*` and `delete_body_*`
+//!       cover the #6422 default and its failure paths; the HTTP round-trip,
+//!       including the #8175 "touches neither index" proof, is exercised by
+//!       `tests/index_remove_env_conflict_8175.rs`.
 
 use super::daemon_utils::daemon_base_url;
 use crate::config::GlobalConfig;
@@ -36,6 +48,86 @@ use colored::Colorize;
 use serde_json::Value;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+
+/// Where an explicit `-i`/`--index` value came from (issue #8175).
+///
+/// Why: clap folds a real `-i`/`--index` flag and the `TRUSTY_INDEX` env
+/// fallback into the SAME `Cli::index` value, so once parsing is done a value
+/// alone cannot say which one supplied it. A destructive verb needs that
+/// distinction: it must refuse when the ONLY source is the environment, but
+/// proceed when the operator typed the flag.
+/// What: `main.rs` reads `ArgMatches::value_source("index")` before the
+/// derive-based parse consumes the matches, and passes the answer down as
+/// this enum.
+/// Test: `classify_remove_target_env_only_refuses`,
+/// `classify_remove_target_cli_flag_alone_is_used_directly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexIdSource {
+    /// A real `-i`/`--index` flag on the command line.
+    CliFlag,
+    /// Only the `TRUSTY_INDEX` environment fallback — no flag was typed.
+    EnvVar,
+}
+
+/// The decision reached from PATH, `-i`/`--index`, and their source, before
+/// any of it is checked against the daemon (issue #8175).
+///
+/// Why: separating "what was given" from "what the daemon says about it"
+/// lets the precedence/refusal rule be unit-tested without a daemon at all —
+/// [`classify_remove_target`] is the pure function; `handle_index_remove`
+/// resolves each variant against the daemon afterward.
+/// What: the four shapes PATH/`-i`/`TRUSTY_INDEX` can take together.
+/// Test: `classify_remove_target_*` below.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemoveTarget {
+    /// Neither PATH nor `-i`/`TRUSTY_INDEX` was given — auto-detect from CWD,
+    /// unchanged default behaviour (nothing was misread, so nothing refuses).
+    CwdAutoDetect,
+    /// A PATH argument only.
+    Path(PathBuf),
+    /// An index id from a real `-i` flag, with no PATH to check it against.
+    Id(String),
+    /// PATH and an id were both given; the caller resolves PATH to an id and
+    /// checks it agrees with this one before doing anything destructive.
+    PathAndId(PathBuf, String),
+    /// Refuse before any network call — the target could only be read from
+    /// `TRUSTY_INDEX` alone, and a destructive command never does that
+    /// (issue #8175: this is exactly how the live `trusty-tools-4e2cf878`
+    /// index was deleted by a `remove <PATH>` run in a shell that also
+    /// exported `TRUSTY_INDEX` for an unrelated session).
+    Refuse(String),
+}
+
+/// Classify how `index remove` should resolve its target, from PATH and
+/// `-i`/`--index` alone — no daemon call yet (issue #8175).
+///
+/// Why: this is the precedence/refusal rule at the heart of the #8175 fix,
+/// extracted as a pure function so it can be asserted directly.
+/// What: `explicit_index` carries the value clap resolved for `-i`/`--index`
+/// together with [`IndexIdSource`] saying whether a real flag supplied it.
+/// Returns [`RemoveTarget::Refuse`] when the only target is an env-sourced id
+/// with no PATH to corroborate it; otherwise returns the shape the caller
+/// should resolve, deferring an explicit-PATH-vs-explicit-id MISMATCH to
+/// `handle_index_remove` (via [`RemoveTarget::PathAndId`]), because checking
+/// that requires resolving PATH against the daemon first.
+/// Test: `classify_remove_target_*` below.
+pub(crate) fn classify_remove_target(
+    cli_path: Option<PathBuf>,
+    explicit_index: Option<(String, IndexIdSource)>,
+) -> RemoveTarget {
+    match (cli_path, explicit_index) {
+        (None, None) => RemoveTarget::CwdAutoDetect,
+        (Some(p), None) => RemoveTarget::Path(p),
+        (None, Some((id, IndexIdSource::CliFlag))) => RemoveTarget::Id(id),
+        (None, Some((id, IndexIdSource::EnvVar))) => RemoveTarget::Refuse(format!(
+            "refusing to remove index \"{id}\" resolved only from TRUSTY_INDEX; \
+             destructive commands need an explicit PATH argument or -i/--index \
+             flag (issue #8175) — pass one, or unset TRUSTY_INDEX and re-run \
+             from inside the project"
+        )),
+        (Some(p), Some((id, _))) => RemoveTarget::PathAndId(p, id),
+    }
+}
 
 /// Entry point for `trusty-search index remove [PATH]`.
 ///
@@ -48,17 +140,24 @@ use std::path::{Path, PathBuf};
 /// the fix for the bug where `index remove -i other` would remove the CWD
 /// index instead of `other`.
 ///
+/// Issue #8175: `explicit_index_id` alone is no longer enough — see
+/// [`classify_remove_target`] and [`IndexIdSource`]'s docs for why a value
+/// with no known source can no longer be trusted to act alone.
+///
 /// Issue #6422: `keep_data` is the opt-out from the destructive default. When
 /// it is false the on-disk corpus goes with the registration and the operator
 /// is asked to confirm first, unless `yes` already answered.
 ///
 /// What: see module docs.
-/// Test: `index_remove_resolves_path_*` below; `index_remove_explicit_id_*`;
-///       `delete_index_url_*` / `confirmation_*` / `delete_body_*` for #6422;
-///       HTTP path covered by integration tests.
+/// Test: `index_remove_resolves_path_*` below; `classify_remove_target_*` for
+///       the #8175 precedence/refusal rule; `delete_index_url_*` /
+///       `confirmation_*` / `delete_body_*` for #6422; the full HTTP path,
+///       including the #8175 "touches neither index" proof, is covered by
+///       `tests/index_remove_env_conflict_8175.rs`.
 pub async fn handle_index_remove(
     cli_path: Option<PathBuf>,
     explicit_index_id: Option<String>,
+    index_source: Option<IndexIdSource>,
     keep_data: bool,
     yes: bool,
 ) -> Result<()> {
@@ -69,18 +168,56 @@ pub async fn handle_index_remove(
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
     let client = trusty_common::server::daemon_http_client()?;
 
-    // Issue #1087: when an explicit index id is supplied via `-i`/`--index`,
-    // use it directly and skip the CWD-path→id lookup entirely. This prevents
-    // accidentally removing the CWD's index when the user clearly specified a
-    // different one.
-    let (index_id, registered_path) = if let Some(ref id) = explicit_index_id {
-        // Fetch the root_path for this explicit id so we can clean up the
-        // global config and allowlist (same post-delete steps as the path path).
-        find_index_by_id(&client, &base, id).await?
-    } else {
-        let target_path = resolve_target_path(cli_path)?;
-        find_index_by_path(&client, &base, &target_path).await?
+    let target = classify_remove_target(
+        cli_path,
+        explicit_index_id.map(|id| (id, index_source.unwrap_or(IndexIdSource::EnvVar))),
+    );
+
+    // #8175: resolve each shape against the daemon, and — for the one shape
+    // that carries a conflict risk (PATH AND an id both given) — refuse
+    // rather than pick one when they disagree. This is the "never silently
+    // pick one" half of the fix; `classify_remove_target` above is the
+    // "never resolve from TRUSTY_INDEX alone" half.
+    let (index_id, registered_path, resolved_via) = match target {
+        RemoveTarget::CwdAutoDetect => {
+            let target_path = resolve_target_path(None)?;
+            let (id, root) = find_index_by_path(&client, &base, &target_path).await?;
+            (id, root, "the current working directory")
+        }
+        RemoveTarget::Path(p) => {
+            let (id, root) = find_index_by_path(&client, &base, &p).await?;
+            (id, root, "the PATH argument")
+        }
+        RemoveTarget::Id(id) => {
+            let (id, root) = find_index_by_id(&client, &base, &id).await?;
+            (id, root, "the -i/--index flag")
+        }
+        RemoveTarget::Refuse(reason) => bail!(reason),
+        RemoveTarget::PathAndId(p, id) => {
+            let (path_id, path_root) = find_index_by_path(&client, &base, &p).await?;
+            if path_id != id {
+                bail!(
+                    "refusing to remove: PATH {} resolves to index \"{path_id}\", but \
+                     -i/--index (or TRUSTY_INDEX) names \"{id}\" — pass matching values, \
+                     or drop one of them (issue #8175)",
+                    p.display()
+                );
+            }
+            (
+                path_id,
+                path_root,
+                "the PATH argument (confirmed to agree with -i/--index)",
+            )
+        }
     };
+
+    // #8175: report how the target was resolved before anything destructive
+    // happens, so a script's log (or a human re-reading a scrollback) can
+    // tell an explicit choice from a guess after the fact.
+    println!(
+        "Resolving target: index \"{index_id}\" ({}), via {resolved_via}",
+        registered_path.display()
+    );
 
     // #6422: the confirmation gate. It runs after resolution so the prompt can
     // name the exact index and root path the operator is about to destroy.
@@ -277,24 +414,6 @@ fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
     Ok(ctx.root_path)
 }
 
-/// Classify how the index to remove should be resolved (issue #1087).
-///
-/// Why: the decision "explicit id vs. path lookup" is a small pure predicate
-/// that sits at the heart of the #1087 fix. Extracting it lets unit tests
-/// verify the correct branch is taken for each input combination WITHOUT
-/// needing a live daemon.
-///
-/// What: returns `Some(id)` when an explicit `-i` id was given (the id should
-/// be used directly, bypassing CWD detection entirely), or `None` when the
-/// removal should fall back to path-based lookup.
-///
-/// Test: `index_remove_explicit_id_bypasses_path_lookup` exercises this
-/// function directly.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn resolve_index_id_source(explicit_index_id: Option<&str>) -> Option<String> {
-    explicit_index_id.map(|id| id.to_string())
-}
-
 /// Fetch the registered `root_path` for a known index id.
 ///
 /// Why (issue #1087): when `-i <id>` is given we know the id already; we still
@@ -433,49 +552,92 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// Regression test for issue #1087 — explicit `-i <id>` MUST bypass
-    /// CWD detection and never fall back to path lookup.
-    ///
-    /// Why: `handle_index_remove` used to ignore `-i`/`--index` entirely and
-    /// always resolve via the CWD path. This test pins the `resolve_index_id_source`
-    /// decision function, which is the pure predicate at the heart of the fix.
-    ///
-    /// What (issue #1097 enhancement): `resolve_index_id_source` is now a
-    /// named pure function (not just an inline `if let`) so its behaviour can
-    /// be asserted directly — no live daemon needed:
-    ///
-    /// - `Some("my-index")` → explicit id returned as `Some("my-index")`.
-    /// - `None` → `None` (signals: fall back to path lookup).
-    ///
-    /// End-to-end coverage for the full `-i` code path (daemon HTTP round-trip)
-    /// lives in the integration tests.
-    ///
+    // ── #8175: PATH vs `-i`/TRUSTY_INDEX precedence and refusal ─────────────
+
+    /// Regression test for issue #1087 (carried forward under #8175's new
+    /// function) — an explicit `-i <id>` with no PATH argument MUST bypass
+    /// CWD detection.
+    /// Why: this is the #1087 behaviour `classify_remove_target` must
+    /// preserve — a real flag with nothing to check it against is used
+    /// directly, never silently redirected to the CWD.
+    /// What: `Some((id, CliFlag))`, no path → `RemoveTarget::Id(id)`.
     /// Test: this test.
     #[test]
-    fn index_remove_explicit_id_bypasses_path_lookup() {
-        // Explicit id is given: must be returned as Some(id), never as None.
-        let result = super::resolve_index_id_source(Some("other-project"));
-        assert_eq!(
-            result.as_deref(),
-            Some("other-project"),
-            "explicit id must be returned verbatim — CWD must not interfere"
-        );
+    fn classify_remove_target_cli_flag_alone_is_used_directly() {
+        let target =
+            classify_remove_target(None, Some(("other-project".to_string(), IndexIdSource::CliFlag)));
+        assert_eq!(target, RemoveTarget::Id("other-project".to_string()));
+    }
 
-        // No explicit id: must return None so callers know to use path lookup.
-        let fallback = super::resolve_index_id_source(None);
+    /// Why: nothing given at all must fall back to the pre-existing,
+    /// unaffected CWD auto-detect default — #8175 only tightens the cases
+    /// where a target was actually named.
+    /// What: `None`, no path → `RemoveTarget::CwdAutoDetect`.
+    /// Test: this test.
+    #[test]
+    fn classify_remove_target_nothing_given_uses_cwd() {
+        assert_eq!(classify_remove_target(None, None), RemoveTarget::CwdAutoDetect);
+    }
+
+    /// Why: a bare `remove <PATH>` with no `-i`/`TRUSTY_INDEX` in play must
+    /// keep working exactly as it always has.
+    /// What: a path, no id → `RemoveTarget::Path`.
+    /// Test: this test.
+    #[test]
+    fn classify_remove_target_path_alone_is_used_directly() {
+        let target = classify_remove_target(Some(PathBuf::from("/explicit/path")), None);
+        assert_eq!(target, RemoveTarget::Path(PathBuf::from("/explicit/path")));
+    }
+
+    /// Core regression for issue #8175: an id resolved ONLY from
+    /// `TRUSTY_INDEX`, with no PATH and no real `-i` flag, must refuse rather
+    /// than act — this is exactly the shape of the incident (`index remove
+    /// <scratch-path>` with `TRUSTY_INDEX` pointing at the live project
+    /// index; the pre-fix code used the env value unconditionally). Run
+    /// against the pre-#8175 `handle_index_remove`, an equivalent call would
+    /// have deleted the `TRUSTY_INDEX` index outright with no refusal at all.
+    /// What: `Some((id, EnvVar))`, no path → `RemoveTarget::Refuse` naming the
+    /// id and pointing at an explicit argument or `TRUSTY_INDEX` unset.
+    /// Test: this test.
+    #[test]
+    fn classify_remove_target_env_only_refuses() {
+        let target = classify_remove_target(
+            None,
+            Some(("trusty-tools-4e2cf878".to_string(), IndexIdSource::EnvVar)),
+        );
+        let RemoveTarget::Refuse(reason) = target else {
+            panic!("an id known only from TRUSTY_INDEX must refuse, got {target:?}");
+        };
         assert!(
-            fallback.is_none(),
-            "no explicit id → None (path-based lookup will be used)"
+            reason.contains("trusty-tools-4e2cf878"),
+            "the refusal must name the index it declined to touch: {reason}"
         );
+        assert!(
+            reason.contains("TRUSTY_INDEX"),
+            "the refusal must name the source it declined to trust alone: {reason}"
+        );
+    }
 
-        // The explicit id must never equal the CWD — they are distinct sources.
-        // (Guards against a regression where both branches return the same thing.)
-        let cwd_p = resolve_target_path(None).unwrap();
-        assert_ne!(
-            cwd_p.to_string_lossy().as_ref(),
-            "other-project",
-            "CWD fallback must not accidentally equal an explicit id string"
-        );
+    /// Why: PATH and an id together — from either source — carry a genuine
+    /// conflict risk that can only be checked once PATH is resolved against
+    /// the daemon, so `classify_remove_target` defers the comparison rather
+    /// than guessing; `handle_index_remove` is what actually refuses on a
+    /// mismatch (see `tests/index_remove_env_conflict_8175.rs`).
+    /// What: a path AND an id (either source) → `RemoveTarget::PathAndId`.
+    /// Test: this test.
+    #[test]
+    fn classify_remove_target_path_and_id_defers_to_daemon_check() {
+        for source in [IndexIdSource::CliFlag, IndexIdSource::EnvVar] {
+            let target = classify_remove_target(
+                Some(PathBuf::from("/scratch/proj")),
+                Some(("other-id".to_string(), source)),
+            );
+            assert_eq!(
+                target,
+                RemoveTarget::PathAndId(PathBuf::from("/scratch/proj"), "other-id".to_string()),
+                "source {source:?} must still defer to the daemon-backed agreement check"
+            );
+        }
     }
 
     // ── #6422: deleting an index purges its data by default ─────────────────
