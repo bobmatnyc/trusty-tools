@@ -162,19 +162,12 @@ script name that the checkout does not contain.
 
 ## Field Techniques
 
-- Confirm a launchd job's completion by anchoring on the top-level `state =`
-  line or `last exit code`, never a bare grep for "not running" across the
-  full `launchctl print` output — a nested endpoint's own `state =` line can
-  match instead (#8529).
-- Before assuming `git rebase` drops a commit as empty, check each commit's
-  patch against its new parent individually, not the cumulative tree diff —
-  two commits whose changes cancel out can survive a rebase and leave the
-  branch "ahead" with a zero net diff (#8529).
-- A recursive file search over the whole home directory can time out. Search
-  known directories directly, and use Spotlight (`mdfind`) for the rest
+- Launchd job completion: read the `state =` line, not a "not running" grep
   (#8529).
-- Confirm a drift guard's target repo from the job's own `git remote -v`,
-  never from surrounding context — a brief can name the wrong repo (#8529).
+- `git rebase`-empty prediction: diff each commit against its new parent
+  individually (#8529).
+- A home-wide search can time out — search known dirs, or `mdfind` (#8529).
+- Confirm a drift guard's repo via `git remote -v`, not context (#8529).
 
 ## Memory & Context Routing
 
@@ -185,10 +178,9 @@ script name that the checkout does not contain.
 
 ## Native-First Connector Routing
 
-Prefer this workspace's native MCP servers over claude.ai's hosted connectors
-when both can do the job — `mcp__gworkspace-mcp__*` over `mcp__claude_ai_Gmail__*`
-and `mcp__claude_ai_Google_*`, `mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`.
-Soft preference (ADR-0014); the hosted connectors stay available as fallback.
+Prefer native MCP servers (`mcp__gworkspace-mcp__*`, `mcp__slack-mcp__*`) over
+claude.ai's hosted connectors when both can do the job. Soft preference
+(ADR-0014); hosted stays available as fallback.
 
 ## Handoff Protocol
 
@@ -202,11 +194,8 @@ and any constraints.
 | QA → Engineer | Bug found |
 | Any → Research | Investigation needed |
 
-When the target branch is already checked out elsewhere, your edits land as
-commits on the branch actually checked out in your own worktree, not on that
-target branch — name which branch or commit holds them. A branch-to-branch
-`git diff` cannot see untracked files, so their absence from that diff is not
-a deletion (#8576).
+A target branch already checked out elsewhere: edits land on the branch
+checked out in your worktree, not that branch (#8576).
 
 ## No Subagent Fan-Out
 
@@ -232,18 +221,15 @@ is reserved for the top-level PM/orchestrator.
 ## File-Size Precheck
 
 Before the first edit to a production source file, measure its size with the
-project's cap tool. Current size + planned addition over cap → plan the
-split before writing and name it in the report; the split ships in the same
-PR.
+project's cap tool. Size plus the planned addition over cap → plan the split
+before writing; the split ships in the same PR.
 
 Framework default: 500 lines production / 3000 lines test, non-comment
-non-blank lines only. A project's CLAUDE.md overrides the numbers and the
-measuring command — use its named tool, or fall back to
-`grep -cvE '^\s*(//|#|$)' <file>`; never invent a config key or script name.
+non-blank lines. A project's CLAUDE.md overrides the numbers and tool; else
+fall back to `grep -cvE '^\s*(//|#|$)' <file>`.
 
 A file's own comment stating it already sits at the cap is itself the
-trigger — plan the split before the first edit, not only when
-size-plus-addition crosses it (#7470).
+trigger, not only when size-plus-addition crosses it (#7470).
 
 ## Minimalism Principle
 
@@ -253,14 +239,14 @@ to adding it. If removing something doesn't break functionality, remove it.
 ## Effort Matches Blast Radius
 
 Spend verification effort in proportion to what the change can break. Run the
-smallest deterministic gate that covers what you changed; widen only when the
-change is wider — a broad gate on a narrow change adds no signal.
+smallest deterministic gate that covers the change; widen only when the change
+is wider.
 
 Consolidation — dedup, a file split, a stale doc, a rename — ships inside the
-next change that touches that code; never a standalone cleanup change.
+next change touching that code, never as a standalone cleanup.
 
-The exception is a defect you would otherwise ship in code you are already
-editing. A bug, a security hole, a broken contract: fix it now, not later.
+Exception: a defect you would otherwise ship in code you're already editing.
+Fix it now, not later.
 
 ## Agent Responsibilities
 
@@ -272,15 +258,13 @@ editing. A bug, a security hole, a broken contract: fix it now, not later.
 
 ## Self-Action Imperative
 
-Execute work yourself. Never delegate execution back to the user: run the
-command, report the actual output, interpret it, take the next action.
+Execute work yourself: run the command, report the actual output, interpret
+it, take the next action. Never delegate execution back to the user.
 
-Forbidden: "You'll need to run…", "Please run…", "You should execute…",
-"Try running…".
+Forbidden: "You'll need to run…", "Please run…", "Try running…".
 
 Exception — genuine user action (credentials, business decisions, production
-approvals, inaccessible systems). Say why: "This requires your action because
-[specific reason]."
+approvals, inaccessible systems); say why.
 
 ## Verification Before Completion
 
@@ -341,15 +325,14 @@ PM. The token box is the PM's to watch, not yours.
 ## Verification Hygiene
 
 - **Empty or partial output is not a real result.** Retry twice, then
-  redirect to a scratchpad file and read that; still unobservable → report
-  "Could not verify" and hand back (#7383).
-- **A declarative process (test suite, build, CI check) wants a verdict, not
-  a play-by-play** — the Gate Output rule above, plus the terraform lock
-  hazard and the `gh --jq` empty-output trap in that skill (#7315, #7722).
+  redirect to a scratchpad file; still unobservable → report "Could not
+  verify" and hand back (#7383).
+- **A declarative process wants a verdict, not a play-by-play** — see the
+  Gate Output rule, plus the terraform-lock and `gh --jq` empty-output traps
+  in that skill (#7315, #7722).
 - **A count or stale-result check must be shown able to fail.** Delete the
-  counted behavior or remove the guard once, confirm the check goes red, then
-  restore; assert on references captured before the transition, not state
-  re-read after (#7230).
+  behavior or remove the guard, confirm the check goes red, then restore;
+  assert on references captured before the transition (#7230).
 
 ## Finishing Work — Push, Report, Stop
 
