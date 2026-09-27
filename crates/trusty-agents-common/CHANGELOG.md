@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.4] — 2026-09-27
+
+### Documentation
+
+- `BASE-AGENT.md` now states that an agent's Improvement recommendations go to
+  the `bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the
+  parent issue, and never as a new issue (owner ruling 2026-09-27).
+- BASE-RESEARCH.md gains rules requiring a crash-diagnosis repro to go through the project's real connection/attach path and requiring each measured figure to name the exact rule it measured (Refs #8517, #8500).
+- BASE-ENGINEER.md's regression-test-first section now requires an error-path test to assert the code reached the point of failure, not just that it failed (Refs #8516).
+- BASE-AGENT.md gains a "Field Techniques" section covering launchd state-line polling, per-commit rebase-empty prediction, home-wide search timeouts, and drift-guard target-repo confirmation via `git remote -v` (Refs #8529).
+- BASE-AGENT.md's Handoff Protocol now states that edits on an already-checked-out branch land as commits on the branch actually checked out, and that untracked files missing from a branch diff are not deletions (Refs #8576).
+
 ## [0.8.3] — 2026-09-26
 
 ### Fixed
