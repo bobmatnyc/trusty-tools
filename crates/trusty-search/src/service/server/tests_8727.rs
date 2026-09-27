@@ -83,3 +83,42 @@ async fn a_parked_registration_that_blocks_create_is_listed_and_named() {
         );
     }
 }
+
+/// #8727: a `?repo_identity=` list — flat or `?details=true` — carries that
+/// repo's parked rows and no other repo's (DOC-37 narrows every format).
+#[tokio::test]
+async fn a_repo_scoped_list_carries_only_that_repos_parked_rows() {
+    let canonical = |raw: &str| {
+        trusty_common::repo_identity::RepoIdentity::parse(raw)
+            .map(|r| r.canonical())
+            .unwrap_or_else(|| raw.to_string())
+    };
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let parked = |id: &str, repo: &str| {
+        let mut entry = PersistedIndex::new(id.to_string(), format!("/tmp/{id}"));
+        entry.repo_identity = Some(canonical(repo));
+        entry
+    };
+    state.cold_store.register_cold_entries(vec![
+        parked("parked-mine-8727", "acme/mine"),
+        parked("parked-theirs-8727", "acme/theirs"),
+    ]);
+
+    for details in [false, true] {
+        let params = ListIndexesParams {
+            details,
+            repo_identity: Some("acme/mine".to_string()),
+            ..Default::default()
+        };
+        let listed = list_indexes_report(&state, &params).await;
+        let ids: Vec<&str> = listed["parked"]
+            .as_array()
+            .map(|rows| rows.iter().filter_map(|r| r["id"].as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            ids,
+            vec!["parked-mine-8727"],
+            "details={details}: a repo-scoped list shows that repo's parked rows only: {listed}"
+        );
+    }
+}

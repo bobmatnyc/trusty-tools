@@ -20,6 +20,7 @@ use trusty_common::embedder::MockEmbedder;
 
 use super::build_router;
 use super::tests_components::IsolatedDataDir;
+use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::Embedder;
 use crate::service::persistence::{corpus_redb_path_for_entry, PersistedIndex};
@@ -86,4 +87,71 @@ async fn delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index() {
     );
     let deleted = outcome.expect_err("a job for a deleted index must not run its pass");
     assert_eq!(deleted.index_id, INDEX_ID);
+}
+
+/// #8664: a queued job's handle that cannot be closed abandons the whole
+/// delete, and because job handles close before the hot one, the resident
+/// index is still registered and serving afterwards.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index() {
+    const ID: &str = "delete-abandon-8664";
+    let _isolated = IsolatedDataDir::new();
+    let root = tempfile::tempdir().expect("root");
+    let bare = || {
+        IndexHandle::bare(
+            IndexId::new(ID),
+            Arc::new(RwLock::new(CodeIndexer::new(
+                ID,
+                root.path().display().to_string(),
+            ))),
+            root.path().to_path_buf(),
+        )
+    };
+    let registry = IndexRegistry::new();
+    let hot = registry.register(bare());
+    // A detached handle with its own indexer, as a job queued before a park holds.
+    let job = Arc::new(bare());
+    let seq = push_job(Arc::clone(&job), Arc::new(ReindexProgress::new()), 1);
+    let router = build_router(SearchAppState::new(registry.clone()));
+
+    // Holding the job indexer's write lock makes its close time out.
+    let held = job.indexer.write().await;
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/indexes/{ID}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    drop(held);
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let hot_deleted = hot.indexer.read().await.is_deleted();
+    let _ = job.indexer.write().await.detach_for_delete();
+    let outcome = wait_for_turn(seq).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["removed"], false, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not closed")),
+        "the abandon must name the unclosed files: {body}"
+    );
+    assert!(
+        registry.get(&IndexId::new(ID)).is_some(),
+        "an abandoned delete leaves the index registered"
+    );
+    assert!(
+        !hot_deleted,
+        "the hot handle must not be closed before a job handle's close fails"
+    );
+    assert!(outcome.is_err(), "the settled job must not run its pass");
 }

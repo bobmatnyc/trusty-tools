@@ -9,7 +9,9 @@
 //! compiled `trusty-search index remove <PATH>` against it. The router process
 //! points `TRUSTY_DATA_DIR` at a temp dir before any request, so its
 //! `indexes.toml` rewrite never reaches a real registry; the subprocess gets a
-//! fake `HOME`, and the operator's real allowlist is proven unchanged.
+//! fake `HOME`, and the operator's real allowlist is proven unchanged. The
+//! parked-aware lookups are the shared `commands::explicit_target` ones, so
+//! the PATH-plus-flag shape and `reindex` are driven here too.
 //! Test: `cargo test -p trusty-search --test index_remove_residency_8687`
 
 use std::path::{Path, PathBuf};
@@ -17,11 +19,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use tokio::sync::RwLock;
 
 use trusty_search::allowlist::{AllowlistConfig, AllowlistEntry};
-use trusty_search::core::registry::IndexRegistry;
+use trusty_search::core::indexer::CodeIndexer;
+use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use trusty_search::service::persistence::PersistedIndex;
 use trusty_search::service::server::{build_router_on, SearchAppState};
 
@@ -44,6 +49,16 @@ async fn log_requests(State(log): State<Log>, req: Request, next: Next) -> Respo
 
 /// Serve a router with `parked` registered only in the cold store.
 async fn spawn_daemon(parked: &[(&str, &Path)]) -> (String, Arc<SearchAppState>, Log) {
+    spawn_daemon_with(parked, &[], None).await
+}
+
+/// [`spawn_daemon`] plus bare `resident` indexes, and — when `failing_status`
+/// names one — a `GET /indexes/<id>/status` that always answers `500`.
+async fn spawn_daemon_with(
+    parked: &[(&str, &Path)],
+    resident: &[(&str, &Path)],
+    failing_status: Option<&'static str>,
+) -> (String, Arc<SearchAppState>, Log) {
     isolate_router_data_dir();
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let entries = parked
@@ -51,12 +66,32 @@ async fn spawn_daemon(parked: &[(&str, &Path)]) -> (String, Arc<SearchAppState>,
         .map(|(id, root)| PersistedIndex::new(id.to_string(), root.to_path_buf()))
         .collect();
     state.cold_store.register_cold_entries(entries);
+    for (id, root) in resident {
+        let indexer = CodeIndexer::new(*id, root.to_string_lossy().into_owned());
+        state.registry.register(IndexHandle::bare(
+            IndexId::new(*id),
+            Arc::new(RwLock::new(indexer)),
+            root.to_path_buf(),
+        ));
+    }
     let log: Log = Arc::default();
-    let app = build_router_on(
+    let mut app = build_router_on(
         Arc::clone(&state),
         trusty_common::server::SelfOrigins::default(),
-    )
-    .layer(middleware::from_fn_with_state(log.clone(), log_requests));
+    );
+    if let Some(id) = failing_status {
+        let status_path = format!("/indexes/{id}/status");
+        app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
+            let fail = req.method() == Method::GET && req.uri().path() == status_path;
+            async move {
+                if fail {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "status chaos").into_response();
+                }
+                next.run(req).await
+            }
+        }));
+    }
+    let app = app.layer(middleware::from_fn_with_state(log.clone(), log_requests));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback");
@@ -94,16 +129,22 @@ fn seed_allowlist(file: &Path, roots: &[&Path]) {
 
 /// Run `index remove <root> --keep-data` against `base`; returns exit code and output.
 fn remove(base: &str, root: &Path, fake_home: &Path) -> (i32, String) {
+    let root = root.to_str().expect("utf-8 root");
+    cli(base, &["index", "remove", root, "--keep-data"], fake_home)
+}
+
+/// Run `trusty-search <args>` against `base`; returns exit code and output.
+fn cli(base: &str, args: &[&str], fake_home: &Path) -> (i32, String) {
     let data_dir = tempfile::tempdir().expect("cli data dir");
     std::fs::write(
         data_dir.path().join("http_addr"),
         base.trim_start_matches("http://"),
     )
     .expect("http_addr");
+    let cwd = tempfile::tempdir().expect("cli cwd");
     let out = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
-        .args(["index", "remove"])
-        .arg(root)
-        .arg("--keep-data")
+        .args(args)
+        .current_dir(cwd.path())
         .env("TRUSTY_DATA_DIR", data_dir.path())
         .env("HOME", fake_home)
         .env("XDG_CONFIG_HOME", fake_home)
@@ -209,4 +250,99 @@ async fn removing_an_already_deleted_index_clears_its_stale_allowlist_row() {
         real_allowlist_bytes(),
         "the real allowlist must be untouched"
     );
+}
+
+/// Every non-GET request the router saw, as `(method, path)`.
+fn mutations(log: &Log) -> Vec<(String, String)> {
+    log.lock()
+        .expect("log")
+        .iter()
+        .filter(|(m, _)| m != "GET")
+        .cloned()
+        .collect()
+}
+
+/// #8687 via the shared lookups: PATH plus an agreeing `--index` resolves a
+/// parked X from its parked row and deletes only X.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_parked_index_by_path_and_flag_succeeds() {
+    let (_x, root_x) = canonical_tempdir();
+    let fake_home = tempfile::tempdir().expect("fake HOME");
+    seed_allowlist(&fake_allowlist(fake_home.path()), &[&root_x]);
+    let (base, _state, log) = spawn_daemon(&[("idx-x3-8687", &root_x)]).await;
+    let root = root_x.to_str().expect("utf-8 root");
+
+    let args = [
+        "index",
+        "remove",
+        root,
+        "--index",
+        "idx-x3-8687",
+        "--keep-data",
+    ];
+    let (code, output) = cli(&base, &args, fake_home.path());
+
+    assert_eq!(code, 0, "PATH and flag agree on parked X; output:\n{output}");
+    assert_eq!(
+        mutations(&log),
+        vec![("DELETE".to_string(), "/indexes/idx-x3-8687".to_string())],
+        "{output}"
+    );
+}
+
+/// #8687/#8737: `reindex` of a parked index — by flag or by PATH — refuses
+/// before any reindex request and says the index is parked, because the
+/// daemon's reindex route serves resident indexes only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reindex_of_a_parked_index_refuses_and_names_it_parked() {
+    let (_x, root_x) = canonical_tempdir();
+    let fake_home = tempfile::tempdir().expect("fake HOME");
+    let (base, _state, log) = spawn_daemon(&[("idx-x4-8687", &root_x)]).await;
+    let root = root_x.to_str().expect("utf-8 root");
+
+    for args in [
+        vec!["reindex", "--index", "idx-x4-8687"],
+        vec!["reindex", root],
+    ] {
+        let (code, output) = cli(&base, &args, fake_home.path());
+        assert_ne!(code, 0, "{args:?}: a parked target must refuse:\n{output}");
+        assert!(
+            output.contains("idx-x4-8687") && output.contains("parked"),
+            "{args:?}: the refusal must name the index and say it is parked:\n{output}"
+        );
+    }
+    assert!(
+        mutations(&log).is_empty(),
+        "no reindex may be sent: {:?}",
+        mutations(&log)
+    );
+}
+
+/// #8687 fail-closed: a resident index whose status answers `500` (not `404`)
+/// could own PATH, so `index remove <PATH>` must refuse naming it, not report
+/// PATH unregistered and clear its rows as stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_status_refuses_instead_of_reporting_not_registered() {
+    let real = real_allowlist_bytes();
+    let ((_a, root_a), (_x, root_x)) = (canonical_tempdir(), canonical_tempdir());
+    let fake_home = tempfile::tempdir().expect("fake HOME");
+    let file = fake_allowlist(fake_home.path());
+    seed_allowlist(&file, &[&root_x]);
+    let (base, _state, log) =
+        spawn_daemon_with(&[], &[("idx-a5-8687", &root_a)], Some("idx-a5-8687")).await;
+
+    let (code, output) = remove(&base, &root_x, fake_home.path());
+
+    assert_ne!(code, 0, "an unreadable status must refuse:\n{output}");
+    assert!(
+        output.contains("\"idx-a5-8687\""),
+        "the refusal must name the unreadable index:\n{output}"
+    );
+    assert!(
+        !output.contains("already removed"),
+        "PATH must not be reported unregistered:\n{output}"
+    );
+    assert!(mutations(&log).is_empty(), "{:?}", mutations(&log));
+    assert!(allowlisted(&file, &root_x), "X's row must survive a refusal");
+    assert_eq!(real, real_allowlist_bytes(), "the real allowlist is untouched");
 }
