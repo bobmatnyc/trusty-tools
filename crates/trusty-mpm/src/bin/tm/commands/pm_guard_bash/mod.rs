@@ -65,6 +65,8 @@ mod path_tokens;
 mod persistence;
 // #7648: an unscoped environment dump inside a Kubernetes pod.
 mod pod_env_dump;
+// #8756: a launchd or pm2 query that prints a managed job's environment.
+mod process_env_dump;
 // #8439: a read-only dispatch runs only allowlisted command shapes.
 mod read_only_allow;
 // #8567: the `gh` read verbs a read-only dispatch may run.
@@ -91,6 +93,7 @@ pub(crate) use main_checkout::{
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
+pub(crate) use process_env_dump::evaluate_process_env_dump_command;
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #7266: the secret-read guard frames here-document bodies through the SAME
