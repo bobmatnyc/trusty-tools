@@ -6,14 +6,17 @@
 # Why: the guard is what keeps scripts/asset-content-tests.tsv complete. If it
 #   stops seeing an asset read, a new asset-reading test runs nowhere on an
 #   asset-only diff and the guard still reports green.
-# What: builds a fixture workspace and asserts the guard
+# What: builds a fixture workspace — package `fix` in crates/trusty-mpm, whose
+#   src/assets .md files are Cargo-inert — and asserts the guard
 #   - passes when every read is listed, and ignores tests that read nothing
 #     (a comment naming src/assets, a `src/assets` path in a crate without
 #     that directory, an unrelated same-named constant);
-#   - fails for each read shape planted outside the list: include_str! of an
-#     asset, a `src/assets` literal, a qualified asset const, a bare const
-#     under `use super::*`, a loader fn, an integration-test target, and a
-#     `#[path]` test module;
+#   - fails for each read shape planted outside the list, each against a .md
+#     asset: include_str!, a `src/assets` literal, a qualified asset const, a
+#     bare const under `use super::*`, a loader fn, an integration-test
+#     target, a `#[path]` test module, and a manifest naming the .md;
+#   - passes with an unlisted reader of a non-.md asset (a hook script) and of
+#     a compiled-in .md outside the inert roots (a trusty-code agent);
 #   - fails on a malformed row and on a row naming no real target;
 #   - plans one cargo invocation per crate + target with the rows' filters.
 #   Then it plants a reader into a copy of the real trusty-agents-common crate
@@ -53,18 +56,18 @@ check() {
 # ------------------------------------------------------------------ fixture
 new_fixture() {
   local root="$1"
-  mkdir -p "$root/crates/fix/src/assets/skills" "$root/crates/fix/src/core" "$root/crates/fix/tests" \
+  mkdir -p "$root/crates/trusty-mpm/src/assets/skills" "$root/crates/trusty-mpm/src/core" "$root/crates/trusty-mpm/tests" \
     "$root/crates/other/src" "$root/scripts"
-  printf '[package]\nname = "fix"\nversion = "0.0.0"\n' > "$root/crates/fix/Cargo.toml"
+  printf '[package]\nname = "fix"\nversion = "0.0.0"\n' > "$root/crates/trusty-mpm/Cargo.toml"
   printf '[package]\nname = "other"\nversion = "0.0.0"\n' > "$root/crates/other/Cargo.toml"
-  echo "# skill" > "$root/crates/fix/src/assets/skills/a.md"
-  cat > "$root/crates/fix/src/lib.rs" <<'EOF'
+  echo "# skill" > "$root/crates/trusty-mpm/src/assets/skills/a.md"
+  cat > "$root/crates/trusty-mpm/src/lib.rs" <<'EOF'
 pub mod core;
 EOF
-  cat > "$root/crates/fix/src/core/mod.rs" <<'EOF'
+  cat > "$root/crates/trusty-mpm/src/core/mod.rs" <<'EOF'
 pub mod bundle;
 EOF
-  cat > "$root/crates/fix/src/core/bundle.rs" <<'EOF'
+  cat > "$root/crates/trusty-mpm/src/core/bundle.rs" <<'EOF'
 //! Embeds the skill.
 pub const SKILL_A: &str = include_str!("../assets/skills/a.md");
 pub const ALL: &[&str] = &[SKILL_A];
@@ -89,7 +92,7 @@ pub const ALL: u8 = 1;
 
 #[cfg(test)]
 mod tests {
-    // Mentions crates/fix/src/assets/skills/a.md in a comment only.
+    // Mentions crates/trusty-mpm/src/assets/skills/a.md in a comment only.
     #[test]
     fn web_bundle_path() {
         assert_eq!("src/assets/main-AbCd.js".len(), 23);
@@ -100,10 +103,10 @@ EOF
   printf 'fix\tlib\tcore::bundle::tests\treads SKILL_A\n' > "$root/scripts/list.tsv"
 }
 
-# plant <root> <file under crates/fix> <content>: append a test module.
+# plant <root> <file under crates/trusty-mpm> <content>: append a test module.
 plant() {
-  mkdir -p "$(dirname "$1/crates/fix/$2")"
-  printf '%s\n' "$3" >> "$1/crates/fix/$2"
+  mkdir -p "$(dirname "$1/crates/trusty-mpm/$2")"
+  printf '%s\n' "$3" >> "$1/crates/trusty-mpm/$2"
 }
 
 echo "fixture:"
@@ -176,6 +179,48 @@ use super::*;
 #[test]
 fn via_path() { assert!(!SKILL_A.is_empty()); }'
 check "planted: #[path] test module" 1 "$P" "$P/scripts/list.tsv" "fix lib core::bundle::extra::via_path"
+
+M="$WORK/manifest"
+new_fixture "$M"
+printf '{"file": "skills/a.md"}\n' > "$M/crates/trusty-mpm/src/assets/index.json"
+plant "$M" "src/lib.rs" '
+pub const INDEX: &str = include_str!("assets/index.json");
+#[cfg(test)]
+mod m {
+    #[test]
+    fn idx() { assert!(!super::INDEX.is_empty()); }
+}'
+check "planted: a manifest naming a .md asset" 1 "$M" "$M/scripts/list.tsv" "fix lib m::idx"
+
+echo "not asset-content readers (#8378 round 2b):"
+N="$WORK/non-md"
+new_fixture "$N"
+mkdir -p "$N/crates/trusty-mpm/src/assets/hooks"
+printf '#!/bin/sh\n' > "$N/crates/trusty-mpm/src/assets/hooks/pre-push"
+plant "$N" "src/lib.rs" '
+pub const HOOK: &str = include_str!("assets/hooks/pre-push");
+#[cfg(test)]
+mod hook_tests {
+    #[test]
+    fn hook() {
+        assert!(!super::HOOK.is_empty());
+        let _ = std::path::Path::new("src/assets/hooks");
+    }
+}'
+check "an unlisted reader of a non-.md asset is not flagged" 0 "$N" "$N/scripts/list.tsv"
+
+T="$WORK/compiled-md"
+new_fixture "$T"
+mkdir -p "$T/crates/trusty-code/src/assets/agents"
+printf '[package]\nname = "tcode"\nversion = "0.0.0"\n' > "$T/crates/trusty-code/Cargo.toml"
+echo "# agent" > "$T/crates/trusty-code/src/assets/agents/qa.md"
+printf '%s\n' 'pub const QA: &str = include_str!("assets/agents/qa.md");
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn qa() { assert!(!super::QA.is_empty()); }
+}' > "$T/crates/trusty-code/src/lib.rs"
+check "an unlisted reader of a compiled-in .md elsewhere is not flagged" 0 "$T" "$T/scripts/list.tsv"
 
 echo "list rows:"
 printf 'fix\tlib\tcore::bundle::tests\n' > "$F/scripts/bad.tsv"

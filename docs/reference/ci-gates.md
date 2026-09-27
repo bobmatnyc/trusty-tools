@@ -84,18 +84,25 @@ proves every `include_str!` still compiles), its resident-budget tests, and —
 for a Cargo-inert diff that touches an instruction root — the
 `Asset-content tests (filtered list, …)` step. It runs exactly the rows of
 `scripts/asset-content-tests.tsv`: every test, in any crate and target, that
-reads `crates/*/src/assets/**`. One `cargo test` runs per crate + target with
-the rows' name filters, and the step fails on a row that selects no test. The
-job runs on the push to main as well, so the merge of an asset-only PR runs the
-same list there, where the test shards skip it. The tmux gate also scans
+reads Cargo-inert instruction content — the paths
+`scripts/detect-docs-only.sh --instruction-assets` accepts, the same predicate
+that routes the diff to this step. A reader of any other asset (a hook script,
+a TOML or JSON file, trusty-code's own compiled-in `.md`) is not listed: an
+edit to that asset is code, so the affected-crates job runs its crate. One
+`cargo test` runs per crate + target with the rows' name filters, and the step
+fails on a failing test or on a row that selects no test. The job runs on the
+push to main as well, so the merge of an asset-only PR runs the same list
+there, where the test shards skip it. The tmux gate also scans
 `crates/*/src/assets/**/*.md`, so it runs too.
 
-🔴 **A new test that reads an asset joins the list in the same PR.** The same
-job runs `scripts/check_asset_test_filter.py check` on every diff. It fails
-when test code reads an asset (an `include_str!` of an asset path, a
-`src/assets` literal, or an asset constant or loader it derives by search)
-outside the list. Add a row naming the test, or its module; `check --verbose`
-prints what it found.
+🔴 **A new test that reads instruction `.md` joins the list in the same PR.**
+The same job runs `scripts/check_asset_test_filter.py check` on every diff. It
+fails when test code reads such a file outside the list: an `include_str!` of
+it or of its directory, a `src/assets` literal naming it, a manifest asset that
+names it by path (the PM instruction package), or an asset constant or loader
+it derives by search. Add a row naming the test, or its module; `check
+--verbose` prints what it found. A test that reaches the `.md` only through a
+run-time lookup is invisible to the guard; its row carries a `runtime:` reason.
 
 ## The agent resident-budget tests gate merge through the drift check
 

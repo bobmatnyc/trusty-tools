@@ -71,9 +71,10 @@ jobs:
     # acceptable here either: the job always runs; the relevance step inside
     # it (below) is what stays cheap on an inert diff.
     runs-on: ubuntu-latest
-    # #8378: 35, not 20 — an asset-only diff also compiles the listed tests'
-    # targets (trusty-code, trusty-agents-common, the `tm` bin, `integration`).
-    timeout-minutes: 35
+    # #8378: 30, not 20 — an asset-only diff also compiles the listed tests'
+    # targets (trusty-code and its dependencies, trusty-agents-common, the
+    # `tm` bin): about 13 min with a cache hit, about 20 on a miss.
+    timeout-minutes: 30
     env:
       SKIP_UI_BUILD: "1"
     steps:
@@ -153,19 +154,21 @@ jobs:
           # #8378: an instruction-content edit is Cargo-inert, so `Rust tests
           # (affected crates)` skips it. `asset_content=true` makes this job
           # run the listed asset-content tests (scripts/asset-content-tests.tsv)
-          # instead. Set by a Cargo-inert diff that touches an instruction
-          # root, by an edit to the list or its runner, and by a failed
-          # classification. A code diff leaves the tests to the affected-crates
-          # job. The trigger covers push to main too, so the merge of an
-          # asset-only PR runs the same list on main (base = the push's
-          # `before`). Setting it always makes the job relevant: a content/**
-          # diff sits outside trusty-mpm's closure.
+          # instead. Set by a Cargo-inert diff that touches instruction
+          # content (the paths `detect-docs-only.sh --instruction-assets`
+          # accepts — the guard below reads the same definition), by an edit
+          # to the list or its runner, and by a failed classification. A code
+          # diff leaves the tests to the affected-crates job. The trigger
+          # covers push to main too, so the merge of an asset-only PR runs the
+          # same list on main (base = the push's `before`). Setting it always
+          # makes the job relevant: a content/** diff sits outside
+          # trusty-mpm's closure.
           if ! verdict="$(env -u GITHUB_OUTPUT DOCS_ONLY_BASE="$merge_base" bash scripts/detect-docs-only.sh)"; then
             echo "asset_content=true" >> "$GITHUB_OUTPUT"
             echo "capabilities-drift: detect-docs-only.sh failed — asset-content tests run (fail closed)"
             asset_content=true
           elif { [ "$verdict" = "docs_only=true" ] &&
-                 grep -qE '^(crates/trusty-mpm/src/assets/|crates/trusty-agents-common/src/assets/|content/)' "$changed_nl"; } ||
+                 [ -n "$(bash scripts/detect-docs-only.sh --instruction-assets < "$changed_nl")" ]; } ||
                grep -qxE 'scripts/(asset-content-tests\.tsv|check_asset_test_filter\.py)' "$changed_nl"; then
             echo "asset_content=true" >> "$GITHUB_OUTPUT"
             echo "capabilities-drift: Cargo-inert instruction-content edit, or the test list changed — asset-content tests run here"

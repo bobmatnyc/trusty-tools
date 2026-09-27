@@ -73,6 +73,11 @@
 #                              changelog gate rejects; do not also exempt it.
 #
 # Usage:
+#   scripts/detect-docs-only.sh --instruction-assets < paths
+#     prints each stdin path whose ADD or MODIFY is inert instruction content
+#     (the second list above). The capabilities-drift relevance step and
+#     scripts/check_asset_test_filter.py read the asset-content definition
+#     from here, so it has one copy (#8378).
 #   git diff --name-status --no-renames "$MERGE_BASE" HEAD | scripts/detect-docs-only.sh
 #   git diff --name-only --no-renames "$MERGE_BASE" HEAD | scripts/detect-docs-only.sh
 #   DOCS_ONLY_BASE=origin/main scripts/detect-docs-only.sh     # resolves its own diff
@@ -187,6 +192,16 @@ is_inert_instruction_asset() {
 }
 
 main() {
+  if [ "${1:-}" = "--instruction-assets" ]; then
+    local p
+    while IFS= read -r p; do
+      if [ -n "$p" ] && is_inert_instruction_asset M "$p"; then
+        printf '%s\n' "$p"
+      fi
+    done
+    return 0
+  fi
+
   local input
   if [ -n "${DOCS_ONLY_BASE:-}" ]; then
     local merge_base

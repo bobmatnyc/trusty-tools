@@ -18,12 +18,20 @@ What: three subcommands over scripts/asset-content-tests.tsv.
   run    executes the plan. It fails on a failing test, and on a row that
          selected no test (a renamed test must not pass vacuously).
 
+  An ASSET here is a file whose edit is Cargo-inert instruction content: the
+  set `scripts/detect-docs-only.sh --instruction-assets` accepts, the same
+  predicate that sets capabilities-drift's `asset_content=true` (today the
+  .md files under the trusty-mpm and trusty-agents-common asset roots, and
+  content/**). A non-.md asset or trusty-code's compiled-in .md is code: an
+  edit to it plans its crate in `Rust tests (affected crates)`, so its
+  readers need no row.
+
   A test READS an asset when its test code holds:
-    R1  include_str!/include_bytes!/include_dir! of a path that resolves under
-        crates/<crate>/src/assets/;
-    R2  a string literal naming an existing crates/<crate>/src/assets
-        directory: `<crate>/src/assets…`, or a bare `src/assets…` inside a
-        crate that has one;
+    R1  include_str!/include_bytes!/include_dir! of a file that is an asset,
+        or of a directory holding one;
+    R2  a string literal naming a crates/<crate>/src/assets path that is an
+        asset, a directory holding one, or a prefix of one:
+        `<crate>/src/assets…`, or a bare `src/assets…` inside that crate;
     R3  a reference to an ASSET SYMBOL. Asset symbols are found by search, to
         a fixed point, in non-test code:
           - a const/static whose initializer holds R1, R2 or an asset symbol;
@@ -55,6 +63,7 @@ Exit: 0 clean; 1 guard or run failure; 2 usage or unreadable input.
 Test: scripts/check_asset_test_filter_selftest.sh.
 """
 import argparse
+import glob
 import os
 import re
 import subprocess
@@ -75,6 +84,7 @@ BARE = re.compile(r"(?<![\w:.])(" + IDENT + r")\b(?!\s*::)")
 TEST_ATTR = re.compile(r"#\[\s*(?:" + IDENT + r"\s*::\s*)*(?:test|rstest|test_case)\b")
 CFG_TEST = re.compile(r"#\[\s*cfg\s*\((?![^\]]*\bnot\s*\(\s*test)[^\]]*\btest\b")
 ASSET_DIR = re.compile(r"(?:^|/)(?:([\w.-]+)/)?src/assets(?:/|$)")
+DETECT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detect-docs-only.sh")
 
 
 # ------------------------------------------------------------------- lexing
@@ -246,10 +256,10 @@ def expand_use(tree):
 class Source:
     """One lexed .rs file. Every span records its innermost inline module index."""
 
-    def __init__(self, path, crate_dir):
+    def __init__(self, path, crate_dir, assets):
         with open(path, encoding="utf-8", errors="replace") as f:
             self.text = f.read()
-        self.path, self.crate_dir = path, crate_dir
+        self.path, self.crate_dir, self.assets = path, crate_dir, assets
         self.masked, self.lits = lex(self.text)
         m = self.masked
         self.inline = []  # (start, end, name, attrs)
@@ -329,7 +339,10 @@ class Source:
         m = ASSET_DIR.search(value)
         if m:
             crate_dir = os.path.join(os.path.dirname(self.crate_dir), m.group(1)) if m.group(1) else self.crate_dir
-            if os.path.isdir(os.path.join(crate_dir, "src", "assets")):
+            # A format string (`src/assets/agents/{name}.md`) names the prefix before its first hole.
+            tail = re.split(r"[{}*?]", value[m.end():], maxsplit=1)[0]
+            prefix = os.path.normpath(os.path.join(crate_dir, "src", "assets", tail))
+            if any(a.startswith(prefix) for a in self.assets):
                 return f"literal {value!r}"
         if value and not value.startswith("/"):
             start = self.masked.rfind("include_", 0, lit_off)
@@ -337,7 +350,7 @@ class Source:
                 paren = self.masked.find("(", start)
                 if lit_off < match_close(self.masked, paren):
                     resolved = os.path.normpath(os.path.join(os.path.dirname(self.path), value))
-                    if "/src/assets/" in resolved.replace(os.sep, "/"):
+                    if any(a == resolved or a.startswith(resolved + os.sep) for a in self.assets):
                         return f"include of {value!r}"
         return None
 
@@ -366,6 +379,37 @@ class Module:
         self.items = [i for i in src.items if i[4] == idx and not nested(i)]
         self.uses = [u for u in src.uses if u[4] == idx]
         self.seg = path[-1] if path else ""
+
+
+def inert_assets(root):
+    """Absolute paths of the assets: inert instruction files, and the manifests naming them.
+
+    detect-docs-only.sh owns which files are inert; this only lists the
+    candidates. A manifest is any other candidate whose text names an inert
+    file by its path from the manifest's directory, as the PM instruction
+    package's `file` bodies do: composing it reads those files.
+    """
+    cands = []
+    for top in [os.path.join(root, "content"), *sorted(glob.glob(os.path.join(root, "crates", "*", "src", "assets")))]:
+        for d, _, files in os.walk(top):
+            cands += [os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/") for f in files]
+    proc = subprocess.run(["bash", DETECT, "--instruction-assets"], input="".join(c + "\n" for c in cands),
+                          text=True, capture_output=True)
+    if proc.returncode != 0:
+        sys.exit(f"check_asset_test_filter: {DETECT} --instruction-assets exited {proc.returncode}: {proc.stderr}")
+    inert = [os.path.join(root, p) for p in proc.stdout.splitlines() if p]
+    manifests = []
+    for c in sorted(set(cands) - set(proc.stdout.splitlines())):
+        path = os.path.join(root, c)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        here = os.path.dirname(path)
+        for a in inert:
+            rel = os.path.relpath(a, here).replace(os.sep, "/")
+            if not rel.startswith("..") and re.search(r"(?<![\w./-])" + re.escape(rel) + r"(?![\w.-])", text):
+                manifests.append(path)
+                break
+    return tuple(sorted(inert + manifests))
 
 
 def crate_targets(crate_dir):
@@ -413,6 +457,7 @@ class Tree:
 
     def __init__(self, root):
         self.root = root
+        self.assets = inert_assets(root)
         self.sources = {}
         self.modules = []
         self.by_path = {}
@@ -434,7 +479,7 @@ class Tree:
             return
         seen = seen | {path}
         if path not in self.sources:
-            self.sources[path] = Source(path, crate_dir)
+            self.sources[path] = Source(path, crate_dir, self.assets)
         src = self.sources[path]
         self.add(Module(crate, tid, modpath, src, None, test))
         for idx, (_, _, _, attrs) in enumerate(src.inline):
@@ -703,6 +748,7 @@ def main():
     ap.add_argument("--list", default=None)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    args.root = os.path.abspath(args.root)
     args.list = args.list or os.path.join(args.root, "scripts", "asset-content-tests.tsv")
     if not os.path.isfile(args.list) or not os.path.isdir(os.path.join(args.root, "crates")):
         print(f"check_asset_test_filter: missing {args.list} or {args.root}/crates", file=sys.stderr)

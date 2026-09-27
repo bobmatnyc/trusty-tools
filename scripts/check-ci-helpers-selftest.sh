@@ -328,6 +328,14 @@ crates/trusty-mpm/src/lib.rs')"
 assert_eq "mixed website + code"  "false" "$(docs_only_of 'website/src/routes/+page.svelte
 crates/trusty-mpm/src/lib.rs')"
 assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
+# #8378: the asset-content definition check_asset_test_filter.py and the
+# capabilities-drift relevance step both read.
+assert_eq "--instruction-assets keeps only inert instruction content" \
+  "crates/trusty-mpm/src/assets/skills/a.md crates/trusty-agents-common/src/assets/agents/qa.md content/agents/qa.json " \
+  "$(printf '%s\n' crates/trusty-mpm/src/assets/skills/a.md crates/trusty-mpm/src/assets/hooks/pre-push \
+    crates/trusty-agents-common/src/assets/agents/qa.md crates/trusty-code/src/assets/agents/qa.md \
+    content/agents/qa.json docs/a.md crates/trusty-mpm/src/lib.rs |
+    bash scripts/detect-docs-only.sh --instruction-assets | tr '\n' ' ')"
 
 # ---------------------------------------------------------------------------
 # detect-embedder-cuda-relevant.sh
