@@ -89,8 +89,11 @@ pub fn scratch_home() -> &'static Path {
             .keep();
         // SAFETY: this runs inside `OnceLock::get_or_init`, so exactly one
         // thread ever writes `HOME` in this process and every other thread is
-        // blocked until that write is visible. Nothing else in these targets
-        // mutates `HOME`.
+        // blocked until that write is visible. In the parallel `integration`
+        // target nothing else mutates `HOME` (ratcheted by
+        // `every_integration_target_arms_the_home_write_fence`). `env_serial`
+        // modules do rewrite it, which is safe only because that target runs
+        // one test at a time (#8345).
         unsafe { std::env::set_var("HOME", &dir) };
         dir
     })
@@ -121,8 +124,8 @@ pub fn tm_bin() -> &'static str {
 /// server and session rather than the fixture's.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
-/// environment, so the `#5544` hazard — a `set_var` visible to every parallel
-/// sibling in the same test binary — does not arise.
+/// environment, so the `#5544` hazard — a `set_var` visible to every test
+/// running in parallel in the `integration` target — does not arise.
 /// Test: `the_helper_clears_every_state_pointing_var`.
 const CHILD_STATE_ENV: &[&str] = &[
     "TRUSTY_MPM_ROOT",

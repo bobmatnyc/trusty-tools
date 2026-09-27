@@ -59,8 +59,13 @@ fn meta_run_demo_writes_and_verifies_artifact() {
     // #7568: deliberately NOT confined to a scratch `$HOME`. This is a live,
     // `#[ignore]`d run against the framework the operator actually installed —
     // a scratch home would make it untestable rather than hermetic.
+    // #8345: name the operator's home explicitly. This module shares the
+    // `integration` process with `common::scratch_home()` callers, so the live
+    // `$HOME` may already point at a scratch dir.
+    let home = common::operator_home().expect("the harness started with no $HOME");
     let bin = common::tm_bin();
     let output = Command::new(bin)
+        .env("HOME", home)
         .args([
             "meta",
             "run",

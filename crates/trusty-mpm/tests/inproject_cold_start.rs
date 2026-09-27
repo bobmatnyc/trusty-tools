@@ -43,8 +43,9 @@ struct ReposRootGuard(Option<String>);
 impl ReposRootGuard {
     fn set(dir: &Path) -> Self {
         let prev = std::env::var(REPOS_ROOT_ENV).ok();
-        // SAFETY: every caller is `#[serial_test::serial]`, so only one thread
-        // in this test binary mutates the environment at a time.
+        // SAFETY: this module is mounted in the `env_serial` target, which runs
+        // one test at a time, so no other thread reads the environment while
+        // this write happens (#8345).
         unsafe { std::env::set_var(REPOS_ROOT_ENV, dir) };
         Self(prev)
     }

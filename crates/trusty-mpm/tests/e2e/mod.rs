@@ -5,10 +5,11 @@
 //! a real axum server on a loopback port, driven over HTTP with `reqwest` — so
 //! routing, status codes, JSON shapes, and the framework-config boot path are
 //! all verified the way a real client (CLI, TUI, Telegram bot) sees them.
-//! What: a single integration-test binary. [`harness`] spawns a temp-scoped
-//! daemon; each `test_*` module is one scenario area. Rust runs the `#[test]`
-//! functions across these modules concurrently, and that is safe here because
-//! every test spawns its own isolated daemon and temp directory.
+//! What: the `e2e` module of the parallel `integration` target (#8345).
+//! [`harness`] spawns a temp-scoped daemon; each `test_*` module is one
+//! scenario area. libtest runs these tests concurrently with every other
+//! `integration` test, which is safe because each spawns its own isolated
+//! daemon and temp directory and none mutates the process environment.
 //! Test: `cargo test -p trusty-mpm --test integration e2e::`.
 
 mod harness;
