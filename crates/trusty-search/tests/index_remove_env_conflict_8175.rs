@@ -47,7 +47,6 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use tokio::sync::RwLock;
 
-use trusty_search::allowlist::AllowlistConfig;
 use trusty_search::core::indexer::CodeIndexer;
 use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use trusty_search::service::server::{build_router, SearchAppState};
@@ -56,72 +55,10 @@ const INDEX_A: &str = "idx-a-8175";
 const INDEX_B: &str = "idx-b-8175";
 
 // ─── Real-allowlist guard (fix-up: code-critic WARN) ───────────────────────
-
-/// Snapshot of the OPERATOR's real
-/// `~/Library/Application Support/trusty-search/allowlist.toml` (or its
-/// absence), read only to prove this file never touches it.
-///
-/// Why: `AllowlistConfig::default_path()` (`crates/trusty-search/src/allowlist/mod.rs:210`)
-/// resolves via `dirs::config_dir()`, which on macOS reads `$HOME` and on
-/// Linux reads `$XDG_CONFIG_HOME`/`$HOME` — NOT `TRUSTY_DATA_DIR`. The
-/// best-effort allowlist cleanup at `index_remove.rs:309`
-/// (`crate::allowlist::remove_from_allowlist`) runs on every path that
-/// completes a real `DELETE`, so a subprocess that inherits the operator's
-/// real `HOME` can rewrite that real file even though the `DELETE` itself
-/// always targets the fake router. [`remove_command`] closes this by pinning
-/// `HOME`/`XDG_CONFIG_HOME` to a fake per-test home; this guard is the proof
-/// that pin actually holds. Read-only access to the real path is taken ONLY
-/// here, and only to build the before/after comparison.
-/// What: absence is a valid, expected state (CI has no such file at all) —
-/// `exists: false` on both sides is success, not a skipped check. Presence
-/// is compared on content bytes AND mtime, so even a content-preserving
-/// rewrite (a temp-file-then-rename with unchanged bytes) is caught.
-/// Test: every `#[tokio::test]` below calls `RealAllowlistGuard::capture`
-/// before its subprocess and `assert_unchanged` after.
-struct RealAllowlistGuard {
-    exists: bool,
-    bytes: Option<Vec<u8>>,
-    mtime: Option<std::time::SystemTime>,
-}
-
-impl RealAllowlistGuard {
-    fn capture() -> Self {
-        let path = AllowlistConfig::default_path();
-        match std::fs::metadata(&path) {
-            Ok(meta) => Self {
-                exists: true,
-                bytes: std::fs::read(&path).ok(),
-                mtime: meta.modified().ok(),
-            },
-            Err(_) => Self {
-                exists: false,
-                bytes: None,
-                mtime: None,
-            },
-        }
-    }
-
-    /// Why: called after the subprocess under test has exited, so any write
-    /// it performed against the real path — however cheap or well-intentioned
-    /// — is captured here and turned into a hard test failure.
-    fn assert_unchanged(&self, label: &str) {
-        let after = Self::capture();
-        assert_eq!(
-            self.exists, after.exists,
-            "{label}: the real allowlist.toml went from present to absent or vice versa"
-        );
-        assert_eq!(
-            self.bytes, after.bytes,
-            "{label}: the real allowlist.toml content changed"
-        );
-        assert_eq!(
-            self.mtime, after.mtime,
-            "{label}: the real allowlist.toml mtime changed (even a no-op \
-             rewrite bumps this, so an unchanged mtime is the strongest signal \
-             nothing touched it)"
-        );
-    }
-}
+// #8737: shared with `reindex_quantize_env_conflict_8737.rs`.
+#[path = "support/real_allowlist_guard.rs"]
+mod real_allowlist_guard;
+use real_allowlist_guard::RealAllowlistGuard;
 
 // ─── Request log + chaos middleware (fix-up: error-arm tests) ──────────────
 
@@ -415,12 +352,13 @@ async fn remove_with_path_and_flag_when_daemon_is_down_refuses_with_no_requests(
 }
 
 /// (b) PATH and `-i` both given, the daemon is reachable but answers every
-/// per-index status lookup with `503` — the lookup of the `-i` id during the
-/// agreement check. `remove` must exit non-zero with NO `DELETE` ever sent.
+/// per-index status lookup with `503` — the lookup that resolves PATH to an
+/// id during the agreement check. `remove` must exit non-zero with NO
+/// `DELETE` ever sent.
 ///
-/// Why: with `--index` set, `handle_index_remove` resolves the id through
-/// `find_index_by_id`, whose `error_for_status()?` propagates the `503` as a
-/// hard error before the id-agreement
+/// Why: the `PathAndId` arm resolves PATH through `find_index_by_path`, which
+/// fails closed on any unreadable status (#8737), so the `503` is a hard error
+/// before the id-agreement
 /// comparison (and therefore before any `DELETE`) is ever reached. This pins
 /// that existing propagation against a REAL 503, not just a synthetic
 /// `Result::Err` in a unit test.

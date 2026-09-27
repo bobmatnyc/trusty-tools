@@ -17,6 +17,7 @@
 //! `tests::render_report_marks_unknown_counts`.
 
 use super::daemon_utils::daemon_base_url;
+use super::explicit_target::{flag_only_index, IndexIdSource};
 use super::format::format_with_commas;
 use super::index_resolve::{print_index_header, resolve_index};
 use anyhow::{Context, Result};
@@ -50,18 +51,22 @@ pub struct QuantizeArgs {
 /// Handle `trusty-search quantize [--to f16] [--dry-run] [--yes]`.
 ///
 /// Why: gives the #6822 default flip a path onto indexes that already exist.
-/// What: resolves the index the way every other project-scoped subcommand does,
-/// renders the dry-run report, then applies unless the caller only asked to
-/// look. `--yes` skips the prompt for scripted fleet runs.
+/// What: resolves the index from a real `-i` flag or CWD detection —
+/// `TRUSTY_INDEX` alone refuses before any network call (#8737) — renders the
+/// dry-run report, then applies unless the caller only asked to look. `--yes`
+/// skips the prompt for scripted fleet runs.
 /// Test: the render helper's unit tests below; the route itself is covered by
-/// `service::server::tests_quantize_6822`.
+/// `service::server::tests_quantize_6822`; the #8737 refusal by
+/// `quantize_env_only_refuses_with_no_requests`.
 pub async fn handle_quantize(
     explicit_index: &Option<String>,
+    index_source: Option<IndexIdSource>,
     args: &QuantizeArgs,
     json: bool,
 ) -> Result<()> {
     let (to, dry_run, yes) = (args.to.as_str(), args.dry_run, args.yes);
-    let (index_id, warned) = resolve_index(explicit_index)?;
+    let explicit = flag_only_index("quantize", explicit_index, index_source)?;
+    let (index_id, warned) = resolve_index(&explicit)?;
     print_index_header(&index_id, warned);
 
     let base = daemon_base_url();

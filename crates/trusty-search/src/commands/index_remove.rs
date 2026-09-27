@@ -41,106 +41,28 @@
 //!       `tests/index_remove_env_conflict_8175.rs`.
 
 use super::daemon_utils::daemon_base_url;
+// #8737: the target-resolution rule moved to `explicit_target` so `reindex`,
+// `quantize` and `index relocate` share it; re-exported for existing callers.
+use super::explicit_target::{
+    classify_explicit_target, find_index_by_path, resolve_explicit_target, with_source,
+};
+pub(crate) use super::explicit_target::{ExplicitTarget as RemoveTarget, IndexIdSource};
 use crate::config::GlobalConfig;
 use crate::detect::detect_project;
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use serde_json::Value;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Where an explicit `-i`/`--index` value came from (issue #8175).
-///
-/// Why: clap folds a real `-i`/`--index` flag and the `TRUSTY_INDEX` env
-/// fallback into the SAME `Cli::index` value, so once parsing is done a value
-/// alone cannot say which one supplied it. A destructive verb needs that
-/// distinction: it must refuse when the ONLY source is the environment, but
-/// proceed when the operator typed the flag.
-/// What: `main.rs` reads `ArgMatches::value_source("index")` before the
-/// derive-based parse consumes the matches, and passes the answer down as
-/// this enum.
-/// Test: `classify_remove_target_env_only_refuses`,
-/// `classify_remove_target_cli_flag_alone_is_used_directly`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IndexIdSource {
-    /// A real `-i`/`--index` flag on the command line.
-    CliFlag,
-    /// Only the `TRUSTY_INDEX` environment fallback — no flag was typed.
-    EnvVar,
-}
-
-/// `main.rs`'s one-line call to build the `Option<IndexIdSource>`
-/// [`handle_index_remove`] expects, from `cli.index.is_some()` and whether
-/// clap's `ArgMatches::value_source` said a real flag supplied it.
-/// Test: covered indirectly by `classify_remove_target_env_only_refuses` and
-/// `tests/index_remove_env_conflict_8175.rs`, which exercise both sources
-/// this produces end-to-end.
-pub(crate) fn index_id_source(has_value: bool, from_cli_flag: bool) -> Option<IndexIdSource> {
-    has_value.then_some(if from_cli_flag {
-        IndexIdSource::CliFlag
-    } else {
-        IndexIdSource::EnvVar
-    })
-}
-
-/// The decision reached from PATH, `-i`/`--index`, and their source, before
-/// any of it is checked against the daemon (issue #8175).
-///
-/// Why: separating "what was given" from "what the daemon says about it"
-/// lets the precedence/refusal rule be unit-tested without a daemon at all —
-/// [`classify_remove_target`] is the pure function; `handle_index_remove`
-/// resolves each variant against the daemon afterward.
-/// What: the four shapes PATH/`-i`/`TRUSTY_INDEX` can take together.
-/// Test: `classify_remove_target_*` below.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RemoveTarget {
-    /// Neither PATH nor `-i`/`TRUSTY_INDEX` was given — auto-detect from CWD,
-    /// unchanged default behaviour (nothing was misread, so nothing refuses).
-    CwdAutoDetect,
-    /// A PATH argument only.
-    Path(PathBuf),
-    /// An index id from a real `-i` flag, with no PATH to check it against.
-    Id(String),
-    /// PATH and an id were both given; the caller resolves PATH to an id and
-    /// checks it agrees with this one before doing anything destructive.
-    PathAndId(PathBuf, String),
-    /// Refuse before any network call — the target could only be read from
-    /// `TRUSTY_INDEX` alone, and a destructive command never does that
-    /// (issue #8175: this is exactly how the live `trusty-tools-4e2cf878`
-    /// index was deleted by a `remove <PATH>` run in a shell that also
-    /// exported `TRUSTY_INDEX` for an unrelated session).
-    Refuse(String),
-}
-
-/// Classify how `index remove` should resolve its target, from PATH and
-/// `-i`/`--index` alone — no daemon call yet (issue #8175).
-///
-/// Why: this is the precedence/refusal rule at the heart of the #8175 fix,
-/// extracted as a pure function so it can be asserted directly.
-/// What: `explicit_index` carries the value clap resolved for `-i`/`--index`
-/// together with [`IndexIdSource`] saying whether a real flag supplied it.
-/// Returns [`RemoveTarget::Refuse`] when the only target is an env-sourced id
-/// with no PATH to corroborate it; otherwise returns the shape the caller
-/// should resolve, deferring an explicit-PATH-vs-explicit-id MISMATCH to
-/// `handle_index_remove` (via [`RemoveTarget::PathAndId`]), because checking
-/// that requires resolving PATH against the daemon first.
+/// Classify how `index remove` resolves its target, with no daemon call yet
+/// (issue #8175): the shared [`classify_explicit_target`] rule, verb `remove`.
 /// Test: `classify_remove_target_*` below.
 pub(crate) fn classify_remove_target(
     cli_path: Option<PathBuf>,
     explicit_index: Option<(String, IndexIdSource)>,
 ) -> RemoveTarget {
-    match (cli_path, explicit_index) {
-        (None, None) => RemoveTarget::CwdAutoDetect,
-        (Some(p), None) => RemoveTarget::Path(p),
-        (None, Some((id, IndexIdSource::CliFlag))) => RemoveTarget::Id(id),
-        (None, Some((id, IndexIdSource::EnvVar))) => RemoveTarget::Refuse(format!(
-            "refusing to remove index \"{id}\" resolved only from TRUSTY_INDEX; \
-             destructive commands need an explicit PATH argument or -i/--index \
-             flag (issue #8175) — pass one, or unset TRUSTY_INDEX and re-run \
-             from inside the project"
-        )),
-        (Some(p), Some((id, _))) => RemoveTarget::PathAndId(p, id),
-    }
+    classify_explicit_target("remove", cli_path, explicit_index)
 }
 
 /// Entry point for `trusty-search index remove [PATH]`.
@@ -178,52 +100,26 @@ pub async fn handle_index_remove(
     // #6422: purge by default; `--keep-data` is the explicit deregister-only
     // opt-out.
     let delete_data = !keep_data;
+    // #8737: an env-only target refuses before any network call.
+    let target = classify_remove_target(cli_path, with_source(explicit_index_id, index_source));
+    if let RemoveTarget::Refuse(reason) = &target {
+        bail!("{reason}");
+    }
     let base = daemon_base_url();
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
     let client = trusty_common::server::daemon_http_client()?;
 
-    let target = classify_remove_target(
-        cli_path,
-        explicit_index_id.map(|id| (id, index_source.unwrap_or(IndexIdSource::EnvVar))),
-    );
-
-    // #8175: resolve each shape against the daemon, and — for the one shape
-    // that carries a conflict risk (PATH AND an id both given) — refuse
-    // rather than pick one when they disagree. This is the "never silently
-    // pick one" half of the fix; `classify_remove_target` above is the
-    // "never resolve from TRUSTY_INDEX alone" half.
-    let (index_id, registered_path, resolved_via) = match target {
-        RemoveTarget::CwdAutoDetect => {
-            let target_path = resolve_target_path(None)?;
-            let (id, root) = find_index_by_path(&client, &base, &target_path).await?;
-            (id, root, "the current working directory")
-        }
-        RemoveTarget::Path(p) => {
-            let (id, root) = find_index_by_path(&client, &base, &p).await?;
-            (id, root, "the PATH argument")
-        }
-        RemoveTarget::Id(id) => {
-            let (id, root) = find_index_by_id(&client, &base, &id).await?;
-            (id, root, "the -i/--index flag")
-        }
-        RemoveTarget::Refuse(reason) => bail!(reason),
-        RemoveTarget::PathAndId(p, id) => {
-            let (path_id, path_root) = find_index_by_path(&client, &base, &p).await?;
-            if path_id != id {
-                bail!(
-                    "refusing to remove: PATH {} resolves to index \"{path_id}\", but \
-                     -i/--index (or TRUSTY_INDEX) names \"{id}\" — pass matching values, \
-                     or drop one of them (issue #8175)",
-                    p.display()
-                );
+    // #8175: resolve each shape against the daemon; PATH plus an id must agree
+    // (see `resolve_explicit_target`), and `TRUSTY_INDEX` alone refuses.
+    let (index_id, registered_path, resolved_via) =
+        match resolve_explicit_target("remove", &client, &base, target).await? {
+            Some(resolved) => resolved,
+            None => {
+                let target_path = resolve_target_path(None)?;
+                let (id, root) = find_index_by_path(&client, &base, &target_path).await?;
+                (id, root, "the current working directory")
             }
-            (
-                path_id,
-                path_root,
-                "the PATH argument (confirmed to agree with -i/--index)",
-            )
-        }
-    };
+        };
 
     // #8175: report how the target was resolved before anything destructive
     // happens, so a script's log (or a human re-reading a scrollback) can
@@ -426,103 +322,6 @@ fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
     // #6550: a refused root is an error here, not a path to remove by guess.
     let ctx = detect_project(&cwd)?;
     Ok(ctx.root_path)
-}
-
-/// Fetch the registered `root_path` for a known index id.
-///
-/// Why (issue #1087): when `-i <id>` is given we know the id already; we still
-/// need the `root_path` for post-delete cleanup (global config + allowlist).
-/// What: calls `GET /indexes/:id/status`, extracts `root_path`. Returns
-/// `(id, root_path)` so callers can use the same post-delete code path.
-/// Test: side-effect-only; covered by integration tests for the `-i` flag path.
-async fn find_index_by_id(
-    client: &reqwest::Client,
-    base: &str,
-    id: &str,
-) -> Result<(String, PathBuf)> {
-    let url = format!("{base}/indexes/{id}/status");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("could not reach daemon at {base}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon returned an error for {url}"))?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .context("could not parse status response")?;
-    let root = body
-        .get("root_path")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .with_context(|| format!("status response for '{id}' is missing root_path"))?;
-    Ok((id.to_string(), root))
-}
-
-/// Find the daemon-side index id whose `root_path` matches `target`.
-///
-/// Why: the CLI takes a path, but the daemon's REST API is keyed by index id.
-///      Walking the registry once and comparing canonicalised paths is the
-///      least surprising way to bridge the two views.
-/// What: lists all indexes, queries `/indexes/:id/status` for each, returns
-///       the first id whose `root_path` canonicalises to the same value as
-///       `target`. Errors out with a clear message when no match is found.
-/// Test: side-effect-only at this level; covered by integration tests that
-///       register an index and then exercise the remove subcommand.
-async fn find_index_by_path(
-    client: &reqwest::Client,
-    base: &str,
-    target: &Path,
-) -> Result<(String, PathBuf)> {
-    let list_url = format!("{base}/indexes");
-    let list_body: serde_json::Value = client
-        .get(&list_url)
-        .send()
-        .await
-        .with_context(|| format!("could not reach daemon at {base}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon error for {list_url}"))?
-        .json()
-        .await
-        .context("could not parse /indexes response")?;
-    let empty: Vec<serde_json::Value> = Vec::new();
-    let ids: Vec<String> = list_body
-        .get("indexes")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
-
-    let canonical_target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-
-    for id in ids {
-        let url = format!("{base}/indexes/{id}/status");
-        let resp = match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
-        let body: serde_json::Value = match resp.json().await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let root = body
-            .get("root_path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from);
-        let Some(root) = root else {
-            continue;
-        };
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-        if canonical_root == canonical_target {
-            return Ok((id, root));
-        }
-    }
-    bail!(
-        "no index registered for path {}; run `trusty-search list` to see registered indexes",
-        target.display()
-    )
 }
 
 #[cfg(test)]

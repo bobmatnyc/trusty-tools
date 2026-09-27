@@ -31,8 +31,9 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use commands::convert::ConvertTarget;
+use commands::explicit_target::index_id_source;
 use commands::index_action::IndexAction;
-use commands::index_remove::{handle_index_remove, index_id_source};
+use commands::index_remove::handle_index_remove;
 use commands::service::ServiceAction;
 use std::io;
 
@@ -1173,6 +1174,9 @@ async fn run() -> Result<()> {
         e.print().ok();
         std::process::exit(e.exit_code());
     });
+    // #8175/#8737: the destructive verbs (`index remove`, `reindex`,
+    // `quantize`, `index relocate`) take this to refuse an env-only target.
+    let index_source = index_id_source(cli.index.is_some(), index_from_cli_flag);
 
     // Tracing init + NO_COLOR handling via shared trusty-common helpers.
     //
@@ -1289,9 +1293,6 @@ async fn run() -> Result<()> {
                 keep_data,
                 yes,
             }) => {
-                // #8175: a destructive verb must know whether `-i`/`--index`
-                // came from a real flag or only from `TRUSTY_INDEX`.
-                let index_source = index_id_source(cli.index.is_some(), index_from_cli_flag);
                 handle_index_remove(rm_path, cli.index, index_source, keep_data, yes).await?;
             }
             Some(IndexAction::Add {
@@ -1310,7 +1311,8 @@ async fn run() -> Result<()> {
                 commands::index_allowlist::handle_allowlist_list(json).await?;
             }
             Some(IndexAction::Relocate { to }) => {
-                commands::index_relocate::handle_index_relocate(&cli.index, to).await?;
+                commands::index_relocate::handle_index_relocate(&cli.index, index_source, to)
+                    .await?;
             }
             None => {
                 commands::index::handle_index(
@@ -1335,11 +1337,11 @@ async fn run() -> Result<()> {
         }
 
         Commands::Quantize(args) => {
-            commands::quantize::handle_quantize(&cli.index, &args, cli.json).await?;
+            commands::quantize::handle_quantize(&cli.index, index_source, &args, cli.json).await?;
         }
 
         Commands::Reindex { path, timeout } => {
-            commands::reindex::handle_reindex(&cli.index, path, timeout).await?;
+            commands::reindex::handle_reindex(&cli.index, index_source, path, timeout).await?;
         }
 
         Commands::List => commands::list::handle_list(cli.json).await?,

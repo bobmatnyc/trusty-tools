@@ -39,6 +39,8 @@ pub mod daemon_guard;
 pub mod dashboard;
 pub mod discover;
 pub mod doctor;
+// #8175/#8737: target resolution shared by the destructive index verbs.
+pub(crate) mod explicit_target;
 pub mod hook;
 pub mod index;
 pub(crate) mod index_action;
