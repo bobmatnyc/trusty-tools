@@ -683,8 +683,9 @@ impl DaemonState {
     /// ceiling keeps reusing the same few directories — which is what makes
     /// them warm. Growing the pool monotonically would leave every slot cold
     /// exactly when the ceiling is finally reached.
-    /// What: collects the indices live leases already hold (excluding this
-    /// dispatch's own record), takes the first index not among them, and stamps
+    /// What: collects the indices live leases already hold, plus those a
+    /// stop-released builder may still use (#8548), excluding this dispatch's
+    /// own record; takes the first index not among them, and stamps
     /// it on the record carrying `tool_use_id`. Caller must hold
     /// [`builder_claim_guard`](DaemonState::builder_claim_guard) — the whole
     /// point is that the read and the write are one step.
@@ -695,7 +696,8 @@ impl DaemonState {
     /// dispatch with no slot index simply gets no pool directory, which is the
     /// fail-closed direction.
     /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
-    /// `a_released_slot_index_is_reassigned_to_the_next_builder`.
+    /// `a_released_slot_index_is_reassigned_to_the_next_builder`,
+    /// `a_resumed_user_stopped_builder_keeps_its_slot_index_8548`.
     fn assign_builder_slot(&self, tool_use_id: Option<&str>) {
         let Some(tool_use_id) = tool_use_id else {
             return;
@@ -706,9 +708,11 @@ impl DaemonState {
         }
     }
 
-    /// The slot indices live builder leases hold, excluding `tool_use_id`'s own.
+    /// The slot indices live builder leases hold, plus those a stop-released
+    /// builder may still be resumed into (#8548), excluding `tool_use_id`'s own.
     ///
-    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`.
+    /// Test: `an_admitted_builder_is_assigned_the_lowest_free_slot`,
+    /// `a_resumed_user_stopped_builder_keeps_its_slot_index_8548`.
     fn taken_builder_slots(&self, tool_use_id: &str) -> BTreeSet<u32> {
         let now = chrono::Utc::now();
         self.delegations
@@ -718,10 +722,13 @@ impl DaemonState {
                 if d.tool_use_id.as_deref() == Some(tool_use_id) || !agent_is_builder(&d.agent) {
                     return None;
                 }
-                builder_lease(d, self.session_owner_alive(d.session), now)
-                    .is_held()
-                    .then_some(d.builder_slot)
-                    .flatten()
+                let owner = self.session_owner_alive(d.session);
+                // #8548: a stopped builder may be resumed into its directory, so
+                // its index stays taken until the TTL although its capacity is free.
+                (builder_lease(d, owner, now).is_held()
+                    || super::builder_slot_release::stop_quarantine_holds(d, owner, now))
+                .then_some(d.builder_slot)
+                .flatten()
             })
             .collect()
     }

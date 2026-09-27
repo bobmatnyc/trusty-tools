@@ -1054,8 +1054,11 @@ impl DaemonState {
     /// nothing: the recovery window is long, not infinite, because the map must
     /// stay bounded. That bound is asserted, not incidental.
     /// It also ages the #4142 deferred-stop ledger on the same pass, for the
-    /// same reason: both are bounded off the hook path, never on it.
+    /// same reason: both are bounded off the hook path, never on it. #8548: and
+    /// it cancels a live builder lease whose agent the user stopped, and re-arms
+    /// one the user resumed, via [`Self::reconcile_builder_stop_markers`].
     /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
+    /// `a_user_stopped_builder_releases_its_slot_8548`,
     /// `declared_but_never_dispatched_goes_stale_quickly`,
     /// `terminal_delegations_are_evicted_after_retention`,
     /// `live_delegations_are_never_evicted`,
@@ -1083,6 +1086,9 @@ impl DaemonState {
         if expired > 0 {
             tracing::debug!(expired, "delegation: pruned expired deferred stops (#4142)");
         }
+        // #8548: a user stop emits no hook; its stop marker is read here, before
+        // the `retain` below takes the shard locks the release writes through.
+        self.reconcile_builder_stop_markers();
         self.delegations.retain(|_, d| {
             let age_from = d.started_at.unwrap_or(d.created_at);
             if d.status.is_live() {

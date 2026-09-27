@@ -277,7 +277,9 @@ fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> boo
         task_id,
         "delegation: a TaskStop cancelled this agent — releasing the tree it claimed (#7487)"
     );
-    state.terminate_delegation(id, DelegationStatus::Cancelled)
+    // #8548: Cancelled as before; a builder's record is also tagged so a resume
+    // re-arms it and its slot index is not reissued meanwhile.
+    state.cancel_task_stopped(id)
 }
 
 /// The guard denied this dispatch: it never ran, so it holds nothing (#7487).
@@ -583,6 +585,8 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     else {
         return;
     };
+    // #8548: a stopped builder that makes a tool call was resumed.
+    state.rearm_on_agent_activity(id);
     // #6556 critic round: track where this agent is NOW, in the same pass that
     // decides whether to claim. `worktree_path` is a latch and must stay one —
     // the reap needs it — so the current directory is its own field. Written

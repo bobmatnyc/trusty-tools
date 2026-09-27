@@ -184,8 +184,9 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// `POST /api/v1/sessions/{id}/delegations/builder-slot` (#6892).
 ///
 /// Why: see the module doc.
-/// What: parses the session id, resolves the machine's cap, and hands the
-/// scan-and-claim to [`builder_slot_op`]. A malformed session id is a 400; an
+/// What: resolves the machine's cap through [`capacity_for`], which first
+/// releases any user-stopped holder (#8548), and hands the scan-and-claim to
+/// [`builder_slot_op`]. A malformed session id is a 400; an
 /// unknown session is not an error — a session the daemon has no record of has
 /// no delegations, and a 404 would read to the guard as "the daemon could not
 /// answer", which this guard denies on.
@@ -320,14 +321,19 @@ struct ResolvedPool {
 /// builder it was supposed to refuse. The exclusion is the same
 /// `tool_use_id` the claim itself excludes, read from the same payload, so the
 /// number that admits and the number that counts cannot disagree.
-/// What: [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
-/// Test: `the_throttle_excludes_the_claimants_own_record`.
+/// What: reconciles the builder stop markers (#8548), then
+/// [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
+/// Test: `the_throttle_excludes_the_claimants_own_record`,
+/// `the_claim_route_releases_a_user_stopped_holder_8548`.
 fn capacity_for(
     state: &DaemonState,
     config: &crate::core::builders::BuildersConfig,
     ceiling: u32,
     payload: &Value,
 ) -> Capacity {
+    // #8548: free a user-stopped holder's slot before anything counts holders,
+    // so the claim that needs the slot does not wait for the 60 s sweep.
+    state.reconcile_builder_stop_markers();
     state.builder_capacity(config, ceiling, str_field(payload, "tool_use_id"))
 }
 
@@ -1130,6 +1136,42 @@ mod tests {
             !body.claimed,
             "the third builder on a throttled two-holder machine must be refused"
         );
+    }
+
+    /// #8548 critic: the claim path itself releases a user-stopped holder. On a
+    /// one-slot machine whose only holder the user stopped, the next builder is
+    /// admitted without waiting for the 60 s sweep.
+    #[test]
+    fn the_claim_route_releases_a_user_stopped_holder_8548() {
+        let (state, dir, session) = hermetic();
+        let mut stopped =
+            Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "build");
+        stopped.status = DelegationStatus::Running;
+        stopped.started_at = Some(chrono::Utc::now());
+        stopped.agent_id = Some("a1b2c3stopped".to_string());
+        stopped.tool_use_id = Some("toolu_STOPPED".to_string());
+        stopped.transcript_path = Some(dir.path().join("proj").join("sess.jsonl"));
+        state.upsert_delegation(stopped);
+        let sidecar = dir.path().join("proj").join("sess").join("subagents");
+        std::fs::create_dir_all(&sidecar).expect("sidecar dir");
+        std::fs::write(
+            sidecar.join("agent-a1b2c3stopped.meta.json"),
+            r#"{"toolUseId":"toolu_STOPPED","stoppedByUser":true}"#,
+        )
+        .expect("sidecar");
+        let config = crate::core::builders::BuildersConfig {
+            max_concurrent: Some(1),
+            ..crate::core::builders::BuildersConfig::default()
+        };
+        let request = dispatch("rust-engineer", Some("toolu_NEXT"));
+
+        let measured = capacity_for(&state, &config, 1, &request.payload);
+        let body =
+            builder_slot_op_with_capacity(&state, &session.0.to_string(), request, &measured)
+                .expect("a well-formed session id");
+
+        assert!(body.claimed, "the stopped holder's slot is free: {body:?}");
+        assert!(body.holders.is_empty(), "{:?}", body.holders);
     }
 
     /// #8261: a `Capacity` the test scripts outright, so no reading of the real
