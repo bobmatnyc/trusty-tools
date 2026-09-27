@@ -158,6 +158,9 @@ pub struct SlotClaimOutcome {
     pub response: BuilderSlotResponse,
     /// The slot index still needing a seed, off the answering path.
     pub seed_index: Option<u32>,
+    /// #8794: trash trees of invalidated fingerprints, deleted off the
+    /// answering path by [`spawn_purge`].
+    pub purge: Vec<std::path::PathBuf>,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -202,7 +205,12 @@ pub async fn builder_slot_route(
     // cap is — `builders.slot_pool_root` and the repo identity are the daemon's
     // to read, and a hook deriving them itself would be a second authority.
     let project_dir = str_field(&req.payload, "cwd").map(std::path::PathBuf::from);
-    let resolved = resolve_slot_pool(&config, dirs::home_dir(), project_dir.as_deref());
+    let resolved = resolve_slot_pool(
+        &config,
+        dirs::home_dir(),
+        project_dir.as_deref(),
+        capacity.ceiling,
+    );
     let outcome = builder_slot_op_with_pool(
         &state,
         &id,
@@ -216,7 +224,29 @@ pub async fn builder_slot_route(
     if let (Some(index), Some(pool)) = (outcome.seed_index, resolved.pool) {
         spawn_seed(Arc::clone(&state), pool, resolved.clone_from, index);
     }
+    // #8794 critic round 3: likewise the handover's delete of the previous
+    // holder's builds, which outran the 2-second budget under the mutex.
+    if !outcome.purge.is_empty() {
+        spawn_purge(outcome.purge);
+    }
     Ok(Json(outcome.response))
+}
+
+/// Delete a handover's invalidated fingerprints off the answering path (#8794).
+///
+/// Why: about 9,000 files on the real pool; see [`SlotPool::purge_invalidated`].
+/// What: `spawn_blocking`, like [`spawn_seed`]. A tree it cannot delete stays
+/// listed, and the slot's next handover retries it.
+/// Test: `a_leftover_trash_tree_is_purged_at_the_next_handover`.
+fn spawn_purge(trees: Vec<std::path::PathBuf>) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let purged = SlotPool::purge_invalidated(&trees);
+        tracing::info!(
+            purged,
+            listed = trees.len(),
+            "builder slot handover: purged invalidated fingerprints"
+        );
+    })
 }
 
 /// Run one slot's seed off the answering path, then release its claim (#8261).
@@ -241,26 +271,29 @@ fn spawn_seed(
     index: u32,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let _guard = SeedGuard { state, index };
+        let _guard = SeedGuard {
+            state,
+            slot: pool.slot_path(index),
+        };
         if let Err(err) = pool.seed(index, clone_from.as_deref()) {
             tracing::warn!("builder slot {index} could not be seeded: {err}");
         }
     })
 }
 
-/// Holds one slot index's seed claim for as long as the seed runs (#8261).
+/// Holds one slot's seed claim for as long as the seed runs (#8261).
 ///
 /// Why: see [`spawn_seed`] — the release must survive a panic, and only `Drop`
 /// runs during an unwind.
 /// Test: `a_panicking_seed_still_releases_its_index`.
 struct SeedGuard {
     state: Arc<DaemonState>,
-    index: u32,
+    slot: std::path::PathBuf,
 }
 
 impl Drop for SeedGuard {
     fn drop(&mut self) {
-        self.state.finish_builder_seed(self.index);
+        self.state.finish_builder_seed(&self.slot);
     }
 }
 
@@ -313,6 +346,7 @@ fn resolve_slot_pool(
     config: &crate::core::builders::BuildersConfig,
     home: Option<std::path::PathBuf>,
     project_dir: Option<&std::path::Path>,
+    ceiling: u32,
 ) -> ResolvedPool {
     let no_pool = |why: &str| {
         tracing::warn!("no builder slot pool for this dispatch: {why}");
@@ -351,10 +385,12 @@ fn resolve_slot_pool(
     .ok()
     .map(|env| env.cargo_target_dir);
     ResolvedPool {
-        pool: Some(SlotPool::new(
-            config.effective_slot_pool_root(&home),
-            identity,
-        )),
+        // #8794: the checkout's Cargo.lock names the packages a handover
+        // invalidates; the ceiling bounds how many slots are ever seeded.
+        pool: Some(
+            SlotPool::new(config.effective_slot_pool_root(&home), identity, ceiling)
+                .with_checkout(project_dir.to_path_buf()),
+        ),
         clone_from,
         notice: None,
     }
@@ -544,6 +580,7 @@ pub fn builder_slot_op_with_pool(
             slot_refused: grant.slot_refused,
         },
         seed_index: grant.seed_index,
+        purge: grant.purge,
     })
 }
 
@@ -638,15 +675,21 @@ mod tests {
         state.upsert_delegation(d);
     }
 
-    /// A pool rooted at `root`, for a fixed test identity.
+    /// A pool rooted at `root`, for a fixed test identity, whose checkout (a
+    /// sibling of `root`) names a path package — a handover needs one (#8794).
     fn test_pool(root: std::path::PathBuf) -> SlotPool {
+        let checkout = crate::core::builder_slot_pool::test_support::write_checkout(
+            &root.with_file_name("checkout"),
+        );
         SlotPool::new(
             root,
             trusty_common::github_path::GithubPath {
                 owner: "acme".to_string(),
                 repo: "widgets".to_string(),
             },
+            4,
         )
+        .with_checkout(checkout)
     }
 
     /// #8261: the answer must carry the DIRECTORY, not only the verdict — the
@@ -855,7 +898,7 @@ mod tests {
         // The seed task's own release is what makes the index seedable again —
         // without it slot 0 could never be warmed by anyone.
         state.release_denied_builder_dispatch(session, Some("toolu_B"));
-        state.finish_builder_seed(0);
+        state.finish_builder_seed(&pool.slot_path(0));
         let third = builder_slot_op_with_pool(
             &state,
             &session.0.to_string(),
@@ -985,7 +1028,7 @@ mod tests {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = SeedGuard {
                 state: Arc::clone(&state),
-                index: 0,
+                slot: pool.slot_path(0),
             };
             panic!("the clone died mid-copy");
         }));
