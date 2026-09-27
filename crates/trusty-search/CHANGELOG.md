@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.4] — 2026-09-27
+
+### Fixed
+
+- `index remove` no longer lets `TRUSTY_INDEX` silently outrank an explicit
+  PATH argument, or resolve its target from the environment alone — either
+  case now refuses and names the conflicting values (closes [#8175](https://github.com/bobmatnyc/trusty-tools/issues/8175))
+  - `index-status`/`status` now honour `-i`/`--index` when the positional
+    INDEX argument is omitted, instead of silently falling back to the
+    current working directory's index
+- `DELETE /indexes/{id}` on a cold-parked index now closes `index.redb` and the HNSW mapping that a queued deferred-embed job holds, and that job ends with `IndexDeleted` instead of running its embed pass against the deleted index. Several queued jobs on one index close its files once (#8664).
+- `trusty-search index remove` no longer depends on other indexes' residency: a cold-parked target resolves from its parked row — by PATH, by `-i`, or both — and a PATH whose registration was already deleted has its stale `allowlist.toml` and config rows cleared instead of aborting. A registration whose status cannot be read (any error but `404`) still refuses, naming it (#8687).
+- `trusty-search reindex` of a cold-parked index now refuses before sending anything, naming the index and saying it is parked, instead of failing on the status lookup (#8687).
+- `GET /indexes`, `trusty-search list`, `trusty-search status` and MCP `list_indexes` now list parked registrations (`parked`: id, root, root state) — the same set the create-time overlap check consults. A `?repo_identity=` list carries only that repo's parked rows, in the flat and `?details=true` shapes alike. An overlap `409` reports the blocking root's state and, for a deleted root, the command that removes the stale registration; the CLI prints the blocking id and root (#8727).
+- The semantic stage no longer reports `ready` while the vector store holds fewer vectors than the corpus holds chunks. After warm boot, lazy reload, and a successful boot migration chain, an index whose `vectors_present` is below `chunk_count` has its semantic stage set to `in_progress` and an embed backfill queued for the missing chunks through the serialized deferred-embed queue. The stage returns to `ready` only when the backfill finishes, or goes to `failed` if the backfill cannot embed. Before this fix, an index re-chunked by the M005 migration kept `semantic: ready` with hundreds of chunks unembedded and no backfill queued (#8726).
+
+### Changed
+
+- `reindex`, `quantize` and `index relocate` now refuse a target taken from
+  `TRUSTY_INDEX` alone; pass `-i`/`--index` (or, for `reindex`, a PATH), or
+  unset `TRUSTY_INDEX` and run from inside the project. Before, an exported
+  `TRUSTY_INDEX` could re-point a live index at an unrelated PATH and
+  overwrite its corpus (Refs [#8737](https://github.com/bobmatnyc/trusty-tools/issues/8737))
+  - `reindex PATH` now reindexes the index registered at PATH, not the
+    current directory's; PATH together with `-i`/`TRUSTY_INDEX` must name the
+    same index, and a mismatch — or a daemon that cannot confirm the match —
+    refuses before any reindex is sent
+  - `reindex -i ID` now reindexes ID at its registered root instead of
+    rebasing it onto the current directory
+  - resolving a PATH to an index (`reindex PATH`, `index remove PATH`) now
+    refuses when any registered index's status cannot be read, naming that
+    index, instead of skipping it and matching another index at the same root
+
 ## [0.54.3] — 2026-09-26
 
 ### Added
