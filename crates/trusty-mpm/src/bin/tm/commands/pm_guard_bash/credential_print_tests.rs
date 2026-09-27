@@ -268,6 +268,74 @@ fn allows_script_operands_and_comments() {
     );
 }
 
+/// #8676: a credential captured into a shell variable and printed in a later
+/// stage. The first three rows are the reported shapes; each row was allowed
+/// at 62947a19f.
+#[test]
+fn denies_a_credential_carried_by_a_variable() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); echo \"${T:0:10}\"",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv K",
+            "for t in $(gcloud auth print-access-token); do echo $t; done",
+            // Environment and variable dumps while a name is tainted.
+            "export K=$(security find-generic-password -s fake-svc -w); env",
+            "T=$(gcloud auth print-access-token) printenv T",
+            "T=$(gcloud auth print-access-token); sudo -u fake env",
+            "T=$(gcloud auth print-access-token); set",
+            "T=$(gcloud auth print-access-token); declare -p T",
+            "export T=$(gcloud auth print-access-token); export -p",
+            "T=$(gcloud auth print-access-token); timeout 5 printenv",
+            // Every binding form, and every stage separator.
+            "T=$(gcloud auth print-access-token)\nprintf '%s\\n' \"$T\"",
+            "local T=$(gcloud auth print-access-token) || echo ${T}",
+            "declare -r T=`gcloud auth print-access-token`; echo ${T:-none}",
+            "readonly T=$(gcloud auth print-access-token); echo ${T#ya29}",
+            "f() { T=$(gcloud auth print-access-token); }; f; echo $T",
+            "select t in $(gcloud auth print-access-token); do echo $t; done",
+            "set -- $(gcloud auth print-access-token); echo \"$1\"",
+            "set -- $(gcloud auth print-access-token); for t; do echo $t; done",
+            // A copy, a nameref, a run-time name, and a loop that reprints.
+            "T=$(gcloud auth print-access-token); U=\"Bearer $T\"; echo $U",
+            "T=$(gcloud auth print-access-token); declare -n R=T; echo $R",
+            "declare \"$N=$(gcloud auth print-access-token)\"; echo $OTHER",
+            "T=$(gcloud auth print-access-token); echo ${!T}",
+            "while true; do echo $T; T=$(gcloud auth print-access-token); done",
+            // The value reaching the terminal through another route.
+            "T=$(gcloud auth print-access-token); echo \"$(echo $T)\"",
+            "T=$(gcloud auth print-access-token); echo $T | head -c 5",
+            "T=$(gcloud auth print-access-token); cat <<< \"$T\"",
+            "T=$(gcloud auth print-access-token); head <<EOF\n$T\nEOF",
+            "T=$(gcloud auth print-access-token); bash -c \"echo $T\"",
+            "export T=$(gcloud auth print-access-token); bash -c 'echo $T'",
+            "T=$(gcloud auth print-access-token); echo $T >&2",
+        ],
+    );
+}
+
+/// #8676: a variable that holds a credential but is only measured, tested, or
+/// handed to a program that does not print it.
+#[test]
+fn allows_a_carried_variable_that_is_never_printed() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); echo ${#T}",
+            "T=$(gcloud auth print-access-token); echo \"len=${#T}\"",
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+            "T=$(gcloud auth print-access-token); curl -sS -H \"Authorization: Bearer $T\" https://example.test/v1",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv HOME",
+            "T=$(gcloud auth print-access-token); [ -n \"$T\" ] && echo present",
+            "T=$(gcloud auth print-access-token); printenv T > /tmp/fake-out",
+            "T=$(gcloud auth print-access-token); set -e; echo done",
+            "T=$(gcloud auth print-access-token >/dev/null); echo $T",
+            "for t in a b; do echo $t; done; T=$(gcloud auth print-access-token)",
+            "T=$(gcloud auth print-access-token); printf '%s' \"$T\" | docker login -u x --password-stdin r.test",
+        ],
+    );
+}
+
 /// No prefix of a credential command panics, and each gets a verdict: a panic
 /// would exit the hook 101 and fail open.
 #[test]
@@ -325,6 +393,203 @@ fn denies_what_it_cannot_read() {
     assert!(evaluate_credential_print_command(&deep).is_some());
 }
 
+/// #8676 round 2, row 1: inline code reads an exported name with no `$`.
+/// One row per `EVALUATORS` entry, plus a here-document and a pipe.
+#[test]
+fn denies_inline_code_reading_a_tainted_name() {
+    check(
+        true,
+        &[
+            "export T=$(gcloud auth print-access-token); eval 'printenv T'",
+            "export T=$(gcloud auth print-access-token); source /dev/stdin <<< 'printenv T'",
+            "export T=$(gcloud auth print-access-token); . /dev/stdin <<< 'printenv T'",
+            "export T=$(gcloud auth print-access-token); osascript -e 'system attribute \"T\"'",
+            "export T=$(gcloud auth print-access-token); ssh fake-host printenv T",
+            "export T=$(gcloud auth print-access-token); python -c 'import os; print(os.environ[\"T\"])'",
+            "export T=$(gcloud auth print-access-token); python3 -c 'import os; print(os.environ[\"T\"])'",
+            "export T=$(gcloud auth print-access-token); perl -le 'print for values %ENV'",
+            "export T=$(gcloud auth print-access-token); ruby -e 'puts ENV[\"T\"]'",
+            "export T=$(gcloud auth print-access-token); node -e 'console.log(process.env.T)'",
+            "export T=$(gcloud auth print-access-token); deno eval 'console.log(Deno.env.get(\"T\"))'",
+            "export T=$(gcloud auth print-access-token); php -r 'echo getenv(\"T\");'",
+            "export T=$(gcloud auth print-access-token); fish -c 'printenv T'",
+            "export T=$(gcloud auth print-access-token); python3 <<'PY'\nimport os; print(os.environ['T'])\nPY",
+            "export T=$(gcloud auth print-access-token); echo 'import os; print(os.environ[\"T\"])' | python3",
+        ],
+    );
+}
+
+/// #8676 round 2, row 2: zsh expansion flags and prefixes, and a nested `${…}`.
+#[test]
+fn denies_zsh_expansion_forms() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); N=T; echo ${(P)N}",
+            "T=$(gcloud auth print-access-token); echo ${(U)T}",
+            "T=$(gcloud auth print-access-token); echo \"${(U)T}\"",
+            "T=$(gcloud auth print-access-token); echo ${^T}",
+            "T=$(gcloud auth print-access-token); echo ${=T}",
+            "T=$(gcloud auth print-access-token); echo ${~T}",
+            "T=$(gcloud auth print-access-token); echo $=T",
+            "T=$(gcloud auth print-access-token); echo $~T",
+            "T=$(gcloud auth print-access-token); echo $^T",
+            "T=$(gcloud auth print-access-token); echo ${${T}:0:5}",
+        ],
+    );
+}
+
+/// #8676 round 2, row 3: a compound array assignment copies the value.
+#[test]
+fn denies_array_assignment_copies() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); A=(x \"$T\"); echo ${A[1]}",
+            "T=$(gcloud auth print-access-token); A+=(\"$T\"); echo ${A[@]}",
+            "declare -a A=($(gcloud auth print-access-token)); echo ${A[0]}",
+            "T=$(gcloud auth print-access-token); local -A M=([k]=\"$T\"); echo ${M[k]}",
+        ],
+    );
+}
+
+/// #8676 round 2, row 4: a word nested ~100k `${` deep. Unbounded, the
+/// recursion overflows the stack, which aborts past `catch_unwind`.
+#[test]
+fn deep_brace_nesting_denies_without_overflow() {
+    let depth = 100_000;
+    let command = format!(
+        "T=$(gcloud auth print-access-token); echo {}T{}",
+        "${a".repeat(depth),
+        "}".repeat(depth)
+    );
+    let started = std::time::Instant::now();
+    let verdict = evaluate_credential_print_command(&command);
+    let spent = started.elapsed();
+    assert!(verdict.is_some(), "must deny");
+    // #8676 round 4: bounded in time as well as in stack depth.
+    assert!(spent < std::time::Duration::from_secs(1), "took {spent:?}");
+}
+
+/// #8676 round 2, row 5: a scan whose fixed point would take exponential work
+/// refuses inside its budget. Eight substitution levels, each with an
+/// eight-name copy chain seeded by a credential call; the reversed chain needs
+/// one pass per name at every level.
+#[test]
+fn scan_work_is_bounded() {
+    let seed = "A=$(gcloud auth print-access-token)";
+    let forward = format!("{seed}; B=$A; C=$B; D=$C; E=$D; F=$E; G=$F; H=$G");
+    let reversed = format!("H=$G; G=$F; F=$E; E=$D; D=$C; C=$B; B=$A; {seed}");
+    for chain in [forward, reversed] {
+        let mut text = chain.clone();
+        for _ in 0..7 {
+            text = format!("{chain}; X=$({text}); echo $H");
+        }
+        let started = std::time::Instant::now();
+        let verdict = evaluate_credential_print_command(&text);
+        let spent = started.elapsed();
+        assert!(verdict.is_some(), "must deny: {text}");
+        assert!(spent < std::time::Duration::from_secs(1), "took {spent:?}");
+    }
+}
+
+/// #8676 round 2, row 6: an arithmetic context reads a bare name, and its
+/// error message echoes a non-numeric value.
+#[test]
+fn denies_arithmetic_reads() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); echo $((T))",
+            "T=$(gcloud auth print-access-token); X=$((T + 1))",
+            "T=$(gcloud auth print-access-token); (( T > 0 ))",
+            "T=$(gcloud auth print-access-token); let X=T+1",
+            "T=$(gcloud auth print-access-token); [[ T -eq 0 ]]",
+            "T=$(gcloud auth print-access-token); [ \"$T\" -gt 0 ]",
+            "T=$(gcloud auth print-access-token); echo ${A[T]}",
+            "T=$(gcloud auth print-access-token); A[T]=1",
+        ],
+    );
+}
+
+/// #8676 round 2, row 7: `=~` copies the match into the match arrays.
+#[test]
+fn denies_a_regex_match_copy() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); [[ $T =~ (.*) ]]; echo ${BASH_REMATCH[1]}",
+            "T=$(gcloud auth print-access-token); [[ $T =~ (.*) ]] && echo $match",
+            "T=$(gcloud auth print-access-token); [[ $T =~ .* ]] && echo $MATCH",
+        ],
+    );
+}
+
+/// #8676 round 2, row 8: a function header before a loop or a printer.
+#[test]
+fn denies_after_a_function_header() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); f() { echo $T; }; f",
+            "T=$(gcloud auth print-access-token); function f { echo $T; }; f",
+            "f() { for t in $(gcloud auth print-access-token); do echo $t; done; }; f",
+            "function f() { set; }; T=$(gcloud auth print-access-token); f",
+        ],
+    );
+}
+
+/// #8676 round 2, row 9: environment readers that name no `$`.
+#[test]
+fn denies_environment_readers() {
+    check(
+        true,
+        &[
+            "export T=$(gcloud auth print-access-token); awk 'BEGIN { print ENVIRON[\"T\"] }'",
+            "export T=$(gcloud auth print-access-token); jq -n env.T",
+            "export T=$(gcloud auth print-access-token); jq -n '$ENV.T'",
+            "export T=$(gcloud auth print-access-token); ps eww",
+            "export T=$(gcloud auth print-access-token); ps -E",
+            "export T=$(gcloud auth print-access-token); cat /proc/self/environ",
+            "export T=$(gcloud auth print-access-token); strings /proc/$$/environ",
+        ],
+    );
+}
+
+/// #8676 round 2, row 10: zsh prints a name a flagless declaration names.
+#[test]
+fn denies_a_flagless_declaration_of_a_tainted_name() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); typeset T",
+            "T=$(gcloud auth print-access-token); local T",
+            "T=$(gcloud auth print-access-token); declare T",
+        ],
+    );
+}
+
+/// #8676 round 2: the neighbours of every row above still pass.
+#[test]
+fn allows_the_round_two_neighbours() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+            "T=$(gcloud auth print-access-token); echo $((1 + 2))",
+            "T=$(gcloud auth print-access-token); echo $(( ${#T} + 1 ))",
+            "T=$(gcloud auth print-access-token); A=(x y); echo ${A[0]}",
+            "T=$(gcloud auth print-access-token); f() { echo hi; }; f",
+            "T=$(gcloud auth print-access-token); ps -o pid",
+            "T=$(gcloud auth print-access-token); declare -x U=1",
+            "T=$(gcloud auth print-access-token); [[ $T =~ ^ya29 ]] && echo ok",
+            "T=$(gcloud auth print-access-token); jq -n '.x'",
+            "python3 -c 'print(1)'; gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); echo ${#T}",
+        ],
+    );
+}
+
 /// A command that names no trigger is never parsed, broken quoting included.
 #[test]
 fn ignores_commands_that_name_no_credential_cli() {
@@ -336,4 +601,298 @@ fn ignores_commands_that_name_no_credential_cli() {
             "gcloud config list",
         ],
     );
+}
+
+/// #8676 round 3, HIGH 1: brace expansion builds a declared name. Each row was
+/// allowed at 90e0813e1.
+#[test]
+fn denies_brace_expanded_declarer_names() {
+    check(
+        true,
+        &[
+            "export {T,U}=$(gcloud auth print-access-token); printenv T",
+            "declare {T,U}=$(gcloud auth print-access-token); echo $T",
+            "typeset {T,U}=`gcloud auth print-access-token`; echo $U",
+            "local T{,}=$(gcloud auth print-access-token); echo $T",
+            "export T{,}=$(gcloud auth print-access-token); printenv T",
+        ],
+    );
+}
+
+/// #8676 round 3, HIGH 2: an evaluator reads its script from stdin or a
+/// process substitution by path. Each row was allowed at 90e0813e1.
+#[test]
+fn denies_an_evaluator_reading_its_script_by_path() {
+    check(
+        true,
+        &[
+            "export T=$(gcloud auth print-access-token); echo 'printenv T' | bash /dev/stdin",
+            "export T=$(gcloud auth print-access-token); echo 'printenv T' | sh /dev/fd/0",
+            "export T=$(gcloud auth print-access-token); echo 'printenv T' | bash /proc/self/fd/0",
+            "export T=$(gcloud auth print-access-token); bash <(echo 'printenv T')",
+            "export T=$(gcloud auth print-access-token); python3 <(echo 'import os;print(os.getenv(\"T\"))')",
+            "export T=$(gcloud auth print-access-token); bash < <(echo 'printenv T')",
+        ],
+    );
+}
+
+/// #8676 round 3, HIGH 3: arithmetic contexts bash evaluates, whose error
+/// message echoes a non-numeric value. Each row was allowed at 90e0813e1.
+#[test]
+fn denies_arithmetic_reads_in_offsets_and_integer_declarations() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); declare -i X=T",
+            "T=$(gcloud auth print-access-token); local -i X=T",
+            "T=$(gcloud auth print-access-token); typeset -i X=T",
+            "T=$(gcloud auth print-access-token); echo ${X:T}",
+            "T=$(gcloud auth print-access-token); echo ${X:0:T}",
+            "T=$(gcloud auth print-access-token); echo $[T]",
+            // A name holding the bare name is evaluated recursively.
+            "T=$(gcloud auth print-access-token); U=T; echo $((U))",
+            "T=$(gcloud auth print-access-token); declare -i X; X=T",
+        ],
+    );
+}
+
+/// #8676 round 3, HIGH 4: a nameref reaches the value through a loop, a
+/// subscript, or a later assignment. Each row was allowed at 90e0813e1.
+#[test]
+fn denies_nameref_loops_and_subscripted_namerefs() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); declare -n R; for R in T; do echo $R; done",
+            "T=$(gcloud auth print-access-token); A=$T; declare -n R='A[0]'; echo $R",
+            "T=$(gcloud auth print-access-token); declare -n R; R=T; echo $R",
+        ],
+    );
+}
+
+/// #8676 round 3, MEDIUM 5: evaluators the list missed. Each row was allowed
+/// at 90e0813e1.
+#[test]
+fn denies_the_missing_evaluators() {
+    check(
+        true,
+        &[
+            "export T=$(gcloud auth print-access-token); trap 'echo $T' EXIT",
+            "trap \"echo $(gcloud auth print-access-token)\" EXIT",
+            "export T=$(gcloud auth print-access-token); python3.12 -c 'import os; print(os.getenv(\"T\"))'",
+            "export T=$(gcloud auth print-access-token); /usr/local/bin/python3.11 -c 'import os; print(os.getenv(\"T\"))'",
+            "export T=$(gcloud auth print-access-token); bun -e 'console.log(process.env.T)'",
+            "export T=$(gcloud auth print-access-token); lua -e 'print(os.getenv(\"T\"))'",
+            "export T=$(gcloud auth print-access-token); pwsh -c '$env:T'",
+        ],
+    );
+}
+
+/// #8676 round 3, MEDIUM 6: builtins whose output or error text echoes the
+/// operand. Each row was allowed at 90e0813e1.
+#[test]
+fn denies_builtins_that_echo_their_operand() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); cd \"$T\"",
+            "T=$(gcloud auth print-access-token); exit \"$T\"",
+            "T=$(gcloud auth print-access-token); kill \"$T\"",
+            "T=$(gcloud auth print-access-token); sleep \"$T\"",
+            "T=$(gcloud auth print-access-token); compgen -W \"$T\"",
+            "T=$(gcloud auth print-access-token); export \"$T\"",
+            "T=$(gcloud auth print-access-token); unset \"$T\"",
+        ],
+    );
+}
+
+/// #8676 round 3: the neighbours of every row above still pass.
+#[test]
+fn allows_the_round_three_neighbours() {
+    check(
+        false,
+        &[
+            "export {A,B}=1; gcloud auth print-access-token > /tmp/fake-token",
+            "export T=$(gcloud auth print-access-token); bash deploy.sh",
+            "export T=$(gcloud auth print-access-token); python3.12 upload.py",
+            "T=$(gcloud auth print-access-token); echo ${X:-T} ${X:0:2}",
+            "T=$(gcloud auth print-access-token); declare -i N=5",
+            "T=$(gcloud auth print-access-token); declare -n R=HOME; echo $R",
+            "T=$(gcloud auth print-access-token); for f in a b; do echo $f; done",
+            "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; gcloud auth print-access-token > \"$tmp\"",
+            "T=$(gcloud auth print-access-token); cd /tmp && sleep 1; echo ${#T}",
+            "T=$(gcloud auth print-access-token); cd /tmp && curl -H \"Authorization: Bearer $T\" https://example.test",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 1: a brace *sequence* builds the declared names. Each
+/// row was allowed at 6aa69afab.
+#[test]
+fn denies_brace_sequence_declarer_names() {
+    check(
+        true,
+        &[
+            "declare {A..C}=$(gcloud auth print-access-token); echo $B",
+            "export {A..C}=$(gcloud auth print-access-token); printenv B",
+            "local T{1..2}=$(gcloud auth print-access-token); echo $T1",
+            "T=$(gcloud auth print-access-token); typeset {X..Z}=$T; echo $Y",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 2: an indexed array's `[key]=` in a compound
+/// assignment is arithmetic, whose error echoes a non-numeric value. Each row
+/// was allowed at 6aa69afab.
+#[test]
+fn denies_array_keys_read_as_arithmetic() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); A=([T]=1)",
+            "T=$(gcloud auth print-access-token); A=(x [T]=1)",
+            "T=$(gcloud auth print-access-token); A+=([$T]=1)",
+            "T=$(gcloud auth print-access-token); declare -a A=([T+1]=x)",
+        ],
+    );
+}
+
+/// #8676 round 4, HIGH 3: a coproc runs its command with its output on a
+/// descriptor a later stage reads. Each row was allowed at 6aa69afab.
+#[test]
+fn denies_a_coproc_that_carries() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); coproc printf %s \"$T\"",
+            "T=$(gcloud auth print-access-token); coproc NAME { echo \"$T\"; }",
+            "T=$(gcloud auth print-access-token); coproc NAME ( echo \"$T\" )",
+            "T=$(gcloud auth print-access-token); coproc { printf %s \"$T\"; }",
+            "T=$(gcloud auth print-access-token); coproc NAME for x in $T; do echo $x; done",
+        ],
+    );
+}
+
+/// #8676 round 4: the neighbours of every row above still pass. #8676 round
+/// 5: a coproc row moved to `denies_the_round_five_bypasses` — the round-5
+/// fix refuses every coproc stage while any name is tainted, including one
+/// that (like this one did) never itself reads the name.
+#[test]
+fn allows_the_round_four_neighbours() {
+    check(
+        false,
+        &[
+            "declare {A..C}=1; gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); A=([0]=x [1]=y); echo ${A[1]}",
+            "coproc cat /etc/hosts; gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); curl --oauth2-bearer=$T https://example.test",
+        ],
+    );
+}
+
+/// #8676 round 4 review, round 5 fix: four HIGH shapes the round-4 coproc
+/// check and the rest of the scan missed. Each row was allowed at 8cd9ba4e1.
+#[test]
+fn denies_the_round_five_bypasses() {
+    check(
+        true,
+        &[
+            // 1: `ungroup` leaves a coproc's NAME as the program word, so a
+            // declarer, `set`, or an evaluator inside never gets judged;
+            // round 4's fix only caught a word that itself carried the
+            // value. Refusing every coproc while tainted closes it,
+            // including the benign neighbour that never reads the name.
+            "T=$(gcloud auth print-access-token); coproc X ( declare -p T )",
+            "T=$(gcloud auth print-access-token); coproc X ( set )",
+            "T=$(gcloud auth print-access-token); coproc X ( eval 'echo $T' )",
+            "T=$(gcloud auth print-access-token); coproc NAME { sleep 1; }",
+            // 2: `select NAME in WORD...` lists every WORD on stderr.
+            "T=$(gcloud auth print-access-token); select x in \"$T\"; do break; done",
+            // 3: `${NAME?word}`/`${NAME:?word}` writes a carrying `word` to
+            // stderr at expansion time, even in a stage that is only an
+            // assignment.
+            "T=$(gcloud auth print-access-token); : \"${UNSET:?$T}\"",
+            "T=$(gcloud auth print-access-token); Y=${UNSET?$T}",
+            // 4: a plain input redirect's missing-file error names the path.
+            "T=$(gcloud auth print-access-token); wc -c < \"$T\"",
+            "T=$(gcloud auth print-access-token); : < \"$T\"",
+        ],
+    );
+}
+
+/// #8676 round 5: the neighbours of every row above still pass.
+#[test]
+fn allows_the_round_five_neighbours() {
+    check(
+        false,
+        &[
+            "coproc X ( declare -p PATH ); gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); select x in a b c; do break; done",
+            "T=$(gcloud auth print-access-token); : \"${SAFE:?fallback}\"",
+            "T=$(gcloud auth print-access-token); wc -c < /tmp/fake-token-file",
+        ],
+    );
+}
+
+/// #8676 round 6, code-critic CRITICAL on round 5: a plain input redirect's
+/// missing-file error names its target the same way round 5's bare `$T`
+/// does, but a command-substitution or backtick target has no `$NAME` for
+/// `expands_tainted` to match — the placeholder `lift_substitutions` leaves
+/// behind carries no `$`. Each row was allowed at c3778fa0b.
+#[test]
+fn denies_the_round_six_bypasses() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); wc -c < \"$(echo \"$T\")\"",
+            "T=$(gcloud auth print-access-token); : < \"$(echo \"$T\")\"",
+            "T=$(gcloud auth print-access-token); wc -c < \"`echo $T`\"",
+        ],
+    );
+}
+
+/// #8676 round 6: a `<(…)` target is a real descriptor bash always opens —
+/// never a missing-file error — so this sink must not flag it.
+#[test]
+fn allows_the_round_six_neighbours() {
+    check(
+        false,
+        &["T=$(gcloud auth print-access-token); wc -c < <(echo \"$T\")"],
+    );
+}
+
+/// #8676 round 3: bracket runs 100k wide scan in linear time. A scan from each
+/// opener to its close took minutes on the round-two nesting row; a nest
+/// deeper than the cap refuses.
+#[test]
+fn wide_bracket_runs_scan_in_linear_time() {
+    let seed = "T=$(gcloud auth print-access-token); echo ";
+    for (run, deny) in [
+        ("A[", true),
+        ("$[", true),
+        ("${X:", true),
+        ("A[x]", false),
+        ("${X:0:1}", false),
+    ] {
+        let command = format!("{seed}{}", run.repeat(100_000));
+        let started = std::time::Instant::now();
+        let verdict = evaluate_credential_print_command(&command);
+        let spent = started.elapsed();
+        assert_eq!(verdict.is_some(), deny, "{run:?}");
+        assert!(
+            spent < std::time::Duration::from_secs(1),
+            "{run:?} took {spent:?}"
+        );
+    }
+}
+
+/// #8676 round 3: the deny reason never quotes the command, so a credential
+/// literal pasted into it is not echoed back.
+#[test]
+fn deny_reason_never_echoes_the_command() {
+    let command = "T=$(gcloud auth print-access-token); cd \"$T\" # ya29.fake-literal";
+    let reason = evaluate_credential_print_command(command).unwrap_or_default();
+    assert!(!reason.is_empty(), "must deny");
+    assert!(!reason.contains("ya29.fake-literal"), "{reason}");
+    assert!(!reason.contains("cd \""), "{reason}");
 }
