@@ -440,7 +440,8 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
 /// `wedge_threshold_resets_on_success`,
 /// `late_replies_to_timed_out_ids_do_not_reset_the_wedge_counter`,
 /// `orphan_frames_do_not_extend_a_pending_request_deadline`,
-/// `replies_to_later_requests_do_not_mask_a_stuck_head` in stdio_tests.
+/// `replies_to_later_requests_do_not_mask_a_stuck_head`,
+/// `a_single_stuck_request_times_out_once_without_a_restart` in stdio_tests.
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,

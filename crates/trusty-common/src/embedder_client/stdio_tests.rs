@@ -1131,6 +1131,122 @@ async fn replies_to_later_requests_do_not_mask_a_stuck_head() {
     handle.abort();
 }
 
+/// #8600 acceptance: ONE request the sidecar never answers, while every other
+/// request is answered about every 20 ms, fails that caller once and does not
+/// restart the sidecar.
+///
+/// Why: the head-of-line deadline must evict a single stuck request without
+/// treating a sidecar that is otherwise answering as wedged.
+/// What: id 1 is never answered; a driver registers and answers a new id every
+/// ~20 ms. Asserts the stuck caller gets exactly one timeout `Err` with no
+/// hang, `unhealthy` stays false for 3x the timeout after it, id 1 never
+/// re-enters the pending map, and the map drains to empty.
+/// Test: this test.
+#[tokio::test]
+async fn a_single_stuck_request_times_out_once_without_a_restart() {
+    use std::sync::atomic::AtomicBool;
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    const STUCK_ID: u64 = 1;
+    let short_timeout = Duration::from_millis(200);
+    let (mut writer, reader_end) = duplex(64 * 1024);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (stuck_tx, stuck_rx) = oneshot::channel();
+    pending.lock().await.insert(
+        STUCK_ID,
+        PendingRequest {
+            sent: 1,
+            reply: stuck_tx,
+        },
+    );
+    let started = tokio::time::Instant::now();
+    let (handle, mut unhealthy_rx) = spawn_test_reader(
+        tokio::io::BufReader::new(reader_end),
+        &pending,
+        short_timeout,
+    );
+
+    let answered = Arc::new(AtomicU64::new(0));
+    let stuck_reentered = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let driver = {
+        let pending = Arc::clone(&pending);
+        let answered = Arc::clone(&answered);
+        let stuck_reentered = Arc::clone(&stuck_reentered);
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut id = 1_000_u64;
+            let mut stuck_evicted = false;
+            while !stop.load(Ordering::Relaxed) {
+                id += 1;
+                let (tx, rx) = oneshot::channel();
+                {
+                    let mut guard = pending.lock().await;
+                    if stuck_evicted && guard.contains_key(&STUCK_ID) {
+                        stuck_reentered.store(true, Ordering::Relaxed);
+                    }
+                    stuck_evicted |= !guard.contains_key(&STUCK_ID);
+                    guard.insert(id, PendingRequest { sent: 1, reply: tx });
+                }
+                if writer
+                    .write_all(one_vector_frame(id).as_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = writer.flush().await;
+                if let Ok(Ok(Ok(_))) = tokio::time::timeout(Duration::from_secs(1), rx).await {
+                    answered.fetch_add(1, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+    };
+
+    let reply = tokio::time::timeout(short_timeout * 3, stuck_rx)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the stuck caller must get its timeout, not hang (elapsed {:?})",
+                started.elapsed()
+            )
+        })
+        .expect("the stuck caller's reply channel must carry a result, not be dropped");
+    let err = reply.expect_err("a request that is never answered must fail");
+    assert!(
+        err.to_string().contains("timed out") && err.to_string().contains("id=1"),
+        "the stuck caller's error names the timeout and its id: {err}"
+    );
+
+    let window = short_timeout * 3;
+    assert!(
+        tokio::time::timeout(window, unhealthy_rx.wait_for(|v| *v))
+            .await
+            .is_err(),
+        "one stuck request among answered ones must not trip the wedge restart \
+         within {window:?} of its timeout"
+    );
+    assert!(
+        answered.load(Ordering::Relaxed) > 0,
+        "the other requests must have been answered while id 1 was stuck"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    driver.await.expect("driver task must not panic");
+    assert!(
+        !stuck_reentered.load(Ordering::Relaxed),
+        "nothing may re-register the timed-out request"
+    );
+    wait_until_pending_empty(&pending, Duration::from_secs(2)).await;
+    assert!(
+        !*unhealthy_rx.borrow(),
+        "unhealthy must still be false once the traffic drains"
+    );
+    handle.abort();
+}
+
 /// Condition-poll until `pending` is empty or `budget` elapses (panics on
 /// timeout). Prefer this over a fixed `sleep` when waiting for the reader
 /// task to finish draining timed-out entries — see `condition-based-waiting`
