@@ -273,9 +273,9 @@ pub(crate) async fn list_indexes_report(
             });
         }
         // #8727: also every parked registration the overlap check consults.
-        let parked = parked_rows(
-            state,
+        let parked = super::root_overlap::parked_registrations(
             &state.registry.list_handles(),
+            &state.cold_store.snapshot(),
             identity_filter.as_ref(),
         );
         super::root_overlap::with_parked(serde_json::json!({ "indexes": entries }), parked)
@@ -283,7 +283,12 @@ pub(crate) async fn list_indexes_report(
         // Flat list, but scoped to one repo identity (DOC-37).
         let handles = state.registry.list_handles();
         let ids = resolve_identities(state, &handles);
-        let parked = parked_rows(state, &handles, Some(target));
+        // #8727: this repo's parked rows only.
+        let parked = super::root_overlap::parked_registrations(
+            &handles,
+            &state.cold_store.snapshot(),
+            Some(target),
+        );
         let indexes: Vec<String> = handles
             .into_iter()
             .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))
@@ -294,27 +299,10 @@ pub(crate) async fn list_indexes_report(
         let handles = state.registry.list_handles();
         let indexes: Vec<String> = handles.iter().map(|h| h.id.0.clone()).collect();
         // #8727: `indexes` stays the resident set; `parked` lists the rest.
-        let parked = parked_rows(state, &handles, None);
+        let parked =
+            super::root_overlap::parked_registrations(&handles, &state.cold_store.snapshot(), None);
         super::root_overlap::with_parked(serde_json::json!({ "indexes": indexes }), parked)
     }
-}
-
-/// The `parked` rows for one list, narrowed by the same DOC-37 repo filter as
-/// the resident rows (#8727): a repo-scoped list carries that repo's parked
-/// registrations and no other repo's.
-/// Test: `a_repo_scoped_list_carries_only_that_repos_parked_rows`.
-fn parked_rows(
-    state: &SearchAppState,
-    handles: &[Arc<IndexHandle>],
-    identity_filter: Option<&String>,
-) -> Vec<serde_json::Value> {
-    let cold: Vec<_> = state
-        .cold_store
-        .snapshot()
-        .into_iter()
-        .filter(|e| identity_filter.is_none_or(|t| e.repo_identity.as_ref() == Some(t)))
-        .collect();
-    super::root_overlap::parked_registrations(handles, &cold)
 }
 
 pub(super) async fn create_index_handler(

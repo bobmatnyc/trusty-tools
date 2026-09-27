@@ -222,7 +222,8 @@ List every registered index.
   - `parked` (#8727): every registered-but-not-resident id — the rest of the
     set `POST /indexes`'s overlap check consults. `root_state` is the
     `/registry/orphans` classification (`present` / `orphaned` /
-    `indeterminate`). Also on `?details=true`. Omitted when nothing is
+    `indeterminate`). Also on `?details=true`; a `?repo_identity=` filter
+    narrows it to that repo's rows. Omitted when nothing is
     parked, so a consumer must treat it as optional.
 
 ##### `POST /indexes`

@@ -226,15 +226,19 @@ fn root_state_label(state: &RootState) -> &'static str {
 /// often one whose worktree was deleted — refused `create_index` from
 /// nowhere the operator could see.
 /// What: one row per parked id, sorted — `{id, root_path, root_state}`, where
-/// `root_state` is the `/registry/orphans` classification of its root.
-/// Test: `a_parked_registration_that_blocks_create_is_listed_and_named`.
+/// `root_state` is the `/registry/orphans` classification of its root. A
+/// `repo_identity` narrows the rows to that repo, as DOC-37 narrows the list.
+/// Test: `a_parked_registration_that_blocks_create_is_listed_and_named`,
+/// `a_repo_scoped_list_carries_only_that_repos_parked_rows`.
 pub(crate) fn parked_registrations(
     handles: &[Arc<IndexHandle>],
     cold_entries: &[crate::service::persistence::PersistedIndex],
+    repo_identity: Option<&String>,
 ) -> Vec<serde_json::Value> {
     let mut rows: Vec<_> = cold_entries
         .iter()
         .filter(|e| !handles.iter().any(|h| h.id.0 == e.id))
+        .filter(|e| repo_identity.is_none_or(|t| e.repo_identity.as_ref() == Some(t)))
         .map(|e| {
             serde_json::json!({
                 "id": e.id,
