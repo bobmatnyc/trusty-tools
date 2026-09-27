@@ -324,12 +324,11 @@ mod tests {
     /// Wait until the job this test enqueued has left the process-global queue.
     ///
     /// Why (#6574): `defer_embed_queue::enqueue` increments `QUEUE_DEPTH` inline
-    /// but spawns `wait_for_turn` — which owns the ONLY decrement — onto the
-    /// CALLING runtime. Each test below returns as soon as a `stages` field
-    /// flips, and `run_embed_catch_up` writes those fields before that decrement
-    /// runs, so `#[tokio::test]` drops the runtime with the task still in flight
-    /// and the job's depth is never given back. The phantom is permanent,
-    /// process-global, and invisible to the test that created it; it is what made
+    /// and spawns `wait_for_turn` onto the CALLING runtime. Each test below
+    /// returns as soon as a `stages` field flips, and `run_embed_catch_up`
+    /// writes those fields before the decrement runs, so `#[tokio::test]` would
+    /// drop the runtime with the task still in flight. Before #8770 that job's
+    /// depth was never given back, which made
     /// `embed_pause_tests::shutdown_drain_releases_a_parked_embed_pass` fail its
     /// entry guard with "depth is 1". These tests are also `#[serial_test::serial]`
     /// so nothing else is adding while this waits.
