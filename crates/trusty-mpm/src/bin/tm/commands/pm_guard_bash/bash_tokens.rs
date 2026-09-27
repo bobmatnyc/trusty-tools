@@ -9,8 +9,8 @@
 //! `python3 -c` regex literal `.*?` read the same way (#7738); an `awk`
 //! `/regex/{action}` rule's body likewise (#7744); and the file descriptor of
 //! `2>&1` read as a file named `&1` (#7743) — which the sibling BYTE scanner
-//! [`super::scan_file_write_redirect`] had already answered correctly for
-//! years, while the argv-side parser in [`super::secret_file_copy`] had not.
+//! [`super::scan_file_write_redirects`], which returns every redirect target
+//! in a command, had already answered correctly for years, while the argv-side parser in [`super::secret_file_copy`] had not.
 //! One classifier is what stops a sixth shape getting a sixth answer.
 //!
 //! What: [`tokenize`] is the lexer call for the guards #7839 migrated, and it
@@ -96,8 +96,9 @@ pub(crate) enum RedirectRole<'a> {
 /// Why: `ls .env.local 2>&1` was refused as laundering the dotenv file into a
 /// file named `&1`. `2>&1` points stderr at stdout's descriptor; it opens no
 /// file, so there is nothing to launder. The byte scanner
-/// [`super::scan_file_write_redirect`] has skipped `>&` since #5356 — this is
-/// that same rule, stated once, for the callers that work on argv.
+/// [`super::scan_file_write_redirects`] leaves a `>&` descriptor duplication
+/// out of the redirect targets it returns (#5356, #8730) — this is that same
+/// rule, stated once, for the callers that work on argv.
 /// What: the token must split at `>` with a descriptor prefix that is empty,
 /// `&`, or all digits. A second `>` and one clobber mark ([`strip_clobber`])
 /// are stripped, then a `&` prefix on the remainder decides: a
