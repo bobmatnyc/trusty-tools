@@ -107,6 +107,11 @@ pub use delete_close::IndexDeleted;
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
+// #8348: the typed error a pinned semantic query raises when its embed fails.
+pub use search::embed_degrade::EmbedderUnavailable;
+// #8600: test-only no-progress deadline override for the embed wave loop.
+#[cfg(test)]
+pub(crate) use ingest::embed::WAVE_DEADLINE_OVERRIDE;
 // #7979: the failed-migration record `GET /indexes/:id/status` reports.
 pub use migration_state::{
     MigrationFault, MIGRATION_STAGE_JSON_TO_REDB, MIGRATION_STAGE_SCHEMA_CHAIN,

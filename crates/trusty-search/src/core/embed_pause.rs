@@ -85,6 +85,30 @@ impl EmbeddingPause {
         was_paused
     }
 
+    /// Whether the daemon has begun shutting down (#8600).
+    pub fn is_drained(&self) -> bool {
+        self.drained.load(Ordering::Acquire)
+    }
+
+    /// Resolve once the gate is drained; pending forever otherwise (#8600).
+    ///
+    /// Why: an in-flight embed wave can wait on the embedder for a whole call
+    /// timeout, or forever on a hung one. Racing the wave against this future is
+    /// what lets shutdown abandon it instead of waiting.
+    /// What: same arm-before-re-read loop as [`Self::wait_while_paused`].
+    /// Test: `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`.
+    pub async fn drained(&self) {
+        loop {
+            let wake = self.wake.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            if self.is_drained() {
+                return;
+            }
+            wake.await;
+        }
+    }
+
     /// Release every parked stage permanently — daemon shutdown only.
     ///
     /// Why: a park is an unbounded wait on an operator action. Shutdown cannot
