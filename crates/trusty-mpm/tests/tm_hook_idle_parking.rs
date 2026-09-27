@@ -13,9 +13,9 @@
 //! URL must never fail the hook). The `session_id`/`transcript_path` field names
 //! match the live Claude Code hooks reference
 //! (<https://code.claude.com/docs/en/hooks>).
-//! Test: `cargo test -p trusty-mpm --test tm_hook_idle_parking`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_idle_parking::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};

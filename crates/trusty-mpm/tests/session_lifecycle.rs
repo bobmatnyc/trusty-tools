@@ -10,9 +10,6 @@
 //! `list_reconciles_live_session_state_not_stopped`.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use std::sync::Arc;
 
 use tempfile::TempDir;

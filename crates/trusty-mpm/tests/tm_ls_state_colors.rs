@@ -8,9 +8,9 @@
 //! What: serves a fixed `GET /api/v1/sessions/managed` body holding one
 //! session per colored state, points the binary at it with `TRUSTY_MPM_URL`,
 //! and asserts on stdout. `--no-prune` keeps each listing a pure read.
-//! Test: this file; run with `cargo test -p trusty-mpm --test tm_ls_state_colors`.
+//! Test: this file; run with `cargo test -p trusty-mpm --test integration tm_ls_state_colors::`.
 
-mod common;
+use crate::common;
 
 use std::future::IntoFuture;
 

@@ -12,9 +12,9 @@
 //! and asserts the process exits 0 (the #1051 acceptance criterion) and the
 //! artifact exists with the expected marker.
 //! Test: this file (run with `TRUSTY_MPM_META_DEMO_E2E=1 cargo test -p
-//! trusty-mpm --test meta_demo_e2e -- --include-ignored`).
+//! trusty-mpm --test integration meta_demo_e2e:: -- --include-ignored`).
 
-mod common;
+use crate::common;
 
 use std::process::Command;
 

@@ -15,10 +15,7 @@
 //! config-completeness flags, and (as of #2382) the Deliverable/Milestone status
 //! histograms — plus the 404 path for an unregistered project.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test project_status_route`.
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//! `cargo test -p trusty-mpm --test integration project_status_route::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;

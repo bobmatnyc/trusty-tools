@@ -10,9 +10,9 @@
 //! `local-ops` payload and asserts DENY (one JSON line carrying
 //! `permissionDecision: "deny"`) or ALLOW (empty stdout). Nothing is executed;
 //! every fixture value is an obviously fake placeholder.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_secret_batch`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_secret_batch::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::Path;

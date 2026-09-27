@@ -202,8 +202,10 @@ jobs:
       # features) therefore shared nothing with the test build. Asking cargo
       # for one integration-test target makes it also build the normal `tm`
       # executable inside that same resolve, so `tm` and the lib test harness
-      # come from one dependency graph. `config_mount` is only the smallest
-      # integration target; it is built, never run here.
+      # come from one dependency graph. `env_serial` is only the smaller of
+      # trusty-mpm's two integration targets (#8345 folded the per-file
+      # targets, including the old `config_mount`, into `integration` and
+      # `env_serial`); it is built, never run here.
       #
       # scripts/lib/run_or_cargo.sh (used by check_capabilities.sh) prefers a
       # `tm` on PATH over `cargo run`, so putting this build's output dir on
@@ -219,7 +221,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
-          cargo test -p trusty-mpm --lib --test config_mount --locked --no-run
+          cargo test -p trusty-mpm --lib --test env_serial --locked --no-run
           echo "${CARGO_TARGET_DIR}/debug" >> "$GITHUB_PATH"
 
       - name: Check tm-capabilities generated skill for drift

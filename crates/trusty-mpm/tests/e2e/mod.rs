@@ -9,11 +9,7 @@
 //! daemon; each `test_*` module is one scenario area. Rust runs the `#[test]`
 //! functions across these modules concurrently, and that is safe here because
 //! every test spawns its own isolated daemon and temp directory.
-//! Test: `cargo test -p trusty-mpm-daemon --test e2e`.
-
-// #8545: `common` arms the home-write fence before `main`.
-#[path = "../common/mod.rs"]
-mod common;
+//! Test: `cargo test -p trusty-mpm --test integration e2e::`.
 
 mod harness;
 
