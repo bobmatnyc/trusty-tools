@@ -112,7 +112,10 @@ name = "trusty-common"
 # repoints only, no code behavior change), so the "PR version bump vs
 # crates.io" gate (#4421) requires a bump. No public item was added, removed,
 # or changed shape.
-version = "0.52.4"
+# 0.52.5 (#8732, issue #4421): patch — 0.52.4 is already live on crates.io
+# and this PR changes `src/**`, so the "PR version bump vs crates.io" gate
+# requires a bump. No public item added, removed, or changed shape.
+version = "0.52.5"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
