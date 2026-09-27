@@ -152,6 +152,13 @@ fn pm_guard_refuses_a_launchd_plist_carrying_a_credential_8523() {
     assert_denied_citing(&run_bash(&cat, cwd.path()), "#8523", &cat);
     let plutil = format!("plutil -p {}", secret.display());
     assert_denied_citing(&run_bash(&plutil, cwd.path()), "#8523", &plutil);
+    // #8523 round 3: a Bash content search over the directory, not only `Grep`.
+    for command in [
+        format!("grep -r . {}", agents.display()),
+        format!("rg . {}", agents.display()),
+    ] {
+        assert_denied_citing(&run_bash(&command, cwd.path()), "#8523", &command);
+    }
     let read = serde_json::json!({ "file_path": secret.display().to_string() });
     assert_denied_citing(
         &run_pm_guard("Read", read, cwd.path()),
@@ -222,6 +229,10 @@ fn pm_guard_refuses_an_unscoped_pod_env_dump_7648() {
         "kubectl exec -n prod my-pod -c app -- env | grep -i LOG",
         "kubectl exec deploy/api -- printenv",
         "kubectl exec my-pod -- sh -c 'env | sort'",
+        // #7648 round 3: an unlisted value option, and a container exec.
+        "oc rsh --as adminuser mypod env",
+        "docker exec -e FOO=1 c env",
+        "podman container exec c cat /proc/1/environ",
     ] {
         assert_denied_citing(&run_bash(command, cwd.path()), "#7648", command);
     }
@@ -229,6 +240,8 @@ fn pm_guard_refuses_an_unscoped_pod_env_dump_7648() {
         "kubectl exec my-pod -- printenv LOG_LEVEL",
         "kubectl get pods -n prod",
         "kubectl exec my-pod -- ls /app",
+        "oc rsh mypod ls",
+        "docker exec c ls",
     ] {
         let stdout = run_bash(command, cwd.path());
         assert!(stdout.is_empty(), "{command} must allow: {stdout}");

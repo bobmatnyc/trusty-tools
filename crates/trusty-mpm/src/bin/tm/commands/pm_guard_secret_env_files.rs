@@ -63,9 +63,11 @@ pub(crate) fn names_a_process_manager_dump(path: &str) -> bool {
 /// Why: see the module doc. The plist's CONTENT decides, so relative paths
 /// resolve against `cwd`, the hook's working directory.
 /// What: collects every candidate path the call names, then asks
-/// [`judge_plist`] of each; the first refusal wins.
+/// [`judge_plist`] of each; the first refusal wins. A launchd directory named
+/// by a `Grep` or by a printing Bash command is refused.
 /// Test: `refuses_a_plist_whose_environment_carries_a_credential`,
-/// `fails_closed_on_a_plist_it_cannot_judge`.
+/// `fails_closed_on_a_plist_it_cannot_judge`,
+/// `refuses_a_bash_content_search_over_a_launchd_directory`.
 pub(crate) fn evaluate_env_plist_read(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
@@ -85,7 +87,10 @@ pub(crate) fn evaluate_env_plist_read(
     };
     // #8523 critic CRITICAL 1: a `Grep` prints the lines of every file under a
     // directory, so a directory it names is judged, not waved through.
-    let searches_directories = tool_name == "Grep";
+    // #8523 round 3: so does `grep -r`/`rg`/`find -exec cat` through Bash, and
+    // `bash_candidates` already dropped every non-printing verb (`ls`, `stat`,
+    // …), so every Bash candidate left is judged the same way.
+    let searches_directories = matches!(tool_name, "Grep" | "Bash");
     candidates
         .iter()
         .find_map(|word| judge_plist(word, cwd, has_cd, searches_directories).err())

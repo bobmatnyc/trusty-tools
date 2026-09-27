@@ -1,18 +1,25 @@
-//! Refuse an unscoped environment dump inside a Kubernetes pod (#7648).
+//! Refuse an unscoped environment dump inside a Kubernetes pod or a container
+//! (#7648).
 //!
 //! Why: `kubectl exec <pod> -- env | grep -i LOG` printed a Twenty API key JWT
 //! and a Postgres DSN into a transcript, and a bare `env` in a pod did the same
 //! on 2026-09-20. A pod's environment is where Kubernetes injects its Secrets,
-//! so a dump of it is a credential print that names no file — the #7266 rule
-//! never sees it.
-//! What: [`evaluate_pod_env_dump_command`] refuses a `kubectl`/`oc` `exec`, or
-//! an `oc rsh`, whose remote command dumps the environment: `env` with no command to run,
-//! `printenv` with no variable name, a bare `export`/`set`/`declare`, or a
+//! and a container's is where `docker run -e`/`--env-file` put them, so a dump
+//! of either is a credential print that names no file — the #7266 rule never
+//! sees it.
+//! What: [`evaluate_pod_env_dump_command`] refuses a `kubectl`/`oc` `exec`, an
+//! `oc rsh`, or a `docker`/`podman`/`nerdctl`/compose `exec`, whose remote
+//! command dumps the environment: `env` with no command to run, `printenv`
+//! with no variable name, a bare `export`/`set`/`declare`, or a
 //! `/proc/<pid>/environ` read — directly or inside `sh -c '…'`. Naming a
-//! variable (`printenv LOG_LEVEL`) allows. A segment naming `kubectl exec`
-//! that does not lex, or nesting past [`MAX_DEPTH`], fails CLOSED.
+//! variable (`printenv LOG_LEVEL`) allows. An option the flag tables do not
+//! know is read both as taking a value and as not, and any reading that dumps
+//! refuses. A segment naming the shape that does not lex, or nesting past
+//! [`MAX_DEPTH`], fails CLOSED.
 //! Test: `refuses_an_unscoped_pod_env_dump`, `allows_a_scoped_pod_command`,
-//! `refuses_an_oc_rsh_env_dump`, `refuses_what_it_cannot_read`.
+//! `refuses_an_oc_rsh_env_dump`, `refuses_what_it_cannot_read`,
+//! `refuses_an_oc_rsh_dump_behind_an_unlisted_value_flag`,
+//! `refuses_a_container_env_dump`.
 
 use super::bash_tokens::tokenize;
 use super::split_shell_segments;
@@ -20,12 +27,22 @@ use super::split_shell_segments;
 /// Programs whose `exec` subcommand runs a command inside a pod.
 const POD_CLIS: &[&str] = &["kubectl", "oc"];
 
-/// Pod-CLI subcommands that run a command inside a pod (#7648; `rsh` is
+/// Programs whose `exec` subcommand runs a command inside a container
+/// (#7648 round 3: the same dump, owner ruling "fix the class").
+const CONTAINER_CLIS: &[&str] = &[
+    "docker",
+    "podman",
+    "nerdctl",
+    "docker-compose",
+    "podman-compose",
+];
+
+/// Subcommands that run a command inside a pod or container (#7648; `rsh` is
 /// `oc`'s remote shell, critic HIGH 1).
 const REMOTE_VERBS: &[&str] = &["exec", "rsh"];
 
-/// `oc rsh` options whose value is the next token when written without `=`.
-const RSH_VALUE_FLAGS: &[&str] = &[
+/// Pod-CLI options known to take the next word as their value.
+const POD_VALUE_FLAGS: &[&str] = &[
     "-c",
     "--container",
     "-n",
@@ -42,6 +59,39 @@ const RSH_VALUE_FLAGS: &[&str] = &[
     "--cluster",
 ];
 
+/// Pod-CLI options known to take no value.
+const POD_BOOLEAN_FLAGS: &[&str] = &[
+    "-i", "-t", "-it", "-ti", "-T", "-q", "--stdin", "--tty", "--no-tty", "--quiet",
+];
+
+/// Container-CLI `exec` options known to take the next word as their value.
+const CONTAINER_VALUE_FLAGS: &[&str] = &[
+    "-e",
+    "--env",
+    "--env-file",
+    "-u",
+    "--user",
+    "-w",
+    "--workdir",
+    "--detach-keys",
+    "--index",
+];
+
+/// Container-CLI `exec` options known to take no value.
+const CONTAINER_BOOLEAN_FLAGS: &[&str] = &[
+    "-d",
+    "--detach",
+    "-i",
+    "--interactive",
+    "-t",
+    "--tty",
+    "-it",
+    "-ti",
+    "-T",
+    "--no-TTY",
+    "--privileged",
+];
+
 /// Shells whose `-c` operand is a script to judge in turn.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ash", "ksh"];
 
@@ -51,10 +101,13 @@ const ENV_VALUE_FLAGS: &[&str] = &["-u", "--unset", "-C", "--chdir"];
 /// Nested `sh -c` / `env` levels followed before refusing.
 const MAX_DEPTH: usize = 4;
 
-/// `Some(reason)` when `command` dumps a pod's environment, else `None`.
+/// Option tables for one CLI family: (takes a value, takes none).
+type FlagTables = (&'static [&'static str], &'static [&'static str]);
+
+/// `Some(reason)` when `command` dumps a pod's or container's environment.
 ///
 /// Test: `refuses_an_unscoped_pod_env_dump`, `allows_a_scoped_pod_command`,
-/// `refuses_what_it_cannot_read`.
+/// `refuses_what_it_cannot_read`, `refuses_a_container_env_dump`.
 pub(crate) fn evaluate_pod_env_dump_command(command: &str) -> Option<String> {
     if !REMOTE_VERBS.iter().any(|verb| command.contains(verb)) {
         return None;
@@ -65,61 +118,114 @@ pub(crate) fn evaluate_pod_env_dump_command(command: &str) -> Option<String> {
         .then(deny_reason)
 }
 
-/// Whether one segment is a pod `exec` whose remote command dumps the env.
+/// Whether one segment is a pod or container `exec` whose remote command
+/// dumps the env.
 fn segment_dumps_pod_env(segment: &str) -> bool {
+    let is_cli = |word: &str| POD_CLIS.contains(&word) || CONTAINER_CLIS.contains(&word);
     let Ok(argv) = tokenize(segment) else {
         // #7648: fail closed on a segment we cannot read that names the shape.
         let words: Vec<&str> = segment.split(|c: char| !is_word_byte(c)).collect();
-        return words.iter().any(|w| POD_CLIS.contains(w))
+        return words.iter().any(|w| is_cli(w))
             && words.iter().any(|w| REMOTE_VERBS.contains(w))
             && words
                 .iter()
                 .any(|w| matches!(*w, "env" | "printenv" | "environ"));
     };
-    let Some(cli) = argv.iter().position(|t| POD_CLIS.contains(&basename(t))) else {
+    let Some(cli) = argv.iter().position(|t| is_cli(basename(t))) else {
         return false;
     };
     let rest = &argv[cli + 1..];
+    if CONTAINER_CLIS.contains(&basename(&argv[cli])) {
+        // #7648 round 3: `docker [container|compose] exec [options] <name>
+        // <command…>` takes no `--`; every word after the name is the command.
+        let tables = (CONTAINER_VALUE_FLAGS, CONTAINER_BOOLEAN_FLAGS);
+        return verb_positions(rest, &["exec"])
+            .any(|at| any_command_dumps(&rest[at + 1..], tables));
+    }
     let separator = rest.iter().position(|t| t == "--");
     let options = &rest[..separator.unwrap_or(rest.len())];
-    let Some(exec_at) = options
-        .iter()
-        .position(|t| REMOTE_VERBS.contains(&t.as_str()))
-    else {
+    let mut verbs = verb_positions(options, REMOTE_VERBS).peekable();
+    if verbs.peek().is_none() {
         return false;
-    };
-    match separator {
-        Some(at) => dumps_environment(&rest[at + 1..], 0),
-        // #7648 critic HIGH 1: `oc rsh <pod> <command…>` needs no `--`; the
-        // words after the pod name are the remote command.
-        None if options[exec_at] == "rsh" => rsh_remote_command(&options[exec_at + 1..])
-            .is_some_and(|argv| dumps_environment(argv, 0)),
-        // The deprecated `kubectl exec <pod> env` form has no `--`, so the
-        // remote command cannot be told from the options; its last word decides.
-        None => options[exec_at + 1..]
-            .last()
-            .is_some_and(|last| matches!(basename(last), "env" | "printenv")),
     }
+    if let Some(at) = separator {
+        return dumps_environment(&rest[at + 1..], 0);
+    }
+    // #7648 critic HIGH 1: `oc rsh <pod> <command…>` needs no `--`; the words
+    // after the pod name are the remote command. The deprecated
+    // `kubectl exec <pod> env` form is read the same way, and its last word
+    // still decides on its own. #7648 round 3: every `exec`/`rsh` word is
+    // tried, since an option before it may have taken the first as its value.
+    verbs.any(|at| {
+        let args = &options[at + 1..];
+        any_command_dumps(args, (POD_VALUE_FLAGS, POD_BOOLEAN_FLAGS))
+            || (options[at] == "exec"
+                && args
+                    .last()
+                    .is_some_and(|last| matches!(basename(last), "env" | "printenv")))
+    })
 }
 
-/// The remote command of `oc rsh [options] <pod> <command…>`, if one follows.
+/// Every index of `args` holding one of `verbs`.
+fn verb_positions<'a>(args: &'a [String], verbs: &'a [&str]) -> impl Iterator<Item = usize> + 'a {
+    args.iter()
+        .enumerate()
+        .filter(|(_, t)| verbs.contains(&t.as_str()))
+        .map(|(at, _)| at)
+}
+
+/// Whether any reading of `[options] <target> <command…>` runs a dump.
+fn any_command_dumps(args: &[String], tables: FlagTables) -> bool {
+    target_commands(args, tables)
+        .into_iter()
+        .any(|command| dumps_environment(command, 0))
+}
+
+/// The remote command of `[options] <target> <command…>` under every reading
+/// of its options (#7648 round 3).
 ///
-/// What: skips options, and the value of each [`RSH_VALUE_FLAGS`] spelling
-/// written without `=`; the first other word is the pod, and every word after
-/// it is the command. `None` for an interactive shell (no command).
-/// Test: `refuses_an_oc_rsh_env_dump`.
-fn rsh_remote_command(args: &[String]) -> Option<&[String]> {
-    let mut i = 0;
-    while let Some(arg) = args.get(i) {
-        if RSH_VALUE_FLAGS.contains(&arg.as_str()) {
-            i += 2;
-        } else if arg.starts_with('-') {
-            i += 1;
+/// Why: `oc rsh --as adminuser mypod env` read `adminuser` as the pod because
+/// `--as` was not listed as taking a value, and no list of a CLI's global
+/// options stays complete.
+/// What: walks the options over a reachability table. A listed value option
+/// skips its value; a listed boolean option, or any `--flag=value`, skips
+/// itself; an UNLISTED option reaches both the next word and the one after,
+/// so the word after it is tried as its value and as the target. `--` ends
+/// the options. The first non-option word reached is a target, and the words
+/// after it (less a leading `--`) are a candidate command. Linear in
+/// `args.len()`.
+/// Test: `refuses_an_oc_rsh_dump_behind_an_unlisted_value_flag`,
+/// `refuses_a_container_env_dump`.
+fn target_commands(args: &[String], (value, boolean): FlagTables) -> Vec<&[String]> {
+    let mut reachable = vec![false; args.len() + 1];
+    reachable[0] = true;
+    let mut commands = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if !reachable[i] {
+            continue;
+        }
+        let skip_value = (i + 2).min(args.len());
+        if arg == "--" {
+            if let Some(command) = args.get(i + 2..) {
+                commands.push(command);
+            }
+        } else if !arg.starts_with('-') || arg == "-" {
+            let command = &args[i + 1..];
+            commands.push(match command.first() {
+                Some(first) if first == "--" => &command[1..],
+                _ => command,
+            });
+        } else if value.contains(&arg.as_str()) {
+            reachable[skip_value] = true;
+        } else if boolean.contains(&arg.as_str()) || arg.contains('=') {
+            reachable[i + 1] = true;
         } else {
-            return args.get(i + 1..).filter(|command| !command.is_empty());
+            // #7648 round 3: fail closed — an unlisted option may take a value.
+            reachable[i + 1] = true;
+            reachable[skip_value] = true;
         }
     }
-    None
+    commands
 }
 
 /// Whether the remote `argv` prints the whole environment.
@@ -216,109 +322,16 @@ fn is_word_byte(c: char) -> bool {
 
 /// The refusal, naming the scoped way through.
 fn deny_reason() -> String {
-    "an unscoped environment dump inside a pod (`kubectl exec … -- env`, `printenv`, \
-     `export`, `set`, `/proc/*/environ`) is refused (issue #7648) — a pod's environment is \
-     where Kubernetes injects its Secrets, so the dump prints them into the transcript. Query \
-     one named variable instead (`kubectl exec <pod> -- printenv NAME`), or test for its \
-     presence without printing it (`kubectl exec <pod> -- sh -c 'test -n \"$NAME\" && echo set'`)."
+    // #7648 round 3: the same refusal covers a container `exec`.
+    "an unscoped environment dump inside a pod or container (`kubectl exec … -- env`, \
+     `docker exec … env`, `printenv`, `export`, `set`, `/proc/*/environ`) is refused \
+     (issue #7648) — a pod's or container's environment is where its Secrets are injected, \
+     so the dump prints them into the transcript. Query one named variable instead \
+     (`kubectl exec <pod> -- printenv NAME`, `docker exec <name> printenv NAME`), or test for \
+     its presence without printing it (`kubectl exec <pod> -- sh -c 'test -n \"$NAME\" && echo set'`)."
         .to_string()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn refuses_an_unscoped_pod_env_dump() {
-        for command in [
-            "kubectl exec my-pod -- env",
-            "kubectl exec my-pod -- env | grep -i LOG",
-            "kubectl -n prod exec -it my-pod -c app -- /usr/bin/env",
-            "kubectl exec deploy/api -- printenv",
-            "kubectl exec my-pod -- printenv -0",
-            "kubectl exec my-pod -- env -i -u X",
-            "kubectl exec my-pod -- env -- ",
-            "kubectl exec my-pod -- sh -c 'env | sort'",
-            "kubectl exec my-pod -- bash -lc \"printenv\"",
-            "kubectl exec my-pod -- env FOO=1 sh -c env",
-            "kubectl exec my-pod -- export",
-            "kubectl exec my-pod -- sh -c set",
-            "kubectl exec my-pod -- cat /proc/1/environ",
-            "oc exec my-pod -- env",
-            "kubectl exec my-pod env",
-            "cd /tmp && kubectl exec my-pod -- env",
-        ] {
-            assert!(
-                evaluate_pod_env_dump_command(command).is_some(),
-                "`{command}` must deny"
-            );
-        }
-    }
-
-    /// 🔴 REGRESSION (#7648 critic HIGH 1): `oc rsh` runs a remote command
-    /// with no `exec` and no `--`. Both deny rows ALLOWED on `8dfcf2e1e`.
-    #[test]
-    fn refuses_an_oc_rsh_env_dump() {
-        for command in [
-            "oc rsh mypod env",
-            "oc rsh mypod -- env",
-            "oc -n prod rsh -c app mypod printenv",
-            "oc rsh --shell=/bin/bash mypod sh -c 'env | sort'",
-        ] {
-            assert!(
-                evaluate_pod_env_dump_command(command).is_some(),
-                "`{command}` must deny"
-            );
-        }
-        for command in [
-            "oc rsh mypod ls",
-            "oc rsh mypod",
-            "oc rsh mypod printenv HOME",
-        ] {
-            assert_eq!(
-                evaluate_pod_env_dump_command(command),
-                None,
-                "`{command}` must allow"
-            );
-        }
-    }
-
-    #[test]
-    fn allows_a_scoped_pod_command() {
-        for command in [
-            "kubectl exec my-pod -- printenv LOG_LEVEL",
-            "kubectl exec my-pod -- sh -c 'echo $LOG_LEVEL'",
-            "kubectl exec my-pod -- env FOO=1 node app.js",
-            "kubectl exec my-pod -- ls /app",
-            "kubectl exec my-pod printenv LOG_LEVEL",
-            "kubectl exec -it my-pod -- sh",
-            "kubectl get pods -n prod",
-            "kubectl logs my-pod | grep env",
-            "env | grep PATH",
-            "printenv HOME",
-        ] {
-            assert_eq!(
-                evaluate_pod_env_dump_command(command),
-                None,
-                "`{command}` must allow"
-            );
-        }
-    }
-
-    /// Error arms: an unlexable segment naming the shape, an unreadable inner
-    /// script, and nesting past the bound all fail closed.
-    #[test]
-    fn refuses_what_it_cannot_read() {
-        for command in [
-            "kubectl exec my-pod -- env 'unclosed",
-            "kubectl exec my-pod -- sh -c 'env \"unclosed'",
-            "kubectl exec p -- env env env env env env true",
-        ] {
-            assert!(
-                evaluate_pod_env_dump_command(command).is_some(),
-                "`{command}` must deny"
-            );
-        }
-        assert!(dumps_environment(&["true".to_string()], MAX_DEPTH + 1));
-    }
-}
+#[path = "pod_env_dump_tests.rs"]
+mod tests;

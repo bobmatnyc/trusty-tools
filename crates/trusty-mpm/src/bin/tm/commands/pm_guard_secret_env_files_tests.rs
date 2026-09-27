@@ -189,6 +189,41 @@ fn refuses_a_content_grep_over_a_launchd_directory() {
     assert_eq!(bash("ls -la ~/Library/LaunchAgents", dir.path()), None);
 }
 
+/// 🔴 REGRESSION (#8523 round-3 critic CRITICAL): a Bash content search or
+/// recursive read over a launchd directory, or one below it, prints every
+/// plist's `EnvironmentVariables` values. ALLOWED on `bec394551`, where only a
+/// `Grep` call judged a directory. A listing stays allowed.
+#[test]
+fn refuses_a_bash_content_search_over_a_launchd_directory() {
+    let (dir, path) = fixture("com.example.fake.plist", WITH_CREDENTIAL.as_bytes());
+    let agents = path.parent().expect("dir").to_path_buf();
+    let sub = agents.join("sub");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    for target in [&agents, &sub] {
+        let t = target.display();
+        for command in [
+            format!("grep -r . {t}"),
+            format!("rg . {t}"),
+            format!("rg -uu KEY '{t}'"),
+            format!("find {t} -type f -exec cat {{}} +"),
+            format!("tar -cf - {t} | tar -xOf -"),
+            format!("cd {t} && grep -r . ."),
+        ] {
+            assert!(
+                bash(&command, dir.path()).is_some(),
+                "`{command}` must deny"
+            );
+        }
+    }
+    for command in [
+        format!("ls -la {}", agents.display()),
+        format!("stat {}", sub.display()),
+        "ls -la ~/Library/LaunchAgents".to_string(),
+    ] {
+        assert_eq!(bash(&command, dir.path()), None, "`{command}` must allow");
+    }
+}
+
 /// 🔴 REGRESSION (#8523 critic HIGH 2): a FIFO or device reports length 0, so
 /// the size check passed and `fs::read` blocked the hook forever. On
 /// `8dfcf2e1e` this test times out. It must deny, and promptly.
