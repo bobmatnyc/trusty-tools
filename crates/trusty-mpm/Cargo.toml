@@ -142,7 +142,11 @@ name = "trusty-mpm"
 # edits `src/**`, so the "PR version bump vs crates.io" check requires the
 # bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
 # consumer surface, no library dependents); no signature break.
-version = "1.7.9"
+# 1.7.10 (Refs #8261, #8736): patch — release-opening bump carrying over the
+# build-lease accepted break declared in
+# scripts/semver-accepted-breaks/trusty-mpm-1.7.10.txt. No source change in
+# this commit.
+version = "1.7.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
