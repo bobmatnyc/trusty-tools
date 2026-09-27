@@ -716,3 +716,118 @@ fn an_ambient_pool_slot_held_by_another_lease_is_not_used() {
     assert_ne!(Path::new(&target), slot0, "{err}");
     assert!(target.ends_with("slot-1"), "{target}");
 }
+
+/// Like [`home_with_ceiling`], but the heavy-build table also matches a real
+/// `cargo test` invocation (#8261 round 7, supervisor acceptance criterion 2:
+/// the driven test needs the run path's own classifier to admit `cargo`, not
+/// the `sleep`/`true`/`sh`/`touch` stand-ins the other cases use).
+fn home_with_ceiling_and_cargo(ceiling: u32) -> tempfile::TempDir {
+    let home = tempfile::Builder::new()
+        .prefix("tm-test-build-lease-")
+        .tempdir_in("/tmp")
+        .expect("scratch home");
+    let dir = home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("config dir");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "[builders]\nmax_concurrent = {ceiling}\ncount_foreign_builds = false\n\
+             memory_pressure_max = \"critical\"\nmin_available_pct = 0\nload_factor = 64\n\
+             heavy_build_commands = [\"sleep\", \"true\", \"sh\", \"touch\", \"cargo test\"]\n"
+        ),
+    )
+    .expect("config");
+    home
+}
+
+/// A fake `cargo` on `PATH` recording `$CARGO_TARGET_DIR` and its own
+/// arguments (excluding argv[0], which the exec path resolves to an absolute
+/// program path, not the literal `cargo` word), byte for byte, to the files
+/// named by `FAKE_CARGO_TARGET_OUT` and `FAKE_CARGO_ARGV_OUT` (#8261 round 7,
+/// supervisor acceptance criterion 2).
+fn fake_cargo_bin(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).expect("fake bin dir");
+    let script = dir.join("cargo");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         printf '%s' \"$CARGO_TARGET_DIR\" > \"$FAKE_CARGO_TARGET_OUT\"\n\
+         : > \"$FAKE_CARGO_ARGV_OUT\"\n\
+         for a in \"$@\"; do\n\
+         printf '%s\\n' \"$a\" >> \"$FAKE_CARGO_ARGV_OUT\"\n\
+         done\n",
+    )
+    .expect("write fake cargo");
+    let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).expect("chmod");
+}
+
+/// #8261 round 7 (supervisor acceptance criterion 2, 2026-09-27): before the
+/// fix, `explicit_target_dir_arg` read a `--target-dir` value AFTER a literal
+/// `--` as cargo's OWN flag, so a real `cargo test -- --target-dir <value>`
+/// invocation used the forwarded test-binary argument as `ambient` instead of
+/// `CARGO_TARGET_DIR`, and the rewrite then overwrote that forwarded argument
+/// with the resolved slot directory. This drives the real run path — not
+/// `plan`/`explicit_target_dir_arg`/`rewrite_target_dir_arg` directly — with a
+/// private `CARGO_TARGET_DIR` and an `X` that is itself a directory this
+/// repo's slot pool would replace, so a wrong `ambient` takes a visibly
+/// different, observable route from a correct one.
+/// Test: this function.
+#[test]
+fn a_target_dir_after_the_double_dash_is_never_read_as_cargos_own_flag() {
+    let home = home_with_ceiling_and_cargo(2);
+    let (repo, _pool, shared) = widget_repo(home.path());
+    let fakebin = home.path().join("fakebin");
+    fake_cargo_bin(&fakebin);
+    let target_out = home.path().join("target-out");
+    let argv_out = home.path().join("argv-out");
+    let private_target = home.path().join("private-target");
+    let path = format!(
+        "{}:{}",
+        fakebin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = build_lease(home.path())
+        .current_dir(&repo)
+        .env("PATH", path)
+        .env("CARGO_TARGET_DIR", &private_target)
+        .env("FAKE_CARGO_TARGET_OUT", &target_out)
+        .env("FAKE_CARGO_ARGV_OUT", &argv_out)
+        .args(["--wait-secs", "3", "--"])
+        .args(["cargo", "test", "--", "--target-dir"])
+        .arg(&shared)
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+
+    // Criterion (a): the lease admits CARGO_TARGET_DIR, never the forwarded
+    // `--target-dir` value after the double dash.
+    let target =
+        std::fs::read_to_string(&target_out).expect("the build recorded its CARGO_TARGET_DIR");
+    assert_eq!(
+        Path::new(&target),
+        private_target,
+        "the lease must admit CARGO_TARGET_DIR, not the forwarded --target-dir value: {err}"
+    );
+
+    // Criterion (b): the arguments handed to the child are byte-identical to
+    // the input argv (excluding argv[0], the program name) — the forwarded
+    // `--target-dir <shared>` is never rewritten.
+    let want_argv: Vec<String> = ["test", "--", "--target-dir"]
+        .into_iter()
+        .map(String::from)
+        .chain(std::iter::once(shared.display().to_string()))
+        .collect();
+    let got_argv: Vec<String> = std::fs::read_to_string(&argv_out)
+        .expect("the build recorded its argv")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        got_argv, want_argv,
+        "the argv handed to the child must be byte-identical to the input argv: {err}"
+    );
+}
