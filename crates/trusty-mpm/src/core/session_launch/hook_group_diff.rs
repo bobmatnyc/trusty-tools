@@ -44,13 +44,16 @@ use crate::core::standalone::hooks::cleanup::event_names_matching;
 /// does). One function resolves all three, and both callers go through it.
 /// What: `[hooks] prompt_context` from [`crate::core::config::MpmConfig`] at
 /// `fw.root`, `[divert] enabled` from the re-resolved plan, and the #7688 flag
-/// from [`crate::core::prompt_self_improvement::enabled_for`], fed to
+/// from [`crate::core::prompt_self_improvement::enabled_for_with_host`] with
+/// the host layer taken from that same `fw.root` config, fed to
 /// [`super::project_hooks::project_managed_hook_additions_with_prompt_feedback`].
+/// Nothing here reads `$HOME`; `fw` is the only host input.
 /// `exe_override` pins the hook binary; production passes `None` and lets
 /// [`crate::core::standalone::hooks::resolve_stable_hook_exe`] (#7670) find the
 /// installed one, which refuses a build-tree artifact (#7244).
 /// Test: `expected_additions_carry_the_capture_when_the_flag_is_on`,
-/// `expected_additions_omit_the_capture_when_the_flag_is_off`.
+/// `expected_additions_omit_the_capture_when_the_flag_is_off`,
+/// `expected_additions_read_the_host_flag_from_the_framework_root`.
 pub(crate) fn project_hook_additions_for(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -64,7 +67,12 @@ pub(crate) fn project_hook_additions_for(
         plan.divert_enabled,
         // #7849: the toggle the resume merge used to hard-code `false`, which
         // stripped on every resume the capture the launch had just written.
-        crate::core::prompt_self_improvement::enabled_for(project_dir),
+        // #5040: the host layer comes from the SAME `fw.root` config as the
+        // other two toggles, not a second `$HOME` read `fw` cannot redirect.
+        crate::core::prompt_self_improvement::enabled_for_with_host(
+            project_dir,
+            config.pm.prompt_self_improvement,
+        ),
     )
 }
 

@@ -7,13 +7,21 @@
   runtime-only. See "Superseded 2026-09-27" under Decision item 5.
 - **Amended:** 2026-09-27 (owner and supervisor ruling) — the runtime
   resolver ships before any file move; the move and the removal of every
-  embed land together in one later PR; scope adds three more embeds
-  (trusty-agents' `rust-embed` agents and workflows, trusty-review's prompt
-  templates, trusty-mpm's `bundle.rs` embedded docs); a fifth content
-  class, "product prompts," covers trusty-review's templates; the
+  embed land together, split into five per-crate PRs in publish order (see
+  the 2026-09-27 split-per-crate amendment below); scope adds three more
+  embeds (trusty-agents' `rust-embed` agents and workflows, trusty-review's
+  prompt templates, trusty-mpm's `bundle.rs` embedded docs); a fifth
+  content class, "product prompts," covers trusty-review's templates; the
   sha256/pin integrity check has one implementation, in trusty-common,
   called by trusty-installer. See "Sequencing" under Decision item 5 and
   the updated Decision item 1 and Scope below.
+- **Amended:** 2026-09-27 (owner ruling) — decision 5's move-and-embed-drop
+  splits into five PRs, one per crate, merging in publish order:
+  trusty-agents-common, then trusty-mpm, then trusty-code and
+  trusty-agents, then trusty-review. Each PR moves that crate's content
+  into `content/**` and removes that crate's embeds in the same PR, so no
+  published crate ever references a file outside its own package. See
+  "Sequencing" under Decision item 5.
 - **Date:** 2026-09-22
 - **Scope:** Workspace-wide — bundled agents
   (`crates/trusty-agents-common/src/assets/agents/`), skills
@@ -147,18 +155,23 @@ tree, versioned and changelogged independently of any crate:
    data files — and a published crate cannot `include_str!` files outside
    its own directory.
 
-   **Sequencing (amended 2026-09-27, owner and supervisor ruling).** PHASE_3
-   (the runtime resolver) ships before PHASE_1 (the file move). PHASE_1 then
-   moves every embedded asset out of `crates/*/src/` and removes every
-   embed macro that currently reads it — the move and every embed removal
-   land together, in one later PR, not in a first PR that moves files while
-   embeds stay compiled in and a second PR that drops them. Nothing in this
-   sequence freezes any crate's `cargo publish`; the one ordering
-   constraint runs the other way, on the content side — a `content-v*`
-   release must exist before the next crate publish that depends on the
-   resolver, so PHASE_3's own tests have a real tag to verify against. This
-   supersedes the earlier phrasing under this item, which deferred the
-   embed removals to a later phase while PHASE_1 moved only the files.
+   **Sequencing (amended 2026-09-27, owner and supervisor ruling; split per
+   crate 2026-09-27, owner ruling).** PHASE_3 (the runtime resolver) ships
+   before PHASE_1 (the file move). PHASE_1 then moves every embedded asset
+   out of `crates/*/src/` and removes every embed macro that currently
+   reads it, split into five PRs, one per crate, merging in publish order:
+   trusty-agents-common, then trusty-mpm, then trusty-code and
+   trusty-agents, then trusty-review. Each crate's move and its embed
+   removal land together in that crate's PR, so no published crate ever
+   references a file outside its own package — not in a first PR that
+   moves files while embeds stay compiled in and a second PR that drops
+   them. Nothing in this sequence freezes any crate's `cargo publish`; the
+   one ordering constraint runs the other way, on the content side — a
+   `content-v*` release must exist before the next crate publish that
+   depends on the resolver, so PHASE_3's own tests have a real tag to
+   verify against. This supersedes the earlier phrasing under this item,
+   which deferred the embed removals to a later phase while PHASE_1 moved
+   only the files.
 
    **PHASE_3 acceptance criteria (owner ruling 2026-09-27).** PHASE_3 ships
    only once all four hold:
@@ -210,10 +223,11 @@ facts instead of conflating "stale" with "binary rebuilt."
 **Harder:** PHASE_1 moves every file `include_str!` or `RustEmbed` currently
 embeds — across `trusty-mpm`, `trusty-agents-common`, `trusty-agents`,
 `trusty-review`, and `trusty-code` — into the new `content/` tree and
-removes the embed macro at every one of those call sites, together, in one
-coordinated PR (see "Sequencing" under Decision item 5); with no cache and
-no network, `tm` names the command to run, and content changes never touch
-a crate version. Two of the added embeds are more than a path swap:
+removes the embed macro at every one of those call sites, split into five
+per-crate PRs merging in publish order (see "Sequencing" under Decision
+item 5); with no cache and no network, `tm` names the command to run, and
+content changes never touch a crate version. Two of the added embeds are
+more than a path swap:
 trusty-review's `prompt_templates.rs` and trusty-mpm's `bundle.rs` currently
 expose `pub const &'static str` values, and their resolver-backed
 replacements are fallible — every call site that reads one now handles a
@@ -223,8 +237,8 @@ new single `content/agents/` directory — no code change needed there, but
 the directory move must not split the roster across two locations; the
 `pm-prompt-*.md` goldens, `check_capabilities.sh`'s drift diff, and
 `check_context_budget.sh`'s scanned-path list all need one mechanical
-update to the new paths in the same PR that moves the tree, or they go red
-for a reason unrelated to their actual purpose.
+update to the new paths, landing in whichever crate's PR moves the path it
+covers, or they go red for a reason unrelated to their actual purpose.
 
 **Neutral / follow-up:** `content/manifest.toml`, `content-lock.toml`, the
 `tm content` subcommand family, and the compatibility test matrix are new
@@ -236,9 +250,12 @@ sides now read the one `content/` tree) or needs updating to the new path —
 resolved when `trusty-code`'s own asset tree is folded into `content/` in a
 later step, deliberately out of scope for step 1.
 
-**Open question:** whether PHASE_1's move-and-embed-drop lands as a single
-PR spanning every affected crate, or splits into one PR per crate, is not
-yet decided. Either answer satisfies the sequencing ruling above.
+**Decided (2026-09-27, owner ruling):** PHASE_1's move-and-embed-drop splits
+into five PRs, one per crate, merging in publish order:
+trusty-agents-common, then trusty-mpm, then trusty-code and trusty-agents,
+then trusty-review. Each PR moves that crate's content into `content/**`
+and removes that crate's embeds in the same PR, so no published crate ever
+references a file outside its own package.
 
 ## Related Decisions
 

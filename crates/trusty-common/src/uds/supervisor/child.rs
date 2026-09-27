@@ -128,7 +128,9 @@ impl SpawnedChild {
 /// `detached` inverts that last decision (#6350). An on-demand service ends on
 /// its own idle window and is meant to be reused by the next client, so a
 /// transient caller's exit must not take it down — see
-/// [`super::SupervisorConfig::with_detached`].
+/// [`super::SupervisorConfig::with_detached`]. For the same reason a detached
+/// child starts in its own session (#8783), so a group kill or Ctrl-C aimed at
+/// the caller does not reach it; a supervised child stays in the caller's group.
 ///
 /// 🔴 **`detached` also decides whether stderr is captured (#6600), and the two
 /// arms are not interchangeable.** A supervised child's stderr is PIPED and
@@ -142,7 +144,8 @@ impl SpawnedChild {
 /// Test: `spawn_child_creates_requested_directories`,
 /// `spawn_child_reports_a_missing_binary`,
 /// `detached_children_are_not_retained_in_the_population`,
-/// `a_child_that_exits_before_binding_reports_its_status_and_stderr`.
+/// `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
+/// `only_a_detached_child_leads_its_own_session`.
 pub(super) async fn spawn_child(
     service: &str,
     key: &str,
@@ -175,6 +178,14 @@ pub(super) async fn spawn_child(
             Stdio::piped()
         })
         .kill_on_drop(!detached);
+    if detached {
+        // #8783: out of the caller's process group, so a group kill or Ctrl-C
+        // aimed at the caller spares the child it is meant to leave running.
+        // SAFETY: runs between fork and exec; the body is async-signal-safe.
+        unsafe {
+            command.pre_exec(crate::daemon_guard::become_session_leader);
+        }
+    }
 
     let mut child = command.spawn().map_err(|source| SupervisorError::Spawn {
         service: service.to_string(),

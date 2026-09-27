@@ -155,6 +155,13 @@ in the code, so deleting or moving a source file is what breaks it — a filter
 over Markdown would miss exactly that case, and filtering on the union of every
 tree it can reach is every path in the repository.
 
+`scripts/package_content.sh` (#8389) is a packager, not a check, and an
+operator can run it locally. It builds the deterministic content bundle that
+`.github/workflows/content-release.yml` publishes. Its self-test,
+`scripts/package_content_selftest.sh`, runs as a step of `ci.yml`'s `changes`
+job and again before packaging in the release workflow. Usage, bundle layout
+and the release procedure: [content-release.md](content-release.md).
+
 ## Which of these block a merge
 
 One does: `check_workspace_dep_versions.sh` runs as a step of `version-parity.yml`'s

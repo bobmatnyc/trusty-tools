@@ -159,7 +159,7 @@ pub(crate) fn retire_snapshot(chunks_path: &std::path::Path) -> Result<()> {
 /// What: `Colocated` → `<root>/.trusty-search/chunks.json` when it exists as a
 /// file, else the global path; `DataDir` → the global path only. `None` when
 /// no candidate exists — the real first boot — or when the global path cannot
-/// be resolved.
+/// be resolved. Creates nothing (#8499).
 /// Test: `colocated_snapshot_is_the_resolved_source`,
 /// `legacy_global_snapshot_is_still_resolved_and_absence_is_none`,
 /// `data_dir_index_ignores_a_foreign_colocated_snapshot`.
@@ -172,7 +172,14 @@ pub(crate) fn legacy_snapshot_source(indexer: &CodeIndexer) -> Option<std::path:
             return Some(colocated);
         }
     }
-    match persistence::chunks_path(&indexer.index_id) {
+    // #8499: resolve without `chunks_path`'s `create_dir_all` — a read must not
+    // leave an empty store directory that later reads as an existing store.
+    let global = persistence::data_dir().map(|d| {
+        d.join("indexes")
+            .join(persistence::sanitize_id_for_path(&indexer.index_id))
+            .join(crate::service::storage_layout::CHUNKS_JSON_FILE)
+    });
+    match global {
         Ok(p) if p.is_file() => Some(p),
         Ok(_) => None,
         Err(e) => {
@@ -575,6 +582,10 @@ mod tests {
             legacy_snapshot_source(&indexer),
             None,
             "no snapshot in either location resolves to None — the real first boot"
+        );
+        assert!(
+            !data_dir.path().join("indexes").join("global-8134").exists(),
+            "#8499: the probe must not create the store directory"
         );
 
         let global = persistence::chunks_path("global-8134").unwrap();

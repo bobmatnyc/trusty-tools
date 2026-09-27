@@ -12,11 +12,18 @@
 //! - Moving the project directory can be handled by a `migrate storage` step.
 //! - The index is co-located with the code it indexes for easy `find`/cleanup.
 //!
-//! What: this module resolves colocated storage paths and manages the `.gitignore`
-//! entry that prevents the `.trusty-search/` dir from being committed.
+//! #8499: a directory inside the work tree is deleted by `git clean -fdx`, so
+//! new registrations no longer use this layout — they keep their store in the
+//! data dir, outside the work tree. This layout remains for indexes that
+//! already have (or were shipped with) a `.trusty-search/` artifact.
 //!
-//! Test: `storage_dir_resolves_under_root`, `gitignore_entry_added_idempotently`,
-//! and `colocated_paths_distinct_for_different_roots` in the test block below.
+//! What: this module resolves colocated storage paths and writes the
+//! self-contained `.trusty-search/.gitignore` that hides the directory from
+//! git. It never reads or writes the repository's own `.gitignore`.
+//!
+//! Test: `storage_dir_resolves_under_root`,
+//! `self_ignore_is_created_once_and_never_rewritten`, and
+//! `colocated_paths_distinct_for_different_roots` in the test block below.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -28,16 +35,6 @@ use std::path::{Path, PathBuf};
 /// What: the literal string `.trusty-search`.
 /// Test: referenced by every test that constructs an expected path.
 pub const COLOCATED_DIR_NAME: &str = ".trusty-search";
-
-/// `.gitignore` line that should be present for every colocated index dir.
-///
-/// Why: the `.trusty-search/` dir contains redb, HNSW, and schema stamps —
-/// large binary files that should never be committed. Auto-adding this line
-/// prevents accidental `git add -A` from including them.
-/// What: the pattern that git(1) matches against the dir name.
-/// Test: `gitignore_entry_added_idempotently` verifies the line is appended
-/// exactly once regardless of how many times the helper is called.
-pub const GITIGNORE_LINE: &str = ".trusty-search/";
 
 /// Resolve the colocated storage directory for a given project root.
 ///
@@ -130,130 +127,64 @@ pub fn has_colocated_storage(root_path: &Path) -> bool {
     dir.exists() && dir.is_dir()
 }
 
-/// Ensure `.trusty-search/` is present in the `.gitignore` at `root_path`.
+/// Name of the git exclude file trusty-search keeps inside its own directory.
+pub const SELF_IGNORE_FILE: &str = ".gitignore";
+
+/// Content of [`SELF_IGNORE_FILE`]: ignore everything, the file included.
+pub const SELF_IGNORE_CONTENT: &str = "*\n";
+
+/// Hide a colocated storage directory from git without touching a tracked file.
 ///
-/// Why: `.trusty-search/` contains large binary files (redb, HNSW snapshots)
-/// that must never be committed. Auto-adding the ignore entry prevents
-/// accidental `git add -A` inclusion. The operation is idempotent — it
-/// checks for the pattern before appending.
-/// What: looks for `root_path/.gitignore`; if none found, creates one there.
-/// Appends `GITIGNORE_LINE` when it is not already present (checking both
-/// `".trusty-search/"` and `".trusty-search"` forms). Resolution is bounded
-/// strictly to `root_path` — no ancestor directory is ever read or written
-/// (issue #3564: an earlier version walked upward with no boundary and could
-/// find/write a `.gitignore` outside the caller's intended root, e.g. the
-/// shared `$TMPDIR` root under test). Failures are logged at warn level and
-/// do not propagate — missing `.gitignore` coverage is not fatal.
-/// Test: `gitignore_entry_added_idempotently`, `gitignore_stays_within_root_boundary`.
+/// Why (#8499): the daemon used to append `.trusty-search/` to the repo's own
+/// tracked `.gitignore` and leave the edit uncommitted. `git reset --hard`
+/// reverted it, and `git clean -fd` then deleted the index under a live mmap.
+/// A `.gitignore` inside the directory is untracked by design: `reset --hard`
+/// and `checkout` never touch it, `git status` stops reporting the directory,
+/// and `git clean -fd` (no `-x`) leaves it in place. `git clean -fdx` still
+/// removes it, which is why new indexes live outside the work tree
+/// ([`crate::service::storage_layout::StorageLayout::for_new_registration`]).
+/// What: creates `<dir>/.gitignore` holding `*` with `create_new`, so an
+/// existing file — whatever it holds — is never read or rewritten. Nothing
+/// outside `dir` is touched.
+/// Test: `self_ignore_is_created_once_and_never_rewritten`.
+pub fn ensure_self_ignored(dir: &Path) -> Result<()> {
+    let path = dir.join(SELF_IGNORE_FILE);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(SELF_IGNORE_CONTENT.as_bytes())
+                .with_context(|| format!("write {}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("create {}", path.display())),
+    }
+}
+
+/// Former `.gitignore` line; kept only so the public API does not break.
+#[deprecated(note = "#8499: trusty-search no longer edits the repository's .gitignore")]
+pub const GITIGNORE_LINE: &str = ".trusty-search/";
+
+/// Hide `<root_path>/.trusty-search/` from git, if it exists.
+///
+/// Why (#8499): this used to append `.trusty-search/` to the repository's own
+/// tracked `.gitignore`, leaving an uncommitted edit that `git reset --hard`
+/// reverted. It is kept for API compatibility and now edits nothing the
+/// repository tracks.
+/// What: delegates to [`ensure_self_ignored`] when the colocated directory
+/// exists; otherwise does nothing. The root `.gitignore` is never read or
+/// written, and the directory is never created.
+/// Test: `deprecated_ensure_gitignored_never_touches_the_root_gitignore`.
+#[deprecated(note = "#8499: use the data-dir layout; the colocated dir hides itself")]
 pub fn ensure_gitignored(root_path: &Path) -> Result<()> {
-    // The boundary equals `root_path` itself: this is the intended project
-    // root the caller pointed the tool at (see the two production callers,
-    // `migrate_storage::migrate` and `service::server::indexes::create_index`,
-    // both of which pass the user-supplied index root). Injecting the same
-    // value as both the start point and the hard upper bound means the walk
-    // can never escape it, in tests or production alike — there is no
-    // environment-dependent branch (e.g. "does `.git` exist above here?") for
-    // behavior to diverge on.
-    let gitignore_path = find_or_create_gitignore(root_path, root_path)?;
-
-    let content = match std::fs::read_to_string(&gitignore_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).context("read .gitignore"),
-    };
-
-    if gitignore_already_covers(&content) {
-        tracing::debug!(
-            ".gitignore at {} already covers .trusty-search/",
-            gitignore_path.display()
-        );
-        return Ok(());
+    let dir = root_path.join(COLOCATED_DIR_NAME);
+    if dir.is_dir() {
+        ensure_self_ignored(&dir)?;
     }
-
-    // Append the line. Ensure there is a trailing newline before our entry.
-    let needs_newline = !content.is_empty() && !content.ends_with('\n');
-    let mut new_content = content;
-    if needs_newline {
-        new_content.push('\n');
-    }
-    new_content.push_str(GITIGNORE_LINE);
-    new_content.push('\n');
-
-    std::fs::write(&gitignore_path, &new_content)
-        .with_context(|| format!("write .gitignore at {}", gitignore_path.display()))?;
-
-    tracing::info!(
-        "added .trusty-search/ to .gitignore at {}",
-        gitignore_path.display()
-    );
     Ok(())
-}
-
-/// Return true if the gitignore content already contains an entry that would
-/// exclude `.trusty-search/`.
-///
-/// Why: both `".trusty-search/"` (trailing slash) and `".trusty-search"` (no
-/// slash) are valid gitignore patterns that match the directory. Checking for
-/// both avoids a spurious double-entry when the user already wrote one form.
-/// What: line-based search for both patterns, ignoring comment lines.
-/// Test: `gitignore_entry_added_idempotently` covers both forms.
-fn gitignore_already_covers(content: &str) -> bool {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == ".trusty-search/" || trimmed == ".trusty-search" {
-            return true;
-        }
-    }
-    false
-}
-
-/// Find the closest `.gitignore` at or above `root_path`, never reading or
-/// creating anything above `boundary`.
-///
-/// Why (issue #3564): the previous version inferred its stop condition by
-/// checking for a `.git` directory during the walk, falling all the way to
-/// the filesystem root when none was ever found. That fallback is the bug:
-/// a `tempdir()` under test (or any production root not itself inside a git
-/// repo) has no `.git` anywhere above it, so the walk continued past the
-/// caller's intended root — in tests, into the shared `$TMPDIR` root, reading
-/// and potentially *writing* a stray `.gitignore` there instead of inside the
-/// project. In production the identical code path could locate and mutate a
-/// `.gitignore` outside the directory the user pointed the tool at. Inferring
-/// the boundary from `.git` presence also meant the walk behaved differently
-/// in tests (rarely inside a real repo) than in production (usually inside
-/// one) — an environment-dependent code path is exactly how this hid for so
-/// long. The fix takes `boundary` as an explicit, caller-injected parameter
-/// instead: the same hard limit applies identically regardless of what `.git`
-/// markers happen to exist on disk.
-/// What: walks upward from `root_path` (inclusive) toward `boundary`
-/// (inclusive); `boundary` must be `root_path` or one of its ancestors
-/// (debug-asserted). Returns the first existing `.gitignore` found at or
-/// between them. If none exists by the time the walk reaches `boundary`,
-/// returns `boundary/.gitignore` as the create target (which may not yet
-/// exist — the caller creates it by writing to the returned path). Never
-/// returns, reads, or writes a path outside `boundary`.
-/// Test: `gitignore_entry_added_idempotently` (root-level create case) and
-/// `gitignore_stays_within_root_boundary` (escape regression — proves a
-/// `.gitignore` outside the boundary is neither found nor mutated).
-fn find_or_create_gitignore(root_path: &Path, boundary: &Path) -> Result<PathBuf> {
-    debug_assert!(
-        root_path.starts_with(boundary),
-        "boundary must be root_path or an ancestor of root_path"
-    );
-    let mut current = root_path;
-    loop {
-        let candidate = current.join(".gitignore");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        if current == boundary {
-            return Ok(boundary.join(".gitignore"));
-        }
-        // `starts_with(boundary)` (asserted above) guarantees `parent()`
-        // eventually equals `boundary` before ever returning `None`; the
-        // `unwrap_or(boundary)` is a defensive fallback only.
-        current = current.parent().unwrap_or(boundary);
-    }
 }
 
 #[cfg(test)]
@@ -304,143 +235,44 @@ mod tests {
         assert!(path2.starts_with(tmp2.path()));
     }
 
+    /// Why (#8499): the self-ignore file must be created when absent and never
+    /// rewritten when present — an existing file may be the user's.
+    /// Test: this test.
     #[test]
-    fn gitignore_entry_added_idempotently() {
-        // Why: `ensure_gitignored` must append the line exactly once even when
-        // called multiple times. Duplicate entries are gitignore-harmless but
-        // look sloppy and confuse users.
+    fn self_ignore_is_created_once_and_never_rewritten() {
+        let tmp = tempdir().unwrap();
+        ensure_self_ignored(tmp.path()).unwrap();
+        let path = tmp.path().join(SELF_IGNORE_FILE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SELF_IGNORE_CONTENT);
+
+        std::fs::write(&path, "user content\n").unwrap();
+        ensure_self_ignored(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "user content\n",
+            "an existing file must be left byte for byte"
+        );
+    }
+
+    /// Why (#8499): the compatibility shim must never edit the root
+    /// `.gitignore` nor create the colocated directory.
+    /// Test: this test.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_ensure_gitignored_never_touches_the_root_gitignore() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
-
-        // First call — file does not yet exist; should be created with the entry.
+        std::fs::write(root.join(".gitignore"), "target/").unwrap();
         ensure_gitignored(root).unwrap();
-        let content1 = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(
-            content1.contains(GITIGNORE_LINE),
-            "first call must write the entry"
-        );
-        let count = content1
-            .lines()
-            .filter(|l| l.trim() == ".trusty-search/")
-            .count();
-        assert_eq!(count, 1, "exactly one entry after first call");
-
-        // Second call — file exists with the entry; must not duplicate it.
+        assert!(!has_colocated_storage(root), "must not create the dir");
+        colocated_storage_dir(root).unwrap();
         ensure_gitignored(root).unwrap();
-        let content2 = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        let count2 = content2
-            .lines()
-            .filter(|l| l.trim() == ".trusty-search/")
-            .count();
-        assert_eq!(count2, 1, "still exactly one entry after second call");
-    }
-
-    #[test]
-    fn gitignore_respects_no_trailing_slash_form() {
-        // Why: if the user already wrote `.trusty-search` (no trailing slash),
-        // we must NOT add a second entry.
-        let tmp = tempdir().unwrap();
-        let gitignore = tmp.path().join(".gitignore");
-        std::fs::write(&gitignore, ".trusty-search\n").unwrap();
-
-        ensure_gitignored(tmp.path()).unwrap();
-        let content = std::fs::read_to_string(&gitignore).unwrap();
-        let count = content
-            .lines()
-            .filter(|l| {
-                let t = l.trim();
-                t == ".trusty-search/" || t == ".trusty-search"
-            })
-            .count();
-        assert_eq!(count, 1, "no duplicate when no-slash form already present");
-    }
-
-    #[test]
-    fn gitignore_stays_within_root_boundary() {
-        // Why (issue #3564): this is the exact shape of the production bug —
-        // an ancestor directory (standing in for the shared `$TMPDIR` root
-        // seen in the wild) has its OWN `.gitignore` and even a `.git`
-        // marker, one level (in fact two) above a nested project root that
-        // has neither. The pre-fix `find_or_create_gitignore` walked upward
-        // with no boundary, found the ancestor `.gitignore` first, and wrote
-        // the entry there — mutating a file outside the directory the caller
-        // pointed the tool at, and leaving `project/.gitignore` absent. This
-        // test fails against pre-fix code for exactly that reason: the
-        // ancestor-untouched assertion below would fail (pre-fix, the
-        // ancestor gains `GITIGNORE_LINE`) and the project-gitignore-exists
-        // assertion would also fail (pre-fix, that file is never created).
-        let tmp = tempdir().unwrap();
-        let ancestor_gitignore = tmp.path().join(".gitignore");
-        std::fs::write(&ancestor_gitignore, "target/\n").unwrap();
-        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-
-        // Nested two levels down: `<tmp>/nested/project`. Neither
-        // intermediate dir has its own `.gitignore` or `.git`.
-        let project = tmp.path().join("nested").join("project");
-        std::fs::create_dir_all(&project).unwrap();
-
-        ensure_gitignored(&project).unwrap();
-
-        // Post-fix: the entry must land INSIDE the boundary (project root).
-        let project_gitignore = project.join(".gitignore");
-        assert!(
-            project_gitignore.exists(),
-            "gitignore must be created inside the boundary root, not escape it"
-        );
-        let project_content = std::fs::read_to_string(&project_gitignore).unwrap();
-        assert!(
-            project_content.contains(GITIGNORE_LINE),
-            "the created gitignore must contain the entry"
-        );
-
-        // Post-fix: the ancestor .gitignore (outside the boundary) must be
-        // completely untouched — this is the assertion that fails against
-        // pre-fix code (pre-fix, this file gains GITIGNORE_LINE instead).
-        let ancestor_content = std::fs::read_to_string(&ancestor_gitignore).unwrap();
         assert_eq!(
-            ancestor_content, "target/\n",
-            "ancestor .gitignore outside the boundary must never be read or mutated"
+            std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "target/"
         );
-    }
-
-    #[test]
-    fn find_or_create_gitignore_never_reads_above_explicit_boundary() {
-        // Why: directly exercises the private helper's boundary contract with
-        // a boundary that is a strict ancestor of `root_path` (not merely
-        // `root_path == boundary`, which `ensure_gitignored` always uses in
-        // production). Proves the general walk-with-boundary mechanism is
-        // correct on its own terms, independent of how the public API happens
-        // to invoke it today.
-        let tmp = tempdir().unwrap();
-        let boundary = tmp.path().join("boundary");
-        std::fs::create_dir_all(&boundary).unwrap();
-        let nested = boundary.join("a").join("b");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        // A `.gitignore` above `boundary` must never be found.
-        let outside_gitignore = tmp.path().join(".gitignore");
-        std::fs::write(&outside_gitignore, "should-not-be-found\n").unwrap();
-
-        let found = find_or_create_gitignore(&nested, &boundary).unwrap();
-        assert_eq!(
-            found,
-            boundary.join(".gitignore"),
-            "with none present within the boundary, target must be boundary/.gitignore"
-        );
-        assert!(
-            !found.exists(),
-            "find_or_create_gitignore only resolves the path; it does not create the file"
-        );
-
-        // Now place a `.gitignore` at an intermediate level WITHIN the
-        // boundary — it must be found instead of falling through to boundary.
-        let mid_gitignore = boundary.join("a").join(".gitignore");
-        std::fs::write(&mid_gitignore, "mid\n").unwrap();
-        let found2 = find_or_create_gitignore(&nested, &boundary).unwrap();
-        assert_eq!(
-            found2, mid_gitignore,
-            "an existing .gitignore within the boundary must be preferred"
-        );
+        let inner = root.join(COLOCATED_DIR_NAME).join(SELF_IGNORE_FILE);
+        assert_eq!(std::fs::read_to_string(inner).unwrap(), SELF_IGNORE_CONTENT);
     }
 
     #[test]
