@@ -1,6 +1,10 @@
 # 0064. Instructional content is tracked, versioned, and deployed separately from code
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-09-22 (owner ruling, [epic #8378](https://github.com/bobmatnyc/trusty-tools/issues/8378)); scope and scheduling confirmed 2026-09-23 10:55Z ([#8387](https://github.com/bobmatnyc/trusty-tools/issues/8387)) — decisions 3 and 4 (moving `sm_instructions/`, `harness_understanding/`, and the 43 shared agents; `hooks/` and `trusty-code`'s 12 local agents stay put until PHASE_4, [#8390](https://github.com/bobmatnyc/trusty-tools/issues/8390)) confirmed within this ADR's four content classes, no ADR change needed; PHASE_1 joins the merge queue after 1.7.1 ships.
+- **Amended:** 2026-09-27 20:30Z (owner ruling) — decision 5's compiled
+  offline-bootstrap fallback is dropped; content distribution is
+  runtime-only. See "Superseded 2026-09-27" under Decision item 5.
 - **Date:** 2026-09-22
 - **Scope:** Workspace-wide — bundled agents (`crates/trusty-agents-common/src/assets/agents/`),
   skills (`crates/trusty-mpm/src/assets/skills/`, `crates/trusty-code/src/assets/skills/`),
@@ -85,12 +89,25 @@ tree, versioned and changelogged independently of any crate:
    required branch-protection check) packages `content/` on every
    `content/**`-touching push to `main` and publishes a GitHub Release
    tagged `content-vX.Y.Z`, independent of every crate's own release tags.
-5. **Consumption.** `tm content update [--content-ref <tag>]` fetches and
+5. ~~**Consumption.** `tm content update [--content-ref <tag>]` fetches and
    pins a content bundle into a local cache, recorded in
    `content-lock.toml`. `include_str!` of the in-repo `content/` tree stays
    compiled into the binary, but strictly as an OFFLINE BOOTSTRAP FALLBACK —
    preferred only when no cache exists and no network is reachable — never
-   as the update channel.
+   as the update channel.~~
+   **Superseded 2026-09-27 (owner ruling):** drop the compiled fallback —
+   runtime only. Nothing about agents, skills, instructions, or output
+   styles is compiled into any binary: no `include_str!` and no `RustEmbed`
+   of content anywhere in the load path. On first run, `tm` fetches the
+   pinned content release (`content-vX.Y.Z`) into `~/.trusty-mpm/content`
+   and records it in `content-lock.toml`. With no cache and no network, `tm`
+   says so and names the command to run. Content changes never touch a
+   crate version or trigger a Rust build. Rationale: `cargo install` copies
+   binaries only — Cargo has no install model for data files — and a
+   published crate cannot `include_str!` files outside its own directory.
+   The actual `include_str!`/embed-macro removals may be sequenced into a
+   later phase (PHASE_3); PHASE_1 (this ADR's step 1, above) still only
+   moves the files.
 6. **Compatibility.** No hard version gate anywhere in the load path. A
    `requires:` frontmatter block is advisory — `tm doctor` reports it, deploy
    never blocks on it. A skill or agent that names a harness-specific
@@ -115,7 +132,10 @@ facts instead of conflating "stale" with "binary rebuilt."
 
 **Harder:** every `include_str!` call site across `trusty-mpm`,
 `trusty-agents-common`, and `trusty-code` moves and must be re-pointed in
-one coordinated PR (the migration's step 1); `extends:`-chain resolution
+one coordinated PR (the migration's step 1) — interim only, since decision 5
+(amended 2026-09-27) deletes these call sites entirely in a later phase
+rather than keeping them as a permanent offline fallback; `extends:`-chain
+resolution
 (`agents::builder::SourceLookup`) must keep resolving within the new
 single `content/agents/` directory — no code change needed there, but the
 directory move must not split the roster across two locations; the
