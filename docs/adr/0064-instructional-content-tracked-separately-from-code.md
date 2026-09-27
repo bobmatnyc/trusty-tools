@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Accepted:** 2026-09-22 (owner ruling, [epic #8378](https://github.com/bobmatnyc/trusty-tools/issues/8378)); scope and scheduling confirmed 2026-09-23 10:55Z ([#8387](https://github.com/bobmatnyc/trusty-tools/issues/8387)) — decisions 3 and 4 (moving `sm_instructions/`, `harness_understanding/`, and the 43 shared agents; `hooks/` and `trusty-code`'s 12 local agents stay put until PHASE_4, [#8390](https://github.com/bobmatnyc/trusty-tools/issues/8390)) confirmed within this ADR's four content classes, no ADR change needed; PHASE_1 joins the merge queue after 1.7.1 ships.
-- **Amended:** 2026-09-27 20:30Z (owner ruling) — decision 5's compiled
+- **Amended:** 2026-09-27 (owner ruling) — decision 5's compiled
   offline-bootstrap fallback is dropped; content distribution is
   runtime-only. See "Superseded 2026-09-27" under Decision item 5.
 - **Date:** 2026-09-22
@@ -108,6 +108,26 @@ tree, versioned and changelogged independently of any crate:
    The actual `include_str!`/embed-macro removals may be sequenced into a
    later phase (PHASE_3); PHASE_1 (this ADR's step 1, above) still only
    moves the files.
+
+   **PHASE_3 acceptance criteria (owner ruling 2026-09-27).** PHASE_3 ships
+   only once all four hold:
+
+   i. **Integrity.** `content-lock.toml` pins the installed release's tag
+      and a sha256 of the bundle. `tm` refuses to run against an installed
+      bundle whose sha256 does not match the pinned value.
+   ii. **Offline install.** `tm content install --from <bundle.tar.gz>`
+       installs a content bundle from a local file, with no network
+       reachable.
+   iii. **Dev override.** Run from inside the `trusty-tools` checkout, `tm`
+        reads `content/` directly, bypassing the installed cache.
+   iv. **Schema major version.** Content frontmatter carries a schema major
+       version. `tm` refuses to load a bundle whose schema major version is
+       newer than the one it supports, and states why.
+
+   The content version stays advisory (decision 6 is otherwise unchanged):
+   none of the four conditions above adds a hard version gate. Hooks,
+   `pm-guard`, and the deployer stay in code — PHASE_3 relocates
+   instructional content only.
 6. **Compatibility.** No hard version gate anywhere in the load path. A
    `requires:` frontmatter block is advisory — `tm doctor` reports it, deploy
    never blocks on it. A skill or agent that names a harness-specific
