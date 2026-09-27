@@ -1,0 +1,2 @@
+Added
+- `trusty-memory palace deletions <palace> [--drawer <uuid>] [--limit N] [--json]` lists the drawers the dream and purge passes deleted, with the reason, the pid of the deleting process and, for a dedup, the surviving drawer and its similarity score. It is read-only and safe with the daemon up. A pass that deletes drawers now also logs a one-line summary at `warn`, so it shows at the daemon's default log level (#8732).

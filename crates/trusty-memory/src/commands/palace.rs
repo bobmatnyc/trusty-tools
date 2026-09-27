@@ -34,7 +34,7 @@ use trusty_common::memory_core::PalaceRegistry;
 /// existing vector-only `palace_compact` MCP tool would have widened that
 /// tool's blast radius with nothing in its name to warn a caller.
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
-/// `LegacyKg` writes only with `--apply` (#8434).
+/// `LegacyKg` writes only with `--apply` (#8434). `Deletions` is read-only (#8732).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -98,6 +98,24 @@ pub enum PalaceAction {
         #[arg(long)]
         allow_short: bool,
     },
+    /// List drawers the dream and purge passes deleted, with the reason and,
+    /// for dedup, the surviving drawer and score (#8732).
+    ///
+    /// READ-ONLY. Reads the palace's `maintenance_deletions.jsonl`; safe with
+    /// the daemon up. User deletions (`memory_forget`) are not listed.
+    Deletions {
+        /// Palace id.
+        name: String,
+        /// Only records naming this drawer, as removed or surviving side.
+        #[arg(long, value_name = "UUID")]
+        drawer: Option<uuid::Uuid>,
+        /// Show at most this many of the newest matching records.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -144,6 +162,18 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
                 Some(e) => anyhow::bail!("embed imported drawers: {e}"),
                 None => Ok(()),
             }
+        }
+        PalaceAction::Deletions {
+            name,
+            drawer,
+            limit,
+            json,
+        } => {
+            let palace = resolve(&name)?;
+            let report =
+                super::palace_deletions::deletions_report(&name, &palace, drawer, limit, json)?;
+            print!("{report}");
+            Ok(())
         }
     }
 }

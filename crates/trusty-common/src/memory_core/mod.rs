@@ -25,6 +25,10 @@ pub mod dream;
 pub mod embed;
 pub mod filter;
 pub mod git;
+// #8732: durable trail of drawer deletions made by maintenance paths.
+pub mod maintenance_log;
+#[cfg(test)]
+mod maintenance_log_tests;
 pub mod palace;
 pub mod registry;
 // ADR-0027 T1: pure room identity (canonical keys, UUIDv5 minting, the legacy

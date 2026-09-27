@@ -474,11 +474,15 @@ impl PalaceHandle {
             kg.store(),
             expired_ids,
             &palace.id,
+            Some(data_dir.clone()),
             super::open_sweep::OPEN_WRITE_BUDGET,
         );
-        if pruned > 0 {
-            tracing::info!(palace = %palace.id, count = pruned, "purged expired drawers at open");
-        }
+        // #8732: `warn`, so the purge shows at the daemon's default filter.
+        crate::memory_core::maintenance_log::warn_removed(
+            &palace.id,
+            "open-time TTL purge",
+            pruned,
+        );
 
         // Surface orphaned vectors so operators can re-ingest if needed.
         let index_count = vector_store.index_size();
@@ -1003,15 +1007,15 @@ impl PalaceHandle {
         // forget that failed or raced another writer used to inflate this.
         let mut count = 0usize;
         for id in expired_ids {
-            match self.forget(id).await {
+            // #8732: recorded as a maintenance deletion, summarised at `warn`.
+            let reason = crate::memory_core::maintenance_log::DeletionReason::ExpiredPurge;
+            match self.forget_for_maintenance(id, reason, None).await {
                 Ok(outcome) if outcome.is_deleted() => count += 1,
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?id, "purge_expired: forget failed: {e:#}"),
             }
         }
-        if count > 0 {
-            tracing::info!(palace = %self.id, count, "purged expired drawers");
-        }
+        crate::memory_core::maintenance_log::warn_removed(&self.id, "TTL purge", count);
         Ok(count)
     }
 

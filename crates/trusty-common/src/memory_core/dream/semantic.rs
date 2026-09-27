@@ -509,7 +509,9 @@ pub(super) async fn consolidate_scoped_within(
         }
         // #5231: a superseded id that is no longer in the drawer table was not
         // evicted by this pass and must not be counted as one.
-        match handle.forget(id).await {
+        // #8732: recorded; the canonical id is the KG `superseded_by` edge.
+        let reason = crate::memory_core::maintenance_log::DeletionReason::SemanticConsolidation;
+        match handle.forget_for_maintenance(id, reason, None).await {
             Ok(outcome) if outcome.is_deleted() => evicted += 1,
             Ok(_) => tracing::warn!(?id, "dream_consolidate_room: superseded id not in palace"),
             Err(e) => tracing::warn!(?id, "dream_consolidate_room: evict failed: {e:#}"),
@@ -519,6 +521,7 @@ pub(super) async fn consolidate_scoped_within(
     if let Err(e) = handle.flush() {
         tracing::warn!(palace = %handle.id, "dream_consolidate_room flush failed: {e:#}");
     }
+    crate::memory_core::maintenance_log::warn_removed(&handle.id, "room consolidation", evicted);
 
     Ok(RoomConsolidationStats {
         summary_facts_created,

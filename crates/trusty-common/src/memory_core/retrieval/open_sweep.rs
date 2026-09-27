@@ -22,6 +22,7 @@
 //! `a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time`,
 //! `expired_tier_c_drawer_survives_the_open_time_sweep`.
 
+use crate::memory_core::maintenance_log::{self, DeletionReason, MaintenanceDeletion};
 use crate::memory_core::palace::PalaceId;
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use std::sync::Arc;
@@ -98,11 +99,15 @@ where
 ///
 /// Why/What: see the module doc. Returns how many deletes succeeded, or 0 when
 /// the sweep was skipped or ran past `budget`, so the caller's "purged" count
-/// never reports a row that is not known to be gone.
+/// never reports a row that is not known to be gone. #8732: each committed
+/// delete is recorded to the maintenance journal in `data_dir` from the helper
+/// thread, so a delete that lands after the budget is recorded too.
+/// Test: `maintenance_log_tests::the_open_time_purge_records_each_expired_drawer`.
 pub(super) fn reclaim_expired_rows(
     store: Arc<KgStoreRedb>,
     ids: Vec<Uuid>,
     palace: &PalaceId,
+    data_dir: Option<std::path::PathBuf>,
     budget: Duration,
 ) -> usize {
     if ids.is_empty() {
@@ -114,7 +119,12 @@ pub(super) fn reclaim_expired_rows(
         let mut reclaimed = 0usize;
         for id in ids {
             match worker.delete_drawer(id) {
-                Ok(()) => reclaimed += 1,
+                Ok(()) => {
+                    reclaimed += 1;
+                    let rec =
+                        MaintenanceDeletion::new(&owner, id, DeletionReason::ExpiredPurgeAtOpen);
+                    maintenance_log::record(data_dir.as_deref(), &rec);
+                }
                 Err(e) => tracing::warn!(
                     palace = %owner, id = %id,
                     "purge_expired: delete_drawer failed: {e:#}"

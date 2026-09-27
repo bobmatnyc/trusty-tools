@@ -303,10 +303,14 @@ pub(crate) async fn restore_index_on_demand(
     // #4390: a cold-parked index reloaded on demand gets the same re-arm the
     // eager warm-boot path does — otherwise an interrupted pass on a parked
     // index would wait for an unrelated reindex, indefinitely on a quiet repo.
-    crate::service::boot_markers::rearm_deferred_embed_if_pending(
-        &registered,
-        deferred_embed_pending,
-        chunk_count,
-    )
-    .await;
+    // #8726: a snapshot on disk is not a complete one. A store short of the
+    // corpus is demoted and backfilled; that pass also settles the #4390 marker.
+    if !crate::service::vector_gap::reconcile_semantic_vector_gap(&registered).await {
+        crate::service::boot_markers::rearm_deferred_embed_if_pending(
+            &registered,
+            deferred_embed_pending,
+            chunk_count,
+        )
+        .await;
+    }
 }
