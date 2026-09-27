@@ -560,9 +560,15 @@ pub(crate) enum SessionAction {
     /// caller's own claim. The caller's own workspace directory is still
     /// refused, and every refusal now names the session that holds the claim
     /// and says whether it is the caller.
+    ///
+    /// #8782: scoped to the checkout the command runs in unless
+    /// `--all-projects` is given. Every run prints a per-project preview —
+    /// each path, its reason, a count — and `--force` removes only the paths
+    /// that preview listed.
     /// Test: `cli_parses_session_prune_worktrees`,
     /// `cli_prune_worktrees_discard_dirty_is_opt_in`,
-    /// `cli_prune_worktrees_merged_prs_is_opt_in`.
+    /// `cli_prune_worktrees_merged_prs_is_opt_in`,
+    /// `cli_prune_worktrees_all_projects_is_opt_in`.
     PruneWorktrees {
         /// Actually delete orphaned dirs (default: dry-run / preview only).
         ///
@@ -580,6 +586,10 @@ pub(crate) enum SessionAction {
         /// (#2919). Off by default. Never destroys unsaved work.
         #[arg(long)]
         merged_prs: bool,
+        /// Act on EVERY registered project's worktrees (#8782). Off by default:
+        /// the run is scoped to the checkout it is invoked from.
+        #[arg(long)]
+        all_projects: bool,
     },
     /// Report every git-registered worktree against `sessions.json` (#4288).
     ///

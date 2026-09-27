@@ -450,7 +450,15 @@ pub(crate) async fn session(
             force,
             discard_dirty,
             merged_prs,
+            all_projects,
         } => {
+            // #8782: scoped to this checkout unless `--all-projects`; outside a
+            // repository there is no project to scope to, so it refuses.
+            let project_root = if all_projects {
+                None
+            } else {
+                Some(crate::commands::prune_preview::current_project_root()?)
+            };
             // `--force` means "actually delete"; absence means dry-run (#1840).
             // `--discard-dirty` is a SEPARATE opt-in that additionally permits
             // destroying uncommitted/unpushed work (#4091).
@@ -466,6 +474,7 @@ pub(crate) async fn session(
                 discard_dirty,
                 merged_prs,
                 std::env::var("TM_MANAGED_SESSION_ID").ok(),
+                project_root,
             )
             .await?
         }

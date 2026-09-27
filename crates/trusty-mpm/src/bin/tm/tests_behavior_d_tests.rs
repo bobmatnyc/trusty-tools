@@ -530,6 +530,7 @@ fn cli_parses_session_prune_worktrees() {
                     force,
                     discard_dirty,
                     merged_prs,
+                    ..
                 },
         } => {
             assert!(!force, "default must be dry-run (force=false)");
@@ -551,6 +552,7 @@ fn cli_parses_session_prune_worktrees() {
                     force,
                     discard_dirty,
                     merged_prs,
+                    ..
                 },
         } => {
             assert!(force, "--force must set force=true");
@@ -591,6 +593,7 @@ fn cli_prune_worktrees_discard_dirty_is_opt_in() {
                     force,
                     discard_dirty,
                     merged_prs,
+                    ..
                 },
         } => {
             assert!(force);
@@ -648,6 +651,7 @@ fn cli_prune_worktrees_merged_prs_is_opt_in() {
                     force,
                     discard_dirty,
                     merged_prs,
+                    ..
                 },
         } => {
             assert!(force);

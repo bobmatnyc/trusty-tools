@@ -141,6 +141,10 @@ pub(crate) mod ssh_host_alias;
 // read from that directory's own `origin` rather than inferred by `gh`.
 pub(crate) mod worktree_repo_slug;
 pub mod worktree_safety;
+// #8782: the project/path bounds of one prune-worktrees pass.
+pub mod worktree_scope;
+// #8782: the per-path preview rows the prune route returns.
+pub(crate) mod worktree_reclaim_preview;
 
 // #7259: `pub(crate)` so the doctor's own tests can drive a manager against
 // `FakeTmuxDriver` — the doctor probe's claim set now comes from the store, so

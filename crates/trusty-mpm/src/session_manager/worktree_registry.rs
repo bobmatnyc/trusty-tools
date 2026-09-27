@@ -53,6 +53,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::worktree_safety::git_command;
+use super::worktree_scope::WorktreeScope;
 
 /// The bare-clone checkout trusty-mpm provisions alongside a managed project.
 ///
@@ -516,11 +517,25 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// other than `<repos_root>/<owner>/<repo>`; see
 /// [`scan_registered_worktrees`] for the containment rule they get. Pass `&[]`
 /// for the walk alone.
+// #8782: every production caller passes a scope; the unscoped form serves the
+// tests and the module docs that name it.
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn enumerate_registered_worktrees(
     repos_root: &Path,
     adopted: &[PathBuf],
 ) -> Vec<PathBuf> {
-    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root, adopted)
+    enumerate_registered_worktrees_in(repos_root, adopted, &WorktreeScope::all())
+}
+
+/// [`enumerate_registered_worktrees`], bounded by `scope` (#8782).
+///
+/// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`.
+pub(crate) fn enumerate_registered_worktrees_in(
+    repos_root: &Path,
+    adopted: &[PathBuf],
+    scope: &WorktreeScope,
+) -> Vec<PathBuf> {
+    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees_in(repos_root, adopted, scope)
         .into_iter()
         .filter(|s| s.admission == Admission::Admitted)
         .map(|s| s.path)
@@ -737,6 +752,22 @@ pub(crate) fn scan_registered_worktrees(
             branch: key.branch,
             admission: key.admission,
         })
+        .collect()
+}
+
+/// [`scan_registered_worktrees`], keeping only the rows `scope` admits (#8782).
+///
+/// Why: the one chokepoint both prune passes enumerate through, so a scoped
+/// run cannot survey — or reclaim — another project's worktrees.
+/// Test: `a_project_scope_admits_only_that_projects_worktrees`.
+pub(crate) fn scan_registered_worktrees_in(
+    repos_root: &Path,
+    adopted: &[PathBuf],
+    scope: &WorktreeScope,
+) -> Vec<ScannedWorktree> {
+    scan_registered_worktrees(repos_root, adopted)
+        .into_iter()
+        .filter(|s| scope.admits(s))
         .collect()
 }
 

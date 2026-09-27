@@ -20,6 +20,8 @@ use tracing::warn;
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_reclaim::ReclaimMode;
+use crate::session_manager::worktree_reclaim_preview::preview_rows;
+use crate::session_manager::worktree_scope::WorktreeScope;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
@@ -169,6 +171,18 @@ pub struct PruneWorktreesRequest {
     /// worktrees as blocked by a stranger.
     #[serde(default)]
     pub invoking_session: Option<String>,
+    /// The checkout the caller is working in; when set, both passes touch only
+    /// worktrees that checkout's registry lists (#8782).
+    ///
+    /// Absent means every registered project — the automatic sweep's and the
+    /// MCP tool's scope. A value that does not resolve is REJECTED, never read
+    /// as "absent", so a typo cannot widen a prune to every project.
+    #[serde(default)]
+    pub project_root: Option<String>,
+    /// The paths a `--force` run's own preview listed (#8782). When set, no
+    /// worktree outside it is surveyed or removed.
+    #[serde(default)]
+    pub only_paths: Option<Vec<String>>,
 }
 
 fn default_dry_run() -> bool {
@@ -224,6 +238,16 @@ pub(crate) async fn prune_worktrees_core(
         warn!("prune-worktrees route: {msg}");
         return RouteOutcome::text(400, msg);
     }
+    // #8782: resolved before any work, and a project root that does not
+    // resolve is a 400 rather than a daemon-global sweep.
+    let scope =
+        match WorktreeScope::from_request(req.project_root.as_deref(), req.only_paths.as_deref()) {
+            Ok(scope) => scope,
+            Err(msg) => {
+                warn!("prune-worktrees route: {msg}");
+                return RouteOutcome::text(400, msg);
+            }
+        };
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -275,12 +299,13 @@ pub(crate) async fn prune_worktrees_core(
     // wrote them to. Every scan below takes them as a parameter.
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
     match mgr
-        .prune_orphaned_worktrees(
+        .prune_orphaned_worktrees_in(
             &repos_root,
             &in_use_workspace_paths,
             req.dry_run,
             policy,
             &adopted,
+            &scope,
         )
         .await
     {
@@ -328,39 +353,48 @@ pub(crate) async fn prune_worktrees_core(
                     &repos_root,
                     mode,
                     req.invoking_session.clone(),
+                    scope.clone(),
                 )
                 .await
                 {
-                    Ok(o) => serde_json::json!({
-                        "removed": o.removed,
-                        "removed_bytes": o.removed_bytes,
-                        "refused_at_recheck": o.refused_at_recheck,
-                        "removal_failed": o.removal_failed,
-                        // #5829: the agent-ownership gate has spared these
-                        // since #5661, but reported nothing — so a run that
-                        // protected a live agent's tree was indistinguishable
-                        // from one that found nothing to reclaim.
-                        "spared_agent_owned": o.survey.agent_owned,
-                        // #6507: one line per non-reclaimable candidate naming
-                        // the GATE that refused it. Without it a plain
-                        // `Blocked` — every gate but 4 — appears in no field of
-                        // this reply and in no log line, which is how a merged,
-                        // clean worktree sat unreclaimed with nothing saying
-                        // why.
-                        "blocked_reasons": o.survey.blocked_reasons,
-                        "reclaimable": o.survey.reclaimable,
-                        "reclaimable_measured": o.survey.reclaimable_measured,
-                        "reclaimable_bytes": o.survey.reclaimable_bytes,
-                        "total_bytes": o.survey.total_bytes,
-                        "pr_state_unknown": o.survey.pr_state_unknown,
-                        // #6561: without these three, `0 reclaimable` and
-                        // "the `gh` call failed for every worktree" are the
-                        // same reply. The renderer prints them beside the
-                        // reclaimable count.
-                        "not_inspected": o.survey.not_inspected,
-                        "lookup_failed": o.survey.lookup_failed,
-                        "lookup_failure": o.survey.lookup_failure,
-                    }),
+                    Ok(o) => {
+                        // #8782: every path the pass would remove, and every path
+                        // it keeps because its PR state is unknown, each with its
+                        // project and reason.
+                        let preview = preview_rows(&o.survey);
+                        serde_json::json!({
+                            "reclaimable_paths": preview.reclaim,
+                            "unknown_paths": preview.unknown,
+                            "removed": o.removed,
+                            "removed_bytes": o.removed_bytes,
+                            "refused_at_recheck": o.refused_at_recheck,
+                            "removal_failed": o.removal_failed,
+                            // #5829: the agent-ownership gate has spared these
+                            // since #5661, but reported nothing — so a run that
+                            // protected a live agent's tree was indistinguishable
+                            // from one that found nothing to reclaim.
+                            "spared_agent_owned": o.survey.agent_owned,
+                            // #6507: one line per non-reclaimable candidate naming
+                            // the GATE that refused it. Without it a plain
+                            // `Blocked` — every gate but 4 — appears in no field of
+                            // this reply and in no log line, which is how a merged,
+                            // clean worktree sat unreclaimed with nothing saying
+                            // why.
+                            "blocked_reasons": o.survey.blocked_reasons,
+                            "reclaimable": o.survey.reclaimable,
+                            "reclaimable_measured": o.survey.reclaimable_measured,
+                            "reclaimable_bytes": o.survey.reclaimable_bytes,
+                            "total_bytes": o.survey.total_bytes,
+                            "pr_state_unknown": o.survey.pr_state_unknown,
+                            // #6561: without these three, `0 reclaimable` and
+                            // "the `gh` call failed for every worktree" are the
+                            // same reply. The renderer prints them beside the
+                            // reclaimable count.
+                            "not_inspected": o.survey.not_inspected,
+                            "lookup_failed": o.survey.lookup_failed,
+                            "lookup_failure": o.survey.lookup_failure,
+                        })
+                    }
                     Err(e) => {
                         // A panicked pass reclaimed nothing; say so rather than
                         // omitting the key, which would read as "not requested".
@@ -373,6 +407,10 @@ pub(crate) async fn prune_worktrees_core(
             };
             RouteOutcome::ok(&serde_json::json!({
                 "dry_run": req.dry_run,
+                // #8782: echoed so a client can refuse a daemon that predates
+                // the scope and would have run daemon-global.
+                "scope": scope.echo(),
+                "orphan_rows": orphan_rows(&outcome.removed),
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
                 "agent_owned_paths": agent_owned_paths,
@@ -385,6 +423,25 @@ pub(crate) async fn prune_worktrees_core(
             RouteOutcome::text(500, format!("orphan worktree scan failed: {e}"))
         }
     }
+}
+
+/// The orphan pass's paths as preview rows: path, owning checkout, reason (#8782).
+///
+/// Test: `orphan_rows_name_the_owning_checkout`.
+pub(crate) fn orphan_rows(paths: &[std::path::PathBuf]) -> Vec<serde_json::Value> {
+    paths
+        .iter()
+        .map(|p| {
+            let project = crate::session_manager::worktree_scope::project_root_for(p)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(owning checkout unresolved)".to_string());
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "project": project,
+                "reason": "orphaned — its owning session has ended and it holds no unsaved work",
+            })
+        })
+        .collect()
 }
 
 /// POST /api/v1/sessions/managed/prune — by-state prune + compaction (#1508).
@@ -524,6 +581,8 @@ mod tests {
                 discard_dirty: false,
                 merged_prs: false,
                 invoking_session: Some("not-a-uuid".into()),
+                project_root: None,
+                only_paths: None,
             }),
         )
         .await
@@ -542,6 +601,8 @@ mod tests {
                 discard_dirty: false,
                 merged_prs: false,
                 invoking_session: None,
+                project_root: None,
+                only_paths: None,
             }),
         )
         .await
@@ -757,6 +818,8 @@ mod tests {
                     discard_dirty: false,
                     merged_prs: false,
                     invoking_session: None,
+                    project_root: None,
+                    only_paths: None,
                 }),
             )
             .await

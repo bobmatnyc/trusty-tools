@@ -59,6 +59,7 @@ use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode, ReclaimOutcome};
 use crate::session_manager::worktree_reclaim_launch::process_launch_dirs;
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
+use crate::session_manager::worktree_scope::WorktreeScope;
 
 /// Environment variable that disables the automatic sweep entirely.
 ///
@@ -222,6 +223,8 @@ pub(crate) async fn reclaim(
     repos_root: &Path,
     mode: ReclaimMode,
     invoking_session: Option<String>,
+    // #8782: the project/path bounds; `WorktreeScope::all()` for the sweep.
+    scope: WorktreeScope,
 ) -> Result<ReclaimOutcome, String> {
     let repos_root = repos_root.to_path_buf();
     // #7357: resolved here — on the entry point — never inside the engine, which
@@ -270,6 +273,7 @@ pub(crate) async fn reclaim(
             &keep_list,
             &adopted,
             &launched_from,
+            &scope,
         )
     })
     .await
@@ -373,6 +377,8 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         &configured_workspace_root(),
         ReclaimMode::Remove,
         None,
+        // The automatic sweep stays daemon-global: it has no caller project.
+        WorktreeScope::all(),
     )
     .await
     {

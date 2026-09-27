@@ -301,11 +301,19 @@ fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
 /// own trees. It is a PARAMETER rather than an inline `$TM_MANAGED_SESSION_ID`
 /// read so this function performs no process-global env work — the call site in
 /// `commands::session` resolves the id.
+/// `project_root` (#8782) is the checkout this run is scoped to, or `None` for
+/// `--all-projects`. Every run POSTs a preview first and prints it; `--force`
+/// then POSTs once more carrying that preview's paths as `only_paths`, so it
+/// removes nothing the preview did not list. Each reply must echo the scope —
+/// a daemon that predates #8782 ignores it and runs daemon-global.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
 /// `merged_pr_request_outlives_the_default_client_timeout`; the caller id by
-/// `prune_worktrees_sends_the_invoking_session`.
+/// `prune_worktrees_sends_the_invoking_session`; the #8782 two-step by
+/// `force_sends_only_the_previewed_paths`,
+/// `force_sends_nothing_after_a_reply_without_the_scope_echo`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
     url: &str,
@@ -313,41 +321,86 @@ pub(crate) async fn session_prune_worktrees(
     discard_dirty: bool,
     merged_prs: bool,
     invoking_session: Option<String>,
+    project_root: Option<String>,
 ) -> anyhow::Result<()> {
     // #8347: a loopback gateway is bypassed for the local daemon; a remote one
     // is refused rather than silently retargeted (#1737).
     let endpoint =
         prune_endpoint(client, url, || trusty_mpm::core::resolve_daemon_url(None)).await?;
-    let mut request = client.post(endpoint).json(&serde_json::json!({
-        "dry_run": dry_run,
-        "discard_dirty": discard_dirty,
-        // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
-        "merged_prs": merged_prs,
-        // #6806: the daemon occupies no pane and cannot discover who is
-        // asking, so the caller names itself. Absent outside a managed
-        // session, which leaves every claim foreign — the pre-#6806 gate.
-        "invoking_session": invoking_session,
-    }));
+    let post = |dry_run: bool, only_paths: Option<Vec<String>>| {
+        let mut request = client.post(&endpoint).json(&serde_json::json!({
+            "dry_run": dry_run,
+            "discard_dirty": discard_dirty,
+            // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
+            "merged_prs": merged_prs,
+            // #6806: the daemon occupies no pane and cannot discover who is
+            // asking, so the caller names itself. Absent outside a managed
+            // session, which leaves every claim foreign — the pre-#6806 gate.
+            "invoking_session": invoking_session,
+            // #8782: the project this run is bounded to, and on `--force` the
+            // preview's own paths.
+            "project_root": project_root,
+            "only_paths": only_paths,
+        }));
+        if merged_prs {
+            // #5830: the merged-PR survey runs synchronously in the handler and
+            // takes minutes, so the client's 10s default aborted every invocation.
+            request =
+                request.timeout(trusty_mpm::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT);
+        }
+        async move {
+            // #7884: a timeout is a named error, never a generic transport line.
+            let resp = request.send().await.map_err(prune_transport_error)?;
+            let body: serde_json::Value = resp
+                .error_for_status()?
+                .json()
+                .await
+                .map_err(prune_transport_error)?;
+            anyhow::Ok(body)
+        }
+    };
     if merged_prs {
-        // #5830: the merged-PR survey runs synchronously in the handler and
-        // takes minutes, so the client's 10s default aborted every invocation.
-        request = request.timeout(trusty_mpm::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT);
         // The wait is long and the daemon streams nothing, so say what is
         // happening — an operator with no output cannot tell a running survey
         // from a wedged one.
         eprintln!(
-            "merged-PR pass: surveying every registered worktree (classify, then byte-walk) \
-             — this takes minutes on a large workspace and prints nothing until it \
+            "merged-PR pass: surveying the registered worktrees in scope (classify, then \
+             byte-walk) — this takes minutes on a large workspace and prints nothing until it \
              finishes (#5830)"
         );
     }
-    // #7884: a timeout is a named error, never a generic transport line.
-    let resp = request.send().await.map_err(prune_transport_error)?;
-    let body: serde_json::Value = resp
-        .error_for_status()?
-        .json()
-        .await
-        .map_err(prune_transport_error)?;
+    // #8782: every run previews first. A `--force` run needs the echo too: a
+    // daemon without it would ignore `only_paths` as well as the scope.
+    let preview = post(true, None).await?;
+    let project = project_root.as_deref();
+    super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
+    for line in super::prune_preview::preview_lines(&preview) {
+        println!("{line}");
+    }
+    if dry_run {
+        print_prune_reply(&preview, true, merged_prs);
+        return Ok(());
+    }
+    let planned = super::prune_preview::planned_paths(&preview);
+    if planned.is_empty() {
+        println!("--force: the preview listed nothing to remove, so nothing was removed (#8782)");
+        print_prune_reply(&preview, true, merged_prs);
+        return Ok(());
+    }
+    let body = post(false, Some(planned)).await?;
+    super::prune_preview::check_scope_echo(&body, project, true)?;
+    print_prune_reply(&body, false, merged_prs);
+    Ok(())
+}
+
+/// Print one prune-worktrees reply: removed paths, dirty skips, merged-PR pass.
+///
+/// Why: split from [`session_prune_worktrees`] by #8782, which prints a preview
+/// reply and a removal reply through the same renderer.
+/// What: under `dry_run` the orphan paths are not repeated — the preview has
+/// listed them — and only the count is printed.
+/// Test: exercised by `prune_worktrees_sends_the_invoking_session`.
+fn print_prune_reply(body: &serde_json::Value, dry_run: bool, merged_prs: bool) {
     let paths = body
         .get("paths")
         .and_then(serde_json::Value::as_array)
@@ -359,7 +412,9 @@ pub(crate) async fn session_prune_worktrees(
     // stderr so the operator is aware, rather than silently dropping the entry.
     for p in &paths {
         if let Some(s) = p.as_str() {
-            println!("{s}");
+            if !dry_run {
+                println!("{s}");
+            }
             printed += 1;
         } else {
             eprintln!("warning: prune-worktrees: unexpected non-string path entry: {p}");
@@ -401,7 +456,6 @@ pub(crate) async fn session_prune_worktrees(
     if merged_prs {
         print_merged_pr_pass(body.get("merged_prs"), dry_run);
     }
-    Ok(())
 }
 
 #[cfg(test)]
