@@ -531,6 +531,8 @@ async fn run_with_mode_capture_folds_stderr_into_error() {
 /// Why: We need a real binary that is always present to test the happy path
 /// without installing anything. `cargo --version` is a safe no-side-effect probe.
 /// Test: tagged #[ignore] (shells out); run manually with `--include-ignored`.
+// #5937: resolves ~/.cargo/bin from HOME, which the group below sets.
+#[serial(update_verify_installed_binary_env)]
 #[tokio::test]
 #[ignore]
 async fn verify_installed_binary_passes_for_cargo() {
@@ -546,6 +548,8 @@ async fn verify_installed_binary_passes_for_cargo() {
 ///
 /// Why: Confirms the health gate catches missing binaries before a self-exit.
 /// Test: sync test — no shell-out needed because `which` will quickly fail.
+// #5937: resolves ~/.cargo/bin from HOME, which the group below sets.
+#[serial(update_verify_installed_binary_env)]
 #[tokio::test]
 async fn verify_installed_binary_fails_for_missing_binary() {
     let result = super::verify_installed_binary("___no_such_binary_xyz_999___").await;
@@ -901,6 +905,8 @@ fn write_versioned_binary(path: &std::path::Path, version_line: &str) {
 /// correct NEW version instead. A test that only exercised a clean `$HOME`
 /// (no `~/.cargo/bin` entry) would pass either way and would NOT have caught
 /// #3554; this one fails against the pre-fix code path.
+// #5937: sets HOME across an await; join the group every other HOME writer here holds.
+#[serial(update_verify_installed_binary_env)]
 #[cfg(unix)]
 #[tokio::test]
 async fn verify_installed_binary_at_path_reads_exact_binary_despite_path_shadow() {

@@ -360,18 +360,18 @@ impl Default for WorktreeDirNames {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     /// Serialise every test that mutates the two layout env vars.
     ///
     /// Why: `cargo test` runs a crate's tests on parallel threads sharing one
     /// process environment, so an unguarded `set_var` in one test is visible to
     /// another mid-assertion.
-    /// What: a process-global mutex each env-mutating test locks first.
+    /// What: the crate-wide [`crate::data_dir::ENV_LOCK`] — #5937: a private
+    /// mutex here excluded no other `HOME` writer in this test target.
     /// Test: used by every test below that touches env.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::data_dir::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -506,6 +506,8 @@ mod tests {
     /// union of its dependents' features, and trusty-code / trusty-memory /
     /// trusty-mpm / trusty-search all request `crate-config`.
     /// Test: this test.
+    // #5937: sets HOME, which update/tests.rs also sets under this group.
+    #[serial_test::serial(update_verify_installed_binary_env)]
     #[cfg(feature = "crate-config")]
     #[test]
     fn config_file_drives_both_zero_argument_resolvers() {

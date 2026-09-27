@@ -490,12 +490,13 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Serialises tests that read the real env so they cannot interleave.
+    ///
+    /// #5937: the crate-wide [`crate::data_dir::ENV_LOCK`], so the writers in
+    /// `retrieval/timeout_tests.rs` exclude these readers.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        ENV_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
+        crate::data_dir::ENV_LOCK
             .lock()
-            .expect("env_lock mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Why: Guard that the default is 180 s when the env var is absent.

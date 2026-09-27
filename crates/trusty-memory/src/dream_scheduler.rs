@@ -354,6 +354,8 @@ mod tests {
     /// without panic even when a palace is in a degraded state. We test the
     /// per-loop error isolation at the `Dreamer` level in trusty-common.
     /// Test: itself (smoke test — would panic or deadlock on regression).
+    // #5937: removes TRUSTY_DREAM_DISABLED, which its two siblings set under #[serial].
+    #[serial_test::serial]
     #[tokio::test]
     async fn dream_scheduler_no_panic_with_empty_registry() {
         unsafe {

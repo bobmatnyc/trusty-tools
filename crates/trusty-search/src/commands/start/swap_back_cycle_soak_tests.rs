@@ -461,6 +461,8 @@ fn count_processes_matching(needle: &str) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires real trusty-embedderd + trusty-embedderd-py + a bootstrapped \
             uv/torch/MPS venv (Apple Silicon) — additionally gated on TRUSTY_SOAK=1"]
+// #5937: mutates TRUSTY_EMBEDDERD_*; join the #[serial] env group.
+#[serial_test::serial]
 async fn real_repeated_ort_python_ort_cycles_soak() {
     if std::env::var("TRUSTY_SOAK").ok().as_deref() != Some("1") {
         eprintln!(
@@ -605,6 +607,8 @@ async fn real_repeated_ort_python_ort_cycles_soak() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires real trusty-embedderd + trusty-embedderd-py + a bootstrapped \
             uv/torch/MPS venv (Apple Silicon) — additionally gated on TRUSTY_SOAK=1"]
+// #5937: mutates TRUSTY_EMBEDDERD_*; join the #[serial] env group.
+#[serial_test::serial]
 async fn real_build_ort_failure_leaves_no_orphan_and_recovers() {
     if std::env::var("TRUSTY_SOAK").ok().as_deref() != Some("1") {
         eprintln!(
