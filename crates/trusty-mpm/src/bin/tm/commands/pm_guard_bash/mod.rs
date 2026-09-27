@@ -63,6 +63,8 @@ mod linked_worktree_head_move;
 mod main_checkout;
 mod path_tokens;
 mod persistence;
+// #7648: an unscoped environment dump inside a Kubernetes pod.
+mod pod_env_dump;
 // #8439: a read-only dispatch runs only allowlisted command shapes.
 mod read_only_allow;
 // #8567: the `gh` read verbs a read-only dispatch may run.
@@ -86,6 +88,7 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
