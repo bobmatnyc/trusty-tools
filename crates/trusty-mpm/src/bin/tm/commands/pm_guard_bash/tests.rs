@@ -2399,10 +2399,7 @@ fn shell_write_targets_ignores_reads() {
     }
     // A write that names no readable path still denies through
     // `classify_bash_segment`; it just gives the boundary nothing to place.
-    assert_eq!(
-        shell_write_targets("git diff --output"),
-        vec!["".to_string()]
-    );
+    assert!(shell_write_targets("git diff --output").is_empty());
     assert_eq!(
         evaluate_bash_command("git diff --output"),
         Some(SHELL_EDIT_REASON)
