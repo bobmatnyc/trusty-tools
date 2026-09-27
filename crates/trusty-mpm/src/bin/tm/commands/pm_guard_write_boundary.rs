@@ -37,7 +37,10 @@
 //! where nothing was positively identified: a tool call with no readable target
 //! path names no file; a target with no `.git` ancestor is not a checkout; a
 //! non-source extension is not this rule's business. The guard denies only on
-//! positive evidence of both halves.
+//! positive evidence of both halves — with one fail-CLOSED arm (#8730): a
+//! `Bash` write the parser found but could not delimit (an unclosed `$(`,
+//! `(` or backtick, a `tee` that will not lex, nesting past the cap) denies,
+//! because its target cannot be judged at all.
 //!
 //! **A `Bash` write lands here too (#7399).** A shell write used to reach only
 //! `pm_guard_bash`'s `SHELL_EDIT_REASON`, which asks WHO is writing: it is
@@ -88,13 +91,14 @@
 //! nearest EXISTING ancestor of the target is resolved, which is as deep as the
 //! filesystem can answer; a component created between this check and the write
 //! is not seen, the TOCTOU window every `PreToolUse` path check has. The `Bash` half sees only the
-//! two shapes that NAME their target unambiguously — a redirect, and a git
-//! write option — so everything else keeps only the `SHELL_EDIT_REASON`
-//! treatment and gets no WHERE dimension:
+//! shapes that NAME their target unambiguously — a redirect, a git write
+//! option, and a `tee` operand, in every segment, subshell and substitution
+//! (#8730) — so everything else keeps only the `SHELL_EDIT_REASON` treatment
+//! and gets no WHERE dimension:
 //!
 //! * `git apply` and `git am` write the files a patch names, and the patch
 //!   names them, not the argv.
-//! * `tee`, `cp`, `mv`, `install` and `dd` write a target that is an ordinary
+//! * `cp`, `mv`, `install` and `dd` write a target that is an ordinary
 //!   argument, indistinguishable here from the source they read.
 //! * `sed -i` and the awk family put their target in the trailing position,
 //!   which a read (`sed -n '1,5p' <file>`) occupies identically.
@@ -136,7 +140,7 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
-use super::pm_guard_bash::shell_write_targets;
+use super::pm_guard_bash::{UnplaceableWrite, shell_write_targets};
 
 /// Deny a source-file write whose target lives in a project's main checkout.
 ///
@@ -197,7 +201,12 @@ fn evaluate_main_checkout_write_with(
     cwd: &Path,
     home: Option<&str>,
 ) -> Option<String> {
-    write_targets(tool_name, tool_input)
+    // #8730: fail closed — a write whose target cannot be placed is refused.
+    let targets = match write_targets(tool_name, tool_input) {
+        Ok(targets) => targets,
+        Err(what) => return Some(unplaceable_write_reason(what)),
+    };
+    targets
         .into_iter()
         .find_map(|target| deny_reason_for_target(&target, cwd, home))
 }
@@ -349,26 +358,32 @@ fn scratchpad_root(path: &Path) -> Option<PathBuf> {
 /// [`evaluate_main_checkout_write_with`].
 /// What: `tool_input.file_path` for an [`EDIT_TOOLS`] member (at most one), and
 /// for `Bash` every positively identified write target of its command
-/// ([`shell_write_targets`]). Empty for every other tool, and for a command
-/// that names no write.
+/// ([`shell_write_targets`]) — redirects, git write options and `tee` operands,
+/// in every segment, subshell and substitution (#8730). Empty for every other
+/// tool, and for a command that names no write. `Err` when the command holds a
+/// write the guard cannot place.
 /// Test: `denies_a_git_output_write_in_a_main_checkout`,
 /// `denies_a_shell_redirect_into_a_main_checkout`,
-/// `denies_a_second_segments_source_write_when_the_first_writes_elsewhere`.
-fn write_targets(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Vec<String> {
+/// `denies_a_second_segments_source_write_when_the_first_writes_elsewhere`,
+/// `denies_a_tee_write_in_a_main_checkout`.
+fn write_targets(
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+) -> Result<Vec<String>, UnplaceableWrite> {
     if EDIT_TOOLS.contains(&tool_name) {
-        return edit_tool_target_path(tool_input)
+        return Ok(edit_tool_target_path(tool_input)
             .map(str::to_owned)
             .into_iter()
-            .collect();
+            .collect());
     }
     if tool_name != "Bash" {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(command) = tool_input
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     shell_write_targets(command)
 }
@@ -521,6 +536,22 @@ fn deny_reason(target: &str) -> String {
          your own tree; if you are the PM, dispatch the change to an agent rather than writing \
          it here. Documents (`.md`), configuration (`.toml`, `.json`, `.yaml`), and everything \
          under `.claude/worktrees/**` stay writable and are not affected by this rule."
+    )
+}
+
+/// The deny for a `Bash` write whose target the guard cannot place (#8730).
+///
+/// Why: the boundary cannot tell whether an unparsed write lands in a main
+/// checkout, and a missed deny is the direction ADR-0044 exists to prevent.
+/// Bash rejects each such shape bar the nesting cap, so nothing that would
+/// have run is lost.
+/// Test: `denies_a_write_whose_target_cannot_be_placed`.
+fn unplaceable_write_reason(what: UnplaceableWrite) -> String {
+    format!(
+        "Write target could not be placed (ADR-0044, #8730): this command writes through {what}, \
+         so the guard cannot tell whether the write lands in a project's main checkout, and it \
+         refuses rather than guess. Close the quote or parenthesis (bash rejects the command as \
+         written), or flatten the nesting, and run it again."
     )
 }
 
@@ -718,6 +749,158 @@ mod tests {
         let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
             .expect("the relative target must resolve against the hook cwd, not /tmp");
         assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    /// Assert every command writes source into `dir`'s main checkout and denies.
+    fn assert_each_denies(dir: &Path, commands: &[String]) {
+        for command in commands {
+            let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir)
+                .unwrap_or_else(|| panic!("`{command}` writes source into a main checkout"));
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+    }
+
+    // #8730: `tee` names its file as an argument, never a redirect, so the
+    // boundary read no target from it and every spelling was allowed.
+    #[test]
+    fn denies_a_tee_write_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("tee {target}"),
+                format!("echo x | tee {target}"),
+                format!("echo x | tee -a {target} > /dev/null"),
+                format!("echo x | sudo tee -- {target}"),
+            ],
+        );
+    }
+
+    // #8730: a write inside `$(…)` reached the redirect scan as `lib.rs)`, and
+    // one inside a double-quoted `"$(…)"` was never scanned at all.
+    #[test]
+    fn denies_a_command_substitution_write_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("echo $(echo x > {target})"),
+                format!("echo \"$(echo x > {target})\""),
+                format!("echo `echo x > {target}`"),
+                format!("echo $(echo x | tee {target})"),
+                format!("echo x > >(tee {target})"),
+            ],
+        );
+    }
+
+    // #8730: a subshell's closing `)` was glued to the redirect target.
+    #[test]
+    fn denies_a_subshell_write_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs").display().to_string();
+        assert_each_denies(
+            dir.path(),
+            &[
+                format!("(echo x > {target})"),
+                format!("( cd /tmp && echo x > {target} )"),
+                format!("(echo x | tee {target})"),
+            ],
+        );
+    }
+
+    // #8730 Fail-Open Check: a write whose body or arguments cannot be parsed
+    // has no target to judge, so it denies wherever the hook stands — here a
+    // directory that is no checkout at all.
+    #[test]
+    fn denies_a_write_whose_target_cannot_be_placed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in [
+            "echo $(echo x > src/lib.rs",
+            "(echo x > src/lib.rs",
+            "echo `echo x > src/lib.rs",
+            "echo x | tee 'src/lib.rs",
+        ] {
+            let reason =
+                evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
+                    .unwrap_or_else(|| panic!("`{command}` cannot be placed and must deny"));
+            assert!(reason.contains("#8730"), "{reason}");
+        }
+    }
+
+    // #8730: the new shapes judge WHERE, like a redirect — a worktree, a
+    // document, and literal text all stay allowed.
+    #[test]
+    fn allows_tee_substitution_and_subshell_writes_that_are_not_source_in_a_checkout() {
+        let worktree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let main = main_checkout();
+        let in_worktree = worktree
+            .path()
+            .join("crates/x/src/lib.rs")
+            .display()
+            .to_string();
+        let notes = main.path().join("notes.md").display().to_string();
+        let source = main
+            .path()
+            .join("crates/x/src/lib.rs")
+            .display()
+            .to_string();
+        for command in [
+            format!("echo x | tee {in_worktree}"),
+            format!("echo $(echo x > {in_worktree})"),
+            format!("(echo x > {in_worktree})"),
+            format!("echo x | tee -a {notes}"),
+            format!("(echo x > {notes})"),
+            format!("echo '$(echo x > {source})'"),
+            format!("grep -n tee {source}"),
+        ] {
+            assert_eq!(
+                evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), main.path()),
+                None,
+                "`{command}` writes no source into a main checkout"
+            );
+        }
+    }
+
+    // #8111: a heredoc report into the session scratchpad was refused when its
+    // body held an apostrophe (`it's`): the unbalanced quote made the heredoc
+    // scan claim no body, so body prose (`echo x > <source>`) read as a live
+    // redirect into the checkout. #8730's wider detection must not refuse the
+    // quoted shapes either. The same text run as shell, and the same heredoc
+    // aimed at the checkout, still deny.
+    #[test]
+    fn allows_a_scratchpad_heredoc_whose_body_names_a_source_write() {
+        let main = main_checkout();
+        let pad = tempfile::tempdir().expect("tempdir");
+        let pad = pad.path().join("scratchpad");
+        std::fs::create_dir_all(&pad).expect("mkdir scratchpad");
+        let source = main
+            .path()
+            .join("crates/x/src/lib.rs")
+            .display()
+            .to_string();
+        let body = format!(
+            "see: echo x > {source}\nrun $(echo x > {source}), (echo x > {source}) or \
+             `tee {source}`;\nit's done"
+        );
+        for name in ["report.md", "probe.rs"] {
+            let command = format!("cat > {} <<'EOF'\n{body}\nEOF", pad.join(name).display());
+            assert_eq!(
+                evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), main.path()),
+                None,
+                "`{command}` writes only the scratchpad"
+            );
+        }
+        assert_each_denies(
+            main.path(),
+            &[
+                format!("cat > {source} <<'EOF'\nfn main() {{}}\nEOF"),
+                format!("echo x | tee {source} <<'EOF'\nfn main() {{}}\nEOF"),
+                format!("cat > {}/r.md; echo x | tee {source}", pad.display()),
+            ],
+        );
     }
 
     // #7399: the worktree is where the write is SUPPOSED to land.

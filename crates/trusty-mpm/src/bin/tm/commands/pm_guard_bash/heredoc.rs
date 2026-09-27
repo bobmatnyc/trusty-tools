@@ -14,7 +14,8 @@
 //! content. Only the BODY is claimed — the operator line keeps its live
 //! syntax, so `python3 <<'PY' > out.rs` still reads as a redirect. The scan
 //! claims nothing at all (preserving the pre-#5356 over-deny) whenever it
-//! cannot parse with confidence: unbalanced quotes, or a `<<` whose delimiter
+//! cannot parse with confidence: unbalanced quotes outside every body (#8111
+//! lets an apostrophe INSIDE a body through), or a `<<` whose delimiter
 //! never appears on a line of its own, which is also what an arithmetic
 //! `$((1 << 3))` looks like.
 //! Test: `heredoc_bodies_*` in this module's `tests` submodule;
@@ -69,9 +70,29 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`.
     pub(super) fn scan(command: &str) -> Self {
         let quotes = QuoteScan::new(command);
-        if !quotes.balanced {
-            return Self::empty();
+        if quotes.balanced {
+            return Self::collect(command, Some(&quotes)).unwrap_or_else(Self::empty);
         }
+        // #8111: an apostrophe in a BODY (`it's`) unbalances the whole-command
+        // map, and claiming nothing made that body prose live shell. Retry with
+        // each operator line's own quotes; keep the answer only when blanking
+        // the bodies it found leaves the rest of the command balanced.
+        match Self::collect(command, None) {
+            Some(found)
+                if !found.spans.is_empty()
+                    && QuoteScan::new(&blank_spans(command, &found.spans)).balanced =>
+            {
+                found
+            }
+            _ => Self::empty(),
+        }
+    }
+
+    /// The line walk behind [`HeredocBodies::scan`]: `quotes` is the
+    /// whole-command map, or `None` to read each operator line's quotes alone.
+    /// `None` back when a delimiter has no terminator line, or an operator
+    /// line's own quotes do not close.
+    fn collect(command: &str, quotes: Option<&QuoteScan>) -> Option<Self> {
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
@@ -80,13 +101,20 @@ impl HeredocBodies {
         while line < lines.len() {
             let (start, end) = lines[line];
             let operator_line = &command[start..end];
-            let delimiters = delimiters_on(operator_line, start, &quotes);
+            let delimiters = match quotes {
+                Some(quotes) => delimiters_on(operator_line, start, quotes),
+                None => {
+                    let own = QuoteScan::new(operator_line);
+                    if !own.balanced {
+                        return None;
+                    }
+                    delimiters_on(operator_line, 0, &own)
+                }
+            };
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
             line += 1;
             for delimiter in delimiters {
-                let Some(body) = body_span(command, &lines, line, &delimiter) else {
-                    return Self::empty();
-                };
+                let body = body_span(command, &lines, line, &delimiter)?;
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
                     if framing {
@@ -104,11 +132,11 @@ impl HeredocBodies {
                 line = body.next_line;
             }
         }
-        Self {
+        Some(Self {
             spans,
             frames,
             data_spans,
-        }
+        })
     }
 
     /// The no-confidence result: every byte stays live shell syntax.
@@ -217,6 +245,19 @@ fn line_runs_a_shell(line: &str) -> bool {
         let base = token.rsplit('/').next().unwrap_or(token);
         super::shell_lex::DASH_C_SHELLS.contains(&base)
     })
+}
+
+/// `command` with every byte inside `spans` replaced by a space, newlines kept.
+fn blank_spans(command: &str, spans: &[(usize, usize)]) -> String {
+    let mut bytes = command.as_bytes().to_vec();
+    for &(start, end) in spans {
+        for byte in &mut bytes[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Half-open `[start, end)` byte ranges of each line, newline excluded.

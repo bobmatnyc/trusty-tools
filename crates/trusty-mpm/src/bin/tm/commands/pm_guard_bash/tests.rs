@@ -2365,7 +2365,7 @@ fn shell_write_targets_reads_redirects_and_git_output() {
     ] {
         assert_eq!(
             shell_write_targets(command),
-            vec![target.to_string()],
+            Ok(vec![target.to_string()]),
             "{command}"
         );
     }
@@ -2392,14 +2392,14 @@ fn shell_write_targets_ignores_reads() {
         "git diff --output='/tmp/o.diff",
     ] {
         assert!(
-            shell_write_targets(command).is_empty(),
+            shell_write_targets(command).is_ok_and(|t| t.is_empty()),
             "{command} -> {:?}",
             shell_write_targets(command)
         );
     }
     // A write that names no readable path still denies through
     // `classify_bash_segment`; it just gives the boundary nothing to place.
-    assert!(shell_write_targets("git diff --output").is_empty());
+    assert_eq!(shell_write_targets("git diff --output"), Ok(Vec::new()));
     assert_eq!(
         evaluate_bash_command("git diff --output"),
         Some(SHELL_EDIT_REASON)
@@ -2414,12 +2414,15 @@ fn shell_write_targets_ignores_reads() {
 fn shell_write_targets_collects_every_segments_write() {
     assert_eq!(
         shell_write_targets("echo hi > notes.md && echo bye > crates/x/src/lib.rs"),
-        vec!["notes.md".to_string(), "crates/x/src/lib.rs".to_string()]
+        Ok(vec![
+            "notes.md".to_string(),
+            "crates/x/src/lib.rs".to_string()
+        ])
     );
     // A `cd` segment's own redirect is a write like any other segment's.
     assert_eq!(
         shell_write_targets("cd . > crates/x/src/lib.rs"),
-        vec!["crates/x/src/lib.rs".to_string()]
+        Ok(vec!["crates/x/src/lib.rs".to_string()])
     );
 }
 
@@ -2435,7 +2438,7 @@ fn shell_write_targets_ignores_a_heredoc_body_redirect() {
         "python3 <<'PY'\nprint([k for k in d if len(k) > 3])\nPY",
         "cat <<EOF\nthe pipeline is read -> parse -> write\nEOF",
     ] {
-        assert!(shell_write_targets(command).is_empty(), "{command}");
+        assert_eq!(shell_write_targets(command), Ok(Vec::new()), "{command}");
         assert_eq!(extract_shell_edit_target(command), None, "{command}");
         assert_eq!(evaluate_bash_command(command), None, "{command}");
     }
@@ -2444,11 +2447,11 @@ fn shell_write_targets_ignores_a_heredoc_body_redirect() {
     // mirror of `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`.
     assert_eq!(
         shell_write_targets("python3 <<'PY' > out.rs\nprint(1)\nPY"),
-        vec!["out.rs".to_string()]
+        Ok(vec!["out.rs".to_string()])
     );
     assert_eq!(
         shell_write_targets("python3 <<'PY'\nprint(1)\nPY\necho done > f.rs"),
-        vec!["f.rs".to_string()]
+        Ok(vec!["f.rs".to_string()])
     );
 }
 
