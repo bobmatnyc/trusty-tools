@@ -1043,6 +1043,94 @@ async fn orphan_frames_do_not_extend_a_pending_request_deadline() {
     handle.abort();
 }
 
+/// Regression test for #8600 (critic HIGH): replies to LATER in-flight
+/// requests must not keep a stuck head-of-line request alive, nor reset the
+/// wedge counter.
+///
+/// Why: the deadline used to re-arm on any matched reply and the counter
+/// reset on any matched reply, so with several requests in flight a sidecar
+/// that starved its oldest request while answering newer ones never timed
+/// the head out and never tripped the wedge restart.
+/// What: `WEDGED_TIMEOUT_THRESHOLD` stuck requests (ids 1..) are the head in
+/// turn, never answered; a fake sidecar keeps registering and answering
+/// newer requests (ids from 1000) every 20 ms. Asserts the unhealthy signal
+/// fires within `WEDGED_TIMEOUT_THRESHOLD` x timeout plus slack, and that the
+/// newer requests really were answered meanwhile.
+/// Test: this test.
+#[tokio::test]
+async fn replies_to_later_requests_do_not_mask_a_stuck_head() {
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    let short_timeout = Duration::from_millis(200);
+    let (mut writer, reader_end) = duplex(64 * 1024);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let mut guard = pending.lock().await;
+        for id in 1..=u64::from(WEDGED_TIMEOUT_THRESHOLD) {
+            let (tx, _rx) = oneshot::channel();
+            guard.insert(id, PendingRequest { sent: 1, reply: tx });
+        }
+    }
+    let started = tokio::time::Instant::now();
+    let (handle, mut unhealthy_rx) = spawn_test_reader(
+        tokio::io::BufReader::new(reader_end),
+        &pending,
+        short_timeout,
+    );
+
+    let answered = Arc::new(AtomicU64::new(0));
+    let driver_pending = Arc::clone(&pending);
+    let driver_answered = Arc::clone(&answered);
+    let driver = tokio::spawn(async move {
+        for n in 0..500_u64 {
+            // Two newer requests in flight behind the stuck head, answered.
+            let mut replies = Vec::new();
+            for k in 0..2 {
+                let id = 1_000 + n * 2 + k;
+                let (tx, rx) = oneshot::channel();
+                driver_pending
+                    .lock()
+                    .await
+                    .insert(id, PendingRequest { sent: 1, reply: tx });
+                replies.push(rx);
+                if writer
+                    .write_all(one_vector_frame(id).as_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = writer.flush().await;
+            for rx in replies {
+                if let Ok(Ok(Ok(_))) = tokio::time::timeout(Duration::from_secs(1), rx).await {
+                    driver_answered.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+
+    let budget = short_timeout * WEDGED_TIMEOUT_THRESHOLD + Duration::from_millis(600);
+    tokio::time::timeout(budget, unhealthy_rx.wait_for(|v| *v))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "a head request starved while later ones are answered must trip the \
+                 wedge restart within {budget:?} (elapsed {:?})",
+                started.elapsed()
+            )
+        })
+        .expect("unhealthy watch channel must stay open");
+    assert!(
+        answered.load(Ordering::Relaxed) > 0,
+        "the later requests must have been answered while the head was stuck"
+    );
+    driver.abort();
+    handle.abort();
+}
+
 /// Condition-poll until `pending` is empty or `budget` elapses (panics on
 /// timeout). Prefer this over a fixed `sleep` when waiting for the reader
 /// task to finish draining timed-out entries — see `condition-based-waiting`

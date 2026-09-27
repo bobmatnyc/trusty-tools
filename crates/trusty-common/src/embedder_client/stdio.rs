@@ -103,8 +103,9 @@ impl TimeoutTracker {
     }
 
     /// Reset the consecutive-timeout count — called only when a reply
-    /// matches a still-pending request. #8600: a late reply to a timed-out
-    /// request is not progress and must not reset the count.
+    /// resolves the head-of-line pending request. #8600: a late reply to a
+    /// timed-out request, or a reply to a later request while the head is
+    /// still pending, is not progress and must not reset the count.
     fn record_success(&self) {
         self.consecutive_timeouts.store(0, Ordering::Release);
     }
@@ -429,15 +430,17 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
 /// What: reads newline-framed JSON-RPC responses, looks up each by echoed id,
 /// and dispatches to the caller's oneshot. On timeout, removes only the oldest
 /// stalled entry and CONTINUEs — MUST NOT exit (fix #763). On EOF, exits.
-/// Only a reply that matches a still-pending request counts as progress: it
-/// resets the timeout tracker and re-arms the deadline. A late reply to an
-/// already-timed-out request, or an unparseable frame, does neither (#8600) —
-/// a sidecar busy answering abandoned requests is not serving live ones.
+/// The deadline belongs to the head-of-line (oldest pending) request and is
+/// re-armed only when the head changes. Only a reply that resolves the head
+/// resets the timeout tracker. A late reply to a timed-out request, a reply
+/// to a later request, or an unparseable frame does neither (#8600) — a
+/// sidecar that starves its oldest request is wedged for that request.
 /// Test: `reader_task_survives_timeout_and_serves_next_request`,
 /// `wedge_threshold_fires_after_consecutive_timeouts`,
 /// `wedge_threshold_resets_on_success`,
 /// `late_replies_to_timed_out_ids_do_not_reset_the_wedge_counter`,
-/// `orphan_frames_do_not_extend_a_pending_request_deadline` in stdio_tests.
+/// `orphan_frames_do_not_extend_a_pending_request_deadline`,
+/// `replies_to_later_requests_do_not_mask_a_stuck_head` in stdio_tests.
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,
@@ -448,12 +451,11 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut line = String::new();
-    // #8600: the deadline is anchored to the last real progress (a new
-    // head-of-line request or a matched reply), so orphan frames cannot keep
-    // re-arming it while a live request goes unanswered.
+    // #8600: the deadline is anchored to the moment the current head-of-line
+    // request became the head. Only a change of head re-arms it, so neither
+    // orphan frames nor replies to later in-flight requests extend it.
     let mut anchor = tokio::time::Instant::now();
     let mut anchored_id: Option<u64> = None;
-    let mut progressed = false;
 
     loop {
         line.clear();
@@ -469,11 +471,10 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             }
         };
 
-        if progressed || oldest_id.is_none() || oldest_id != anchored_id {
+        if oldest_id.is_none() || oldest_id != anchored_id {
             anchor = tokio::time::Instant::now();
             anchored_id = oldest_id;
         }
-        progressed = false;
 
         // Wait for the next response frame under a per-call deadline.
         let read_result =
@@ -612,10 +613,13 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             continue;
         };
 
-        // Look up and remove the pending entry for this id.
-        let req = {
+        // Look up and remove the pending entry for this id. #8600: note
+        // whether it was the head of line (no older request still pending).
+        let (req, was_head) = {
             let mut guard = pending.lock().await;
-            guard.remove(&response_id)
+            let req = guard.remove(&response_id);
+            let was_head = guard.keys().all(|&k| k > response_id);
+            (req, was_head)
         };
 
         let Some(pending_req) = req else {
@@ -632,9 +636,12 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             continue;
         };
 
-        // #8600: a reply to a live request is the only proof of progress.
-        timeout_tracker.record_success();
-        progressed = true;
+        // #8600: only a reply that resolves the head of line is progress. A
+        // reply to a later request while an older one is still pending says
+        // nothing about the stuck head, so it must not reset the count.
+        if was_head {
+            timeout_tracker.record_success();
+        }
 
         // Decode the response and deliver to the waiter.
         let result = decode_response(line.trim(), pending_req.sent);
