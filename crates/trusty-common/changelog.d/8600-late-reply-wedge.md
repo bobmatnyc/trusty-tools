@@ -1,0 +1,2 @@
+Fixed
+- The stdio embedder client now restarts a sidecar that answers only requests that have already timed out. Only a reply to a still-pending request resets the wedge counter or re-arms the call deadline; a late or orphan reply does neither. Before this, a sidecar working through abandoned requests at high CPU reset the counter on every late reply and never tripped the three-timeout wedge restart (#8600).

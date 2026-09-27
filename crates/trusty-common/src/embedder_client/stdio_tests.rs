@@ -906,6 +906,143 @@ async fn wedge_threshold_resets_on_success() {
     handle.abort();
 }
 
+/// Spawn `reader_task` over `reader` with fresh tracker/device state and
+/// return its handle plus the unhealthy receiver. Test-only convenience.
+fn spawn_test_reader(
+    reader: tokio::io::BufReader<tokio::io::DuplexStream>,
+    pending: &PendingMap,
+    timeout: Duration,
+) -> (tokio::task::JoinHandle<()>, watch::Receiver<bool>) {
+    let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(pending),
+        timeout,
+        Arc::new(TimeoutTracker::new()),
+        unhealthy_tx,
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    ));
+    (handle, unhealthy_rx)
+}
+
+/// One success frame carrying a single one-dimensional embedding for `id`.
+fn one_vector_frame(id: u64) -> String {
+    format!("{{\"jsonrpc\":\"2.0\",\"result\":{{\"embeddings\":[[0.1]]}},\"id\":{id}}}\n")
+}
+
+/// Regression test for #8600: a sidecar that answers every request only
+/// after it has timed out must still trip the wedge restart.
+///
+/// Why: the reader used to reset the wedge counter on ANY frame, so a late
+/// reply for a timed-out id wiped the count before the next timeout. A
+/// sidecar chewing through abandoned requests at high CPU never restarted.
+/// What: registers `WEDGED_TIMEOUT_THRESHOLD` live requests; after each one
+/// times out, the fake sidecar sends that id's late reply. Asserts the
+/// unhealthy signal fires once the last one times out.
+/// Test: this test.
+#[tokio::test]
+async fn late_replies_to_timed_out_ids_do_not_reset_the_wedge_counter() {
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    let short_timeout = Duration::from_millis(150);
+    let (mut writer, reader_end) = duplex(4096);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut receivers = Vec::new();
+    {
+        let mut guard = pending.lock().await;
+        for i in 1..=u64::from(WEDGED_TIMEOUT_THRESHOLD) {
+            let (tx, rx) = oneshot::channel();
+            guard.insert(i, PendingRequest { sent: 1, reply: tx });
+            receivers.push((i, rx));
+        }
+    }
+    let (handle, mut unhealthy_rx) = spawn_test_reader(
+        tokio::io::BufReader::new(reader_end),
+        &pending,
+        short_timeout,
+    );
+
+    for (id, rx) in receivers {
+        let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("each request must time out within the budget")
+            .expect("oneshot must carry the timeout error");
+        assert!(
+            matches!(outcome, Err(EmbedderError::Stdio(_))),
+            "request {id} must fail with the timeout error, got {outcome:?}"
+        );
+        // The sidecar finally answers the request it was abandoned on.
+        writer
+            .write_all(one_vector_frame(id).as_bytes())
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    tokio::time::timeout(Duration::from_secs(2), unhealthy_rx.wait_for(|v| *v))
+        .await
+        .expect(
+            "late replies to timed-out ids must not reset the wedge counter — \
+             unhealthy_signal must fire after WEDGED_TIMEOUT_THRESHOLD timeouts",
+        )
+        .expect("unhealthy watch channel must stay open");
+    handle.abort();
+}
+
+/// Regression test for #8600: orphan frames arriving faster than the call
+/// timeout must not keep a live request waiting past its deadline.
+///
+/// Why: the per-call deadline used to re-arm on every frame, so a steady
+/// stream of late replies meant a live request never timed out and never
+/// counted toward the wedge threshold.
+/// What: one live request (id 10) while the fake sidecar emits orphan frames
+/// every 30 ms; asserts id 10 still fails with the timeout error well before
+/// the orphan stream ends.
+/// Test: this test.
+#[tokio::test]
+async fn orphan_frames_do_not_extend_a_pending_request_deadline() {
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    let short_timeout = Duration::from_millis(200);
+    let (mut writer, reader_end) = duplex(64 * 1024);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (tx, rx) = oneshot::channel();
+    pending
+        .lock()
+        .await
+        .insert(10, PendingRequest { sent: 1, reply: tx });
+    let (handle, _unhealthy_rx) = spawn_test_reader(
+        tokio::io::BufReader::new(reader_end),
+        &pending,
+        short_timeout,
+    );
+
+    let orphans = tokio::spawn(async move {
+        for n in 0..200_u64 {
+            let frame = one_vector_frame(5_000 + n);
+            if writer.write_all(frame.as_bytes()).await.is_err() {
+                return;
+            }
+            let _ = writer.flush().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_millis(1_500), rx)
+        .await
+        .expect("orphan frames must not re-arm the live request's deadline")
+        .expect("oneshot must carry the timeout error");
+    assert!(
+        matches!(outcome, Err(EmbedderError::Stdio(_))),
+        "the live request must fail with the timeout error, got {outcome:?}"
+    );
+    orphans.abort();
+    handle.abort();
+}
+
 /// Condition-poll until `pending` is empty or `budget` elapses (panics on
 /// timeout). Prefer this over a fixed `sleep` when waiting for the reader
 /// task to finish draining timed-out entries — see `condition-based-waiting`

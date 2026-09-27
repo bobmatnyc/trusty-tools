@@ -102,8 +102,9 @@ impl TimeoutTracker {
         n == WEDGED_TIMEOUT_THRESHOLD
     }
 
-    /// Reset the consecutive-timeout count — called whenever the reader
-    /// receives any response frame, proving the sidecar is still talking.
+    /// Reset the consecutive-timeout count — called only when a reply
+    /// matches a still-pending request. #8600: a late reply to a timed-out
+    /// request is not progress and must not reset the count.
     fn record_success(&self) {
         self.consecutive_timeouts.store(0, Ordering::Release);
     }
@@ -428,12 +429,15 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
 /// What: reads newline-framed JSON-RPC responses, looks up each by echoed id,
 /// and dispatches to the caller's oneshot. On timeout, removes only the oldest
 /// stalled entry and CONTINUEs — MUST NOT exit (fix #763). On EOF, exits.
-/// Every successfully read response frame (matched or stale) resets the
-/// timeout tracker, since receiving any frame proves the sidecar is still
-/// talking.
+/// Only a reply that matches a still-pending request counts as progress: it
+/// resets the timeout tracker and re-arms the deadline. A late reply to an
+/// already-timed-out request, or an unparseable frame, does neither (#8600) —
+/// a sidecar busy answering abandoned requests is not serving live ones.
 /// Test: `reader_task_survives_timeout_and_serves_next_request`,
 /// `wedge_threshold_fires_after_consecutive_timeouts`,
-/// `wedge_threshold_resets_on_success` in stdio_tests.
+/// `wedge_threshold_resets_on_success`,
+/// `late_replies_to_timed_out_ids_do_not_reset_the_wedge_counter`,
+/// `orphan_frames_do_not_extend_a_pending_request_deadline` in stdio_tests.
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,
@@ -444,6 +448,12 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut line = String::new();
+    // #8600: the deadline is anchored to the last real progress (a new
+    // head-of-line request or a matched reply), so orphan frames cannot keep
+    // re-arming it while a live request goes unanswered.
+    let mut anchor = tokio::time::Instant::now();
+    let mut anchored_id: Option<u64> = None;
+    let mut progressed = false;
 
     loop {
         line.clear();
@@ -459,8 +469,15 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             }
         };
 
+        if progressed || oldest_id.is_none() || oldest_id != anchored_id {
+            anchor = tokio::time::Instant::now();
+            anchored_id = oldest_id;
+        }
+        progressed = false;
+
         // Wait for the next response frame under a per-call deadline.
-        let read_result = tokio::time::timeout(timeout, reader.read_line(&mut line)).await;
+        let read_result =
+            tokio::time::timeout_at(anchor + timeout, reader.read_line(&mut line)).await;
 
         match read_result {
             Err(_elapsed) => {
@@ -561,10 +578,8 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             }
             Ok(Ok(_)) => {
                 // Got a line — dispatch to the matching pending entry by id.
-                // #1450: any received frame (even a stale/orphaned one)
-                // proves the sidecar is still talking, so reset the
-                // consecutive-timeout wedge counter.
-                timeout_tracker.record_success();
+                // #8600: the wedge counter resets only on a matched reply
+                // (below), never on a late or orphan frame.
                 // Epic #3524 slice 5 / issue #3493 P1: capture the real
                 // backend device from the FIRST successful response frame
                 // only (review finding, PR #3560 MEDIUM fix). The resolved
@@ -616,6 +631,10 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             );
             continue;
         };
+
+        // #8600: a reply to a live request is the only proof of progress.
+        timeout_tracker.record_success();
+        progressed = true;
 
         // Decode the response and deliver to the waiter.
         let result = decode_response(line.trim(), pending_req.sent);
