@@ -63,9 +63,10 @@ every agent runs, which records hypotheses in the memory palace under one tag.
 7. Report only the significant results: a group whose measurements show a
    statistically significant difference at the sample size its records named.
    A group still `open` with a small n is not a finding yet.
-8. File only what needs a framework, skill, agent, or workflow fix, as a
-   trusty-tools issue labelled `self-improvement`, linked to #6933. A behavioral
-   tweak that works stays in memory and generates no issue.
+8. Route only what needs a framework, skill, agent, or workflow fix to the
+   rollup issue #8021, or as a comment on the parent issue — never a new issue
+   (owner ruling 2026-09-27) — labelled `self-improvement`, linked to #6933. A
+   behavioral tweak that works stays in memory and generates no issue.
 
 ## What Counts as Worth Reporting
 

@@ -131,9 +131,10 @@ managed by `ticketing`.
   Findings, evidence, rationale and defect analysis go in an issue or PR comment.
 - A completion claim owes the four-part report in
   `Skill(skill="tm-verification-protocols")`; in-flight responses answer the
-  question instead. Route every agent's **Improvement recommendations** block to
-  `bobmatnyc/trusty-tools` issues through `ticketing`, whatever project it ran
-  in (#6935).
+  question instead. Route every agent's **Improvement recommendations** block
+  to the `bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the
+  parent issue — never a new issue — whatever project it ran in (#6935, owner
+  ruling 2026-09-27).
 - Session lifecycle is a native command, never an agent: `tm session ls | rename
   | pause | resume | stop`. Running one is P10, so it goes to `local-ops`. Any
   other verb and its argument forms: `Skill(skill="tm-cli-operations")`. At 70%+
