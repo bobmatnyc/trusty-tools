@@ -51,7 +51,9 @@
 //! [`UdsSecurityError::BindInProgress`]; and one that cannot take the lock at
 //! all refuses with [`UdsSecurityError::BindLock`] instead of binding unlocked.
 //! The lock file is never removed: unlinking it while another process has it
-//! open would let a third lock a fresh inode alongside.
+//! open would let a third lock a fresh inode alongside. Like the socket path,
+//! the lock path is never followed through a symlink, and anything but a
+//! regular file there refuses with [`UdsSecurityError::BindLock`].
 //!
 //! `trusty-agents`' `CtrlSocket::bind_singleton` predates this and still carries
 //! its own copy; migrating it is a separate change, not a side effect of one
@@ -148,6 +150,8 @@ pub(crate) fn classify_takeover(
 /// `bind_singleton_racing_takeover_leaves_exactly_one_owner`,
 /// `bind_singleton_refuses_while_another_binder_holds_the_lock`,
 /// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
+/// `bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path`,
+/// `bind_singleton_releases_the_bind_lock_when_it_returns`,
 /// `bind_singleton_refuses_a_socket_someone_is_serving`,
 /// `bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk`,
 /// `bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket`,
@@ -239,41 +243,84 @@ where
 
 /// Take the exclusive, non-blocking bind lock beside `path`.
 ///
-/// Why: #8759 — see the invariant in the module doc.
-/// What: opens `<path>.lock` (created `0600`, never truncated, never removed)
-/// and `try_lock`s it. Contention is [`UdsSecurityError::BindInProgress`];
-/// any I/O failure is [`UdsSecurityError::BindLock`]. The returned file holds
-/// the lock until dropped.
+/// Why: #8759 — see the invariant in the module doc. Like every other path
+/// this module touches (#7312), the lock path must never be followed through a
+/// symlink: a followed link would create and lock the link's target instead.
+/// What: opens `<path>.lock` with `O_NOFOLLOW` (created `0600`, never
+/// truncated, never removed), refuses the descriptor unless `fstat` says it is
+/// a regular file, then `try_lock`s it. Contention is
+/// [`UdsSecurityError::BindInProgress`]; a symlink, a non-regular file, or any
+/// I/O failure is [`UdsSecurityError::BindLock`] naming the lock path. The
+/// returned file holds the lock until dropped.
 /// Test: `bind_singleton_refuses_while_another_binder_holds_the_lock`,
-/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`.
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
+/// `bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path`,
+/// `bind_singleton_refuses_a_dangling_symlink_at_the_lock_path`,
+/// `bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path`,
+/// `bind_singleton_refuses_a_fifo_at_the_lock_path`,
+/// `bind_singleton_releases_the_bind_lock_when_it_returns`.
 fn lock_for_bind(path: &Path) -> Result<File, UdsSecurityError> {
     let lock_path = bind_lock_path(path);
+    let refuse = |source| UdsSecurityError::BindLock {
+        path: lock_path.clone(),
+        source,
+    };
+    // #8759 review: `O_NOFOLLOW` makes the kernel refuse a symlink in the final
+    // component inside the same `open` that creates the file, so there is no
+    // lstat-then-open window. `O_NONBLOCK` keeps a planted FIFO from parking
+    // the open; the descriptor is only ever `flock`ed, never read.
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(&lock_path);
-    let file = match file {
-        Ok(file) => file,
-        Err(source) => {
-            return Err(UdsSecurityError::BindLock {
-                path: lock_path,
-                source,
-            });
-        }
-    };
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&lock_path)
+        .map_err(|err| refuse(explain_lock_open_failure(&lock_path, err)))?;
+    // #8759 review: `fstat` on the opened descriptor, not a path stat, so the
+    // file checked is the file locked.
+    let file_type = file.metadata().map_err(refuse)?.file_type();
+    if !file_type.is_file() {
+        return Err(refuse(not_a_regular_file(&file_type)));
+    }
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(UdsSecurityError::BindInProgress {
             path: path.to_path_buf(),
         }),
-        Err(TryLockError::Error(source)) => Err(UdsSecurityError::BindLock {
-            path: lock_path,
-            source,
-        }),
+        Err(TryLockError::Error(source)) => Err(refuse(source)),
     }
+}
+
+/// Reword a failed lock-file `open` by what occupies the lock path.
+///
+/// Why: `O_NOFOLLOW` reports a symlink as `ELOOP` (`EMLINK` on FreeBSD) and a
+/// directory as `EISDIR`, neither of which says why the bind was refused.
+/// What: an `lstat` of `lock_path` picks the message — a symlink or any other
+/// non-regular file gets a named reason; anything else keeps the OS error. The
+/// `open` already refused; this stat decides only the wording, never the
+/// outcome.
+/// Test: `bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`.
+fn explain_lock_open_failure(lock_path: &Path, err: std::io::Error) -> std::io::Error {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::io::Error::new(
+            err.kind(),
+            format!("is a symlink; refusing to follow it ({err})"),
+        ),
+        Ok(meta) if !meta.file_type().is_file() => not_a_regular_file(&meta.file_type()),
+        _ => err,
+    }
+}
+
+/// The error for a lock path held by something other than a regular file.
+fn not_a_regular_file(file_type: &std::fs::FileType) -> std::io::Error {
+    let found = super::dir::describe_file_type(file_type);
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("exists and is a {found}, not a regular file"),
+    )
 }
 
 /// `<path>.lock`: the bind lock's file, beside the socket it guards.
