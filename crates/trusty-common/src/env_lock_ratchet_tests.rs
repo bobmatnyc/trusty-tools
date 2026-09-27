@@ -13,11 +13,14 @@
 //! call site at a time, which is why the second one happened.
 //!
 //! What: over this crate's LIB target sources (`src/**`), a file that both uses
-//! a `serial_test` attribute and mutates the process environment must mention
-//! `ENV_LOCK`. Files that do so today are clean; the ones that do not are
-//! listed in [`SERIAL_WITHOUT_ENV_LOCK`] with a reason. A new offender fails,
-//! and a listed file that becomes compliant fails too, so the population can
-//! only shrink.
+//! a `serial_test` attribute and mutates the process environment must name
+//! `crate::data_dir::ENV_LOCK` (directly or through a `use` of it) and declare
+//! no env mutex of its own. Files that do so today are clean; the ones that do
+//! not are listed in [`SERIAL_WITHOUT_ENV_LOCK`] with a reason. A new offender
+//! fails, and a listed file that becomes compliant fails too, so the population
+//! can only shrink. A second ratchet holds every private env mutex in the lib
+//! target to [`PRIVATE_ENV_MUTEXES`] the same way (#5937: a bare-name match
+//! read `update/tests.rs`'s own `static ENV_LOCK` as compliance).
 //!
 //! The audit unit is the TEST TARGET, not the crate. `ENV_LOCK` is
 //! `#[cfg(test)] pub(crate)`, so only the lib target's own tests can take it,
@@ -66,7 +69,6 @@ use std::path::{Path, PathBuf};
 /// deleting carries `<PR> removes this row` so the two merge in either order.
 const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
     ("src/bm25/tests.rs", "TRUSTY_BM25_CORPUS_CAP"),
-    ("src/catchup/mod.rs", "TRUSTY_MEMORY_PALACE"),
     // The `dotenv_credential_env` group. These write provider API keys rather
     // than `TRUSTY_*` state, and `credentials/dotenv.rs` republishes arbitrary
     // keys in bulk — the widest env writer in the target, and the one whose
@@ -115,11 +117,56 @@ const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
     ),
 ];
 
+/// Env mutexes the lib target still declares beside the shared one, each with
+/// the reason it is still here.
+///
+/// Why (#5937): a private env mutex excludes only the tests that take it, so
+/// a variable it guards is still read and written by tests holding the shared
+/// lock or none. Same shrink-only rule as [`SERIAL_WITHOUT_ENV_LOCK`]: a new
+/// declaration fails, and so does a row whose declaration is gone.
+/// What: `(path suffix, static name, reason)`.
+const PRIVATE_ENV_MUTEXES: &[(&str, &str, &str)] = &[
+    (
+        "src/embedder/test_env.rs",
+        "ENV_LOCK",
+        "embedder-tree lock over TRUSTY_EMBEDDER_*, TRUSTY_DEVICE and FASTEMBED_*. Its tests \
+         hold it across ONNX loads and #4940's poison test poisons it on purpose, so moving \
+         them onto the crate-wide lock is its own change. Its one HOME reader \
+         (`resolve_fastembed_cache_dir_prefers_env_vars`) takes the crate-wide lock first",
+    ),
+    (
+        "src/error_capture/mod.rs",
+        "BUG_CAPTURE_ENV_TEST_LOCK",
+        "`pub` (doc-hidden) lock over TRUSTY_NO_BUG_CAPTURE; retiring it changes the public \
+         surface. Guards no HOME access",
+    ),
+    (
+        "src/inference/bedrock/tests.rs",
+        "REGION_ENV_LOCK",
+        "tokio mutex over the AWS region variables, held across `.await`s a std mutex cannot \
+         span. Guards no HOME access",
+    ),
+];
+
 /// This file's own basename, skipped so its pattern literals do not match it.
 const SELF_BASENAME: &str = "env_lock_ratchet_tests.rs";
 
-/// The identifier that proves a file joined the crate-wide env lock.
-const ENV_LOCK_IDENT: &str = "ENV_LOCK";
+/// The one lock's full path. A file proves it joined the lock by naming it.
+///
+/// Why the exact path (#5937): the bare name `ENV_LOCK` also matched
+/// `update/tests.rs`'s own file-private `static ENV_LOCK`, which excluded no
+/// `HOME` reader elsewhere in the binary, and `REGION_ENV_LOCK`, a third mutex.
+const SHARED_LOCK_PATH: &str = "crate::data_dir::ENV_LOCK";
+
+/// The lock's bare name, accepted only after a `use` of [`SHARED_LOCK_MODULE`].
+const SHARED_LOCK_NAME: &str = "ENV_LOCK";
+
+/// The module that owns the lock, as a `use` group names it.
+const SHARED_LOCK_MODULE: &str = "crate::data_dir::";
+
+/// The file that declares the lock. It reaches it as `super::ENV_LOCK`, so the
+/// path rule does not apply to it, and its declaration is not a private one.
+const SHARED_LOCK_OWNER: &str = "src/data_dir.rs";
 
 /// Attribute spellings that mean "this test asked `serial_test` to serialise
 /// it". `#[serial_test::serial]` and `#[serial_test::file_serial]` are covered
@@ -143,9 +190,11 @@ const ENV_MUTATION_TYPES: &[&str] = &["EnvVarGuard"];
 enum Verdict {
     /// No `serial_test` attribute, or no environment mutation: out of scope.
     OutOfScope,
-    /// Mutates the environment under `#[serial]` and takes `ENV_LOCK`.
+    /// Mutates the environment under `#[serial]`, takes the shared lock, and
+    /// declares no env mutex of its own.
     Compliant,
-    /// Mutates the environment under `#[serial]` and does not take `ENV_LOCK`.
+    /// Mutates the environment under `#[serial]` and either does not take the
+    /// shared lock or declares a private env mutex.
     Offender,
 }
 
@@ -155,10 +204,12 @@ enum Verdict {
 /// guard that treats "I could not look" as "nothing there" reports a clean
 /// target regardless of its contents. Fail closed — it counts as an offender,
 /// so an unreadable file fails the build rather than disappearing from it.
-/// What: strips comments and string literals, then applies the three
-/// predicates.
+/// What: strips comments and string literals, then applies the predicates. A
+/// file is compliant only when it names [`SHARED_LOCK_PATH`] (directly or
+/// through a `use`) AND declares no private env mutex (#5937).
 /// Test: `an_unreadable_source_counts_as_an_offender`,
-/// `the_ratchet_detects_a_serial_mutation_without_env_lock`.
+/// `the_ratchet_detects_a_serial_mutation_without_env_lock`,
+/// `the_ratchet_requires_the_shared_lock_path`.
 fn classify(source: Option<&str>) -> Verdict {
     let Some(text) = source else {
         return Verdict::Offender;
@@ -167,11 +218,87 @@ fn classify(source: Option<&str>) -> Verdict {
     if !uses_serial_attribute(&code) || !mutates_env(&code) {
         return Verdict::OutOfScope;
     }
-    if code.contains(ENV_LOCK_IDENT) {
+    if takes_shared_lock(&code) && private_env_mutexes(&code).is_empty() {
         Verdict::Compliant
     } else {
         Verdict::Offender
     }
+}
+
+/// Does the stripped source name the ONE lock, `crate::data_dir::ENV_LOCK`?
+///
+/// What: true for the full path anywhere in code (an inline path or
+/// `use crate::data_dir::ENV_LOCK;`), or for a `use crate::data_dir::{…}`
+/// group that lists `ENV_LOCK` as a whole word. A bare `ENV_LOCK` imported
+/// from any other module, or declared locally, does not count.
+fn takes_shared_lock(code: &str) -> bool {
+    if code.contains(SHARED_LOCK_PATH) {
+        return true;
+    }
+    let group_open = format!("use {SHARED_LOCK_MODULE}{{");
+    let mut from = 0;
+    while let Some(rel) = code[from..].find(&group_open) {
+        let body_start = from + rel + group_open.len();
+        let Some(len) = code[body_start..].find('}') else {
+            return false;
+        };
+        let body = &code[body_start..body_start + len];
+        if body
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|tok| tok == SHARED_LOCK_NAME)
+        {
+            return true;
+        }
+        from = body_start + len;
+    }
+    false
+}
+
+/// The names of the env mutexes a stripped source declares for itself.
+///
+/// Why (#5937): a file-private mutex serialises only the tests that take it,
+/// so a `HOME` writer holding one still runs inside every other test's read.
+/// `update/tests.rs` carried exactly that, and the bare-name rule read it as
+/// compliance.
+/// What: every `static NAME: TYPE` whose `TYPE` holds a `Mutex` or `RwLock`,
+/// and which is an env lock — its name contains `ENV`, or it is a unit lock
+/// (`Mutex<()>`) in a file that writes the environment. Caches of real data
+/// (`Mutex<HashMap<…>>`) are not locks over env and do not match.
+/// Test: `the_ratchet_flags_a_private_env_mutex`.
+fn private_env_mutexes(code: &str) -> Vec<String> {
+    let writes_env = mutates_env(code);
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = code[from..].find("static ") {
+        let at = from + rel;
+        from = at + "static ".len();
+        // `'static` is a lifetime, and `_static ` the tail of a name.
+        let preceded_by_word = code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\'');
+        if preceded_by_word {
+            continue;
+        }
+        let rest = code[from..].trim_start();
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let Some(ty_rest) = rest[name.len()..].trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let ty_end = ty_rest.find(['=', ';']).unwrap_or(ty_rest.len());
+        let ty: String = ty_rest[..ty_end].split_whitespace().collect();
+        if !(ty.contains("Mutex") || ty.contains("RwLock")) {
+            continue;
+        }
+        if name.contains("ENV") || (writes_env && ty.contains("<()>")) {
+            found.push(name);
+        }
+    }
+    found
 }
 
 /// Does the stripped source carry a `serial_test` attribute?
@@ -376,7 +503,9 @@ fn serial_env_mutating_files_take_env_lock() {
     let mut matched: Vec<&str> = Vec::new();
     for path in lib_target_sources() {
         let rel = relative(&path);
-        if classify(std::fs::read_to_string(&path).ok().as_deref()) != Verdict::Offender {
+        if rel == SHARED_LOCK_OWNER
+            || classify(std::fs::read_to_string(&path).ok().as_deref()) != Verdict::Offender
+        {
             continue;
         }
         match SERIAL_WITHOUT_ENV_LOCK
@@ -396,11 +525,12 @@ fn serial_env_mutating_files_take_env_lock() {
     assert!(
         unlisted.is_empty(),
         "these files mutate the process environment under a `serial_test` attribute without \
-         taking `data_dir::ENV_LOCK` (#7253). `#[serial]` and `ENV_LOCK` are different mutexes \
+         taking `crate::data_dir::ENV_LOCK` by that path, or they declare an env mutex of their \
+         own (#7253, #5937). `#[serial]`, a private mutex and `ENV_LOCK` are different locks \
          and exclude nothing of each other, so such a test still runs inside another test's \
-         `setenv`. Take `ENV_LOCK` for the whole window the variable is changed — \
-         `http_client.rs`'s `with_http_proxy` is the pattern. If a file genuinely cannot, add \
-         it to `SERIAL_WITHOUT_ENV_LOCK` in this file with the reason.\n  {}",
+         `setenv`. Take `crate::data_dir::ENV_LOCK` for the whole window the variable is \
+         changed — `http_client.rs`'s `with_http_proxy` is the pattern. If a file genuinely \
+         cannot, add it to `SERIAL_WITHOUT_ENV_LOCK` in this file with the reason.\n  {}",
         unlisted.join("\n  ")
     );
     assert!(
@@ -464,6 +594,170 @@ fn the_ratchet_detects_a_serial_mutation_without_env_lock() {
     );
 }
 
+/// The ratchet — the private env mutexes are exactly [`PRIVATE_ENV_MUTEXES`].
+///
+/// Why (#5937): see [`private_env_mutexes`]. This runs over every lib-target
+/// source, `#[serial]` or not, because a private env mutex is the defect with
+/// or without an attribute beside it.
+/// What: scans each source, then compares the `(file, name)` set against the
+/// table in both directions.
+/// Test: this function IS the test; `the_ratchet_flags_a_private_env_mutex`
+/// proves the detection underneath it fires.
+#[test]
+fn lib_target_declares_no_private_env_mutex() {
+    let mut unlisted: Vec<String> = Vec::new();
+    let mut matched: Vec<(&str, &str)> = Vec::new();
+    for path in lib_target_sources() {
+        let rel = relative(&path);
+        if rel == SHARED_LOCK_OWNER {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            unlisted.push(format!("{rel}: unreadable"));
+            continue;
+        };
+        for name in private_env_mutexes(&strip_noncode(&text)) {
+            match PRIVATE_ENV_MUTEXES
+                .iter()
+                .find(|(suffix, listed, _)| rel.ends_with(suffix) && *listed == name)
+            {
+                Some((suffix, listed, _)) => matched.push((suffix, listed)),
+                None => unlisted.push(format!("{rel}: static {name}")),
+            }
+        }
+    }
+    let stale: Vec<String> = PRIVATE_ENV_MUTEXES
+        .iter()
+        .filter(|(suffix, name, _)| !matched.contains(&(*suffix, *name)))
+        .map(|(suffix, name, _)| format!("{suffix}: static {name}"))
+        .collect();
+
+    assert!(
+        unlisted.is_empty(),
+        "these lib-target files declare an env mutex of their own (#5937). A private mutex \
+         excludes only the tests that take it, so the variable it guards still races every \
+         test holding `crate::data_dir::ENV_LOCK` or nothing. Delete it and take \
+         `crate::data_dir::ENV_LOCK`; if a file genuinely cannot, add it to \
+         `PRIVATE_ENV_MUTEXES` in this file with the reason.\n  {}",
+        unlisted.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "`PRIVATE_ENV_MUTEXES` is stale — these rows name declarations that are gone. Delete \
+         the rows so the ratchet keeps its grip.\n  {}",
+        stale.join("\n  ")
+    );
+}
+
+/// Only the shared lock's path counts; a same-named private lock does not.
+///
+/// Why (#5937): `update/tests.rs` declared `static ENV_LOCK` and the
+/// bare-substring rule read it as compliance, while its `HOME` writers raced
+/// `workspace_layout`'s readers. Each sample here is a shape that fooled, or
+/// could fool, the substring rule.
+/// What: classifies the file-private lock, a lock imported from another
+/// module, a longer name containing `ENV_LOCK`, the two `use` forms, and the
+/// shared path beside a private declaration.
+/// Test: this function IS the test.
+#[test]
+fn the_ratchet_requires_the_shared_lock_path() {
+    let body = concat!(
+        "#[test]\n#[serial(g)]\n",
+        "fn t() { let _g = ENV_LOCK.lock(); unsafe { std::env::set_var(\"HOME\", \"/x\") } }\n",
+    );
+
+    let file_private = format!("static ENV_LOCK: Mutex<()> = Mutex::new(());\n{body}");
+    assert_eq!(
+        classify(Some(&file_private)),
+        Verdict::Offender,
+        "a file-private ENV_LOCK is not the shared lock"
+    );
+
+    let imported_elsewhere = format!("use super::test_env::{{EnvVarGuard, ENV_LOCK}};\n{body}");
+    assert_eq!(
+        classify(Some(&imported_elsewhere)),
+        Verdict::Offender,
+        "an ENV_LOCK imported from another module is not the shared lock"
+    );
+
+    let longer_name = concat!(
+        "#[test]\n#[serial]\n",
+        "fn t() { let _g = REGION_ENV_LOCK.lock(); unsafe { std::env::remove_var(\"K\") } }\n",
+    );
+    assert_eq!(
+        classify(Some(longer_name)),
+        Verdict::Offender,
+        "REGION_ENV_LOCK merely contains the name"
+    );
+
+    let use_group = format!("use crate::data_dir::{{DATA_DIR_OVERRIDE_ENV, ENV_LOCK}};\n{body}");
+    assert_eq!(classify(Some(&use_group)), Verdict::Compliant);
+
+    let use_single = format!("use crate::data_dir::ENV_LOCK;\n{body}");
+    assert_eq!(classify(Some(&use_single)), Verdict::Compliant);
+
+    let both = format!(
+        "static ENV_LOCK: Mutex<()> = Mutex::new(());\n\
+         fn f() {{ let _ = crate::data_dir::ENV_LOCK.lock(); }}\n{body}"
+    );
+    assert_eq!(
+        classify(Some(&both)),
+        Verdict::Offender,
+        "naming the shared lock does not excuse declaring a private one"
+    );
+}
+
+/// The private-mutex scan fires on env locks and not on data caches.
+///
+/// Why: a scanner that matches nothing passes forever; one that matches every
+/// `static Mutex` would bury the real finding under caches.
+/// What: runs [`private_env_mutexes`] over the shapes the lib target holds.
+/// Test: this function IS the test.
+#[test]
+fn the_ratchet_flags_a_private_env_mutex() {
+    let scan = |s: &str| private_env_mutexes(&strip_noncode(s));
+    assert_eq!(
+        scan("static ENV_LOCK: Mutex<()> = Mutex::new(());"),
+        ["ENV_LOCK"]
+    );
+    assert_eq!(
+        scan("pub static BUG_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());"),
+        ["BUG_ENV_TEST_LOCK"]
+    );
+    assert_eq!(
+        scan("static REGION_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());"),
+        ["REGION_ENV_LOCK"]
+    );
+    let unnamed_lock = concat!(
+        "fn l() { static LOCK: OnceLock<Mutex<()>> = OnceLock::new(); }\n",
+        "fn w() { unsafe { std::env::set_var(\"K\", \"v\") } }\n",
+    );
+    assert_eq!(
+        scan(unnamed_lock),
+        ["LOCK"],
+        "a unit lock in a file that writes env is an env lock, whatever its name"
+    );
+    assert!(
+        scan("fn l() { static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()); }")
+            .is_empty(),
+        "a unit lock in a file that writes no env guards something else"
+    );
+    let cache = concat!(
+        "static CACHE: OnceLock<Mutex<HashMap<PathBuf, Weak<S>>>> = OnceLock::new();\n",
+        "fn w() { unsafe { std::env::set_var(\"K\", \"v\") } }\n",
+    );
+    assert!(scan(cache).is_empty(), "a data cache is not an env lock");
+    assert!(
+        scan("fn f(g: &'static Mutex<()>) { unsafe { std::env::set_var(\"K\", \"v\") } }")
+            .is_empty(),
+        "a `'static` lifetime is not a declaration"
+    );
+    assert!(
+        scan("// static ENV_LOCK: Mutex<()> = Mutex::new(());").is_empty(),
+        "a commented-out declaration is prose"
+    );
+}
+
 /// A file the guard cannot read counts as an offender.
 ///
 /// Why: "I could not look" must never render as "nothing there". Fail closed.
@@ -497,7 +791,7 @@ fn the_stripper_removes_prose_and_string_literals() {
         "the real call after the URL literal must survive:\n{code}"
     );
     assert!(
-        !code.contains(ENV_LOCK_IDENT),
+        !code.contains(SHARED_LOCK_NAME),
         "every ENV_LOCK here is prose or a literal:\n{code}"
     );
     assert!(

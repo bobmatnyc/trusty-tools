@@ -269,6 +269,8 @@ fn doctor_data_dir_reads_env_var() {
     assert_eq!(p, std::path::PathBuf::from("/tmp/ts-wrapper"));
 }
 
+// #5937: mutates FASTEMBED_CACHE_*; join the #[serial] env group.
+#[serial_test::serial]
 #[test]
 fn fastembed_cache_dir_respects_env_override() {
     // Set a unique override value and assert the function returns exactly it.

@@ -771,6 +771,269 @@ async fn wait_until_corpse(sock: &Path) {
     }
 }
 
+/// Why: #8759 — two daemons starting on one data root both proved the same
+/// socket dead, both unlinked and bound, and both went on serving: the loser's
+/// listener sat on an unlinked inode while believing it owned the path.
+/// What: the first binder has decided to take over the corpse; the second runs
+/// its whole bind inside that gap via the `before_takeover` hook, so the
+/// interleaving is forced rather than slept into. Exactly one may come back
+/// `Ok`, and the path on disk must reach that one.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_racing_takeover_leaves_exactly_one_owner() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("race.sock");
+    drop(bind_hardened(&sock).expect("bind the soon-to-be corpse"));
+    wait_until_corpse(&sock).await;
+
+    let mut second = None;
+    let slot = &mut second;
+    let path = &sock;
+    let first = super::singleton::bind_singleton_with(&sock, move || async move {
+        *slot = Some(bind_singleton_hardened(path).await);
+    })
+    .await;
+    let second = second.expect("the hook runs on the takeover arm");
+
+    let owners = usize::from(first.is_ok()) + usize::from(second.is_ok());
+    assert_eq!(
+        owners, 1,
+        "exactly one binder may own the socket; first: {first:?}, second: {second:?}"
+    );
+    // A completed UDS connect is already queued on the listener it reached, so
+    // a non-blocking accept answers "was it this one?" with no wait.
+    let owner = first
+        .or(second)
+        .expect("one owner, asserted above")
+        .into_std()
+        .expect("into_std");
+    let _client = std::os::unix::net::UnixStream::connect(&sock)
+        .expect("the socket path must reach a listener");
+    owner
+        .accept()
+        .expect("the connection must be queued on the owner, not an orphan");
+}
+
+/// Inode of the file at `path`, read without following a symlink.
+fn inode_of(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::symlink_metadata(path).expect("lstat"))
+}
+
+/// Why: #8759 — a binder that finds the bind lock held must refuse rather than
+/// step around another binder's takeover.
+/// What: a second descriptor holds `<sock>.lock` over a corpse; the bind
+/// refuses with `BindInProgress` and leaves the corpse's inode in place. Once
+/// the holder lets go, the same bind takes the corpse over.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_refuses_while_another_binder_holds_the_lock() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("held.sock");
+    drop(bind_hardened(&sock).expect("bind the soon-to-be corpse"));
+    wait_until_corpse(&sock).await;
+    let corpse = inode_of(&sock);
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(super::singleton::bind_lock_path(&sock))
+        .expect("open the bind lock file");
+    holder.try_lock().expect("take the bind lock");
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a held bind lock must refuse");
+    assert!(
+        matches!(err, UdsSecurityError::BindInProgress { ref path } if *path == sock),
+        "expected BindInProgress for {}, got {err:?}",
+        sock.display()
+    );
+    assert_eq!(
+        inode_of(&sock),
+        corpse,
+        "a refused bind must not touch the path"
+    );
+
+    drop(holder);
+    bind_singleton_hardened(&sock)
+        .await
+        .expect("a released lock lets the corpse be taken over");
+}
+
+/// Why: #8759 Fail-Open Check — a bind lock that cannot be taken must stop the
+/// bind, never downgrade to an unlocked takeover.
+/// What: a directory sits where `<sock>.lock` belongs, so opening it fails; the
+/// bind returns `BindLock` and the corpse it would otherwise have reclaimed
+/// keeps its inode.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("blocked.sock");
+    std::fs::create_dir_all(sock.parent().expect("parent")).expect("socket dir");
+    std::fs::create_dir(super::singleton::bind_lock_path(&sock)).expect("dir at the lock path");
+    let dead = std::os::unix::net::UnixListener::bind(&sock).expect("bind the corpse");
+    drop(dead);
+    wait_until_corpse(&sock).await;
+    let corpse = inode_of(&sock);
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("an unusable bind lock must refuse");
+    assert_bind_lock_refusal(&err, &sock, "is a directory, not a regular file");
+    assert_eq!(
+        inode_of(&sock),
+        corpse,
+        "no takeover may run without the lock"
+    );
+}
+
+/// Asserts `err` is a `BindLock` refusal on `<sock>.lock` whose message names
+/// that path and carries `reason`.
+fn assert_bind_lock_refusal(err: &UdsSecurityError, sock: &Path, reason: &str) {
+    let lock = super::singleton::bind_lock_path(sock);
+    assert!(
+        matches!(err, UdsSecurityError::BindLock { path, .. } if *path == lock),
+        "expected BindLock on {}, got {err:?}",
+        lock.display()
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains(&lock.display().to_string()) && message.contains(reason),
+        "message must name {} and say {reason:?}; got {message:?}",
+        lock.display()
+    );
+}
+
+/// Plants `plant` at `<sock>.lock` in a fresh socket dir, binds, and asserts the
+/// bind refused with `reason` and created no socket.
+async fn refuse_with_lock_path_occupant(
+    tmp: &tempfile::TempDir,
+    plant: impl FnOnce(&Path),
+    reason: &str,
+) {
+    let sock = tmp.path().join("sockets").join("planted.sock");
+    std::fs::create_dir_all(sock.parent().expect("parent")).expect("socket dir");
+    plant(&super::singleton::bind_lock_path(&sock));
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a lock path that is not a plain file must refuse");
+
+    assert_bind_lock_refusal(&err, &sock, reason);
+    assert!(
+        std::fs::symlink_metadata(&sock).is_err(),
+        "a refused bind must not create the socket"
+    );
+}
+
+/// Why: #8759 review — a symlink planted at `<sock>.lock` must never be
+/// followed, or the lock (and its `0600` create) lands on the link's target.
+/// What: the link points at a file outside the socket dir; the bind refuses
+/// with `BindLock`, the target keeps its bytes and is not left locked.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, b"victim").expect("write victim");
+
+    refuse_with_lock_path_occupant(
+        &tmp,
+        |lock| std::os::unix::fs::symlink(&victim, lock).expect("plant symlink"),
+        "is a symlink; refusing to follow it",
+    )
+    .await;
+
+    assert_eq!(std::fs::read(&victim).expect("read victim"), b"victim");
+    let probe = std::fs::File::open(&victim).expect("open victim");
+    probe
+        .try_lock()
+        .expect("the link's target must not be left locked");
+}
+
+/// Why: #8759 review — `O_CREAT` through a dangling link creates the link's
+/// target, so a followed link lets anyone who can plant one create a file.
+/// What: the bind refuses with `BindLock` and the target never appears.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_refuses_a_dangling_symlink_at_the_lock_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let target = tmp.path().join("created-through-the-link");
+
+    refuse_with_lock_path_occupant(
+        &tmp,
+        |lock| std::os::unix::fs::symlink(&target, lock).expect("plant symlink"),
+        "is a symlink; refusing to follow it",
+    )
+    .await;
+
+    assert!(
+        std::fs::symlink_metadata(&target).is_err(),
+        "the bind lock must not create a dangling link's target"
+    );
+}
+
+/// Why: #8759 review — a link to a directory is refused as a link, on its own
+/// type, not by whatever the directory makes `open` return.
+/// What: the bind refuses with `BindLock` naming the symlink.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("elsewhere");
+    std::fs::create_dir(&dir).expect("target dir");
+
+    refuse_with_lock_path_occupant(
+        &tmp,
+        |lock| std::os::unix::fs::symlink(&dir, lock).expect("plant symlink"),
+        "is a symlink; refusing to follow it",
+    )
+    .await;
+}
+
+/// Why: #8759 review — `open` succeeds on a FIFO, so only a file-type check on
+/// the opened descriptor refuses a lock path that is not a regular file.
+/// What: a FIFO at `<sock>.lock`; the bind refuses with `BindLock`.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_refuses_a_fifo_at_the_lock_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    refuse_with_lock_path_occupant(
+        &tmp,
+        |lock| {
+            use std::os::unix::ffi::OsStrExt as _;
+            let c_path = std::ffi::CString::new(lock.as_os_str().as_bytes()).expect("c path");
+            // SAFETY: `c_path` is a valid NUL-terminated path for the call.
+            let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+            assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        },
+        "is a fifo, not a regular file",
+    )
+    .await;
+}
+
+/// Why: #8759 review — a guard held past a successful return would turn every
+/// later start on the same path into `BindInProgress` for this process's life.
+/// What: bind, drop the listener, bind the same path again; the second bind
+/// takes the corpse over instead of reporting the lock held.
+/// Test: itself.
+#[tokio::test]
+async fn bind_singleton_releases_the_bind_lock_when_it_returns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("released.sock");
+
+    let first = bind_singleton_hardened(&sock).await.expect("first bind");
+    drop(first);
+    wait_until_corpse(&sock).await;
+
+    let second = bind_singleton_hardened(&sock)
+        .await
+        .expect("a returned bind must not still hold the bind lock");
+    drop(second);
+}
+
 #[tokio::test]
 async fn bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket() {
     // #7312: a symlink is refused on its own type, and the dead socket it

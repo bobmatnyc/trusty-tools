@@ -250,10 +250,12 @@ impl TmuxDriver {
     /// returns nothing and every managed-session spawn 500s after a restart
     /// (#1298). Resolving via the well-known dirs makes discovery survive the
     /// minimal inherited `PATH`.
-    /// What: delegates to [`trusty_common::bin_resolve::resolve_binary`], which
-    /// consults the live `PATH` first and then falls back to the well-known
-    /// daemon dirs (Homebrew + user bins). Errors with a clear message if no
-    /// `tmux` is found anywhere.
+    /// What: delegates to [`crate::core::tmux::resolve_tmux_binary`] — the
+    /// `with_tmux_binary` test override when one is in scope, else
+    /// [`trusty_common::bin_resolve::resolve_binary`], which consults the live
+    /// `PATH` first and then falls back to the well-known daemon dirs
+    /// (Homebrew + user bins). Errors with a clear message if no `tmux` is
+    /// found anywhere.
     ///
     /// Scratch-environment gate (#5784): before resolving anything, this asks
     /// [`crate::core::host_state_gate::host_state_access`] whether the process
@@ -279,14 +281,18 @@ impl TmuxDriver {
     /// `TRUSTY_MPM_ALLOW_HOST_STATE=1` is the explicit way back in.
     /// Test: `driver_reports_availability` (skips assertion when tmux
     /// missing); `scratch_home_daemon_does_not_spawn_tmux`
-    /// proves no tmux process is spawned once this refuses.
+    /// proves no tmux process is spawned once this refuses;
+    /// `tmux_backend_constructs_without_spawning` resolves through a
+    /// `with_tmux_binary` scope.
     pub fn discover() -> Result<Self> {
         let access = crate::core::host_state_gate::host_state_access();
         if let Some(reason) = access.skip_reason() {
             tracing::warn!("#5784: tmux access refused — {reason}");
             return Err(Error::Protocol(format!("tmux access refused: {reason}")));
         }
-        let path = trusty_common::bin_resolve::resolve_binary("tmux").ok_or_else(|| {
+        // #6542: `resolve_tmux_binary`, not `bin_resolve` directly, so a test
+        // inside a `with_tmux_binary` scope reaches its private server here too.
+        let path = crate::core::tmux::resolve_tmux_binary().ok_or_else(|| {
             Error::Protocol(
                 "tmux not found on PATH or in well-known dirs (e.g. /opt/homebrew/bin); \
                  use the PTY or SDK control model"

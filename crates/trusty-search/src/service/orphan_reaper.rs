@@ -513,9 +513,8 @@ mod tests {
     /// What: exercises the three branches via a scoped env guard.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn reap_interval_secs_env_branches() {
-        // Serialize on a process-global to avoid cross-test env races.
-        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var(REAP_INTERVAL_ENV, "0");
         assert_eq!(reap_interval_secs(), None);
         std::env::set_var(REAP_INTERVAL_ENV, "120");
@@ -525,8 +524,6 @@ mod tests {
         std::env::remove_var(REAP_INTERVAL_ENV);
         assert_eq!(reap_interval_secs(), Some(DEFAULT_REAP_INTERVAL_SECS));
     }
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Why: a colocated orphan must be preserved so warm-boot's relocation scan
     /// can still recover a moved repo; only non-colocated dead roots are reaped.
@@ -638,8 +635,8 @@ mod tests {
     /// mirroring `reap_interval_secs`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn ambiguous_root_grace_secs_env_branches() {
-        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var(AMBIGUOUS_ROOT_GRACE_ENV, "0");
         assert_eq!(ambiguous_root_grace_secs(), None);
         std::env::set_var(AMBIGUOUS_ROOT_GRACE_ENV, "600");

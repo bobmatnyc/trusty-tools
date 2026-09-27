@@ -34,6 +34,8 @@ fn raw(id: &str, content: &str) -> RawChunk {
     }
 }
 
+// #5937: mutates TRUSTY_REDB_CACHE_MB; join the crate-wide #[serial] env group.
+#[serial_test::serial]
 #[test]
 fn redb_cache_size_default_and_env_override() {
     // Idle-memory audit: the redb page cache defaults to 64 MB (issue #329

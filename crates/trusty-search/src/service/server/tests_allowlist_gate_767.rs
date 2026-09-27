@@ -250,6 +250,8 @@ async fn create_index_accepts_subdirectory_of_approved_root() {
 /// The hard denylist still wins over an explicit allowlist entry, and still
 /// answers `400` rather than the gate's `403` — the denylist is a different
 /// refusal from "not approved" and keeps its own contract.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[tokio::test]
 async fn denylist_still_wins_over_an_allowlist_entry() {
     let ssh = dirs::home_dir().expect("home").join(".ssh");
@@ -344,6 +346,8 @@ async fn allow_sensitive_path_relaxes_only_the_prefix_denylist() {
 
 /// The opt-in relaxes the EPHEMERAL-prefix rows only. A credential directory is
 /// still refused with it set — that is what keeps it from being a skeleton key.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[tokio::test]
 async fn allow_sensitive_path_still_obeys_the_credential_denylist() {
     let ssh = dirs::home_dir().expect("home").join(".ssh");

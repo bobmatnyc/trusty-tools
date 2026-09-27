@@ -1198,6 +1198,9 @@ pub(crate) struct ReclaimOutcome {
     /// `"<path>: <reason>"` (#4732 — the reason used to be dropped, and a
     /// deliberate `git worktree lock` refusal read as a transient error).
     pub removal_failed: Vec<String>,
+    /// Candidates git failed on after deleting some or all of their content,
+    /// each as `"<path>: <report>"` (#8782). Never counted as kept.
+    pub partially_removed: Vec<String>,
 }
 
 #[cfg(test)]

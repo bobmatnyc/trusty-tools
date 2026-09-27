@@ -359,6 +359,9 @@ pub mod stop_spool;
 pub mod statusline_settings;
 pub mod stray_mcp;
 pub mod tmux;
+// #6542: each test binary's private default tmux server; test support only.
+#[doc(hidden)]
+pub mod tmux_test_isolation;
 pub mod transcript_usage;
 pub mod trusty_tools_config;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.

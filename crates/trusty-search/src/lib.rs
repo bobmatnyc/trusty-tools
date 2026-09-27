@@ -73,6 +73,10 @@ pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 #[path = "service/persistence_tests_1088.rs"]
 mod persistence_tests_1088;
 
+/// #5937: every env-writing `src/**` test runs in the unnamed `#[serial]` group.
+#[cfg(test)]
+mod env_serial_ratchet_tests;
+
 #[cfg(test)]
 mod truncate_at_char_boundary_tests {
     use super::truncate_at_char_boundary;

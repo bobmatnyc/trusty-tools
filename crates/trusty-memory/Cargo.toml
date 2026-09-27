@@ -43,7 +43,11 @@ name = "trusty-memory"
 # 0.28.1 (#8732, issue #4421): patch — 0.28.0 is already live on crates.io
 # and this PR changes `src/**`, so the "PR version bump vs crates.io" gate
 # requires a bump. No public item added, removed, or changed shape.
-version = "0.28.1"
+# 0.28.1 -> 0.28.2 (issue #4421): patch — 0.28.1 is already live on crates.io
+# and open PRs #8791, #8790, #8779 all change `src/**`, so this branch opens
+# the next patch version ahead of those PRs' rebase. No public item added,
+# removed, or changed shape on main as of this bump.
+version = "0.28.2"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -181,9 +185,8 @@ redb = { workspace = true }
 # trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
 # lockfile churn.
 sha2 = { workspace = true }
-# `commands::daemon_lock` probes a recorded pid with `libc::kill(pid, 0)` and
 # `fd_metrics` reads `RLIMIT_NOFILE` via `libc::getrlimit`. (#5329 removed the
-# other caller, the BM25 spawn supervisor's SIGTERM path.)
+# BM25 spawn supervisor's SIGTERM caller; #8759 removed `commands::daemon_lock`.)
 libc = { workspace = true }
 # Issue #220: rolling dedup window uses Jaro-Winkler similarity to detect
 # near-duplicate memory writes within a short time window. `strsim` is

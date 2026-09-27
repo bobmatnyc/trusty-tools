@@ -20,7 +20,7 @@ use crate::session_manager::worktree_reclaim::{
 use crate::session_manager::worktree_reclaim_landed::{ReclaimProof, reclaim_landed_proof};
 use crate::session_manager::worktree_reclaim_pr_match::worktree_reclaim_pr_match_tests::FakeProbe;
 use crate::session_manager::worktree_reclaim_pr_match::{MergedPrHead, resolve_with_index};
-use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_with_probes};
+use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_scoped};
 
 fn no_agents(_: &AgentWorktreeOwner) -> AgentDelegationState {
     AgentDelegationState::Unknown
@@ -52,7 +52,7 @@ fn reclaim_proving(
     index_for: &dyn Fn(&Path) -> PrIndex,
     prove: &dyn Fn(&Path) -> ReclaimProof,
 ) -> ReclaimOutcome {
-    reclaim_with_probes(
+    reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove,
@@ -64,6 +64,7 @@ fn reclaim_proving(
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     )
 }
 
