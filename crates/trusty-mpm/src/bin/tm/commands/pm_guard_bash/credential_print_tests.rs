@@ -246,6 +246,40 @@ fn denies_the_round_three_bypasses() {
     );
 }
 
+/// #8730: zsh's clobber spellings `>!`/`>>!` (and `>&!`/`>&|`) left the `!`
+/// or `|` glued to the target, so `/dev/tty` read as the file `!/dev/tty` and
+/// the value was taken as discarded. Each row was allowed at 6a1aeb2b0.
+#[test]
+fn denies_a_clobber_redirect_to_the_terminal_8730() {
+    check(
+        true,
+        &[
+            "security find-generic-password -s x -w >!/dev/tty",
+            "security find-generic-password -s x -w >>!/dev/tty",
+            "security find-generic-password -s x -w >!/dev/stdout",
+            "security find-generic-password -s x -w >&!/dev/tty",
+            "security find-generic-password -s x -w >&|/dev/tty",
+            "security find-generic-password -s x -w >| /dev/tty",
+        ],
+    );
+}
+
+/// #8730: a clobber redirect to an ordinary file is a file write. The `>|`
+/// rows were refused as unreadable at 6a1aeb2b0: the stage split cut at the
+/// operator's `|` as if it were a pipe.
+#[test]
+fn allows_a_clobber_redirect_to_a_file_8730() {
+    check(
+        false,
+        &[
+            "security find-generic-password -s x -w >!/tmp/fake-out",
+            "security find-generic-password -s x -w >>!/tmp/fake-out",
+            "security find-generic-password -s x -w >|/tmp/fake-out",
+            "security find-generic-password -s x -w >>| /tmp/fake-out",
+        ],
+    );
+}
+
 /// #8596 round 3, finding 6: only an evaluator's code operand is judged, so a
 /// script-path operand is an ordinary argument; a comment, or a `#` inside a
 /// word, changes nothing that was allowed.
